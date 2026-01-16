@@ -1,0 +1,323 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================
+   NEXUS LINEAGE DESIGN SYSTEM
+   Adaptive Modern Theme with Glassmorphism
+   ============================================ */
+
+@layer base {
+  :root {
+    /* === Color Primitives === */
+    --nx-bg-canvas: #fafbfc;
+    --nx-bg-elevated: #ffffff;
+    --nx-bg-overlay: rgba(255, 255, 255, 0.95);
+    --nx-bg-glass: rgba(255, 255, 255, 0.72);
+    --nx-border-glass: rgba(255, 255, 255, 0.4);
+    --nx-border-subtle: rgba(0, 0, 0, 0.08);
+    
+    /* Text */
+    --nx-text-primary: #1a1d21;
+    --nx-text-secondary: #4a5568;
+    --nx-text-muted: #8898a9;
+    --nx-text-inverse: #ffffff;
+    
+    /* Accent Palette */
+    --nx-accent-lineage: #6366f1;
+    --nx-accent-lineage-soft: rgba(99, 102, 241, 0.12);
+    --nx-accent-business: #10b981;
+    --nx-accent-business-soft: rgba(16, 185, 129, 0.12);
+    --nx-accent-technical: #f59e0b;
+    --nx-accent-technical-soft: rgba(245, 158, 11, 0.12);
+    --nx-accent-warning: #ef4444;
+    --nx-accent-warning-soft: rgba(239, 68, 68, 0.12);
+    --nx-accent-muted: #64748b;
+    
+    /* Glassmorphism */
+    --nx-glass-blur: 16px;
+    --nx-glass-saturation: 180%;
+    
+    /* Node Colors */
+    --nx-node-domain: #8b5cf6;
+    --nx-node-app: #06b6d4;
+    --nx-node-asset: #22c55e;
+    --nx-node-ghost: #94a3b8;
+    
+    /* Shadows */
+    --nx-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+    --nx-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+    --nx-shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.12);
+    --nx-shadow-glow: 0 0 24px rgba(99, 102, 241, 0.4);
+  }
+
+  .dark {
+    --nx-bg-canvas: #0d1117;
+    --nx-bg-elevated: #161b22;
+    --nx-bg-overlay: rgba(22, 27, 34, 0.95);
+    --nx-bg-glass: rgba(30, 35, 45, 0.78);
+    --nx-border-glass: rgba(255, 255, 255, 0.06);
+    --nx-border-subtle: rgba(255, 255, 255, 0.08);
+    
+    --nx-text-primary: #e6edf3;
+    --nx-text-secondary: #8b949e;
+    --nx-text-muted: #6e7681;
+    --nx-text-inverse: #0d1117;
+    
+    --nx-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --nx-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+    --nx-shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
+  }
+
+  /* === Base Styles === */
+  html {
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  body {
+    @apply bg-canvas text-ink antialiased;
+    font-family: 'Inter Variable', 'Inter', system-ui, sans-serif;
+  }
+
+  /* Smooth theme transitions */
+  * {
+    transition-property: background-color, border-color, color;
+    transition-timing-function: ease-out;
+    transition-duration: 150ms;
+  }
+
+  /* Disable transitions on theme change to prevent flash */
+  .theme-transitioning * {
+    transition: none !important;
+  }
+}
+
+@layer components {
+  /* === Glass Panel === */
+  .glass-panel {
+    background: var(--nx-bg-glass);
+    backdrop-filter: blur(var(--nx-glass-blur)) saturate(var(--nx-glass-saturation));
+    -webkit-backdrop-filter: blur(var(--nx-glass-blur)) saturate(var(--nx-glass-saturation));
+    border: 1px solid var(--nx-border-glass);
+    box-shadow: var(--nx-shadow-lg);
+  }
+
+  .glass-panel-subtle {
+    background: var(--nx-bg-glass);
+    backdrop-filter: blur(8px) saturate(150%);
+    -webkit-backdrop-filter: blur(8px) saturate(150%);
+    border: 1px solid var(--nx-border-glass);
+    box-shadow: var(--nx-shadow-md);
+  }
+
+  /* === Node Styles === */
+  .nx-node {
+    @apply relative rounded-xl transition-all duration-200;
+    background: var(--nx-bg-elevated);
+    border: 1px solid var(--nx-border-subtle);
+    box-shadow: var(--nx-shadow-md);
+  }
+
+  .nx-node:hover {
+    box-shadow: var(--nx-shadow-lg);
+    transform: translateY(-1px);
+  }
+
+  .nx-node.selected {
+    border-color: var(--nx-accent-lineage);
+    box-shadow: var(--nx-shadow-glow);
+  }
+
+  .nx-node-domain {
+    --node-accent: var(--nx-node-domain);
+    border-left: 3px solid var(--node-accent);
+  }
+
+  .nx-node-app {
+    --node-accent: var(--nx-node-app);
+    border-left: 3px solid var(--node-accent);
+  }
+
+  .nx-node-asset {
+    --node-accent: var(--nx-node-asset);
+    border-left: 3px solid var(--node-accent);
+  }
+
+  .nx-node-ghost {
+    @apply opacity-50;
+    background: transparent;
+    border: 2px dashed var(--nx-node-ghost);
+  }
+
+  /* === Edge Animations === */
+  .nx-edge-animated {
+    stroke-dasharray: 8 4;
+    animation: flow 1.5s linear infinite;
+  }
+
+  @keyframes flow {
+    from {
+      stroke-dashoffset: 24;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  /* Edge confidence gradients */
+  .nx-edge-high-confidence {
+    stroke: var(--nx-accent-lineage);
+  }
+
+  .nx-edge-medium-confidence {
+    stroke: var(--nx-accent-technical);
+  }
+
+  .nx-edge-low-confidence {
+    stroke: var(--nx-accent-warning);
+  }
+
+  /* === Buttons === */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-all duration-150;
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2;
+    @apply disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent-lineage text-white;
+    @apply hover:brightness-110 active:brightness-95;
+    @apply focus-visible:ring-accent-lineage;
+  }
+
+  .btn-secondary {
+    @apply btn bg-canvas-elevated border border-glass-border;
+    @apply hover:bg-opacity-80 active:bg-opacity-70;
+  }
+
+  .btn-ghost {
+    @apply btn bg-transparent;
+    @apply hover:bg-black/5 dark:hover:bg-white/5;
+  }
+
+  .btn-sm {
+    @apply px-3 py-1.5 text-sm;
+  }
+
+  .btn-md {
+    @apply px-4 py-2 text-sm;
+  }
+
+  .btn-lg {
+    @apply px-6 py-3 text-base;
+  }
+
+  /* === Form Controls === */
+  .input {
+    @apply w-full rounded-lg border bg-canvas-elevated px-3 py-2 text-sm;
+    @apply border-glass-border;
+    @apply placeholder:text-ink-muted;
+    @apply focus:outline-none focus:ring-2 focus:border-accent-lineage;
+    @apply transition-all duration-150;
+    --tw-ring-color: rgba(99, 102, 241, 0.5);
+  }
+
+  /* === Scrollbar === */
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: var(--nx-text-muted) transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background-color: var(--nx-text-muted);
+    border-radius: 3px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: var(--nx-text-secondary);
+  }
+
+  /* === Skeleton Loading === */
+  .skeleton {
+    @apply relative overflow-hidden bg-gradient-to-r from-transparent via-white/10 to-transparent;
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+
+  @keyframes shimmer {
+    0% {
+      background-position: -200% 0;
+    }
+    100% {
+      background-position: 200% 0;
+    }
+  }
+
+  /* === Kbd (Keyboard Shortcuts) === */
+  .kbd {
+    @apply inline-flex items-center justify-center min-w-[1.5rem] h-5 px-1.5;
+    @apply text-2xs font-mono font-medium;
+    @apply bg-black/5 dark:bg-white/10 rounded border border-black/10 dark:border-white/10;
+    @apply text-ink-secondary;
+  }
+}
+
+@layer utilities {
+  /* === React Flow Overrides === */
+  .react-flow__background {
+    background-color: var(--nx-bg-canvas) !important;
+  }
+
+  .react-flow__minimap {
+    @apply glass-panel-subtle rounded-xl overflow-hidden;
+  }
+
+  .react-flow__controls {
+    @apply glass-panel-subtle rounded-xl overflow-hidden;
+  }
+
+  .react-flow__controls-button {
+    @apply bg-transparent border-none;
+    @apply hover:bg-black/5 dark:hover:bg-white/10;
+  }
+
+  .react-flow__controls-button svg {
+    fill: var(--nx-text-primary);
+  }
+
+  /* === Persona Mode Indicators === */
+  .persona-business {
+    --persona-accent: var(--nx-accent-business);
+  }
+
+  .persona-technical {
+    --persona-accent: var(--nx-accent-technical);
+  }
+
+  /* === Focus States === */
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage focus-visible:ring-offset-2;
+  }
+
+  /* === Gradient Text === */
+  .gradient-text {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, var(--nx-accent-lineage), var(--nx-accent-business));
+  }
+}
+
+/* === React Flow Dot Pattern Background === */
+.react-flow__background-pattern {
+  fill: var(--nx-text-muted) !important;
+  opacity: 0.4;
+}
+

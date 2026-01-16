@@ -1,0 +1,113 @@
+import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+
+export type ThemeMode = 'light' | 'dark' | 'system'
+
+export interface NodeStyleConfig {
+  color: string
+  icon?: string
+  shape: 'rectangle' | 'rounded' | 'diamond' | 'hexagon'
+  sizeMultiplier: number
+}
+
+export interface ShortcutConfig {
+  id: string
+  label: string
+  keys: string
+  action: string
+}
+
+interface PreferencesState {
+  // Theme
+  theme: ThemeMode
+  accentColor: string
+  setTheme: (theme: ThemeMode) => void
+  setAccentColor: (color: string) => void
+  
+  // Node Styling
+  nodeStyles: Record<string, NodeStyleConfig>
+  setNodeStyle: (nodeType: string, config: Partial<NodeStyleConfig>) => void
+  
+  // Keyboard Shortcuts
+  shortcuts: ShortcutConfig[]
+  updateShortcut: (id: string, keys: string) => void
+  resetShortcuts: () => void
+  
+  // Sidebar
+  sidebarCollapsed: boolean
+  toggleSidebar: () => void
+  
+  // Canvas preferences
+  showMinimap: boolean
+  showGrid: boolean
+  snapToGrid: boolean
+  toggleMinimap: () => void
+  toggleGrid: () => void
+  toggleSnapToGrid: () => void
+}
+
+const DEFAULT_SHORTCUTS: ShortcutConfig[] = [
+  { id: 'command-palette', label: 'Command Palette', keys: 'mod+k', action: 'openCommandPalette' },
+  { id: 'toggle-persona', label: 'Toggle Persona', keys: 'mod+/', action: 'togglePersona' },
+  { id: 'save-view', label: 'Save Current View', keys: 'mod+s', action: 'saveView' },
+  { id: 'focus-search', label: 'Focus Search', keys: 'mod+f', action: 'focusSearch' },
+  { id: 'deselect', label: 'Deselect All', keys: 'escape', action: 'deselectAll' },
+  { id: 'zoom-domains', label: 'Zoom to Domains', keys: 'mod+1', action: 'zoomToDomains' },
+  { id: 'zoom-apps', label: 'Zoom to Apps', keys: 'mod+2', action: 'zoomToApps' },
+  { id: 'zoom-assets', label: 'Zoom to Assets', keys: 'mod+3', action: 'zoomToAssets' },
+  { id: 'fit-view', label: 'Fit to View', keys: 'mod+0', action: 'fitView' },
+  { id: 'toggle-sidebar', label: 'Toggle Sidebar', keys: 'mod+b', action: 'toggleSidebar' },
+]
+
+const DEFAULT_NODE_STYLES: Record<string, NodeStyleConfig> = {
+  domain: { color: '#8b5cf6', shape: 'rounded', sizeMultiplier: 1.2 },
+  app: { color: '#06b6d4', shape: 'rounded', sizeMultiplier: 1 },
+  asset: { color: '#22c55e', shape: 'rectangle', sizeMultiplier: 0.9 },
+  ghost: { color: '#94a3b8', shape: 'rounded', sizeMultiplier: 0.8 },
+}
+
+export const usePreferencesStore = create<PreferencesState>()(
+  persist(
+    (set) => ({
+      // Theme
+      theme: 'system',
+      accentColor: '#6366f1',
+      setTheme: (theme) => set({ theme }),
+      setAccentColor: (accentColor) => set({ accentColor }),
+      
+      // Node Styling
+      nodeStyles: DEFAULT_NODE_STYLES,
+      setNodeStyle: (nodeType, config) => set((state) => ({
+        nodeStyles: {
+          ...state.nodeStyles,
+          [nodeType]: { ...state.nodeStyles[nodeType], ...config },
+        },
+      })),
+      
+      // Shortcuts
+      shortcuts: DEFAULT_SHORTCUTS,
+      updateShortcut: (id, keys) => set((state) => ({
+        shortcuts: state.shortcuts.map((s) =>
+          s.id === id ? { ...s, keys } : s
+        ),
+      })),
+      resetShortcuts: () => set({ shortcuts: DEFAULT_SHORTCUTS }),
+      
+      // Sidebar
+      sidebarCollapsed: false,
+      toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+      
+      // Canvas
+      showMinimap: true,
+      showGrid: true,
+      snapToGrid: false,
+      toggleMinimap: () => set((state) => ({ showMinimap: !state.showMinimap })),
+      toggleGrid: () => set((state) => ({ showGrid: !state.showGrid })),
+      toggleSnapToGrid: () => set((state) => ({ snapToGrid: !state.snapToGrid })),
+    }),
+    {
+      name: 'nexus-preferences',
+    }
+  )
+)
+
