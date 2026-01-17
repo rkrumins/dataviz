@@ -1,5 +1,5 @@
 /**
- * HierarchyCanvas - Solidatus-style Reference Model View
+ * HierarchyCanvas - Hierarchy-style Reference Model View
  * 
  * Displays entities in a hierarchical nested container structure with:
  * - Collapsible containers that roll up children
