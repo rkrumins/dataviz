@@ -28,6 +28,7 @@ export interface LineageEdge extends Edge {
     edgeType?: string
     relationship?: string
     animated?: boolean
+    label?: string
     // For aggregated edges
     isAggregated?: boolean
     sourceEdgeCount?: number
@@ -43,29 +44,29 @@ interface CanvasState {
   setEdges: (edges: LineageEdge[]) => void
   addNodes: (nodes: LineageNode[]) => void
   addEdges: (edges: LineageEdge[]) => void
-  
+
   // Selection
   selectedNodeIds: string[]
   selectedEdgeIds: string[]
   selectNode: (id: string, multi?: boolean) => void
   selectEdge: (id: string, multi?: boolean) => void
   clearSelection: () => void
-  
+
   // Viewport
   viewport: Viewport
   setViewport: (viewport: Viewport) => void
-  
+
   // Loading State
   isLoading: boolean
   loadingRegions: Set<string>
   setLoading: (loading: boolean) => void
   addLoadingRegion: (region: string) => void
   removeLoadingRegion: (region: string) => void
-  
+
   // Active Lens
   activeLensId: string | null
   setActiveLens: (lensId: string | null) => void
-  
+
   // Trace State
   traceOrigin: string | null
   traceDirection: 'upstream' | 'downstream' | 'both'
@@ -73,7 +74,7 @@ interface CanvasState {
   setTraceOrigin: (nodeId: string | null) => void
   setTraceDirection: (direction: 'upstream' | 'downstream' | 'both') => void
   setTraceDepth: (depth: number) => void
-  
+
   // Cache
   cachedRegions: Map<string, LineageNode[]>
   cacheRegion: (key: string, nodes: LineageNode[]) => void
@@ -97,12 +98,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     const uniqueEdges = newEdges.filter((e) => !existingIds.has(e.id))
     return { edges: [...state.edges, ...uniqueEdges] }
   }),
-  
+
   // Selection
   selectedNodeIds: [],
   selectedEdgeIds: [],
   selectNode: (id, multi = false) => set((state) => ({
-    selectedNodeIds: multi 
+    selectedNodeIds: multi
       ? state.selectedNodeIds.includes(id)
         ? state.selectedNodeIds.filter((nid) => nid !== id)
         : [...state.selectedNodeIds, id]
@@ -118,11 +119,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     selectedNodeIds: multi ? state.selectedNodeIds : [],
   })),
   clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [] }),
-  
+
   // Viewport
   viewport: { x: 0, y: 0, zoom: 1 },
   setViewport: (viewport) => set({ viewport }),
-  
+
   // Loading
   isLoading: false,
   loadingRegions: new Set(),
@@ -135,16 +136,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   removeLoadingRegion: (region) => set((state) => {
     const newRegions = new Set(state.loadingRegions)
     newRegions.delete(region)
-    return { 
-      loadingRegions: newRegions, 
-      isLoading: newRegions.size > 0 
+    return {
+      loadingRegions: newRegions,
+      isLoading: newRegions.size > 0
     }
   }),
-  
+
   // Active Lens
   activeLensId: null,
   setActiveLens: (activeLensId) => set({ activeLensId }),
-  
+
   // Trace
   traceOrigin: null,
   traceDirection: 'both',
@@ -152,7 +153,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   setTraceOrigin: (traceOrigin) => set({ traceOrigin }),
   setTraceDirection: (traceDirection) => set({ traceDirection }),
   setTraceDepth: (traceDepth) => set({ traceDepth }),
-  
+
   // Cache
   cachedRegions: new Map(),
   cacheRegion: (key, nodes) => set((state) => {

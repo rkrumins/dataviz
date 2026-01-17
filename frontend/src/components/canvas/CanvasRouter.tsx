@@ -15,6 +15,7 @@ import { useSchemaStore } from '@/store/schema'
 import { LineageCanvas } from './LineageCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
+import { LayeredLineageCanvas } from './LayeredLineageCanvas'
 import { cn } from '@/lib/utils'
 
 interface CanvasRouterProps {
@@ -24,17 +25,22 @@ interface CanvasRouterProps {
 export function CanvasRouter({ className }: CanvasRouterProps) {
   const activeView = useSchemaStore((s) => s.getActiveView())
   const layoutType = activeView?.layout.type ?? 'graph'
-  
+
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {
     // Also check view ID for specific handling
     const viewId = activeView?.id ?? ''
-    
+
+    // Layered lineage view combines layers with lineage flow
+    if (viewId === 'layered-lineage' || layoutType === 'layered-lineage') {
+      return LayeredLineageCanvas
+    }
+
     // Reference model view gets special horizontal layer layout
     if (viewId === 'reference-model' || layoutType === 'reference') {
       return ReferenceModelCanvas
     }
-    
+
     switch (layoutType) {
       case 'hierarchy':
       case 'tree':
@@ -44,7 +50,7 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
         return LineageCanvas
     }
   }, [layoutType, activeView?.id])
-  
+
   return (
     <div className={cn("relative w-full h-full", className)}>
       {/* View Type Indicator */}
@@ -61,12 +67,12 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
           </Suspense>
         </motion.div>
       </AnimatePresence>
-      
+
       {/* Active View Badge - Only for non-graph views (LineageCanvas has its own toolbar) */}
       {activeView && layoutType !== 'graph' && (
         <div className="absolute top-4 left-4 z-10 pointer-events-none">
-          <ViewBadge 
-            name={activeView.name} 
+          <ViewBadge
+            name={activeView.name}
             layoutType={layoutType}
             entityCount={activeView.content.visibleEntityTypes.length}
           />
@@ -101,8 +107,10 @@ function ViewBadge({ name, layoutType, entityCount }: ViewBadgeProps) {
     list: 'List',
     grid: 'Grid',
     timeline: 'Timeline',
+    'layered-lineage': 'Layered Lineage',
+    reference: 'Reference Model',
   }
-  
+
   return (
     <div className="flex items-center gap-2">
       <div className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2">

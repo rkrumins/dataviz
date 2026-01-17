@@ -24,7 +24,7 @@ export interface UseProjectedGraphResult {
   // Projected nodes and edges for rendering
   nodes: Node[]
   edges: Edge[]
-  
+
   // Aggregation metadata
   aggregatedEdges: Map<string, {
     id: string
@@ -33,11 +33,11 @@ export interface UseProjectedGraphResult {
     sourceEdges: string[]
     confidence: number
   }>
-  
+
   // Helpers
   isAggregated: boolean
   projectionConfig: ViewProjectionConfig
-  
+
   // Get the original column-level edges for an aggregated edge
   getSourceEdges: (aggregatedEdgeId: string) => string[]
 }
@@ -50,14 +50,14 @@ export function useProjectedGraph(): UseProjectedGraphResult {
   const rawEdges = useCanvasStore((s) => s.edges)
   const activeViewId = useSchemaStore((s) => s.activeViewId)
   const getActiveView = useSchemaStore((s) => s.getActiveView)
-  
+
   const activeView = getActiveView()
-  
+
   // Build projection config from view settings
   const projectionConfig = useMemo<ViewProjectionConfig>(() => {
     // Try to get config from view's layout.projection
     const viewProjection = activeView?.layout?.projection
-    
+
     if (viewProjection) {
       return {
         targetGranularity: viewProjection.targetGranularity ?? GranularityLevel.Table,
@@ -69,11 +69,11 @@ export function useProjectedGraph(): UseProjectedGraphResult {
         containerTypes: viewProjection.containerTypes ?? [],
       }
     }
-    
+
     // Fallback to predefined configs
-    return getViewProjectionConfig(activeViewId)
+    return getViewProjectionConfig(activeViewId ?? 'default')
   }, [activeView, activeViewId])
-  
+
   // Apply projection
   const projected = useMemo<ProjectedGraph>(() => {
     if (!rawNodes.length) {
@@ -83,10 +83,10 @@ export function useProjectedGraph(): UseProjectedGraphResult {
         aggregatedEdges: new Map(),
       }
     }
-    
+
     return projectGraph(rawNodes, rawEdges, projectionConfig)
   }, [rawNodes, rawEdges, projectionConfig])
-  
+
   // Helper to get source edges for an aggregated edge
   const getSourceEdges = useMemo(() => {
     return (aggregatedEdgeId: string): string[] => {
@@ -94,7 +94,7 @@ export function useProjectedGraph(): UseProjectedGraphResult {
       return agg?.sourceEdges ?? []
     }
   }, [projected.aggregatedEdges])
-  
+
   return {
     nodes: projected.nodes,
     edges: projected.edges,
@@ -109,10 +109,10 @@ export function useProjectedGraph(): UseProjectedGraphResult {
  * Hook to get just the visible entity types for the current view
  */
 export function useVisibleEntityTypes(): string[] {
-  const activeViewId = useSchemaStore((s) => s.activeViewId)
+  const _activeViewId = useSchemaStore((s) => s.activeViewId)
   const getActiveView = useSchemaStore((s) => s.getActiveView)
   const activeView = getActiveView()
-  
+
   return useMemo(() => {
     return activeView?.content?.visibleEntityTypes ?? []
   }, [activeView])
@@ -131,20 +131,20 @@ export function useIsEntityTypeVisible(typeId: string): boolean {
  */
 export function useLineageStats() {
   const { nodes, edges, aggregatedEdges, isAggregated } = useProjectedGraph()
-  
+
   return useMemo(() => {
     const nodesByType = new Map<string, number>()
     nodes.forEach((node) => {
       const type = (node.data as Record<string, unknown>)?.type as string ?? 'unknown'
       nodesByType.set(type, (nodesByType.get(type) ?? 0) + 1)
     })
-    
+
     const edgesByType = new Map<string, number>()
     edges.forEach((edge) => {
       const type = (edge.data as Record<string, unknown>)?.edgeType as string ?? 'lineage'
       edgesByType.set(type, (edgesByType.get(type) ?? 0) + 1)
     })
-    
+
     return {
       totalNodes: nodes.length,
       totalEdges: edges.length,

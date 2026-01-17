@@ -11,7 +11,8 @@ export function cn(...inputs: ClassValue[]) {
 /**
  * Debounce function for performance-critical operations
  */
-export function debounce<T extends (...args: unknown[]) => unknown>(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function debounce<T extends (...args: any[]) => any>(
   fn: T,
   delay: number
 ): (...args: Parameters<T>) => void {
@@ -44,7 +45,7 @@ export function throttle<T extends (...args: unknown[]) => unknown>(
  */
 export function formatUrn(urn: string, mode: 'business' | 'technical'): string {
   if (mode === 'technical') return urn
-  
+
   // Extract readable name from URN
   const parts = urn.split(':')
   const lastPart = parts[parts.length - 1] || urn

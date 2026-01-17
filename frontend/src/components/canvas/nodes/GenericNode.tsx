@@ -8,12 +8,12 @@ import { cn } from '@/lib/utils'
 import type { EntityInstance } from '@/types/schema'
 
 // Dynamic icon component
-function DynamicIcon({ name, className }: { name: string; className?: string }) {
-  const IconComponent = (LucideIcons as Record<string, React.ComponentType<{ className?: string }>>)[name]
+function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
+  const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string; style?: React.CSSProperties }>>)[name]
   if (!IconComponent) {
-    return <LucideIcons.Box className={className} />
+    return <LucideIcons.Box className={className} style={style} />
   }
-  return <IconComponent className={className} />
+  return <IconComponent className={className} style={style} />
 }
 
 interface GenericNodeData extends EntityInstance {
@@ -22,7 +22,7 @@ interface GenericNodeData extends EntityInstance {
   childCount?: number
 }
 
-type GenericNodeProps = NodeProps<{ data: GenericNodeData }>
+type GenericNodeProps = NodeProps<Record<string, unknown>>
 
 /**
  * GenericNode - Renders any entity type based on schema configuration
@@ -37,41 +37,41 @@ export const GenericNode = memo(function GenericNode({
 }: GenericNodeProps) {
   // Handle both nested (data.data) and flat (data) structures
   const rawData = (data as Record<string, unknown>)
-  const entityData: GenericNodeData = rawData.data 
+  const entityData: GenericNodeData = rawData.data
     ? (rawData.data as GenericNodeData)
     : (rawData as unknown as GenericNodeData)
-  
+
   // Support both typeId and type fields
   const typeId = entityData.typeId || (entityData as Record<string, unknown>).type as string || 'unknown'
-  
+
   const getEntityType = useSchemaStore((s) => s.getEntityType)
   const getEntityVisual = useSchemaStore((s) => s.getEntityVisual)
   const mode = usePersonaStore((s) => s.mode)
-  
+
   const entityType = getEntityType(typeId)
   const visual = getEntityVisual(typeId)
-  
+
   if (!entityType || !visual) {
-    return <FallbackNode data={entityData} selected={selected} />
+    return <FallbackNode data={entityData} selected={selected ?? false} />
   }
-  
+
   // Get fields to display in the node
   const visibleFields = useMemo(() => {
     return entityType.fields
       .filter((f) => f.showInNode)
       .sort((a, b) => a.displayOrder - b.displayOrder)
   }, [entityType.fields])
-  
+
   // Get the primary label - handle both nested and flat structures
   const entityFields = (entityData.data || entityData) as Record<string, unknown>
-  const primaryLabel = entityFields['name'] as string || 
-                       entityFields['label'] as string || 
-                       entityFields['businessLabel'] as string ||
-                       entityData.id || 'Unknown'
-  const secondaryLabel = mode === 'technical' 
+  const primaryLabel = entityFields['name'] as string ||
+    entityFields['label'] as string ||
+    entityFields['businessLabel'] as string ||
+    entityData.id || 'Unknown'
+  const secondaryLabel = mode === 'technical'
     ? (entityFields['urn'] as string)
     : (entityFields['description'] as string)
-  
+
   // Size classes
   const sizeClasses = {
     xs: 'min-w-[100px] max-w-[140px] px-2 py-1.5',
@@ -80,7 +80,7 @@ export const GenericNode = memo(function GenericNode({
     lg: 'min-w-[220px] max-w-[300px] px-4 py-3',
     xl: 'min-w-[280px] max-w-[380px] px-5 py-4',
   }
-  
+
   // Shape classes
   const shapeClasses = {
     rectangle: 'rounded-md',
@@ -90,7 +90,7 @@ export const GenericNode = memo(function GenericNode({
     hexagon: 'rounded-lg', // Would need clip-path
     circle: 'rounded-full aspect-square',
   }
-  
+
   // Border style classes
   const borderClasses = {
     solid: 'border-2',
@@ -98,10 +98,10 @@ export const GenericNode = memo(function GenericNode({
     dotted: 'border-2 border-dotted',
     none: 'border-0',
   }
-  
+
   const isGhost = entityType.id === 'ghost'
-  const isExpandable = entityType.behavior.expandable && (entityData.childCount ?? 0) > 0
-  
+  const isExpandable = entityType.behavior.expandable && ((entityData.childCount ?? 0) > 0)
+
   return (
     <>
       {/* Node Toolbar (appears on selection) */}
@@ -143,11 +143,11 @@ export const GenericNode = memo(function GenericNode({
           dragging && "opacity-80 cursor-grabbing",
           isGhost && "opacity-60"
         )}
-        style={{ 
+        style={{
           borderColor: visual.color,
           borderLeftWidth: visual.borderStyle !== 'none' ? '4px' : undefined,
-          boxShadow: selected 
-            ? `0 0 20px ${visual.color}40` 
+          boxShadow: selected
+            ? `0 0 20px ${visual.color}40`
             : '0 4px 12px rgba(0,0,0,0.1)',
           ['--ring-color' as string]: visual.color,
         }}
@@ -155,23 +155,23 @@ export const GenericNode = memo(function GenericNode({
         {/* Header */}
         <div className="flex items-start gap-2">
           {/* Icon */}
-          <div 
+          <div
             className={cn(
               "flex-shrink-0 rounded-lg flex items-center justify-center",
-              visual.size === 'xs' ? 'w-5 h-5' : 
-              visual.size === 'sm' ? 'w-6 h-6' :
-              visual.size === 'md' ? 'w-8 h-8' :
-              visual.size === 'lg' ? 'w-10 h-10' : 'w-12 h-12'
+              visual.size === 'xs' ? 'w-5 h-5' :
+                visual.size === 'sm' ? 'w-6 h-6' :
+                  visual.size === 'md' ? 'w-8 h-8' :
+                    visual.size === 'lg' ? 'w-10 h-10' : 'w-12 h-12'
             )}
             style={{ backgroundColor: `${visual.color}15` }}
           >
-            <DynamicIcon 
-              name={visual.icon} 
+            <DynamicIcon
+              name={visual.icon}
               className={cn(
                 visual.size === 'xs' ? 'w-3 h-3' :
-                visual.size === 'sm' ? 'w-3.5 h-3.5' :
-                visual.size === 'md' ? 'w-4 h-4' :
-                visual.size === 'lg' ? 'w-5 h-5' : 'w-6 h-6'
+                  visual.size === 'sm' ? 'w-3.5 h-3.5' :
+                    visual.size === 'md' ? 'w-4 h-4' :
+                      visual.size === 'lg' ? 'w-5 h-5' : 'w-6 h-6'
               )}
               style={{ color: visual.color }}
             />
@@ -180,18 +180,18 @@ export const GenericNode = memo(function GenericNode({
           {/* Content */}
           <div className="flex-1 min-w-0">
             {/* Type Badge */}
-            <span 
+            <span
               className="text-2xs font-medium uppercase tracking-wider"
               style={{ color: visual.color }}
             >
               {entityType.name}
             </span>
-            
+
             {/* Primary Label */}
             <h3 className={cn(
               "font-medium text-ink leading-tight truncate",
               visual.size === 'xs' ? 'text-xs' :
-              visual.size === 'sm' ? 'text-sm' : 'text-sm'
+                visual.size === 'sm' ? 'text-sm' : 'text-sm'
             )}>
               {primaryLabel}
             </h3>
@@ -199,14 +199,14 @@ export const GenericNode = memo(function GenericNode({
 
           {/* Expand Button */}
           {isExpandable && (
-            <button 
+            <button
               className={cn(
                 "w-5 h-5 rounded flex items-center justify-center",
                 "hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
               )}
             >
-              <DynamicIcon 
-                name={entityData.isExpanded ? "ChevronDown" : "ChevronRight"} 
+              <DynamicIcon
+                name={entityData.isExpanded ? "ChevronDown" : "ChevronRight"}
                 className="w-3 h-3 text-ink-muted"
               />
             </button>
@@ -217,7 +217,7 @@ export const GenericNode = memo(function GenericNode({
         {visibleFields.length > 1 && visual.size !== 'xs' && (
           <div className="mt-2 space-y-1">
             {visibleFields.slice(1).map((field) => (
-              <FieldRenderer 
+              <FieldRenderer
                 key={field.id}
                 field={field}
                 value={entityFields[field.id]}
@@ -234,7 +234,7 @@ export const GenericNode = memo(function GenericNode({
             <div className="flex items-center gap-3 text-2xs text-ink-muted">
               {entityType.hierarchy.rollUpFields.map((rollUp) => (
                 <span key={rollUp.targetField}>
-                  {entityData._computed?.rollUps[rollUp.targetField]} {rollUp.label}
+                  {String(entityData._computed?.rollUps[rollUp.targetField])} {rollUp.label}
                 </span>
               ))}
             </div>
@@ -251,7 +251,7 @@ export const GenericNode = memo(function GenericNode({
         {/* Loading State */}
         <AnimatePresence>
           {entityData.isLoading && (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
@@ -288,14 +288,14 @@ interface FieldRendererProps {
 
 function FieldRenderer({ field, value, color, size }: FieldRendererProps) {
   if (value === undefined || value === null) return null
-  
+
   switch (field.type) {
     case 'tags':
       const tags = value as string[]
       return (
         <div className="flex flex-wrap gap-1">
           {tags.slice(0, 3).map((tag) => (
-            <span 
+            <span
               key={tag}
               className="px-1.5 py-0.5 rounded text-2xs font-medium"
               style={{ backgroundColor: `${color}15`, color }}
@@ -308,17 +308,17 @@ function FieldRenderer({ field, value, color, size }: FieldRendererProps) {
           )}
         </div>
       )
-    
+
     case 'badge':
       return (
-        <span 
+        <span
           className="inline-block px-1.5 py-0.5 rounded text-2xs font-medium"
           style={{ backgroundColor: `${color}15`, color }}
         >
           {String(value)}
         </span>
       )
-    
+
     case 'progress':
       const progress = Number(value)
       return (
@@ -328,18 +328,18 @@ function FieldRenderer({ field, value, color, size }: FieldRendererProps) {
             <span className={cn(
               "font-medium",
               progress >= 80 ? "text-green-500" :
-              progress >= 50 ? "text-amber-500" : "text-red-500"
+                progress >= 50 ? "text-amber-500" : "text-red-500"
             )}>
               {Math.round(progress)}%
             </span>
           </div>
           {size !== 'xs' && size !== 'sm' && (
             <div className="h-1 bg-black/5 dark:bg-white/5 rounded-full overflow-hidden">
-              <div 
+              <div
                 className={cn(
                   "h-full rounded-full transition-all",
                   progress >= 80 ? "bg-green-500" :
-                  progress >= 50 ? "bg-amber-500" : "bg-red-500"
+                    progress >= 50 ? "bg-amber-500" : "bg-red-500"
                 )}
                 style={{ width: `${progress}%` }}
               />
@@ -347,27 +347,27 @@ function FieldRenderer({ field, value, color, size }: FieldRendererProps) {
           )}
         </div>
       )
-    
+
     case 'status':
       const format = field.format as { statusColors?: Record<string, string> }
       const statusColor = format?.statusColors?.[String(value)] || color
       return (
         <div className="flex items-center gap-1.5">
-          <div 
+          <div
             className="w-2 h-2 rounded-full"
             style={{ backgroundColor: statusColor }}
           />
           <span className="text-2xs font-medium capitalize">{String(value)}</span>
         </div>
       )
-    
+
     case 'urn':
       return (
         <code className="block text-2xs font-mono text-ink-muted bg-black/5 dark:bg-white/5 px-1.5 py-0.5 rounded truncate">
           {String(value)}
         </code>
       )
-    
+
     case 'number':
       const numFormat = (field.format as { numberFormat?: string })?.numberFormat
       let displayNum = String(value)
@@ -379,7 +379,7 @@ function FieldRenderer({ field, value, color, size }: FieldRendererProps) {
       return (
         <span className="text-2xs text-ink-secondary">{displayNum}</span>
       )
-    
+
     default:
       return (
         <span className="text-2xs text-ink-secondary truncate">

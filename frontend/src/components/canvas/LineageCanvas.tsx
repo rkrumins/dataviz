@@ -9,12 +9,13 @@ import {
   type OnEdgesChange,
   type OnConnect,
   type NodeMouseHandler,
+  type EdgeMouseHandler,
   applyNodeChanges,
   applyEdgeChanges,
-  type Node,
-  type Edge,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
+import { AnimatePresence } from 'framer-motion'
+import { GitBranch } from 'lucide-react'
 
 // Legacy nodes for backward compatibility
 import { DomainNode } from './nodes/DomainNode'
@@ -27,8 +28,10 @@ import { LineageEdge } from './edges/LineageEdge'
 import { AggregatedEdge } from './edges/AggregatedEdge'
 import { CanvasControls } from './CanvasControls'
 import { LineageToolbar } from './LineageToolbar'
+import { EdgeDetailPanel } from '../panels/EdgeDetailPanel'
 import { useSpatialLoading } from '@/hooks/useSpatialLoading'
 import { useLineageExploration } from '@/hooks/useLineageExploration'
+import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
@@ -53,13 +56,12 @@ const edgeTypes = {
 
 export function LineageCanvas() {
   // Raw nodes/edges from store (for mutations)
-  const { setNodes, setEdges, selectNode, clearSelection } = useCanvasStore()
+  const { setNodes, setEdges, selectNode, selectEdge, clearSelection } = useCanvasStore()
   const rawNodes = useCanvasStore((s) => s.nodes)
   const rawEdges = useCanvasStore((s) => s.edges)
-  
+
   // Lineage exploration hook - handles modes, granularity, trace
   const {
-    config,
     mode,
     granularity,
     focusEntityId,
@@ -68,20 +70,22 @@ export function LineageCanvas() {
     aggregatedEdges,
     upstreamCount,
     downstreamCount,
-    highlightedPath,
     setFocus,
   } = useLineageExploration()
-  
+
   // Use exploration-computed data for display, fallback to raw
   const displayNodes = visibleNodes.length > 0 ? visibleNodes : rawNodes
   const displayEdges = visibleEdges.length > 0 ? visibleEdges : rawEdges
-  
+
   const { showMinimap, showGrid, snapToGrid } = usePreferencesStore()
   const schema = useSchemaStore((s) => s.schema)
-  const activeView = useSchemaStore((s) => s.getActiveView())
-  
+
+  // Edge detail panel
+  const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
+  const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
+
   // Spatial loading hook
-  const { onViewportChange, isLoadingRegion } = useSpatialLoading()
+  const { isLoadingRegion } = useSpatialLoading()
 
   // Handle node changes (position, selection, etc.)
   const onNodesChange: OnNodesChange = useCallback(
@@ -131,6 +135,14 @@ export function LineageCanvas() {
     clearSelection()
   }, [clearSelection])
 
+  // Handle edge click
+  const onEdgeClick: EdgeMouseHandler = useCallback(
+    (_, edge) => {
+      selectEdge(edge.id)
+    },
+    [selectEdge]
+  )
+
   // Default edge options
   const defaultEdgeOptions = useMemo(() => ({
     type: 'lineage',
@@ -144,7 +156,7 @@ export function LineageCanvas() {
     if (entityType) {
       return entityType.visual.color
     }
-    
+
     // Fallback for legacy nodes
     switch (node.data.type) {
       case 'domain':
@@ -166,7 +178,7 @@ export function LineageCanvas() {
       <div className="absolute top-4 left-4 right-4 z-10">
         <LineageToolbar />
       </div>
-      
+
       {/* React Flow Canvas */}
       <div className="flex-1">
         <ReactFlow
@@ -179,8 +191,8 @@ export function LineageCanvas() {
           onConnect={onConnect}
           onNodeClick={onNodeClick}
           onNodeDoubleClick={onNodeDoubleClick}
+          onEdgeClick={onEdgeClick}
           onPaneClick={onPaneClick}
-          onMoveEnd={onViewportChange}
           defaultEdgeOptions={defaultEdgeOptions}
           snapToGrid={snapToGrid}
           snapGrid={[16, 16]}
@@ -191,41 +203,41 @@ export function LineageCanvas() {
           className="bg-canvas"
           proOptions={{ hideAttribution: true }}
         >
-        {/* Background Pattern */}
-        {showGrid && (
-          <Background 
-            variant={BackgroundVariant.Dots} 
-            gap={20} 
-            size={1}
-            className="opacity-40"
-          />
-        )}
-
-        {/* Custom Controls */}
-        <CanvasControls />
-
-        {/* Minimap */}
-        {showMinimap && (
-          <MiniMap
-            nodeColor={minimapNodeColor}
-            maskColor="rgba(0, 0, 0, 0.1)"
-            className={cn(
-              "glass-panel-subtle !rounded-xl !overflow-hidden",
-              "!bottom-4 !right-4"
-            )}
-            pannable
-            zoomable
-          />
-        )}
-
-        {/* Standard Controls */}
-        <Controls
-          className={cn(
-            "glass-panel-subtle !rounded-xl !overflow-hidden !shadow-lg",
-            "!bottom-4 !left-4"
+          {/* Background Pattern */}
+          {showGrid && (
+            <Background
+              variant={BackgroundVariant.Dots}
+              gap={20}
+              size={1}
+              className="opacity-40"
+            />
           )}
-          showInteractive={false}
-        />
+
+          {/* Custom Controls */}
+          <CanvasControls />
+
+          {/* Minimap */}
+          {showMinimap && (
+            <MiniMap
+              nodeColor={minimapNodeColor}
+              maskColor="rgba(0, 0, 0, 0.1)"
+              className={cn(
+                "glass-panel-subtle !rounded-xl !overflow-hidden",
+                "!bottom-4 !right-4"
+              )}
+              pannable
+              zoomable
+            />
+          )}
+
+          {/* Standard Controls */}
+          <Controls
+            className={cn(
+              "glass-panel-subtle !rounded-xl !overflow-hidden !shadow-lg",
+              "!bottom-4 !left-4"
+            )}
+            showInteractive={false}
+          />
 
           {/* Loading indicator for spatial loading */}
           {isLoadingRegion && (
@@ -236,7 +248,7 @@ export function LineageCanvas() {
           )}
         </ReactFlow>
       </div>
-      
+
       {/* Stats Bar */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3">
         {/* Mode/Granularity indicator */}
@@ -245,14 +257,14 @@ export function LineageCanvas() {
             {mode} · {granularity}
           </span>
         </div>
-        
+
         {/* Entity counts */}
         <div className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2">
           <span className="text-2xs text-ink-muted">
             {displayNodes.length} entities · {displayEdges.length} relationships
           </span>
         </div>
-        
+
         {/* Trace info (when focused) */}
         {focusEntityId && (upstreamCount > 0 || downstreamCount > 0) && (
           <div className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2">
@@ -261,7 +273,7 @@ export function LineageCanvas() {
             </span>
           </div>
         )}
-        
+
         {/* Aggregated edges indicator */}
         {aggregatedEdges.size > 0 && (
           <div className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2">
@@ -271,7 +283,31 @@ export function LineageCanvas() {
             </span>
           </div>
         )}
+
+        {/* Edge Details Toggle */}
+        <button
+          onClick={toggleEdgePanel}
+          className={cn(
+            "glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2 transition-colors",
+            isEdgePanelOpen && "bg-accent-lineage/10 border-accent-lineage"
+          )}
+        >
+          <GitBranch className="w-3.5 h-3.5 text-accent-lineage" />
+          <span className="text-2xs text-ink-muted">Edge Details</span>
+        </button>
       </div>
+
+      {/* Edge Detail Panel */}
+      <AnimatePresence>
+        {isEdgePanelOpen && (
+          <EdgeDetailPanel
+            isOpen={isEdgePanelOpen}
+            onClose={closeEdgePanel}
+            edgeFilters={edgeFilters}
+            onToggleFilter={toggleEdgeFilter}
+          />
+        )}
+      </AnimatePresence>
     </div>
   )
 }

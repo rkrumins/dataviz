@@ -9,21 +9,19 @@
  * - Computed visible nodes based on configuration
  */
 
-import { useState, useCallback, useMemo } from 'react'
+import { useMemo } from 'react'
 import { create } from 'zustand'
 import type { Node, Edge } from '@xyflow/react'
-import type { 
-  LineageExplorationConfig, 
-  LineageExplorationMode, 
+import type {
+  LineageExplorationConfig,
+  LineageExplorationMode,
   LineageGranularity,
-  DEFAULT_EXPLORATION_CONFIGS,
 } from '@/types/schema'
-import { useCanvasStore } from '@/store/canvas'
+import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import {
   GranularityLevel,
   ENTITY_GRANULARITY,
   buildContainmentMap,
-  findAncestorAtGranularity,
   aggregateLineageEdges,
 } from '@/lib/projection-engine'
 
@@ -34,16 +32,16 @@ import {
 interface LineageExplorationState {
   // Current configuration
   config: LineageExplorationConfig
-  
+
   // Focus entity
   focusEntityId: string | null
-  
+
   // Expanded nodes
   expandedIds: Set<string>
-  
+
   // Highlighted path (for lineage trace)
   highlightedPath: Set<string>
-  
+
   // Actions
   setMode: (mode: LineageExplorationMode) => void
   setGranularity: (granularity: LineageGranularity) => void
@@ -90,15 +88,15 @@ export const useLineageExplorationStore = create<LineageExplorationState>((set, 
   focusEntityId: null,
   expandedIds: new Set(),
   highlightedPath: new Set(),
-  
+
   setMode: (mode) => set((state) => ({
     config: { ...state.config, mode },
   })),
-  
+
   setGranularity: (granularity) => set((state) => ({
     config: { ...state.config, granularity },
   })),
-  
+
   setFocus: (entityId) => set({
     focusEntityId: entityId,
     config: {
@@ -106,21 +104,21 @@ export const useLineageExplorationStore = create<LineageExplorationState>((set, 
       mode: entityId ? 'focused' : 'overview',
     },
   }),
-  
+
   setUpstreamDepth: (depth) => set((state) => ({
     config: {
       ...state.config,
       trace: { ...state.config.trace, upstreamDepth: Math.max(0, depth) },
     },
   })),
-  
+
   setDownstreamDepth: (depth) => set((state) => ({
     config: {
       ...state.config,
       trace: { ...state.config.trace, downstreamDepth: Math.max(0, depth) },
     },
   })),
-  
+
   toggleExpanded: (entityId) => set((state) => {
     const newExpanded = new Set(state.expandedIds)
     if (newExpanded.has(entityId)) {
@@ -130,17 +128,17 @@ export const useLineageExplorationStore = create<LineageExplorationState>((set, 
     }
     return { expandedIds: newExpanded }
   }),
-  
-  expandAll: () => set({ 
+
+  expandAll: () => set({
     expandedIds: new Set(['__all__']), // Special flag
   }),
-  
-  collapseAll: () => set({ 
+
+  collapseAll: () => set({
     expandedIds: new Set(),
   }),
-  
+
   setHighlightedPath: (path) => set({ highlightedPath: path }),
-  
+
   toggleIncludeChildLineage: () => set((state) => ({
     config: {
       ...state.config,
@@ -150,7 +148,7 @@ export const useLineageExplorationStore = create<LineageExplorationState>((set, 
       },
     },
   })),
-  
+
   resetToDefault: (preset = 'overview') => {
     const presets: Record<string, Partial<LineageExplorationConfig>> = {
       overview: {
@@ -172,7 +170,7 @@ export const useLineageExplorationStore = create<LineageExplorationState>((set, 
         aggregation: { inheritFromChildren: true, showAggregatedEdges: true, minConfidence: 0.5 },
       },
     }
-    
+
     const presetConfig = presets[preset]
     set({
       config: {
@@ -210,13 +208,13 @@ export function computeTrace(
   downstreamDepth: number,
   includeChildLineage: boolean
 ): TraceResult {
-  const nodeMap = new Map(allNodes.map(n => [n.id, n]))
+  const _nodeMap = new Map(allNodes.map(n => [n.id, n]))
   const containmentMap = buildContainmentMap(allNodes, allEdges)
-  
+
   // Build adjacency lists
   const upstreamEdges = new Map<string, Edge[]>()
   const downstreamEdges = new Map<string, Edge[]>()
-  
+
   // Find child nodes (for includeChildLineage)
   const childrenMap = new Map<string, string[]>()
   allNodes.forEach((node) => {
@@ -228,7 +226,7 @@ export function computeTrace(
       childrenMap.get(parentId)!.push(node.id)
     }
   })
-  
+
   // Build edge maps
   allEdges.forEach((edge) => {
     const rel = edge.data?.relationship ?? edge.data?.edgeType ?? ''
@@ -236,25 +234,25 @@ export function computeTrace(
     if (rel === 'contains' || rel === 'has_schema' || rel === 'has_dataset' || rel === 'has_column') {
       return
     }
-    
+
     // Downstream: edges where focus is source
     if (!downstreamEdges.has(edge.source)) {
       downstreamEdges.set(edge.source, [])
     }
     downstreamEdges.get(edge.source)!.push(edge)
-    
+
     // Upstream: edges where focus is target
     if (!upstreamEdges.has(edge.target)) {
       upstreamEdges.set(edge.target, [])
     }
     upstreamEdges.get(edge.target)!.push(edge)
   })
-  
+
   // BFS to find nodes at each depth
   const upstreamNodes = new Set<string>()
   const downstreamNodes = new Set<string>()
   const pathEdges = new Set<string>()
-  
+
   // Include focus entity's children if configured
   const startIds = [focusId]
   if (includeChildLineage) {
@@ -267,12 +265,12 @@ export function computeTrace(
     }
     startIds.push(...getAllDescendants(focusId))
   }
-  
+
   // Trace upstream
   let currentLevel = new Set(startIds)
   for (let depth = 0; depth < upstreamDepth; depth++) {
     const nextLevel = new Set<string>()
-    
+
     currentLevel.forEach((nodeId) => {
       const edges = upstreamEdges.get(nodeId) ?? []
       edges.forEach((edge) => {
@@ -282,17 +280,17 @@ export function computeTrace(
         }
       })
     })
-    
+
     nextLevel.forEach((id) => upstreamNodes.add(id))
     currentLevel = nextLevel
     if (currentLevel.size === 0) break
   }
-  
+
   // Trace downstream
   currentLevel = new Set(startIds)
   for (let depth = 0; depth < downstreamDepth; depth++) {
     const nextLevel = new Set<string>()
-    
+
     currentLevel.forEach((nodeId) => {
       const edges = downstreamEdges.get(nodeId) ?? []
       edges.forEach((edge) => {
@@ -302,15 +300,15 @@ export function computeTrace(
         }
       })
     })
-    
+
     nextLevel.forEach((id) => downstreamNodes.add(id))
     currentLevel = nextLevel
     if (currentLevel.size === 0) break
   }
-  
+
   // Collect all nodes in path
   const pathNodes = new Set([focusId, ...upstreamNodes, ...downstreamNodes])
-  
+
   // Add focus children if included
   if (includeChildLineage) {
     const getAllDescendants = (id: string): string[] => {
@@ -319,13 +317,13 @@ export function computeTrace(
     }
     getAllDescendants(focusId).forEach((id) => pathNodes.add(id))
   }
-  
+
   // Filter nodes and edges
   const traceNodes = allNodes.filter((n) => pathNodes.has(n.id))
-  const traceEdges = allEdges.filter((e) => 
+  const traceEdges = allEdges.filter((e) =>
     pathNodes.has(e.source) && pathNodes.has(e.target)
   )
-  
+
   return {
     nodes: traceNodes,
     edges: traceEdges,
@@ -355,22 +353,22 @@ export function projectToGranularity(
     system: GranularityLevel.System,
     domain: GranularityLevel.Domain,
   }
-  
+
   const targetLevel = granularityMap[targetGranularity]
   const containmentMap = buildContainmentMap(nodes, edges)
-  
+
   // Filter nodes at or above target granularity
   const visibleNodes = nodes.filter((node) => {
     const nodeType = node.data?.type as string
     const nodeGranularity = ENTITY_GRANULARITY[nodeType] ?? GranularityLevel.Column
     return nodeGranularity >= targetLevel
   })
-  
+
   const visibleNodeIds = new Set(visibleNodes.map(n => n.id))
-  
+
   // Aggregate edges from lower granularity
   const aggregatedEdges = new Map<string, { sourceCount: number; confidence: number; sourceEdges: string[] }>()
-  
+
   if (inheritFromChildren) {
     const aggregated = aggregateLineageEdges(edges, nodes, containmentMap, targetLevel)
     aggregated.forEach((agg) => {
@@ -383,7 +381,7 @@ export function projectToGranularity(
       }
     })
   }
-  
+
   // Create edges for visible nodes
   const visibleEdges = edges.filter((edge) => {
     const rel = edge.data?.relationship ?? edge.data?.edgeType ?? ''
@@ -392,12 +390,12 @@ export function projectToGranularity(
     }
     return visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)
   })
-  
+
   // Add aggregated edges
   aggregatedEdges.forEach((agg, key) => {
     const [source, target] = key.split('->')
     const existingEdge = visibleEdges.find(e => e.source === source && e.target === target)
-    
+
     if (!existingEdge) {
       visibleEdges.push({
         id: `agg-${key}`,
@@ -413,7 +411,7 @@ export function projectToGranularity(
       })
     }
   })
-  
+
   // Add child counts to visible nodes
   const nodesWithCounts = visibleNodes.map((node) => {
     // Count children at lower granularity
@@ -423,7 +421,7 @@ export function projectToGranularity(
         childCount++
       }
     })
-    
+
     return {
       ...node,
       data: {
@@ -433,7 +431,7 @@ export function projectToGranularity(
       },
     }
   })
-  
+
   return {
     nodes: nodesWithCounts,
     edges: visibleEdges,
@@ -453,17 +451,17 @@ export interface UseLineageExplorationResult {
   mode: LineageExplorationMode
   granularity: LineageGranularity
   focusEntityId: string | null
-  
+
   // Computed data
   visibleNodes: Node[]
   visibleEdges: Edge[]
   aggregatedEdges: Map<string, { sourceCount: number; confidence: number }>
-  
+
   // Path info
   upstreamCount: number
   downstreamCount: number
   highlightedPath: Set<string>
-  
+
   // Actions
   setMode: (mode: LineageExplorationMode) => void
   setGranularity: (granularity: LineageGranularity) => void
@@ -481,7 +479,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
   const {
     config,
     focusEntityId,
-    expandedIds,
+    expandedIds: _expandedIds,
     highlightedPath,
     setMode,
     setGranularity,
@@ -495,10 +493,10 @@ export function useLineageExploration(): UseLineageExplorationResult {
     toggleIncludeChildLineage,
     resetToDefault,
   } = useLineageExplorationStore()
-  
+
   const rawNodes = useCanvasStore((s) => s.nodes)
   const rawEdges = useCanvasStore((s) => s.edges)
-  
+
   // Compute visible nodes/edges based on configuration
   const { visibleNodes, visibleEdges, aggregatedEdges, upstreamCount, downstreamCount } = useMemo(() => {
     if (rawNodes.length === 0) {
@@ -510,12 +508,12 @@ export function useLineageExploration(): UseLineageExplorationResult {
         downstreamCount: 0,
       }
     }
-    
+
     let nodes = rawNodes
     let edges = rawEdges
     let upCount = 0
     let downCount = 0
-    
+
     // 1. If focused mode, compute trace first
     if (config.mode === 'focused' && focusEntityId) {
       const trace = computeTrace(
@@ -526,15 +524,15 @@ export function useLineageExploration(): UseLineageExplorationResult {
         config.trace.downstreamDepth,
         config.trace.includeChildLineage
       )
-      nodes = trace.nodes
+      nodes = trace.nodes as LineageNode[]
       edges = trace.edges
       upCount = trace.upstreamNodes.size
       downCount = trace.downstreamNodes.size
-      
+
       // Update highlighted path
       setHighlightedPath(trace.pathNodes)
     }
-    
+
     // 2. Project to target granularity
     const projected = projectToGranularity(
       nodes,
@@ -542,7 +540,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
       config.granularity,
       config.aggregation.inheritFromChildren
     )
-    
+
     return {
       visibleNodes: projected.nodes,
       visibleEdges: projected.edges,
@@ -562,7 +560,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
     focusEntityId,
     setHighlightedPath,
   ])
-  
+
   return {
     config,
     mode: config.mode,

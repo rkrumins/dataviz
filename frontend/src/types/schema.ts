@@ -18,16 +18,16 @@ export interface EntityTypeSchema {
   name: string;                        // Display name (e.g., "Domain", "Table")
   pluralName: string;                  // Plural form (e.g., "Domains", "Tables")
   description?: string;
-  
+
   // Visual Configuration
   visual: EntityVisualConfig;
-  
+
   // Field Definitions - what properties this entity has
   fields: EntityFieldDefinition[];
-  
+
   // Hierarchy Configuration
   hierarchy: EntityHierarchyConfig;
-  
+
   // Behavior Configuration
   behavior: EntityBehaviorConfig;
 }
@@ -54,13 +54,13 @@ export interface EntityFieldDefinition {
   format?: FieldFormat;                // How to format the value
 }
 
-export type FieldType = 
-  | 'string' 
-  | 'number' 
-  | 'boolean' 
-  | 'date' 
+export type FieldType =
+  | 'string'
+  | 'number'
+  | 'boolean'
+  | 'date'
   | 'datetime'
-  | 'url' 
+  | 'url'
   | 'email'
   | 'urn'                              // Technical identifier
   | 'tags'                             // Array of strings
@@ -102,7 +102,7 @@ export interface EntityBehaviorConfig {
   expandable: boolean;                 // Can show/hide children
   traceable: boolean;                  // Can start lineage trace from this
   clickAction: 'select' | 'expand' | 'navigate' | 'panel';
-  doubleClickAction: 'expand' | 'navigate' | 'trace' | 'edit';
+  doubleClickAction: 'expand' | 'navigate' | 'trace' | 'edit' | 'panel';
 }
 
 // ============================================
@@ -113,14 +113,14 @@ export interface RelationshipTypeSchema {
   id: string;
   name: string;
   description?: string;
-  
+
   // Source and Target constraints
   sourceTypes: string[];               // Entity types that can be source
   targetTypes: string[];               // Entity types that can be target
-  
+
   // Visual Configuration
   visual: RelationshipVisualConfig;
-  
+
   // Behavior
   bidirectional: boolean;
   showLabel: boolean;
@@ -150,22 +150,22 @@ export interface ViewConfiguration {
   name: string;
   description?: string;
   icon?: string;
-  
+
   // What to show
   content: ViewContentConfig;
-  
+
   // How to show it
   layout: ViewLayoutConfig;
-  
+
   // Filtering
   filters: ViewFilterConfig;
-  
+
   // Visual overrides per entity type
   entityOverrides: Record<string, Partial<EntityVisualConfig>>;
-  
+
   // Grouping configuration
   grouping?: ViewGroupingConfig;
-  
+
   // Permissions
   isDefault: boolean;
   isPublic: boolean;
@@ -177,23 +177,23 @@ export interface ViewConfiguration {
 export interface ViewContentConfig {
   // Which entity types are visible in this view
   visibleEntityTypes: string[];
-  
+
   // Which relationship types are visible
   visibleRelationshipTypes: string[];
-  
+
   // Default hierarchy depth to show
   defaultDepth: number;
-  
+
   // Max hierarchy depth allowed
   maxDepth: number;
-  
+
   // Root entity types (entry points for navigation)
   rootEntityTypes: string[];
 }
 
 export interface ViewLayoutConfig {
-  type: 'graph' | 'tree' | 'hierarchy' | 'reference' | 'list' | 'grid' | 'timeline';
-  
+  type: 'graph' | 'tree' | 'hierarchy' | 'reference' | 'layered-lineage' | 'list' | 'grid' | 'timeline';
+
   // Graph-specific
   graphLayout?: {
     algorithm: 'dagre' | 'elk' | 'force' | 'radial' | 'manual';
@@ -201,21 +201,21 @@ export interface ViewLayoutConfig {
     nodeSpacing: number;
     levelSpacing: number;
   };
-  
+
   // Tree-specific
   treeLayout?: {
     orientation: 'horizontal' | 'vertical';
     compactMode: boolean;
   };
-  
+
   // Reference Model specific (horizontal layer columns)
   referenceLayout?: {
     layers: ViewLayerConfig[];
   };
-  
+
   // LOD (Level of Detail) configuration
   lod: LODConfig;
-  
+
   // Projection/Aggregation configuration
   projection?: ViewProjectionConfig;
 }
@@ -239,13 +239,13 @@ export interface ViewLayerConfig {
 export interface ViewProjectionConfig {
   // Target granularity level (0=Column, 1=Table, 2=Schema, 3=System, 4=Domain)
   targetGranularity: number;
-  
+
   // Aggregate child lineage to parent level
   aggregateLineage: boolean;
-  
+
   // Collapse children, show roll-up counts
   collapseChildren: boolean;
-  
+
   // Entity types that act as visual containers
   containerTypes: string[];
 }
@@ -257,7 +257,7 @@ export interface ViewProjectionConfig {
 /**
  * Exploration Mode determines how lineage is initially loaded and expanded
  */
-export type LineageExplorationMode = 
+export type LineageExplorationMode =
   | 'overview'   // Top-down: Start aggregated, expand layer by layer
   | 'focused'    // Bottom-up: Start from a target, expand N levels
   | 'full'       // Show everything at once (for small graphs)
@@ -266,7 +266,7 @@ export type LineageExplorationMode =
 /**
  * Granularity determines what level of detail is shown
  */
-export type LineageGranularity = 
+export type LineageGranularity =
   | 'column'     // Show column-level lineage
   | 'table'      // Aggregate to table level
   | 'schema'     // Aggregate to schema level  
@@ -279,17 +279,17 @@ export type LineageGranularity =
 export interface LineageExplorationConfig {
   // Exploration Mode
   mode: LineageExplorationMode;
-  
+
   // Current granularity level
   granularity: LineageGranularity;
-  
+
   // Focus configuration (for 'focused' mode)
   focus?: {
     entityId: string;            // The entity to focus on
     includeAncestors: boolean;   // Show parent entities (table → schema → domain)
     includeDescendants: boolean; // Show child entities (table → columns)
   };
-  
+
   // Trace configuration
   trace: {
     upstreamDepth: number;       // How many levels upstream (0 = none)
@@ -297,31 +297,31 @@ export interface LineageExplorationConfig {
     includeChildLineage: boolean; // When at table level, include column lineage in trace
     maxNodes: number;            // Max nodes to load (performance limit)
   };
-  
+
   // Aggregation behavior
   aggregation: {
     // When true, if any child has lineage, parent shows lineage
     inheritFromChildren: boolean;
-    
+
     // Show aggregated edges with source count badge
     showAggregatedEdges: boolean;
-    
+
     // Min confidence to show aggregated edge (0-1)
     minConfidence: number;
   };
-  
+
   // Expansion state
   expansion: {
     // Entity IDs that have been manually expanded
     expandedIds: Set<string>;
-    
+
     // Whether to auto-expand on focus
     autoExpandOnFocus: boolean;
-    
+
     // Default expansion depth for overview mode
     defaultExpandDepth: number;
   };
-  
+
   // Visual toggles
   display: {
     showGhostNodes: boolean;     // Show collapsed/offscreen indicators
@@ -362,7 +362,7 @@ export const DEFAULT_EXPLORATION_CONFIGS: Record<string, Partial<LineageExplorat
       highlightPath: true,
     },
   },
-  
+
   // Technical: Deep dive from a specific entity
   technical: {
     mode: 'focused',
@@ -390,7 +390,7 @@ export const DEFAULT_EXPLORATION_CONFIGS: Record<string, Partial<LineageExplorat
       highlightPath: true,
     },
   },
-  
+
   // Impact Analysis: Table-level with child inheritance
   impact: {
     mode: 'focused',
@@ -439,10 +439,10 @@ export interface ViewFilterConfig {
   // Persistent filters for this view
   entityTypeFilters: string[];
   fieldFilters: FieldFilter[];
-  
+
   // Search configuration
   searchableFields: string[];
-  
+
   // Quick filter buttons
   quickFilters: QuickFilter[];
 }
@@ -481,19 +481,19 @@ export interface WorkspaceSchema {
   id: string;
   name: string;
   version: string;
-  
+
   // Entity type definitions
   entityTypes: EntityTypeSchema[];
-  
+
   // Relationship type definitions
   relationshipTypes: RelationshipTypeSchema[];
-  
+
   // View configurations
   views: ViewConfiguration[];
-  
+
   // Default view ID
   defaultViewId: string;
-  
+
   // Global visual settings
   globalVisuals: GlobalVisualConfig;
 }
@@ -517,17 +517,17 @@ export interface GlobalVisualConfig {
 export interface EntityInstance {
   id: string;
   typeId: string;                      // References EntityTypeSchema.id
-  
+
   // Core data
   data: Record<string, unknown>;       // Field values
-  
+
   // Hierarchy
   parentId?: string;
   childIds: string[];
-  
+
   // Position (for graph layout)
   position?: { x: number; y: number };
-  
+
   // Computed/cached values
   _computed?: {
     rollUps: Record<string, unknown>;

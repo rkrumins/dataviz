@@ -30,17 +30,17 @@ interface SpatialLoadingResult {
 export function useSpatialLoading(): SpatialLoadingResult {
   const [isLoadingRegion, setIsLoadingRegion] = useState(false)
   const loadedRegionsRef = useRef<Set<string>>(new Set())
-  
-  const { 
-    setViewport, 
-    addNodes, 
+
+  const {
+    setViewport,
+    addNodes,
     addEdges,
     activeLensId,
     cacheRegion,
     getCachedRegion,
   } = useCanvasStore()
-  
-  const { lodDefault } = usePersonaStore()
+
+  const { lodDefault: _lodDefault } = usePersonaStore()
 
   /**
    * Calculate which region the viewport covers (grid-based)
@@ -69,7 +69,7 @@ export function useSpatialLoading(): SpatialLoadingResult {
     if (!activeLensId) return
 
     const regionKey = getRegionKey(bounds)
-    
+
     // Check cache first
     const cached = getCachedRegion(regionKey)
     if (cached) {
@@ -87,7 +87,7 @@ export function useSpatialLoading(): SpatialLoadingResult {
 
     try {
       const lod = getLODFromZoom(bounds.zoom)
-      
+
       // TODO: Replace with actual API call
       const response = await mockFetchLineage({
         lensId: activeLensId,
@@ -107,12 +107,12 @@ export function useSpatialLoading(): SpatialLoadingResult {
       setIsLoadingRegion(false)
     }
   }, [
-    activeLensId, 
-    getRegionKey, 
-    getLODFromZoom, 
-    getCachedRegion, 
-    cacheRegion, 
-    addNodes, 
+    activeLensId,
+    getRegionKey,
+    getLODFromZoom,
+    getCachedRegion,
+    cacheRegion,
+    addNodes,
     addEdges
   ])
 
@@ -145,7 +145,7 @@ export function useSpatialLoading(): SpatialLoadingResult {
     (event?: unknown, viewport?: Viewport) => {
       // Handle different callback signatures
       let vp: Viewport | undefined = viewport
-      
+
       // React Flow v12+ passes viewport directly as second arg
       if (viewport && typeof viewport === 'object' && 'x' in viewport) {
         vp = viewport
@@ -158,9 +158,9 @@ export function useSpatialLoading(): SpatialLoadingResult {
       else if (event && typeof event === 'object' && 'x' in event && 'y' in event && 'zoom' in event) {
         vp = event as Viewport
       }
-      
+
       if (!vp) return
-      
+
       setViewport(vp)
       debouncedFetch(vp)
     },
