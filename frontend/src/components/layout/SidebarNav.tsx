@@ -11,10 +11,10 @@ import {
   Palette
 } from 'lucide-react'
 import { usePreferencesStore } from '@/store/preferences'
-import { useViewsStore } from '@/store/views'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { ViewSelector } from '@/components/views/ViewSelector'
+import { useViewEditorModal } from './AppShell'
 import { cn } from '@/lib/utils'
 
 interface NavItem {
@@ -33,20 +33,26 @@ const mainNavItems: NavItem[] = [
 
 export function SidebarNav() {
   const { sidebarCollapsed, toggleSidebar } = usePreferencesStore()
-  const savedViews = useViewsStore((s) => s.views)
-  const recentViewIds = useViewsStore((s) => s.recentViewIds)
   const activeLensId = useCanvasStore((s) => s.activeLensId)
   const schema = useSchemaStore((s) => s.schema)
+  const { openViewEditor } = useViewEditorModal()
   
-  // Compute derived views client-side to avoid infinite loops
-  const pinnedViews = savedViews.filter((v) => v.isPinned)
-  const recentViews = recentViewIds
-    .slice(0, 5)
-    .map((id) => savedViews.find((v) => v.id === id))
-    .filter((v): v is typeof savedViews[0] => v !== undefined)
+  // Get views from schema
+  const savedViews = schema?.views ?? []
+  const pinnedViews = savedViews.filter((v) => v.isDefault)
   
   // Entity types from schema for quick access
   const entityTypes = schema?.entityTypes.slice(0, 5) ?? []
+  
+  // Handle view creation
+  const handleCreateView = () => {
+    openViewEditor()
+  }
+  
+  // Handle view edit
+  const handleEditView = (viewId: string) => {
+    openViewEditor(viewId)
+  }
 
   return (
     <aside
@@ -72,7 +78,10 @@ export function SidebarNav() {
         {!sidebarCollapsed && (
           <div className="pt-4">
             <SectionHeader title="Active View" />
-            <ViewSelector />
+            <ViewSelector 
+              onCreateView={handleCreateView}
+              onEditView={handleEditView}
+            />
           </div>
         )}
 
@@ -86,8 +95,8 @@ export function SidebarNav() {
         {/* Saved Views Section */}
         {!sidebarCollapsed && (
           <div className="pt-2">
-            <SectionHeader title="Saved Views" onAdd={() => {}} />
-            {pinnedViews.length === 0 && recentViews.length === 0 ? (
+            <SectionHeader title="Saved Views" onAdd={handleCreateView} />
+            {savedViews.length === 0 ? (
               <p className="text-xs text-ink-muted px-3 py-2">
                 No saved views yet
               </p>
@@ -96,8 +105,9 @@ export function SidebarNav() {
                 {pinnedViews.map((view) => (
                   <ViewButton key={view.id} view={view} isPinned />
                 ))}
-                {recentViews
-                  .filter((v) => !v.isPinned)
+                {savedViews
+                  .filter((v) => !v.isDefault)
+                  .slice(0, 5)
                   .map((view) => (
                     <ViewButton key={view.id} view={view} />
                   ))}
@@ -149,6 +159,7 @@ export function SidebarNav() {
           <ChevronLeft className="w-3 h-3" />
         )}
       </button>
+      
     </aside>
   )
 }

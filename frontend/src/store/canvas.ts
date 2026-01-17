@@ -7,19 +7,31 @@ export interface LineageNode extends Node {
     businessLabel?: string
     technicalLabel?: string
     urn: string
-    type: 'domain' | 'app' | 'asset' | 'ghost'
+    type: string // Allow any entity type
     lensId?: string
     classifications?: string[]
     confidence?: number
     metadata?: Record<string, unknown>
+    // Hierarchy
+    childIds?: string[]
+    parentId?: string
+    isExpanded?: boolean
+    // Roll-up data
+    _collapsedChildCount?: number
+    _rollupData?: Record<string, unknown>
   }
 }
 
 export interface LineageEdge extends Edge {
   data?: {
-    confidence: number
-    edgeType: 'produces' | 'consumes' | 'transforms'
+    confidence?: number
+    edgeType?: string
+    relationship?: string
     animated?: boolean
+    // For aggregated edges
+    isAggregated?: boolean
+    sourceEdgeCount?: number
+    sourceEdges?: string[]
   }
 }
 

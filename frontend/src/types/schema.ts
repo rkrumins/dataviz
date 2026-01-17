@@ -192,7 +192,7 @@ export interface ViewContentConfig {
 }
 
 export interface ViewLayoutConfig {
-  type: 'graph' | 'tree' | 'hierarchy' | 'list' | 'grid' | 'timeline';
+  type: 'graph' | 'tree' | 'hierarchy' | 'reference' | 'list' | 'grid' | 'timeline';
   
   // Graph-specific
   graphLayout?: {
@@ -208,9 +208,217 @@ export interface ViewLayoutConfig {
     compactMode: boolean;
   };
   
+  // Reference Model specific (horizontal layer columns)
+  referenceLayout?: {
+    layers: ViewLayerConfig[];
+  };
+  
   // LOD (Level of Detail) configuration
   lod: LODConfig;
+  
+  // Projection/Aggregation configuration
+  projection?: ViewProjectionConfig;
 }
+
+/**
+ * Layer configuration for Reference Model view
+ */
+export interface ViewLayerConfig {
+  id: string;
+  name: string;
+  description?: string;
+  icon?: string;
+  color?: string;
+  entityTypes: string[];
+  order: number;
+}
+
+/**
+ * How to project/aggregate the underlying data for this view
+ */
+export interface ViewProjectionConfig {
+  // Target granularity level (0=Column, 1=Table, 2=Schema, 3=System, 4=Domain)
+  targetGranularity: number;
+  
+  // Aggregate child lineage to parent level
+  aggregateLineage: boolean;
+  
+  // Collapse children, show roll-up counts
+  collapseChildren: boolean;
+  
+  // Entity types that act as visual containers
+  containerTypes: string[];
+}
+
+// ============================================
+// LINEAGE EXPLORATION CONFIGURATION
+// ============================================
+
+/**
+ * Exploration Mode determines how lineage is initially loaded and expanded
+ */
+export type LineageExplorationMode = 
+  | 'overview'   // Top-down: Start aggregated, expand layer by layer
+  | 'focused'    // Bottom-up: Start from a target, expand N levels
+  | 'full'       // Show everything at once (for small graphs)
+  | 'search';    // Search-based: Show results and their context
+
+/**
+ * Granularity determines what level of detail is shown
+ */
+export type LineageGranularity = 
+  | 'column'     // Show column-level lineage
+  | 'table'      // Aggregate to table level
+  | 'schema'     // Aggregate to schema level  
+  | 'system'     // Aggregate to system level
+  | 'domain';    // Aggregate to domain level
+
+/**
+ * Complete configuration for lineage exploration
+ */
+export interface LineageExplorationConfig {
+  // Exploration Mode
+  mode: LineageExplorationMode;
+  
+  // Current granularity level
+  granularity: LineageGranularity;
+  
+  // Focus configuration (for 'focused' mode)
+  focus?: {
+    entityId: string;            // The entity to focus on
+    includeAncestors: boolean;   // Show parent entities (table → schema → domain)
+    includeDescendants: boolean; // Show child entities (table → columns)
+  };
+  
+  // Trace configuration
+  trace: {
+    upstreamDepth: number;       // How many levels upstream (0 = none)
+    downstreamDepth: number;     // How many levels downstream (0 = none)
+    includeChildLineage: boolean; // When at table level, include column lineage in trace
+    maxNodes: number;            // Max nodes to load (performance limit)
+  };
+  
+  // Aggregation behavior
+  aggregation: {
+    // When true, if any child has lineage, parent shows lineage
+    inheritFromChildren: boolean;
+    
+    // Show aggregated edges with source count badge
+    showAggregatedEdges: boolean;
+    
+    // Min confidence to show aggregated edge (0-1)
+    minConfidence: number;
+  };
+  
+  // Expansion state
+  expansion: {
+    // Entity IDs that have been manually expanded
+    expandedIds: Set<string>;
+    
+    // Whether to auto-expand on focus
+    autoExpandOnFocus: boolean;
+    
+    // Default expansion depth for overview mode
+    defaultExpandDepth: number;
+  };
+  
+  // Visual toggles
+  display: {
+    showGhostNodes: boolean;     // Show collapsed/offscreen indicators
+    showConfidence: boolean;     // Show confidence scores on edges
+    showCounts: boolean;         // Show child counts on collapsed nodes
+    highlightPath: boolean;      // Highlight lineage path on selection
+  };
+}
+
+/**
+ * Default exploration configurations for common use cases
+ */
+export const DEFAULT_EXPLORATION_CONFIGS: Record<string, Partial<LineageExplorationConfig>> = {
+  // Overview: Start high-level, expand on demand
+  overview: {
+    mode: 'overview',
+    granularity: 'table',
+    trace: {
+      upstreamDepth: 2,
+      downstreamDepth: 2,
+      includeChildLineage: true,
+      maxNodes: 100,
+    },
+    aggregation: {
+      inheritFromChildren: true,
+      showAggregatedEdges: true,
+      minConfidence: 0.3,
+    },
+    expansion: {
+      expandedIds: new Set(),
+      autoExpandOnFocus: false,
+      defaultExpandDepth: 1,
+    },
+    display: {
+      showGhostNodes: true,
+      showConfidence: false,
+      showCounts: true,
+      highlightPath: true,
+    },
+  },
+  
+  // Technical: Deep dive from a specific entity
+  technical: {
+    mode: 'focused',
+    granularity: 'column',
+    trace: {
+      upstreamDepth: 5,
+      downstreamDepth: 5,
+      includeChildLineage: false,
+      maxNodes: 200,
+    },
+    aggregation: {
+      inheritFromChildren: false,
+      showAggregatedEdges: false,
+      minConfidence: 0,
+    },
+    expansion: {
+      expandedIds: new Set(),
+      autoExpandOnFocus: true,
+      defaultExpandDepth: 3,
+    },
+    display: {
+      showGhostNodes: true,
+      showConfidence: true,
+      showCounts: false,
+      highlightPath: true,
+    },
+  },
+  
+  // Impact Analysis: Table-level with child inheritance
+  impact: {
+    mode: 'focused',
+    granularity: 'table',
+    trace: {
+      upstreamDepth: 10,
+      downstreamDepth: 10,
+      includeChildLineage: true, // Table shows impact from all columns
+      maxNodes: 150,
+    },
+    aggregation: {
+      inheritFromChildren: true,
+      showAggregatedEdges: true,
+      minConfidence: 0.5,
+    },
+    expansion: {
+      expandedIds: new Set(),
+      autoExpandOnFocus: true,
+      defaultExpandDepth: 2,
+    },
+    display: {
+      showGhostNodes: true,
+      showConfidence: true,
+      showCounts: true,
+      highlightPath: true,
+    },
+  },
+};
 
 export interface LODConfig {
   enabled: boolean;

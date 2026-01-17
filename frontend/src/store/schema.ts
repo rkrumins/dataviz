@@ -34,6 +34,7 @@ interface SchemaState {
   // Views
   addView: (view: ViewConfiguration) => void;
   updateView: (id: string, updates: Partial<ViewConfiguration>) => void;
+  addOrUpdateView: (view: ViewConfiguration) => void;
   removeView: (id: string) => void;
   duplicateView: (id: string) => string;
   getActiveView: () => ViewConfiguration | undefined;
@@ -145,6 +146,27 @@ export const useSchemaStore = create<SchemaState>()(
             views: state.schema.views.map((v) =>
               v.id === id ? { ...v, ...updates, updatedAt: new Date().toISOString() } : v
             ),
+          },
+        };
+      }),
+      
+      addOrUpdateView: (view) => set((state) => {
+        if (!state.schema) return state;
+        const existingIndex = state.schema.views.findIndex((v) => v.id === view.id);
+        if (existingIndex >= 0) {
+          const updatedViews = [...state.schema.views];
+          updatedViews[existingIndex] = { ...view, updatedAt: new Date().toISOString() };
+          return {
+            schema: {
+              ...state.schema,
+              views: updatedViews,
+            },
+          };
+        }
+        return {
+          schema: {
+            ...state.schema,
+            views: [...state.schema.views, view],
           },
         };
       }),

@@ -195,6 +195,166 @@ export const demoNodes: LineageNode[] = [
     },
   },
 
+  // ============================================
+  // Columns (Level 4) - for hierarchy roll-up demo
+  // ============================================
+  
+  // Revenue table columns
+  {
+    id: 'col-revenue-month',
+    type: 'asset',
+    position: { x: 900, y: 30 },
+    data: {
+      label: 'month',
+      businessLabel: 'Month',
+      technicalLabel: 'revenue_monthly.month',
+      urn: 'urn:li:column:revenue_monthly.month',
+      type: 'column',
+      metadata: { dataType: 'DATE', nullable: false },
+    },
+  },
+  {
+    id: 'col-revenue-amount',
+    type: 'asset',
+    position: { x: 900, y: 60 },
+    data: {
+      label: 'revenue_amount',
+      businessLabel: 'Revenue Amount',
+      technicalLabel: 'revenue_monthly.revenue_amount',
+      urn: 'urn:li:column:revenue_monthly.revenue_amount',
+      type: 'column',
+      classifications: ['Financial'],
+      metadata: { dataType: 'DECIMAL(18,2)', nullable: false },
+    },
+  },
+  {
+    id: 'col-revenue-currency',
+    type: 'asset',
+    position: { x: 900, y: 90 },
+    data: {
+      label: 'currency',
+      businessLabel: 'Currency Code',
+      technicalLabel: 'revenue_monthly.currency',
+      urn: 'urn:li:column:revenue_monthly.currency',
+      type: 'column',
+      metadata: { dataType: 'VARCHAR(3)', nullable: false },
+    },
+  },
+  
+  // Orders table columns
+  {
+    id: 'col-orders-id',
+    type: 'asset',
+    position: { x: 900, y: 130 },
+    data: {
+      label: 'order_id',
+      businessLabel: 'Order ID',
+      technicalLabel: 'orders.order_id',
+      urn: 'urn:li:column:orders.order_id',
+      type: 'column',
+      classifications: ['PK'],
+      metadata: { dataType: 'BIGINT', nullable: false },
+    },
+  },
+  {
+    id: 'col-orders-customer',
+    type: 'asset',
+    position: { x: 900, y: 160 },
+    data: {
+      label: 'customer_id',
+      businessLabel: 'Customer ID',
+      technicalLabel: 'orders.customer_id',
+      urn: 'urn:li:column:orders.customer_id',
+      type: 'column',
+      classifications: ['FK', 'PII'],
+      metadata: { dataType: 'BIGINT', nullable: false },
+    },
+  },
+  {
+    id: 'col-orders-total',
+    type: 'asset',
+    position: { x: 900, y: 190 },
+    data: {
+      label: 'order_total',
+      businessLabel: 'Order Total',
+      technicalLabel: 'orders.order_total',
+      urn: 'urn:li:column:orders.order_total',
+      type: 'column',
+      classifications: ['Financial'],
+      metadata: { dataType: 'DECIMAL(18,2)', nullable: false },
+    },
+  },
+  {
+    id: 'col-orders-date',
+    type: 'asset',
+    position: { x: 900, y: 220 },
+    data: {
+      label: 'order_date',
+      businessLabel: 'Order Date',
+      technicalLabel: 'orders.order_date',
+      urn: 'urn:li:column:orders.order_date',
+      type: 'column',
+      metadata: { dataType: 'TIMESTAMP', nullable: false },
+    },
+  },
+  
+  // Customers table columns
+  {
+    id: 'col-customers-id',
+    type: 'asset',
+    position: { x: 900, y: 330 },
+    data: {
+      label: 'customer_id',
+      businessLabel: 'Customer ID',
+      technicalLabel: 'customers.customer_id',
+      urn: 'urn:li:column:customers.customer_id',
+      type: 'column',
+      classifications: ['PK', 'PII'],
+      metadata: { dataType: 'BIGINT', nullable: false },
+    },
+  },
+  {
+    id: 'col-customers-email',
+    type: 'asset',
+    position: { x: 900, y: 360 },
+    data: {
+      label: 'email',
+      businessLabel: 'Email Address',
+      technicalLabel: 'customers.email',
+      urn: 'urn:li:column:customers.email',
+      type: 'column',
+      classifications: ['PII', 'GDPR'],
+      metadata: { dataType: 'VARCHAR(255)', nullable: false },
+    },
+  },
+  {
+    id: 'col-customers-name',
+    type: 'asset',
+    position: { x: 900, y: 390 },
+    data: {
+      label: 'full_name',
+      businessLabel: 'Full Name',
+      technicalLabel: 'customers.full_name',
+      urn: 'urn:li:column:customers.full_name',
+      type: 'column',
+      classifications: ['PII', 'GDPR'],
+      metadata: { dataType: 'VARCHAR(200)', nullable: true },
+    },
+  },
+  {
+    id: 'col-customers-created',
+    type: 'asset',
+    position: { x: 900, y: 420 },
+    data: {
+      label: 'created_at',
+      businessLabel: 'Created At',
+      technicalLabel: 'customers.created_at',
+      urn: 'urn:li:column:customers.created_at',
+      type: 'column',
+      metadata: { dataType: 'TIMESTAMP', nullable: false },
+    },
+  },
+
   // Downstream - Dashboards & Reports
   {
     id: 'asset-revenue-dashboard',
@@ -267,7 +427,158 @@ export const demoNodes: LineageNode[] = [
 ]
 
 export const demoEdges: LineageEdge[] = [
-  // Domain to App connections
+  // ============================================
+  // CONTAINMENT EDGES (for hierarchy view)
+  // Domain → System containment
+  // ============================================
+  {
+    id: 'contains-finance-snowflake',
+    source: 'domain-finance',
+    target: 'app-snowflake-finance',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-finance-dbt',
+    source: 'domain-finance',
+    target: 'app-dbt-finance',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-customer-salesforce',
+    source: 'domain-customer',
+    target: 'app-salesforce',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-customer-segment',
+    source: 'domain-customer',
+    target: 'app-segment',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  
+  // System → Dataset containment
+  {
+    id: 'contains-snowflake-revenue',
+    source: 'app-snowflake-finance',
+    target: 'asset-revenue-table',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-snowflake-orders',
+    source: 'app-snowflake-finance',
+    target: 'asset-orders-table',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-salesforce-customers',
+    source: 'app-salesforce',
+    target: 'asset-customers-table',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-segment-events',
+    source: 'app-segment',
+    target: 'asset-events-table',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  
+  // Dataset → Column containment (for hierarchy roll-up)
+  // Revenue table columns
+  {
+    id: 'contains-revenue-month',
+    source: 'asset-revenue-table',
+    target: 'col-revenue-month',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-revenue-amount',
+    source: 'asset-revenue-table',
+    target: 'col-revenue-amount',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-revenue-currency',
+    source: 'asset-revenue-table',
+    target: 'col-revenue-currency',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  
+  // Orders table columns
+  {
+    id: 'contains-orders-id',
+    source: 'asset-orders-table',
+    target: 'col-orders-id',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-orders-customer',
+    source: 'asset-orders-table',
+    target: 'col-orders-customer',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-orders-total',
+    source: 'asset-orders-table',
+    target: 'col-orders-total',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-orders-date',
+    source: 'asset-orders-table',
+    target: 'col-orders-date',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  
+  // Customers table columns
+  {
+    id: 'contains-customers-id',
+    source: 'asset-customers-table',
+    target: 'col-customers-id',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-customers-email',
+    source: 'asset-customers-table',
+    target: 'col-customers-email',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-customers-name',
+    source: 'asset-customers-table',
+    target: 'col-customers-name',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  {
+    id: 'contains-customers-created',
+    source: 'asset-customers-table',
+    target: 'col-customers-created',
+    type: 'lineage',
+    data: { relationship: 'contains', edgeType: 'contains', animated: false },
+  },
+  
+  // ============================================
+  // LINEAGE EDGES (data flow)
+  // ============================================
+  
+  // Domain to App connections (data flow)
   {
     id: 'edge-finance-snowflake',
     source: 'domain-finance',

@@ -14,8 +14,12 @@ function App() {
 
   // Initialize schema and demo data on mount
   useEffect(() => {
-    // Load default schema if not already loaded
-    if (!schema) {
+    // Load/refresh schema - check version to handle updates
+    const currentVersion = schema?.version
+    const defaultVersion = defaultWorkspaceSchema.version
+    
+    if (!schema || currentVersion !== defaultVersion) {
+      // Force refresh schema when version changes or not loaded
       loadSchema(defaultWorkspaceSchema)
     }
     

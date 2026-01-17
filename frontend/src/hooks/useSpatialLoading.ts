@@ -139,12 +139,30 @@ export function useSpatialLoading(): SpatialLoadingResult {
 
   /**
    * Handle viewport changes from React Flow
+   * Safely handles various event formats from different React Flow versions
    */
   const onViewportChange = useCallback(
-    (event: { viewState: Viewport }) => {
-      const viewport = event.viewState
-      setViewport(viewport)
-      debouncedFetch(viewport)
+    (event?: unknown, viewport?: Viewport) => {
+      // Handle different callback signatures
+      let vp: Viewport | undefined = viewport
+      
+      // React Flow v12+ passes viewport directly as second arg
+      if (viewport && typeof viewport === 'object' && 'x' in viewport) {
+        vp = viewport
+      }
+      // Older format with viewState
+      else if (event && typeof event === 'object' && 'viewState' in event) {
+        vp = (event as { viewState: Viewport }).viewState
+      }
+      // Direct viewport object
+      else if (event && typeof event === 'object' && 'x' in event && 'y' in event && 'zoom' in event) {
+        vp = event as Viewport
+      }
+      
+      if (!vp) return
+      
+      setViewport(vp)
+      debouncedFetch(vp)
     },
     [setViewport, debouncedFetch]
   )

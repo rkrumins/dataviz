@@ -35,13 +35,21 @@ export const GenericNode = memo(function GenericNode({
   selected,
   dragging,
 }: GenericNodeProps) {
-  const entityData = data.data as GenericNodeData
+  // Handle both nested (data.data) and flat (data) structures
+  const rawData = (data as Record<string, unknown>)
+  const entityData: GenericNodeData = rawData.data 
+    ? (rawData.data as GenericNodeData)
+    : (rawData as unknown as GenericNodeData)
+  
+  // Support both typeId and type fields
+  const typeId = entityData.typeId || (entityData as Record<string, unknown>).type as string || 'unknown'
+  
   const getEntityType = useSchemaStore((s) => s.getEntityType)
   const getEntityVisual = useSchemaStore((s) => s.getEntityVisual)
   const mode = usePersonaStore((s) => s.mode)
   
-  const entityType = getEntityType(entityData.typeId)
-  const visual = getEntityVisual(entityData.typeId)
+  const entityType = getEntityType(typeId)
+  const visual = getEntityVisual(typeId)
   
   if (!entityType || !visual) {
     return <FallbackNode data={entityData} selected={selected} />
@@ -54,11 +62,15 @@ export const GenericNode = memo(function GenericNode({
       .sort((a, b) => a.displayOrder - b.displayOrder)
   }, [entityType.fields])
   
-  // Get the primary label
-  const primaryLabel = entityData.data['name'] as string || entityData.id
+  // Get the primary label - handle both nested and flat structures
+  const entityFields = (entityData.data || entityData) as Record<string, unknown>
+  const primaryLabel = entityFields['name'] as string || 
+                       entityFields['label'] as string || 
+                       entityFields['businessLabel'] as string ||
+                       entityData.id || 'Unknown'
   const secondaryLabel = mode === 'technical' 
-    ? (entityData.data['urn'] as string)
-    : (entityData.data['description'] as string)
+    ? (entityFields['urn'] as string)
+    : (entityFields['description'] as string)
   
   // Size classes
   const sizeClasses = {
@@ -208,7 +220,7 @@ export const GenericNode = memo(function GenericNode({
               <FieldRenderer 
                 key={field.id}
                 field={field}
-                value={entityData.data[field.id]}
+                value={entityFields[field.id]}
                 color={visual.color}
                 size={visual.size}
               />

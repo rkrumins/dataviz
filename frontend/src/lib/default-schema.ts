@@ -394,6 +394,7 @@ const defaultRelationshipTypes: RelationshipTypeSchema[] = [
  * Default Views
  */
 const defaultViews: ViewConfiguration[] = [
+  // Default Lineage View - Graph-based flow visualization
   {
     id: 'lineage-view',
     name: 'Data Lineage',
@@ -440,23 +441,85 @@ const defaultViews: ViewConfiguration[] = [
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   },
+  
+  // Physical Fabric View - Hierarchy-style Reference Model
   {
-    id: 'hierarchy-view',
-    name: 'Data Hierarchy',
-    description: 'Hierarchical view of data organization',
-    icon: 'ListTree',
+    id: 'physical-fabric',
+    name: 'Physical Fabric',
+    description: 'Hierarchy-style hierarchical reference model with L→R flow',
+    icon: 'FolderTree',
     content: {
       visibleEntityTypes: ['domain', 'system', 'schema', 'dataset', 'column'],
       visibleRelationshipTypes: ['contains'],
-      defaultDepth: 2,
-      maxDepth: 5,
-      rootEntityTypes: ['domain'],
+      defaultDepth: 5,
+      maxDepth: 10,
+      rootEntityTypes: ['domain', 'system'],
     },
     layout: {
-      type: 'tree',
-      treeLayout: {
-        orientation: 'horizontal',
-        compactMode: false,
+      type: 'hierarchy',
+      graphLayout: {
+        algorithm: 'dagre',
+        direction: 'LR',
+        nodeSpacing: 40,
+        levelSpacing: 280,
+      },
+      lod: {
+        enabled: true,
+        levels: [
+          { name: 'Systems', zoomRange: [0, 0.4], visibleEntityTypes: ['domain', 'system'], showLabels: true, showIcons: true, showBadges: false, aggregateChildren: true },
+          { name: 'Schemas', zoomRange: [0.4, 0.7], visibleEntityTypes: ['domain', 'system', 'schema'], showLabels: true, showIcons: true, showBadges: true, aggregateChildren: true },
+          { name: 'Datasets', zoomRange: [0.7, 1.2], visibleEntityTypes: ['domain', 'system', 'schema', 'dataset'], showLabels: true, showIcons: true, showBadges: true, aggregateChildren: true },
+          { name: 'Columns', zoomRange: [1.2, 3], visibleEntityTypes: ['domain', 'system', 'schema', 'dataset', 'column'], showLabels: true, showIcons: true, showBadges: true, aggregateChildren: false },
+        ],
+      },
+    },
+    filters: {
+      entityTypeFilters: [],
+      fieldFilters: [],
+      searchableFields: ['name', 'urn', 'dataType'],
+      quickFilters: [
+        { id: 'pii', label: 'PII Columns', icon: 'Shield', filter: [{ field: 'tags', operator: 'contains', value: 'PII' }] },
+        { id: 'pk', label: 'Primary Keys', icon: 'Key', filter: [{ field: 'tags', operator: 'contains', value: 'PK' }] },
+        { id: 'fk', label: 'Foreign Keys', icon: 'Link', filter: [{ field: 'tags', operator: 'contains', value: 'FK' }] },
+      ],
+    },
+    entityOverrides: {},
+    grouping: {
+      enabled: true,
+      groupByField: 'system',
+      groupVisual: {
+        showHeader: true,
+        collapsible: true,
+        color: '#6366f1',
+      },
+    },
+    isDefault: false,
+    isPublic: true,
+    createdBy: 'system',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  
+  // Reference Model View - Horizontal layer-based layout (Hierarchy-style)
+  {
+    id: 'reference-model',
+    name: 'Reference Model',
+    description: 'Horizontal layer flow: Source → Staging → Refinery → Consumption',
+    icon: 'LayoutTemplate',
+    content: {
+      visibleEntityTypes: ['domain', 'system', 'schema', 'dataset', 'column', 'pipeline', 'dashboard'],
+      visibleRelationshipTypes: ['contains', 'produces', 'consumes'],
+      defaultDepth: 5,
+      maxDepth: 10,
+      rootEntityTypes: ['domain', 'system'],
+    },
+    layout: {
+      type: 'reference', // New layout type for horizontal layer view
+      graphLayout: {
+        algorithm: 'dagre',
+        direction: 'LR',
+        nodeSpacing: 40,
+        levelSpacing: 200,
       },
       lod: {
         enabled: false,
@@ -466,10 +529,13 @@ const defaultViews: ViewConfiguration[] = [
     filters: {
       entityTypeFilters: [],
       fieldFilters: [],
-      searchableFields: ['name', 'urn'],
+      searchableFields: ['name', 'description', 'owner'],
       quickFilters: [],
     },
-    entityOverrides: {},
+    entityOverrides: {
+      domain: { size: 'xl' },
+      system: { size: 'lg' },
+    },
     grouping: undefined,
     isDefault: false,
     isPublic: true,
@@ -477,17 +543,19 @@ const defaultViews: ViewConfiguration[] = [
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   },
+  
+  // Impact Analysis View
   {
     id: 'impact-view',
     name: 'Impact Analysis',
-    description: 'Focus on downstream dependencies',
+    description: 'Focus on downstream dependencies and change impact',
     icon: 'ArrowDownRight',
     content: {
-      visibleEntityTypes: ['dataset', 'pipeline', 'dashboard'],
-      visibleRelationshipTypes: ['produces', 'consumes'],
-      defaultDepth: 5,
+      visibleEntityTypes: ['dataset', 'pipeline', 'dashboard', 'column'],
+      visibleRelationshipTypes: ['produces', 'consumes', 'transforms'],
+      defaultDepth: 10,
       maxDepth: 20,
-      rootEntityTypes: ['dataset'],
+      rootEntityTypes: ['dataset', 'column'],
     },
     layout: {
       type: 'graph',
@@ -506,12 +574,68 @@ const defaultViews: ViewConfiguration[] = [
       entityTypeFilters: [],
       fieldFilters: [],
       searchableFields: ['name', 'urn'],
-      quickFilters: [],
+      quickFilters: [
+        { id: 'critical', label: 'Critical Path', icon: 'AlertTriangle', filter: [{ field: 'criticality', operator: 'equals', value: 'high' }] },
+      ],
     },
     entityOverrides: {
-      dataset: { color: '#ef4444' },  // Highlight datasets in red for impact
+      dataset: { color: '#ef4444' },  // Highlight datasets in red for impact visibility
     },
     grouping: undefined,
+    isDefault: false,
+    isPublic: true,
+    createdBy: 'system',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  
+  // Column Lineage View - Fine-grained attribute tracking
+  {
+    id: 'column-lineage',
+    name: 'Column Lineage',
+    description: 'Granular attribute-level lineage tracking',
+    icon: 'Columns3',
+    content: {
+      visibleEntityTypes: ['dataset', 'column'],
+      visibleRelationshipTypes: ['produces', 'consumes', 'transforms', 'derives'],
+      defaultDepth: 5,
+      maxDepth: 15,
+      rootEntityTypes: ['column'],
+    },
+    layout: {
+      type: 'graph',
+      graphLayout: {
+        algorithm: 'dagre',
+        direction: 'LR',
+        nodeSpacing: 30,
+        levelSpacing: 200,
+      },
+      lod: {
+        enabled: false,
+        levels: [],
+      },
+    },
+    filters: {
+      entityTypeFilters: [],
+      fieldFilters: [],
+      searchableFields: ['name', 'dataType', 'urn'],
+      quickFilters: [
+        { id: 'string', label: 'Strings', icon: 'Type', filter: [{ field: 'dataType', operator: 'contains', value: 'string' }] },
+        { id: 'numeric', label: 'Numeric', icon: 'Hash', filter: [{ field: 'dataType', operator: 'in', value: ['int', 'float', 'decimal', 'number'] }] },
+      ],
+    },
+    entityOverrides: {
+      column: { size: 'sm' },
+      dataset: { size: 'md', shape: 'rounded' },
+    },
+    grouping: {
+      enabled: true,
+      groupByField: 'dataset',
+      groupVisual: {
+        showHeader: true,
+        collapsible: true,
+      },
+    },
     isDefault: false,
     isPublic: true,
     createdBy: 'system',
@@ -526,7 +650,7 @@ const defaultViews: ViewConfiguration[] = [
 export const defaultWorkspaceSchema: WorkspaceSchema = {
   id: 'default-workspace',
   name: 'NexusLineage Workspace',
-  version: '1.0.0',
+  version: '1.1.0',  // Bumped to force schema refresh with new views
   entityTypes: defaultEntityTypes,
   relationshipTypes: defaultRelationshipTypes,
   views: defaultViews,

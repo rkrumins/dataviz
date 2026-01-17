@@ -66,9 +66,10 @@ export function ViewSelector({ onCreateView, onEditView }: ViewSelectorProps) {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
             className={cn(
-              "absolute top-full left-0 right-0 mt-2 z-50",
-              "glass-panel rounded-xl overflow-hidden"
+              "absolute top-full left-0 mt-2 z-[100]",
+              "w-72 bg-canvas-elevated border border-glass-border rounded-xl shadow-lg overflow-hidden"
             )}
+            style={{ backdropFilter: 'blur(16px)' }}
           >
             {/* View List */}
             <div className="p-2 max-h-[300px] overflow-y-auto custom-scrollbar">
@@ -114,7 +115,7 @@ export function ViewSelector({ onCreateView, onEditView }: ViewSelectorProps) {
       {/* Backdrop */}
       {isExpanded && (
         <div 
-          className="fixed inset-0 z-40"
+          className="fixed inset-0 z-[99]"
           onClick={() => setIsExpanded(false)}
         />
       )}
