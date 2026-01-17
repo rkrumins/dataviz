@@ -30,7 +30,7 @@ NexusLineage is a billion-node-ready Data Lineage platform with multi-graph arch
   - Dataset metadata extraction
   - Lineage edge extraction
   - Incremental sync support
-- [ ] Solidatus adapter
+- [ ] Hierarchy adapter
   - Reference/logical model import
   - Mapping to physical URNs
 - [ ] Generic graph source adapter interface

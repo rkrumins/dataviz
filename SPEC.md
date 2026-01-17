@@ -50,7 +50,7 @@ NexusLineage is a billion-node-ready Data Lineage platform that overlays user-de
 interface PhysicalNode {
   urn: string;                    // Unique Resource Name (e.g., "urn:li:dataset:...")
   type: 'table' | 'column' | 'pipeline' | 'dashboard' | 'job';
-  sourceSystem: string;           // DataHub, Solidatus, custom
+  sourceSystem: string;           // DataHub, Amundsen, Atlas, Dataplex, any Hierarchy, custom
   schemaHash: string;             // For change detection
   properties: Record<string, unknown>;
   lastSyncedAt: Date;
