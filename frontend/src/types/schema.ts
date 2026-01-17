@@ -231,6 +231,43 @@ export interface ViewLayerConfig {
   color?: string;
   entityTypes: string[];
   order: number;
+
+  // Logical Hierarchy (New)
+  logicalNodes?: LogicalNodeConfig[];
+  showUnassigned?: boolean; // Whether to show unmapped physical entities
+
+  // Advanced assignment rules (overrides entityTypes)
+  rules?: LayerAssignmentRuleConfig[];
+}
+
+export interface LogicalNodeConfig {
+  id: string;
+  name: string;
+  description?: string;
+  type: 'container' | 'system' | 'group';
+  children?: LogicalNodeConfig[];
+  rules?: LayerAssignmentRuleConfig[];
+
+  // Visual state
+  collapsed?: boolean;
+}
+
+export interface LayerAssignmentRuleConfig {
+  id: string;
+  name?: string;
+  description?: string;
+
+  // Match criteria (OR logic between different fields, AND logic within same field if array)
+  entityTypes?: string[];
+  tags?: string[];
+  urnPattern?: string;
+  propertyMatch?: {
+    field: string;
+    operator: 'equals' | 'contains' | 'startsWith' | 'exists';
+    value: unknown;
+  };
+
+  priority: number; // Higher wins
 }
 
 /**

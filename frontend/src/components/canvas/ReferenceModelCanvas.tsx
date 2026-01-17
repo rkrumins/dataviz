@@ -6,38 +6,37 @@
  * - Collapsible containers within each layer
  * - Entities flow from left (sources) to right (consumers)
  * - Configurable layer definitions via schema
+ * - Lineage flow overlay support
  */
 
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
-import type { EntityTypeSchema } from '@/types/schema'
+import {
+  type GraphNode,
+  resolveLayerAssignment,
+  matchesRule,
+  type LayerAssignmentRule,
+  type EntityType,
+} from '@/providers/GraphDataProvider'
+import { useGraphProvider } from '@/providers'
 
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
-  const IconComponent = (LucideIcons as Record<string, React.ComponentType<{ className?: string; style?: React.CSSProperties }>>)[name]
+  const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string; style?: React.CSSProperties }>>)[name]
   if (!IconComponent) {
     return <LucideIcons.Box className={className} style={style} />
   }
   return <IconComponent className={className} style={style} />
 }
 
-// Layer definition for reference model
-export interface ReferenceModelLayer {
-  id: string
-  name: string
-  description?: string
-  icon?: string
-  color?: string
-  entityTypes: string[] // Which entity types belong to this layer
-  order: number // Left-to-right position (0 = leftmost)
-}
+import type { ViewLayerConfig, LogicalNodeConfig } from '@/types/schema'
 
 // Default layers matching typical data flow
-export const defaultReferenceModelLayers: ReferenceModelLayer[] = [
+export const defaultReferenceModelLayers: ViewLayerConfig[] = [
   {
     id: 'source',
     name: 'Source Layer',
@@ -84,16 +83,25 @@ interface HierarchyNode {
   children: HierarchyNode[]
   parentId?: string
   depth: number
+  // GraphNode properties for layer logic
+  urn: string
+  entityTypeOption: EntityType
+  tags: string[]
+  // Logical Node extensions
+  isLogical?: boolean
+  logicalConfig?: LogicalNodeConfig
 }
 
 interface ReferenceModelCanvasProps {
   className?: string
-  layers?: ReferenceModelLayer[]
+  layers?: ViewLayerConfig[]
+  showLineageFlow?: boolean
 }
 
-export function ReferenceModelCanvas({ 
-  className, 
-  layers = defaultReferenceModelLayers 
+export function ReferenceModelCanvas({
+  className,
+  layers = defaultReferenceModelLayers,
+  showLineageFlow: initialShowLineageFlow = true
 }: ReferenceModelCanvasProps) {
   const nodes = useCanvasStore((s) => s.nodes)
   const edges = useCanvasStore((s) => s.edges)
@@ -101,50 +109,103 @@ export function ReferenceModelCanvas({
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const schema = useSchemaStore((s) => s.schema)
-  
+  const activeView = useSchemaStore((s) => s.getActiveView())
+  const updateView = useSchemaStore((s) => s.updateView)
+
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
   const searchInputRef = useRef<HTMLInputElement>(null)
-  
+
+  // Context Menu State
+  const [contextMenu, setContextMenu] = useState<{ x: number, y: number, nodeId: string } | null>(null)
+
+  // Handle right click
+  const handleContextMenu = useCallback((e: React.MouseEvent, nodeId: string) => {
+    e.preventDefault()
+    e.stopPropagation() // Prevent bubbling
+    setContextMenu({ x: e.clientX, y: e.clientY, nodeId })
+  }, [])
+
+  // Close menu on click elsewhere
+  useEffect(() => {
+    const close = () => setContextMenu(null)
+    window.addEventListener('click', close)
+    return () => window.removeEventListener('click', close)
+  }, [])
+
+
+
+  // Lineage flow toggle
+  const [showLineageFlow, setShowLineageFlow] = useState(initialShowLineageFlow)
+
   // Sort layers by order
-  const sortedLayers = useMemo(() => 
-    [...layers].sort((a, b) => a.order - b.order),
-    [layers]
+  const activeLayers = useMemo(() => {
+    if (layers && layers !== defaultReferenceModelLayers && layers.length > 0) return layers
+    if (activeView?.layout?.referenceLayout?.layers?.length) return activeView.layout.referenceLayout.layers
+    return defaultReferenceModelLayers
+  }, [layers, activeView])
+
+  const sortedLayers = useMemo(() =>
+    [...activeLayers].sort((a, b) => a.order - b.order),
+    [activeLayers]
   )
-  
+
+  // Helper to map canvas type to EntityType
+  const mapNodeType = useCallback((type: string): EntityType => {
+    const mapping: Record<string, EntityType> = {
+      domain: 'container',
+      app: 'dataPlatform',
+      asset: 'dataset',
+      column: 'schemaField',
+      ghost: 'dataset',
+      system: 'dataPlatform',
+      schema: 'container',
+      table: 'dataset',
+      view: 'dataset',
+      pipeline: 'dataJob',
+      dashboard: 'dashboard',
+      report: 'chart'
+    }
+    return mapping[type] ?? 'dataset'
+  }, [])
+
   // Build hierarchy tree from nodes and containment edges
   const hierarchyTree = useMemo(() => {
     if (!nodes.length) return []
-    
-    const containmentEdges = edges.filter((e) => 
-      e.data?.relationship === 'contains' || e.data?.edgeType === 'contains'
+
+    // Containment logic: Edge typ 'contains' OR type 'CONTAINS'
+    const containmentEdges = edges.filter((e) =>
+      e.data?.relationship === 'contains' || e.data?.edgeType === 'contains' || e.data?.edgeType === 'CONTAINS'
     )
-    
+
     const nodeMap = new Map(nodes.map((n) => [n.id, n]))
     const childMap = new Map<string, string[]>()
     const hasParent = new Set<string>()
-    
+
     containmentEdges.forEach((edge) => {
       const children = childMap.get(edge.source) ?? []
       children.push(edge.target)
       childMap.set(edge.source, children)
       hasParent.add(edge.target)
     })
-    
-    const rootNodes = nodes.filter((n) => 
+
+    // Root nodes are those without parents OR nodes that are explicity roots in a layer context
+    // Ideally only true roots (no incoming containment)
+    // Note: If containment cycles exist, this might miss nodes. Assuming DAG.
+    const rootNodes = nodes.filter((n) =>
       !hasParent.has(n.id) && n.data.type !== 'ghost'
     )
-    
+
     const buildTree = (nodeId: string, depth: number): HierarchyNode | null => {
       const node = nodeMap.get(nodeId)
       if (!node) return null
-      
+
       const children = (childMap.get(nodeId) ?? [])
         .map((childId) => buildTree(childId, depth + 1))
         .filter((n): n is HierarchyNode => n !== null)
         .sort((a, b) => a.name.localeCompare(b.name))
-      
+
       return {
         id: node.id,
         typeId: node.data.type,
@@ -152,64 +213,333 @@ export function ReferenceModelCanvas({
         data: node.data as Record<string, unknown>,
         children,
         depth,
+        // Enriched props for layer logic
+        urn: node.data.urn || node.id,
+        entityTypeOption: mapNodeType(node.data.type),
+        tags: node.data.classifications || []
       }
     }
-    
+
     return rootNodes
       .map((n) => buildTree(n.id, 0))
       .filter((n): n is HierarchyNode => n !== null)
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [nodes, edges])
-  
+  }, [nodes, edges, mapNodeType])
+
+  // Build layer assignment rules
+  const layerRules = useMemo<LayerAssignmentRule[]>(() => {
+    const generatedRules: LayerAssignmentRule[] = []
+
+    sortedLayers.forEach(layer => {
+      // 1. Explicit rules from config
+      if (layer.rules) {
+        layer.rules.forEach(rule => {
+          generatedRules.push({
+            id: rule.id,
+            layerId: layer.id,
+            entityTypes: (rule.entityTypes ?? []) as EntityType[],
+            tags: rule.tags,
+            urnPattern: rule.urnPattern,
+            propertyMatch: rule.propertyMatch,
+            priority: rule.priority
+          })
+        })
+      }
+
+      // 2. Default entity type rules (lower priority if rules exist, or base mechanism)
+      // Always add these to support type-based matching alongside complex rules
+      layer.entityTypes.forEach((entityType, idx) => {
+        generatedRules.push({
+          id: `${layer.id}-${entityType}`,
+          layerId: layer.id,
+          entityTypes: [entityType as any], // Cast for simple string matching if needed
+          priority: layer.order * 10 + idx,
+        })
+      })
+    })
+
+    return generatedRules
+  }, [sortedLayers])
+
   // Group nodes by layer
   const nodesByLayer = useMemo(() => {
     const grouped = new Map<string, HierarchyNode[]>()
-    
+
     // Initialize all layers
     sortedLayers.forEach((layer) => {
       grouped.set(layer.id, [])
     })
-    
-    // Flatten hierarchy and assign to layers
-    const assignToLayer = (node: HierarchyNode) => {
-      const layer = sortedLayers.find((l) => l.entityTypes.includes(node.typeId))
-      if (layer) {
-        const layerNodes = grouped.get(layer.id) ?? []
-        layerNodes.push(node)
+
+    const assignedNodeIds = new Set<string>()
+
+    // Helper: Map physical nodes to a logical node context
+    const getMappedPhysicalNodes = (logicalConfig: LogicalNodeConfig): HierarchyNode[] => {
+      const mapped: HierarchyNode[] = []
+
+      // Iterate TOP LEVEL physical nodes
+      // We prioritize assigning roots. If a root is assigned, its children come with it.
+      hierarchyTree.forEach(pNode => {
+        if (assignedNodeIds.has(pNode.id)) return
+
+        const graphNode: GraphNode = {
+          urn: pNode.urn,
+          entityType: pNode.entityTypeOption,
+          displayName: pNode.name,
+          properties: pNode.data,
+          tags: pNode.tags
+        }
+
+        // Check rules
+        // Note: layerRules are flattened. logicalConfig.rules are specific.
+        // We use logicalConfig.rules here.
+        let isMatch = false
+        if (logicalConfig.rules) {
+          for (const rule of logicalConfig.rules) {
+            if (matchesRule(graphNode, rule)) {
+              isMatch = true
+              break
+            }
+          }
+        }
+
+        if (isMatch) {
+          mapped.push(pNode)
+          assignedNodeIds.add(pNode.id)
+        }
+      })
+
+      return mapped
+    }
+
+    // Helper: Build Logical Tree Recursively
+    const buildLogicalTree = (config: LogicalNodeConfig, depth: number): HierarchyNode => {
+      // 1. Build Logical Children
+      const logicalChildren = (config.children || []).map(c => buildLogicalTree(c, depth + 1))
+
+      // 2. Find Mapped Physical Children
+      const physicalChildren = getMappedPhysicalNodes(config)
+
+      return {
+        id: `logical-${config.id}`,
+        typeId: config.type,
+        name: config.name,
+        data: { description: config.description },
+        children: [...logicalChildren, ...physicalChildren],
+        parentId: undefined,
+        depth,
+        urn: `urn:logical:${config.id}`,
+        entityTypeOption: 'container',
+        tags: [],
+        isLogical: true,
+        logicalConfig: config
+      }
+    }
+
+    // Process Layers
+    sortedLayers.forEach(layer => {
+      // STRATEGY A: Logical Hierarchy Defined
+      if (layer.logicalNodes && layer.logicalNodes.length > 0) {
+        const layerRootNodes: HierarchyNode[] = []
+
+        layer.logicalNodes.forEach(config => {
+          layerRootNodes.push(buildLogicalTree(config, 0))
+        })
+
+        // Unassigned Handling: Find roots matching the layer type fallback
+        if (layer.showUnassigned !== false) { // Default true? or false?
+          hierarchyTree.forEach(pNode => {
+            if (assignedNodeIds.has(pNode.id)) return
+            // Fallback to type match
+            if (layer.entityTypes.includes(pNode.typeId)) {
+              layerRootNodes.push(pNode)
+              assignedNodeIds.add(pNode.id)
+            }
+          })
+        }
+        grouped.set(layer.id, layerRootNodes)
+      }
+      // STRATEGY B: Legacy / Pure Type-Based (if no logical nodes defined)
+      else {
+        // Existing logic with a twist: Only assign if not already assigned to a logical node?
+        // We iterate hierarchyTree again
+        const layerNodes: HierarchyNode[] = []
+
+        hierarchyTree.forEach(pNode => {
+          if (assignedNodeIds.has(pNode.id)) return // Already grabbed by a logical node
+
+          // Simple type check OR advanced rule check from layerRules
+          let assignedToThisLayer = false
+
+          // 1. Check type
+          if (layer.entityTypes.includes(pNode.typeId)) {
+            assignedToThisLayer = true
+          }
+
+          // 2. Check global rules (resolveLayerAssignment)
+          // We need to re-verify if this node maps to THIS layer
+          // resolveLayerAssignment returns winner.
+          if (!assignedToThisLayer) {
+            const graphNode: GraphNode = {
+              urn: pNode.urn,
+              entityType: pNode.entityTypeOption,
+              displayName: pNode.name,
+              properties: pNode.data,
+              tags: pNode.tags
+            }
+            if (resolveLayerAssignment(graphNode, layerRules) === layer.id) {
+              assignedToThisLayer = true
+            }
+          }
+
+          if (assignedToThisLayer) {
+            layerNodes.push(pNode)
+            assignedNodeIds.add(pNode.id)
+          }
+        })
+
         grouped.set(layer.id, layerNodes)
       }
-      // Assign children to their respective layers
-      node.children.forEach(assignToLayer)
-    }
-    
-    hierarchyTree.forEach(assignToLayer)
-    
+    })
+
     return grouped
-  }, [hierarchyTree, sortedLayers])
-  
-  // Flatten nodes for search
-  const flatNodes = useMemo(() => {
+  }, [hierarchyTree, sortedLayers, layerRules])
+
+  // Flatten logical/physical nodes for search and lookup
+  const { displayFlat, displayMap } = useMemo(() => {
     const flat: HierarchyNode[] = []
-    const traverse = (node: HierarchyNode) => {
-      flat.push(node)
-      node.children.forEach(traverse)
-    }
-    hierarchyTree.forEach(traverse)
-    return flat
-  }, [hierarchyTree])
-  
+    const map = new Map<string, HierarchyNode>()
+
+    nodesByLayer.forEach((layerNodes) => {
+      const traverse = (node: HierarchyNode) => {
+        flat.push(node)
+        map.set(node.id, node)
+        node.children.forEach(traverse)
+      }
+      layerNodes.forEach(traverse)
+    })
+
+    return { displayFlat: flat, displayMap: map }
+  }, [nodesByLayer])
+
   // Search results
   const searchResults = useMemo(() => {
     if (!searchQuery.trim()) return []
     const query = searchQuery.toLowerCase()
-    return flatNodes.filter((node) => 
+    return displayFlat.filter((node) =>
       node.name.toLowerCase().includes(query) ||
       node.typeId.toLowerCase().includes(query)
     )
-  }, [searchQuery, flatNodes])
-  
-  // Toggle node expansion
-  const toggleNode = useCallback((nodeId: string) => {
+  }, [searchQuery, displayFlat])
+
+  // Action: Move entity to layer
+  const moveToLayer = useCallback((layerId: string) => {
+    if (!contextMenu || !activeView || !activeView.id) return
+
+    const node = displayMap.get(contextMenu.nodeId)
+    if (!node) return
+
+    // Prevent moving Logical Nodes? Or allow?
+    if (node.isLogical) {
+      // Maybe allow moving logical containers? Not for now.
+      return
+    }
+
+    const layers = activeView.layout.referenceLayout?.layers || defaultReferenceModelLayers
+
+    // Clone layers to update
+    const updatedLayers = layers.map(l => {
+      if (l.id === layerId) {
+        return {
+          ...l,
+          rules: [
+            ...(l.rules || []),
+            {
+              id: `rule-${Date.now()}`,
+              priority: 100, // High priority for manual moves
+              urnPattern: node.urn // Strict instance match
+            }
+          ]
+        }
+      }
+      return l
+    })
+
+    // Update View
+    updateView(activeView.id, {
+      layout: {
+        ...activeView.layout,
+        referenceLayout: {
+          ...activeView.layout.referenceLayout,
+          layers: updatedLayers
+        }
+      }
+    })
+
+    setContextMenu(null)
+  }, [contextMenu, activeView, displayMap, updateView])
+
+  // Toggle node expansion with Lazy Loading
+  const provider = useGraphProvider()
+  const addNodes = useCanvasStore((s) => s.addNodes)
+  const addEdges = useCanvasStore((s) => s.addEdges)
+
+  const toggleNode = useCallback(async (nodeId: string) => {
+    // Check if we need to fetch children
+    const node = displayMap.get(nodeId)
+
+    if (node?.isLogical) {
+      // Just toggle logical nodes
+      setExpandedNodes((prev) => {
+        const next = new Set(prev)
+        if (next.has(nodeId)) next.delete(nodeId)
+        else next.add(nodeId)
+        return next
+      })
+      return
+    }
+
+    // If node has childCount metadata but no actual children in the tree, try fetching
+    const childCount = (node?.data?._collapsedChildCount as number) || (node?.data?.childCount as number) || 0
+    const hasNoChildren = (node?.children?.length ?? 0) === 0
+
+    if (node && hasNoChildren && childCount > 0) {
+      try {
+        // Fetch children
+        const children = await provider.getChildren(node.urn)
+
+        // Convert to Canvas Nodes
+        const newNodes = children.map(child => ({
+          id: child.urn, // Use URN as ID
+          position: { x: 0, y: 0 }, // Layout will handle this
+          data: {
+            urn: child.urn,
+            label: child.displayName,
+            type: child.entityType, // Map back if needed
+            ...child.properties,
+            childCount: child.childCount
+          },
+          type: 'custom' // Default type
+        }))
+
+        // Create containment edges
+        const newEdges = children.map(child => ({
+          id: `contains-${node.id}-${child.urn}`,
+          source: node.id,
+          target: child.urn,
+          type: 'contains',
+          data: {
+            relationship: 'contains'
+          }
+        }))
+
+        addNodes(newNodes as any)
+        addEdges(newEdges as any)
+
+      } catch (err) {
+        console.error('Failed to lazy load children', err)
+      }
+    }
+
     setExpandedNodes((prev) => {
       const next = new Set(prev)
       if (next.has(nodeId)) {
@@ -219,17 +549,28 @@ export function ReferenceModelCanvas({
       }
       return next
     })
-  }, [])
-  
+  }, [displayMap, provider, addNodes, addEdges])
+
   // Expand all / collapse all
   const expandAll = useCallback(() => {
-    const allIds = flatNodes.map((n) => n.id)
+    const allIds = displayFlat.map((n) => n.id)
     setExpandedNodes(new Set(allIds))
-  }, [flatNodes])
-  
+  }, [displayFlat])
+
   const collapseAll = useCallback(() => {
     setExpandedNodes(new Set())
   }, [])
+
+  // Lineage Edges for Overlay
+  const lineageEdges = useMemo(() => {
+    if (!showLineageFlow) return []
+    // Filter out containment edges
+    return edges.filter(edge => {
+      const params = edge.data || {}
+      const rel = params.relationship || params.edgeType
+      return rel !== 'contains' && rel !== 'CONTAINS'
+    })
+  }, [edges, showLineageFlow])
 
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-canvas", className)}>
@@ -241,7 +582,7 @@ export function ReferenceModelCanvas({
             Data Flow View
           </span>
           <div className="flex-1" />
-          
+
           {/* Search */}
           <div className="relative">
             <LucideIcons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
@@ -254,7 +595,7 @@ export function ReferenceModelCanvas({
               className="input pl-9 pr-8 py-1.5 w-56 text-sm"
             />
             {searchQuery && (
-              <button 
+              <button
                 onClick={() => setSearchQuery('')}
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink"
               >
@@ -262,7 +603,21 @@ export function ReferenceModelCanvas({
               </button>
             )}
           </div>
-          
+
+          {/* Lineage Flow Toggle */}
+          <button
+            onClick={() => setShowLineageFlow(!showLineageFlow)}
+            className={cn(
+              "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all",
+              showLineageFlow
+                ? "bg-accent-lineage/10 text-accent-lineage"
+                : "bg-black/5 dark:bg-white/10 text-ink-muted"
+            )}
+          >
+            <LucideIcons.GitBranch className="w-4 h-4" />
+            {showLineageFlow ? 'Flow On' : 'Flow Off'}
+          </button>
+
           <div className="flex items-center gap-1">
             <button onClick={expandAll} className="btn btn-ghost btn-sm" title="Expand All">
               <LucideIcons.ChevronsDownUp className="w-4 h-4 rotate-180" />
@@ -271,13 +626,13 @@ export function ReferenceModelCanvas({
               <LucideIcons.ChevronsDownUp className="w-4 h-4" />
             </button>
           </div>
-          
+
           <div className="flex items-center gap-2 text-sm text-ink-muted">
             <LucideIcons.ArrowRight className="w-4 h-4" />
             <span>Data Flow</span>
           </div>
         </div>
-        
+
         {/* Search Results */}
         {searchResults.length > 0 && (
           <div className="mt-3 flex items-center gap-2 flex-wrap">
@@ -300,9 +655,9 @@ export function ReferenceModelCanvas({
           </div>
         )}
       </div>
-      
+
       {/* Layer Columns */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto relative">
         <div className="flex h-full min-h-0">
           {sortedLayers.map((layer) => (
             <LayerColumn
@@ -315,16 +670,49 @@ export function ReferenceModelCanvas({
               searchResults={searchResults.map((n) => n.id)}
               onSelect={selectNode}
               onToggle={toggleNode}
+              onContextMenu={handleContextMenu}
             />
           ))}
         </div>
+
+        {/* Context Menu */}
+        {contextMenu && (
+          <div
+            className="fixed z-50 min-w-[160px] glass-panel rounded-lg shadow-xl overflow-hidden py-1 border border-glass-border"
+            style={{ top: contextMenu.y, left: contextMenu.x }}
+          >
+            <div className="px-3 py-1.5 border-b border-glass-border text-xs font-semibold text-ink-muted bg-black/5 dark:bg-white/5">
+              Move to Layer...
+            </div>
+            {sortedLayers.map(layer => (
+              <button
+                key={layer.id}
+                onClick={() => moveToLayer(layer.id)}
+                className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent-lineage/10 hover:text-accent-lineage flex items-center gap-2"
+              >
+                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: layer.color }} />
+                {layer.name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Lineage Flow Overlay */}
+        {showLineageFlow && (
+          <LineageFlowOverlay
+            nodes={nodes}
+            edges={lineageEdges}
+            expandedNodes={expandedNodes}
+          />
+        )}
+
       </div>
     </div>
   )
 }
 
 interface LayerColumnProps {
-  layer: ReferenceModelLayer
+  layer: ViewLayerConfig
   nodes: HierarchyNode[]
   schema: ReturnType<typeof useSchemaStore.getState>['schema']
   selectedNodeId: string | null
@@ -332,6 +720,7 @@ interface LayerColumnProps {
   searchResults: string[]
   onSelect: (id: string) => void
   onToggle: (id: string) => void
+  onContextMenu: (e: React.MouseEvent, id: string) => void
 }
 
 function LayerColumn({
@@ -343,21 +732,22 @@ function LayerColumn({
   searchResults,
   onSelect,
   onToggle,
+  onContextMenu
 }: LayerColumnProps) {
   return (
     <div className="flex-1 min-w-[280px] max-w-[400px] border-r border-glass-border last:border-r-0 flex flex-col">
       {/* Layer Header */}
-      <div 
+      <div
         className="flex-shrink-0 px-4 py-3 border-b border-glass-border"
         style={{ backgroundColor: `${layer.color}10` }}
       >
         <div className="flex items-center gap-3">
-          <div 
+          <div
             className="w-8 h-8 rounded-lg flex items-center justify-center"
             style={{ backgroundColor: `${layer.color}20` }}
           >
-            <DynamicIcon 
-              name={layer.icon ?? 'Layers'} 
+            <DynamicIcon
+              name={layer.icon ?? 'Layers'}
               className="w-4 h-4"
               style={{ color: layer.color }}
             />
@@ -375,7 +765,7 @@ function LayerColumn({
           </span>
         </div>
       </div>
-      
+
       {/* Layer Content */}
       <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
         {nodes.length === 0 ? (
@@ -394,6 +784,7 @@ function LayerColumn({
               searchResults={searchResults}
               onSelect={onSelect}
               onToggle={onToggle}
+              onContextMenu={onContextMenu}
             />
           ))
         )}
@@ -404,13 +795,14 @@ function LayerColumn({
 
 interface LayerNodeCardProps {
   node: HierarchyNode
-  layer: ReferenceModelLayer
+  layer: ViewLayerConfig
   schema: ReturnType<typeof useSchemaStore.getState>['schema']
   selectedNodeId: string | null
   expandedNodes: Set<string>
   searchResults: string[]
   onSelect: (id: string) => void
   onToggle: (id: string) => void
+  onContextMenu: (e: React.MouseEvent, id: string) => void
 }
 
 function LayerNodeCard({
@@ -422,6 +814,7 @@ function LayerNodeCard({
   searchResults,
   onSelect,
   onToggle,
+  onContextMenu
 }: LayerNodeCardProps) {
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
@@ -429,13 +822,13 @@ function LayerNodeCard({
   const isExpanded = expandedNodes.has(node.id)
   const isSelected = selectedNodeId === node.id
   const isSearchResult = searchResults.includes(node.id)
-  
+
   // Count nested children
   const countDescendants = (n: HierarchyNode): number => {
     return n.children.reduce((acc, child) => acc + 1 + countDescendants(child), 0)
   }
   const descendantCount = hasChildren && !isExpanded ? countDescendants(node) : 0
-  
+
   return (
     <motion.div
       layout
@@ -445,6 +838,7 @@ function LayerNodeCard({
         "bg-canvas-elevated hover:shadow-md cursor-pointer",
         isSelected && "ring-2 ring-offset-1",
         isSearchResult && !isSelected && "ring-2 ring-amber-400/50",
+        node.isLogical && "border-dashed bg-black/5 dark:bg-white/5" // Distinct style for logical nodes
       )}
       style={{
         borderColor: visual?.color ?? layer.color ?? '#6b7280',
@@ -452,9 +846,10 @@ function LayerNodeCard({
         ['--tw-ring-color' as string]: visual?.color ?? layer.color ?? '#6b7280',
       }}
       onClick={() => onSelect(node.id)}
+      onContextMenu={(e) => onContextMenu(e, node.id)}
     >
       {/* Node Header */}
-      <div className="flex items-center gap-2 px-3 py-2">
+      < div className="flex items-center gap-2 px-3 py-2" >
         {hasChildren && (
           <button
             onClick={(e) => {
@@ -468,62 +863,171 @@ function LayerNodeCard({
             </motion.div>
           </button>
         )}
-        
+
         {!hasChildren && <div className="w-5" />}
-        
-        <div 
+
+        <div
           className="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0"
           style={{ backgroundColor: `${visual?.color ?? layer.color}15` }}
         >
-          <DynamicIcon 
-            name={visual?.icon ?? 'Box'} 
+          <DynamicIcon
+            name={visual?.icon ?? 'Box'}
             className="w-3.5 h-3.5"
             style={{ color: visual?.color ?? layer.color }}
           />
         </div>
-        
+
         <div className="flex-1 min-w-0">
           <span className="text-2xs font-medium uppercase tracking-wider text-ink-muted">
-            {entityType?.name ?? node.typeId}
+            {node.isLogical ? 'Group' : (entityType?.name ?? node.typeId)}
           </span>
-          <h4 className="text-sm font-medium text-ink truncate">{node.name}</h4>
+          <h4 className={cn("text-sm font-medium truncate", node.isLogical ? "text-ink font-semibold" : "text-ink")}>
+            {node.name}
+          </h4>
+          {node.isLogical && node.data?.description && (
+            <p className="text-2xs text-ink-muted truncate">{String(node.data.description || '')}</p>
+          )}
         </div>
-        
-        {hasChildren && !isExpanded && (
-          <span className="text-2xs text-ink-muted px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10">
-            +{descendantCount}
-          </span>
-        )}
-      </div>
-      
+
+        {
+          hasChildren && !isExpanded && (
+            <span className="text-2xs text-ink-muted px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10">
+              +{descendantCount}
+            </span>
+          )
+        }
+      </div >
+
       {/* Expanded Children */}
       <AnimatePresence>
-        {hasChildren && isExpanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            className="overflow-hidden"
-          >
-            <div className="px-3 pb-2 pl-8 space-y-1.5">
-              {node.children.map((child) => (
-                <LayerNodeCard
-                  key={child.id}
-                  node={child}
-                  layer={layer}
-                  schema={schema}
-                  selectedNodeId={selectedNodeId}
-                  expandedNodes={expandedNodes}
-                  searchResults={searchResults}
-                  onSelect={onSelect}
-                  onToggle={onToggle}
-                />
-              ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </motion.div>
+        {
+          hasChildren && isExpanded && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              className="overflow-hidden"
+            >
+              <div className="px-3 pb-2 pl-8 space-y-1.5">
+                {node.children.map((child) => (
+                  <LayerNodeCard
+                    key={child.id}
+                    node={child}
+                    layer={layer}
+                    schema={schema}
+                    selectedNodeId={selectedNodeId}
+                    expandedNodes={expandedNodes}
+                    searchResults={searchResults}
+                    onSelect={onSelect}
+                    onToggle={onToggle}
+                    onContextMenu={onContextMenu}
+                  />
+                ))}
+              </div>
+            </motion.div>
+          )
+        }
+      </AnimatePresence >
+    </motion.div >
+  )
+}
+// ----------------------------------------------------
+// SVG Overlay Component
+// ----------------------------------------------------
+
+function LineageFlowOverlay({
+  nodes,
+  edges,
+  expandedNodes
+}: {
+  nodes: any[],
+  edges: any[],
+  expandedNodes: Set<string>
+}) {
+  const [paths, setPaths] = useState<React.ReactNode[]>([])
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  // Update paths function
+  const updateFlow = useCallback(() => {
+    if (!containerRef.current) return
+
+    const containerRect = containerRef.current.getBoundingClientRect()
+    const newPaths: React.ReactNode[] = []
+
+    edges.forEach(edge => {
+      const sourceId = `layer-node-${edge.source}`
+      const targetId = `layer-node-${edge.target}`
+
+      const sourceEl = document.getElementById(sourceId)
+      const targetEl = document.getElementById(targetId)
+
+      if (sourceEl && targetEl) {
+        const sRect = sourceEl.getBoundingClientRect()
+        const tRect = targetEl.getBoundingClientRect()
+
+        // Relative coordinates
+        const sx = sRect.right - containerRect.left
+        const sy = sRect.top + sRect.height / 2 - containerRect.top
+        const tx = tRect.left - containerRect.left
+        const ty = tRect.top + tRect.height / 2 - containerRect.top
+
+        // Bezier curve
+        const curvature = 0.5
+
+        // If same column or backwards, adjust curvature?
+        // Assuming left-to-right flow mostly
+
+        const d = `M ${sx} ${sy} C ${sx + (tx - sx) * curvature} ${sy}, ${tx - (tx - sx) * curvature} ${ty}, ${tx} ${ty}`
+
+        newPaths.push(
+          <g key={edge.id}>
+            <path
+              d={d}
+              fill="none"
+              stroke="#6366f1"
+              strokeWidth="2"
+              strokeOpacity="0.4"
+            />
+            <circle cx={sx} cy={sy} r="2" fill="#6366f1" />
+            <circle cx={tx} cy={ty} r="2" fill="#6366f1" />
+          </g>
+        )
+      }
+    })
+    setPaths(newPaths)
+  }, [edges])
+
+  // Listeners
+  useEffect(() => {
+    // Initial draw
+    // Delay slightly to allow layout to settle
+    const timer = setTimeout(updateFlow, 100)
+
+    // Resize
+    window.addEventListener('resize', updateFlow)
+
+    // Scroll - Capture phase to detect scroll in columns?
+    // Or just poll? Scroll interaction is tricky. 
+    // Let's add specific listeners to the columns if possible, but we don't have refs here easily.
+    // We can capture global scroll
+    window.addEventListener('scroll', updateFlow, true)
+
+    return () => {
+      window.removeEventListener('resize', updateFlow)
+      window.removeEventListener('scroll', updateFlow, true)
+      clearTimeout(timer)
+    }
+  }, [updateFlow, nodes, expandedNodes]) // Re-run when nodes change
+
+  return (
+    <div
+      ref={containerRef}
+      className="absolute inset-0 pointer-events-none z-0 overflow-hidden"
+    >
+      <svg className="w-full h-full">
+        {paths}
+      </svg>
+    </div>
   )
 }
 

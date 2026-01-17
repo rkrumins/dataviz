@@ -9,18 +9,18 @@
  * - Layout options
  */
 
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
-import type { ViewConfiguration, EntityTypeSchema, ViewLayerConfig } from '@/types/schema'
+import type { ViewConfiguration, EntityTypeSchema, ViewLayerConfig, LayerAssignmentRuleConfig, LogicalNodeConfig } from '@/types/schema'
 import { cn } from '@/lib/utils'
 
 // Dynamic icon component
-function DynamicIcon({ name, className }: { name: string; className?: string }) {
-  const IconComponent = (LucideIcons as Record<string, React.ComponentType<{ className?: string }>>)[name]
-  if (!IconComponent) return <LucideIcons.Box className={className} />
-  return <IconComponent className={className} />
+function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
+  const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string; style?: React.CSSProperties }>>)[name]
+  if (!IconComponent) return <LucideIcons.Box className={className} style={style} />
+  return <IconComponent className={className} style={style} />
 }
 
 interface ViewEditorProps {
@@ -45,13 +45,12 @@ const LAYOUT_TYPES = [
 
 export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
   const schema = useSchemaStore((s) => s.schema)
-  const getActiveView = useSchemaStore((s) => s.getActiveView)
-  
+
   // Load existing view or create new one
-  const existingView = viewId 
+  const existingView = viewId
     ? schema?.views.find((v) => v.id === viewId)
     : undefined
-  
+
   const [view, setView] = useState<Partial<ViewConfiguration>>(() => {
     if (existingView) return { ...existingView }
     return {
@@ -99,17 +98,17 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
       updatedAt: new Date().toISOString(),
     }
   })
-  
+
   const [activeTab, setActiveTab] = useState<'general' | 'entities' | 'projection' | 'layers'>('general')
-  
+
   // Update a nested property
   const updateView = <K extends keyof ViewConfiguration>(
-    key: K, 
+    key: K,
     value: ViewConfiguration[K]
   ) => {
     setView((prev) => ({ ...prev, [key]: value }))
   }
-  
+
   const updateProjection = (key: string, value: unknown) => {
     setView((prev) => ({
       ...prev,
@@ -118,11 +117,11 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
         projection: {
           ...prev.layout?.projection,
           [key]: value,
-        },
+        } as any,
       },
     }))
   }
-  
+
   const updateContent = (key: string, value: unknown) => {
     setView((prev) => ({
       ...prev,
@@ -132,7 +131,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
       },
     }))
   }
-  
+
   // Toggle entity type visibility
   const toggleEntityType = (typeId: string) => {
     const current = view.content?.visibleEntityTypes ?? []
@@ -141,7 +140,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
       : [...current, typeId]
     updateContent('visibleEntityTypes', updated)
   }
-  
+
   // Add a layer
   const addLayer = () => {
     const layers = view.layout?.referenceLayout?.layers ?? []
@@ -164,10 +163,10 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
       },
     }))
   }
-  
+
   const updateLayer = (layerId: string, updates: Partial<ViewLayerConfig>) => {
     const layers = view.layout?.referenceLayout?.layers ?? []
-    const updated = layers.map((l) => 
+    const updated = layers.map((l) =>
       l.id === layerId ? { ...l, ...updates } : l
     )
     setView((prev) => ({
@@ -178,7 +177,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
       },
     }))
   }
-  
+
   const removeLayer = (layerId: string) => {
     const layers = view.layout?.referenceLayout?.layers ?? []
     setView((prev) => ({
@@ -191,7 +190,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
       },
     }))
   }
-  
+
   const handleSave = () => {
     const finalView: ViewConfiguration = {
       ...view,
@@ -199,15 +198,15 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
     } as ViewConfiguration
     onSave(finalView)
   }
-  
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div 
+      <div
         className="absolute inset-0 bg-black/50 backdrop-blur-sm"
         onClick={onClose}
       />
-      
+
       {/* Modal */}
       <motion.div
         initial={{ opacity: 0, scale: 0.95 }}
@@ -227,7 +226,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
             <LucideIcons.X className="w-5 h-5" />
           </button>
         </div>
-        
+
         {/* Tabs */}
         <div className="flex border-b border-glass-border px-6">
           {[
@@ -251,7 +250,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
             </button>
           ))}
         </div>
-        
+
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
           <AnimatePresence mode="wait">
@@ -275,7 +274,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                       placeholder="e.g., Data Lineage, Impact Analysis"
                     />
                   </div>
-                  
+
                   <div>
                     <label className="block text-sm font-medium text-ink mb-1.5">Description</label>
                     <textarea
@@ -285,7 +284,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                       placeholder="Describe what this view shows..."
                     />
                   </div>
-                  
+
                   <div>
                     <label className="block text-sm font-medium text-ink mb-1.5">Icon</label>
                     <input
@@ -297,7 +296,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                     />
                   </div>
                 </div>
-                
+
                 {/* Layout Type */}
                 <div>
                   <label className="block text-sm font-medium text-ink mb-3">Layout Type</label>
@@ -325,7 +324,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                 </div>
               </motion.div>
             )}
-            
+
             {activeTab === 'entities' && (
               <motion.div
                 key="entities"
@@ -337,7 +336,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                 <p className="text-sm text-ink-muted">
                   Select which entity types are visible in this view.
                 </p>
-                
+
                 <div className="grid grid-cols-2 gap-3">
                   {schema?.entityTypes.map((entityType) => {
                     const isVisible = view.content?.visibleEntityTypes?.includes(entityType.id) ?? false
@@ -352,12 +351,12 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                             : "border-glass-border hover:border-glass-border/80 opacity-50"
                         )}
                       >
-                        <div 
+                        <div
                           className="w-8 h-8 rounded-lg flex items-center justify-center"
                           style={{ backgroundColor: `${entityType.visual.color}20` }}
                         >
-                          <DynamicIcon 
-                            name={entityType.visual.icon} 
+                          <DynamicIcon
+                            name={entityType.visual.icon}
                             className="w-4 h-4"
                             style={{ color: entityType.visual.color }}
                           />
@@ -375,7 +374,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                 </div>
               </motion.div>
             )}
-            
+
             {activeTab === 'projection' && (
               <motion.div
                 key="projection"
@@ -387,7 +386,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                 <p className="text-sm text-ink-muted">
                   Configure how data is projected and aggregated in this view.
                 </p>
-                
+
                 {/* Target Granularity */}
                 <div>
                   <label className="block text-sm font-medium text-ink mb-3">Target Granularity</label>
@@ -419,7 +418,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                     ))}
                   </div>
                 </div>
-                
+
                 {/* Toggle Options */}
                 <div className="space-y-3">
                   <ToggleOption
@@ -428,7 +427,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                     enabled={view.layout?.projection?.aggregateLineage ?? false}
                     onChange={(v) => updateProjection('aggregateLineage', v)}
                   />
-                  
+
                   <ToggleOption
                     label="Collapse Children"
                     description="Hide child entities and show count badges"
@@ -438,7 +437,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                 </div>
               </motion.div>
             )}
-            
+
             {activeTab === 'layers' && (
               <motion.div
                 key="layers"
@@ -456,7 +455,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                     Add Layer
                   </button>
                 </div>
-                
+
                 {(view.layout?.referenceLayout?.layers ?? []).length === 0 ? (
                   <div className="text-center py-12 text-ink-muted">
                     <LucideIcons.LayoutTemplate className="w-12 h-12 mx-auto mb-3 opacity-30" />
@@ -483,7 +482,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
             )}
           </AnimatePresence>
         </div>
-        
+
         {/* Footer */}
         <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-glass-border">
           <button onClick={onClose} className="btn btn-secondary btn-md">
@@ -495,6 +494,147 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
           </button>
         </div>
       </motion.div>
+    </div>
+  )
+}
+// Helper to detect rule type
+const getRuleType = (rule: LayerAssignmentRuleConfig): 'identifier' | 'name' | 'tag' | 'property' => {
+  if (rule.urnPattern) return 'identifier'
+  if (rule.propertyMatch?.field === 'name') return 'name'
+  if (rule.tags && rule.tags.length > 0) return 'tag'
+  return 'property'
+}
+
+function RuleListEditor({
+  rules,
+  onUpdate
+}: {
+  rules: LayerAssignmentRuleConfig[]
+  onUpdate: (rules: LayerAssignmentRuleConfig[]) => void
+}) {
+  return (
+    <div className="space-y-2">
+      {rules.map((rule, idx) => {
+        const ruleType = getRuleType(rule)
+
+        const updateRule = (newRule: Partial<LayerAssignmentRuleConfig>) => {
+          const newRules = [...rules]
+          newRules[idx] = { ...rule, ...newRule }
+          onUpdate(newRules)
+        }
+
+        const changeType = (newType: string) => {
+          // Reset fields when changing type
+          const base = { id: rule.id, priority: rule.priority }
+          if (newType === 'identifier') updateRule({ ...base, urnPattern: '' })
+          if (newType === 'name') updateRule({ ...base, propertyMatch: { field: 'name', operator: 'contains', value: '' } })
+          if (newType === 'tag') updateRule({ ...base, tags: [''] })
+          if (newType === 'property') updateRule({ ...base, propertyMatch: { field: '', operator: 'equals', value: '' } })
+        }
+
+        return (
+          <div key={rule.id} className="p-3 rounded bg-black/5 dark:bg-white/5 space-y-3">
+            <div className="flex items-start gap-2">
+              {/* Type Selector */}
+              <div className="w-24 flex-shrink-0">
+                <select
+                  value={ruleType}
+                  onChange={(e) => changeType(e.target.value)}
+                  className="w-full bg-transparent text-xs font-medium text-ink border-b border-glass-border focus:outline-none py-1"
+                >
+                  <option value="identifier">Identifier</option>
+                  <option value="name">Name</option>
+                  <option value="tag">Tag</option>
+                  <option value="property">Property</option>
+                </select>
+              </div>
+
+              {/* Dynamic Inputs */}
+              <div className="flex-1 min-w-0">
+                {ruleType === 'identifier' && (
+                  <input
+                    type="text"
+                    value={rule.urnPattern ?? ''}
+                    onChange={(e) => updateRule({ urnPattern: e.target.value })}
+                    className="w-full bg-transparent border-b border-glass-border text-xs px-1 py-1 focus:outline-none focus:border-accent-lineage"
+                    placeholder="URN pattern (e.g. *finance*)"
+                  />
+                )}
+
+                {ruleType === 'name' && (
+                  <div className="flex gap-2">
+                    <span className="text-xs text-ink-muted py-1">contains</span>
+                    <input
+                      type="text"
+                      value={String(rule.propertyMatch?.value ?? '')}
+                      onChange={(e) => updateRule({
+                        propertyMatch: { field: 'name', operator: 'contains', value: e.target.value }
+                      })}
+                      className="flex-1 bg-transparent border-b border-glass-border text-xs px-1 py-1 focus:outline-none focus:border-accent-lineage"
+                      placeholder="Name text..."
+                    />
+                  </div>
+                )}
+
+                {ruleType === 'tag' && (
+                  <input
+                    type="text"
+                    value={rule.tags?.[0] ?? ''}
+                    onChange={(e) => updateRule({ tags: [e.target.value] })}
+                    className="w-full bg-transparent border-b border-glass-border text-xs px-1 py-1 focus:outline-none focus:border-accent-lineage"
+                    placeholder="Tag (e.g. source)"
+                  />
+                )}
+
+                {ruleType === 'property' && (
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={rule.propertyMatch?.field ?? ''}
+                      onChange={(e) => updateRule({
+                        propertyMatch: { ...(rule.propertyMatch!), field: e.target.value }
+                      })}
+                      className="w-20 bg-transparent border-b border-glass-border text-xs px-1 py-1 focus:outline-none focus:border-accent-lineage"
+                      placeholder="Field"
+                    />
+                    <select
+                      value={rule.propertyMatch?.operator ?? 'equals'}
+                      onChange={(e) => updateRule({
+                        propertyMatch: { ...(rule.propertyMatch!), operator: e.target.value as any }
+                      })}
+                      className="w-20 bg-transparent border-b border-glass-border text-xs py-1 focus:outline-none"
+                    >
+                      <option value="equals">=</option>
+                      <option value="contains">contains</option>
+                      <option value="startsWith">starts with</option>
+                    </select>
+                    <input
+                      type="text"
+                      value={String(rule.propertyMatch?.value ?? '')}
+                      onChange={(e) => updateRule({
+                        propertyMatch: { ...(rule.propertyMatch!), value: e.target.value }
+                      })}
+                      className="flex-1 bg-transparent border-b border-glass-border text-xs px-1 py-1 focus:outline-none focus:border-accent-lineage"
+                      placeholder="Value"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Remove Rule */}
+              <button
+                onClick={() => {
+                  const newRules = rules.filter(r => r.id !== rule.id)
+                  onUpdate(newRules)
+                }}
+                className="text-ink-muted hover:text-red-500 pt-1"
+              >
+                <LucideIcons.X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -538,6 +678,159 @@ function ToggleOption({
   )
 }
 
+// Logical Node Editor (Recursive)
+function LogicalNodeEditor({
+  node,
+  onUpdate,
+  onRemove
+}: {
+  node: LogicalNodeConfig
+  onUpdate: (updates: Partial<LogicalNodeConfig>) => void
+  onRemove: () => void
+}) {
+  const [isExpanded, setIsExpanded] = useState(false)
+
+  const updateChild = (childId: string, updates: Partial<LogicalNodeConfig>) => {
+    const newChildren = (node.children ?? []).map(c =>
+      c.id === childId ? { ...c, ...updates } : c
+    )
+    onUpdate({ children: newChildren })
+  }
+
+  const removeChild = (childId: string) => {
+    const newChildren = (node.children ?? []).filter(c => c.id !== childId)
+    onUpdate({ children: newChildren })
+  }
+
+  const addChild = () => {
+    const newChild: LogicalNodeConfig = {
+      id: `group-${Date.now()}`,
+      name: 'New Group',
+      type: 'group',
+      children: [],
+      rules: []
+    }
+    onUpdate({ children: [...(node.children ?? []), newChild] })
+  }
+
+  return (
+    <div className="border border-glass-border rounded-lg overflow-hidden bg-black/5 dark:bg-white/5">
+      {/* Header */}
+      <div
+        className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+        onClick={() => setIsExpanded(!isExpanded)}
+      >
+        <LucideIcons.ChevronRight className={cn("w-4 h-4 text-ink-muted transition-transform", isExpanded && "rotate-90")} />
+        <DynamicIcon name={node.type === 'container' ? 'Box' : 'Folder'} className="w-4 h-4 text-accent-lineage" />
+        <input
+          type="text"
+          value={node.name}
+          onChange={(e) => {
+            e.stopPropagation()
+            onUpdate({ name: e.target.value })
+          }}
+          onClick={(e) => e.stopPropagation()}
+          className="bg-transparent text-sm font-medium focus:outline-none flex-1 min-w-0"
+        />
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            onRemove()
+          }}
+          className="text-ink-muted hover:text-red-500 p-1"
+        >
+          <LucideIcons.Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      <AnimatePresence>
+        {isExpanded && (
+          <motion.div
+            initial={{ height: 0 }}
+            animate={{ height: 'auto' }}
+            exit={{ height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="p-3 space-y-4 border-t border-glass-border">
+              {/* Type & Description */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-ink-muted mb-1">Type</label>
+                  <select
+                    value={node.type}
+                    onChange={(e) => onUpdate({ type: e.target.value as any })}
+                    className="w-full bg-transparent border-b border-glass-border text-xs py-1 focus:outline-none"
+                  >
+                    <option value="container">Container</option>
+                    <option value="group">Group</option>
+                    <option value="system">System</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-ink-muted mb-1">Description</label>
+                  <input
+                    type="text"
+                    value={node.description ?? ''}
+                    onChange={(e) => onUpdate({ description: e.target.value })}
+                    className="w-full bg-transparent border-b border-glass-border text-xs py-1 focus:outline-none"
+                    placeholder="Optional description"
+                  />
+                </div>
+              </div>
+
+              {/* Rules */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-medium text-ink-muted">Mapping Rules</label>
+                  <button
+                    onClick={() => onUpdate({
+                      rules: [...(node.rules ?? []), { id: `rule-${Date.now()}`, priority: 10 }]
+                    })}
+                    className="text-xs text-accent-lineage hover:underline"
+                  >
+                    + Add Rule
+                  </button>
+                </div>
+                {(!node.rules || node.rules.length === 0) ? (
+                  <p className="text-xs text-ink-muted italic">No rules (drag physical entities here or add rules)</p>
+                ) : (
+                  <RuleListEditor
+                    rules={node.rules}
+                    onUpdate={(rules) => onUpdate({ rules })}
+                  />
+                )}
+              </div>
+
+              {/* Children */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-medium text-ink-muted">Nested Groups</label>
+                  <button
+                    onClick={addChild}
+                    className="text-xs text-accent-lineage hover:underline"
+                  >
+                    + Add Group
+                  </button>
+                </div>
+                <div className="space-y-2 pl-2 border-l border-glass-border">
+                  {(node.children ?? []).map(child => (
+                    <LogicalNodeEditor
+                      key={child.id}
+                      node={child}
+                      onUpdate={(u) => updateChild(child.id, u)}
+                      onRemove={() => removeChild(child.id)}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
 // Layer editor component
 function LayerEditor({
   layer,
@@ -553,15 +846,17 @@ function LayerEditor({
   onRemove: () => void
 }) {
   const [isExpanded, setIsExpanded] = useState(false)
-  
+
+
+
   return (
     <div className="rounded-lg border border-glass-border overflow-hidden">
       {/* Header */}
-      <div 
+      <div
         className="flex items-center gap-3 px-4 py-3 bg-canvas-elevated cursor-pointer"
         onClick={() => setIsExpanded(!isExpanded)}
       >
-        <div 
+        <div
           className="w-3 h-8 rounded"
           style={{ backgroundColor: layer.color }}
         />
@@ -589,14 +884,14 @@ function LayerEditor({
         >
           <LucideIcons.Trash2 className="w-4 h-4" />
         </button>
-        <LucideIcons.ChevronDown 
+        <LucideIcons.ChevronDown
           className={cn(
             "w-4 h-4 text-ink-muted transition-transform",
             isExpanded && "rotate-180"
-          )} 
+          )}
         />
       </div>
-      
+
       {/* Expanded Content */}
       <AnimatePresence>
         {isExpanded && (
@@ -617,7 +912,7 @@ function LayerEditor({
                   className="w-full h-8 rounded cursor-pointer"
                 />
               </div>
-              
+
               {/* Description */}
               <div>
                 <label className="block text-xs font-medium text-ink-muted mb-1.5">Description</label>
@@ -629,7 +924,7 @@ function LayerEditor({
                   placeholder="e.g., Raw data sources"
                 />
               </div>
-              
+
               {/* Entity Types */}
               <div>
                 <label className="block text-xs font-medium text-ink-muted mb-2">Entity Types in this Layer</label>
@@ -659,6 +954,107 @@ function LayerEditor({
                   })}
                 </div>
               </div>
+
+
+              {/* Assignment Rules */}
+              <div className="pt-3 border-t border-glass-border">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-xs font-medium text-ink-muted">Assignment Rules (Legacy)</label>
+                  <button
+                    onClick={() => {
+                      const rules = layer.rules ?? []
+                      onUpdate({
+                        rules: [
+                          ...rules,
+                          {
+                            id: `rule-${Date.now()}`,
+                            priority: 10,
+                            urnPattern: '' // Default to identifier
+                          }
+                        ]
+                      })
+                    }}
+                    className="text-xs text-accent-lineage hover:underline"
+                  >
+                    + Add Rule
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  <RuleListEditor
+                    rules={layer.rules ?? []}
+                    onUpdate={(rules) => onUpdate({ rules })}
+                  />
+                  {(layer.rules ?? []).length === 0 && (
+                    <p className="text-2xs text-ink-muted italic">
+                      No rules defined. Entities will be assigned based on type only.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Logical Hierarchy (New) */}
+              <div className="pt-3 border-t border-glass-border">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-medium text-ink-muted">Logical Hierarchy</label>
+                    <span className="px-1.5 py-0.5 rounded text-2xs bg-accent-lineage/10 text-accent-lineage font-medium">New</span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const newRoot: LogicalNodeConfig = {
+                        id: `group-${Date.now()}`,
+                        name: 'New Group',
+                        type: 'container',
+                        rules: [],
+                        children: []
+                      }
+                      onUpdate({ logicalNodes: [...(layer.logicalNodes ?? []), newRoot] })
+                    }}
+                    className="text-xs text-accent-lineage hover:underline"
+                  >
+                    + Add Root Group
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {(layer.logicalNodes ?? []).length === 0 ? (
+                    <p className="text-2xs text-ink-muted italic">
+                      Define logical containers (e.g. Domains, Platforms) and map entities to them.
+                    </p>
+                  ) : (
+                    (layer.logicalNodes ?? []).map((node, idx) => (
+                      <LogicalNodeEditor
+                        key={node.id}
+                        node={node}
+                        onUpdate={(u) => {
+                          const newNodes = [...(layer.logicalNodes ?? [])]
+                          newNodes[idx] = { ...node, ...u }
+                          onUpdate({ logicalNodes: newNodes })
+                        }}
+                        onRemove={() => {
+                          const newNodes = (layer.logicalNodes ?? []).filter(n => n.id !== node.id)
+                          onUpdate({ logicalNodes: newNodes })
+                        }}
+                      />
+                    ))
+                  )}
+                </div>
+
+                <div className="mt-3 flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id={`unassigned-${layer.id}`}
+                    checked={layer.showUnassigned !== false}
+                    onChange={(e) => onUpdate({ showUnassigned: e.target.checked })}
+                    className="rounded border-glass-border text-accent-lineage focus:ring-accent-lineage"
+                  />
+                  <label htmlFor={`unassigned-${layer.id}`} className="text-xs text-ink-muted cursor-pointer select-none">
+                    Show unassigned entities matching layer types
+                  </label>
+                </div>
+              </div>
+
             </div>
           </motion.div>
         )}

@@ -6,6 +6,8 @@
  * other graph data source.
  */
 
+import { LogicalNodeConfig, LayerAssignmentRuleConfig } from '../types/schema'
+
 // ============================================
 // URN Types (DataHub Compatible)
 // ============================================
@@ -367,11 +369,78 @@ export interface LayerAssignmentRule {
     /** Match by property value */
     propertyMatch?: {
         field: string
-        value: unknown
+        operator?: 'equals' | 'contains' | 'startsWith' | 'exists'
+        value?: unknown
     }
 
     /** Priority for conflict resolution (higher wins) */
     priority: number
+}
+
+/**
+ * Resolve layer assignment for a node based on rules
+ */
+/**
+ * Check if a node matches a specific rule's criteria
+ */
+export function matchesRule(
+    node: GraphNode,
+    rule: LayerAssignmentRule | LayerAssignmentRuleConfig
+): boolean {
+    // Check entity type match
+    if (rule.entityTypes && rule.entityTypes.length > 0) {
+        if (!rule.entityTypes.includes(node.entityType)) {
+            return false
+        }
+    }
+
+    // Check tag match
+    if (rule.tags && rule.tags.length > 0) {
+        if (!node.tags || !node.tags.some(t => rule.tags!.includes(t))) {
+            return false
+        }
+    }
+
+    // Check URN pattern match
+    if (rule.urnPattern) {
+        const regex = new RegExp(rule.urnPattern.replace(/\*/g, '.*'))
+        if (!regex.test(node.urn)) {
+            return false
+        }
+    }
+
+    // Check property match
+    if (rule.propertyMatch) {
+        const { field, operator = 'equals', value: targetValue } = rule.propertyMatch
+        const actualValue = node.properties[field]
+
+        switch (operator) {
+            case 'exists':
+                if (actualValue === undefined || actualValue === null) return false
+                break
+            case 'contains':
+                if (typeof actualValue === 'string' && typeof targetValue === 'string') {
+                    if (!actualValue.includes(targetValue)) return false
+                } else if (Array.isArray(actualValue)) {
+                    if (!actualValue.includes(targetValue)) return false
+                } else {
+                    return false
+                }
+                break
+            case 'startsWith':
+                if (typeof actualValue === 'string' && typeof targetValue === 'string') {
+                    if (!actualValue.startsWith(targetValue)) return false
+                } else {
+                    return false
+                }
+                break
+            case 'equals':
+            default:
+                if (actualValue !== targetValue) return false
+        }
+    }
+
+    return true
 }
 
 /**
@@ -385,32 +454,48 @@ export function resolveLayerAssignment(
     const sortedRules = [...rules].sort((a, b) => b.priority - a.priority)
 
     for (const rule of sortedRules) {
-        // Check entity type match
-        if (rule.entityTypes && rule.entityTypes.includes(node.entityType)) {
+        if (matchesRule(node, rule)) {
             return rule.layerId
-        }
-
-        // Check tag match
-        if (rule.tags && node.tags?.some(t => rule.tags!.includes(t))) {
-            return rule.layerId
-        }
-
-        // Check URN pattern match
-        if (rule.urnPattern) {
-            const regex = new RegExp(rule.urnPattern.replace(/\*/g, '.*'))
-            if (regex.test(node.urn)) {
-                return rule.layerId
-            }
-        }
-
-        // Check property match
-        if (rule.propertyMatch) {
-            const value = node.properties[rule.propertyMatch.field]
-            if (value === rule.propertyMatch.value) {
-                return rule.layerId
-            }
         }
     }
 
+    return undefined
+}
+
+/**
+ * Recursively find the best logical node assignment for a physical node
+ * 
+ * Strategy:
+ * 1. Depth-First Search: Check children first (specificity).
+ * 2. Check rules on the current logical node.
+ * 3. Priority: Rules with higher priority win within the same node context?
+ *    Actually, users might define rules on "Payment Platform".
+ */
+export function resolveLogicalAssignment(
+    node: GraphNode,
+    logicalNodes: LogicalNodeConfig[]
+): string | undefined {
+    for (const logicalNode of logicalNodes) {
+        // 1. Check children first (Depth-First)
+        if (logicalNode.children && logicalNode.children.length > 0) {
+            const childMatch = resolveLogicalAssignment(node, logicalNode.children)
+            if (childMatch) return childMatch
+        }
+
+        // 2. Check rules on this node
+        if (logicalNode.rules && logicalNode.rules.length > 0) {
+            // Check if any rule matches
+            // We take the highest priority match if multiple exist? 
+            // Or just any match? Assuming logical nodes are distinct enough.
+            // Let's sort rules by priority just in case.
+            const sortedRules = [...logicalNode.rules].sort((a, b) => b.priority - a.priority)
+
+            for (const rule of sortedRules) {
+                if (matchesRule(node, rule)) {
+                    return logicalNode.id
+                }
+            }
+        }
+    }
     return undefined
 }
