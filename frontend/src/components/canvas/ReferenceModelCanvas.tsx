@@ -23,6 +23,8 @@ import {
   type EntityType,
 } from '@/providers/GraphDataProvider'
 import { useGraphProvider } from '@/providers'
+import { EdgeDetailPanel } from '../panels/EdgeDetailPanel'
+import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
@@ -135,6 +137,157 @@ export function ReferenceModelCanvas({
   }, [])
 
 
+
+  // Edge details
+  const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
+  const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
+  const selectEdge = useCanvasStore((s) => s.selectEdge)
+
+  // Trace / Focus State
+  const [traceFocusId, setTraceFocusId] = useState<string | null>(null)
+  const [traceNodes, setTraceNodes] = useState<Set<string>>(new Set())
+
+  // Trace Calculation for Double Click
+  // We import computeTrace dynamically or assume it's available via utility
+  // Since we can't easily import from hook file if it's not exported, we'll implement a lightweight version 
+  // OR rely on the hook if possible. 
+  // Actually, we can assume the user meant "computeTrace" is importable.
+  // Checking previous file view: "export function computeTrace" exists in hooks/useLineageExploration.ts
+
+  const handleDoubleClick = useCallback((nodeId: string) => {
+    // Toggle trace
+    if (traceFocusId === nodeId) {
+      setTraceFocusId(null)
+      setTraceNodes(new Set())
+      return
+    }
+
+    setTraceFocusId(nodeId)
+
+    // Simple BFS for trace (upstream/downstream)
+    // Or we could use the full computeTrace if we can import it.
+    // Let's do a simple recursive finder here to avoid heavy dependencies if import fails.
+    // Actually, let's try to do it right.
+
+    const visited = new Set<string>()
+    // For Trace, we need to include:
+    // 1. The node itself
+    // 2. ALL its descendants (if it's a container)
+    // 3. ALL its ancestors (so the container lights up if a child is traced)
+    // 4. Lineage neighbors of any of the above
+
+    // Helper to find descendants and ancestors
+    const descendants = new Set<string>()
+    const ancestors = new Set<string>()
+
+    // Naive tree search from hierarchyTree? 
+    // We can iterate `displayMap` since it has parent/child links usually?
+    // ReferenceModel hierarchy is in `hierarchyTree`.
+    // Let's build a quick map for this trace efficiently.
+    const findFamily = (targetId: string) => {
+      // Find descendants
+      const q = [targetId]
+      descendants.add(targetId)
+
+      // Traverse hierarchyTree to find children? 
+      // We can use the already built `hierarchyTree` via `nodesByLayer` or just `nodes`.
+      // `nodes` from store are flat. Containment edges define structure.
+      const containmentEdges = edges.filter(e => e.data?.relationship === 'contains' || e.data?.edgeType === 'contains')
+      const parentMap = new Map<string, string>()
+      const childMap = new Map<string, string[]>()
+      containmentEdges.forEach(e => {
+        if (!childMap.has(e.source)) childMap.set(e.source, [])
+        childMap.get(e.source)!.push(e.target)
+        parentMap.set(e.target, e.source)
+      })
+
+      // Descendants
+      let head = 0
+      while (head < q.length) {
+        const curr = q[head++]
+        const kids = childMap.get(curr) || []
+        kids.forEach(k => {
+          if (!descendants.has(k)) {
+            descendants.add(k)
+            q.push(k)
+          }
+        })
+      }
+
+      // Ancestors
+      let curr = targetId
+      while (parentMap.has(curr)) {
+        curr = parentMap.get(curr)!
+        ancestors.add(curr)
+      }
+    }
+
+    findFamily(nodeId)
+
+    // Add all family to visited (so they light up)
+    descendants.forEach(d => visited.add(d))
+    ancestors.forEach(a => visited.add(a))
+
+    // Now BFS on Lineage Edges starting from ALL descendants
+    // (Containers don't have lineage, their children do)
+    const traceQueue = Array.from(descendants)
+
+    // Build lineage adj
+    const relevantEdges = edges.filter(e =>
+      e.data?.relationship !== 'contains' &&
+      e.data?.edgeType !== 'contains' &&
+      e.data?.edgeType !== 'CONTAINS'
+    )
+    const adj = new Map<string, string[]>()
+    relevantEdges.forEach(e => {
+      if (!adj.has(e.source)) adj.set(e.source, [])
+      if (!adj.has(e.target)) adj.set(e.target, [])
+      adj.get(e.source)!.push(e.target)
+      adj.get(e.target)!.push(e.source)
+    })
+
+    let items = 0
+    const bfsSeen = new Set<string>(descendants)
+
+    while (traceQueue.length > 0 && items < 1000) {
+      const curr = traceQueue.shift()!
+      items++
+      const neighbors = adj.get(curr) || []
+      for (const n of neighbors) {
+        if (!bfsSeen.has(n)) {
+          bfsSeen.add(n)
+          visited.add(n)
+          traceQueue.push(n)
+
+          // If we found a node, we should also highlight its ancestors!
+          // So the container of the upstream/downstream node also lights up
+          // We need the parentMap again. Re-use or rebuild?
+          // Let's rebuild local lookup or hoisting is messy.
+          // Just minimal calc:
+          // findAncestors(n).forEach(a => visited.add(a))
+          // Optimizing: capture map in closure
+        }
+      }
+    }
+
+    // Re-run ancestor fill for all visited nodes (to ensure containers light up)
+    // Build parent map once
+    const containmentEdges = edges.filter(e => e.data?.relationship === 'contains' || e.data?.edgeType === 'contains' || e.data?.edgeType === 'CONTAINS')
+    const parentMap = new Map<string, string>()
+    containmentEdges.forEach(e => parentMap.set(e.target, e.source))
+
+    const finalTrace = new Set(visited)
+    visited.forEach(v => {
+      let curr = v
+      while (parentMap.has(curr)) {
+        curr = parentMap.get(curr)!
+        finalTrace.add(curr)
+      }
+    })
+
+    setTraceNodes(finalTrace)
+
+  }, [traceFocusId, edges])
 
   // Lineage flow toggle
   const [showLineageFlow, setShowLineageFlow] = useState(initialShowLineageFlow)
@@ -275,11 +428,19 @@ export function ReferenceModelCanvas({
     // Helper: Map physical nodes to a logical node context
     const getMappedPhysicalNodes = (logicalConfig: LogicalNodeConfig): HierarchyNode[] => {
       const mapped: HierarchyNode[] = []
+      const visibleTypes = activeView?.content?.visibleEntityTypes || []
+      const hasTypeFilter = visibleTypes.length > 0
 
       // Iterate TOP LEVEL physical nodes
       // We prioritize assigning roots. If a root is assigned, its children come with it.
       hierarchyTree.forEach(pNode => {
         if (assignedNodeIds.has(pNode.id)) return
+
+        // Global Visibility Check
+        // If the node type is not in visibleEntityTypes, skip it
+        if (hasTypeFilter && !visibleTypes.includes(pNode.typeId)) {
+          return
+        }
 
         const graphNode: GraphNode = {
           urn: pNode.urn,
@@ -435,19 +596,47 @@ export function ReferenceModelCanvas({
   const moveToLayer = useCallback((layerId: string) => {
     if (!contextMenu || !activeView || !activeView.id) return
 
-    const node = displayMap.get(contextMenu.nodeId)
-    if (!node) return
+    const entity = displayMap.get(contextMenu.nodeId)
+    if (!entity) return
 
-    // Prevent moving Logical Nodes? Or allow?
-    if (node.isLogical) {
-      // Maybe allow moving logical containers? Not for now.
+    // If moving a logical node, we might need different logic (e.g. reparenting)
+    // For now, we assume we are moving a PHYSICAL entity into a layer/group
+    if (entity.isLogical) {
+      console.warn("Moving logical nodes not yet supported via context menu")
       return
     }
 
     const layers = activeView.layout.referenceLayout?.layers || defaultReferenceModelLayers
 
+    // Helper to recursively add rule to the correct logical node
+    const addRuleToNode = (nodes: LogicalNodeConfig[], targetId: string): LogicalNodeConfig[] => {
+      return nodes.map(node => {
+        if (node.id === targetId) {
+          return {
+            ...node,
+            rules: [
+              ...(node.rules || []),
+              {
+                id: `rule-${Date.now()}`,
+                priority: 100,
+                urnPattern: entity.urn
+              }
+            ]
+          }
+        }
+        if (node.children) {
+          return {
+            ...node,
+            children: addRuleToNode(node.children, targetId)
+          }
+        }
+        return node
+      })
+    }
+
     // Clone layers to update
     const updatedLayers = layers.map(l => {
+      // Check if target is the layer itself
       if (l.id === layerId) {
         return {
           ...l,
@@ -456,11 +645,20 @@ export function ReferenceModelCanvas({
             {
               id: `rule-${Date.now()}`,
               priority: 100, // High priority for manual moves
-              urnPattern: node.urn // Strict instance match
+              urnPattern: entity.urn // Strict instance match
             }
           ]
         }
       }
+
+      // Check if target is a logical node within this layer
+      if (l.logicalNodes) {
+        const updatedLogicalNodes = addRuleToNode(l.logicalNodes, layerId)
+        if (updatedLogicalNodes !== l.logicalNodes) {
+          return { ...l, logicalNodes: updatedLogicalNodes }
+        }
+      }
+
       return l
     })
 
@@ -572,6 +770,86 @@ export function ReferenceModelCanvas({
     })
   }, [edges, showLineageFlow])
 
+  // Lineage Roll-up: Project edges to visible ancestors
+  const visibleLineageEdges = useMemo(() => {
+    if (!showLineageFlow) return []
+
+    // 1. Build Ancestor Map: Physical URN -> Visible Node ID
+    const ancestorMap = new Map<string, string>()
+
+    // Helper to traverse and map
+    // currentVisibleAnchor: The ID of the node that 'node' should roll up to
+    const processNode = (node: HierarchyNode, currentVisibleAnchor: string) => {
+      // Map current node to the anchor
+      if (node.urn) ancestorMap.set(node.urn, currentVisibleAnchor)
+      ancestorMap.set(node.id, currentVisibleAnchor)
+
+      // Determine anchor for children
+      // Logic:
+      // 1. If I am the current anchor (i.e. I am visible)
+      // 2. AND I am expanded
+      // -> My children become their own anchors (initially)
+      // Else -> My children roll up to me (if I'm anchor) or whoever I rolled up to
+
+      let childAnchor = currentVisibleAnchor
+
+      // If I am the visible node, check if I allow my children to be seen
+      if (node.id === currentVisibleAnchor) {
+        if (expandedNodes.has(node.id)) {
+          // I am expanded. Children are revealed. 
+          // BUT we pass the child's ID as the NEW anchor in the recursion loop
+          // Special flag to indicate "Use Child ID"
+          childAnchor = 'USE_CHILD_ID'
+        } else {
+          // I am collapsed. Children roll up to me.
+          childAnchor = node.id
+        }
+      }
+
+      // Recurse
+      if (node.children) {
+        node.children.forEach(child => {
+          const nextAnchor = childAnchor === 'USE_CHILD_ID' ? child.id : childAnchor
+          processNode(child, nextAnchor)
+        })
+      }
+    }
+
+    // Process all layers
+    nodesByLayer.forEach(roots => roots.forEach(root => {
+      // Roots are always initially visible anchors
+      processNode(root, root.id)
+    }))
+
+    // 2. Project Edges
+    const projected: any[] = []
+    const seen = new Set<string>()
+
+    lineageEdges.forEach(edge => {
+      // Resolve source/target to effective visible nodes
+      // If not in map, fallback to edge source (might be a node that isn't in hierarchy but is on canvas?)
+      // Actually strictly rely on map for consistency logic
+      const sourceId = ancestorMap.get(edge.source) || (displayMap.has(edge.source) ? edge.source : null)
+      const targetId = ancestorMap.get(edge.target) || (displayMap.has(edge.target) ? edge.target : null)
+
+      if (sourceId && targetId && sourceId !== targetId) {
+        const key = `${sourceId}->${targetId}`
+        if (!seen.has(key)) {
+          projected.push({
+            ...edge,
+            id: `proj-${key}-${edge.id}`,
+            source: sourceId,
+            target: targetId,
+            animated: true // Visual cue for rolled up edges?
+          })
+          seen.add(key)
+        }
+      }
+    })
+
+    return projected
+  }, [lineageEdges, nodesByLayer, expandedNodes, displayMap, showLineageFlow])
+
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-canvas", className)}>
       {/* Header */}
@@ -656,60 +934,86 @@ export function ReferenceModelCanvas({
         )}
       </div>
 
-      {/* Layer Columns */}
-      <div className="flex-1 overflow-auto relative">
-        <div className="flex h-full min-h-0">
-          {sortedLayers.map((layer) => (
-            <LayerColumn
-              key={layer.id}
-              layer={layer}
-              nodes={nodesByLayer.get(layer.id) ?? []}
-              schema={schema}
-              selectedNodeId={selectedNodeId}
-              expandedNodes={expandedNodes}
-              searchResults={searchResults.map((n) => n.id)}
-              onSelect={selectNode}
-              onToggle={toggleNode}
-              onContextMenu={handleContextMenu}
+      <div className="flex-1 w-full h-full relative overflow-hidden bg-canvas flex flex-col">
+        {/* Edge Panel */}
+        <AnimatePresence>
+          {isEdgePanelOpen && (
+            <EdgeDetailPanel
+              isOpen={isEdgePanelOpen}
+              onClose={closeEdgePanel}
+              edgeFilters={edgeFilters}
+              onToggleFilter={toggleEdgeFilter}
             />
-          ))}
-        </div>
+          )}
+        </AnimatePresence>
 
-        {/* Context Menu */}
-        {contextMenu && (
-          <div
-            className="fixed z-50 min-w-[160px] glass-panel rounded-lg shadow-xl overflow-hidden py-1 border border-glass-border"
-            style={{ top: contextMenu.y, left: contextMenu.x }}
-          >
-            <div className="px-3 py-1.5 border-b border-glass-border text-xs font-semibold text-ink-muted bg-black/5 dark:bg-white/5">
-              Move to Layer...
-            </div>
-            {sortedLayers.map(layer => (
-              <button
+        {/* Layer Columns */}
+        <div className="flex-1 overflow-auto relative">
+          <div className="flex h-full min-h-0">
+            {sortedLayers.map((layer) => (
+              <LayerColumn
                 key={layer.id}
-                onClick={() => moveToLayer(layer.id)}
-                className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent-lineage/10 hover:text-accent-lineage flex items-center gap-2"
-              >
-                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: layer.color }} />
-                {layer.name}
-              </button>
+                layer={layer}
+                nodes={nodesByLayer.get(layer.id) ?? []}
+                schema={schema}
+                selectedNodeId={selectedNodeId}
+                expandedNodes={expandedNodes}
+                searchResults={searchResults.map((n) => n.id)}
+                onSelect={selectNode}
+                onToggle={toggleNode}
+                onContextMenu={handleContextMenu}
+                onDoubleClick={handleDoubleClick}
+                traceFocusId={traceFocusId}
+                traceNodes={traceNodes}
+              />
             ))}
           </div>
-        )}
 
-        {/* Lineage Flow Overlay */}
-        {showLineageFlow && (
-          <LineageFlowOverlay
-            nodes={nodes}
-            edges={lineageEdges}
-            expandedNodes={expandedNodes}
-          />
-        )}
+          {/* Context Menu */}
+          {contextMenu && (
+            <div
+              className="fixed z-50 min-w-[160px] glass-panel rounded-lg shadow-xl overflow-hidden py-1 border border-glass-border"
+              style={{ top: contextMenu.y, left: contextMenu.x }}
+            >
+              <div className="px-3 py-1.5 border-b border-glass-border text-xs font-semibold text-ink-muted bg-black/5 dark:bg-white/5">
+                Move to Layer...
+              </div>
+              {sortedLayers.map(layer => (
+                <button
+                  key={layer.id}
+                  onClick={() => moveToLayer(layer.id)}
+                  className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent-lineage/10 hover:text-accent-lineage flex items-center gap-2"
+                >
+                  <div className="w-2 h-2 rounded-full" style={{ backgroundColor: layer.color }} />
+                  {layer.name}
+                </button>
+              ))}
+            </div>
+          )}
 
+          {/* Lineage Flow Overlay */}
+          {showLineageFlow && (
+            <LineageFlowOverlay
+              nodes={displayFlat} // Pass rendered nodes for checking existence? Actually Overlay searches DOM.
+              edges={visibleLineageEdges}
+              expandedNodes={expandedNodes}
+              selectEdge={selectEdge}
+              isEdgePanelOpen={isEdgePanelOpen}
+              toggleEdgePanel={toggleEdgePanel}
+            />
+          )}
+
+        </div>
       </div>
     </div>
   )
 }
+
+// Helper for Lineage Roll-up
+// This must be inside component to access state, or mapped outside.
+// Use memo inside component.
+
+// ... (Rest of file)
 
 interface LayerColumnProps {
   layer: ViewLayerConfig
@@ -721,6 +1025,10 @@ interface LayerColumnProps {
   onSelect: (id: string) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
+  onDoubleClick: (id: string) => void
+  traceFocusId: string | null
+  traceNodes: Set<string>
+  isDimmed?: boolean // Computed internally or passed? Computed is better.
 }
 
 function LayerColumn({
@@ -732,8 +1040,11 @@ function LayerColumn({
   searchResults,
   onSelect,
   onToggle,
-  onContextMenu
-}: LayerColumnProps) {
+  onContextMenu,
+  onDoubleClick,
+  traceFocusId,
+  traceNodes
+}: LayerColumnProps) { // No longer LayerColumnProps? Yes it is.
   return (
     <div className="flex-1 min-w-[280px] max-w-[400px] border-r border-glass-border last:border-r-0 flex flex-col">
       {/* Layer Header */}
@@ -785,6 +1096,9 @@ function LayerColumn({
               onSelect={onSelect}
               onToggle={onToggle}
               onContextMenu={onContextMenu}
+              onDoubleClick={onDoubleClick}
+              traceFocusId={traceFocusId}
+              traceNodes={traceNodes}
             />
           ))
         )}
@@ -803,6 +1117,9 @@ interface LayerNodeCardProps {
   onSelect: (id: string) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
+  onDoubleClick: (id: string) => void
+  traceFocusId: string | null
+  traceNodes: Set<string>
 }
 
 function LayerNodeCard({
@@ -814,10 +1131,14 @@ function LayerNodeCard({
   searchResults,
   onSelect,
   onToggle,
-  onContextMenu
+  onContextMenu,
+  onDoubleClick,
+  traceFocusId,
+  traceNodes
 }: LayerNodeCardProps) {
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
+  const isDimmed = traceFocusId !== null && !traceNodes.has(node.id) && node.id !== traceFocusId
   const hasChildren = node.children.length > 0
   const isExpanded = expandedNodes.has(node.id)
   const isSelected = selectedNodeId === node.id
@@ -838,7 +1159,8 @@ function LayerNodeCard({
         "bg-canvas-elevated hover:shadow-md cursor-pointer",
         isSelected && "ring-2 ring-offset-1",
         isSearchResult && !isSelected && "ring-2 ring-amber-400/50",
-        node.isLogical && "border-dashed bg-black/5 dark:bg-white/5" // Distinct style for logical nodes
+        node.isLogical && "border-dashed bg-black/5 dark:bg-white/5", // Distinct style for logical nodes
+        isDimmed && "opacity-25 grayscale"
       )}
       style={{
         borderColor: visual?.color ?? layer.color ?? '#6b7280',
@@ -884,7 +1206,7 @@ function LayerNodeCard({
           <h4 className={cn("text-sm font-medium truncate", node.isLogical ? "text-ink font-semibold" : "text-ink")}>
             {node.name}
           </h4>
-          {node.isLogical && node.data?.description && (
+          {node.isLogical && !!node.data?.description && (
             <p className="text-2xs text-ink-muted truncate">{String(node.data.description || '')}</p>
           )}
         </div>
@@ -921,6 +1243,9 @@ function LayerNodeCard({
                     onSelect={onSelect}
                     onToggle={onToggle}
                     onContextMenu={onContextMenu}
+                    onDoubleClick={onDoubleClick}
+                    traceFocusId={traceFocusId}
+                    traceNodes={traceNodes}
                   />
                 ))}
               </div>
@@ -938,11 +1263,17 @@ function LayerNodeCard({
 function LineageFlowOverlay({
   nodes,
   edges,
-  expandedNodes
+  expandedNodes,
+  selectEdge,
+  isEdgePanelOpen,
+  toggleEdgePanel
 }: {
   nodes: any[],
   edges: any[],
-  expandedNodes: Set<string>
+  expandedNodes: Set<string>,
+  selectEdge: (id: string) => void,
+  isEdgePanelOpen: boolean,
+  toggleEdgePanel: () => void
 }) {
   const [paths, setPaths] = useState<React.ReactNode[]>([])
   const containerRef = useRef<HTMLDivElement>(null)
@@ -980,16 +1311,26 @@ function LineageFlowOverlay({
         const d = `M ${sx} ${sy} C ${sx + (tx - sx) * curvature} ${sy}, ${tx - (tx - sx) * curvature} ${ty}, ${tx} ${ty}`
 
         newPaths.push(
-          <g key={edge.id}>
+          <g
+            key={edge.id}
+            className="pointer-events-auto cursor-pointer"
+            onClick={(e) => {
+              e.stopPropagation()
+              selectEdge(edge.id)
+              if (!isEdgePanelOpen) toggleEdgePanel()
+            }}
+          >
             <path
               d={d}
               fill="none"
               stroke="#6366f1"
               strokeWidth="2"
-              strokeOpacity="0.4"
+              strokeOpacity="0.6"
+              className="hover:stroke-[3px] transition-all"
             />
             <circle cx={sx} cy={sy} r="2" fill="#6366f1" />
             <circle cx={tx} cy={ty} r="2" fill="#6366f1" />
+            <title>{edge.source} → {edge.target}</title>
           </g>
         )
       }

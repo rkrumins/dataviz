@@ -337,6 +337,11 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                   Select which entity types are visible in this view.
                 </p>
 
+                <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-xs text-ink-muted mb-4">
+                  <strong>Note:</strong> Selected entities will be available to all views.
+                  However, they must also be assigned to a layer in the "Layers" tab to appear in the Reference Model.
+                </div>
+
                 <div className="grid grid-cols-2 gap-3">
                   {schema?.entityTypes.map((entityType) => {
                     const isVisible = view.content?.visibleEntityTypes?.includes(entityType.id) ?? false
@@ -449,6 +454,10 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                 <div className="flex items-center justify-between">
                   <p className="text-sm text-ink-muted">
                     Define horizontal layers for Reference Model layout.
+                    <br />
+                    <span className="text-2xs opacity-70">
+                      (Assign entity types to each layer to determine where they appear)
+                    </span>
                   </p>
                   <button onClick={addLayer} className="btn btn-primary btn-sm">
                     <LucideIcons.Plus className="w-4 h-4" />

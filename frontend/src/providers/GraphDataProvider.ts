@@ -6,7 +6,7 @@
  * other graph data source.
  */
 
-import { LogicalNodeConfig, LayerAssignmentRuleConfig } from '../types/schema'
+import { LogicalNodeConfig, LayerAssignmentRuleConfig, RuleCondition } from '../types/schema'
 
 // ============================================
 // URN Types (DataHub Compatible)
@@ -373,6 +373,9 @@ export interface LayerAssignmentRule {
         value?: unknown
     }
 
+    /** Match by compound conditions (Phase 3) */
+    conditions?: RuleCondition[]
+
     /** Priority for conflict resolution (higher wins) */
     priority: number
 }
@@ -383,25 +386,66 @@ export interface LayerAssignmentRule {
 /**
  * Check if a node matches a specific rule's criteria
  */
+/**
+ * Helper to evaluate a single condition against a node
+ */
+function evaluateCondition(node: GraphNode, field: string, operator: string, targetValue: any): boolean {
+    // Resolve value from node properties OR top-level fields
+    let actualValue = node.properties[field]
+    if (actualValue === undefined) {
+        // Fallback to top-level fields
+        if (field === 'name') actualValue = node.displayName
+        else if (field === 'type') actualValue = node.entityType
+        else if (field === 'urn') actualValue = node.urn
+    }
+
+    switch (operator) {
+        case 'exists':
+            return actualValue !== undefined && actualValue !== null
+        case 'contains':
+            if (typeof actualValue === 'string' && typeof targetValue === 'string') {
+                return actualValue.toLowerCase().includes(targetValue.toLowerCase())
+            } else if (Array.isArray(actualValue)) {
+                return actualValue.includes(targetValue)
+            }
+            return false
+        case 'startsWith':
+            if (typeof actualValue === 'string' && typeof targetValue === 'string') {
+                return actualValue.toLowerCase().startsWith(targetValue.toLowerCase())
+            }
+            return false
+        case 'endsWith':
+            if (typeof actualValue === 'string' && typeof targetValue === 'string') {
+                return actualValue.toLowerCase().endsWith(targetValue.toLowerCase())
+            }
+            return false
+        case 'notEquals':
+            return actualValue !== targetValue
+        case 'equals':
+        default:
+            return actualValue === targetValue
+    }
+}
+
 export function matchesRule(
     node: GraphNode,
     rule: LayerAssignmentRule | LayerAssignmentRuleConfig
 ): boolean {
-    // Check entity type match
+    // 1. Check entity type match
     if (rule.entityTypes && rule.entityTypes.length > 0) {
         if (!rule.entityTypes.includes(node.entityType)) {
             return false
         }
     }
 
-    // Check tag match
+    // 2. Check tag match
     if (rule.tags && rule.tags.length > 0) {
         if (!node.tags || !node.tags.some(t => rule.tags!.includes(t))) {
             return false
         }
     }
 
-    // Check URN pattern match
+    // 3. Check URN pattern match
     if (rule.urnPattern) {
         const regex = new RegExp(rule.urnPattern.replace(/\*/g, '.*'))
         if (!regex.test(node.urn)) {
@@ -409,34 +453,22 @@ export function matchesRule(
         }
     }
 
-    // Check property match
-    if (rule.propertyMatch) {
-        const { field, operator = 'equals', value: targetValue } = rule.propertyMatch
-        const actualValue = node.properties[field]
+    // 4. Check Compound Conditions (Phase 3)
+    if (rule.conditions && rule.conditions.length > 0) {
+        // All conditions must match (AND)
+        for (const condition of rule.conditions) {
+            if (!evaluateCondition(node, condition.field, condition.operator, condition.value)) {
+                return false
+            }
+        }
+        return true
+    }
 
-        switch (operator) {
-            case 'exists':
-                if (actualValue === undefined || actualValue === null) return false
-                break
-            case 'contains':
-                if (typeof actualValue === 'string' && typeof targetValue === 'string') {
-                    if (!actualValue.includes(targetValue)) return false
-                } else if (Array.isArray(actualValue)) {
-                    if (!actualValue.includes(targetValue)) return false
-                } else {
-                    return false
-                }
-                break
-            case 'startsWith':
-                if (typeof actualValue === 'string' && typeof targetValue === 'string') {
-                    if (!actualValue.startsWith(targetValue)) return false
-                } else {
-                    return false
-                }
-                break
-            case 'equals':
-            default:
-                if (actualValue !== targetValue) return false
+    // 5. Fallback Check Single Property Match (Legacy)
+    if (rule.propertyMatch) {
+        const { field, operator = 'equals', value } = rule.propertyMatch
+        if (!evaluateCondition(node, field, operator, value)) {
+            return false
         }
     }
 

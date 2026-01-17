@@ -268,6 +268,17 @@ export interface LayerAssignmentRuleConfig {
   };
 
   priority: number; // Higher wins
+
+  // Compound Rules (Phase 3)
+  // If present, ALL conditions must match (AND logic)
+  // Replaces the single propertyMatch if both exist (or works in conjunction)
+  conditions?: RuleCondition[];
+}
+
+export interface RuleCondition {
+  field: string;
+  operator: 'equals' | 'contains' | 'startsWith' | 'exists' | 'endsWith' | 'notEquals';
+  value: unknown;
 }
 
 /**
