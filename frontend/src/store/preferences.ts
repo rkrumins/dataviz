@@ -23,20 +23,20 @@ interface PreferencesState {
   accentColor: string
   setTheme: (theme: ThemeMode) => void
   setAccentColor: (color: string) => void
-  
+
   // Node Styling
   nodeStyles: Record<string, NodeStyleConfig>
   setNodeStyle: (nodeType: string, config: Partial<NodeStyleConfig>) => void
-  
+
   // Keyboard Shortcuts
   shortcuts: ShortcutConfig[]
   updateShortcut: (id: string, keys: string) => void
   resetShortcuts: () => void
-  
+
   // Sidebar
   sidebarCollapsed: boolean
   toggleSidebar: () => void
-  
+
   // Canvas preferences
   showMinimap: boolean
   showGrid: boolean
@@ -44,6 +44,11 @@ interface PreferencesState {
   toggleMinimap: () => void
   toggleGrid: () => void
   toggleSnapToGrid: () => void
+
+  // LOD preferences
+  autoLOD: boolean
+  setAutoLOD: (enabled: boolean) => void
+  toggleAutoLOD: () => void
 }
 
 const DEFAULT_SHORTCUTS: ShortcutConfig[] = [
@@ -74,7 +79,7 @@ export const usePreferencesStore = create<PreferencesState>()(
       accentColor: '#6366f1',
       setTheme: (theme) => set({ theme }),
       setAccentColor: (accentColor) => set({ accentColor }),
-      
+
       // Node Styling
       nodeStyles: DEFAULT_NODE_STYLES,
       setNodeStyle: (nodeType, config) => set((state) => ({
@@ -83,7 +88,7 @@ export const usePreferencesStore = create<PreferencesState>()(
           [nodeType]: { ...state.nodeStyles[nodeType], ...config },
         },
       })),
-      
+
       // Shortcuts
       shortcuts: DEFAULT_SHORTCUTS,
       updateShortcut: (id, keys) => set((state) => ({
@@ -92,11 +97,11 @@ export const usePreferencesStore = create<PreferencesState>()(
         ),
       })),
       resetShortcuts: () => set({ shortcuts: DEFAULT_SHORTCUTS }),
-      
+
       // Sidebar
       sidebarCollapsed: false,
       toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
-      
+
       // Canvas
       showMinimap: true,
       showGrid: true,
@@ -104,6 +109,11 @@ export const usePreferencesStore = create<PreferencesState>()(
       toggleMinimap: () => set((state) => ({ showMinimap: !state.showMinimap })),
       toggleGrid: () => set((state) => ({ showGrid: !state.showGrid })),
       toggleSnapToGrid: () => set((state) => ({ snapToGrid: !state.snapToGrid })),
+
+      // LOD
+      autoLOD: false, // Off by default - user can enable
+      setAutoLOD: (autoLOD) => set({ autoLOD }),
+      toggleAutoLOD: () => set((state) => ({ autoLOD: !state.autoLOD })),
     }),
     {
       name: 'nexus-preferences',

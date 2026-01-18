@@ -33,6 +33,7 @@ import { EdgeLegend } from './EdgeLegend'
 import { useSpatialLoading } from '@/hooks/useSpatialLoading'
 import { useLineageExploration } from '@/hooks/useLineageExploration'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
+import { useLevelOfDetail } from '@/hooks/useLevelOfDetail'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
@@ -247,6 +248,9 @@ export function LineageCanvas() {
               <span className="text-xs text-ink-secondary">Loading region...</span>
             </div>
           )}
+
+          {/* LOD Controller - invisible hook manager */}
+          <LODController />
         </ReactFlow>
       </div>
 
@@ -318,3 +322,12 @@ export function LineageCanvas() {
   )
 }
 
+/**
+ * LODController - Invisible component that manages zoom-to-granularity mapping
+ * Must be rendered inside ReactFlow to have access to zoom state
+ */
+function LODController() {
+  // The hook handles all the logic - just calling it activates it
+  useLevelOfDetail()
+  return null
+}

@@ -31,9 +31,11 @@ import {
   Eye,
   EyeOff,
   Network,
+  Wand2,
 } from 'lucide-react'
 import { useLineageExploration } from '@/hooks/useLineageExploration'
 import { useSchemaStore } from '@/store/schema'
+import { usePreferencesStore } from '@/store/preferences'
 import type { LineageGranularity, LineageExplorationMode } from '@/types/schema'
 import { cn } from '@/lib/utils'
 
@@ -222,12 +224,12 @@ export function LineageToolbar({ className }: LineageToolbarProps) {
                 </div>
               </div>
 
-              {/* Display Options */}
               <div>
                 <label className="text-2xs font-medium text-ink-muted uppercase tracking-wider mb-2 block">
                   Display Options
                 </label>
                 <div className="flex flex-wrap gap-2">
+                  <AutoLODToggle />
                   <ToggleChip
                     label="Confidence Scores"
                     enabled={config.display.showConfidence}
@@ -499,6 +501,34 @@ function ToggleChip({
     >
       {enabled ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
       {label}
+    </button>
+  )
+}
+
+// Auto-LOD toggle component with special styling
+function AutoLODToggle() {
+  const autoLOD = usePreferencesStore((s) => s.autoLOD)
+  const toggleAutoLOD = usePreferencesStore((s) => s.toggleAutoLOD)
+
+  return (
+    <button
+      onClick={toggleAutoLOD}
+      className={cn(
+        "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-2xs font-medium transition-all",
+        autoLOD
+          ? "bg-gradient-to-r from-purple-500/20 to-blue-500/20 text-purple-600 dark:text-purple-400 ring-1 ring-purple-500/30"
+          : "bg-black/5 dark:bg-white/5 text-ink-muted"
+      )}
+      title={autoLOD
+        ? "Auto-LOD: Granularity adjusts automatically as you zoom"
+        : "Enable Auto-LOD to adjust granularity based on zoom level"
+      }
+    >
+      <Wand2 className="w-3 h-3" />
+      Auto-LOD
+      {autoLOD && (
+        <span className="ml-1 w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+      )}
     </button>
   )
 }
