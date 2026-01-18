@@ -1,0 +1,439 @@
+/**
+ * Reference Model Store - SINGLE SOURCE OF TRUTH for layer assignments
+ * 
+ * Architecture:
+ * 1. Canvas populates parentMap from containment edges
+ * 2. Store receives assignments from backend (or computes locally)
+ * 3. Canvas reads effectiveAssignments for rendering
+ * 4. All assignment changes go through store validation
+ * 
+ * Features:
+ * - Backend-ready assignment computation (FalkorDB)
+ * - Inheritance enforcement (parent takes precedence)
+ * - Edge preservation for lineage visualization
+ * - Lazy loading support
+ */
+
+import { create } from 'zustand'
+import { generateId } from '@/lib/utils'
+import type { ViewLayerConfig, ScopeFilterConfig } from '@/types/schema'
+import type {
+    GraphEdge,
+    EntityAssignment,
+    LayerAssignmentResult,
+    LayerAssignmentRequest
+} from '@/providers/GraphDataProvider'
+
+// ============================================
+// Types
+// ============================================
+
+type LayerChangeType = 'add' | 'remove' | 'update' | 'reorder'
+
+interface LayerChangeEvent {
+    type: LayerChangeType
+    layerId?: string
+    layers: ViewLayerConfig[]
+    prevLayers?: ViewLayerConfig[]
+}
+
+type LayerChangeCallback = (event: LayerChangeEvent) => void
+type UnsubscribeFn = () => void
+
+/** Pending assignment request (for async backend calls) */
+type AssignmentStatus = 'idle' | 'loading' | 'success' | 'error'
+
+// ============================================
+// Store State
+// ============================================
+
+interface ReferenceModelState {
+    // ===== Layer Configuration =====
+    layers: ViewLayerConfig[]
+    layerSequence: string[] // Ordered layer IDs (left-to-right)
+
+    // ===== Scope Filter =====
+    scopeFilter: ScopeFilterConfig | null
+
+    // ===== Assignments (SINGLE SOURCE OF TRUTH) =====
+    /** All entity assignments - canvas reads only from here */
+    effectiveAssignments: Map<string, EntityAssignment>
+
+    /** Parent-child relationships (from containment edges) */
+    parentMap: Map<string, string>  // childId -> parentId
+
+    /** Preserved edges for lineage visualization */
+    preservedEdges: GraphEdge[]
+
+    /** Unassigned entity IDs (didn't match any rule) */
+    unassignedEntityIds: string[]
+
+    // ===== Loading State =====
+    assignmentStatus: AssignmentStatus
+    lastError: string | null
+    lastComputeTimeMs: number
+
+    // ===== Expanded Nodes (for lazy loading) =====
+    expandedNodeIds: Set<string>
+
+    // ===== Subscription Management =====
+    _subscribers: Set<LayerChangeCallback>
+
+    // ===== Layer Actions =====
+    setLayers: (layers: ViewLayerConfig[]) => void
+    addLayer: (layer: Omit<ViewLayerConfig, 'id' | 'order'>) => string
+    removeLayer: (id: string) => void
+    updateLayer: (id: string, updates: Partial<ViewLayerConfig>) => void
+    reorderLayers: (newSequence: string[]) => void
+
+    // ===== Assignment Actions (NEW - Backend Ready) =====
+    /** Set assignments from backend/provider computation */
+    setAssignmentResult: (result: LayerAssignmentResult) => void
+
+    /** Set parent map from containment edges */
+    setParentMap: (map: Map<string, string>) => void
+
+    /** Set preserved edges for lineage */
+    setPreservedEdges: (edges: GraphEdge[]) => void
+
+    /** Mark assignment computation as loading */
+    setAssignmentLoading: () => void
+
+    /** Mark assignment computation as error */
+    setAssignmentError: (error: string) => void
+
+    // ===== Lazy Loading =====
+    toggleNodeExpanded: (nodeId: string) => void
+    isNodeExpanded: (nodeId: string) => boolean
+
+    // ===== Query Helpers =====
+    getAssignment: (entityId: string) => EntityAssignment | undefined
+    getAssignmentsByLayer: (layerId: string) => EntityAssignment[]
+    getAssignmentsByLogicalNode: (layerId: string, logicalNodeId: string) => EntityAssignment[]
+    getInheritedFrom: (entityId: string) => EntityAssignment | null
+
+    // ===== Scope Filter =====
+    setScopeFilter: (filter: ScopeFilterConfig | null) => void
+
+    // ===== Observer Pattern =====
+    onLayerChange: (callback: LayerChangeCallback) => UnsubscribeFn
+
+    // ===== Layout Helpers =====
+    getLayerBySequence: (index: number) => ViewLayerConfig | undefined
+    calculateLayerX: (layerId: string, config?: { margin?: number; width?: number; gap?: number }) => number
+
+    // ===== Build Assignment Request =====
+    buildAssignmentRequest: () => LayerAssignmentRequest
+}
+
+// ============================================
+// Store Implementation
+// ============================================
+
+const DEFAULT_LAYOUT = {
+    margin: 24,
+    width: 280,
+    gap: 16
+}
+
+export const useReferenceModelStore = create<ReferenceModelState>((set, get) => ({
+    // ===== Initial State =====
+    layers: [],
+    layerSequence: [],
+    scopeFilter: null,
+    effectiveAssignments: new Map(),
+    parentMap: new Map(),
+    preservedEdges: [],
+    unassignedEntityIds: [],
+    assignmentStatus: 'idle',
+    lastError: null,
+    lastComputeTimeMs: 0,
+    expandedNodeIds: new Set(),
+    _subscribers: new Set(),
+
+    setLayers: (layers) => {
+        const prevLayers = get().layers
+        const sequence = layers
+            .sort((a, b) => (a.sequence ?? a.order) - (b.sequence ?? b.order))
+            .map(l => l.id)
+
+        set({ layers, layerSequence: sequence })
+
+        // Notify subscribers
+        get()._subscribers.forEach(cb => cb({
+            type: 'update',
+            layers,
+            prevLayers
+        }))
+    },
+
+    addLayer: (layerData) => {
+        const state = get()
+        const id = generateId('layer')
+        const order = state.layers.length
+
+        const newLayer: ViewLayerConfig = {
+            ...layerData,
+            id,
+            order,
+            sequence: order,
+            entityTypes: layerData.entityTypes || []
+        }
+
+        const layers = [...state.layers, newLayer]
+        const layerSequence = [...state.layerSequence, id]
+
+        set({ layers, layerSequence })
+
+        // Notify subscribers
+        state._subscribers.forEach(cb => cb({
+            type: 'add',
+            layerId: id,
+            layers,
+            prevLayers: state.layers
+        }))
+
+        return id
+    },
+
+    removeLayer: (id, _moveToInbox = true) => {
+        const state = get()
+        const layerToRemove = state.layers.find(l => l.id === id)
+
+        if (!layerToRemove) return
+
+        // Collect URNs of nodes assigned to this layer (for inbox)
+        // Note: Actual URN collection requires integration with canvas state
+        // For now, we just remove the layer
+
+        const layers = state.layers
+            .filter(l => l.id !== id)
+            .map((l, idx) => ({ ...l, order: idx, sequence: idx }))
+
+        const layerSequence = state.layerSequence.filter(lid => lid !== id)
+
+        set({ layers, layerSequence })
+
+        // Notify subscribers
+        state._subscribers.forEach(cb => cb({
+            type: 'remove',
+            layerId: id,
+            layers,
+            prevLayers: state.layers
+        }))
+    },
+
+    updateLayer: (id, updates) => {
+        const state = get()
+        const layers = state.layers.map(l =>
+            l.id === id ? { ...l, ...updates } : l
+        )
+
+        set({ layers })
+
+        // Notify subscribers
+        state._subscribers.forEach(cb => cb({
+            type: 'update',
+            layerId: id,
+            layers,
+            prevLayers: state.layers
+        }))
+    },
+
+    reorderLayers: (newSequence) => {
+        const state = get()
+
+        // Rebuild layers with new sequence/order
+        const layerMap = new Map(state.layers.map(l => [l.id, l]))
+        const layers = newSequence
+            .filter(id => layerMap.has(id))
+            .map((id, idx) => ({
+                ...layerMap.get(id)!,
+                order: idx,
+                sequence: idx
+            }))
+
+        set({ layers, layerSequence: newSequence })
+
+        // Notify subscribers
+        state._subscribers.forEach(cb => cb({
+            type: 'reorder',
+            layers,
+            prevLayers: state.layers
+        }))
+    },
+
+    // ===== Scope Filter =====
+    setScopeFilter: (filter) => {
+        set({ scopeFilter: filter })
+    },
+
+    // ===== Assignment Actions (Backend-Ready) =====
+
+    setAssignmentResult: (result) => {
+        set({
+            effectiveAssignments: result.assignments,
+            parentMap: result.parentMap,
+            preservedEdges: result.edges,
+            unassignedEntityIds: result.unassignedEntityIds,
+            assignmentStatus: 'success',
+            lastError: null,
+            lastComputeTimeMs: result.stats.computeTimeMs
+        })
+    },
+
+    setParentMap: (map) => {
+        set({ parentMap: map })
+    },
+
+    setPreservedEdges: (edges) => {
+        set({ preservedEdges: edges })
+    },
+
+    setAssignmentLoading: () => {
+        set({ assignmentStatus: 'loading', lastError: null })
+    },
+
+    setAssignmentError: (error) => {
+        set({ assignmentStatus: 'error', lastError: error })
+    },
+
+    // ===== Lazy Loading =====
+
+    toggleNodeExpanded: (nodeId) => {
+        const state = get()
+        const newExpanded = new Set(state.expandedNodeIds)
+        if (newExpanded.has(nodeId)) {
+            newExpanded.delete(nodeId)
+        } else {
+            newExpanded.add(nodeId)
+        }
+        set({ expandedNodeIds: newExpanded })
+    },
+
+    isNodeExpanded: (nodeId) => {
+        return get().expandedNodeIds.has(nodeId)
+    },
+
+    // ===== Query Helpers =====
+
+    getAssignment: (entityId) => {
+        return get().effectiveAssignments.get(entityId)
+    },
+
+    getAssignmentsByLayer: (layerId) => {
+        const state = get()
+        const result: EntityAssignment[] = []
+        state.effectiveAssignments.forEach((assignment) => {
+            if (assignment.layerId === layerId) {
+                result.push(assignment)
+            }
+        })
+        return result
+    },
+
+    getAssignmentsByLogicalNode: (layerId, logicalNodeId) => {
+        const state = get()
+        const result: EntityAssignment[] = []
+        state.effectiveAssignments.forEach((assignment) => {
+            if (assignment.layerId === layerId && assignment.logicalNodeId === logicalNodeId) {
+                result.push(assignment)
+            }
+        })
+        return result
+    },
+
+    getInheritedFrom: (entityId) => {
+        const assignment = get().effectiveAssignments.get(entityId)
+        if (assignment?.isInherited && assignment?.inheritedFromId) {
+            return get().effectiveAssignments.get(assignment.inheritedFromId) ?? null
+        }
+        return null
+    },
+
+    // ===== Observer Pattern =====
+
+    onLayerChange: (callback) => {
+        const state = get()
+        state._subscribers.add(callback)
+
+        return () => {
+            state._subscribers.delete(callback)
+        }
+    },
+
+    // ===== Layout Helpers =====
+
+    getLayerBySequence: (index) => {
+        const state = get()
+        const layerId = state.layerSequence[index]
+        return layerId ? state.layers.find(l => l.id === layerId) : undefined
+    },
+
+    calculateLayerX: (layerId, config = {}) => {
+        const state = get()
+        const { margin = DEFAULT_LAYOUT.margin, width = DEFAULT_LAYOUT.width, gap = DEFAULT_LAYOUT.gap } = config
+
+        const index = state.layerSequence.indexOf(layerId)
+        if (index === -1) return 0
+
+        return margin + (index * width) + (index * gap)
+    },
+
+    // ===== Build Assignment Request =====
+
+    buildAssignmentRequest: () => {
+        const state = get()
+
+        return {
+            scopeFilter: state.scopeFilter ?? undefined,
+            layers: state.layers.map(layer => ({
+                layerId: layer.id,
+                sequence: layer.sequence ?? layer.order,
+                entityTypes: layer.entityTypes,
+                rules: layer.rules ?? [],
+                logicalNodes: layer.logicalNodes
+            })),
+            includeEdges: true
+        }
+    }
+}))
+
+// ============================================
+// Selector Hooks
+// ============================================
+
+export const useLayers = () => useReferenceModelStore(s => s.layers)
+export const useLayerSequence = () => useReferenceModelStore(s => s.layerSequence)
+export const useScopeFilter = () => useReferenceModelStore(s => s.scopeFilter)
+export const useEffectiveAssignments = () => useReferenceModelStore(s => s.effectiveAssignments)
+export const usePreservedEdges = () => useReferenceModelStore(s => s.preservedEdges)
+export const useAssignmentStatus = () => useReferenceModelStore(s => s.assignmentStatus)
+export const useUnassignedEntityIds = () => useReferenceModelStore(s => s.unassignedEntityIds)
+
+/**
+ * Hook to subscribe to layer changes
+ * Returns cleanup function
+ */
+export const useLayerChangeSubscription = (callback: LayerChangeCallback) => {
+    const subscribe = useReferenceModelStore(s => s.onLayerChange)
+
+    // Note: Caller should wrap in useEffect to handle subscription lifecycle
+    return subscribe(callback)
+}
+
+/**
+ * Hook to get assignment for a specific entity
+ */
+export const useEntityAssignment = (entityId: string) => {
+    const assignments = useReferenceModelStore(s => s.effectiveAssignments)
+    return assignments.get(entityId)
+}
+
+/**
+ * Hook to check if entity is inherited
+ */
+export const useIsInherited = (entityId: string) => {
+    const assignment = useEntityAssignment(entityId)
+    return assignment?.isInherited ?? false
+}
