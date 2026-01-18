@@ -29,6 +29,7 @@ import { AggregatedEdge } from './edges/AggregatedEdge'
 import { CanvasControls } from './CanvasControls'
 import { LineageToolbar } from './LineageToolbar'
 import { EdgeDetailPanel } from '../panels/EdgeDetailPanel'
+import { EdgeLegend } from './EdgeLegend'
 import { useSpatialLoading } from '@/hooks/useSpatialLoading'
 import { useLineageExploration } from '@/hooks/useLineageExploration'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
@@ -247,6 +248,11 @@ export function LineageCanvas() {
             </div>
           )}
         </ReactFlow>
+      </div>
+
+      {/* Edge Legend - positioned above minimap */}
+      <div className="absolute bottom-40 right-4 z-10 w-64">
+        <EdgeLegend defaultExpanded={false} />
       </div>
 
       {/* Stats Bar */}

@@ -1,9 +1,9 @@
 import { useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { 
-  X, 
-  ArrowUpRight, 
-  ArrowDownLeft, 
+import {
+  X,
+  ArrowUpRight,
+  ArrowDownLeft,
   GitBranch,
   ExternalLink,
   Copy,
@@ -27,8 +27,8 @@ export function DetailPanel({ isOpen, nodeId }: DetailPanelProps) {
   const nodes = useCanvasStore((s) => s.nodes)
   const clearSelection = useCanvasStore((s) => s.clearSelection)
   const mode = usePersonaStore((s) => s.mode)
-  
-  const node = useMemo(() => 
+
+  const node = useMemo(() =>
     nodes.find((n) => n.id === nodeId),
     [nodes, nodeId]
   )
@@ -39,13 +39,17 @@ export function DetailPanel({ isOpen, nodeId }: DetailPanelProps) {
     ? (node.data.businessLabel || node.data.label)
     : (node.data.technicalLabel || node.data.label)
 
-  const typeColors = {
+  const typeColors: Record<string, { bg: string; text: string; border: string }> = {
     domain: { bg: 'bg-purple-500/10', text: 'text-purple-500', border: 'border-purple-500' },
     app: { bg: 'bg-cyan-500/10', text: 'text-cyan-500', border: 'border-cyan-500' },
     asset: { bg: 'bg-green-500/10', text: 'text-green-500', border: 'border-green-500' },
+    column: { bg: 'bg-indigo-500/10', text: 'text-indigo-500', border: 'border-indigo-500' },
+    dataset: { bg: 'bg-emerald-500/10', text: 'text-emerald-500', border: 'border-emerald-500' },
     ghost: { bg: 'bg-slate-500/10', text: 'text-slate-500', border: 'border-slate-500' },
   }
-  const colors = typeColors[node.data.type]
+  // Fallback for unknown types
+  const defaultColors = { bg: 'bg-gray-500/10', text: 'text-gray-500', border: 'border-gray-500' }
+  const colors = typeColors[node.data.type as string] ?? defaultColors
 
   return (
     <AnimatePresence>
@@ -75,7 +79,7 @@ export function DetailPanel({ isOpen, nodeId }: DetailPanelProps) {
                     <span className={cn(
                       "text-2xs font-medium",
                       node.data.confidence >= 0.8 ? "text-green-500" :
-                      node.data.confidence >= 0.5 ? "text-amber-500" : "text-red-500"
+                        node.data.confidence >= 0.5 ? "text-amber-500" : "text-red-500"
                     )}>
                       {Math.round(node.data.confidence * 100)}% confidence
                     </span>
@@ -167,14 +171,14 @@ export function DetailPanel({ isOpen, nodeId }: DetailPanelProps) {
             {/* Lineage Preview */}
             <Section title="Lineage Preview" icon={GitBranch}>
               <div className="space-y-3">
-                <LineagePreviewRow 
-                  direction="upstream" 
-                  count={3} 
+                <LineagePreviewRow
+                  direction="upstream"
+                  count={3}
                   label="Data Sources"
                 />
-                <LineagePreviewRow 
-                  direction="downstream" 
-                  count={7} 
+                <LineagePreviewRow
+                  direction="downstream"
+                  count={7}
                   label="Data Consumers"
                 />
               </div>
@@ -183,17 +187,17 @@ export function DetailPanel({ isOpen, nodeId }: DetailPanelProps) {
             {/* Activity */}
             <Section title="Recent Activity" icon={History}>
               <div className="space-y-2">
-                <ActivityRow 
+                <ActivityRow
                   action="Schema updated"
                   time="2 hours ago"
                   user="system"
                 />
-                <ActivityRow 
+                <ActivityRow
                   action="Classification added"
                   time="1 day ago"
                   user="jane.doe@company.com"
                 />
-                <ActivityRow 
+                <ActivityRow
                   action="Created"
                   time="2 weeks ago"
                   user="data-catalog"
@@ -272,8 +276,8 @@ interface MetadataRowProps {
 }
 
 function MetadataRow({ label, value }: MetadataRowProps) {
-  const displayValue = typeof value === 'object' 
-    ? JSON.stringify(value) 
+  const displayValue = typeof value === 'object'
+    ? JSON.stringify(value)
     : String(value)
 
   return (

@@ -23,6 +23,7 @@ import {
   ENTITY_GRANULARITY,
   buildContainmentMap,
   aggregateLineageEdges,
+  computeAllNodeCounts,
 } from '@/lib/projection-engine'
 
 // ============================================
@@ -195,10 +196,13 @@ interface TraceResult {
   upstreamNodes: Set<string>
   downstreamNodes: Set<string>
   pathNodes: Set<string>
+  hasDirectLineage: boolean // Whether the focus entity has its own lineage
+  inheritedFrom?: string // If lineage was inherited, the parent ID
 }
 
 /**
  * Compute trace from a focus entity
+ * If the focused entity has no direct lineage, includes lineage from its parent container
  */
 export function computeTrace(
   focusId: string,
@@ -208,7 +212,7 @@ export function computeTrace(
   downstreamDepth: number,
   includeChildLineage: boolean
 ): TraceResult {
-  const _nodeMap = new Map(allNodes.map(n => [n.id, n]))
+  const nodeMap = new Map(allNodes.map(n => [n.id, n]))
   const containmentMap = buildContainmentMap(allNodes, allEdges)
 
   // Build adjacency lists
@@ -227,7 +231,7 @@ export function computeTrace(
     }
   })
 
-  // Build edge maps
+  // Build edge maps (skip containment edges)
   allEdges.forEach((edge) => {
     const rel = edge.data?.relationship ?? edge.data?.edgeType ?? ''
     // Skip containment edges for lineage trace
@@ -248,22 +252,45 @@ export function computeTrace(
     upstreamEdges.get(edge.target)!.push(edge)
   })
 
+  // Check if the focus entity has any direct lineage edges
+  const focusUpstreamEdges = upstreamEdges.get(focusId) ?? []
+  const focusDownstreamEdges = downstreamEdges.get(focusId) ?? []
+  const hasDirectLineage = focusUpstreamEdges.length > 0 || focusDownstreamEdges.length > 0
+
+  // If no direct lineage, try to inherit from parent
+  let effectiveFocusId = focusId
+  let inheritedFrom: string | undefined
+
+  if (!hasDirectLineage) {
+    // Get parent of focus entity
+    const parentId = containmentMap.get(focusId)
+    if (parentId) {
+      const parentUpstream = upstreamEdges.get(parentId) ?? []
+      const parentDownstream = downstreamEdges.get(parentId) ?? []
+      if (parentUpstream.length > 0 || parentDownstream.length > 0) {
+        // Use parent's lineage
+        effectiveFocusId = parentId
+        inheritedFrom = parentId
+      }
+    }
+  }
+
   // BFS to find nodes at each depth
   const upstreamNodes = new Set<string>()
   const downstreamNodes = new Set<string>()
   const pathEdges = new Set<string>()
 
   // Include focus entity's children if configured
-  const startIds = [focusId]
+  const startIds = [effectiveFocusId]
   if (includeChildLineage) {
-    const children = childrenMap.get(focusId) ?? []
+    const children = childrenMap.get(effectiveFocusId) ?? []
     startIds.push(...children)
     // Recursively get all descendants
     const getAllDescendants = (id: string): string[] => {
       const kids = childrenMap.get(id) ?? []
       return kids.concat(kids.flatMap(getAllDescendants))
     }
-    startIds.push(...getAllDescendants(focusId))
+    startIds.push(...getAllDescendants(effectiveFocusId))
   }
 
   // Trace upstream
@@ -274,7 +301,7 @@ export function computeTrace(
     currentLevel.forEach((nodeId) => {
       const edges = upstreamEdges.get(nodeId) ?? []
       edges.forEach((edge) => {
-        if (!upstreamNodes.has(edge.source) && edge.source !== focusId) {
+        if (!upstreamNodes.has(edge.source) && edge.source !== effectiveFocusId) {
           nextLevel.add(edge.source)
           pathEdges.add(edge.id)
         }
@@ -294,7 +321,7 @@ export function computeTrace(
     currentLevel.forEach((nodeId) => {
       const edges = downstreamEdges.get(nodeId) ?? []
       edges.forEach((edge) => {
-        if (!downstreamNodes.has(edge.target) && edge.target !== focusId) {
+        if (!downstreamNodes.has(edge.target) && edge.target !== effectiveFocusId) {
           nextLevel.add(edge.target)
           pathEdges.add(edge.id)
         }
@@ -307,7 +334,20 @@ export function computeTrace(
   }
 
   // Collect all nodes in path
-  const pathNodes = new Set([focusId, ...upstreamNodes, ...downstreamNodes])
+  const pathNodes = new Set([focusId, effectiveFocusId, ...upstreamNodes, ...downstreamNodes])
+
+  // ALWAYS include parent containers up to domain level
+  // This ensures the column's table, schema, and domain are always visible
+  let currentId: string | undefined = focusId
+  while (currentId) {
+    const parentId = containmentMap.get(currentId)
+    if (parentId) {
+      pathNodes.add(parentId)
+      currentId = parentId
+    } else {
+      currentId = undefined
+    }
+  }
 
   // Add focus children if included
   if (includeChildLineage) {
@@ -315,11 +355,13 @@ export function computeTrace(
       const kids = childrenMap.get(id) ?? []
       return kids.concat(kids.flatMap(getAllDescendants))
     }
-    getAllDescendants(focusId).forEach((id) => pathNodes.add(id))
+    getAllDescendants(effectiveFocusId).forEach((id) => pathNodes.add(id))
   }
 
   // Filter nodes and edges
   const traceNodes = allNodes.filter((n) => pathNodes.has(n.id))
+
+  // Include both lineage edges AND containment edges that connect visible nodes
   const traceEdges = allEdges.filter((e) =>
     pathNodes.has(e.source) && pathNodes.has(e.target)
   )
@@ -330,6 +372,8 @@ export function computeTrace(
     upstreamNodes,
     downstreamNodes,
     pathNodes,
+    hasDirectLineage,
+    inheritedFrom,
   }
 }
 
@@ -382,12 +426,8 @@ export function projectToGranularity(
     })
   }
 
-  // Create edges for visible nodes
+  // Create edges for visible nodes (don't filter containment - let UI edge filters handle that)
   const visibleEdges = edges.filter((edge) => {
-    const rel = edge.data?.relationship ?? edge.data?.edgeType ?? ''
-    if (rel === 'contains' || rel === 'has_schema' || rel === 'has_dataset' || rel === 'has_column') {
-      return false // Skip containment edges
-    }
     return visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)
   })
 
@@ -412,13 +452,22 @@ export function projectToGranularity(
     }
   })
 
+  // Compute all node counts (direct children, total descendants, breakdown by type)
+  const allNodeCounts = computeAllNodeCounts(nodes, edges)
+
   // Add child counts to visible nodes
   const nodesWithCounts = visibleNodes.map((node) => {
-    // Count children at lower granularity
-    let childCount = 0
-    nodes.forEach((potentialChild) => {
-      if (containmentMap.get(potentialChild.id) === node.id) {
-        childCount++
+    const counts = allNodeCounts.get(node.id) ?? {
+      directChildren: 0,
+      totalDescendants: 0,
+      byType: {},
+    }
+
+    // Check if this node has any aggregated lineage edges as source
+    let hasAggregatedLineage = false
+    aggregatedEdges.forEach((_agg, key) => {
+      if (key.startsWith(node.id + '->')) {
+        hasAggregatedLineage = true
       }
     })
 
@@ -426,8 +475,10 @@ export function projectToGranularity(
       ...node,
       data: {
         ...node.data,
-        _collapsedChildCount: childCount,
-        _hasAggregatedLineage: aggregatedEdges.has(node.id),
+        _collapsedChildCount: counts.directChildren,
+        _totalDescendants: counts.totalDescendants,
+        _childCountsByType: counts.byType,
+        _hasAggregatedLineage: hasAggregatedLineage,
       },
     }
   })

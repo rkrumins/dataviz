@@ -27,13 +27,12 @@ import {
   Globe,
   X,
   Sparkles,
-  RefreshCw,
   GitBranch,
   Eye,
   EyeOff,
   Network,
 } from 'lucide-react'
-import { useLineageExplorationStore, useLineageExploration } from '@/hooks/useLineageExploration'
+import { useLineageExploration } from '@/hooks/useLineageExploration'
 import { useSchemaStore } from '@/store/schema'
 import type { LineageGranularity, LineageExplorationMode } from '@/types/schema'
 import { cn } from '@/lib/utils'
@@ -45,7 +44,7 @@ interface LineageToolbarProps {
 export function LineageToolbar({ className }: LineageToolbarProps) {
   const [showSettings, setShowSettings] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
-  
+
   const {
     config,
     mode,
@@ -74,10 +73,10 @@ export function LineageToolbar({ className }: LineageToolbarProps) {
             Graph
           </span>
         </div>
-        
+
         {/* Separator */}
         <div className="w-px h-6 bg-glass-border" />
-        
+
         {/* Mode Toggle */}
         <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-black/5 dark:bg-white/5">
           <ModeButton
@@ -95,34 +94,45 @@ export function LineageToolbar({ className }: LineageToolbarProps) {
             onClick={() => setMode('focused')}
           />
         </div>
-        
+
         {/* Granularity Selector */}
         <GranularitySelector
           value={granularity}
           onChange={setGranularity}
         />
-        
-        {/* Depth Controls */}
-        <div className="flex items-center gap-2 px-2 py-1 rounded-lg bg-black/5 dark:bg-white/5">
+
+        {/* Depth Controls - only active in focused mode with a focus entity */}
+        <div
+          className={cn(
+            "flex items-center gap-2 px-2 py-1 rounded-lg bg-black/5 dark:bg-white/5",
+            !(mode === 'focused' && focusEntityId) && "opacity-50"
+          )}
+          title={!(mode === 'focused' && focusEntityId)
+            ? "Depth controls only work when tracing a specific entity. Double-click a node to start a trace."
+            : "Control how many levels up/down to trace"
+          }
+        >
           <DepthControl
             icon={<ArrowUpFromLine className="w-3.5 h-3.5" />}
             label="Upstream"
             value={config.trace.upstreamDepth}
             onChange={setUpstreamDepth}
             count={upstreamCount}
+            disabled={!(mode === 'focused' && focusEntityId)}
           />
-          
+
           <div className="w-px h-5 bg-glass-border" />
-          
+
           <DepthControl
             icon={<ArrowDownFromLine className="w-3.5 h-3.5" />}
             label="Downstream"
             value={config.trace.downstreamDepth}
             onChange={setDownstreamDepth}
             count={downstreamCount}
+            disabled={!(mode === 'focused' && focusEntityId)}
           />
         </div>
-        
+
         {/* Include Child Lineage Toggle */}
         <button
           onClick={toggleIncludeChildLineage}
@@ -132,8 +142,8 @@ export function LineageToolbar({ className }: LineageToolbarProps) {
               ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
               : "bg-black/5 dark:bg-white/5 text-ink-muted hover:text-ink"
           )}
-          title={config.trace.includeChildLineage 
-            ? "Child lineage included (table shows all column lineage)" 
+          title={config.trace.includeChildLineage
+            ? "Child lineage included (table shows all column lineage)"
             : "Child lineage excluded (only direct edges)"
           }
         >
@@ -142,7 +152,7 @@ export function LineageToolbar({ className }: LineageToolbarProps) {
             {config.trace.includeChildLineage ? 'Inherited' : 'Direct'}
           </span>
         </button>
-        
+
         {/* Settings */}
         <button
           onClick={() => setShowSettings(!showSettings)}
@@ -156,7 +166,7 @@ export function LineageToolbar({ className }: LineageToolbarProps) {
         >
           <Settings2 className="w-4 h-4" />
         </button>
-        
+
         {/* Focus indicator */}
         {focusEntityId && (
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
@@ -174,7 +184,7 @@ export function LineageToolbar({ className }: LineageToolbarProps) {
           </div>
         )}
       </div>
-      
+
       {/* Extended Settings Panel */}
       <AnimatePresence>
         {showSettings && (
@@ -211,7 +221,7 @@ export function LineageToolbar({ className }: LineageToolbarProps) {
                   />
                 </div>
               </div>
-              
+
               {/* Display Options */}
               <div>
                 <label className="text-2xs font-medium text-ink-muted uppercase tracking-wider mb-2 block">
@@ -222,7 +232,7 @@ export function LineageToolbar({ className }: LineageToolbarProps) {
                     label="Confidence Scores"
                     enabled={config.display.showConfidence}
                     icon={<Eye className="w-3.5 h-3.5" />}
-                    // Would need to wire up display toggle
+                  // Would need to wire up display toggle
                   />
                   <ToggleChip
                     label="Child Counts"
@@ -236,7 +246,7 @@ export function LineageToolbar({ className }: LineageToolbarProps) {
                   />
                 </div>
               </div>
-              
+
               {/* Aggregation Settings */}
               <div>
                 <label className="text-2xs font-medium text-ink-muted uppercase tracking-wider mb-2 block">
@@ -282,7 +292,7 @@ function ModeButton({
   onClick: () => void
 }) {
   const isActive = mode === currentMode
-  
+
   return (
     <button
       onClick={onClick}
@@ -308,16 +318,16 @@ function GranularitySelector({
   onChange: (granularity: LineageGranularity) => void
 }) {
   const [isOpen, setIsOpen] = useState(false)
-  
+
   const options: { value: LineageGranularity; label: string; icon: React.ReactNode; description: string }[] = [
     { value: 'column', label: 'Column', icon: <Columns className="w-3.5 h-3.5" />, description: 'Most detailed view' },
     { value: 'table', label: 'Table', icon: <Table2 className="w-3.5 h-3.5" />, description: 'Aggregate columns' },
     { value: 'schema', label: 'Schema', icon: <Database className="w-3.5 h-3.5" />, description: 'Aggregate tables' },
     { value: 'domain', label: 'Domain', icon: <Globe className="w-3.5 h-3.5" />, description: 'Highest level' },
   ]
-  
+
   const current = options.find(o => o.value === value) ?? options[1]
-  
+
   return (
     <div className="relative">
       <button
@@ -335,13 +345,13 @@ function GranularitySelector({
           isOpen && "rotate-180"
         )} />
       </button>
-      
+
       <AnimatePresence>
         {isOpen && (
           <>
-            <div 
-              className="fixed inset-0 z-40" 
-              onClick={() => setIsOpen(false)} 
+            <div
+              className="fixed inset-0 z-40"
+              onClick={() => setIsOpen(false)}
             />
             <motion.div
               initial={{ opacity: 0, y: -8 }}
@@ -389,21 +399,23 @@ function DepthControl({
   value,
   onChange,
   count,
+  disabled = false,
 }: {
   icon: React.ReactNode
   label: string
   value: number
   onChange: (value: number) => void
   count?: number
+  disabled?: boolean
 }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className={cn("flex items-center gap-2", disabled && "pointer-events-none")}>
       <div className="text-ink-muted" title={label}>
         {icon}
       </div>
       <button
         onClick={() => onChange(value - 1)}
-        disabled={value <= 0}
+        disabled={disabled || value <= 0}
         className={cn(
           "w-5 h-5 rounded flex items-center justify-center",
           "text-ink-muted hover:text-ink hover:bg-black/10 dark:hover:bg-white/10",
@@ -416,7 +428,7 @@ function DepthControl({
       <span className="w-4 text-center text-xs font-medium">{value}</span>
       <button
         onClick={() => onChange(value + 1)}
-        disabled={value >= 20}
+        disabled={disabled || value >= 20}
         className={cn(
           "w-5 h-5 rounded flex items-center justify-center",
           "text-ink-muted hover:text-ink hover:bg-black/10 dark:hover:bg-white/10",
@@ -467,7 +479,7 @@ function PresetButton({
 function ToggleChip({
   label,
   enabled,
-  icon,
+  icon: _icon, // Reserved for future custom icons
   onClick,
 }: {
   label: string

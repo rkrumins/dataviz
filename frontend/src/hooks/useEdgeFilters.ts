@@ -43,7 +43,8 @@ export const DEFAULT_EDGE_FILTERS: EdgeTypeFilter[] = [
     { type: 'transforms', label: 'Transforms', color: '#f59e0b', enabled: true },
     { type: 'produces', label: 'Produces', color: '#22c55e', enabled: true },
     { type: 'consumes', label: 'Consumes', color: '#3b82f6', enabled: true },
-    { type: 'contains', label: 'Contains', color: '#8b5cf6', enabled: false },
+    { type: 'contains', label: 'Contains', color: '#8b5cf6', enabled: true },
+    { type: 'derives_from', label: 'Derives From', color: '#a855f7', enabled: true },
     { type: 'lineage', label: 'Lineage', color: '#06b6d4', enabled: true },
 ]
 

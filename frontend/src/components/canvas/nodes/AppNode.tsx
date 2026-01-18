@@ -7,15 +7,15 @@ import type { LineageNode } from '@/store/canvas'
 
 type AppNodeProps = NodeProps<LineageNode>
 
-export const AppNode = memo(function AppNode({ 
-  data, 
+export const AppNode = memo(function AppNode({
+  data,
   selected,
-  dragging 
+  dragging
 }: AppNodeProps) {
   const mode = usePersonaStore((s) => s.mode)
-  
-  const label = mode === 'business' 
-    ? (data.businessLabel || data.label) 
+
+  const label = mode === 'business'
+    ? (data.businessLabel || data.label)
     : (data.technicalLabel || data.label)
 
   // Determine icon based on metadata
@@ -85,17 +85,17 @@ export const AppNode = memo(function AppNode({
               <span className={cn(
                 "font-medium",
                 data.confidence >= 0.8 ? "text-green-500" :
-                data.confidence >= 0.5 ? "text-amber-500" : "text-red-500"
+                  data.confidence >= 0.5 ? "text-amber-500" : "text-red-500"
               )}>
                 {Math.round(data.confidence * 100)}%
               </span>
             </div>
             <div className="h-1 bg-black/5 dark:bg-white/5 rounded-full overflow-hidden">
-              <div 
+              <div
                 className={cn(
                   "h-full rounded-full transition-all",
                   data.confidence >= 0.8 ? "bg-green-500" :
-                  data.confidence >= 0.5 ? "bg-amber-500" : "bg-red-500"
+                    data.confidence >= 0.5 ? "bg-amber-500" : "bg-red-500"
                 )}
                 style={{ width: `${data.confidence * 100}%` }}
               />

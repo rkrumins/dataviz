@@ -64,9 +64,9 @@ function randomFloat(min: number, max: number): number {
 
 function generateUrn(type: string, parts: string[]): string {
   const prefix = type === 'domain' ? 'urn:li:domain' :
-                 type === 'app' ? 'urn:li:dataPlatform' :
-                 type === 'asset' ? 'urn:li:dataset' :
-                 'urn:li:column'
+    type === 'app' ? 'urn:li:dataPlatform' :
+      type === 'asset' ? 'urn:li:dataset' :
+        'urn:li:column'
   return `${prefix}:${parts.join('.')}`
 }
 
@@ -98,17 +98,17 @@ export function generateDemoData(config: DemoDataConfig = {}): {
   const cfg = { ...DEFAULT_CONFIG, ...config }
   const nodes: LineageNode[] = []
   const edges: LineageEdge[] = []
-  
+
   let xPosition = 0
   const domainYPositions: number[] = []
-  
+
   // Generate domains
   for (let d = 0; d < cfg.domainCount; d++) {
     const domainName = domainNames[d % domainNames.length]
     const domainId = `domain-${domainName.toLowerCase()}`
     const domainY = d * 400 + 200
     domainYPositions.push(domainY)
-    
+
     const domainNode: LineageNode = {
       id: domainId,
       type: 'domain',
@@ -129,18 +129,18 @@ export function generateDemoData(config: DemoDataConfig = {}): {
       },
     }
     nodes.push(domainNode)
-    
+
     // Generate applications for this domain
     const appX = xPosition + 350
     const appsPerRow = Math.ceil(Math.sqrt(cfg.appsPerDomain))
     let appIndex = 0
-    
+
     for (let a = 0; a < cfg.appsPerDomain; a++) {
       const appType = randomChoice(appTypes)
       const platform = randomChoice(appType.platforms)
       const appId = `app-${domainName.toLowerCase()}-${platform}-${a}`
       const appY = domainY + (appIndex % appsPerRow) * 150 - 100
-      
+
       const appNode: LineageNode = {
         id: appId,
         type: 'app',
@@ -160,7 +160,7 @@ export function generateDemoData(config: DemoDataConfig = {}): {
         },
       }
       nodes.push(appNode)
-      
+
       // Containment edge: domain → app
       edges.push({
         id: `contains-${domainId}-${appId}`,
@@ -169,7 +169,7 @@ export function generateDemoData(config: DemoDataConfig = {}): {
         type: 'lineage',
         data: { relationship: 'contains', edgeType: 'contains', animated: false },
       })
-      
+
       // Lineage edge: domain → app (data flow)
       edges.push({
         id: `edge-${domainId}-${appId}`,
@@ -182,19 +182,19 @@ export function generateDemoData(config: DemoDataConfig = {}): {
           animated: true,
         },
       })
-      
+
       // Generate assets for this application
       const assetCount = randomInt(cfg.assetsPerApp.min, cfg.assetsPerApp.max)
       const assetX = appX + 350
       let assetY = appY - 50
-      
+
       for (let ast = 0; ast < assetCount; ast++) {
         const assetType = randomChoice(assetTypes)
         const businessTerm = randomChoice(businessTerms)
         const technicalTerm = randomChoice(technicalTerms)
         const assetName = `${technicalTerm}_${businessTerm.toLowerCase()}_${ast}`
         const assetId = `asset-${appId}-${ast}`
-        
+
         const assetNode: LineageNode = {
           id: assetId,
           type: 'asset',
@@ -217,7 +217,7 @@ export function generateDemoData(config: DemoDataConfig = {}): {
           },
         }
         nodes.push(assetNode)
-        
+
         // Containment edge: app → asset
         edges.push({
           id: `contains-${appId}-${assetId}`,
@@ -226,7 +226,7 @@ export function generateDemoData(config: DemoDataConfig = {}): {
           type: 'lineage',
           data: { relationship: 'contains', edgeType: 'contains', animated: false },
         })
-        
+
         // Lineage edge: app → asset
         edges.push({
           id: `edge-${appId}-${assetId}`,
@@ -239,36 +239,36 @@ export function generateDemoData(config: DemoDataConfig = {}): {
             animated: true,
           },
         })
-        
+
         // Generate columns for this asset
         const columnCount = randomInt(cfg.columnsPerAsset.min, cfg.columnsPerAsset.max)
         const columnX = assetX + 200
         let columnY = assetY - 20
-        
+
         for (let col = 0; col < columnCount; col++) {
           const columnName = col === 0 ? 'id' :
-                            col === 1 ? `${businessTerm.toLowerCase()}_id` :
-                            col === 2 ? 'created_at' :
-                            col === 3 ? 'updated_at' :
-                            `${randomChoice(businessTerms).toLowerCase()}_${col}`
+            col === 1 ? `${businessTerm.toLowerCase()}_id` :
+              col === 2 ? 'created_at' :
+                col === 3 ? 'updated_at' :
+                  `${randomChoice(businessTerms).toLowerCase()}_${col}`
           const columnId = `col-${assetId}-${col}`
           const dataType = randomChoice(columnTypes)
-          
+
           const columnNode: LineageNode = {
             id: columnId,
             type: 'asset',
             position: { x: columnX, y: columnY },
             data: {
               label: columnName,
-              businessLabel: columnName.split('_').map(w => 
+              businessLabel: columnName.split('_').map(w =>
                 w.charAt(0).toUpperCase() + w.slice(1)
               ).join(' '),
               technicalLabel: `${assetName}.${columnName}`,
               urn: generateUrn('column', [assetName, columnName]),
               type: 'column',
-              classifications: col < 2 ? ['PK'] : 
-                              columnName.includes('id') ? ['FK'] :
-                              randomChoice([['PII'], ['GDPR'], ['Financial'], []]),
+              classifications: col < 2 ? ['PK'] :
+                columnName.includes('id') ? ['FK'] :
+                  randomChoice([['PII'], ['GDPR'], ['Financial'], []]),
               metadata: {
                 dataType: dataType + (dataType.includes('VARCHAR') ? `(${randomInt(50, 500)})` : ''),
                 nullable: col > 1 && Math.random() > 0.7,
@@ -276,7 +276,7 @@ export function generateDemoData(config: DemoDataConfig = {}): {
             },
           }
           nodes.push(columnNode)
-          
+
           // Containment edge: asset → column
           edges.push({
             id: `contains-${assetId}-${columnId}`,
@@ -285,10 +285,10 @@ export function generateDemoData(config: DemoDataConfig = {}): {
             type: 'lineage',
             data: { relationship: 'contains', edgeType: 'contains', animated: false },
           })
-          
+
           columnY += 30
         }
-        
+
         // Add some cross-asset lineage relationships (20% chance)
         if (ast > 0 && Math.random() < 0.2) {
           const prevAssetId = `asset-${appId}-${ast - 1}`
@@ -304,30 +304,30 @@ export function generateDemoData(config: DemoDataConfig = {}): {
             },
           })
         }
-        
+
         assetY += 100
       }
-      
+
       appIndex++
     }
-    
+
     xPosition += 50 // Slight offset for next domain's apps
   }
-  
+
   // Add dashboards (downstream consumers)
   if (cfg.includeDashboards) {
     const dashboardX = xPosition + 500
     const dashboardPlatforms = ['looker', 'tableau', 'powerbi', 'metabase']
-    
+
     for (let d = 0; d < cfg.domainCount; d++) {
       const domainName = domainNames[d % domainNames.length]
       const dashboardCount = randomInt(2, 5)
-      
+
       for (let dash = 0; dash < dashboardCount; dash++) {
         const platform = randomChoice(dashboardPlatforms)
         const dashboardId = `asset-${domainName.toLowerCase()}-dashboard-${dash}`
         const dashboardY = domainYPositions[d] + (dash - 1) * 150
-        
+
         const dashboardNode: LineageNode = {
           id: dashboardId,
           type: 'asset',
@@ -347,9 +347,9 @@ export function generateDemoData(config: DemoDataConfig = {}): {
           },
         }
         nodes.push(dashboardNode)
-        
+
         // Connect to some assets in this domain (non-dashboard assets)
-        const domainApps = nodes.filter(n => 
+        const domainApps = nodes.filter(n =>
           n.id.startsWith(`app-${domainName.toLowerCase()}-`) && n.type === 'app'
         )
         const domainAssets = nodes.filter(n =>
@@ -357,13 +357,13 @@ export function generateDemoData(config: DemoDataConfig = {}): {
           n.data.type === 'asset' &&
           n.data.metadata?.assetType !== 'dashboard'
         )
-        
+
         // Connect to 1-3 random assets
         if (domainAssets.length > 0) {
           const connectedAssets = domainAssets
             .sort(() => Math.random() - 0.5)
             .slice(0, Math.min(randomInt(1, 3), domainAssets.length))
-          
+
           connectedAssets.forEach(asset => {
             edges.push({
               id: `edge-${asset.id}-${dashboardId}`,
@@ -381,13 +381,13 @@ export function generateDemoData(config: DemoDataConfig = {}): {
       }
     }
   }
-  
+
   // Add ghost nodes
   if (cfg.includeGhostNodes) {
     const firstDomainY = domainYPositions[0]
     const lastDomainY = domainYPositions[domainYPositions.length - 1]
     const midY = (firstDomainY + lastDomainY) / 2
-    
+
     const ghostUpstream: LineageNode = {
       id: 'ghost-upstream',
       type: 'ghost',
@@ -404,7 +404,7 @@ export function generateDemoData(config: DemoDataConfig = {}): {
       },
     }
     nodes.push(ghostUpstream)
-    
+
     const ghostDownstream: LineageNode = {
       id: 'ghost-downstream',
       type: 'ghost',
@@ -421,11 +421,11 @@ export function generateDemoData(config: DemoDataConfig = {}): {
       },
     }
     nodes.push(ghostDownstream)
-    
+
     // Connect ghost nodes
     const firstDomain = nodes.find(n => n.type === 'domain')
     const lastDashboard = nodes.filter(n => n.data.metadata?.assetType === 'dashboard').pop()
-    
+
     if (firstDomain) {
       edges.push({
         id: 'edge-ghost-upstream',
@@ -435,7 +435,7 @@ export function generateDemoData(config: DemoDataConfig = {}): {
         data: { confidence: 0.5, edgeType: 'produces', animated: false },
       })
     }
-    
+
     if (lastDashboard) {
       edges.push({
         id: 'edge-ghost-downstream',
@@ -446,7 +446,7 @@ export function generateDemoData(config: DemoDataConfig = {}): {
       })
     }
   }
-  
+
   return { nodes, edges }
 }
 
@@ -647,7 +647,7 @@ export const demoNodes: LineageNode[] = [
   // ============================================
   // Columns (Level 4) - for hierarchy roll-up demo
   // ============================================
-  
+
   // Revenue table columns
   {
     id: 'col-revenue-month',
@@ -689,7 +689,7 @@ export const demoNodes: LineageNode[] = [
       metadata: { dataType: 'VARCHAR(3)', nullable: false },
     },
   },
-  
+
   // Orders table columns
   {
     id: 'col-orders-id',
@@ -746,7 +746,7 @@ export const demoNodes: LineageNode[] = [
       metadata: { dataType: 'TIMESTAMP', nullable: false },
     },
   },
-  
+
   // Customers table columns
   {
     id: 'col-customers-id',
@@ -908,7 +908,7 @@ export const demoEdges: LineageEdge[] = [
     type: 'lineage',
     data: { relationship: 'contains', edgeType: 'contains', animated: false },
   },
-  
+
   // System → Dataset containment
   {
     id: 'contains-snowflake-revenue',
@@ -938,7 +938,7 @@ export const demoEdges: LineageEdge[] = [
     type: 'lineage',
     data: { relationship: 'contains', edgeType: 'contains', animated: false },
   },
-  
+
   // Dataset → Column containment (for hierarchy roll-up)
   // Revenue table columns
   {
@@ -962,7 +962,7 @@ export const demoEdges: LineageEdge[] = [
     type: 'lineage',
     data: { relationship: 'contains', edgeType: 'contains', animated: false },
   },
-  
+
   // Orders table columns
   {
     id: 'contains-orders-id',
@@ -992,7 +992,7 @@ export const demoEdges: LineageEdge[] = [
     type: 'lineage',
     data: { relationship: 'contains', edgeType: 'contains', animated: false },
   },
-  
+
   // Customers table columns
   {
     id: 'contains-customers-id',
@@ -1022,11 +1022,11 @@ export const demoEdges: LineageEdge[] = [
     type: 'lineage',
     data: { relationship: 'contains', edgeType: 'contains', animated: false },
   },
-  
+
   // ============================================
   // LINEAGE EDGES (data flow)
   // ============================================
-  
+
   // Domain to App connections (data flow)
   {
     id: 'edge-finance-snowflake',
@@ -1124,13 +1124,51 @@ export const demoEdges: LineageEdge[] = [
     data: { confidence: 0.78, edgeType: 'consumes', animated: true },
   },
 
-  // Cross-domain relationships
+  // Cross-domain relationships (table level)
   {
     id: 'edge-customers-orders',
     source: 'asset-customers-table',
     target: 'asset-orders-table',
     type: 'lineage',
     data: { confidence: 0.93, edgeType: 'transforms', label: 'customer_id join' },
+  },
+
+  // ============================================
+  // COLUMN-LEVEL LINEAGE (data transformations)
+  // ============================================
+
+  // Orders table columns derive from Customers columns (FK relationship data flow)
+  {
+    id: 'col-edge-customer-to-orders',
+    source: 'col-customers-id',
+    target: 'col-orders-customer',
+    type: 'lineage',
+    data: { confidence: 0.98, edgeType: 'derives_from', animated: true, label: 'FK reference' },
+  },
+
+  // Revenue columns aggregate from Orders columns
+  {
+    id: 'col-edge-orders-total-revenue',
+    source: 'col-orders-total',
+    target: 'col-revenue-amount',
+    type: 'lineage',
+    data: { confidence: 0.95, edgeType: 'transforms', animated: true, label: 'SUM aggregation' },
+  },
+  {
+    id: 'col-edge-orders-date-revenue-month',
+    source: 'col-orders-date',
+    target: 'col-revenue-month',
+    type: 'lineage',
+    data: { confidence: 0.92, edgeType: 'transforms', animated: true, label: 'DATE_TRUNC(month)' },
+  },
+
+  // Email used for customer matching
+  {
+    id: 'col-edge-email-lookup',
+    source: 'col-customers-email',
+    target: 'col-orders-customer',
+    type: 'lineage',
+    data: { confidence: 0.75, edgeType: 'transforms', animated: true, label: 'email lookup' },
   },
 
   // Ghost connections

@@ -1,9 +1,9 @@
 import { memo } from 'react'
 import { Handle, Position, type NodeProps, NodeToolbar } from '@xyflow/react'
-import { 
-  Table2, 
-  Columns3, 
-  FileCode, 
+import {
+  Table2,
+  Columns3,
+  FileCode,
   Workflow,
   ArrowUpRight,
   ArrowDownLeft,
@@ -16,15 +16,15 @@ import type { LineageNode } from '@/store/canvas'
 
 type AssetNodeProps = NodeProps<LineageNode>
 
-export const AssetNode = memo(function AssetNode({ 
-  data, 
+export const AssetNode = memo(function AssetNode({
+  data,
   selected,
-  dragging 
+  dragging
 }: AssetNodeProps) {
   const mode = usePersonaStore((s) => s.mode)
-  
-  const label = mode === 'business' 
-    ? (data.businessLabel || data.label) 
+
+  const label = mode === 'business'
+    ? (data.businessLabel || data.label)
     : (data.technicalLabel || data.label)
 
   // Determine icon based on asset type

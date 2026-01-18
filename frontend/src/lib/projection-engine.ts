@@ -104,6 +104,81 @@ export function buildContainmentMap(
 }
 
 /**
+ * Summary of child counts for a node
+ */
+export interface NodeCountSummary {
+  directChildren: number
+  totalDescendants: number
+  byType: Record<string, number> // e.g., { table: 5, column: 47 }
+}
+
+/**
+ * Compute child counts for a node
+ * Returns direct children count, total descendants, and breakdown by entity type
+ */
+export function computeNodeCounts(
+  nodeId: string,
+  nodes: Node[],
+  containmentMap: Map<string, string>
+): NodeCountSummary {
+  const nodeMap = new Map(nodes.map(n => [n.id, n]))
+  const result: NodeCountSummary = {
+    directChildren: 0,
+    totalDescendants: 0,
+    byType: {},
+  }
+
+  // Build children map (parent → children[])
+  const childrenMap = new Map<string, string[]>()
+  containmentMap.forEach((parentId, childId) => {
+    if (!childrenMap.has(parentId)) {
+      childrenMap.set(parentId, [])
+    }
+    childrenMap.get(parentId)!.push(childId)
+  })
+
+  // Count direct children
+  const directChildren = childrenMap.get(nodeId) ?? []
+  result.directChildren = directChildren.length
+
+  // Recursively count all descendants
+  const countDescendants = (id: string): void => {
+    const children = childrenMap.get(id) ?? []
+    children.forEach(childId => {
+      result.totalDescendants++
+      const childNode = nodeMap.get(childId)
+      if (childNode) {
+        const childType = (childNode.data?.type as string) ?? 'unknown'
+        result.byType[childType] = (result.byType[childType] ?? 0) + 1
+      }
+      countDescendants(childId)
+    })
+  }
+
+  countDescendants(nodeId)
+
+  return result
+}
+
+/**
+ * Compute counts for all nodes in the graph
+ * Returns a map of nodeId → NodeCountSummary
+ */
+export function computeAllNodeCounts(
+  nodes: Node[],
+  edges: Edge[]
+): Map<string, NodeCountSummary> {
+  const containmentMap = buildContainmentMap(nodes, edges)
+  const countMap = new Map<string, NodeCountSummary>()
+
+  nodes.forEach(node => {
+    countMap.set(node.id, computeNodeCounts(node.id, nodes, containmentMap))
+  })
+
+  return countMap
+}
+
+/**
  * Find ancestor at a specific granularity level
  */
 export function findAncestorAtGranularity(
