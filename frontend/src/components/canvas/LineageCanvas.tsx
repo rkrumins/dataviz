@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ReactFlow,
   Background,
@@ -15,7 +15,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { AnimatePresence } from 'framer-motion'
-import { GitBranch } from 'lucide-react'
+import { GitBranch, ArrowRight, ArrowDown, Loader2 } from 'lucide-react'
 
 // Legacy nodes for backward compatibility
 import { DomainNode } from './nodes/DomainNode'
@@ -34,6 +34,7 @@ import { useSpatialLoading } from '@/hooks/useSpatialLoading'
 import { useLineageExploration } from '@/hooks/useLineageExploration'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useLevelOfDetail } from '@/hooks/useLevelOfDetail'
+import { useElkLayout } from '@/hooks/useElkLayout'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
@@ -75,10 +76,6 @@ export function LineageCanvas() {
     setFocus,
   } = useLineageExploration()
 
-  // Use exploration-computed data for display, fallback to raw
-  const displayNodes = visibleNodes.length > 0 ? visibleNodes : rawNodes
-  const displayEdges = visibleEdges.length > 0 ? visibleEdges : rawEdges
-
   const { showMinimap, showGrid, snapToGrid } = usePreferencesStore()
   const schema = useSchemaStore((s) => s.schema)
 
@@ -88,6 +85,35 @@ export function LineageCanvas() {
 
   // Spatial loading hook
   const { isLoadingRegion } = useSpatialLoading()
+
+  // ELK layout hook
+  const { applyLayout, isLayouting, direction, toggleDirection } = useElkLayout()
+
+  // Track if we've applied initial layout
+  const hasAppliedInitialLayout = useRef(false)
+  const [layoutedNodes, setLayoutedNodes] = useState<LineageNode[]>([])
+
+  // Apply ELK layout when visible nodes change
+  useEffect(() => {
+    const nodesToLayout = visibleNodes.length > 0 ? visibleNodes : rawNodes
+    const edgesToLayout = visibleEdges.length > 0 ? visibleEdges : rawEdges
+
+    if (nodesToLayout.length === 0) {
+      setLayoutedNodes([])
+      return
+    }
+
+    // Apply layout
+    applyLayout(nodesToLayout, edgesToLayout).then((positioned) => {
+      setLayoutedNodes(positioned as LineageNode[])
+      hasAppliedInitialLayout.current = true
+    })
+  }, [visibleNodes, visibleEdges, rawNodes, rawEdges, applyLayout, direction])
+
+  // Use layouted nodes or fall back to raw/visible
+  const displayNodes = layoutedNodes.length > 0 ? layoutedNodes :
+    (visibleNodes.length > 0 ? visibleNodes : rawNodes)
+  const displayEdges = visibleEdges.length > 0 ? visibleEdges : rawEdges
 
   // Handle node changes (position, selection, etc.)
   const onNodesChange: OnNodesChange = useCallback(
@@ -261,6 +287,31 @@ export function LineageCanvas() {
 
       {/* Stats Bar */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3">
+        {/* Layout Direction Toggle */}
+        <button
+          onClick={toggleDirection}
+          className={cn(
+            "glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2 transition-colors",
+            "hover:bg-accent-lineage/10"
+          )}
+          title={`Layout: ${direction === 'LR' ? 'Left to Right' : 'Top to Bottom'}`}
+        >
+          {direction === 'LR' ? (
+            <ArrowRight className="w-3.5 h-3.5 text-accent-lineage" />
+          ) : (
+            <ArrowDown className="w-3.5 h-3.5 text-accent-lineage" />
+          )}
+          <span className="text-2xs text-ink-muted">{direction}</span>
+        </button>
+
+        {/* Layout Loading Indicator */}
+        {isLayouting && (
+          <div className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2">
+            <Loader2 className="w-3 h-3 text-accent-lineage animate-spin" />
+            <span className="text-2xs text-ink-muted">Layouting...</span>
+          </div>
+        )}
+
         {/* Mode/Granularity indicator */}
         <div className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2">
           <span className="text-2xs text-ink-muted capitalize">

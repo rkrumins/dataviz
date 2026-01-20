@@ -11,10 +11,10 @@
 import { useState } from 'react'
 import { Panel, useReactFlow } from '@xyflow/react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { 
-  ZoomIn, 
-  ZoomOut, 
-  Maximize2, 
+import {
+  ZoomIn,
+  ZoomOut,
+  Maximize2,
   Grid3X3,
   Map,
   Magnet,
@@ -40,15 +40,15 @@ export function CanvasControls() {
         <div className="flex items-center gap-2">
           <div className={cn(
             "w-2.5 h-2.5 rounded-full ring-2 ring-offset-1 ring-offset-canvas",
-            mode === 'business' 
-              ? "bg-accent-business ring-accent-business/30" 
+            mode === 'business'
+              ? "bg-accent-business ring-accent-business/30"
               : "bg-accent-technical ring-accent-technical/30"
           )} />
           <span className="text-xs font-semibold text-ink">
             {mode === 'business' ? 'Business View' : 'Technical View'}
           </span>
         </div>
-        
+
         {/* LOD Quick Filters */}
         <div className="flex items-center gap-1 mt-2">
           <LODButton label="Domains" level="domain" active={mode === 'business'} />
@@ -71,7 +71,7 @@ export function CanvasControls() {
             <ChevronDown className="w-3.5 h-3.5 text-ink-muted" />
           )}
         </button>
-        
+
         <AnimatePresence>
           {isExpanded && (
             <motion.div
@@ -86,7 +86,7 @@ export function CanvasControls() {
                 <div className="px-1 py-1">
                   <span className="text-2xs font-medium text-ink-muted uppercase tracking-wider">Display</span>
                 </div>
-                
+
                 <ControlButton
                   icon={Grid3X3}
                   label="Grid"
@@ -108,28 +108,28 @@ export function CanvasControls() {
                   active={snapToGrid}
                   onClick={toggleSnapToGrid}
                 />
-                
+
                 {/* Zoom Controls */}
                 <div className="h-px bg-glass-border my-2" />
                 <div className="px-1 py-1">
                   <span className="text-2xs font-medium text-ink-muted uppercase tracking-wider">Zoom</span>
                 </div>
-                
+
                 <div className="flex items-center gap-1">
-                  <ZoomButton 
-                    icon={ZoomOut} 
-                    label="Zoom out" 
-                    onClick={() => zoomOut()} 
+                  <ZoomButton
+                    icon={ZoomOut}
+                    label="Zoom out"
+                    onClick={() => zoomOut()}
                   />
-                  <ZoomButton 
-                    icon={ZoomIn} 
-                    label="Zoom in" 
-                    onClick={() => zoomIn()} 
+                  <ZoomButton
+                    icon={ZoomIn}
+                    label="Zoom in"
+                    onClick={() => zoomIn()}
                   />
-                  <ZoomButton 
-                    icon={Maximize2} 
-                    label="Fit to view" 
-                    onClick={() => fitView({ padding: 0.2 })} 
+                  <ZoomButton
+                    icon={Maximize2}
+                    label="Fit to view"
+                    onClick={() => fitView({ padding: 0.2 })}
                   />
                 </div>
               </div>
@@ -137,7 +137,7 @@ export function CanvasControls() {
           )}
         </AnimatePresence>
       </div>
-      
+
       {/* Quick Help Tip */}
       <div className="glass-panel-subtle rounded-xl px-3 py-2 max-w-[200px]">
         <div className="flex items-start gap-2">
@@ -173,8 +173,8 @@ function ControlButton({ icon: Icon, label, description, active, onClick }: Cont
     >
       <div className={cn(
         "w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0",
-        active 
-          ? "bg-accent-lineage/20" 
+        active
+          ? "bg-accent-lineage/20"
           : "bg-black/5 dark:bg-white/5"
       )}>
         <Icon className="w-3.5 h-3.5" />

@@ -43,6 +43,9 @@ interface LineageExplorationState {
   // Highlighted path (for lineage trace)
   highlightedPath: Set<string>
 
+  // Pagination
+  pagination: Record<string, number>
+
   // Actions
   setMode: (mode: LineageExplorationMode) => void
   setGranularity: (granularity: LineageGranularity) => void
@@ -55,6 +58,8 @@ interface LineageExplorationState {
   setHighlightedPath: (path: Set<string>) => void
   toggleIncludeChildLineage: () => void
   resetToDefault: (preset?: 'overview' | 'technical' | 'impact') => void
+  loadMoreNodes: (parentId: string, count?: number) => void
+  resetPagination: () => void
 }
 
 const DEFAULT_CONFIG: LineageExplorationConfig = {
@@ -90,9 +95,15 @@ export const useLineageExplorationStore = create<LineageExplorationState>((set, 
   expandedIds: new Set(),
   highlightedPath: new Set(),
 
-  setMode: (mode) => set((state) => ({
-    config: { ...state.config, mode },
-  })),
+  // Pagination
+  pagination: {},
+
+  // Actions
+  setMode: (mode) =>
+    set((state) => ({
+      config: { ...state.config, mode },
+      // Reset expanded state on mode switch if needed
+    })),
 
   setGranularity: (granularity) => set((state) => ({
     config: { ...state.config, granularity },
@@ -151,39 +162,44 @@ export const useLineageExplorationStore = create<LineageExplorationState>((set, 
   })),
 
   resetToDefault: (preset = 'overview') => {
-    const presets: Record<string, Partial<LineageExplorationConfig>> = {
-      overview: {
-        mode: 'overview',
-        granularity: 'table',
-        trace: { upstreamDepth: 2, downstreamDepth: 2, includeChildLineage: true, maxNodes: 100 },
-        aggregation: { inheritFromChildren: true, showAggregatedEdges: true, minConfidence: 0.3 },
-      },
-      technical: {
-        mode: 'focused',
-        granularity: 'column',
-        trace: { upstreamDepth: 5, downstreamDepth: 5, includeChildLineage: false, maxNodes: 200 },
-        aggregation: { inheritFromChildren: false, showAggregatedEdges: false, minConfidence: 0 },
-      },
-      impact: {
-        mode: 'focused',
-        granularity: 'table',
-        trace: { upstreamDepth: 10, downstreamDepth: 10, includeChildLineage: true, maxNodes: 150 },
-        aggregation: { inheritFromChildren: true, showAggregatedEdges: true, minConfidence: 0.5 },
-      },
-    }
+    set((state) => {
+      let newConfig = { ...state.config }
 
-    const presetConfig = presets[preset]
-    set({
-      config: {
-        ...DEFAULT_CONFIG,
-        ...presetConfig,
-        trace: { ...DEFAULT_CONFIG.trace, ...(presetConfig?.trace ?? {}) },
-        aggregation: { ...DEFAULT_CONFIG.aggregation, ...(presetConfig?.aggregation ?? {}) },
-      },
-      expandedIds: new Set(),
-      highlightedPath: new Set(),
+      if (preset === 'overview') {
+        newConfig.mode = 'overview'
+        newConfig.granularity = 'domain'
+        newConfig.trace.includeChildLineage = false
+      } else if (preset === 'technical') {
+        newConfig.mode = 'focused'
+        newConfig.granularity = 'column'
+        newConfig.trace.includeChildLineage = true
+        newConfig.trace.upstreamDepth = 3
+        newConfig.trace.downstreamDepth = 3
+      } else if (preset === 'impact') {
+        newConfig.mode = 'focused'
+        newConfig.granularity = 'table'
+        newConfig.trace.includeChildLineage = true
+        newConfig.aggregation.inheritFromChildren = true
+      }
+
+      return {
+        config: newConfig,
+        focusEntityId: null,
+        expandedIds: new Set(),
+        pagination: {}, // Reset pagination
+      }
     })
   },
+
+  loadMoreNodes: (parentId, count = 20) =>
+    set((state) => ({
+      pagination: {
+        ...state.pagination,
+        [parentId]: (state.pagination[parentId] || 10) + count
+      }
+    })),
+
+  resetPagination: () => set({ pagination: {} }),
 }))
 
 // ============================================
@@ -388,7 +404,10 @@ export function projectToGranularity(
   nodes: Node[],
   edges: Edge[],
   targetGranularity: LineageGranularity,
-  inheritFromChildren: boolean
+  inheritFromChildren: boolean,
+  pagination: Record<string, number>,
+  focusId: string | null = null,
+  tracePath: Set<string> = new Set()
 ): { nodes: Node[]; edges: Edge[]; aggregatedEdges: Map<string, { sourceCount: number; confidence: number }> } {
   const granularityMap: Record<LineageGranularity, GranularityLevel> = {
     column: GranularityLevel.Column,
@@ -402,13 +421,107 @@ export function projectToGranularity(
   const containmentMap = buildContainmentMap(nodes, edges)
 
   // Filter nodes at or above target granularity
-  const visibleNodes = nodes.filter((node) => {
+  const filteredNodes = nodes.filter((node) => {
     const nodeType = node.data?.type as string
     const nodeGranularity = ENTITY_GRANULARITY[nodeType] ?? GranularityLevel.Column
     return nodeGranularity >= targetLevel
   })
 
-  const visibleNodeIds = new Set(visibleNodes.map(n => n.id))
+  const visibleNodes: Node[] = []
+  const visibleNodeIds = new Set<string>()
+
+  // PAGINATION LOGIC
+  // Group children by parent to apply pagination limits
+  const nodesByParent = new Map<string, Node[]>()
+  const orphans: Node[] = []
+
+  // Helper to get effective parent ID for pagination grouping
+  const getPaginationParent = (node: Node) => {
+    return containmentMap.get(node.id) || node.parentId
+  }
+
+  filteredNodes.forEach(node => {
+    const parentId = getPaginationParent(node)
+    // Only paginate if node is a 'child' type (column, table in schema, etc) based on granularity
+    // and has a visible parent
+    if (parentId && nodes.find(n => n.id === parentId)) { // Simple check, optimization possible
+      if (!nodesByParent.has(parentId)) {
+        nodesByParent.set(parentId, [])
+      }
+      nodesByParent.get(parentId)!.push(node)
+    } else {
+      orphans.push(node)
+    }
+  })
+
+  // Process grouped nodes
+  const DEFAULT_PAGE_SIZE = 5
+
+  nodesByParent.forEach((children, parentId) => {
+    // 1. Always include parent node itself (it's in orphans or handled elsewhere? No, parent is upper level)
+    // Actually parent is a separate node in filteredNodes if level is mixed?
+    // ProjectToGranularity flattens or specific level?
+    // "filteredNodes" contains ALL levels >= target. so Table AND Column are in there.
+    // We only want to paginate the lowest level relative to container?
+    // Let's just paginate all groups.
+
+    // Sort alphabetically by label
+    children.sort((a, b) => {
+      const labelA = (a.data?.label as string) || a.id
+      const labelB = (b.data?.label as string) || b.id
+      return labelA.localeCompare(labelB)
+    })
+
+    const limit = pagination[parentId] || DEFAULT_PAGE_SIZE
+
+    // Split into visible and hidden, but ALWAYS keep focused/traced nodes visible
+    const visibleChildren: Node[] = []
+    let hiddenCount = 0
+
+    children.forEach((child, index) => {
+      const isImportant = (focusId && child.id === focusId) || tracePath.has(child.id)
+
+      if (index < limit || isImportant) {
+        visibleChildren.push(child)
+      } else {
+        hiddenCount++
+      }
+    })
+
+    // Use natural positions (ELK will handle final positioning)
+    visibleChildren.forEach((child) => {
+      visibleNodes.push(child)
+    })
+
+    // Add Ghost Node if there are more
+    if (hiddenCount > 0) {
+      // Determine entity type of hidden children for labeling
+      const firstHiddenChild = children[limit]
+      const entityType = firstHiddenChild?.data?.type as string || 'item'
+
+      // Ghost node position will be set by ELK layout
+      visibleNodes.push({
+        id: `ghost-${parentId}`,
+        type: 'ghost',
+        position: { x: 0, y: 0 }, // Placeholder - ELK will set actual position
+        data: {
+          label: `+${hiddenCount} more`,
+          urn: `ghost:${parentId}`,
+          type: 'ghost',
+          hiddenCount,
+          nodeCount: hiddenCount,
+          parentId,
+          entityType, // Type of hidden children
+        }
+      })
+    }
+  })
+
+  // Add orphans (nodes without parents in the map, e.g. Domain nodes)
+  orphans.forEach(n => visibleNodes.push(n))
+
+  // Update ID set for edge filtering
+  visibleNodes.forEach(n => visibleNodeIds.add(n.id))
 
   // Aggregate edges from lower granularity
   const aggregatedEdges = new Map<string, { sourceCount: number; confidence: number; sourceEdges: string[] }>()
@@ -513,6 +626,9 @@ export interface UseLineageExplorationResult {
   downstreamCount: number
   highlightedPath: Set<string>
 
+  // Pagination
+  pagination: Record<string, number>
+
   // Actions
   setMode: (mode: LineageExplorationMode) => void
   setGranularity: (granularity: LineageGranularity) => void
@@ -524,6 +640,8 @@ export interface UseLineageExplorationResult {
   collapseAll: () => void
   toggleIncludeChildLineage: () => void
   resetToDefault: (preset?: 'overview' | 'technical' | 'impact') => void
+  loadMoreNodes: (parentId: string, count?: number) => void
+  resetPagination: () => void
 }
 
 export function useLineageExploration(): UseLineageExplorationResult {
@@ -532,6 +650,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
     focusEntityId,
     expandedIds: _expandedIds,
     highlightedPath,
+    pagination,
     setMode,
     setGranularity,
     setFocus,
@@ -543,6 +662,8 @@ export function useLineageExploration(): UseLineageExplorationResult {
     setHighlightedPath,
     toggleIncludeChildLineage,
     resetToDefault,
+    loadMoreNodes,
+    resetPagination,
   } = useLineageExplorationStore()
 
   const rawNodes = useCanvasStore((s) => s.nodes)
@@ -589,7 +710,10 @@ export function useLineageExploration(): UseLineageExplorationResult {
       nodes,
       edges,
       config.granularity,
-      config.aggregation.inheritFromChildren
+      config.aggregation.inheritFromChildren,
+      pagination,
+      focusEntityId,
+      highlightedPath
     )
 
     return {
@@ -608,6 +732,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
     config.trace.downstreamDepth,
     config.trace.includeChildLineage,
     config.aggregation.inheritFromChildren,
+    pagination,
     focusEntityId,
     setHighlightedPath,
   ])
@@ -623,6 +748,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
     upstreamCount,
     downstreamCount,
     highlightedPath,
+    pagination,
     setMode,
     setGranularity,
     setFocus,
@@ -633,6 +759,8 @@ export function useLineageExploration(): UseLineageExplorationResult {
     collapseAll,
     toggleIncludeChildLineage,
     resetToDefault,
+    loadMoreNodes,
+    resetPagination,
   }
 }
 
