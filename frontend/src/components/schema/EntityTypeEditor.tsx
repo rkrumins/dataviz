@@ -31,17 +31,17 @@ interface EntityTypeEditorProps {
 
 export function EntityTypeEditor({ entityType, onSave, onCancel }: EntityTypeEditorProps) {
   const isNew = !entityType
-  
+
   const [form, setForm] = useState<EntityTypeSchema>(
     entityType || createDefaultEntityType()
   )
-  
+
   const [activeTab, setActiveTab] = useState<'basic' | 'visual' | 'fields' | 'hierarchy'>('basic')
-  
+
   const updateForm = <K extends keyof EntityTypeSchema>(key: K, value: EntityTypeSchema[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }))
   }
-  
+
   const updateVisual = <K extends keyof EntityVisualConfig>(key: K, value: EntityVisualConfig[K]) => {
     setForm((prev) => ({ ...prev, visual: { ...prev.visual, [key]: value } }))
   }
@@ -62,7 +62,7 @@ export function EntityTypeEditor({ entityType, onSave, onCancel }: EntityTypeEdi
           <LucideIcons.X className="w-5 h-5" />
         </button>
       </div>
-      
+
       {/* Tabs */}
       <div className="flex items-center gap-1 p-2 border-b border-glass-border">
         {(['basic', 'visual', 'fields', 'hierarchy'] as const).map((tab) => (
@@ -80,7 +80,7 @@ export function EntityTypeEditor({ entityType, onSave, onCancel }: EntityTypeEdi
           </button>
         ))}
       </div>
-      
+
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
         {activeTab === 'basic' && (
@@ -96,7 +96,7 @@ export function EntityTypeEditor({ entityType, onSave, onCancel }: EntityTypeEdi
           <HierarchyTab form={form} updateForm={updateForm} />
         )}
       </div>
-      
+
       {/* Footer */}
       <div className="flex items-center justify-between p-4 border-t border-glass-border">
         <button onClick={onCancel} className="btn btn-secondary btn-md">
@@ -106,7 +106,7 @@ export function EntityTypeEditor({ entityType, onSave, onCancel }: EntityTypeEdi
           <button className="btn btn-ghost btn-md">
             Preview
           </button>
-          <button 
+          <button
             onClick={() => onSave(form)}
             className="btn btn-primary btn-md"
           >
@@ -142,7 +142,7 @@ function BasicTab({ form, updateForm }: BasicTabProps) {
           Unique identifier used in configuration and API
         </p>
       </div>
-      
+
       <div className="grid grid-cols-2 gap-4">
         <div>
           <label className="block text-sm font-medium text-ink mb-1">
@@ -169,7 +169,7 @@ function BasicTab({ form, updateForm }: BasicTabProps) {
           />
         </div>
       </div>
-      
+
       <div>
         <label className="block text-sm font-medium text-ink mb-1">
           Description
@@ -202,13 +202,13 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
           <EntityPreview visual={form.visual} name={form.name} />
         </div>
       </div>
-      
+
       {/* Icon Picker */}
       <div>
         <label className="block text-sm font-medium text-ink mb-2">Icon</label>
         <div className="grid grid-cols-10 gap-1 p-2 rounded-lg bg-canvas border border-glass-border">
           {COMMON_ICONS.map((iconName) => {
-            const Icon = (LucideIcons as Record<string, React.ComponentType<{ className?: string }>>)[iconName]
+            const Icon = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string }>>)[iconName]
             return (
               <button
                 key={iconName}
@@ -226,7 +226,7 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
           })}
         </div>
       </div>
-      
+
       {/* Color Picker */}
       <div>
         <label className="block text-sm font-medium text-ink mb-2">Color</label>
@@ -244,7 +244,7 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
           ))}
         </div>
       </div>
-      
+
       {/* Shape */}
       <div>
         <label className="block text-sm font-medium text-ink mb-2">Shape</label>
@@ -256,7 +256,7 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
               className={cn(
                 "px-4 py-2 border-2 transition-colors",
                 shape === 'rectangle' ? 'rounded-md' :
-                shape === 'rounded' ? 'rounded-xl' : 'rounded-full',
+                  shape === 'rounded' ? 'rounded-xl' : 'rounded-full',
                 form.visual.shape === shape
                   ? "border-accent-lineage bg-accent-lineage/10"
                   : "border-glass-border hover:border-ink-muted"
@@ -267,7 +267,7 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
           ))}
         </div>
       </div>
-      
+
       {/* Size */}
       <div>
         <label className="block text-sm font-medium text-ink mb-2">Size</label>
@@ -288,7 +288,7 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
           ))}
         </div>
       </div>
-      
+
       {/* Border Style */}
       <div>
         <label className="block text-sm font-medium text-ink mb-2">Border Style</label>
@@ -300,8 +300,8 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
               className={cn(
                 "px-4 py-2 rounded-lg transition-colors",
                 style === 'solid' ? 'border-2' :
-                style === 'dashed' ? 'border-2 border-dashed' :
-                style === 'dotted' ? 'border-2 border-dotted' : 'border-0 bg-black/5 dark:bg-white/5',
+                  style === 'dashed' ? 'border-2 border-dashed' :
+                    style === 'dotted' ? 'border-2 border-dotted' : 'border-0 bg-black/5 dark:bg-white/5',
                 form.visual.borderStyle === style
                   ? "border-accent-lineage"
                   : "border-glass-border"
@@ -318,8 +318,8 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
 
 // Entity Preview Component
 function EntityPreview({ visual, name }: { visual: EntityVisualConfig; name: string }) {
-  const Icon = (LucideIcons as Record<string, React.ComponentType<{ className?: string }>>)[visual.icon] || LucideIcons.Box
-  
+  const Icon = ((LucideIcons as any)[visual.icon] || LucideIcons.Box) as React.ComponentType<any>
+
   const sizeClasses = {
     xs: 'px-2 py-1.5 min-w-[100px]',
     sm: 'px-2.5 py-2 min-w-[140px]',
@@ -327,7 +327,7 @@ function EntityPreview({ visual, name }: { visual: EntityVisualConfig; name: str
     lg: 'px-4 py-3 min-w-[220px]',
     xl: 'px-5 py-4 min-w-[280px]',
   }
-  
+
   const shapeClasses = {
     rectangle: 'rounded-md',
     rounded: 'rounded-xl',
@@ -336,7 +336,7 @@ function EntityPreview({ visual, name }: { visual: EntityVisualConfig; name: str
     hexagon: 'rounded-lg',
     circle: 'rounded-full',
   }
-  
+
   return (
     <motion.div
       layout
@@ -347,17 +347,17 @@ function EntityPreview({ visual, name }: { visual: EntityVisualConfig; name: str
         visual.borderStyle === 'dashed' && 'border-dashed',
         visual.borderStyle === 'dotted' && 'border-dotted',
       )}
-      style={{ 
+      style={{
         borderColor: visual.color,
         borderLeftWidth: '4px',
       }}
     >
       <div className="flex items-center gap-2">
-        <div 
+        <div
           className="w-8 h-8 rounded-lg flex items-center justify-center"
           style={{ backgroundColor: `${visual.color}15` }}
         >
-          <Icon className="w-4 h-4" style={{ color: visual.color }} />
+          <Icon className="w-4 h-4" color={visual.color} />
         </div>
         <div>
           <span className="text-2xs font-medium uppercase" style={{ color: visual.color }}>
@@ -393,14 +393,14 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
       fields: [...prev.fields, newField],
     }))
   }
-  
+
   const removeField = (fieldId: string) => {
     setForm((prev) => ({
       ...prev,
       fields: prev.fields.filter((f) => f.id !== fieldId),
     }))
   }
-  
+
   const updateField = (fieldId: string, updates: Partial<EntityFieldDefinition>) => {
     setForm((prev) => ({
       ...prev,
@@ -422,15 +422,15 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
           Add Field
         </button>
       </div>
-      
+
       <div className="space-y-2">
-        {form.fields.map((field, index) => (
-          <div 
+        {form.fields.map((field) => (
+          <div
             key={field.id}
             className="flex items-center gap-3 p-3 rounded-lg border border-glass-border bg-canvas"
           >
             <LucideIcons.GripVertical className="w-4 h-4 text-ink-muted cursor-grab" />
-            
+
             <input
               type="text"
               value={field.name}
@@ -438,7 +438,7 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
               className="input py-1 px-2 w-32"
               placeholder="Field name"
             />
-            
+
             <select
               value={field.type}
               onChange={(e) => updateField(field.id, { type: e.target.value as EntityFieldDefinition['type'] })}
@@ -455,7 +455,7 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
               <option value="status">Status</option>
               <option value="user">User</option>
             </select>
-            
+
             <label className="flex items-center gap-1 text-2xs text-ink-muted">
               <input
                 type="checkbox"
@@ -465,7 +465,7 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
               />
               Node
             </label>
-            
+
             <label className="flex items-center gap-1 text-2xs text-ink-muted">
               <input
                 type="checkbox"
@@ -475,7 +475,7 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
               />
               Panel
             </label>
-            
+
             <label className="flex items-center gap-1 text-2xs text-ink-muted">
               <input
                 type="checkbox"
@@ -485,8 +485,8 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
               />
               Required
             </label>
-            
-            <button 
+
+            <button
               onClick={() => removeField(field.id)}
               className="ml-auto p-1 rounded hover:bg-red-500/10 text-ink-muted hover:text-red-500"
             >
@@ -507,7 +507,7 @@ interface HierarchyTabProps {
 
 function HierarchyTab({ form, updateForm }: HierarchyTabProps) {
   const updateHierarchy = <K extends keyof typeof form.hierarchy>(
-    key: K, 
+    key: K,
     value: typeof form.hierarchy[K]
   ) => {
     updateForm('hierarchy', { ...form.hierarchy, [key]: value })
@@ -531,7 +531,7 @@ function HierarchyTab({ form, updateForm }: HierarchyTabProps) {
           0 = root level, higher numbers = deeper in hierarchy
         </p>
       </div>
-      
+
       <div>
         <label className="block text-sm font-medium text-ink mb-1">
           Can Contain (Child Types)
@@ -547,7 +547,7 @@ function HierarchyTab({ form, updateForm }: HierarchyTabProps) {
           Comma-separated list of entity type IDs this can contain
         </p>
       </div>
-      
+
       <div>
         <label className="block text-sm font-medium text-ink mb-1">
           Can Be Contained By (Parent Types)
@@ -560,7 +560,7 @@ function HierarchyTab({ form, updateForm }: HierarchyTabProps) {
           className="input"
         />
       </div>
-      
+
       <div className="flex items-center gap-4">
         <label className="flex items-center gap-2">
           <input

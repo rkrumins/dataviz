@@ -18,7 +18,6 @@ import {
   Grid3X3,
   Map,
   Magnet,
-  Layers,
   ChevronDown,
   ChevronUp,
   MousePointer2,
@@ -28,7 +27,7 @@ import { usePersonaStore } from '@/store/persona'
 import { cn } from '@/lib/utils'
 
 export function CanvasControls() {
-  const { fitView, zoomIn, zoomOut, getZoom } = useReactFlow()
+  const { fitView, zoomIn, zoomOut } = useReactFlow()
   const { showGrid, showMinimap, snapToGrid, toggleGrid, toggleMinimap, toggleSnapToGrid } = usePreferencesStore()
   const mode = usePersonaStore((s) => s.mode)
   const [isExpanded, setIsExpanded] = useState(true)

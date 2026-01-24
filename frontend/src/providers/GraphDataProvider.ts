@@ -6,7 +6,7 @@
  * other graph data source.
  */
 
-import { LogicalNodeConfig, LayerAssignmentRuleConfig, RuleCondition } from '../types/schema'
+import { LogicalNodeConfig, LayerAssignmentRuleConfig, RuleCondition, ScopeFilterConfig } from '../types/schema'
 
 // ============================================
 // URN Types (DataHub Compatible)
@@ -530,4 +530,38 @@ export function resolveLogicalAssignment(
         }
     }
     return undefined
+}
+
+export interface EntityAssignment {
+    entityId: string;
+    layerId: string;
+    logicalNodeId?: string; // If assigned to a specific logical node within the layer
+    ruleId?: string;        // Which rule caused this assignment
+    isInherited: boolean;   // True if assigned via parent
+    inheritedFromId?: string; // ID of the parent entity providing the assignment
+    confidence: number;     // 1.0 for manual/explicit, <1.0 for inference
+}
+
+export interface LayerAssignmentResult {
+    assignments: Map<string, EntityAssignment>;
+    parentMap: Map<string, string>;
+    edges: GraphEdge[];
+    unassignedEntityIds: string[];
+    stats: {
+        totalNodes: number;
+        assignedNodes: number;
+        computeTimeMs: number;
+    };
+}
+
+export interface LayerAssignmentRequest {
+    scopeFilter?: ScopeFilterConfig;
+    layers: {
+        layerId: string;
+        sequence: number;
+        entityTypes: string[];
+        rules: LayerAssignmentRuleConfig[];
+        logicalNodes?: LogicalNodeConfig[];
+    }[];
+    includeEdges: boolean;
 }

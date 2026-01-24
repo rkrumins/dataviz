@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils'
 
 // Dynamic icon component
 function DynamicIcon({ name, className }: { name: string; className?: string }) {
-  const IconComponent = (LucideIcons as Record<string, React.ComponentType<{ className?: string }>>)[name]
+  const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string }>>)[name]
   if (!IconComponent) {
     return <LucideIcons.Layout className={className} />
   }
@@ -24,10 +24,10 @@ export function ViewSelector({ onCreateView, onEditView }: ViewSelectorProps) {
   const schema = useSchemaStore((s) => s.schema)
   const activeViewId = useSchemaStore((s) => s.activeViewId)
   const setActiveView = useSchemaStore((s) => s.setActiveView)
-  
+
   const views = schema?.views ?? []
   const activeView = views.find((v) => v.id === activeViewId)
-  
+
   return (
     <div className="relative">
       {/* Current View Button */}
@@ -50,14 +50,14 @@ export function ViewSelector({ onCreateView, onEditView }: ViewSelectorProps) {
             </div>
           </>
         )}
-        <LucideIcons.ChevronDown 
+        <LucideIcons.ChevronDown
           className={cn(
             "w-4 h-4 transition-transform",
             isExpanded && "rotate-180"
-          )} 
+          )}
         />
       </button>
-      
+
       {/* Dropdown */}
       <AnimatePresence>
         {isExpanded && (
@@ -76,7 +76,7 @@ export function ViewSelector({ onCreateView, onEditView }: ViewSelectorProps) {
               <div className="text-2xs font-medium text-ink-muted uppercase tracking-wider px-2 py-1">
                 Available Views
               </div>
-              
+
               {views.map((view) => (
                 <ViewItem
                   key={view.id}
@@ -90,7 +90,7 @@ export function ViewSelector({ onCreateView, onEditView }: ViewSelectorProps) {
                 />
               ))}
             </div>
-            
+
             {/* Actions */}
             <div className="p-2 border-t border-glass-border">
               <button
@@ -111,10 +111,10 @@ export function ViewSelector({ onCreateView, onEditView }: ViewSelectorProps) {
           </motion.div>
         )}
       </AnimatePresence>
-      
+
       {/* Backdrop */}
       {isExpanded && (
-        <div 
+        <div
           className="fixed inset-0 z-[99]"
           onClick={() => setIsExpanded(false)}
         />
@@ -142,14 +142,14 @@ function ViewItem({ view, isActive, onClick, onEdit }: ViewItemProps) {
       )}
       onClick={onClick}
     >
-      <DynamicIcon 
-        name={view.icon || 'Layout'} 
+      <DynamicIcon
+        name={view.icon || 'Layout'}
         className={cn(
           "w-4 h-4",
           isActive ? "text-accent-lineage" : "text-ink-muted"
-        )} 
+        )}
       />
-      
+
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium truncate">{view.name}</span>
@@ -163,7 +163,7 @@ function ViewItem({ view, isActive, onClick, onEdit }: ViewItemProps) {
           <p className="text-2xs text-ink-muted truncate">{view.description}</p>
         )}
       </div>
-      
+
       {/* Edit Button */}
       {onEdit && (
         <button
@@ -181,7 +181,7 @@ function ViewItem({ view, isActive, onClick, onEdit }: ViewItemProps) {
           <LucideIcons.Settings className="w-3 h-3" />
         </button>
       )}
-      
+
       {/* Active Indicator */}
       {isActive && (
         <LucideIcons.Check className="w-4 h-4 text-accent-lineage" />
@@ -197,9 +197,9 @@ export function ViewSelectorCompact() {
   const schema = useSchemaStore((s) => s.schema)
   const activeViewId = useSchemaStore((s) => s.activeViewId)
   const setActiveView = useSchemaStore((s) => s.setActiveView)
-  
+
   const views = schema?.views ?? []
-  
+
   return (
     <div className="flex items-center gap-1 p-1 rounded-lg bg-black/5 dark:bg-white/5">
       {views.map((view) => (

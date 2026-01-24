@@ -11,6 +11,7 @@ import {
   EdgeLabelRenderer,
   getBezierPath,
   type EdgeProps,
+  type Edge,
 } from '@xyflow/react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Layers, ArrowRight } from 'lucide-react'
@@ -22,6 +23,7 @@ interface AggregatedEdgeData {
   sourceEdges?: string[]
   edgeType?: string
   isAggregated?: boolean
+  [key: string]: unknown
 }
 
 export const AggregatedEdge = memo(function AggregatedEdge({
@@ -35,12 +37,12 @@ export const AggregatedEdge = memo(function AggregatedEdge({
   data,
   selected,
   style = {},
-}: EdgeProps<AggregatedEdgeData>) {
+}: EdgeProps<Edge<AggregatedEdgeData>>) {
   const [isHovered, setIsHovered] = useState(false)
-  
+
   const confidence = data?.confidence ?? 0.5
   const sourceCount = data?.sourceEdgeCount ?? 1
-  
+
   // Calculate path
   const [edgePath, labelX, labelY] = getBezierPath({
     sourceX,
@@ -50,16 +52,16 @@ export const AggregatedEdge = memo(function AggregatedEdge({
     targetY,
     targetPosition,
   })
-  
+
   // Color based on confidence
   const getConfidenceColor = (conf: number) => {
     if (conf >= 0.8) return '#22c55e' // Green - high confidence
     if (conf >= 0.5) return '#f59e0b' // Amber - medium confidence
     return '#ef4444' // Red - low confidence
   }
-  
+
   const edgeColor = getConfidenceColor(confidence)
-  
+
   return (
     <>
       {/* Edge Path */}
@@ -67,7 +69,7 @@ export const AggregatedEdge = memo(function AggregatedEdge({
         id={id}
         path={edgePath}
         style={{
-          ...style,
+          ...(style as React.CSSProperties),
           stroke: edgeColor,
           strokeWidth: selected ? 3 : 2,
           strokeDasharray: '8 4',
@@ -76,7 +78,7 @@ export const AggregatedEdge = memo(function AggregatedEdge({
         interactionWidth={20}
         className="transition-all duration-200"
       />
-      
+
       {/* Animated Flow Particles */}
       <path
         d={edgePath}
@@ -89,7 +91,7 @@ export const AggregatedEdge = memo(function AggregatedEdge({
           opacity: 0.5,
         }}
       />
-      
+
       {/* Hover/Interactive Area */}
       <path
         d={edgePath}
@@ -100,7 +102,7 @@ export const AggregatedEdge = memo(function AggregatedEdge({
         onMouseLeave={() => setIsHovered(false)}
         className="cursor-pointer"
       />
-      
+
       {/* Edge Label */}
       <EdgeLabelRenderer>
         <div
@@ -113,7 +115,7 @@ export const AggregatedEdge = memo(function AggregatedEdge({
           onMouseLeave={() => setIsHovered(false)}
         >
           {/* Badge */}
-          <div 
+          <div
             className={cn(
               "flex items-center gap-1 px-2 py-1 rounded-full",
               "text-2xs font-medium transition-all duration-200",
@@ -126,7 +128,7 @@ export const AggregatedEdge = memo(function AggregatedEdge({
             <Layers className="w-3 h-3" />
             <span>{sourceCount}</span>
           </div>
-          
+
           {/* Tooltip on Hover */}
           <AnimatePresence>
             {isHovered && (
@@ -144,20 +146,20 @@ export const AggregatedEdge = memo(function AggregatedEdge({
                   <ArrowRight className="w-3 h-3 text-amber-500" />
                   Aggregated Lineage
                 </div>
-                
+
                 <div className="space-y-1.5 text-ink-secondary">
                   <div className="flex justify-between">
                     <span>Source Edges:</span>
                     <span className="font-medium text-ink">{sourceCount}</span>
                   </div>
-                  
+
                   <div className="flex justify-between items-center">
                     <span>Confidence:</span>
                     <div className="flex items-center gap-1.5">
                       <div className="w-12 h-1.5 bg-black/10 dark:bg-white/10 rounded-full overflow-hidden">
-                        <div 
+                        <div
                           className="h-full rounded-full transition-all"
-                          style={{ 
+                          style={{
                             width: `${confidence * 100}%`,
                             backgroundColor: edgeColor,
                           }}
@@ -169,7 +171,7 @@ export const AggregatedEdge = memo(function AggregatedEdge({
                     </div>
                   </div>
                 </div>
-                
+
                 <div className="mt-2 pt-2 border-t border-glass-border text-2xs text-ink-muted">
                   Click to see column-level details
                 </div>

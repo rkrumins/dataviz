@@ -106,7 +106,7 @@ export const AssetNode = memo(function AssetNode({
                 {data.urn}
               </code>
             )}
-            {data.metadata?.schema && (
+            {!!data.metadata?.schema && (
               <div className="text-2xs text-ink-muted">
                 Schema: <span className="text-ink-secondary">{data.metadata.schema as string}</span>
               </div>

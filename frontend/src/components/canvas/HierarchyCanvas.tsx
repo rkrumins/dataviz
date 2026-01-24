@@ -15,16 +15,10 @@ import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
-import type { EntityTypeSchema } from '@/types/schema'
+// import type { EntityTypeSchema } from '@/types/schema'
 
 // Dynamic icon component
-function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
-  const IconComponent = (LucideIcons as Record<string, React.ComponentType<{ className?: string; style?: React.CSSProperties }>>)[name]
-  if (!IconComponent) {
-    return <LucideIcons.Box className={className} style={style} />
-  }
-  return <IconComponent className={className} style={style} />
-}
+// DynamicIcon removed
 
 interface HierarchyNode {
   id: string
@@ -44,13 +38,13 @@ interface HierarchyCanvasProps {
 function countDescendants(node: HierarchyNode): { total: number; byType: Record<string, number> } {
   const byType: Record<string, number> = {}
   let total = 0
-  
+
   const traverse = (n: HierarchyNode) => {
     total++
     byType[n.typeId] = (byType[n.typeId] ?? 0) + 1
     n.children.forEach(traverse)
   }
-  
+
   node.children.forEach(traverse)
   return { total, byType }
 }
@@ -62,64 +56,64 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const schema = useSchemaStore((s) => s.schema)
-  
+
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<string[]>([])
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
   const searchInputRef = useRef<HTMLInputElement>(null)
-  
+
   // Build hierarchy tree from nodes and edges
   const hierarchyTree = useMemo(() => {
     if (!nodes.length) return []
-    
+
     // Find containment edges
-    const containmentEdges = edges.filter((e) => 
+    const containmentEdges = edges.filter((e) =>
       e.data?.relationship === 'contains' || e.data?.edgeType === 'contains'
     )
-    
+
     // Build tree from containment edges
     const nodeMap = new Map(nodes.map((n) => [n.id, n]))
     const childMap = new Map<string, string[]>()
     const hasParent = new Set<string>()
-    
+
     containmentEdges.forEach((edge) => {
       const children = childMap.get(edge.source) ?? []
       children.push(edge.target)
       childMap.set(edge.source, children)
       hasParent.add(edge.target)
     })
-    
+
     // Find root nodes (no parent in containment hierarchy)
-    const rootNodes = nodes.filter((n) => 
+    const rootNodes = nodes.filter((n) =>
       !hasParent.has(n.id) && n.data.type !== 'ghost'
     )
-    
+
     const buildTree = (nodeId: string, depth: number): HierarchyNode | null => {
       const node = nodeMap.get(nodeId)
       if (!node) return null
-      
+
       const children = (childMap.get(nodeId) ?? [])
         .map((childId) => buildTree(childId, depth + 1))
         .filter((n): n is HierarchyNode => n !== null)
         .sort((a, b) => a.name.localeCompare(b.name))
-      
+
       return {
         id: node.id,
         typeId: node.data.type,
-        name: node.data.label ?? node.data.businessLabel ?? node.id,
+        name: (node.data.label as string) ?? (node.data.businessLabel as string) ?? node.id,
         data: node.data as Record<string, unknown>,
         children,
         depth,
       }
     }
-    
+
     return rootNodes
       .map((n) => buildTree(n.id, 0))
       .filter((n): n is HierarchyNode => n !== null)
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [nodes, edges])
-  
+
   // Flatten tree for search
   const flatNodes = useMemo(() => {
     const flat: HierarchyNode[] = []
@@ -130,31 +124,31 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     hierarchyTree.forEach((root) => traverse(root, []))
     return flat
   }, [hierarchyTree])
-  
+
   // Search functionality
   useEffect(() => {
     if (!searchQuery.trim()) {
       setSearchResults([])
       return
     }
-    
+
     const query = searchQuery.toLowerCase()
     const results = flatNodes
-      .filter((node) => 
+      .filter((node) =>
         node.name.toLowerCase().includes(query) ||
         node.typeId.toLowerCase().includes(query) ||
         (node.data.urn as string)?.toLowerCase().includes(query)
       )
       .map((n) => n.id)
-    
+
     setSearchResults(results)
   }, [searchQuery, flatNodes])
-  
+
   // Expand path to search result
   const expandToNode = useCallback((nodeId: string) => {
     const node = flatNodes.find((n) => n.id === nodeId)
     if (!node) return
-    
+
     const path = node.data._path as string[] | undefined
     if (path) {
       setExpandedNodes((prev) => {
@@ -163,17 +157,17 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         return next
       })
     }
-    
+
     // Select and scroll to node
     selectNode(nodeId)
-    
+
     // Scroll to node after expansion
     setTimeout(() => {
       const element = document.getElementById(`hierarchy-node-${nodeId}`)
       element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }, 100)
   }, [flatNodes, selectNode])
-  
+
   // Toggle node expansion
   const toggleNode = useCallback((nodeId: string) => {
     setExpandedNodes((prev) => {
@@ -186,17 +180,17 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       return next
     })
   }, [])
-  
+
   // Expand/collapse all
   const expandAll = useCallback(() => {
     const allIds = flatNodes.map((n) => n.id)
     setExpandedNodes(new Set(allIds))
   }, [flatNodes])
-  
+
   const collapseAll = useCallback(() => {
     setExpandedNodes(new Set())
   }, [])
-  
+
   // Keyboard shortcut for search
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -209,7 +203,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         searchInputRef.current?.blur()
       }
     }
-    
+
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
@@ -224,7 +218,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             Reference Model View
           </span>
           <div className="flex-1" />
-          
+
           {/* Search */}
           <div className="relative">
             <LucideIcons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
@@ -237,7 +231,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               className="input pl-9 pr-8 py-1.5 w-64 text-sm"
             />
             {searchQuery && (
-              <button 
+              <button
                 onClick={() => setSearchQuery('')}
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink"
               >
@@ -245,17 +239,17 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               </button>
             )}
           </div>
-          
+
           {/* Expand/Collapse All */}
           <div className="flex items-center gap-1">
-            <button 
+            <button
               onClick={expandAll}
               className="btn btn-ghost btn-sm"
               title="Expand All"
             >
               <LucideIcons.ChevronsDownUp className="w-4 h-4 rotate-180" />
             </button>
-            <button 
+            <button
               onClick={collapseAll}
               className="btn btn-ghost btn-sm"
               title="Collapse All"
@@ -263,13 +257,13 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               <LucideIcons.ChevronsDownUp className="w-4 h-4" />
             </button>
           </div>
-          
+
           <div className="flex items-center gap-2 text-sm text-ink-muted">
             <span>Flow: Left → Right</span>
             <LucideIcons.ArrowRight className="w-4 h-4" />
           </div>
         </div>
-        
+
         {/* Search Results */}
         {searchQuery && searchResults.length > 0 && (
           <div className="mt-3 flex items-center gap-2 flex-wrap">
@@ -296,7 +290,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           </div>
         )}
       </div>
-      
+
       {/* Hierarchy Content */}
       <div className="flex-1 overflow-auto p-6 custom-scrollbar">
         {hierarchyTree.length === 0 ? (
@@ -333,13 +327,13 @@ interface HierarchyContainerProps {
   depth?: number
 }
 
-function HierarchyContainer({ 
-  node, 
-  schema, 
-  selectedNodeId, 
+function HierarchyContainer({
+  node,
+  schema,
+  selectedNodeId,
   expandedNodes,
   searchResults,
-  onSelect, 
+  onSelect,
   onToggle,
   depth = 0,
 }: HierarchyContainerProps) {
@@ -349,7 +343,7 @@ function HierarchyContainer({
   const isExpanded = expandedNodes.has(node.id)
   const isSelected = selectedNodeId === node.id
   const isSearchResult = searchResults.includes(node.id)
-  
+
   // Calculate roll-up counts
   const rollUpCounts = useMemo(() => {
     if (hasChildren && !isExpanded) {
@@ -357,11 +351,11 @@ function HierarchyContainer({
     }
     return null
   }, [node, hasChildren, isExpanded])
-  
+
   // Format roll-up display
   const rollUpDisplay = useMemo(() => {
     if (!rollUpCounts || !schema) return null
-    
+
     const parts: string[] = []
     Object.entries(rollUpCounts.byType).forEach(([typeId, count]) => {
       const type = schema.entityTypes.find((et) => et.id === typeId)
@@ -369,27 +363,27 @@ function HierarchyContainer({
         parts.push(`${count} ${count === 1 ? type.name.toLowerCase() : type.pluralName.toLowerCase()}`)
       }
     })
-    
+
     return parts.join(', ')
   }, [rollUpCounts, schema])
-  
+
   // Indentation based on depth
   const indent = depth * 24
-  
+
   return (
-    <div 
+    <div
       id={`hierarchy-node-${node.id}`}
       style={{ marginLeft: indent }}
       className="relative"
     >
       {/* Connector line */}
       {depth > 0 && (
-        <div 
+        <div
           className="absolute left-0 top-0 bottom-0 w-px bg-glass-border"
           style={{ left: -12 }}
         />
       )}
-      
+
       {/* Node Container */}
       <motion.div
         layout
@@ -406,7 +400,7 @@ function HierarchyContainer({
         }}
       >
         {/* Header (always visible) */}
-        <div 
+        <div
           className={cn(
             "flex items-center gap-3 px-4 py-3 cursor-pointer",
             "hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
@@ -434,26 +428,21 @@ function HierarchyContainer({
               </motion.div>
             </button>
           )}
-          
+
           {/* Spacer if no children */}
           {!hasChildren && <div className="w-6" />}
-          
-          {/* Icon */}
-          <div 
-            className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
-            style={{ backgroundColor: `${visual?.color ?? '#6b7280'}15` }}
-          >
-            <DynamicIcon 
-              name={visual?.icon ?? 'Box'} 
-              className="w-5 h-5"
-              style={{ color: visual?.color ?? '#6b7280' }}
-            />
-          </div>
-          
+
+
+
+
+
+
+
+
           {/* Content */}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <span 
+              <span
                 className="text-2xs font-medium uppercase tracking-wider"
                 style={{ color: visual?.color ?? '#6b7280' }}
               >
@@ -468,7 +457,7 @@ function HierarchyContainer({
             <h4 className="text-sm font-medium text-ink truncate">
               {node.name}
             </h4>
-            
+
             {/* Roll-up counts when collapsed */}
             {rollUpDisplay && !isExpanded && (
               <p className="text-2xs text-ink-muted mt-0.5">
@@ -476,12 +465,12 @@ function HierarchyContainer({
               </p>
             )}
           </div>
-          
+
           {/* Tags */}
           {node.data.classifications && Array.isArray(node.data.classifications) && (
             <div className="flex items-center gap-1">
               {(node.data.classifications as string[]).slice(0, 2).map((tag) => (
-                <span 
+                <span
                   key={tag}
                   className="px-1.5 py-0.5 rounded text-2xs font-medium"
                   style={{ backgroundColor: `${visual?.color ?? '#6b7280'}15`, color: visual?.color ?? '#6b7280' }}
@@ -491,7 +480,7 @@ function HierarchyContainer({
               ))}
             </div>
           )}
-          
+
           {/* Expand indicator */}
           {hasChildren && !isExpanded && (
             <div className="flex items-center gap-1 text-ink-muted">
@@ -499,7 +488,7 @@ function HierarchyContainer({
             </div>
           )}
         </div>
-        
+
         {/* Children (collapsible) */}
         <AnimatePresence>
           {hasChildren && isExpanded && (

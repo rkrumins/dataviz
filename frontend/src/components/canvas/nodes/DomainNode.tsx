@@ -7,15 +7,15 @@ import type { LineageNode } from '@/store/canvas'
 
 type DomainNodeProps = NodeProps<LineageNode>
 
-export const DomainNode = memo(function DomainNode({ 
-  data, 
+export const DomainNode = memo(function DomainNode({
+  data,
   selected,
-  dragging 
+  dragging
 }: DomainNodeProps) {
   const mode = usePersonaStore((s) => s.mode)
-  
-  const label = mode === 'business' 
-    ? (data.businessLabel || data.label) 
+
+  const label = mode === 'business'
+    ? (data.businessLabel || data.label)
     : (data.technicalLabel || data.label)
 
   return (

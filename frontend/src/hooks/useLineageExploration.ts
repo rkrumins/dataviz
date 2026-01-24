@@ -228,7 +228,7 @@ export function computeTrace(
   downstreamDepth: number,
   includeChildLineage: boolean
 ): TraceResult {
-  const nodeMap = new Map(allNodes.map(n => [n.id, n]))
+  // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
   const containmentMap = buildContainmentMap(allNodes, allEdges)
 
   // Build adjacency lists

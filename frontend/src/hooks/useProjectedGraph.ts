@@ -109,7 +109,7 @@ export function useProjectedGraph(): UseProjectedGraphResult {
  * Hook to get just the visible entity types for the current view
  */
 export function useVisibleEntityTypes(): string[] {
-  const _activeViewId = useSchemaStore((s) => s.activeViewId)
+  // const _activeViewId = useSchemaStore((s) => s.activeViewId)
   const getActiveView = useSchemaStore((s) => s.getActiveView)
   const activeView = getActiveView()
 

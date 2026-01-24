@@ -17,12 +17,12 @@ function App() {
     // Load/refresh schema - check version to handle updates
     const currentVersion = schema?.version
     const defaultVersion = defaultWorkspaceSchema.version
-    
+
     if (!schema || currentVersion !== defaultVersion) {
       // Force refresh schema when version changes or not loaded
       loadSchema(defaultWorkspaceSchema)
     }
-    
+
     // Initialize demo data with generator (5 domains, 10 apps each, 5-15 assets per app, 10-100 columns per asset)
     initializeDemoData(setNodes, setEdges, setActiveLens, true, {
       domainCount: 2,
@@ -37,11 +37,11 @@ function App() {
   // Apply theme class to document
   useEffect(() => {
     const root = document.documentElement
-    
+
     if (theme === 'system') {
       const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches
       root.classList.toggle('dark', systemDark)
-      
+
       // Listen for system theme changes
       const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
       const handler = (e: MediaQueryListEvent) => {

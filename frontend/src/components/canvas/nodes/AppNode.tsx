@@ -116,9 +116,9 @@ export const AppNode = memo(function AppNode({
         {data.metadata && (
           <div className="mt-2 flex items-center gap-3 text-2xs text-ink-muted">
             {data.metadata.assetCount !== undefined && (
-              <span>{data.metadata.assetCount} assets</span>
+              <span>{String(data.metadata.assetCount)} assets</span>
             )}
-            {data.metadata.lastUpdated && (
+            {!!data.metadata.lastUpdated && (
               <span>{data.metadata.lastUpdated as string}</span>
             )}
           </div>

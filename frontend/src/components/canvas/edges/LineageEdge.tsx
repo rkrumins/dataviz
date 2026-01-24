@@ -14,6 +14,7 @@ interface LineageEdgeData {
   edgeType?: 'produces' | 'consumes' | 'transforms'
   animated?: boolean
   label?: string
+  [key: string]: unknown
 }
 
 export type LineageEdgeProps = EdgeProps<Edge<LineageEdgeData>>

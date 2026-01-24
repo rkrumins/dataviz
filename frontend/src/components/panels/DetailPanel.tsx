@@ -14,7 +14,7 @@ import {
   Calendar,
   Database
 } from 'lucide-react'
-import { useCanvasStore, type LineageNode } from '@/store/canvas'
+import { useCanvasStore } from '@/store/canvas'
 import { usePersonaStore } from '@/store/persona'
 import { cn } from '@/lib/utils'
 

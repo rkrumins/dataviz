@@ -1,13 +1,12 @@
-import { 
-  LayoutDashboard, 
-  Network, 
-  Layers, 
-  Bookmark, 
+import {
+  LayoutDashboard,
+  Network,
+  Layers,
+  Bookmark,
   History,
   ChevronLeft,
   ChevronRight,
   Plus,
-  Settings,
   Palette
 } from 'lucide-react'
 import { usePreferencesStore } from '@/store/preferences'
@@ -36,19 +35,19 @@ export function SidebarNav() {
   const activeLensId = useCanvasStore((s) => s.activeLensId)
   const schema = useSchemaStore((s) => s.schema)
   const { openViewEditor } = useViewEditorModal()
-  
+
   // Get views from schema
   const savedViews = schema?.views ?? []
   const pinnedViews = savedViews.filter((v) => v.isDefault)
-  
+
   // Entity types from schema for quick access
-  const entityTypes = schema?.entityTypes.slice(0, 5) ?? []
-  
+  // const entityTypes = schema?.entityTypes.slice(0, 5) ?? []
+
   // Handle view creation
   const handleCreateView = () => {
     openViewEditor()
   }
-  
+
   // Handle view edit
   const handleEditView = (viewId: string) => {
     openViewEditor(viewId)
@@ -78,7 +77,7 @@ export function SidebarNav() {
         {!sidebarCollapsed && (
           <div className="pt-4">
             <SectionHeader title="Active View" />
-            <ViewSelector 
+            <ViewSelector
               onCreateView={handleCreateView}
               onEditView={handleEditView}
             />
@@ -159,7 +158,7 @@ export function SidebarNav() {
           <ChevronLeft className="w-3 h-3" />
         )}
       </button>
-      
+
     </aside>
   )
 }
@@ -210,7 +209,7 @@ function SectionHeader({ title, onAdd }: SectionHeaderProps) {
         {title}
       </span>
       {onAdd && (
-        <button 
+        <button
           onClick={onAdd}
           className="p-1 rounded hover:bg-black/5 dark:hover:bg-white/5"
         >
@@ -222,7 +221,7 @@ function SectionHeader({ title, onAdd }: SectionHeaderProps) {
 }
 
 interface ViewButtonProps {
-  view: { id: string; name: string; lensId: string }
+  view: { id: string; name: string }
   isPinned?: boolean
 }
 

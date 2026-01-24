@@ -3,7 +3,7 @@ import { Handle, Position, type NodeProps, NodeToolbar } from '@xyflow/react'
 import * as LucideIcons from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSchemaStore } from '@/store/schema'
-import { usePersonaStore } from '@/store/persona'
+// import { usePersonaStore } from '@/store/persona'
 import { cn } from '@/lib/utils'
 import type { EntityInstance } from '@/types/schema'
 
@@ -22,7 +22,8 @@ interface GenericNodeData extends EntityInstance {
   childCount?: number
 }
 
-type GenericNodeProps = NodeProps<Record<string, unknown>>
+import type { Node } from '@xyflow/react'
+type GenericNodeProps = NodeProps<Node<Record<string, unknown>>>
 
 /**
  * GenericNode - Renders any entity type based on schema configuration
@@ -42,17 +43,17 @@ export const GenericNode = memo(function GenericNode({
     : (rawData as unknown as GenericNodeData)
 
   // Support both typeId and type fields
-  const typeId = entityData.typeId || (entityData as Record<string, unknown>).type as string || 'unknown'
+  const typeId = entityData.typeId || (entityData as unknown as Record<string, unknown>).type as string || 'unknown'
 
   const getEntityType = useSchemaStore((s) => s.getEntityType)
   const getEntityVisual = useSchemaStore((s) => s.getEntityVisual)
-  const mode = usePersonaStore((s) => s.mode)
+  // const mode = usePersonaStore((s) => s.mode)
 
   const entityType = getEntityType(typeId)
   const visual = getEntityVisual(typeId)
 
   if (!entityType || !visual) {
-    return <FallbackNode data={entityData} selected={selected ?? false} />
+    return <FallbackNode data={entityData} selected={!!selected} />
   }
 
   // Get fields to display in the node
@@ -68,9 +69,9 @@ export const GenericNode = memo(function GenericNode({
     entityFields['label'] as string ||
     entityFields['businessLabel'] as string ||
     entityData.id || 'Unknown'
-  const secondaryLabel = mode === 'technical'
-    ? (entityFields['urn'] as string)
-    : (entityFields['description'] as string)
+  // const secondaryLabel = mode === 'technical'
+  //   ? (entityFields['urn'] as string)
+  //   : (entityFields['description'] as string)
 
   // Size classes
   const sizeClasses = {
@@ -107,7 +108,7 @@ export const GenericNode = memo(function GenericNode({
       {/* Node Toolbar (appears on selection) */}
       {entityType.behavior.traceable && (
         <NodeToolbar
-          isVisible={selected}
+          isVisible={!!selected}
           position={Position.Top}
           className="flex items-center gap-1 glass-panel-subtle rounded-lg p-1"
         >
@@ -139,8 +140,8 @@ export const GenericNode = memo(function GenericNode({
           shapeClasses[visual.shape],
           borderClasses[visual.borderStyle],
           "bg-canvas-elevated",
-          selected && "ring-2 ring-offset-2",
-          dragging && "opacity-80 cursor-grabbing",
+          !!selected && "ring-2 ring-offset-2",
+          !!dragging && "opacity-80 cursor-grabbing",
           isGhost && "opacity-60"
         )}
         style={{

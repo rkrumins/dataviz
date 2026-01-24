@@ -54,7 +54,7 @@ const nodeTypes = {
 // Register custom edge types
 const edgeTypes = {
   lineage: LineageEdge,
-  aggregated: AggregatedEdge,
+  aggregated: AggregatedEdge as any,
 }
 
 export function LineageCanvas() {

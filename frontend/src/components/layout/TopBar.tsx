@@ -1,4 +1,4 @@
-import { Search, Command, Settings, User, Moon, Sun, Monitor } from 'lucide-react'
+import { Search, Settings, User, Moon, Sun, Monitor } from 'lucide-react'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaStore } from '@/store/persona'
@@ -21,8 +21,8 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
             "w-8 h-8 rounded-lg flex items-center justify-center",
             "bg-gradient-to-br from-accent-lineage to-accent-business"
           )}>
-            <svg 
-              viewBox="0 0 24 24" 
+            <svg
+              viewBox="0 0 24 24"
               className="w-5 h-5 text-white"
               fill="none"
               stroke="currentColor"
@@ -70,18 +70,18 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
       <div className="flex items-center gap-2">
         {/* Persona Toggle */}
         <PersonaToggle />
-        
+
         {/* Divider */}
         <div className="w-px h-6 bg-glass-border mx-2" />
-        
+
         {/* Theme Switcher */}
         <ThemeSwitcher theme={theme} onChange={setTheme} />
-        
+
         {/* Settings */}
         <button className="btn btn-ghost p-2 rounded-lg">
           <Settings className="w-5 h-5 text-ink-secondary" />
         </button>
-        
+
         {/* User Menu */}
         <button className={cn(
           "w-8 h-8 rounded-full bg-accent-lineage/20 flex items-center justify-center",
@@ -106,7 +106,7 @@ function ThemeSwitcher({ theme, onChange }: ThemeSwitcherProps) {
     system: Monitor,
   }
   const Icon = icons[theme]
-  
+
   const cycleTheme = () => {
     const order: Array<'light' | 'dark' | 'system'> = ['light', 'dark', 'system']
     const currentIndex = order.indexOf(theme)

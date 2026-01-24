@@ -231,6 +231,7 @@ export interface ViewLayerConfig {
   color?: string;
   entityTypes: string[];
   order: number;
+  sequence?: number; // Visual order (left-to-right)
 
   // Logical Hierarchy (New)
   logicalNodes?: LogicalNodeConfig[];
@@ -590,5 +591,21 @@ export interface RelationshipInstance {
   sourceId: string;
   targetId: string;
   data?: Record<string, unknown>;
+}
+
+/**
+ * Configuration for scope-based filtering
+ */
+export interface ScopeFilterConfig {
+  id: string;
+  name: string;
+  description?: string;
+  rules: ScopeFilterRule[];
+}
+
+export interface ScopeFilterRule {
+  field: string;
+  operator: 'equals' | 'contains' | 'startsWith' | 'in';
+  value: unknown;
 }
 
