@@ -3,6 +3,7 @@ import { Handle, Position, type NodeProps, NodeToolbar } from '@xyflow/react'
 import * as LucideIcons from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSchemaStore } from '@/store/schema'
+import { useLineageExplorationStore } from '@/hooks/useLineageExploration'
 // import { usePersonaStore } from '@/store/persona'
 import { cn } from '@/lib/utils'
 import type { EntityInstance } from '@/types/schema'
@@ -32,6 +33,7 @@ type GenericNodeProps = NodeProps<Node<Record<string, unknown>>>
  * It reads the entity type schema and renders accordingly.
  */
 export const GenericNode = memo(function GenericNode({
+  id,
   data,
   selected,
   dragging,
@@ -41,6 +43,13 @@ export const GenericNode = memo(function GenericNode({
   const entityData: GenericNodeData = rawData.data
     ? (rawData.data as GenericNodeData)
     : (rawData as unknown as GenericNodeData)
+
+  const loadMoreNodes = useLineageExplorationStore((s) => s.loadMoreNodes)
+  const toggleExpanded = useLineageExplorationStore((s) => s.toggleExpanded)
+
+  const hiddenCount = (entityData as any)._hiddenCount || 0
+  const paginationId = (entityData as any)._paginationId
+
 
   // Support both typeId and type fields
   const typeId = entityData.typeId || (entityData as unknown as Record<string, unknown>).type as string || 'unknown'
@@ -201,6 +210,10 @@ export const GenericNode = memo(function GenericNode({
           {/* Expand Button */}
           {isExpandable && (
             <button
+              onClick={(e) => {
+                e.stopPropagation()
+                toggleExpanded(id)
+              }}
               className={cn(
                 "w-5 h-5 rounded flex items-center justify-center",
                 "hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
@@ -262,6 +275,27 @@ export const GenericNode = memo(function GenericNode({
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* Load More Button */}
+        {hiddenCount > 0 && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              if (paginationId) {
+                loadMoreNodes(paginationId, 5)
+              }
+            }}
+            title={`Load ${hiddenCount} more items`}
+            className={cn(
+              "absolute -bottom-2 -right-2 w-6 h-6 rounded-full flex items-center justify-center",
+              "bg-canvas-elevated shadow-md border-2",
+              "hover:scale-110 transition-transform cursor-pointer"
+            )}
+            style={{ borderColor: visual.color }}
+          >
+            <LucideIcons.Plus className="w-3.5 h-3.5" style={{ color: visual.color }} />
+          </button>
+        )}
       </div>
 
       {/* Output Handle */}

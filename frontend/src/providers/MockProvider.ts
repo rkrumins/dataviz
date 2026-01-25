@@ -111,6 +111,40 @@ export class MockProvider implements GraphDataProvider {
         )
         this.edges = demoEdges.map(convertEdge)
 
+        // GENERATE MOCK DATA FOR PAGINATION TESTING
+        // Find a table and add 50 columns to it
+        const targetTable = this.nodes.get('urn:li:dataset:(urn:li:dataPlatform:hive,SampleHiveDb.LineageTable,PROD)')
+            || Array.from(this.nodes.values()).find(n => n.entityType === 'dataset')
+
+        if (targetTable) {
+            console.log(`[MockProvider] Generating 50 columns for ${targetTable.displayName}`)
+            targetTable.childCount = 50 // Force metadata count
+
+            for (let i = 0; i < 50; i++) {
+                const columnUrn = `${targetTable.urn}/col_${i}`
+                const columnNode: GraphNode = {
+                    urn: columnUrn,
+                    entityType: 'schemaField',
+                    displayName: `generated_col_${i}`,
+                    description: `Auto-generated column ${i}`,
+                    properties: {},
+                    tags: [],
+                    sourceSystem: targetTable.sourceSystem
+                }
+
+                this.nodes.set(columnUrn, columnNode)
+
+                // Add edge (will be indexed below)
+                this.edges.push({
+                    id: `gen_edge_${i}`,
+                    sourceUrn: targetTable.urn,
+                    targetUrn: columnUrn,
+                    edgeType: 'CONTAINS',
+                    properties: {}
+                })
+            }
+        }
+
         // Build indices
         this.childrenMap = new Map()
         this.parentMap = new Map()
@@ -125,31 +159,40 @@ export class MockProvider implements GraphDataProvider {
             const sourceId = edge.sourceUrn
             const targetId = edge.targetUrn
 
-            if (edge.edgeType === 'CONTAINS') {
-                // Build containment hierarchy
-                const children = this.childrenMap.get(sourceId) ?? []
-                children.push(targetId)
-                this.childrenMap.set(sourceId, children)
-                this.parentMap.set(targetId, sourceId)
-            } else {
-                // Build lineage adjacency
-                // Downstream: edges where this node is source
-                const downstream = this.downstreamMap.get(sourceId) ?? []
-                downstream.push(edge)
-                this.downstreamMap.set(sourceId, downstream)
+            // Note: Indices now store ALL relationships. 
+            // The determination of "Containment" happens at QUERY time based on View Config.
 
-                // Upstream: edges where this node is target
-                const upstream = this.upstreamMap.get(targetId) ?? []
-                upstream.push(edge)
-                this.upstreamMap.set(targetId, upstream)
-            }
+            // Build raw adjacency for ALL edge types
+            // Downstream: edges where this node is source
+            const downstream = this.downstreamMap.get(sourceId) ?? []
+            downstream.push(edge)
+            this.downstreamMap.set(sourceId, downstream)
+
+            // Upstream: edges where this node is target
+            const upstream = this.upstreamMap.get(targetId) ?? []
+            upstream.push(edge)
+            this.upstreamMap.set(targetId, upstream)
         }
 
-        // Update child counts
-        for (const [parentId, childIds] of this.childrenMap) {
-            const node = this.nodes.get(parentId)
-            if (node) {
-                node.childCount = childIds.length
+        // We can't precompute "child count" easily without knowing WHICH edges are containment.
+        // So we will compute it dynamically or cache common patterns?
+        // For MockProvider, let's just precompute a "default" containment (CONTAINS) 
+        // but allow overrides.
+        this.recomputeChildCounts(['CONTAINS'])
+    }
+
+    private recomputeChildCounts(containmentTypes: string[]) {
+        // Reset counts
+        for (const node of this.nodes.values()) {
+            node.childCount = 0
+        }
+
+        for (const edge of this.edges) {
+            if (containmentTypes.includes(edge.edgeType)) {
+                const parent = this.nodes.get(edge.sourceUrn)
+                if (parent) {
+                    parent.childCount = (parent.childCount || 0) + 1
+                }
             }
         }
     }
@@ -249,17 +292,38 @@ export class MockProvider implements GraphDataProvider {
     // Containment Hierarchy
     // ==========================================
 
-    async getChildren(parentUrn: URN, entityTypes?: EntityType[]): Promise<GraphNode[]> {
-        const childIds = this.childrenMap.get(parentUrn) ?? []
-        let children = childIds
-            .map((id) => this.nodes.get(id))
+    async getChildren(
+        parentUrn: URN,
+        options?: {
+            entityTypes?: EntityType[]
+            edgeTypes?: string[]
+            offset?: number
+            limit?: number
+        }
+    ): Promise<GraphNode[]> {
+        const edgeTypes = options?.edgeTypes ?? ['CONTAINS'] // Default to CONTAINS
+        const offset = options?.offset ?? 0
+        const limit = options?.limit ?? 100
+
+        // Find all edges from this parent that match the containment types
+        const edges = this.downstreamMap.get(parentUrn) ?? []
+        const relevantEdges = edges.filter(e => edgeTypes.includes(e.edgeType))
+
+        // Get child nodes
+        let children = relevantEdges
+            .map(e => this.nodes.get(e.targetUrn))
             .filter((n): n is GraphNode => n !== undefined)
 
-        if (entityTypes?.length) {
-            children = children.filter((n) => entityTypes.includes(n.entityType))
+        // Filter by entity type
+        if (options?.entityTypes?.length) {
+            children = children.filter((n) => options.entityTypes!.includes(n.entityType))
         }
 
-        return children
+        // Sort alphabetically by default
+        children.sort((a, b) => a.displayName.localeCompare(b.displayName))
+
+        // Apply pagination
+        return children.slice(offset, offset + limit)
     }
 
     async getParent(childUrn: URN): Promise<GraphNode | null> {

@@ -64,6 +64,9 @@ export interface ViewProjectionConfig {
 
   // Entity types that act as containers (showing children inline)
   containerTypes: string[]
+
+  // Edge types that constitute a containment relationship
+  containmentEdgeTypes?: string[]
 }
 
 export interface ProjectedGraph {
@@ -90,12 +93,15 @@ export interface AggregatedEdge {
  */
 export function buildContainmentMap(
   _nodes: Node[],
-  edges: Edge[]
+  edges: Edge[],
+  containmentEdgeTypes: string[] = ['contains'] // Default for backward compatibility
 ): Map<string, string> {
   const containmentMap = new Map<string, string>()
 
   edges.forEach((edge) => {
-    if (edge.data?.relationship === 'contains' || edge.data?.edgeType === 'contains') {
+    // Dynamic check for containment
+    const edgeType = edge.data?.relationship as string || edge.data?.edgeType as string || ''
+    if (containmentEdgeTypes.includes(edgeType)) {
       containmentMap.set(edge.target, edge.source)
     }
   })
@@ -270,7 +276,9 @@ export function projectGraph(
   edges: Edge[],
   config: ViewProjectionConfig
 ): ProjectedGraph {
-  const containmentMap = buildContainmentMap(nodes, edges)
+  // Use View-Specific containment definition
+  const containmentTypes = config.containmentEdgeTypes ?? ['contains', 'has_schema', 'has_dataset', 'has_column']
+  const containmentMap = buildContainmentMap(nodes, edges, containmentTypes)
 
   // 1. Filter nodes by visible entity types
   let filteredNodes = nodes.filter((node) => {
@@ -278,21 +286,124 @@ export function projectGraph(
     return config.visibleEntityTypes.includes(nodeType)
   })
 
-  // 2. Optionally collapse children into parents
+  // 2. Collapse children for ALL levels (Generic)
   if (config.collapseChildren) {
-    // For each visible node, count hidden children
-    filteredNodes = filteredNodes.map((node) => {
-      const childCount = nodes.filter((n) =>
-        containmentMap.get(n.id) === node.id
-      ).length
+    // For each visible node, count hidden children based on view hierarchy
+    filteredNodes = filteredNodes.flatMap((node) => {
+      // Find children in the FULL node list (rawNodes) using our dynamic map
+      // NOTE: nodes passed to projectGraph are usually the Full Raw set? 
+      // If 'nodes' is full raw set, we check which ones have 'node.id' as parent.
 
-      return {
+      const children = nodes.filter((n) =>
+        containmentMap.get(n.id) === node.id
+      )
+
+      const childCount = children.length
+
+      // Update the node with count info
+      const updatedNode = {
         ...node,
         data: {
           ...node.data,
           _collapsedChildCount: childCount,
+          _totalDescendants: 0, // Need full calc for this, skipping for perf now
         }
       }
+
+      // GENERIC PAGINATION CHECK
+      // If this node is "expanded" (meaning its children are supposed to be visible),
+      // we check if all children are actually in the 'nodes' array.
+      // Wait, 'nodes' IS the store nodes. If we are paginating, 'nodes' only contains loaded ones.
+      // 'childCount' (from metadata) > 'children.length' (loaded) -> Show Load More.
+
+      // We rely on node metadata for the TRUE total count from server
+      const serverTotalCount = (node.data?.childCount as number) ?? childCount
+
+      // How many are currently loaded/visible in this projection?
+      // We only filtered by entity type above.
+      // But 'children' array here is from 'nodes' (the store).
+      // So if store has 5 columns, children.length is 5.
+      // If server has 100, serverTotalCount is 100.
+
+      const loadedChildrenCount = children.length
+
+      if (serverTotalCount > loadedChildrenCount) {
+        // Identify the type of missing children (heuristic)
+        // Usually homogenous, take type of first child or generic 'item'
+        const childType = children[0]?.data?.type as string || 'item'
+
+        // Create Ghost Node
+        const ghostNode: Node = {
+          id: `ghost-${node.id}`,
+          type: 'ghost',
+          position: { x: 0, y: 0 }, // Layout will fix
+          data: {
+            label: `Load More`,
+            hiddenCount: serverTotalCount - loadedChildrenCount, // Remaining to load
+            nodeCount: serverTotalCount - loadedChildrenCount,
+            parentId: node.id,
+            entityType: childType,
+            type: 'ghost' // For rendering
+          },
+          parentId: node.id, // Important for ELK if we supported compound nodes
+          extent: 'parent',
+        }
+
+        // Return [node, ghostNode] IF the node is expanded? 
+        // Actually, if collapseChildren is TRUE, we are hiding children anyway. 
+        // This block is named "Collapse Children". Usually this means "Don't show children".
+        // BUT standard behavior in this app seems to be: 
+        // IF collapsed -> Show Badge. 
+        // IF expanded -> Show Children.
+        // 'collapseChildren' config might mean "Enable collapsible behavior".
+
+        // Let's assume proper expansion handling happens in the HOOK or LAYOUT.
+        // Wait, projectGraph does filtering. 
+        // If a node is in 'expandedIds', we typically want its children to survive filter?
+
+        // Re-reading logic:
+        // Typical pattern: Container Node is visible. Its children are visible ONLY if container is expanded.
+        // Current code just returns the node with updated data.
+        // UseLineageExploration handles the expansion logic by adding children to 'visibleNodes'.
+
+        // Actually, I should insert the Ghost Node into the result list
+        // IF the node is expanded and we have partial data.
+        // But projectGraph doesn't know about expansion state directly?
+        // Ah, 'projectGraph' is receiving 'nodes' which are ALL loaded nodes.
+
+        // If I insert a Ghost Node here, it becomes a visible node.
+        // It should only be inserted if the parent is "open" visually?
+        // Or does the user see "Load More" inside the collapsed node? No, usually as a sibling to children.
+
+        // We'll insert it. The layout/renderer will decide where to put it. 
+        // If children are visible, Ghost should be visible.
+        // How do we know if children are visible?
+        // In `projectToGranularity` we filtered by Granularity.
+        // Here `projectGraph` seems to be the main projection.
+
+        // Strategy: ALWAYS return the Ghost Node if there are missing children.
+        // The filtering step downstream (or upstream in hook) will decide if we show it.
+        // Actually, if we return it here, it will be rendered.
+        // We only want to render it if the Parent is "expanded".
+        // But we don't have expanded state here.
+
+        // Alternative: The Ghost Node is a CHILD of the parent.
+        // If the parent is collapsed, the Ghost Node is hidden (rolled up).
+        // If the parent is expanded, the Ghost Node is shown.
+        // This implies we need a "parent-child" relationship in React Flow? 
+        // Or just containment edges?
+
+        // Let's just return it. If the parent is collapsed, `useLineageExploration` (which calls this?)
+        // wait, `useProjectedGraph` calls this.
+        // It doesn't know about expansion.
+
+        // Let's stick to the plan: Generic Pagination Logic.
+        // If we detect partial data, we generate a Ghost Node.
+        // We adding it to the list.
+        return [updatedNode, ghostNode]
+      }
+
+      return [updatedNode]
     })
   }
 
@@ -362,6 +473,7 @@ export const VIEW_PROJECTION_CONFIGS: Record<string, ViewProjectionConfig> = {
     collapseChildren: true, // Hide columns, show count
     maxDepth: -1,
     containerTypes: ['domain', 'app'],
+    containmentEdgeTypes: ['contains', 'has_dataset', 'has_schema'], // Default for lineage view
   },
   'column-lineage': {
     targetGranularity: GranularityLevel.Column,

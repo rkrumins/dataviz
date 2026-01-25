@@ -87,6 +87,7 @@ const DEFAULT_CONFIG: LineageExplorationConfig = {
     showCounts: true,
     highlightPath: true,
   },
+  containmentEdgeTypes: ['contains', 'has_schema', 'has_dataset', 'has_column'],
 }
 
 export const useLineageExplorationStore = create<LineageExplorationState>((set, get) => ({
@@ -229,7 +230,10 @@ export function computeTrace(
   includeChildLineage: boolean
 ): TraceResult {
   // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
-  const containmentMap = buildContainmentMap(allNodes, allEdges)
+  // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
+  // Use View-Specific containment definition (passed or default?)
+  // Ideally this function should accept config, but for now defaulting is safer than breaking signature
+  const containmentMap = buildContainmentMap(allNodes, allEdges, ['contains', 'has_schema', 'has_dataset'])
 
   // Build adjacency lists
   const upstreamEdges = new Map<string, Edge[]>()
@@ -417,8 +421,11 @@ export function projectToGranularity(
     domain: GranularityLevel.Domain,
   }
 
-  const targetLevel = granularityMap[targetGranularity]
-  const containmentMap = buildContainmentMap(nodes, edges)
+  const targetLevel = granularityMap[targetGranularity] || GranularityLevel.Column
+
+  // Use View-Specific containment - passed in options? 
+  // For now using a broad set to ensure we catch all potential parents
+  const containmentMap = buildContainmentMap(nodes, edges, ['contains', 'has_schema', 'has_dataset', 'has_column'])
 
   // Filter nodes at or above target granularity
   const filteredNodes = nodes.filter((node) => {
@@ -434,6 +441,10 @@ export function projectToGranularity(
   // Group children by parent to apply pagination limits
   const nodesByParent = new Map<string, Node[]>()
   const orphans: Node[] = []
+  const hiddenCounts = new Map<string, number>()
+
+  // Optimization: Create map for O(1) lookups
+  const nodeMap = new Map(nodes.map(n => [n.id, n]))
 
   // Helper to get effective parent ID for pagination grouping
   const getPaginationParent = (node: Node) => {
@@ -442,9 +453,9 @@ export function projectToGranularity(
 
   filteredNodes.forEach(node => {
     const parentId = getPaginationParent(node)
-    // Only paginate if node is a 'child' type (column, table in schema, etc) based on granularity
-    // and has a visible parent
-    if (parentId && nodes.find(n => n.id === parentId)) { // Simple check, optimization possible
+    // Only paginate if node is a 'child' type and has a visible parent
+    // OPTIMIZED: Use Map lookup instead of Array.find (O(1) vs O(N))
+    if (parentId && nodeMap.has(parentId)) {
       if (!nodesByParent.has(parentId)) {
         nodesByParent.set(parentId, [])
       }
@@ -458,12 +469,8 @@ export function projectToGranularity(
   const DEFAULT_PAGE_SIZE = 5
 
   nodesByParent.forEach((children, parentId) => {
-    // 1. Always include parent node itself (it's in orphans or handled elsewhere? No, parent is upper level)
-    // Actually parent is a separate node in filteredNodes if level is mixed?
-    // ProjectToGranularity flattens or specific level?
-    // "filteredNodes" contains ALL levels >= target. so Table AND Column are in there.
-    // We only want to paginate the lowest level relative to container?
-    // Let's just paginate all groups.
+    // Determine the entity type of children (heuristic)
+    // const childType = children[0]?.data?.type as string || 'item'
 
     // Sort alphabetically by label
     children.sort((a, b) => {
@@ -475,45 +482,31 @@ export function projectToGranularity(
     const limit = pagination[parentId] || DEFAULT_PAGE_SIZE
 
     // Split into visible and hidden, but ALWAYS keep focused/traced nodes visible
-    const visibleChildren: Node[] = []
+    let visibleCount = 0
     let hiddenCount = 0
 
+    // Check if we have partial data (Server Side Pagination)
+    // We assume the parent node has the TRUE total count in metadata
+    // OPTIMIZED: Use Map lookup
+    const parentNode = nodeMap.get(parentId)
+    const serverTotalCount = (parentNode?.data?.childCount as number) ?? children.length
+
+    // Generic Logic: Render up to LIMIT from the LOADED children
     children.forEach((child, index) => {
       const isImportant = (focusId && child.id === focusId) || tracePath.has(child.id)
 
       if (index < limit || isImportant) {
-        visibleChildren.push(child)
-      } else {
-        hiddenCount++
+        visibleNodes.push(child)
+        visibleCount++
       }
     })
 
-    // Use natural positions (ELK will handle final positioning)
-    visibleChildren.forEach((child) => {
-      visibleNodes.push(child)
-    })
+    // Calculate how many are hidden (both locally hidden AND not yet loaded)
+    // Hidden = (ServerTotal - Visible)
+    hiddenCount = serverTotalCount - visibleCount
 
-    // Add Ghost Node if there are more
     if (hiddenCount > 0) {
-      // Determine entity type of hidden children for labeling
-      const firstHiddenChild = children[limit]
-      const entityType = firstHiddenChild?.data?.type as string || 'item'
-
-      // Ghost node position will be set by ELK layout
-      visibleNodes.push({
-        id: `ghost-${parentId}`,
-        type: 'ghost',
-        position: { x: 0, y: 0 }, // Placeholder - ELK will set actual position
-        data: {
-          label: `+${hiddenCount} more`,
-          urn: `ghost:${parentId}`,
-          type: 'ghost',
-          hiddenCount,
-          nodeCount: hiddenCount,
-          parentId,
-          entityType, // Type of hidden children
-        }
-      })
+      hiddenCounts.set(parentId, hiddenCount)
     }
   })
 
@@ -590,8 +583,9 @@ export function projectToGranularity(
         ...node.data,
         _collapsedChildCount: counts.directChildren,
         _totalDescendants: counts.totalDescendants,
-        _childCountsByType: counts.byType,
         _hasAggregatedLineage: hasAggregatedLineage,
+        _hiddenCount: hiddenCounts.get(node.id) || 0,
+        _paginationId: node.id,
       },
     }
   })
@@ -615,6 +609,7 @@ export interface UseLineageExplorationResult {
   mode: LineageExplorationMode
   granularity: LineageGranularity
   focusEntityId: string | null
+  expandedIds: Set<string>
 
   // Computed data
   visibleNodes: Node[]
@@ -644,11 +639,15 @@ export interface UseLineageExplorationResult {
   resetPagination: () => void
 }
 
+import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { useEffect } from 'react'
+
 export function useLineageExploration(): UseLineageExplorationResult {
+  const provider = useGraphProvider()
   const {
     config,
     focusEntityId,
-    expandedIds: _expandedIds,
+    expandedIds,
     highlightedPath,
     pagination,
     setMode,
@@ -668,6 +667,83 @@ export function useLineageExploration(): UseLineageExplorationResult {
 
   const rawNodes = useCanvasStore((s) => s.nodes)
   const rawEdges = useCanvasStore((s) => s.edges)
+  const { setNodes, setEdges } = useCanvasStore()
+
+  // Side Effect: Fetch data when pagination limit increases
+  useEffect(() => {
+    const syncPagination = async () => {
+      const containmentTypes = config.containmentEdgeTypes ?? ['contains', 'has_schema', 'has_dataset', 'has_column']
+
+      for (const [parentId, limit] of Object.entries(pagination)) {
+        const parentNode = rawNodes.find(n => n.id === parentId)
+        if (!parentNode) continue
+
+        // Count currently loaded children in the store
+        const childIds = new Set<string>()
+        rawEdges.forEach(e => {
+          const type = e.data?.relationship as string || e.data?.edgeType as string || ''
+          if (e.source === parentId && containmentTypes.includes(type)) {
+            childIds.add(e.target)
+          }
+        })
+
+        const loadedCount = childIds.size
+
+        // If we need more nodes than we have loaded, fetch them
+        if (loadedCount < limit) {
+          const parentUrn = (parentNode.data?.urn as string) || parentId
+          try {
+            // Fetch up to the new limit
+            const newChildren = await provider.getChildren(parentUrn, {
+              edgeTypes: containmentTypes,
+              offset: 0,
+              limit: limit
+            })
+
+            if (newChildren.length > 0) {
+              const existingIds = new Set(rawNodes.map(n => n.id))
+              const nodesToAdd: Node[] = []
+              const edgesToAdd: Edge[] = []
+
+              newChildren.forEach(child => {
+                if (!existingIds.has(child.urn)) {
+                  nodesToAdd.push({
+                    id: child.urn,
+                    type: 'generic',
+                    position: { x: 0, y: 0 },
+                    data: {
+                      ...child.properties,
+                      label: child.displayName,
+                      type: child.entityType,
+                      urn: child.urn,
+                    }
+                  })
+
+                  edgesToAdd.push({
+                    id: `${parentUrn}-${child.urn}`,
+                    source: parentId, // Use ID for ReactFlow edge
+                    target: child.urn,
+                    type: 'lineage',
+                    data: { relationship: 'contains', edgeType: 'contains' }
+                  })
+                }
+              })
+
+              if (nodesToAdd.length > 0) {
+                console.log(`[Lineage] Lazy loaded ${nodesToAdd.length} nodes for ${parentId}`)
+                setNodes([...rawNodes, ...nodesToAdd] as any)
+                setEdges([...rawEdges, ...edgesToAdd] as any)
+              }
+            }
+          } catch (err) {
+            console.error("Failed to lazy load nodes", err)
+          }
+        }
+      }
+    }
+
+    syncPagination()
+  }, [pagination, rawNodes, rawEdges, provider, config.containmentEdgeTypes, setNodes, setEdges])
 
   // Compute visible nodes/edges based on configuration
   const { visibleNodes, visibleEdges, aggregatedEdges, upstreamCount, downstreamCount } = useMemo(() => {
@@ -742,6 +818,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
     mode: config.mode,
     granularity: config.granularity,
     focusEntityId,
+    expandedIds,
     visibleNodes,
     visibleEdges,
     aggregatedEdges,

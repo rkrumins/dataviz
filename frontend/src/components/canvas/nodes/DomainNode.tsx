@@ -3,16 +3,24 @@ import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { FolderTree, ChevronRight, Users } from 'lucide-react'
 import { usePersonaStore } from '@/store/persona'
 import { cn } from '@/lib/utils'
+import { useLineageExplorationStore } from '@/hooks/useLineageExploration'
+import { Plus } from 'lucide-react'
 import type { LineageNode } from '@/store/canvas'
 
 type DomainNodeProps = NodeProps<LineageNode>
 
 export const DomainNode = memo(function DomainNode({
+  id,
   data,
   selected,
   dragging
 }: DomainNodeProps) {
   const mode = usePersonaStore((s) => s.mode)
+  const loadMoreNodes = useLineageExplorationStore((s) => s.loadMoreNodes)
+  const toggleExpanded = useLineageExplorationStore((s) => s.toggleExpanded)
+
+  const hiddenCount = (data as any)._hiddenCount || 0
+  const paginationId = (data as any)._paginationId
 
   const label = mode === 'business'
     ? (data.businessLabel || data.label)
@@ -63,11 +71,16 @@ export const DomainNode = memo(function DomainNode({
           </div>
 
           {/* Expand Indicator */}
-          <button className={cn(
-            "w-6 h-6 rounded-md flex items-center justify-center",
-            "hover:bg-purple-500/10 transition-colors",
-            "text-ink-muted hover:text-purple-500"
-          )}>
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              toggleExpanded(id)
+            }}
+            className={cn(
+              "w-6 h-6 rounded-md flex items-center justify-center",
+              "hover:bg-purple-500/10 transition-colors",
+              "text-ink-muted hover:text-purple-500"
+            )}>
             <ChevronRight className="w-4 h-4" />
           </button>
         </div>
@@ -117,6 +130,25 @@ export const DomainNode = memo(function DomainNode({
               </span>
             )}
           </div>
+        )}
+        {/* Load More Button */}
+        {hiddenCount > 0 && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              if (paginationId) {
+                loadMoreNodes(paginationId, 5)
+              }
+            }}
+            title={`Load ${hiddenCount} more items`}
+            className={cn(
+              "absolute -bottom-2 -right-2 w-6 h-6 rounded-full flex items-center justify-center",
+              "bg-canvas-elevated shadow-md border-2 border-purple-500",
+              "hover:scale-110 transition-transform cursor-pointer"
+            )}
+          >
+            <Plus className="w-3.5 h-3.5 text-purple-500" />
+          </button>
         )}
       </div>
 

@@ -12,6 +12,7 @@ import {
   type EdgeMouseHandler,
   applyNodeChanges,
   applyEdgeChanges,
+  type ReactFlowInstance,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { AnimatePresence } from 'framer-motion'
@@ -74,6 +75,7 @@ export function LineageCanvas() {
     upstreamCount,
     downstreamCount,
     setFocus,
+    expandedIds,
   } = useLineageExploration()
 
   const { showMinimap, showGrid, snapToGrid } = usePreferencesStore()
@@ -94,6 +96,40 @@ export function LineageCanvas() {
   const [layoutedNodes, setLayoutedNodes] = useState<LineageNode[]>([])
 
   // Apply ELK layout when visible nodes change
+  // Apply ELK layout when visible nodes change
+  // Optimization: Check for structural changes to prevent infinite loops
+  const prevNodeSignature = useRef<string>('')
+  const [rfInstance, setRfInstance] = useState<ReactFlowInstance | null>(null)
+  const prevExpandedIds = useRef<Set<string>>(new Set())
+  const stableNodeRef = useRef<{ id: string, x: number, y: number } | null>(null)
+  const prevFocusId = useRef<string | null>(null)
+  const shouldCenterOnFocus = useRef(false)
+
+  // Track focus changes
+  useEffect(() => {
+    if (focusEntityId !== prevFocusId.current) {
+      if (focusEntityId) {
+        shouldCenterOnFocus.current = true
+      }
+      prevFocusId.current = focusEntityId
+    }
+  }, [focusEntityId])
+
+  // Track expansion to stabilize viewport
+  useEffect(() => {
+    // Check for NEWLY expanded IDs
+    const newIds = [...expandedIds].filter(id => !prevExpandedIds.current.has(id))
+    if (newIds.length === 1 && rfInstance) {
+      const id = newIds[0]
+      // Get current node position before layout update
+      const node = rfInstance.getNode(id)
+      if (node) {
+        stableNodeRef.current = { id, x: node.position.x, y: node.position.y }
+      }
+    }
+    prevExpandedIds.current = expandedIds
+  }, [expandedIds, rfInstance])
+
   useEffect(() => {
     const nodesToLayout = visibleNodes.length > 0 ? visibleNodes : rawNodes
     const edgesToLayout = visibleEdges.length > 0 ? visibleEdges : rawEdges
@@ -103,12 +139,66 @@ export function LineageCanvas() {
       return
     }
 
+    // Generate specific signature for layout-relevant properties
+    // We only care about IDs and adjacency, not all properties
+    const nodeIds = nodesToLayout.map(n => n.id).sort().join(',')
+    const edgeIds = edgesToLayout.map(e => e.id).sort().join(',')
+    const signature = `${nodeIds}|${edgeIds}|${direction}`
+
+    // If signature hasn't changed, skip layout
+    if (signature === prevNodeSignature.current) {
+      return
+    }
+
+    prevNodeSignature.current = signature
+
     // Apply layout
     applyLayout(nodesToLayout, edgesToLayout).then((positioned) => {
+      // Stabilize Viewport if we have an anchor node
+      if (stableNodeRef.current && rfInstance) {
+        const { id, x: oldX, y: oldY } = stableNodeRef.current
+        const newNode = positioned.find(n => n.id === id)
+
+        if (newNode) {
+          const dx = newNode.position.x - oldX
+          const dy = newNode.position.y - oldY
+
+          if (dx !== 0 || dy !== 0) {
+            const { x, y, zoom } = rfInstance.getViewport()
+            // Pan viewport to keep node stationary relative to screen
+            rfInstance.setViewport({ x: x - dx, y: y - dy, zoom })
+            console.log(`[Layout] Stabilized viewport on node ${id}, shifted by ${dx}, ${dy}`)
+          }
+        }
+        stableNodeRef.current = null // Reset
+      }
+
+      // 2. Focus Logic: Center on new focus node
+      if (shouldCenterOnFocus.current && rfInstance && focusEntityId) {
+        const focusNode = positioned.find(n => n.id === focusEntityId)
+        if (focusNode) {
+          // Fit view to this node with some padding
+          rfInstance.fitView({
+            nodes: [{
+              id: focusNode.id,
+              position: focusNode.position,
+              // Fallback dimensions if not measured yet
+              width: focusNode.measured?.width ?? focusNode.width ?? 200,
+              height: focusNode.measured?.height ?? focusNode.height ?? 80
+            }],
+            duration: 1000,
+            padding: 0.5,
+            minZoom: 0.5,
+            maxZoom: 1.2,
+          })
+          shouldCenterOnFocus.current = false
+        }
+      }
+
       setLayoutedNodes(positioned as LineageNode[])
       hasAppliedInitialLayout.current = true
     })
-  }, [visibleNodes, visibleEdges, rawNodes, rawEdges, applyLayout, direction])
+  }, [visibleNodes, visibleEdges, rawNodes, rawEdges, applyLayout, direction, rfInstance])
 
   // Use layouted nodes or fall back to raw/visible
   const displayNodes = layoutedNodes.length > 0 ? layoutedNodes :
@@ -210,6 +300,7 @@ export function LineageCanvas() {
       {/* React Flow Canvas */}
       <div className="flex-1">
         <ReactFlow
+          onInit={setRfInstance}
           nodes={displayNodes}
           edges={displayEdges}
           nodeTypes={nodeTypes}

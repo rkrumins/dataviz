@@ -25,10 +25,10 @@ function App() {
 
     // Initialize demo data with generator (5 domains, 10 apps each, 5-15 assets per app, 10-100 columns per asset)
     initializeDemoData(setNodes, setEdges, setActiveLens, true, {
-      domainCount: 2,
-      appsPerDomain: 3,
-      assetsPerApp: { min: 3, max: 5 },
-      columnsPerAsset: { min: 5, max: 20 },
+      domainCount: 5,
+      appsPerDomain: 10,
+      assetsPerApp: { min: 3, max: 10 },
+      columnsPerAsset: { min: 5, max: 5 },
       includeDashboards: true,
       includeGhostNodes: true,
     })

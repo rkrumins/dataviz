@@ -239,9 +239,17 @@ export interface GraphDataProvider {
     /**
      * Get direct children of a node
      * @param parentUrn - Parent node URN
-     * @param entityTypes - Optional: filter children by type
+     * @param options - Pagination and filtering options
      */
-    getChildren(parentUrn: URN, entityTypes?: EntityType[]): Promise<GraphNode[]>
+    getChildren(
+        parentUrn: URN,
+        options?: {
+            entityTypes?: EntityType[]
+            edgeTypes?: string[] // Custom edge types for containment
+            offset?: number
+            limit?: number
+        }
+    ): Promise<GraphNode[]>
 
     /**
      * Get parent of a node (inverse of CONTAINS)

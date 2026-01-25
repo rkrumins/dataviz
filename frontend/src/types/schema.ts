@@ -297,6 +297,9 @@ export interface ViewProjectionConfig {
 
   // Entity types that act as visual containers
   containerTypes: string[];
+
+  // Edge types that constitute a containment relationship
+  containmentEdgeTypes?: string[];
 }
 
 // ============================================
@@ -378,6 +381,9 @@ export interface LineageExplorationConfig {
     showCounts: boolean;         // Show child counts on collapsed nodes
     highlightPath: boolean;      // Highlight lineage path on selection
   };
+
+  // Hierarchy Configuration
+  containmentEdgeTypes?: string[];
 }
 
 /**
