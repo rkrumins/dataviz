@@ -37,6 +37,7 @@ export const GenericNode = memo(function GenericNode({
   data,
   selected,
   dragging,
+  isConnectable,
 }: GenericNodeProps) {
   // Handle both nested (data.data) and flat (data) structures
   const rawData = (data as Record<string, unknown>)
@@ -133,6 +134,7 @@ export const GenericNode = memo(function GenericNode({
       <Handle
         type="target"
         position={Position.Left}
+        isConnectable={isConnectable}
         className={cn(
           "!w-2.5 !h-2.5 !rounded-full !border-2",
           "!bg-canvas-elevated transition-colors",
@@ -302,6 +304,7 @@ export const GenericNode = memo(function GenericNode({
       <Handle
         type="source"
         position={Position.Right}
+        isConnectable={isConnectable}
         className={cn(
           "!w-2.5 !h-2.5 !rounded-full !border-2",
           "!bg-canvas-elevated transition-colors",

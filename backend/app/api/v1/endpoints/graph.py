@@ -1,5 +1,6 @@
 from typing import List, Optional, Any
 from fastapi import APIRouter, HTTPException, Query, Body
+from pydantic import BaseModel
 from backend.app.models.graph import (
     GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery
 )
@@ -153,3 +154,17 @@ async def query_nodes(
 async def get_distinct_values(property: str):
     """Generic endpoint to get distinct values for filters."""
     return await context_engine.provider.get_distinct_values(property)
+
+from pydantic import BaseModel
+
+class SaveGraphRequest(BaseModel):
+    nodes: List[GraphNode]
+    edges: List[GraphEdge]
+
+@router.post("/save")
+async def save_graph(request: SaveGraphRequest):
+    """Save custom graph nodes and edges."""
+    success = await context_engine.provider.save_custom_graph(request.nodes, request.edges)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to save graph")
+    return {"status": "success", "message": "Graph saved successfully"}

@@ -130,7 +130,7 @@ export function generateDemoData(config: DemoDataConfig = {}): {
     }
     nodes.push(domainNode)
 
-    // Generate applications for this domain
+    // Generate applications for this domain (Mapped to 'system' in schema)
     const appX = xPosition + 350
     const appsPerRow = Math.ceil(Math.sqrt(cfg.appsPerDomain))
     let appIndex = 0
@@ -143,14 +143,14 @@ export function generateDemoData(config: DemoDataConfig = {}): {
 
       const appNode: LineageNode = {
         id: appId,
-        type: 'app',
+        type: 'system',
         position: { x: appX, y: appY },
         data: {
           label: `${platform} ${domainName}`,
           businessLabel: `${platform} ${domainName} System`,
           technicalLabel: `${platform}.${domainName.toLowerCase()}_${a}`,
           urn: generateUrn('app', [platform, `${domainName.toLowerCase()}_${a}`]),
-          type: 'app',
+          type: 'system', // SCHEMA TYPE: system
           confidence: randomFloat(0.75, 0.98),
           metadata: {
             appType: appType.type,
@@ -161,7 +161,7 @@ export function generateDemoData(config: DemoDataConfig = {}): {
       }
       nodes.push(appNode)
 
-      // Containment edge: domain → app
+      // Containment edge: domain → system
       edges.push({
         id: `contains-${domainId}-${appId}`,
         source: domainId,
@@ -170,7 +170,7 @@ export function generateDemoData(config: DemoDataConfig = {}): {
         data: { relationship: 'contains', edgeType: 'contains', animated: false },
       })
 
-      // Lineage edge: domain → app (data flow)
+      // Lineage edge: domain → system (data flow)
       edges.push({
         id: `edge-${domainId}-${appId}`,
         source: domainId,
@@ -183,7 +183,7 @@ export function generateDemoData(config: DemoDataConfig = {}): {
         },
       })
 
-      // Generate assets for this application
+      // Generate assets for this application (Mapped to 'dataset' in schema)
       const assetCount = randomInt(cfg.assetsPerApp.min, cfg.assetsPerApp.max)
       const assetX = appX + 350
       let assetY = appY - 50
@@ -197,14 +197,14 @@ export function generateDemoData(config: DemoDataConfig = {}): {
 
         const assetNode: LineageNode = {
           id: assetId,
-          type: 'asset',
+          type: 'dataset',
           position: { x: assetX, y: assetY },
           data: {
             label: assetName,
             businessLabel: `${businessTerm} ${assetType === 'table' ? 'Table' : assetType}`,
             technicalLabel: `${platform}.${domainName.toLowerCase()}.${assetName}`,
             urn: generateUrn('asset', [platform, `${domainName.toLowerCase()}.${assetName}`, 'PROD']),
-            type: 'asset',
+            type: 'dataset', // SCHEMA TYPE: dataset
             classifications: randomChoice([
               ['PII'], ['Financial'], ['GDPR'], ['SOX'], ['Sensitive'], []
             ]),
@@ -350,11 +350,11 @@ export function generateDemoData(config: DemoDataConfig = {}): {
 
         // Connect to some assets in this domain (non-dashboard assets)
         const domainApps = nodes.filter(n =>
-          n.id.startsWith(`app-${domainName.toLowerCase()}-`) && n.type === 'app'
+          n.id.startsWith(`app-${domainName.toLowerCase()}-`) && (n.data.type === 'system' || n.data.type === 'app')
         )
         const domainAssets = nodes.filter(n =>
           domainApps.some(app => n.id.startsWith(`asset-${app.id}-`)) &&
-          n.data.type === 'asset' &&
+          (n.data.type === 'dataset' || n.data.type === 'asset') &&
           n.data.metadata?.assetType !== 'dashboard'
         )
 
@@ -495,14 +495,14 @@ export const demoNodes: LineageNode[] = [
   // Applications (Level 2)
   {
     id: 'app-snowflake-finance',
-    type: 'app',
+    type: 'system',
     position: { x: 350, y: 100 },
     data: {
       label: 'Finance Warehouse',
       businessLabel: 'Finance Data Warehouse',
       technicalLabel: 'snowflake.finance_db',
       urn: 'urn:li:dataPlatform:snowflake.finance_db',
-      type: 'app',
+      type: 'system',
       lensId: 'finance-ontology',
       confidence: 0.95,
       metadata: {
@@ -514,14 +514,14 @@ export const demoNodes: LineageNode[] = [
   },
   {
     id: 'app-dbt-finance',
-    type: 'app',
+    type: 'system',
     position: { x: 350, y: 250 },
     data: {
       label: 'Finance dbt',
       businessLabel: 'Finance Transformations',
       technicalLabel: 'dbt.finance_transforms',
       urn: 'urn:li:dataPlatform:dbt.finance_transforms',
-      type: 'app',
+      type: 'system',
       confidence: 0.88,
       metadata: {
         appType: 'pipeline',
@@ -532,14 +532,14 @@ export const demoNodes: LineageNode[] = [
   },
   {
     id: 'app-salesforce',
-    type: 'app',
+    type: 'system',
     position: { x: 350, y: 400 },
     data: {
       label: 'Salesforce',
       businessLabel: 'Salesforce CRM',
       technicalLabel: 'salesforce.production',
       urn: 'urn:li:dataPlatform:salesforce.prod',
-      type: 'app',
+      type: 'system',
       confidence: 0.92,
       metadata: {
         appType: 'service',
@@ -550,14 +550,14 @@ export const demoNodes: LineageNode[] = [
   },
   {
     id: 'app-segment',
-    type: 'app',
+    type: 'system',
     position: { x: 350, y: 550 },
     data: {
       label: 'Segment',
       businessLabel: 'Customer Data Platform',
       technicalLabel: 'segment.workspace',
       urn: 'urn:li:dataPlatform:segment',
-      type: 'app',
+      type: 'system',
       confidence: 0.85,
       metadata: {
         appType: 'service',
@@ -570,14 +570,14 @@ export const demoNodes: LineageNode[] = [
   // Assets (Level 3)
   {
     id: 'asset-revenue-table',
-    type: 'asset',
+    type: 'dataset',
     position: { x: 700, y: 50 },
     data: {
       label: 'revenue_monthly',
       businessLabel: 'Monthly Revenue',
       technicalLabel: 'finance_db.analytics.revenue_monthly',
       urn: 'urn:li:dataset:(urn:li:dataPlatform:snowflake,finance_db.analytics.revenue_monthly,PROD)',
-      type: 'asset',
+      type: 'dataset',
       classifications: ['Financial', 'SOX'],
       confidence: 0.98,
       metadata: {
@@ -589,14 +589,14 @@ export const demoNodes: LineageNode[] = [
   },
   {
     id: 'asset-orders-table',
-    type: 'asset',
+    type: 'dataset',
     position: { x: 700, y: 150 },
     data: {
       label: 'orders',
       businessLabel: 'Order Transactions',
       technicalLabel: 'finance_db.raw.orders',
       urn: 'urn:li:dataset:(urn:li:dataPlatform:snowflake,finance_db.raw.orders,PROD)',
-      type: 'asset',
+      type: 'dataset',
       classifications: ['PII', 'Financial'],
       confidence: 0.94,
       metadata: {
@@ -608,14 +608,14 @@ export const demoNodes: LineageNode[] = [
   },
   {
     id: 'asset-customers-table',
-    type: 'asset',
+    type: 'dataset',
     position: { x: 700, y: 350 },
     data: {
       label: 'customers',
       businessLabel: 'Customer Master',
       technicalLabel: 'customer_db.core.customers',
       urn: 'urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_db.core.customers,PROD)',
-      type: 'asset',
+      type: 'dataset',
       classifications: ['PII', 'GDPR'],
       confidence: 0.91,
       metadata: {
@@ -627,14 +627,14 @@ export const demoNodes: LineageNode[] = [
   },
   {
     id: 'asset-events-table',
-    type: 'asset',
+    type: 'dataset',
     position: { x: 700, y: 500 },
     data: {
       label: 'user_events',
       businessLabel: 'User Events',
       technicalLabel: 'segment.events.user_events',
       urn: 'urn:li:dataset:(urn:li:dataPlatform:segment,events.user_events,PROD)',
-      type: 'asset',
+      type: 'dataset',
       confidence: 0.72,
       metadata: {
         assetType: 'table',

@@ -21,10 +21,76 @@ class MockGraphProvider(GraphDataProvider):
         
         self._initialize_data()
 
+    def _paginate(self, items: List[Any], offset: int, limit: int) -> List[Any]:
+        return items[offset : offset + limit]
+
+    async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:
+        """
+        Updates the in-memory graph with the provided nodes and edges.
+        Also persists to a local JSON file for "proper" persistence across restarts.
+        """
+        import json
+        import os
+
+        # 1. Update In-Memory
+        # We can choose to replace everything or merge. 
+        # For a "Save" action from a canvas, usually we expect the canvas state to be the source of truth,
+        # but we also want to keep the existing "demo" data if it wasn't deleted.
+        # However, the user asked for "manual build". 
+        # Let's simple merge/upsert for now.
+        
+        for node in nodes:
+            self._nodes[node.urn] = node
+        
+        for edge in edges:
+            self._edges[edge.id] = edge
+            # Re-index
+            if edge.source_urn not in self._edges_by_source:
+                self._edges_by_source[edge.source_urn] = []
+            self._edges_by_source[edge.source_urn].append(edge)
+            
+            if edge.target_urn not in self._edges_by_target:
+                self._edges_by_target[edge.target_urn] = []
+            self._edges_by_target[edge.target_urn].append(edge)
+
+        # 2. Persist to Disk
+        data = {
+            "nodes": [n.dict() for n in self._nodes.values()],
+            "edges": [e.dict() for e in self._edges.values()]
+        }
+        
+        try:
+            with open("custom_graph.json", "w") as f:
+                json.dump(data, f, default=str) # handle datetimes if any
+            return True
+        except Exception as e:
+            print(f"Error saving graph: {e}")
+            return False
+
     def _initialize_data(self):
         import random
+        import json
+        import os
+        from ..models.graph import GraphNode, GraphEdge # Ensure imports
+
         random.seed(42)
-        nodes, edges = generate_demo_data()
+        
+        # 1. Check for persisted data first
+        if os.path.exists("custom_graph.json"):
+            try:
+                with open("custom_graph.json", "r") as f:
+                    data = json.load(f)
+                    
+                # Reconstruct objects
+                nodes = [GraphNode(**n) for n in data.get("nodes", [])]
+                edges = [GraphEdge(**e) for e in data.get("edges", [])]
+                
+                print(f"Loaded {len(nodes)} nodes and {len(edges)} edges from persistence.")
+            except Exception as e:
+                print(f"Error loading persisted graph: {e}. Falling back to demo data.")
+                nodes, edges = generate_demo_data()
+        else:
+            nodes, edges = generate_demo_data()
         
         for node in nodes:
             self._nodes[node.urn] = node

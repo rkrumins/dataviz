@@ -32,9 +32,11 @@ import {
   EyeOff,
   Network,
   Wand2,
+  Pencil,
 } from 'lucide-react'
 import { useLineageExploration } from '@/hooks/useLineageExploration'
 import { useSchemaStore } from '@/store/schema'
+import { useCanvasStore } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
 import type { LineageGranularity, LineageExplorationMode } from '@/types/schema'
 import { cn } from '@/lib/utils'
@@ -46,6 +48,8 @@ interface LineageToolbarProps {
 export function LineageToolbar({ className }: LineageToolbarProps) {
   const [showSettings, setShowSettings] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
+
+  const { setEditing } = useCanvasStore()
 
   const {
     config,
@@ -153,6 +157,16 @@ export function LineageToolbar({ className }: LineageToolbarProps) {
           <span>
             {config.trace.includeChildLineage ? 'Inherited' : 'Direct'}
           </span>
+        </button>
+
+        {/* Edit Mode Toggle */}
+        <button
+          onClick={() => setEditing(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+          title="Enable Edit Mode"
+        >
+          <Pencil className="w-3.5 h-3.5" />
+          <span>Edit</span>
         </button>
 
         {/* Settings */}

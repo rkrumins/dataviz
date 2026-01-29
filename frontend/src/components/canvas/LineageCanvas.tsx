@@ -36,6 +36,9 @@ import { useLineageExploration } from '@/hooks/useLineageExploration'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useLevelOfDetail } from '@/hooks/useLevelOfDetail'
 import { useElkLayout } from '@/hooks/useElkLayout'
+import { EditorToolbar } from './EditorToolbar'
+import { NodePalette } from './NodePalette'
+import { EditNodePanel } from '../panels/EditNodePanel'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
@@ -50,6 +53,12 @@ const nodeTypes = {
   ghost: GhostNode,
   // Generic node for schema-driven entities
   generic: GenericNode,
+  // Schema types mapped to generic node
+  system: GenericNode,
+  dataset: GenericNode,
+  pipeline: GenericNode,
+  dashboard: GenericNode,
+  column: GenericNode,
 }
 
 // Register custom edge types
@@ -133,6 +142,11 @@ export function LineageCanvas() {
   useEffect(() => {
     const nodesToLayout = visibleNodes.length > 0 ? visibleNodes : rawNodes
     const edgesToLayout = visibleEdges.length > 0 ? visibleEdges : rawEdges
+
+    // Don't auto-layout if editing (manual mode)
+    if (isEditing && nodesToLayout.length > 0) {
+      return
+    }
 
     if (nodesToLayout.length === 0) {
       setLayoutedNodes([])
@@ -222,13 +236,161 @@ export function LineageCanvas() {
     [rawEdges, setEdges]
   )
 
+  // Store access
+  const { addEdges, isEditing, addNodes, nodes, edges } = useCanvasStore()
+
+  const onSave = useCallback(async () => {
+    try {
+      const response = await fetch('http://localhost:8001/api/v1/graph/save', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          nodes: nodes,
+          edges: edges
+        })
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to save graph')
+      }
+
+      // Disable edit mode after save? Or just show success?
+      // setEditing(false) 
+      alert('Graph saved successfully!')
+    } catch (error) {
+      console.error('Error saving graph:', error)
+      alert('Failed to save graph')
+    }
+  }, [nodes, edges])
+
+  // Edge Types from Schema
+  const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
+  const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
+
   // Handle new connections (if allowed)
   const onConnect: OnConnect = useCallback(
-    (_connection) => {
-      // In lineage view, we typically don't allow manual connections
-      // This could be enabled for editing mode
+    (connection) => {
+      // Allow connection only in edit mode
+      if (isEditing) {
+        addEdges([{
+          id: `e-${connection.source}-${connection.target}-${activeEdgeType}`,
+          source: connection.source,
+          target: connection.target,
+          data: { relationship: activeEdgeType },
+          type: 'lineage', // Force type
+          animated: true
+        }])
+      }
     },
-    []
+    [isEditing, addEdges, activeEdgeType]
+  )
+
+  // Handle edge reconnection
+  const onReconnect = useCallback((oldEdge: any, newConnection: any) => {
+    if (isEditing) {
+      // Remove old edge and add new one
+      const { removeEdge, addEdges } = useCanvasStore.getState()
+      removeEdge(oldEdge.id)
+      addEdges([{
+        id: `e-${newConnection.source}-${newConnection.target}`,
+        source: newConnection.source,
+        target: newConnection.target,
+        data: { relationship: activeEdgeType }, // Use active type or preserve old? User wants to assign type.
+        type: 'lineage',
+        animated: true
+      }])
+    }
+  }, [isEditing, activeEdgeType])
+
+  // Sync layout positions to store when entering edit mode
+  useEffect(() => {
+    if (isEditing && layoutedNodes.length > 0) {
+      // Commit layout positions to store so we can edit manually
+      setNodes(layoutedNodes)
+      // Clear layouted nodes so we fallback to displaying the store nodes (rawNodes)
+      setLayoutedNodes([])
+    }
+  }, [isEditing])
+
+  /**
+   * Validate connections based on Ontology/Schema
+   */
+  const isValidConnection = useCallback(
+    (connection: any) => {
+      // 1. Basic self-loop check
+      if (connection.source === connection.target) return false
+
+      // 2. If 'manual' type, allow everything (or maybe restrict to known types?)
+      // Let's allow everything for manual for maximum flexibility
+      if (activeEdgeType === 'manual') return true
+
+      // 3. Get Schema definition for this edge type
+      const edgeSchema = relationshipTypes.find((r) => r.id === activeEdgeType)
+      if (!edgeSchema) return true // Should indicate error, but allow fallback
+
+      // 4. Get Source and Target Node Types
+      // We need to look up the nodes from the store
+      const sourceNode = nodes.find((n) => n.id === connection.source)
+      const targetNode = nodes.find((n) => n.id === connection.target)
+
+      if (!sourceNode || !targetNode) return false
+
+      const sourceType = sourceNode.data.type
+      const targetType = targetNode.data.type
+
+      // 5. Check constraints
+      // sourceTypes/targetTypes can contain '*' or specific IDs
+      const isSourceValid =
+        edgeSchema.sourceTypes.includes('*') || edgeSchema.sourceTypes.includes(sourceType)
+      const isTargetValid =
+        edgeSchema.targetTypes.includes('*') || edgeSchema.targetTypes.includes(targetType)
+
+      return isSourceValid && isTargetValid
+    },
+    [activeEdgeType, relationshipTypes, nodes]
+  )
+
+  // Drag and Drop
+  const [isPaletteOpen, setPaletteOpen] = useState(false)
+
+  const onDragOver = useCallback((event: React.DragEvent) => {
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+  }, [])
+
+  const onDrop = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault()
+
+      const type = event.dataTransfer.getData('application/reactflow')
+
+      // check if the dropped element is valid
+      if (typeof type === 'undefined' || !type || !rfInstance) {
+        return
+      }
+
+      const position = rfInstance.screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      })
+
+      const newNode: LineageNode = {
+        id: `node-${Date.now()}`,
+        type: 'generic', // Always use generic node
+        position,
+        data: {
+          type: type, // The actual entity type ID
+          label: `New ${type}`,
+          urn: `urn:manual:${type}:${Date.now()}`,
+          // Add other default data if needed
+        },
+      }
+
+      addNodes([newNode])
+    },
+    [rfInstance, addNodes]
   )
 
   // Handle node click
@@ -261,12 +423,6 @@ export function LineageCanvas() {
     [selectEdge]
   )
 
-  // Default edge options
-  const defaultEdgeOptions = useMemo(() => ({
-    type: 'lineage',
-    animated: true,
-  }), [])
-
   // Minimap node color function - now schema-driven
   const minimapNodeColor = useCallback((node: LineageNode) => {
     // Try to get color from schema
@@ -293,9 +449,11 @@ export function LineageCanvas() {
   return (
     <div className="w-full h-full relative flex flex-col">
       {/* Lineage Exploration Toolbar */}
-      <div className="absolute top-4 left-4 right-4 z-10">
-        <LineageToolbar />
-      </div>
+      {!isEditing && (
+        <div className="absolute top-4 left-4 right-4 z-10">
+          <LineageToolbar />
+        </div>
+      )}
 
       {/* React Flow Canvas */}
       <div className="flex-1">
@@ -312,7 +470,17 @@ export function LineageCanvas() {
           onNodeDoubleClick={onNodeDoubleClick}
           onEdgeClick={onEdgeClick}
           onPaneClick={onPaneClick}
-          defaultEdgeOptions={defaultEdgeOptions}
+          onDrop={onDrop}
+          onDragOver={onDragOver}
+          onReconnect={onReconnect}
+          onReconnectStart={() => { }}
+          onReconnectEnd={() => { }}
+          isValidConnection={isValidConnection}
+          defaultEdgeOptions={{
+            type: 'lineage',
+            animated: true,
+            interactionWidth: 20, // Easier to click
+          }}
           snapToGrid={snapToGrid}
           snapGrid={[16, 16]}
           fitView
@@ -459,6 +627,32 @@ export function LineageCanvas() {
             onToggleFilter={toggleEdgeFilter}
           />
         )}
+      </AnimatePresence>
+
+      {/* Editor Controls Overlay */}
+      <div className="absolute top-4 left-4 z-20">
+        <EditorToolbar
+          onAddNode={() => setPaletteOpen(true)}
+          onSave={onSave}
+          edgeTypes={relationshipTypes}
+          activeEdgeType={activeEdgeType}
+          onSelectEdgeType={setActiveEdgeType}
+        />
+      </div>
+
+      {/* Node Palette */}
+      <AnimatePresence>
+        {isPaletteOpen && (
+          <NodePalette
+            isOpen={isPaletteOpen}
+            onClose={() => setPaletteOpen(false)}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Edit Node Panel */}
+      <AnimatePresence>
+        <EditNodePanel />
       </AnimatePresence>
     </div>
   )

@@ -146,3 +146,12 @@ class GraphDataProvider(ABC):
     async def get_nodes_by_layer(self, layer_id: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         """Get nodes by layer"""
         pass
+
+    # ==========================================
+    # Write Operations
+    # ==========================================
+
+    @abstractmethod
+    async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:
+        """Save a custom graph (nodes and edges) meant for editing/manual creation."""
+        pass

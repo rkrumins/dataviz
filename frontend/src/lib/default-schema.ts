@@ -43,7 +43,7 @@ const defaultEntityTypes: EntityTypeSchema[] = [
       doubleClickAction: 'expand',
     },
   },
-  
+
   // Level 1: System / Database / Application
   {
     id: 'system',
@@ -82,7 +82,7 @@ const defaultEntityTypes: EntityTypeSchema[] = [
       doubleClickAction: 'expand',
     },
   },
-  
+
   // Level 2: Schema / Container
   {
     id: 'schema',
@@ -119,7 +119,7 @@ const defaultEntityTypes: EntityTypeSchema[] = [
       doubleClickAction: 'expand',
     },
   },
-  
+
   // Level 3: Dataset / Table
   {
     id: 'dataset',
@@ -160,7 +160,7 @@ const defaultEntityTypes: EntityTypeSchema[] = [
       doubleClickAction: 'panel',
     },
   },
-  
+
   // Level 4: Column / Field
   {
     id: 'column',
@@ -198,7 +198,7 @@ const defaultEntityTypes: EntityTypeSchema[] = [
       doubleClickAction: 'panel',
     },
   },
-  
+
   // Pipeline / Job
   {
     id: 'pipeline',
@@ -236,7 +236,7 @@ const defaultEntityTypes: EntityTypeSchema[] = [
       doubleClickAction: 'panel',
     },
   },
-  
+
   // Dashboard
   {
     id: 'dashboard',
@@ -274,7 +274,7 @@ const defaultEntityTypes: EntityTypeSchema[] = [
       doubleClickAction: 'panel',
     },
   },
-  
+
   // Ghost / Pagination Indicator
   {
     id: 'ghost',
@@ -319,8 +319,8 @@ const defaultRelationshipTypes: RelationshipTypeSchema[] = [
     id: 'produces',
     name: 'Produces',
     description: 'Source produces data for target',
-    sourceTypes: ['pipeline', 'system', 'dataset'],
-    targetTypes: ['dataset', 'dashboard'],
+    sourceTypes: ['pipeline', 'system', 'dataset', 'domain'],
+    targetTypes: ['dataset', 'dashboard', 'system'],
     visual: {
       strokeColor: '#6366f1',
       strokeWidth: 2,
@@ -337,8 +337,8 @@ const defaultRelationshipTypes: RelationshipTypeSchema[] = [
     id: 'consumes',
     name: 'Consumes',
     description: 'Source consumes data from target',
-    sourceTypes: ['dataset', 'pipeline', 'dashboard'],
-    targetTypes: ['dataset'],
+    sourceTypes: ['dataset', 'pipeline', 'dashboard', 'system'],
+    targetTypes: ['dataset', 'dashboard'],
     visual: {
       strokeColor: '#10b981',
       strokeWidth: 2,
@@ -441,7 +441,7 @@ const defaultViews: ViewConfiguration[] = [
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   },
-  
+
   // Physical Fabric View - Hierarchy-style Reference Model
   {
     id: 'physical-fabric',
@@ -499,7 +499,7 @@ const defaultViews: ViewConfiguration[] = [
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   },
-  
+
   // Reference Model View - Horizontal layer-based layout (Hierarchy-style)
   {
     id: 'reference-model',
@@ -543,7 +543,7 @@ const defaultViews: ViewConfiguration[] = [
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   },
-  
+
   // Impact Analysis View
   {
     id: 'impact-view',
@@ -588,7 +588,7 @@ const defaultViews: ViewConfiguration[] = [
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   },
-  
+
   // Column Lineage View - Fine-grained attribute tracking
   {
     id: 'column-lineage',

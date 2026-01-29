@@ -80,6 +80,15 @@ interface CanvasState {
   cacheRegion: (key: string, nodes: LineageNode[]) => void
   getCachedRegion: (key: string) => LineageNode[] | undefined
   clearCache: () => void
+
+  // Editing Mode
+  isEditing: boolean
+  setEditing: (isEditing: boolean) => void
+
+  // Node/Edge CRUD (Manual)
+  updateNode: (id: string, data: Partial<LineageNode['data']>) => void
+  removeNode: (id: string) => void
+  removeEdge: (id: string) => void
 }
 
 export const useCanvasStore = create<CanvasState>((set, get) => ({
@@ -163,6 +172,24 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   }),
   getCachedRegion: (key) => get().cachedRegions.get(key),
   clearCache: () => set({ cachedRegions: new Map() }),
+
+  // Editing Mode
+  isEditing: false,
+  setEditing: (isEditing) => set({ isEditing }),
+
+  // Node/Edge CRUD (Manual)
+  updateNode: (id, data) => set((state) => ({
+    nodes: state.nodes.map((n) =>
+      n.id === id ? { ...n, data: { ...n.data, ...data } } : n
+    )
+  })),
+  removeNode: (id) => set((state) => ({
+    nodes: state.nodes.filter((n) => n.id !== id),
+    edges: state.edges.filter((e) => e.source !== id && e.target !== id)
+  })),
+  removeEdge: (id) => set((state) => ({
+    edges: state.edges.filter((e) => e.id !== id)
+  })),
 }))
 
 // Selector hooks
