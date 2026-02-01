@@ -24,14 +24,18 @@ function App() {
     }
 
     // Initialize demo data with generator (5 domains, 10 apps each, 5-15 assets per app, 10-100 columns per asset)
-    initializeDemoData(setNodes, setEdges, setActiveLens, true, {
-      domainCount: 3,
-      appsPerDomain: 5,
-      assetsPerApp: { min: 3, max: 10 },
-      columnsPerAsset: { min: 5, max: 5 },
-      includeDashboards: true,
-      includeGhostNodes: true,
-    })
+    // CHECK: Only initialize if no nodes exist to prevent regeneration on refresh
+    const currentNodes = useCanvasStore.getState().nodes
+    if (currentNodes.length === 0) {
+      initializeDemoData(setNodes, setEdges, setActiveLens, true, {
+        domainCount: 3,
+        appsPerDomain: 5,
+        assetsPerApp: { min: 3, max: 10 },
+        columnsPerAsset: { min: 5, max: 5 },
+        includeDashboards: true,
+        includeGhostNodes: true,
+      })
+    }
   }, [setNodes, setEdges, setActiveLens, loadSchema, schema])
 
   // Apply theme class to document

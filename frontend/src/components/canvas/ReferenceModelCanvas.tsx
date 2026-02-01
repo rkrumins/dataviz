@@ -19,7 +19,6 @@ import { useInstanceAssignments } from '@/store/referenceModelStore'
 import {
   type GraphNode,
   resolveLayerAssignment,
-  matchesRule,
   type LayerAssignmentRule,
   type EntityType,
 } from '@/providers/GraphDataProvider'
@@ -308,80 +307,26 @@ export function ReferenceModelCanvas({
     [activeLayers]
   )
 
-  // Helper to map canvas type to EntityType
-  const mapNodeType = useCallback((type: string): EntityType => {
-    const mapping: Record<string, EntityType> = {
-      domain: 'container',
-      app: 'dataPlatform',
-      asset: 'dataset',
-      column: 'schemaField',
-      ghost: 'dataset',
-      system: 'dataPlatform',
-      schema: 'container',
-      table: 'dataset',
-      view: 'dataset',
-      pipeline: 'dataJob',
-      dashboard: 'dashboard',
-      report: 'chart'
-    }
-    return mapping[type] ?? 'dataset'
-  }, [])
+  // Build generic hierarchy tree from nodes and containment edges
+  // We keep this to visualize structure, but layer assignment is calculated independently
+  const { nodeMap, childMap, parentMap } = useMemo(() => {
+    const nMap = new Map(nodes.map((n) => [n.id, n]))
+    const cMap = new Map<string, string[]>()
+    const pMap = new Map<string, string>()
 
-  // Build hierarchy tree from nodes and containment edges
-  const hierarchyTree = useMemo(() => {
-    if (!nodes.length) return []
-
-    // Containment logic: Edge typ 'contains' OR type 'CONTAINS'
+    // Containment logic
     const containmentEdges = edges.filter((e) =>
       e.data?.relationship === 'contains' || e.data?.edgeType === 'contains' || e.data?.edgeType === 'CONTAINS'
     )
 
-    const nodeMap = new Map(nodes.map((n) => [n.id, n]))
-    const childMap = new Map<string, string[]>()
-    const hasParent = new Set<string>()
-
     containmentEdges.forEach((edge) => {
-      const children = childMap.get(edge.source) ?? []
-      children.push(edge.target)
-      childMap.set(edge.source, children)
-      hasParent.add(edge.target)
+      if (!cMap.has(edge.source)) cMap.set(edge.source, [])
+      cMap.get(edge.source)!.push(edge.target)
+      pMap.set(edge.target, edge.source)
     })
 
-    // Root nodes are those without parents OR nodes that are explicity roots in a layer context
-    // Ideally only true roots (no incoming containment)
-    // Note: If containment cycles exist, this might miss nodes. Assuming DAG.
-    const rootNodes = nodes.filter((n) =>
-      !hasParent.has(n.id) && n.data.type !== 'ghost'
-    )
-
-    const buildTree = (nodeId: string, depth: number): HierarchyNode | null => {
-      const node = nodeMap.get(nodeId)
-      if (!node) return null
-
-      const children = (childMap.get(nodeId) ?? [])
-        .map((childId) => buildTree(childId, depth + 1))
-        .filter((n): n is HierarchyNode => n !== null)
-        .sort((a, b) => a.name.localeCompare(b.name))
-
-      return {
-        id: node.id,
-        typeId: node.data.type,
-        name: node.data.label ?? node.data.businessLabel ?? node.id,
-        data: node.data as Record<string, unknown>,
-        children,
-        depth,
-        // Enriched props for layer logic
-        urn: node.data.urn || node.id,
-        entityTypeOption: mapNodeType(node.data.type),
-        tags: node.data.classifications || []
-      }
-    }
-
-    return rootNodes
-      .map((n) => buildTree(n.id, 0))
-      .filter((n): n is HierarchyNode => n !== null)
-      .sort((a, b) => a.name.localeCompare(b.name))
-  }, [nodes, edges, mapNodeType])
+    return { nodeMap: nMap, childMap: cMap, parentMap: pMap }
+  }, [nodes, edges])
 
   // Build layer assignment rules
   const layerRules = useMemo<LayerAssignmentRule[]>(() => {
@@ -403,200 +348,163 @@ export function ReferenceModelCanvas({
         })
       }
 
-      // 2. Default entity type rules (lower priority if rules exist, or base mechanism)
-      // Always add these to support type-based matching alongside complex rules
+      // 2. Default entity type rules - REMOVED to prevent implicit auto-assignment
+      // If users want type-based assignment, they should add an explicit rule.
+      /*
       layer.entityTypes.forEach((entityType, idx) => {
         generatedRules.push({
           id: `${layer.id}-${entityType}`,
           layerId: layer.id,
-          entityTypes: [entityType as any], // Cast for simple string matching if needed
+          entityTypes: [entityType as any],
           priority: layer.order * 10 + idx,
         })
       })
+      */
     })
 
     return generatedRules
   }, [sortedLayers])
 
-  // Group nodes by layer
+  // Core Logic: Group nodes by layer with Deep Inheritance support
   const nodesByLayer = useMemo(() => {
     const grouped = new Map<string, HierarchyNode[]>()
 
-    // Initialize all layers
-    sortedLayers.forEach((layer) => {
-      grouped.set(layer.id, [])
-    })
+    // Initialize layers
+    sortedLayers.forEach(l => grouped.set(l.id, []))
 
-    // Map explicit assignments from config (saved state)
-    const configAssignments = new Map<string, string>() // entityId -> layerId
+    // 1. Determine "Explicit Assignment" for every node
+    // This ignores inheritance for a moment, just checking rules/manual overrides
+    const explicitAssignments = new Map<string, string>() // nodeId -> layerId
+
+    // Config assignments
     sortedLayers.forEach(l => {
       l.entityAssignments?.forEach(a => {
-        configAssignments.set(a.entityId, l.id)
+        explicitAssignments.set(a.entityId, l.id)
       })
     })
 
-    const assignedNodeIds = new Set<string>()
+    // Rule assignments
+    nodes.forEach(node => {
+      // If manually assigned via instanceAssignments (store), that wins
+      const instanceAssignment = instanceAssignments.get(node.id)
+      if (instanceAssignment) {
+        explicitAssignments.set(node.id, instanceAssignment.layerId)
+        return
+      }
 
-    // Helper: Map physical nodes to a logical node context
-    const getMappedPhysicalNodes = (logicalConfig: LogicalNodeConfig): HierarchyNode[] => {
-      const mapped: HierarchyNode[] = []
-      const visibleTypes = activeView?.content?.visibleEntityTypes || []
-      const hasTypeFilter = visibleTypes.length > 0
+      // If already found in config, skip rules (config > rules)
+      if (explicitAssignments.has(node.id)) return
 
-      // Iterate TOP LEVEL physical nodes
-      // We prioritize assigning roots. If a root is assigned, its children come with it.
-      hierarchyTree.forEach(pNode => {
-        if (assignedNodeIds.has(pNode.id)) return
+      // Rule match 
+      const graphNode: GraphNode = {
+        urn: node.data.urn || node.id,
+        entityType: (node.data.type as EntityType) || 'dataset', // Generic fallback
+        displayName: node.data.label || node.data.businessLabel || node.id,
+        properties: node.data as Record<string, unknown>,
+        tags: node.data.classifications || []
+      }
 
-        // Global Visibility Check
-        // If the node type is not in visibleEntityTypes, skip it
-        if (hasTypeFilter && !visibleTypes.includes(pNode.typeId)) {
-          return
-        }
+      const ruleLayerId = resolveLayerAssignment(graphNode, layerRules)
+      if (ruleLayerId) {
+        explicitAssignments.set(node.id, ruleLayerId)
+      }
+    })
 
-        const graphNode: GraphNode = {
-          urn: pNode.urn,
-          entityType: pNode.entityTypeOption,
-          displayName: pNode.name,
-          properties: pNode.data,
-          tags: pNode.tags
-        }
+    // 2. Determine "Effective Layer" for every node, considering inheritance
+    // We traverse top-down. If a node has explicit, it wins. If not, it inherits.
+    const effectiveLayer = new Map<string, string>() // nodeId -> layerId
 
-        // Check rules
-        // Note: layerRules are flattened. logicalConfig.rules are specific.
-        // We use logicalConfig.rules here.
-        let isMatch = false
-        if (logicalConfig.rules) {
-          for (const rule of logicalConfig.rules) {
-            if (matchesRule(graphNode, rule)) {
-              isMatch = true
-              break
-            }
-          }
-        }
+    // We can't just iterate nodes orderless. We need top-down.
+    // Use a Set to track processed.
+    const processed = new Set<string>()
 
-        if (isMatch) {
-          mapped.push(pNode)
-          assignedNodeIds.add(pNode.id)
-        }
-      })
+    const calculateEffectiveLayer = (nodeId: string, inheritedLayerId?: string) => {
+      if (processed.has(nodeId)) return
+      processed.add(nodeId)
 
-      return mapped
+      let myLayerId = explicitAssignments.get(nodeId)
+
+      // Check for explicit "Unassigned" override (blocks inheritance)
+      if (myLayerId === '__UNASSIGNED__') {
+        myLayerId = undefined
+      }
+      // If no explicit assignment, check inheritance
+      else if (!myLayerId && inheritedLayerId) {
+        // Check if we SHOULD inherit? (e.g. maybe parent assignment has inheritsChildren=false?)
+        // For now we assume true unless specified. 
+        // We'd need to lookup the specific assignment object to check `inheritsChildren`, 
+        // but `explicitAssignments` is just ID -> ID. 
+        // Simplification: Always inherit unless overridden by explicit.
+        myLayerId = inheritedLayerId
+      }
+
+      if (myLayerId) {
+        effectiveLayer.set(nodeId, myLayerId)
+      }
+
+      // Recurse children
+      const children = childMap.get(nodeId) || []
+      children.forEach(childId => calculateEffectiveLayer(childId, myLayerId))
     }
 
-    // Helper: Build Logical Tree Recursively
-    const buildLogicalTree = (config: LogicalNodeConfig, depth: number): HierarchyNode => {
-      // 1. Build Logical Children
-      const logicalChildren = (config.children || []).map(c => buildLogicalTree(c, depth + 1))
+    // Find true roots (nodes with no parents) and start there
+    const roots = nodes.filter(n => !parentMap.has(n.id))
+    roots.forEach(r => calculateEffectiveLayer(r.id))
 
-      // 2. Find Mapped Physical Children
-      const physicalChildren = getMappedPhysicalNodes(config)
+    // Also handle orphans (cycles or disconnected) if any missed?
+    // The recursive step above should cover all reachable from roots. 
+    // If there are unparented nodes that are not in `roots` (impossible by definition), they are covered.
+
+    // 3. Construct Hierarchy Trees per Layer
+    // A node is a "Visual Root" in Layer L if:
+    // - It is effectively in Layer L
+    // - AND (Its parent is NOT in Layer L OR it has no parent)
+
+    // Helper to build hierarchy node
+    const buildHierarchyNode = (nodeId: string, depth: number): HierarchyNode => {
+      const node = nodeMap.get(nodeId)!
+
+      const childrenIds = childMap.get(nodeId) || []
+      // Filter children: Only include those that are effectively in the SAME layer
+      const validChildren = childrenIds
+        .filter(cid => effectiveLayer.get(cid) === effectiveLayer.get(nodeId))
+        .map(cid => buildHierarchyNode(cid, depth + 1))
+        .sort((a, b) => a.name.localeCompare(b.name))
 
       return {
-        id: `logical-${config.id}`,
-        typeId: config.type,
-        name: config.name,
-        data: { description: config.description },
-        children: [...logicalChildren, ...physicalChildren],
-        parentId: undefined,
+        id: node.id,
+        typeId: node.data.type,
+        name: node.data.label ?? node.data.businessLabel ?? node.id,
+        data: node.data as Record<string, unknown>,
+        children: validChildren,
         depth,
-        urn: `urn:logical:${config.id}`,
-        entityTypeOption: 'container',
-        tags: [],
-        isLogical: true,
-        logicalConfig: config
+        urn: node.data.urn || node.id,
+        entityTypeOption: (node.data.type as EntityType) || 'dataset',
+        tags: node.data.classifications || []
       }
     }
 
-    // Process Layers
-    sortedLayers.forEach(layer => {
-      // STRATEGY A: Logical Hierarchy Defined
-      if (layer.logicalNodes && layer.logicalNodes.length > 0) {
-        const layerRootNodes: HierarchyNode[] = []
+    nodes.forEach(node => {
+      const layerId = effectiveLayer.get(node.id)
+      if (!layerId) return // Unassigned
 
-        layer.logicalNodes.forEach(config => {
-          layerRootNodes.push(buildLogicalTree(config, 0))
-        })
+      // Check if this is a Visual Root for this layer
+      const parentId = parentMap.get(node.id)
+      const parentLayerId = parentId ? effectiveLayer.get(parentId) : undefined
 
-        // Unassigned Handling: Find roots matching the layer type fallback
-        if (layer.showUnassigned !== false) { // Default true? or false?
-          hierarchyTree.forEach(pNode => {
-            if (assignedNodeIds.has(pNode.id)) return
-            // Fallback to type match
-            if (layer.entityTypes.includes(pNode.typeId)) {
-              layerRootNodes.push(pNode)
-              assignedNodeIds.add(pNode.id)
-            }
-          })
-        }
-        grouped.set(layer.id, layerRootNodes)
-      }
-      // STRATEGY B: Legacy / Pure Type-Based (if no logical nodes defined)
-      else {
-        // Existing logic with a twist: Only assign if not already assigned to a logical node?
-        // We iterate hierarchyTree again
-        const layerNodes: HierarchyNode[] = []
-
-        hierarchyTree.forEach(pNode => {
-          if (assignedNodeIds.has(pNode.id)) return // Already grabbed by a logical node
-
-          // Simple type check OR advanced rule check from layerRules
-          let assignedToThisLayer = false
-
-          // 0. Check ASSIGNMENTS first (Instance Store OR Config)
-          // Instance store takes priority (drag-and-drop in progress), then saved config
-          const instanceAssignment = instanceAssignments.get(pNode.id)
-          const configLayerId = configAssignments.get(pNode.id)
-
-          if (instanceAssignment) {
-            if (instanceAssignment.layerId === layer.id) {
-              assignedToThisLayer = true
-            } else {
-              // Assigned to a different layer via store, skip this layer
-              return
-            }
-          } else if (configLayerId) {
-            if (configLayerId === layer.id) {
-              assignedToThisLayer = true
-            } else {
-              // Assigned to a different layer via config, skip this layer
-              return
-            }
-          }
-
-          // 1. Check type
-          if (!assignedToThisLayer && layer.entityTypes.includes(pNode.typeId)) {
-            assignedToThisLayer = true
-          }
-
-          // 2. Check global rules (resolveLayerAssignment)
-          // We need to re-verify if this node maps to THIS layer
-          // resolveLayerAssignment returns winner.
-          if (!assignedToThisLayer) {
-            const graphNode: GraphNode = {
-              urn: pNode.urn,
-              entityType: pNode.entityTypeOption,
-              displayName: pNode.name,
-              properties: pNode.data,
-              tags: pNode.tags
-            }
-            if (resolveLayerAssignment(graphNode, layerRules) === layer.id) {
-              assignedToThisLayer = true
-            }
-          }
-
-          if (assignedToThisLayer) {
-            layerNodes.push(pNode)
-            assignedNodeIds.add(pNode.id)
-          }
-        })
-
-        grouped.set(layer.id, layerNodes)
+      if (layerId !== parentLayerId) {
+        // It's a root in this layer context!
+        const hNode = buildHierarchyNode(node.id, 0)
+        const list = grouped.get(layerId)
+        if (list) list.push(hNode)
       }
     })
 
+    // Sort all lists
+    grouped.forEach(list => list.sort((a, b) => a.name.localeCompare(b.name)))
+
     return grouped
-  }, [hierarchyTree, sortedLayers, layerRules, instanceAssignments])
+  }, [nodes, edges, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap])
 
   // Flatten logical/physical nodes for search and lookup
   const { displayFlat, displayMap } = useMemo(() => {

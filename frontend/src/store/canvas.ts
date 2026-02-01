@@ -91,106 +91,122 @@ interface CanvasState {
   removeEdge: (id: string) => void
 }
 
-export const useCanvasStore = create<CanvasState>((set, get) => ({
-  // Nodes and Edges
-  nodes: [],
-  edges: [],
-  setNodes: (nodes) => set({ nodes }),
-  setEdges: (edges) => set({ edges }),
-  addNodes: (newNodes) => set((state) => {
-    const existingIds = new Set(state.nodes.map((n) => n.id))
-    const uniqueNodes = newNodes.filter((n) => !existingIds.has(n.id))
-    return { nodes: [...state.nodes, ...uniqueNodes] }
-  }),
-  addEdges: (newEdges) => set((state) => {
-    const existingIds = new Set(state.edges.map((e) => e.id))
-    const uniqueEdges = newEdges.filter((e) => !existingIds.has(e.id))
-    return { edges: [...state.edges, ...uniqueEdges] }
-  }),
+import { persist, createJSONStorage } from 'zustand/middleware'
 
-  // Selection
-  selectedNodeIds: [],
-  selectedEdgeIds: [],
-  selectNode: (id, multi = false) => set((state) => ({
-    selectedNodeIds: multi
-      ? state.selectedNodeIds.includes(id)
-        ? state.selectedNodeIds.filter((nid) => nid !== id)
-        : [...state.selectedNodeIds, id]
-      : [id],
-    selectedEdgeIds: multi ? state.selectedEdgeIds : [],
-  })),
-  selectEdge: (id, multi = false) => set((state) => ({
-    selectedEdgeIds: multi
-      ? state.selectedEdgeIds.includes(id)
-        ? state.selectedEdgeIds.filter((eid) => eid !== id)
-        : [...state.selectedEdgeIds, id]
-      : [id],
-    selectedNodeIds: multi ? state.selectedNodeIds : [],
-  })),
-  clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [] }),
+export const useCanvasStore = create<CanvasState>()(
+  persist(
+    (set, get) => ({
+      // Nodes and Edges
+      nodes: [],
+      edges: [],
+      setNodes: (nodes) => set({ nodes }),
+      setEdges: (edges) => set({ edges }),
+      addNodes: (newNodes) => set((state) => {
+        const existingIds = new Set(state.nodes.map((n) => n.id))
+        const uniqueNodes = newNodes.filter((n) => !existingIds.has(n.id))
+        return { nodes: [...state.nodes, ...uniqueNodes] }
+      }),
+      addEdges: (newEdges) => set((state) => {
+        const existingIds = new Set(state.edges.map((e) => e.id))
+        const uniqueEdges = newEdges.filter((e) => !existingIds.has(e.id))
+        return { edges: [...state.edges, ...uniqueEdges] }
+      }),
 
-  // Viewport
-  viewport: { x: 0, y: 0, zoom: 1 },
-  setViewport: (viewport) => set({ viewport }),
+      // Selection
+      selectedNodeIds: [],
+      selectedEdgeIds: [],
+      selectNode: (id, multi = false) => set((state) => ({
+        selectedNodeIds: multi
+          ? state.selectedNodeIds.includes(id)
+            ? state.selectedNodeIds.filter((nid) => nid !== id)
+            : [...state.selectedNodeIds, id]
+          : [id],
+        selectedEdgeIds: multi ? state.selectedEdgeIds : [],
+      })),
+      selectEdge: (id, multi = false) => set((state) => ({
+        selectedEdgeIds: multi
+          ? state.selectedEdgeIds.includes(id)
+            ? state.selectedEdgeIds.filter((eid) => eid !== id)
+            : [...state.selectedEdgeIds, id]
+          : [id],
+        selectedNodeIds: multi ? state.selectedNodeIds : [],
+      })),
+      clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [] }),
 
-  // Loading
-  isLoading: false,
-  loadingRegions: new Set(),
-  setLoading: (isLoading) => set({ isLoading }),
-  addLoadingRegion: (region) => set((state) => {
-    const newRegions = new Set(state.loadingRegions)
-    newRegions.add(region)
-    return { loadingRegions: newRegions, isLoading: true }
-  }),
-  removeLoadingRegion: (region) => set((state) => {
-    const newRegions = new Set(state.loadingRegions)
-    newRegions.delete(region)
-    return {
-      loadingRegions: newRegions,
-      isLoading: newRegions.size > 0
+      // Viewport
+      viewport: { x: 0, y: 0, zoom: 1 },
+      setViewport: (viewport) => set({ viewport }),
+
+      // Loading
+      isLoading: false,
+      loadingRegions: new Set(),
+      setLoading: (isLoading) => set({ isLoading }),
+      addLoadingRegion: (region) => set((state) => {
+        const newRegions = new Set(state.loadingRegions)
+        newRegions.add(region)
+        return { loadingRegions: newRegions, isLoading: true }
+      }),
+      removeLoadingRegion: (region) => set((state) => {
+        const newRegions = new Set(state.loadingRegions)
+        newRegions.delete(region)
+        return {
+          loadingRegions: newRegions,
+          isLoading: newRegions.size > 0
+        }
+      }),
+
+      // Active Lens
+      activeLensId: null,
+      setActiveLens: (activeLensId) => set({ activeLensId }),
+
+      // Trace
+      traceOrigin: null,
+      traceDirection: 'both',
+      traceDepth: 10,
+      setTraceOrigin: (traceOrigin) => set({ traceOrigin }),
+      setTraceDirection: (traceDirection) => set({ traceDirection }),
+      setTraceDepth: (traceDepth) => set({ traceDepth }),
+
+      // Cache
+      cachedRegions: new Map(),
+      cacheRegion: (key, nodes) => set((state) => {
+        const newCache = new Map(state.cachedRegions)
+        newCache.set(key, nodes)
+        return { cachedRegions: newCache }
+      }),
+      getCachedRegion: (key) => get().cachedRegions.get(key),
+      clearCache: () => set({ cachedRegions: new Map() }),
+
+      // Editing Mode
+      isEditing: false,
+      setEditing: (isEditing) => set({ isEditing }),
+
+      // Node/Edge CRUD (Manual)
+      updateNode: (id, data) => set((state) => ({
+        nodes: state.nodes.map((n) =>
+          n.id === id ? { ...n, data: { ...n.data, ...data } } : n
+        )
+      })),
+      removeNode: (id) => set((state) => ({
+        nodes: state.nodes.filter((n) => n.id !== id),
+        edges: state.edges.filter((e) => e.source !== id && e.target !== id)
+      })),
+      removeEdge: (id) => set((state) => ({
+        edges: state.edges.filter((e) => e.id !== id)
+      })),
+    }),
+    {
+      name: 'canvas-storage',
+      storage: createJSONStorage(() => localStorage),
+      partialize: (state) => ({
+        nodes: state.nodes,
+        edges: state.edges,
+        viewport: state.viewport,
+        activeLensId: state.activeLensId
+      }),
     }
-  }),
-
-  // Active Lens
-  activeLensId: null,
-  setActiveLens: (activeLensId) => set({ activeLensId }),
-
-  // Trace
-  traceOrigin: null,
-  traceDirection: 'both',
-  traceDepth: 10,
-  setTraceOrigin: (traceOrigin) => set({ traceOrigin }),
-  setTraceDirection: (traceDirection) => set({ traceDirection }),
-  setTraceDepth: (traceDepth) => set({ traceDepth }),
-
-  // Cache
-  cachedRegions: new Map(),
-  cacheRegion: (key, nodes) => set((state) => {
-    const newCache = new Map(state.cachedRegions)
-    newCache.set(key, nodes)
-    return { cachedRegions: newCache }
-  }),
-  getCachedRegion: (key) => get().cachedRegions.get(key),
-  clearCache: () => set({ cachedRegions: new Map() }),
-
-  // Editing Mode
-  isEditing: false,
-  setEditing: (isEditing) => set({ isEditing }),
-
-  // Node/Edge CRUD (Manual)
-  updateNode: (id, data) => set((state) => ({
-    nodes: state.nodes.map((n) =>
-      n.id === id ? { ...n, data: { ...n.data, ...data } } : n
-    )
-  })),
-  removeNode: (id) => set((state) => ({
-    nodes: state.nodes.filter((n) => n.id !== id),
-    edges: state.edges.filter((e) => e.source !== id && e.target !== id)
-  })),
-  removeEdge: (id) => set((state) => ({
-    edges: state.edges.filter((e) => e.id !== id)
-  })),
-}))
+  )
+)
 
 // Selector hooks
 export const useNodes = () => useCanvasStore((s) => s.nodes)

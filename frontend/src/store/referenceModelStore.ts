@@ -175,501 +175,524 @@ const DEFAULT_LAYOUT = {
     gap: 16
 }
 
-export const useReferenceModelStore = create<ReferenceModelState>((set, get) => ({
-    // ===== Initial State =====
-    layers: [],
-    layerSequence: [],
-    scopeFilter: null,
-    effectiveAssignments: new Map(),
-    parentMap: new Map(),
-    preservedEdges: [],
-    unassignedEntityIds: [],
-    assignmentStatus: 'idle',
-    lastError: null,
-    lastComputeTimeMs: 0,
-    expandedNodeIds: new Set(),
-    instanceAssignments: new Map(),
-    assignmentConflicts: [],
-    scopeEdgeConfig: null,
-    _subscribers: new Set(),
+import { persist, createJSONStorage } from 'zustand/middleware'
 
-    setLayers: (layers) => {
-        const prevLayers = get().layers
-        const sequence = layers
-            .sort((a, b) => (a.sequence ?? a.order) - (b.sequence ?? b.order))
-            .map(l => l.id)
-
-        set({ layers, layerSequence: sequence })
-
-        // Notify subscribers
-        get()._subscribers.forEach(cb => cb({
-            type: 'update',
-            layers,
-            prevLayers
-        }))
-    },
-
-    addLayer: (layerData) => {
-        const state = get()
-        const id = generateId('layer')
-        const order = state.layers.length
-
-        const newLayer: ViewLayerConfig = {
-            ...layerData,
-            id,
-            order,
-            sequence: order,
-            entityTypes: layerData.entityTypes || []
-        }
-
-        const layers = [...state.layers, newLayer]
-        const layerSequence = [...state.layerSequence, id]
-
-        set({ layers, layerSequence })
-
-        // Notify subscribers
-        state._subscribers.forEach(cb => cb({
-            type: 'add',
-            layerId: id,
-            layers,
-            prevLayers: state.layers
-        }))
-
-        return id
-    },
-
-    removeLayer: (id, _moveToInbox = true) => {
-        const state = get()
-        const layerToRemove = state.layers.find(l => l.id === id)
-
-        if (!layerToRemove) return
-
-        // Collect URNs of nodes assigned to this layer (for inbox)
-        // Note: Actual URN collection requires integration with canvas state
-        // For now, we just remove the layer
-
-        const layers = state.layers
-            .filter(l => l.id !== id)
-            .map((l, idx) => ({ ...l, order: idx, sequence: idx }))
-
-        const layerSequence = state.layerSequence.filter(lid => lid !== id)
-
-        set({ layers, layerSequence })
-
-        // Notify subscribers
-        state._subscribers.forEach(cb => cb({
-            type: 'remove',
-            layerId: id,
-            layers,
-            prevLayers: state.layers
-        }))
-    },
-
-    updateLayer: (id, updates) => {
-        const state = get()
-        const layers = state.layers.map(l =>
-            l.id === id ? { ...l, ...updates } : l
-        )
-
-        set({ layers })
-
-        // Notify subscribers
-        state._subscribers.forEach(cb => cb({
-            type: 'update',
-            layerId: id,
-            layers,
-            prevLayers: state.layers
-        }))
-    },
-
-    reorderLayers: (newSequence) => {
-        const state = get()
-
-        // Rebuild layers with new sequence/order
-        const layerMap = new Map(state.layers.map(l => [l.id, l]))
-        const layers = newSequence
-            .filter(id => layerMap.has(id))
-            .map((id, idx) => ({
-                ...layerMap.get(id)!,
-                order: idx,
-                sequence: idx
-            }))
-
-        set({ layers, layerSequence: newSequence })
-
-        // Notify subscribers
-        state._subscribers.forEach(cb => cb({
-            type: 'reorder',
-            layers,
-            prevLayers: state.layers
-        }))
-    },
-
-    // ===== Scope Filter =====
-    setScopeFilter: (filter) => {
-        set({ scopeFilter: filter })
-    },
-
-    // ===== Assignment Actions (Backend-Ready) =====
-
-    setAssignmentResult: (result) => {
-        set({
-            effectiveAssignments: result.assignments,
-            parentMap: result.parentMap,
-            preservedEdges: result.edges,
-            unassignedEntityIds: result.unassignedEntityIds,
-            assignmentStatus: 'success',
+export const useReferenceModelStore = create<ReferenceModelState>()(
+    persist(
+        (set, get) => ({
+            // ===== Initial State =====
+            layers: [],
+            layerSequence: [],
+            scopeFilter: null,
+            effectiveAssignments: new Map(),
+            parentMap: new Map(),
+            preservedEdges: [],
+            unassignedEntityIds: [],
+            assignmentStatus: 'idle',
             lastError: null,
-            lastComputeTimeMs: result.stats.computeTimeMs
-        })
-    },
+            lastComputeTimeMs: 0,
+            expandedNodeIds: new Set(),
+            instanceAssignments: new Map(),
+            assignmentConflicts: [],
+            scopeEdgeConfig: null,
+            _subscribers: new Set(),
 
-    setParentMap: (map) => {
-        set({ parentMap: map })
-    },
+            setLayers: (layers) => {
+                const prevLayers = get().layers
+                const sequence = layers
+                    .sort((a, b) => (a.sequence ?? a.order) - (b.sequence ?? b.order))
+                    .map(l => l.id)
 
-    setPreservedEdges: (edges) => {
-        set({ preservedEdges: edges })
-    },
+                set({ layers, layerSequence: sequence })
 
-    setAssignmentLoading: () => {
-        set({ assignmentStatus: 'loading', lastError: null })
-    },
+                // Notify subscribers
+                get()._subscribers.forEach(cb => cb({
+                    type: 'update',
+                    layers,
+                    prevLayers
+                }))
+            },
 
-    setAssignmentError: (error) => {
-        set({ assignmentStatus: 'error', lastError: error })
-    },
+            addLayer: (layerData) => {
+                const state = get()
+                const id = generateId('layer')
+                const order = state.layers.length
 
-    // ===== Lazy Loading =====
-
-    toggleNodeExpanded: (nodeId) => {
-        const state = get()
-        const newExpanded = new Set(state.expandedNodeIds)
-        if (newExpanded.has(nodeId)) {
-            newExpanded.delete(nodeId)
-        } else {
-            newExpanded.add(nodeId)
-        }
-        set({ expandedNodeIds: newExpanded })
-    },
-
-    isNodeExpanded: (nodeId) => {
-        return get().expandedNodeIds.has(nodeId)
-    },
-
-    // ===== Query Helpers =====
-
-    getAssignment: (entityId) => {
-        return get().effectiveAssignments.get(entityId)
-    },
-
-    getAssignmentsByLayer: (layerId) => {
-        const state = get()
-        const result: EntityAssignment[] = []
-        state.effectiveAssignments.forEach((assignment) => {
-            if (assignment.layerId === layerId) {
-                result.push(assignment)
-            }
-        })
-        return result
-    },
-
-    getAssignmentsByLogicalNode: (layerId, logicalNodeId) => {
-        const state = get()
-        const result: EntityAssignment[] = []
-        state.effectiveAssignments.forEach((assignment) => {
-            if (assignment.layerId === layerId && assignment.logicalNodeId === logicalNodeId) {
-                result.push(assignment)
-            }
-        })
-        return result
-    },
-
-    getInheritedFrom: (entityId) => {
-        const assignment = get().effectiveAssignments.get(entityId)
-        if (assignment?.isInherited && assignment?.inheritedFromId) {
-            return get().effectiveAssignments.get(assignment.inheritedFromId) ?? null
-        }
-        return null
-    },
-
-    // ===== Observer Pattern =====
-
-    onLayerChange: (callback) => {
-        const state = get()
-        state._subscribers.add(callback)
-
-        return () => {
-            state._subscribers.delete(callback)
-        }
-    },
-
-    // ===== Layout Helpers =====
-
-    getLayerBySequence: (index) => {
-        const state = get()
-        const layerId = state.layerSequence[index]
-        return layerId ? state.layers.find(l => l.id === layerId) : undefined
-    },
-
-    calculateLayerX: (layerId, config = {}) => {
-        const state = get()
-        const { margin = DEFAULT_LAYOUT.margin, width = DEFAULT_LAYOUT.width, gap = DEFAULT_LAYOUT.gap } = config
-
-        const index = state.layerSequence.indexOf(layerId)
-        if (index === -1) return 0
-
-        return margin + (index * width) + (index * gap)
-    },
-
-    // ===== Build Assignment Request =====
-
-    buildAssignmentRequest: () => {
-        const state = get()
-
-        return {
-            scopeFilter: state.scopeFilter ?? undefined,
-            layers: state.layers.map(layer => ({
-                layerId: layer.id,
-                sequence: layer.sequence ?? layer.order,
-                entityTypes: layer.entityTypes,
-                rules: layer.rules ?? [],
-                logicalNodes: layer.logicalNodes,
-                entityAssignments: layer.entityAssignments ?? []
-            })),
-            includeEdges: true
-        }
-    },
-
-    // ===== Instance Assignment Actions =====
-
-    assignEntityToLayer: (entityId, layerId, options = {}) => {
-        const state = get()
-        const { logicalNodeId, inheritsChildren = true } = options
-
-        // Check for conflicts first
-        const conflict = state.checkAssignmentConflict(entityId, layerId)
-        if (conflict) {
-            // Still allow assignment but record the conflict
-            set({ assignmentConflicts: [...state.assignmentConflicts, conflict] })
-        }
-
-        // Create the assignment config
-        const assignment: EntityAssignmentConfig = {
-            entityId,
-            layerId,
-            logicalNodeId,
-            inheritsChildren,
-            priority: 1000, // User assignments get highest priority
-            assignedBy: 'user',
-            assignedAt: new Date().toISOString()
-        }
-
-        // Update instance assignments
-        const newAssignments = new Map(state.instanceAssignments)
-        newAssignments.set(entityId, assignment)
-
-        // Also update the layer's entityAssignments array for persistence
-        const updatedLayers = state.layers.map(layer => {
-            if (layer.id === layerId) {
-                const existing = layer.entityAssignments?.filter(a => a.entityId !== entityId) ?? []
-                return {
-                    ...layer,
-                    entityAssignments: [...existing, assignment]
+                const newLayer: ViewLayerConfig = {
+                    ...layerData,
+                    id,
+                    order,
+                    sequence: order,
+                    entityTypes: layerData.entityTypes || []
                 }
-            }
-            // Remove from other layers
-            if (layer.entityAssignments?.some(a => a.entityId === entityId)) {
-                return {
-                    ...layer,
-                    entityAssignments: layer.entityAssignments.filter(a => a.entityId !== entityId)
+
+                const layers = [...state.layers, newLayer]
+                const layerSequence = [...state.layerSequence, id]
+
+                set({ layers, layerSequence })
+
+                // Notify subscribers
+                state._subscribers.forEach(cb => cb({
+                    type: 'add',
+                    layerId: id,
+                    layers,
+                    prevLayers: state.layers
+                }))
+
+                return id
+            },
+
+            removeLayer: (id, _moveToInbox = true) => {
+                const state = get()
+                const layerToRemove = state.layers.find(l => l.id === id)
+
+                if (!layerToRemove) return
+
+                // Collect URNs of nodes assigned to this layer (for inbox)
+                // Note: Actual URN collection requires integration with canvas state
+                // For now, we just remove the layer
+
+                const layers = state.layers
+                    .filter(l => l.id !== id)
+                    .map((l, idx) => ({ ...l, order: idx, sequence: idx }))
+
+                const layerSequence = state.layerSequence.filter(lid => lid !== id)
+
+                set({ layers, layerSequence })
+
+                // Notify subscribers
+                state._subscribers.forEach(cb => cb({
+                    type: 'remove',
+                    layerId: id,
+                    layers,
+                    prevLayers: state.layers
+                }))
+            },
+
+            updateLayer: (id, updates) => {
+                const state = get()
+                const layers = state.layers.map(l =>
+                    l.id === id ? { ...l, ...updates } : l
+                )
+
+                set({ layers })
+
+                // Notify subscribers
+                state._subscribers.forEach(cb => cb({
+                    type: 'update',
+                    layerId: id,
+                    layers,
+                    prevLayers: state.layers
+                }))
+            },
+
+            reorderLayers: (newSequence) => {
+                const state = get()
+
+                // Rebuild layers with new sequence/order
+                const layerMap = new Map(state.layers.map(l => [l.id, l]))
+                const layers = newSequence
+                    .filter(id => layerMap.has(id))
+                    .map((id, idx) => ({
+                        ...layerMap.get(id)!,
+                        order: idx,
+                        sequence: idx
+                    }))
+
+                set({ layers, layerSequence: newSequence })
+
+                // Notify subscribers
+                state._subscribers.forEach(cb => cb({
+                    type: 'reorder',
+                    layers,
+                    prevLayers: state.layers
+                }))
+            },
+
+            // ===== Scope Filter =====
+            setScopeFilter: (filter) => {
+                set({ scopeFilter: filter })
+            },
+
+            // ===== Assignment Actions (Backend-Ready) =====
+
+            setAssignmentResult: (result) => {
+                set({
+                    effectiveAssignments: result.assignments,
+                    parentMap: result.parentMap,
+                    preservedEdges: result.edges,
+                    unassignedEntityIds: result.unassignedEntityIds,
+                    assignmentStatus: 'success',
+                    lastError: null,
+                    lastComputeTimeMs: result.stats.computeTimeMs
+                })
+            },
+
+            setParentMap: (map) => {
+                set({ parentMap: map })
+            },
+
+            setPreservedEdges: (edges) => {
+                set({ preservedEdges: edges })
+            },
+
+            setAssignmentLoading: () => {
+                set({ assignmentStatus: 'loading', lastError: null })
+            },
+
+            setAssignmentError: (error) => {
+                set({ assignmentStatus: 'error', lastError: error })
+            },
+
+            // ===== Lazy Loading =====
+
+            toggleNodeExpanded: (nodeId) => {
+                const state = get()
+                const newExpanded = new Set(state.expandedNodeIds)
+                if (newExpanded.has(nodeId)) {
+                    newExpanded.delete(nodeId)
+                } else {
+                    newExpanded.add(nodeId)
                 }
-            }
-            return layer
-        })
+                set({ expandedNodeIds: newExpanded })
+            },
 
-        set({
-            instanceAssignments: newAssignments,
-            layers: updatedLayers
-        })
+            isNodeExpanded: (nodeId) => {
+                return get().expandedNodeIds.has(nodeId)
+            },
 
-        return { success: true, conflict: conflict ?? undefined }
-    },
+            // ===== Query Helpers =====
 
-    removeEntityAssignment: (entityId) => {
-        const state = get()
+            getAssignment: (entityId) => {
+                return get().effectiveAssignments.get(entityId)
+            },
 
-        // Remove from instanceAssignments
-        const newAssignments = new Map(state.instanceAssignments)
-        newAssignments.delete(entityId)
-
-        // Remove from layer entityAssignments
-        const updatedLayers = state.layers.map(layer => {
-            if (layer.entityAssignments?.some(a => a.entityId === entityId)) {
-                return {
-                    ...layer,
-                    entityAssignments: layer.entityAssignments.filter(a => a.entityId !== entityId)
-                }
-            }
-            return layer
-        })
-
-        // Clear any conflicts related to this entity
-        const updatedConflicts = state.assignmentConflicts.filter(
-            c => c.entityId !== entityId && c.conflictingEntityId !== entityId
-        )
-
-        set({
-            instanceAssignments: newAssignments,
-            layers: updatedLayers,
-            assignmentConflicts: updatedConflicts
-        })
-    },
-
-    checkAssignmentConflict: (entityId, layerId) => {
-        const state = get()
-        const parentMap = state.parentMap
-
-        // Check if any ancestor is assigned to a different layer
-        let currentId = entityId
-        while (parentMap.has(currentId)) {
-            const parentId = parentMap.get(currentId)!
-            const parentAssignment = state.instanceAssignments.get(parentId)
-
-            if (parentAssignment && parentAssignment.layerId !== layerId && parentAssignment.inheritsChildren) {
-                return {
-                    entityId,
-                    conflictingEntityId: parentId,
-                    type: 'parent_assigned' as const,
-                    message: `Parent entity is already assigned to a different layer with inheritance enabled`,
-                    conflictingLayerId: parentAssignment.layerId
-                }
-            }
-            currentId = parentId
-        }
-
-        // Check if any descendant is assigned to a different layer
-        // Build reverse map (parent -> children) for descendant lookup
-        const childMap = new Map<string, string[]>()
-        parentMap.forEach((parentId, childId) => {
-            const children = childMap.get(parentId) ?? []
-            children.push(childId)
-            childMap.set(parentId, children)
-        })
-
-        // BFS to find descendants
-        const queue = [entityId]
-        const visited = new Set<string>()
-
-        while (queue.length > 0) {
-            const current = queue.shift()!
-            if (visited.has(current)) continue
-            visited.add(current)
-
-            const children = childMap.get(current) ?? []
-            for (const childId of children) {
-                const childAssignment = state.instanceAssignments.get(childId)
-                if (childAssignment && childAssignment.layerId !== layerId) {
-                    return {
-                        entityId,
-                        conflictingEntityId: childId,
-                        type: 'child_assigned' as const,
-                        message: `Child entity is already assigned to a different layer`,
-                        conflictingLayerId: childAssignment.layerId
+            getAssignmentsByLayer: (layerId) => {
+                const state = get()
+                const result: EntityAssignment[] = []
+                state.effectiveAssignments.forEach((assignment) => {
+                    if (assignment.layerId === layerId) {
+                        result.push(assignment)
                     }
+                })
+                return result
+            },
+
+            getAssignmentsByLogicalNode: (layerId, logicalNodeId) => {
+                const state = get()
+                const result: EntityAssignment[] = []
+                state.effectiveAssignments.forEach((assignment) => {
+                    if (assignment.layerId === layerId && assignment.logicalNodeId === logicalNodeId) {
+                        result.push(assignment)
+                    }
+                })
+                return result
+            },
+
+            getInheritedFrom: (entityId) => {
+                const assignment = get().effectiveAssignments.get(entityId)
+                if (assignment?.isInherited && assignment?.inheritedFromId) {
+                    return get().effectiveAssignments.get(assignment.inheritedFromId) ?? null
                 }
-                queue.push(childId)
-            }
-        }
+                return null
+            },
 
-        return null
-    },
+            // ===== Observer Pattern =====
 
-    getInstanceAssignments: () => {
-        return get().instanceAssignments
-    },
+            onLayerChange: (callback) => {
+                const state = get()
+                state._subscribers.add(callback)
 
-    clearConflicts: () => {
-        set({ assignmentConflicts: [] })
-    },
+                return () => {
+                    state._subscribers.delete(callback)
+                }
+            },
 
-    setScopeEdgeConfig: (config) => {
-        set({ scopeEdgeConfig: config })
-    },
+            // ===== Layout Helpers =====
 
-    bulkAssignEntitiesToLayer: (entityIds, layerId, options = {}) => {
-        const successful: string[] = []
-        const conflicts: AssignmentConflict[] = []
-        const state = get()
-        const { inheritsChildren = true } = options
+            getLayerBySequence: (index) => {
+                const state = get()
+                const layerId = state.layerSequence[index]
+                return layerId ? state.layers.find(l => l.id === layerId) : undefined
+            },
 
-        // Process each entity
-        for (const entityId of entityIds) {
-            const conflict = state.checkAssignmentConflict(entityId, layerId)
-            if (conflict) {
-                conflicts.push(conflict)
-            }
+            calculateLayerX: (layerId, config = {}) => {
+                const state = get()
+                const { margin = DEFAULT_LAYOUT.margin, width = DEFAULT_LAYOUT.width, gap = DEFAULT_LAYOUT.gap } = config
 
-            // Create the assignment config
-            const assignment: EntityAssignmentConfig = {
-                entityId,
-                layerId,
-                inheritsChildren,
-                priority: 1000,
-                assignedBy: 'user',
-                assignedAt: new Date().toISOString()
-            }
+                const index = state.layerSequence.indexOf(layerId)
+                if (index === -1) return 0
 
-            // Update instance assignments
-            const newAssignments = new Map(state.instanceAssignments)
-            newAssignments.set(entityId, assignment)
+                return margin + (index * width) + (index * gap)
+            },
 
-            // Update state for next iteration
-            state.instanceAssignments = newAssignments
-            successful.push(entityId)
-        }
+            // ===== Build Assignment Request =====
 
-        // Final batch update to layers
-        const finalState = get()
-        const updatedLayers = finalState.layers.map(layer => {
-            if (layer.id === layerId) {
-                const existing = layer.entityAssignments?.filter(
-                    a => !entityIds.includes(a.entityId)
-                ) ?? []
-                const newAssignments = entityIds.map(entityId => ({
+            buildAssignmentRequest: () => {
+                const state = get()
+
+                return {
+                    scopeFilter: state.scopeFilter ?? undefined,
+                    layers: state.layers.map(layer => ({
+                        layerId: layer.id,
+                        sequence: layer.sequence ?? layer.order,
+                        entityTypes: layer.entityTypes,
+                        rules: layer.rules ?? [],
+                        logicalNodes: layer.logicalNodes,
+                        entityAssignments: layer.entityAssignments ?? []
+                    })),
+                    includeEdges: true
+                }
+            },
+
+            // ===== Instance Assignment Actions =====
+
+            assignEntityToLayer: (entityId, layerId, options = {}) => {
+                const state = get()
+                const { logicalNodeId, inheritsChildren = true } = options
+
+                // Check for conflicts first
+                const conflict = state.checkAssignmentConflict(entityId, layerId)
+                if (conflict) {
+                    // Still allow assignment but record the conflict
+                    set({ assignmentConflicts: [...state.assignmentConflicts, conflict] })
+                }
+
+                // Create the assignment config
+                const assignment: EntityAssignmentConfig = {
                     entityId,
                     layerId,
+                    logicalNodeId,
                     inheritsChildren,
-                    priority: 1000,
-                    assignedBy: 'user' as const,
+                    priority: 1000, // User assignments get highest priority
+                    assignedBy: 'user',
                     assignedAt: new Date().toISOString()
-                }))
-                return {
-                    ...layer,
-                    entityAssignments: [...existing, ...newAssignments]
+                }
+
+                // Update instance assignments
+                const newAssignments = new Map(state.instanceAssignments)
+                newAssignments.set(entityId, assignment)
+
+                // Also update the layer's entityAssignments array for persistence
+                const updatedLayers = state.layers.map(layer => {
+                    if (layer.id === layerId) {
+                        const existing = layer.entityAssignments?.filter(a => a.entityId !== entityId) ?? []
+                        return {
+                            ...layer,
+                            entityAssignments: [...existing, assignment]
+                        }
+                    }
+                    // Remove from other layers
+                    if (layer.entityAssignments?.some(a => a.entityId === entityId)) {
+                        return {
+                            ...layer,
+                            entityAssignments: layer.entityAssignments.filter(a => a.entityId !== entityId)
+                        }
+                    }
+                    return layer
+                })
+
+                set({
+                    instanceAssignments: newAssignments,
+                    layers: updatedLayers
+                })
+
+                return { success: true, conflict: conflict ?? undefined }
+            },
+
+            removeEntityAssignment: (entityId) => {
+                const state = get()
+
+                // Remove from instanceAssignments
+                const newAssignments = new Map(state.instanceAssignments)
+                newAssignments.delete(entityId)
+
+                // Remove from layer entityAssignments
+                const updatedLayers = state.layers.map(layer => {
+                    if (layer.entityAssignments?.some(a => a.entityId === entityId)) {
+                        return {
+                            ...layer,
+                            entityAssignments: layer.entityAssignments.filter(a => a.entityId !== entityId)
+                        }
+                    }
+                    return layer
+                })
+
+                // Clear any conflicts related to this entity
+                const updatedConflicts = state.assignmentConflicts.filter(
+                    c => c.entityId !== entityId && c.conflictingEntityId !== entityId
+                )
+
+                set({
+                    instanceAssignments: newAssignments,
+                    layers: updatedLayers,
+                    assignmentConflicts: updatedConflicts
+                })
+            },
+
+            checkAssignmentConflict: (entityId, layerId) => {
+                const state = get()
+                const parentMap = state.parentMap
+
+                // Check if any ancestor is assigned to a different layer
+                let currentId = entityId
+                while (parentMap.has(currentId)) {
+                    const parentId = parentMap.get(currentId)!
+                    const parentAssignment = state.instanceAssignments.get(parentId)
+
+                    if (parentAssignment && parentAssignment.layerId !== layerId && parentAssignment.inheritsChildren) {
+                        return {
+                            entityId,
+                            conflictingEntityId: parentId,
+                            type: 'parent_assigned' as const,
+                            message: `Parent entity is already assigned to a different layer with inheritance enabled`,
+                            conflictingLayerId: parentAssignment.layerId
+                        }
+                    }
+                    currentId = parentId
+                }
+
+                // Check if any descendant is assigned to a different layer
+                // Build reverse map (parent -> children) for descendant lookup
+                const childMap = new Map<string, string[]>()
+                parentMap.forEach((parentId, childId) => {
+                    const children = childMap.get(parentId) ?? []
+                    children.push(childId)
+                    childMap.set(parentId, children)
+                })
+
+                // BFS to find descendants
+                const queue = [entityId]
+                const visited = new Set<string>()
+
+                while (queue.length > 0) {
+                    const current = queue.shift()!
+                    if (visited.has(current)) continue
+                    visited.add(current)
+
+                    const children = childMap.get(current) ?? []
+                    for (const childId of children) {
+                        const childAssignment = state.instanceAssignments.get(childId)
+                        if (childAssignment && childAssignment.layerId !== layerId) {
+                            return {
+                                entityId,
+                                conflictingEntityId: childId,
+                                type: 'child_assigned' as const,
+                                message: `Child entity is already assigned to a different layer`,
+                                conflictingLayerId: childAssignment.layerId
+                            }
+                        }
+                        queue.push(childId)
+                    }
+                }
+
+                return null
+            },
+
+            getInstanceAssignments: () => {
+                return get().instanceAssignments
+            },
+
+            clearConflicts: () => {
+                set({ assignmentConflicts: [] })
+            },
+
+            setScopeEdgeConfig: (config) => {
+                set({ scopeEdgeConfig: config })
+            },
+
+            bulkAssignEntitiesToLayer: (entityIds, layerId, options = {}) => {
+                const successful: string[] = []
+                const conflicts: AssignmentConflict[] = []
+                const state = get()
+                const { inheritsChildren = true } = options
+
+                // Process each entity
+                for (const entityId of entityIds) {
+                    const conflict = state.checkAssignmentConflict(entityId, layerId)
+                    if (conflict) {
+                        conflicts.push(conflict)
+                    }
+
+                    // Create the assignment config
+                    const assignment: EntityAssignmentConfig = {
+                        entityId,
+                        layerId,
+                        inheritsChildren,
+                        priority: 1000,
+                        assignedBy: 'user',
+                        assignedAt: new Date().toISOString()
+                    }
+
+                    // Update instance assignments
+                    const newAssignments = new Map(state.instanceAssignments)
+                    newAssignments.set(entityId, assignment)
+
+                    // Update state for next iteration
+                    state.instanceAssignments = newAssignments
+                    successful.push(entityId)
+                }
+
+                // Final batch update to layers
+                const finalState = get()
+                const updatedLayers = finalState.layers.map(layer => {
+                    if (layer.id === layerId) {
+                        const existing = layer.entityAssignments?.filter(
+                            a => !entityIds.includes(a.entityId)
+                        ) ?? []
+                        const newAssignments = entityIds.map(entityId => ({
+                            entityId,
+                            layerId,
+                            inheritsChildren,
+                            priority: 1000,
+                            assignedBy: 'user' as const,
+                            assignedAt: new Date().toISOString()
+                        }))
+                        return {
+                            ...layer,
+                            entityAssignments: [...existing, ...newAssignments]
+                        }
+                    }
+                    // Remove from other layers
+                    if (layer.entityAssignments?.some(a => entityIds.includes(a.entityId))) {
+                        return {
+                            ...layer,
+                            entityAssignments: layer.entityAssignments.filter(
+                                a => !entityIds.includes(a.entityId)
+                            )
+                        }
+                    }
+                    return layer
+                })
+
+                set({
+                    instanceAssignments: finalState.instanceAssignments,
+                    layers: updatedLayers,
+                    assignmentConflicts: [...finalState.assignmentConflicts, ...conflicts]
+                })
+
+                return { successful, conflicts }
+            }
+        }),
+        {
+            name: 'reference-model-storage',
+            storage: createJSONStorage(() => localStorage),
+            partialize: (state) => ({
+                layers: state.layers,
+                layerSequence: state.layerSequence,
+                instanceAssignments: Array.from(state.instanceAssignments.entries()), // Maps don't JSON stringify well by default, need support or conversion
+                preservedEdges: state.preservedEdges,
+                scopeFilter: state.scopeFilter
+            }),
+            onRehydrateStorage: () => (state) => {
+                // Must convert Array back to Map for instanceAssignments
+                if (state && Array.isArray(state.instanceAssignments)) {
+                    state.instanceAssignments = new Map(state.instanceAssignments)
                 }
             }
-            // Remove from other layers
-            if (layer.entityAssignments?.some(a => entityIds.includes(a.entityId))) {
-                return {
-                    ...layer,
-                    entityAssignments: layer.entityAssignments.filter(
-                        a => !entityIds.includes(a.entityId)
-                    )
-                }
-            }
-            return layer
-        })
-
-        set({
-            instanceAssignments: finalState.instanceAssignments,
-            layers: updatedLayers,
-            assignmentConflicts: [...finalState.assignmentConflicts, ...conflicts]
-        })
-
-        return { successful, conflicts }
-    }
-}))
+        }
+    )
+)
 
 // ============================================
 // Selector Hooks

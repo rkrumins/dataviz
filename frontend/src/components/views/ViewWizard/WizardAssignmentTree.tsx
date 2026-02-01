@@ -354,17 +354,47 @@ export function WizardAssignmentTree({
         conflicts.forEach(c => conflictMap.set(c.entityId, c))
 
         // Recursive tree builder
-        const buildNode = (nodeId: string, depth: number, parentId?: string): EntityTreeNode | null => {
+        const buildNode = (nodeId: string, depth: number, parentId?: string, inheritedLayerId?: string): EntityTreeNode | null => {
             const node = nodeMap.get(nodeId)
             if (!node || node.data.type === 'ghost') return null
 
             const childIds = childMap.get(nodeId) ?? []
+
+            // Determine effective assignment (Top-Down)
+            let effectiveLayerId: string | undefined
+            let isInherited = false
+            let isExplicitlyExcluded = false
+
+            const instanceAssignment = instanceAssignments.get(nodeId)
+
+            // Priority 1: Instance Assignment
+            if (instanceAssignment) {
+                if (instanceAssignment.layerId === '__UNASSIGNED__') {
+                    isExplicitlyExcluded = true
+                } else {
+                    effectiveLayerId = instanceAssignment.layerId
+                }
+            }
+            // Priority 2: Config Assignment (if no instance)
+            else {
+                const configLayer = layers.find(l => l.entityAssignments?.some(a => a.entityId === nodeId))
+                if (configLayer) {
+                    effectiveLayerId = configLayer.id
+                }
+            }
+
+            // Priority 3: Inheritance
+            if (!effectiveLayerId && !isExplicitlyExcluded && inheritedLayerId) {
+                effectiveLayerId = inheritedLayerId
+                isInherited = true
+            }
+
+            // Recurse children with new effective context
             const children = childIds
-                .map(id => buildNode(id, depth + 1, nodeId))
+                .map(id => buildNode(id, depth + 1, nodeId, effectiveLayerId))
                 .filter((n): n is EntityTreeNode => n !== null)
                 .sort((a, b) => a.name.localeCompare(b.name))
 
-            const instanceAssignment = instanceAssignments.get(nodeId)
             const conflict = conflictMap.get(nodeId)
 
             return {
@@ -376,8 +406,8 @@ export function WizardAssignmentTree({
                 children,
                 depth,
                 parentId,
-                assignedLayerId: instanceAssignment?.layerId,
-                isInherited: false,
+                assignedLayerId: effectiveLayerId,
+                isInherited,
                 hasConflict: !!conflict,
                 conflictMessage: conflict?.message
             }
@@ -389,7 +419,7 @@ export function WizardAssignmentTree({
             .map(n => buildNode(n.id, 0))
             .filter((n): n is EntityTreeNode => n !== null)
             .sort((a, b) => a.name.localeCompare(b.name))
-    }, [nodes, edges, containmentSet, instanceAssignments, conflicts])
+    }, [nodes, edges, containmentSet, instanceAssignments, conflicts, layers]) // Added layers dependency
 
     // Get unique entity types for filter
     const entityTypes = useMemo(() => {
@@ -487,16 +517,49 @@ export function WizardAssignmentTree({
 
     const handleAssign = useCallback((entityId: string, layerId: string) => {
         if (!layerId) {
-            removeEntityAssignment(entityId)
+            // "Remove" action logic
+            // We need to know if we are currently inherited or explicit
+            // Re-find the node in the flattened list (most efficient since we have it)
+            // Or look it up in the instance assignments map
+
+            const instanceAssignment = instanceAssignments.get(entityId)
+            const isExplicitlyExcluded = instanceAssignment?.layerId === '__UNASSIGNED__'
+
+            if (isExplicitlyExcluded) {
+                // Was excluded -> Revert to Default (Inheritance)
+                removeEntityAssignment(entityId)
+            } else {
+                // Check if current effective assignment matches a parent's assignment (Inheritance check)
+                // This is tricky without the tree context. 
+                // Let's use the `flattenedNodes` to find the node state if possible, 
+                // BUT `flattenedNodes` only has VISIBLE nodes.
+                // We should assume that if user clicked X, they accessed it via UI. 
+                // But `handleAssign` might be called from outside UI context? No, internal use.
+
+                // Let's try to find it in the flat list
+                const nodeInTree = flattenedNodes.find(n => n.id === entityId)
+
+                // If found and isInherited -> Exclude
+                if (nodeInTree?.isInherited) {
+                    assignEntityToLayer(entityId, '__UNASSIGNED__', { inheritsChildren: true })
+                }
+                // Else (Explicitly assigned or Unassigned Root) -> Remove Assignment
+                else {
+                    removeEntityAssignment(entityId)
+                }
+            }
         } else {
             assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
         }
         onAssignmentChange?.(entityId, layerId || null)
-    }, [assignEntityToLayer, removeEntityAssignment, onAssignmentChange])
+    }, [assignEntityToLayer, removeEntityAssignment, onAssignmentChange, instanceAssignments, flattenedNodes])
 
     const handleBulkAssign = useCallback((layerId: string) => {
         selectedIds.forEach(entityId => {
             if (!layerId) {
+                // Bulk Remove - adhere to same logic? 
+                // For bulk, "Remove" usually means "Clear Explicit". 
+                // Supporting "Exclude" in bulk is complex. Default to Clear.
                 removeEntityAssignment(entityId)
             } else {
                 assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
