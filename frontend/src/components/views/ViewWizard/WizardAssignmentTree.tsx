@@ -208,60 +208,73 @@ function TreeRow({
             )}
 
             {/* Drag Handle */}
-            <GripVertical className="w-4 h-4 text-slate-300 opacity-0 group-hover:opacity-100 cursor-grab active:cursor-grabbing transition-opacity" />
+            <GripVertical className="w-3 h-3 text-slate-300 opacity-0 group-hover:opacity-100 cursor-grab active:cursor-grabbing transition-opacity flex-shrink-0" />
 
             {/* Type Icon with Color */}
             <div
-                className="w-7 h-7 rounded-lg flex items-center justify-center text-white shadow-sm"
+                className="w-6 h-6 rounded-lg flex items-center justify-center text-white shadow-sm flex-shrink-0"
                 style={{ backgroundColor: typeColor }}
             >
                 {icon}
             </div>
 
-            {/* Entity Name */}
-            <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-slate-700 dark:text-slate-200 truncate">
+            {/* Entity Name - takes priority */}
+            <div className="flex-1 min-w-[120px] overflow-hidden">
+                <p className="text-sm font-medium text-slate-800 dark:text-slate-100 truncate" title={node.name}>
                     {highlightMatch(node.name)}
                 </p>
-                <p className="text-xs text-slate-400 truncate">{node.type}</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400 truncate">{node.type}</p>
             </div>
 
             {/* Child Count Badge */}
             {hasChildren && (
-                <span className="text-xs px-2 py-0.5 bg-slate-100 dark:bg-slate-700 text-slate-500 rounded-full">
+                <span className="text-xs px-1.5 py-0.5 bg-slate-100 dark:bg-slate-700 text-slate-500 rounded-full flex-shrink-0">
                     {node.childCount || node.children.length}
                 </span>
             )}
 
             {/* Conflict Warning */}
             {node.hasConflict && (
-                <div className="flex items-center gap-1 text-amber-500" title={node.conflictMessage}>
+                <div className="flex items-center gap-1 text-amber-500 flex-shrink-0" title={node.conflictMessage}>
                     <AlertTriangle className="w-4 h-4" />
                 </div>
             )}
 
-            {/* Assignment Badge */}
+            {/* Assignment Badge with Remove Button */}
             {assignedLayer && (
-                <span
-                    className={cn(
-                        'text-xs px-2 py-1 rounded-full font-medium transition-all',
-                        node.isInherited && 'opacity-70'
-                    )}
-                    style={{
-                        backgroundColor: (assignedLayer.color || '#3b82f6') + '20',
-                        color: assignedLayer.color || '#3b82f6'
-                    }}
-                >
-                    {node.isInherited ? '↳ ' : ''}{assignedLayer.name}
-                </span>
+                <div className="flex items-center gap-1 flex-shrink-0">
+                    <span
+                        className={cn(
+                            'text-xs px-2 py-0.5 rounded-full font-medium',
+                            node.isInherited && 'opacity-70'
+                        )}
+                        style={{
+                            backgroundColor: (assignedLayer.color || '#3b82f6') + '20',
+                            color: assignedLayer.color || '#3b82f6'
+                        }}
+                    >
+                        {node.isInherited ? '↳ ' : ''}{assignedLayer.name}
+                    </span>
+                    {/* Remove assignment button */}
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation()
+                            onAssign(node.id, '')
+                        }}
+                        className="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-slate-400 hover:text-red-500 transition-colors"
+                        title="Remove assignment"
+                    >
+                        <X className="w-3 h-3" />
+                    </button>
+                </div>
             )}
 
-            {/* Quick Assign Dropdown */}
+            {/* Quick Assign Dropdown - only show on hover */}
             <select
                 className={cn(
                     'text-xs bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600',
-                    'rounded-lg px-2 py-1 opacity-0 group-hover:opacity-100 transition-opacity',
-                    'focus:outline-none focus:ring-2 focus:ring-blue-400'
+                    'rounded-lg px-1.5 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0',
+                    'focus:outline-none focus:ring-2 focus:ring-blue-400 max-w-[80px]'
                 )}
                 value={node.assignedLayerId || ''}
                 onClick={(e) => e.stopPropagation()}
@@ -270,7 +283,7 @@ function TreeRow({
                     onAssign(node.id, e.target.value)
                 }}
             >
-                <option value="">Unassigned</option>
+                <option value="">Assign...</option>
                 {layers.map(layer => (
                     <option key={layer.id} value={layer.id}>{layer.name}</option>
                 ))}
