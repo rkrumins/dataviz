@@ -643,6 +643,14 @@ export interface WorkspaceSchema {
 
   // Global visual settings
   globalVisuals: GlobalVisualConfig;
+
+  /**
+   * Default containment edge types for hierarchy traversal.
+   * Used when building parent-child relationships for tree displays.
+   * Examples: ['CONTAINS', 'HAS_SCHEMA', 'HAS_COLUMN', 'BELONGS_TO']
+   * Can be overridden per-view via ViewLayerConfig.scopeEdges
+   */
+  containmentEdgeTypes?: string[];
 }
 
 export interface GlobalVisualConfig {

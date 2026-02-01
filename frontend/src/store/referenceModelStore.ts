@@ -156,6 +156,13 @@ interface ReferenceModelState {
 
     /** Set scope edge configuration */
     setScopeEdgeConfig: (config: ScopeEdgeConfig | null) => void
+
+    /** Bulk assign multiple entities to a layer */
+    bulkAssignEntitiesToLayer: (
+        entityIds: string[],
+        layerId: string,
+        options?: { inheritsChildren?: boolean }
+    ) => { successful: string[]; conflicts: AssignmentConflict[] }
 }
 
 // ============================================
@@ -588,6 +595,79 @@ export const useReferenceModelStore = create<ReferenceModelState>((set, get) => 
 
     setScopeEdgeConfig: (config) => {
         set({ scopeEdgeConfig: config })
+    },
+
+    bulkAssignEntitiesToLayer: (entityIds, layerId, options = {}) => {
+        const successful: string[] = []
+        const conflicts: AssignmentConflict[] = []
+        const state = get()
+        const { inheritsChildren = true } = options
+
+        // Process each entity
+        for (const entityId of entityIds) {
+            const conflict = state.checkAssignmentConflict(entityId, layerId)
+            if (conflict) {
+                conflicts.push(conflict)
+            }
+
+            // Create the assignment config
+            const assignment: EntityAssignmentConfig = {
+                entityId,
+                layerId,
+                inheritsChildren,
+                priority: 1000,
+                assignedBy: 'user',
+                assignedAt: new Date().toISOString()
+            }
+
+            // Update instance assignments
+            const newAssignments = new Map(state.instanceAssignments)
+            newAssignments.set(entityId, assignment)
+
+            // Update state for next iteration
+            state.instanceAssignments = newAssignments
+            successful.push(entityId)
+        }
+
+        // Final batch update to layers
+        const finalState = get()
+        const updatedLayers = finalState.layers.map(layer => {
+            if (layer.id === layerId) {
+                const existing = layer.entityAssignments?.filter(
+                    a => !entityIds.includes(a.entityId)
+                ) ?? []
+                const newAssignments = entityIds.map(entityId => ({
+                    entityId,
+                    layerId,
+                    inheritsChildren,
+                    priority: 1000,
+                    assignedBy: 'user' as const,
+                    assignedAt: new Date().toISOString()
+                }))
+                return {
+                    ...layer,
+                    entityAssignments: [...existing, ...newAssignments]
+                }
+            }
+            // Remove from other layers
+            if (layer.entityAssignments?.some(a => entityIds.includes(a.entityId))) {
+                return {
+                    ...layer,
+                    entityAssignments: layer.entityAssignments.filter(
+                        a => !entityIds.includes(a.entityId)
+                    )
+                }
+            }
+            return layer
+        })
+
+        set({
+            instanceAssignments: finalState.instanceAssignments,
+            layers: updatedLayers,
+            assignmentConflicts: [...finalState.assignmentConflicts, ...conflicts]
+        })
+
+        return { successful, conflicts }
     }
 }))
 

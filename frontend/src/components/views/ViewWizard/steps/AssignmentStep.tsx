@@ -1,7 +1,20 @@
-import { useMemo } from 'react'
+/**
+ * AssignmentStep - Tree-based entity assignment for ViewWizard
+ * 
+ * Features:
+ * - Hierarchical entity browser with virtualization
+ * - Drag-and-drop to layer cards
+ * - Bulk selection and assignment
+ * - Configurable containment edge types
+ */
+
+import { useMemo, useCallback, useEffect } from 'react'
 import type { CreateViewRequest } from '@/services/viewService'
-import { SmartAssignmentPanel } from '../../SmartAssignmentPanel'
+import { WizardAssignmentTree } from '../WizardAssignmentTree'
 import { LayerManager } from '../../LayerManager'
+import { useSchemaStore } from '@/store/schema'
+import { useReferenceModelStore } from '@/store/referenceModelStore'
+import type { EntityAssignmentConfig } from '@/types/schema'
 
 interface AssignmentStepProps {
     formData: CreateViewRequest
@@ -9,42 +22,81 @@ interface AssignmentStepProps {
 }
 
 export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps) {
-    // Collect all entities that are already manually assigned to any layer
-    const assignedEntityIds = useMemo(() => {
-        const set = new Set<string>()
+    const schema = useSchemaStore(s => s.schema)
+    const setLayers = useReferenceModelStore(s => s.setLayers)
+
+    // Sync layers with store for conflict detection
+    useEffect(() => {
         if (formData.layers) {
-            for (const layer of formData.layers) {
-                if (layer.entityAssignments) {
-                    for (const assignment of layer.entityAssignments) {
-                        set.add(assignment.entityId)
-                    }
+            setLayers(formData.layers)
+        }
+    }, [formData.layers, setLayers])
+
+    // Get containment edge types from schema with fallback
+    const containmentEdgeTypes = useMemo(() => {
+        return schema?.containmentEdgeTypes || [
+            'contains', 'CONTAINS',
+            'has_schema', 'HAS_SCHEMA',
+            'has_dataset', 'HAS_DATASET',
+            'has_column', 'HAS_COLUMN'
+        ]
+    }, [schema?.containmentEdgeTypes])
+
+    // Handle assignment changes from tree
+    const handleAssignmentChange = useCallback((entityId: string, layerId: string | null) => {
+        if (!formData.layers) return
+
+        const updatedLayers = formData.layers.map(layer => {
+            // Remove entity from all layers first
+            const filteredAssignments = (layer.entityAssignments || [])
+                .filter(a => a.entityId !== entityId)
+
+            if (layer.id === layerId) {
+                // Add to target layer
+                const newAssignment: EntityAssignmentConfig = {
+                    entityId,
+                    layerId: layer.id,
+                    inheritsChildren: true,
+                    priority: 1000,
+                    assignedBy: 'user',
+                    assignedAt: new Date().toISOString()
+                }
+                return {
+                    ...layer,
+                    entityAssignments: [...filteredAssignments, newAssignment]
                 }
             }
-        }
-        return set
-    }, [formData.layers])
+
+            return {
+                ...layer,
+                entityAssignments: filteredAssignments
+            }
+        })
+
+        updateFormData({ layers: updatedLayers })
+    }, [formData.layers, updateFormData])
 
     return (
-        <div className="flex h-[600px] gap-6">
-            {/* Left Panel: Available Entities */}
-            <div className="w-1/3 min-w-[320px] flex flex-col">
-                <div className="mb-2">
-                    <h3 className="text-lg font-semibold text-slate-800 dark:text-white">Entities</h3>
-                    <p className="text-sm text-slate-500">Drag to assign to layers</p>
-                </div>
-                <div className="flex-1 min-h-0">
-                    <SmartAssignmentPanel
-                        assignedEntityIds={assignedEntityIds}
-                        className="h-full shadow-sm"
-                    />
-                </div>
+        <div className="flex h-[650px] gap-6">
+            {/* Left Panel: Entity Tree Browser */}
+            <div className="w-2/5 min-w-[380px] flex flex-col">
+                <WizardAssignmentTree
+                    layers={formData.layers || []}
+                    containmentEdgeTypes={containmentEdgeTypes}
+                    onAssignmentChange={handleAssignmentChange}
+                    className="h-full"
+                />
             </div>
 
             {/* Right Panel: Layer Drop Targets */}
             <div className="flex-1 flex flex-col min-h-0">
-                <div className="mb-2">
-                    <h3 className="text-lg font-semibold text-slate-800 dark:text-white">Layers</h3>
-                    <p className="text-sm text-slate-500">Drop entities here</p>
+                <div className="mb-3">
+                    <h3 className="text-lg font-semibold text-slate-800 dark:text-white">
+                        Layer Targets
+                    </h3>
+                    <p className="text-sm text-slate-500">
+                        Drop entities here or use the dropdown in the tree
+                    </p>
                 </div>
                 <div className="flex-1 overflow-y-auto pr-2">
                     <LayerManager
