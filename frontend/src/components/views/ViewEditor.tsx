@@ -9,12 +9,16 @@
  * - Layout options
  */
 
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
 import type { ViewConfiguration, EntityTypeSchema, ViewLayerConfig, LayerAssignmentRuleConfig, LogicalNodeConfig } from '@/types/schema'
 import { cn } from '@/lib/utils'
+import { EntityAssignmentPanel } from './EntityAssignmentPanel'
+import { LayerDropZoneRow } from './LayerDropZone'
+import { ReferenceModelBuilder } from './ReferenceModelBuilder'
+import { useInstanceAssignments } from '@/store/referenceModelStore'
 
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
@@ -45,6 +49,7 @@ const LAYOUT_TYPES = [
 
 export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
   const schema = useSchemaStore((s) => s.schema)
+  const instanceAssignments = useInstanceAssignments()
 
   // Load existing view or create new one
   const existingView = viewId
@@ -100,6 +105,18 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
   })
 
   const [activeTab, setActiveTab] = useState<'general' | 'entities' | 'projection' | 'layers'>('general')
+  const [isAssignmentPanelOpen, setIsAssignmentPanelOpen] = useState(false)
+  const [isBuilderOpen, setIsBuilderOpen] = useState(false)
+
+  // Compute entity counts per layer for visual feedback
+  const entityCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    instanceAssignments.forEach((assignment) => {
+      const current = counts.get(assignment.layerId) ?? 0
+      counts.set(assignment.layerId, current + 1)
+    })
+    return counts
+  }, [instanceAssignments])
 
   // Update a nested property
   const updateView = <K extends keyof ViewConfiguration>(
@@ -459,11 +476,38 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                       (Assign entity types to each layer to determine where they appear)
                     </span>
                   </p>
-                  <button onClick={addLayer} className="btn btn-primary btn-sm">
-                    <LucideIcons.Plus className="w-4 h-4" />
-                    Add Layer
-                  </button>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setIsBuilderOpen(true)}
+                      className="btn btn-secondary btn-sm"
+                    >
+                      <LucideIcons.LayoutTemplate className="w-4 h-4" />
+                      Full Builder
+                    </button>
+                    <button
+                      onClick={() => setIsAssignmentPanelOpen(true)}
+                      className="btn btn-secondary btn-sm"
+                    >
+                      <LucideIcons.Users className="w-4 h-4" />
+                      Assign Entities
+                    </button>
+                    <button onClick={addLayer} className="btn btn-primary btn-sm">
+                      <LucideIcons.Plus className="w-4 h-4" />
+                      Add Layer
+                    </button>
+                  </div>
                 </div>
+
+                {/* Layer Drop Zones for Quick Assignment */}
+                {(view.layout?.referenceLayout?.layers ?? []).length > 0 && (
+                  <div className="mt-4">
+                    <p className="text-xs text-ink-muted mb-2">Drop entities here to assign:</p>
+                    <LayerDropZoneRow
+                      layers={view.layout?.referenceLayout?.layers ?? []}
+                      entityCounts={entityCounts}
+                    />
+                  </div>
+                )}
 
                 {(view.layout?.referenceLayout?.layers ?? []).length === 0 ? (
                   <div className="text-center py-12 text-ink-muted">
@@ -503,6 +547,30 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
           </button>
         </div>
       </motion.div>
+
+      {/* Entity Assignment Panel */}
+      <EntityAssignmentPanel
+        isOpen={isAssignmentPanelOpen}
+        onClose={() => setIsAssignmentPanelOpen(false)}
+      />
+
+      {/* Reference Model Builder */}
+      <ReferenceModelBuilder
+        isOpen={isBuilderOpen}
+        onClose={() => setIsBuilderOpen(false)}
+        onSave={(newLayers) => {
+          setView(prev => ({
+            ...prev,
+            layout: {
+              ...prev.layout!,
+              referenceLayout: {
+                ...prev.layout?.referenceLayout,
+                layers: newLayers
+              }
+            }
+          }))
+        }}
+      />
     </div>
   )
 }

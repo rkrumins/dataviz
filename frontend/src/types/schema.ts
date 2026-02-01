@@ -239,7 +239,92 @@ export interface ViewLayerConfig {
 
   // Advanced assignment rules (overrides entityTypes)
   rules?: LayerAssignmentRuleConfig[];
+
+  // Instance-level assignments (highest priority - direct entity mapping)
+  entityAssignments?: EntityAssignmentConfig[];
+
+  // Scope configuration - which edge types define containment hierarchy
+  scopeEdges?: ScopeEdgeConfig;
 }
+
+/**
+ * Direct entity-to-layer assignment (overrides rule-based matching)
+ * Enables assigning specific entities (e.g., "Finance Domain") to layers
+ * regardless of their entity type.
+ */
+export interface EntityAssignmentConfig {
+  /** URN or ID of the specific entity being assigned */
+  entityId: string;
+
+  /** Target layer ID */
+  layerId: string;
+
+  /** Optional logical node within the layer */
+  logicalNodeId?: string;
+
+  /**
+   * If true, all descendants (children, grandchildren, etc.) inherit this assignment.
+   * If false, only this specific entity is assigned; children use rules/defaults.
+   */
+  inheritsChildren: boolean;
+
+  /**
+   * Priority for conflict resolution (higher wins).
+   * - 1000+ for manual user assignments
+   * - 100-999 for rule-based assignments
+   * - <100 for type-based defaults
+   */
+  priority: number;
+
+  /** Optional: who/what assigned this (for audit trail) */
+  assignedBy?: 'user' | 'rule' | 'inference';
+
+  /** Timestamp of assignment */
+  assignedAt?: string;
+}
+
+/**
+ * Edge-based scope filtering for layer assignment.
+ * Controls which relationship types define the containment hierarchy.
+ */
+export interface ScopeEdgeConfig {
+  /**
+   * Specific edge types to include in scope.
+   * Examples: ['CONTAINS', 'BELONGS_TO', 'HAS_CHILD']
+   */
+  edgeTypes: string[];
+
+  /**
+   * If true, all edge types are included regardless of edgeTypes array.
+   * Useful for "include everything except..." logic when combined with excludeEdgeTypes.
+   */
+  includeAll: boolean;
+
+  /** Edge types to explicitly exclude (only applies when includeAll is true) */
+  excludeEdgeTypes?: string[];
+}
+
+/**
+ * Result of checking an assignment for conflicts
+ */
+export interface AssignmentConflict {
+  /** The entity being assigned */
+  entityId: string;
+
+  /** Parent or child entity causing the conflict */
+  conflictingEntityId: string;
+
+  /** Type of conflict */
+  type: 'parent_assigned' | 'child_assigned' | 'circular';
+
+  /** Human-readable message */
+  message: string;
+
+  /** The conflicting assignment's layer */
+  conflictingLayerId: string;
+}
+
+
 
 export interface LogicalNodeConfig {
   id: string;
@@ -269,6 +354,13 @@ export interface LayerAssignmentRuleConfig {
   };
 
   priority: number; // Higher wins
+
+  /**
+   * If true, when this rule matches an entity, all of its descendants
+   * (children, grandchildren, etc.) automatically inherit this layer assignment.
+   * Default: true (existing behavior)
+   */
+  inheritsFromParent?: boolean;
 
   // Compound Rules (Phase 3)
   // If present, ALL conditions must match (AND logic)

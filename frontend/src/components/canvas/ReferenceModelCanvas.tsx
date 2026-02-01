@@ -15,6 +15,7 @@ import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
+import { useInstanceAssignments } from '@/store/referenceModelStore'
 import {
   type GraphNode,
   resolveLayerAssignment,
@@ -113,6 +114,9 @@ export function ReferenceModelCanvas({
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
   const updateView = useSchemaStore((s) => s.updateView)
+
+  // Instance-level assignments from store (user drag-and-drop)
+  const instanceAssignments = useInstanceAssignments()
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
@@ -531,8 +535,19 @@ export function ReferenceModelCanvas({
           // Simple type check OR advanced rule check from layerRules
           let assignedToThisLayer = false
 
+          // 0. Check INSTANCE ASSIGNMENTS first (user drag-and-drop, highest priority)
+          const instanceAssignment = instanceAssignments.get(pNode.id)
+          if (instanceAssignment) {
+            if (instanceAssignment.layerId === layer.id) {
+              assignedToThisLayer = true
+            } else {
+              // Assigned to a different layer, skip this layer
+              return
+            }
+          }
+
           // 1. Check type
-          if (layer.entityTypes.includes(pNode.typeId)) {
+          if (!assignedToThisLayer && layer.entityTypes.includes(pNode.typeId)) {
             assignedToThisLayer = true
           }
 
@@ -563,7 +578,7 @@ export function ReferenceModelCanvas({
     })
 
     return grouped
-  }, [hierarchyTree, sortedLayers, layerRules])
+  }, [hierarchyTree, sortedLayers, layerRules, instanceAssignments])
 
   // Flatten logical/physical nodes for search and lookup
   const { displayFlat, displayMap } = useMemo(() => {

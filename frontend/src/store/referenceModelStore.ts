@@ -16,7 +16,7 @@
 
 import { create } from 'zustand'
 import { generateId } from '@/lib/utils'
-import type { ViewLayerConfig, ScopeFilterConfig } from '@/types/schema'
+import type { ViewLayerConfig, ScopeFilterConfig, EntityAssignmentConfig, AssignmentConflict, ScopeEdgeConfig } from '@/types/schema'
 import type {
     GraphEdge,
     EntityAssignment,
@@ -76,6 +76,16 @@ interface ReferenceModelState {
     // ===== Expanded Nodes (for lazy loading) =====
     expandedNodeIds: Set<string>
 
+    // ===== Instance-Level Assignments (NEW) =====
+    /** Direct entity-to-layer assignments (overrides rule-based) */
+    instanceAssignments: Map<string, EntityAssignmentConfig>
+
+    /** Detected assignment conflicts */
+    assignmentConflicts: AssignmentConflict[]
+
+    /** Current scope edge configuration */
+    scopeEdgeConfig: ScopeEdgeConfig | null
+
     // ===== Subscription Management =====
     _subscribers: Set<LayerChangeCallback>
 
@@ -124,6 +134,28 @@ interface ReferenceModelState {
 
     // ===== Build Assignment Request =====
     buildAssignmentRequest: () => LayerAssignmentRequest
+
+    // ===== Instance Assignment Actions (NEW) =====
+    /** Assign a specific entity to a layer (with conflict detection) */
+    assignEntityToLayer: (entityId: string, layerId: string, options?: {
+        logicalNodeId?: string
+        inheritsChildren?: boolean
+    }) => { success: boolean; conflict?: AssignmentConflict }
+
+    /** Remove an instance assignment */
+    removeEntityAssignment: (entityId: string) => void
+
+    /** Check if assigning an entity would cause a conflict */
+    checkAssignmentConflict: (entityId: string, layerId: string) => AssignmentConflict | null
+
+    /** Get all instance assignments */
+    getInstanceAssignments: () => Map<string, EntityAssignmentConfig>
+
+    /** Clear all conflicts */
+    clearConflicts: () => void
+
+    /** Set scope edge configuration */
+    setScopeEdgeConfig: (config: ScopeEdgeConfig | null) => void
 }
 
 // ============================================
@@ -149,6 +181,9 @@ export const useReferenceModelStore = create<ReferenceModelState>((set, get) => 
     lastError: null,
     lastComputeTimeMs: 0,
     expandedNodeIds: new Set(),
+    instanceAssignments: new Map(),
+    assignmentConflicts: [],
+    scopeEdgeConfig: null,
     _subscribers: new Set(),
 
     setLayers: (layers) => {
@@ -392,10 +427,167 @@ export const useReferenceModelStore = create<ReferenceModelState>((set, get) => 
                 sequence: layer.sequence ?? layer.order,
                 entityTypes: layer.entityTypes,
                 rules: layer.rules ?? [],
-                logicalNodes: layer.logicalNodes
+                logicalNodes: layer.logicalNodes,
+                entityAssignments: layer.entityAssignments ?? []
             })),
             includeEdges: true
         }
+    },
+
+    // ===== Instance Assignment Actions =====
+
+    assignEntityToLayer: (entityId, layerId, options = {}) => {
+        const state = get()
+        const { logicalNodeId, inheritsChildren = true } = options
+
+        // Check for conflicts first
+        const conflict = state.checkAssignmentConflict(entityId, layerId)
+        if (conflict) {
+            // Still allow assignment but record the conflict
+            set({ assignmentConflicts: [...state.assignmentConflicts, conflict] })
+        }
+
+        // Create the assignment config
+        const assignment: EntityAssignmentConfig = {
+            entityId,
+            layerId,
+            logicalNodeId,
+            inheritsChildren,
+            priority: 1000, // User assignments get highest priority
+            assignedBy: 'user',
+            assignedAt: new Date().toISOString()
+        }
+
+        // Update instance assignments
+        const newAssignments = new Map(state.instanceAssignments)
+        newAssignments.set(entityId, assignment)
+
+        // Also update the layer's entityAssignments array for persistence
+        const updatedLayers = state.layers.map(layer => {
+            if (layer.id === layerId) {
+                const existing = layer.entityAssignments?.filter(a => a.entityId !== entityId) ?? []
+                return {
+                    ...layer,
+                    entityAssignments: [...existing, assignment]
+                }
+            }
+            // Remove from other layers
+            if (layer.entityAssignments?.some(a => a.entityId === entityId)) {
+                return {
+                    ...layer,
+                    entityAssignments: layer.entityAssignments.filter(a => a.entityId !== entityId)
+                }
+            }
+            return layer
+        })
+
+        set({
+            instanceAssignments: newAssignments,
+            layers: updatedLayers
+        })
+
+        return { success: true, conflict: conflict ?? undefined }
+    },
+
+    removeEntityAssignment: (entityId) => {
+        const state = get()
+
+        // Remove from instanceAssignments
+        const newAssignments = new Map(state.instanceAssignments)
+        newAssignments.delete(entityId)
+
+        // Remove from layer entityAssignments
+        const updatedLayers = state.layers.map(layer => {
+            if (layer.entityAssignments?.some(a => a.entityId === entityId)) {
+                return {
+                    ...layer,
+                    entityAssignments: layer.entityAssignments.filter(a => a.entityId !== entityId)
+                }
+            }
+            return layer
+        })
+
+        // Clear any conflicts related to this entity
+        const updatedConflicts = state.assignmentConflicts.filter(
+            c => c.entityId !== entityId && c.conflictingEntityId !== entityId
+        )
+
+        set({
+            instanceAssignments: newAssignments,
+            layers: updatedLayers,
+            assignmentConflicts: updatedConflicts
+        })
+    },
+
+    checkAssignmentConflict: (entityId, layerId) => {
+        const state = get()
+        const parentMap = state.parentMap
+
+        // Check if any ancestor is assigned to a different layer
+        let currentId = entityId
+        while (parentMap.has(currentId)) {
+            const parentId = parentMap.get(currentId)!
+            const parentAssignment = state.instanceAssignments.get(parentId)
+
+            if (parentAssignment && parentAssignment.layerId !== layerId && parentAssignment.inheritsChildren) {
+                return {
+                    entityId,
+                    conflictingEntityId: parentId,
+                    type: 'parent_assigned' as const,
+                    message: `Parent entity is already assigned to a different layer with inheritance enabled`,
+                    conflictingLayerId: parentAssignment.layerId
+                }
+            }
+            currentId = parentId
+        }
+
+        // Check if any descendant is assigned to a different layer
+        // Build reverse map (parent -> children) for descendant lookup
+        const childMap = new Map<string, string[]>()
+        parentMap.forEach((parentId, childId) => {
+            const children = childMap.get(parentId) ?? []
+            children.push(childId)
+            childMap.set(parentId, children)
+        })
+
+        // BFS to find descendants
+        const queue = [entityId]
+        const visited = new Set<string>()
+
+        while (queue.length > 0) {
+            const current = queue.shift()!
+            if (visited.has(current)) continue
+            visited.add(current)
+
+            const children = childMap.get(current) ?? []
+            for (const childId of children) {
+                const childAssignment = state.instanceAssignments.get(childId)
+                if (childAssignment && childAssignment.layerId !== layerId) {
+                    return {
+                        entityId,
+                        conflictingEntityId: childId,
+                        type: 'child_assigned' as const,
+                        message: `Child entity is already assigned to a different layer`,
+                        conflictingLayerId: childAssignment.layerId
+                    }
+                }
+                queue.push(childId)
+            }
+        }
+
+        return null
+    },
+
+    getInstanceAssignments: () => {
+        return get().instanceAssignments
+    },
+
+    clearConflicts: () => {
+        set({ assignmentConflicts: [] })
+    },
+
+    setScopeEdgeConfig: (config) => {
+        set({ scopeEdgeConfig: config })
     }
 }))
 
@@ -437,3 +629,35 @@ export const useIsInherited = (entityId: string) => {
     const assignment = useEntityAssignment(entityId)
     return assignment?.isInherited ?? false
 }
+
+/**
+ * Hook to get instance assignments (direct entity-to-layer mappings)
+ */
+export const useInstanceAssignments = () => useReferenceModelStore(s => s.instanceAssignments)
+
+/**
+ * Hook to get assignment conflicts
+ */
+export const useAssignmentConflicts = () => useReferenceModelStore(s => s.assignmentConflicts)
+
+/**
+ * Hook to get scope edge configuration
+ */
+export const useScopeEdgeConfig = () => useReferenceModelStore(s => s.scopeEdgeConfig)
+
+/**
+ * Hook to get instance assignment for a specific entity
+ */
+export const useInstanceEntityAssignment = (entityId: string) => {
+    const assignments = useReferenceModelStore(s => s.instanceAssignments)
+    return assignments.get(entityId)
+}
+
+/**
+ * Hook to check if an entity has a direct instance assignment (not inherited)
+ */
+export const useHasInstanceAssignment = (entityId: string) => {
+    const assignments = useReferenceModelStore(s => s.instanceAssignments)
+    return assignments.has(entityId)
+}
+
