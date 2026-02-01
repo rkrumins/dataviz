@@ -17,6 +17,7 @@
     "@radix-ui/react-tabs": "^1.1.2",
     "@radix-ui/react-tooltip": "^1.1.6",
     "@types/dagre": "^0.7.53",
+    "@types/react-window": "^1.8.8",
     "@xyflow/react": "^12.10.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -28,6 +29,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-grid-layout": "^1.5.0",
+    "react-window": "^2.2.6",
     "tailwind-merge": "^2.6.0",
     "zustand": "^5.0.2"
   },

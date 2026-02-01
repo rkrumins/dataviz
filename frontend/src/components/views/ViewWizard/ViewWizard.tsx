@@ -22,7 +22,8 @@ import {
     LayoutTemplate,
     Save,
     Eye,
-    Loader2
+    Loader2,
+    ClipboardList
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
@@ -34,6 +35,7 @@ import { BasicsStep } from './steps/BasicsStep'
 import { LayoutStep } from './steps/LayoutStep'
 import { EntitiesStep } from './steps/EntitiesStep'
 import { PreviewStep } from './steps/PreviewStep'
+import { AssignmentStep } from './steps/AssignmentStep'
 
 // ============================================
 // Types
@@ -65,14 +67,9 @@ export interface WizardFormData {
     isValid: boolean
 }
 
-type WizardStep = 'basics' | 'layout' | 'entities' | 'preview'
+type WizardStep = 'basics' | 'layout' | 'assignment' | 'entities' | 'preview'
 
-const STEPS: { id: WizardStep; label: string; icon: React.ReactNode }[] = [
-    { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
-    { id: 'layout', label: 'Layout', icon: <LayoutTemplate className="w-4 h-4" /> },
-    { id: 'entities', label: 'Entities', icon: <Network className="w-4 h-4" /> },
-    { id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> }
-]
+
 
 const LAYOUT_TYPES = [
     {
@@ -133,6 +130,24 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
         }
     }, [mode, viewId, schema])
 
+    // Dynamic steps based on layout
+    const activeSteps = useMemo(() => {
+        const baseSteps: { id: WizardStep; label: string; icon: React.ReactNode }[] = [
+            { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
+            { id: 'layout', label: 'Layout', icon: <LayoutTemplate className="w-4 h-4" /> }
+        ]
+
+        if (formData.layoutType === 'reference') {
+            baseSteps.push({ id: 'assignment' as const, label: 'Assignments', icon: <ClipboardList className="w-4 h-4" /> })
+        }
+
+        return [
+            ...baseSteps,
+            { id: 'entities' as const, label: 'Entities', icon: <Network className="w-4 h-4" /> },
+            { id: 'preview' as const, label: 'Preview', icon: <Eye className="w-4 h-4" /> }
+        ]
+    }, [formData.layoutType])
+
     // Reset on open
     useEffect(() => {
         if (isOpen) {
@@ -151,6 +166,8 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                 return formData.name.trim().length > 0
             case 'layout':
                 return formData.layoutType !== undefined
+            case 'assignment':
+                return true
             case 'entities':
                 return formData.visibleEntityTypes.length > 0
             case 'preview':
@@ -162,12 +179,12 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
 
     // Navigation
     const handleNext = useCallback(() => {
-        const stepIndex = STEPS.findIndex(s => s.id === currentStep)
-        if (stepIndex < STEPS.length - 1) {
+        const stepIndex = activeSteps.findIndex(s => s.id === currentStep)
+        if (stepIndex < activeSteps.length - 1) {
             setPreviousSteps(prev => [...prev, currentStep])
-            setCurrentStep(STEPS[stepIndex + 1].id)
+            setCurrentStep(activeSteps[stepIndex + 1].id)
         }
-    }, [currentStep])
+    }, [currentStep, activeSteps])
 
     const handleBack = useCallback(() => {
         if (previousSteps.length > 0) {
@@ -178,14 +195,14 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
     }, [previousSteps])
 
     const handleStepClick = useCallback((stepId: WizardStep) => {
-        const currentIndex = STEPS.findIndex(s => s.id === currentStep)
-        const targetIndex = STEPS.findIndex(s => s.id === stepId)
+        const currentIndex = activeSteps.findIndex(s => s.id === currentStep)
+        const targetIndex = activeSteps.findIndex(s => s.id === stepId)
 
         // Can only go back or stay on current
-        if (targetIndex <= currentIndex) {
+        if (targetIndex <= currentIndex && targetIndex !== -1) {
             setCurrentStep(stepId)
         }
-    }, [currentStep])
+    }, [currentStep, activeSteps])
 
     // Submit
     const handleSubmit = useCallback(async () => {
@@ -232,8 +249,8 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
 
     if (!isOpen) return null
 
-    const currentStepIndex = STEPS.findIndex(s => s.id === currentStep)
-    const isLastStep = currentStepIndex === STEPS.length - 1
+    const currentStepIndex = activeSteps.findIndex(s => s.id === currentStep)
+    const isLastStep = currentStepIndex === activeSteps.length - 1
 
     return (
         <motion.div
@@ -253,14 +270,14 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                 <div className="flex items-center justify-between px-8 py-5 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900">
                     <div className="flex items-center gap-4">
                         <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/25">
-                            {STEPS[currentStepIndex].icon}
+                            {activeSteps[currentStepIndex].icon}
                         </div>
                         <div>
                             <h2 className="text-xl font-bold text-slate-900 dark:text-white">
                                 {mode === 'create' ? 'Create New View' : 'Edit View'}
                             </h2>
                             <p className="text-sm text-slate-500">
-                                Step {currentStepIndex + 1} of {STEPS.length}: {STEPS[currentStepIndex].label}
+                                Step {currentStepIndex + 1} of {activeSteps.length}: {activeSteps[currentStepIndex].label}
                             </p>
                         </div>
                     </div>
@@ -275,42 +292,45 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                 {/* Progress Steps */}
                 <div className="px-8 py-4 bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
                     <div className="flex items-center justify-between max-w-2xl mx-auto">
-                        {STEPS.map((step, index) => {
-                            const isActive = step.id === currentStep
-                            const isCompleted = index < currentStepIndex
-                            const isClickable = index <= currentStepIndex
+                        {/* Steps Indicator */}
+                        <div className="flex items-center gap-2">
+                            {activeSteps.map((step, index) => {
+                                const isActive = step.id === currentStep
+                                const isCompleted = activeSteps.findIndex(s => s.id === currentStep) > index
+                                const isClickable = isCompleted || isActive
 
-                            return (
-                                <React.Fragment key={step.id}>
-                                    <button
-                                        onClick={() => isClickable && handleStepClick(step.id)}
-                                        disabled={!isClickable}
-                                        className={cn(
-                                            'flex items-center gap-2 px-4 py-2 rounded-full transition-all',
-                                            isActive && 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400',
-                                            isCompleted && 'text-green-600 dark:text-green-400 cursor-pointer',
-                                            !isActive && !isCompleted && 'text-slate-400 cursor-not-allowed'
+                                return (
+                                    <div key={step.id} className="flex items-center">
+                                        <button
+                                            onClick={() => isClickable && handleStepClick(step.id)}
+                                            disabled={!isClickable}
+                                            className={cn(
+                                                "flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all",
+                                                isActive
+                                                    ? "bg-blue-600 text-white shadow-md ring-2 ring-blue-100 dark:ring-blue-900"
+                                                    : isCompleted
+                                                        ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/30"
+                                                        : "text-slate-400 cursor-not-allowed"
+                                            )}
+                                        >
+                                            {isCompleted ? (
+                                                <Check className="w-4 h-4" />
+                                            ) : (
+                                                <span className={cn("w-4 h-4 flex items-center justify-center rounded-full text-[10px] font-bold border",
+                                                    isActive ? "border-transparent bg-white/20" : "border-slate-300"
+                                                )}>
+                                                    {index + 1}
+                                                </span>
+                                            )}
+                                            {step.label}
+                                        </button>
+                                        {index < activeSteps.length - 1 && (
+                                            <div className="w-8 h-px bg-slate-200 dark:bg-slate-700 mx-2" />
                                         )}
-                                    >
-                                        <div className={cn(
-                                            'w-7 h-7 rounded-full flex items-center justify-center text-sm font-medium transition-all',
-                                            isActive && 'bg-blue-600 text-white',
-                                            isCompleted && 'bg-green-500 text-white',
-                                            !isActive && !isCompleted && 'bg-slate-200 dark:bg-slate-700 text-slate-500'
-                                        )}>
-                                            {isCompleted ? <Check className="w-4 h-4" /> : index + 1}
-                                        </div>
-                                        <span className="hidden sm:inline font-medium">{step.label}</span>
-                                    </button>
-                                    {index < STEPS.length - 1 && (
-                                        <div className={cn(
-                                            'flex-1 h-0.5 mx-2 transition-colors',
-                                            index < currentStepIndex ? 'bg-green-500' : 'bg-slate-200 dark:bg-slate-700'
-                                        )} />
-                                    )}
-                                </React.Fragment>
-                            )
-                        })}
+                                    </div>
+                                )
+                            })}
+                        </div>
                     </div>
                 </div>
 
@@ -337,6 +357,12 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                                     formData={formData}
                                     updateFormData={updateFormData}
                                     layoutTypes={LAYOUT_TYPES}
+                                />
+                            )}
+                            {currentStep === 'assignment' && (
+                                <AssignmentStep
+                                    formData={formData}
+                                    updateFormData={updateFormData}
                                 />
                             )}
                             {currentStep === 'entities' && (

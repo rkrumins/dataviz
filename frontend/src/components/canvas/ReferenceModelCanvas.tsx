@@ -427,6 +427,14 @@ export function ReferenceModelCanvas({
       grouped.set(layer.id, [])
     })
 
+    // Map explicit assignments from config (saved state)
+    const configAssignments = new Map<string, string>() // entityId -> layerId
+    sortedLayers.forEach(l => {
+      l.entityAssignments?.forEach(a => {
+        configAssignments.set(a.entityId, l.id)
+      })
+    })
+
     const assignedNodeIds = new Set<string>()
 
     // Helper: Map physical nodes to a logical node context
@@ -535,13 +543,23 @@ export function ReferenceModelCanvas({
           // Simple type check OR advanced rule check from layerRules
           let assignedToThisLayer = false
 
-          // 0. Check INSTANCE ASSIGNMENTS first (user drag-and-drop, highest priority)
+          // 0. Check ASSIGNMENTS first (Instance Store OR Config)
+          // Instance store takes priority (drag-and-drop in progress), then saved config
           const instanceAssignment = instanceAssignments.get(pNode.id)
+          const configLayerId = configAssignments.get(pNode.id)
+
           if (instanceAssignment) {
             if (instanceAssignment.layerId === layer.id) {
               assignedToThisLayer = true
             } else {
-              // Assigned to a different layer, skip this layer
+              // Assigned to a different layer via store, skip this layer
+              return
+            }
+          } else if (configLayerId) {
+            if (configLayerId === layer.id) {
+              assignedToThisLayer = true
+            } else {
+              // Assigned to a different layer via config, skip this layer
               return
             }
           }
