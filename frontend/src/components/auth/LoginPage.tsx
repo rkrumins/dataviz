@@ -9,7 +9,9 @@ export function LoginPage() {
     const [password, setPassword] = useState('')
     const [isLoading, setIsLoading] = useState(false)
 
-    const { login, error, clearError } = useAuthStore()
+    const { login, error, clearError, lockoutUntil } = useAuthStore()
+
+    const isLockedOut = lockoutUntil ? new Date(lockoutUntil) > new Date() : false
 
     useEffect(() => {
         // Clear errors when mounting
@@ -18,7 +20,7 @@ export function LoginPage() {
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
-        if (!username || !password) return
+        if (!username || !password || isLockedOut) return
 
         setIsLoading(true)
         await login(username, password)
@@ -138,10 +140,10 @@ export function LoginPage() {
                         {/* Submit Button */}
                         <button
                             type="submit"
-                            disabled={isLoading}
+                            disabled={isLoading || isLockedOut}
                             className={cn(
                                 "w-full h-12 rounded-xl bg-accent-lineage text-white font-semibold shadow-lg shadow-accent-lineage/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2",
-                                isLoading ? "opacity-70 cursor-not-allowed" : "hover:brightness-110"
+                                (isLoading || isLockedOut) ? "opacity-70 cursor-not-allowed" : "hover:brightness-110"
                             )}
                         >
                             {isLoading ? (
