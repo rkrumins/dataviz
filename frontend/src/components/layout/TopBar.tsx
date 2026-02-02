@@ -1,7 +1,9 @@
-import { Search, Settings, User, Moon, Sun, Monitor } from 'lucide-react'
+import { Search, Settings, User, Moon, Sun, Monitor, LogOut } from 'lucide-react'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaStore } from '@/store/persona'
+import { useAuthStore } from '@/store/auth'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { cn } from '@/lib/utils'
 
 interface TopBarProps {
@@ -11,6 +13,7 @@ interface TopBarProps {
 export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   const { theme, setTheme } = usePreferencesStore()
   const persona = usePersonaStore((s) => s.mode)
+  const { user, logout } = useAuthStore()
 
   return (
     <header className="h-14 border-b border-glass-border bg-canvas-elevated flex items-center justify-between px-4 z-50">
@@ -83,12 +86,41 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
         </button>
 
         {/* User Menu */}
-        <button className={cn(
-          "w-8 h-8 rounded-full bg-accent-lineage/20 flex items-center justify-center",
-          "hover:bg-accent-lineage/30 transition-colors"
-        )}>
-          <User className="w-4 h-4 text-accent-lineage" />
-        </button>
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            <button className={cn(
+              "w-8 h-8 rounded-full bg-accent-lineage/20 flex items-center justify-center",
+              "hover:bg-accent-lineage/30 transition-colors outline-none focus:ring-2 focus:ring-accent-lineage/40"
+            )}>
+              <User className="w-4 h-4 text-accent-lineage" />
+            </button>
+          </DropdownMenu.Trigger>
+
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content
+              className="min-w-[200px] bg-canvas-elevated border border-glass-border rounded-xl shadow-xl p-2 z-50 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2"
+              sideOffset={8}
+              align="end"
+            >
+              <div className="px-3 py-2 border-b border-glass-border mb-1">
+                <p className="text-xs font-semibold text-ink">
+                  {user?.name || 'Admin User'}
+                </p>
+                <p className="text-[10px] text-ink-muted capitalize">
+                  {user?.role || 'Administrator'}
+                </p>
+              </div>
+
+              <DropdownMenu.Item
+                className="flex items-center gap-2 px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-lineage/10 focus:text-accent-lineage transition-colors"
+                onSelect={logout}
+              >
+                <LogOut className="w-4 h-4" />
+                <span>Sign Out</span>
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
       </div>
     </header>
   )

@@ -1,6 +1,8 @@
 import { useEffect } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { AppShell } from '@/components/layout/AppShell'
+import { LoginPage } from '@/components/auth/LoginPage'
+import { useAuthStore } from '@/store/auth'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
@@ -8,12 +10,16 @@ import { initializeDemoData } from '@/lib/demo-data'
 import { defaultWorkspaceSchema } from '@/lib/default-schema'
 
 function App() {
+  const { isAuthenticated } = useAuthStore()
   const { theme } = usePreferencesStore()
   const { setNodes, setEdges, setActiveLens } = useCanvasStore()
   const { loadSchema, schema } = useSchemaStore()
 
   // Initialize schema and demo data on mount
   useEffect(() => {
+    // Only initialize if authenticated
+    if (!isAuthenticated) return
+
     // Load/refresh schema - check version to handle updates
     const currentVersion = schema?.version
     const defaultVersion = defaultWorkspaceSchema.version
@@ -36,7 +42,7 @@ function App() {
         includeGhostNodes: true,
       })
     }
-  }, [setNodes, setEdges, setActiveLens, loadSchema, schema])
+  }, [setNodes, setEdges, setActiveLens, loadSchema, schema, isAuthenticated])
 
   // Apply theme class to document
   useEffect(() => {
@@ -57,6 +63,10 @@ function App() {
       root.classList.toggle('dark', theme === 'dark')
     }
   }, [theme])
+
+  if (!isAuthenticated) {
+    return <LoginPage />
+  }
 
   return (
     <ReactFlowProvider>
