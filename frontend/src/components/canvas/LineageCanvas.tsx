@@ -15,7 +15,7 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { AnimatePresence } from 'framer-motion'
+import { AnimatePresence, motion } from 'framer-motion'
 import { GitBranch, ArrowRight, ArrowDown, Loader2 } from 'lucide-react'
 
 // Legacy nodes for backward compatibility
@@ -43,6 +43,9 @@ import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType }
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
 import { cn } from '@/lib/utils'
+import { useGraphProvider } from '@/providers'
+import * as LucideIcons from 'lucide-react'
+
 
 // Register custom node types - includes both legacy and generic
 const nodeTypes = {
@@ -95,6 +98,23 @@ export function LineageCanvas() {
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
   const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
 
+  const provider = useGraphProvider()
+
+  // Trace State
+  const [traceUpstreamNodes, setTraceUpstreamNodes] = useState<Set<string>>(new Set())
+  const [traceDownstreamNodes, setTraceDownstreamNodes] = useState<Set<string>>(new Set())
+  const [showUpstream, setShowUpstream] = useState(true)
+  const [showDownstream, setShowDownstream] = useState(true)
+
+  // Clear trace when focus is cleared (external change)
+  useEffect(() => {
+    if (!focusEntityId) {
+      setTraceUpstreamNodes(new Set())
+      setTraceDownstreamNodes(new Set())
+    }
+  }, [focusEntityId])
+
+
   // Spatial loading hook
   const { isLoadingRegion } = useSpatialLoading()
 
@@ -124,6 +144,17 @@ export function LineageCanvas() {
       prevFocusId.current = focusEntityId
     }
   }, [focusEntityId])
+
+  // Explicit Layout Anchor Handler
+  const handleLoadMore = useCallback((nodeId: string) => {
+    if (rfInstance) {
+      const node = rfInstance.getNode(nodeId)
+      if (node) {
+        console.log(`[Layout] Anchoring logic triggered for ${nodeId}`)
+        stableNodeRef.current = { id: nodeId, x: node.position.x, y: node.position.y }
+      }
+    }
+  }, [rfInstance])
 
   // Track expansion to stabilize viewport
   useEffect(() => {
@@ -216,8 +247,47 @@ export function LineageCanvas() {
   }, [visibleNodes, visibleEdges, rawNodes, rawEdges, applyLayout, direction, rfInstance])
 
   // Use layouted nodes or fall back to raw/visible
-  const displayNodes = layoutedNodes.length > 0 ? layoutedNodes :
+  const baseDisplayNodes = layoutedNodes.length > 0 ? layoutedNodes :
     (visibleNodes.length > 0 ? visibleNodes : rawNodes)
+
+  // Inject Trace Props
+  const displayNodes = useMemo(() => {
+    if (!focusEntityId) return baseDisplayNodes
+
+    const traceNodes = new Set<string>([focusEntityId])
+    if (showUpstream) traceUpstreamNodes.forEach(id => traceNodes.add(id))
+    if (showDownstream) traceDownstreamNodes.forEach(id => traceNodes.add(id))
+
+    return baseDisplayNodes.map(node => {
+      const isTraced = traceNodes.has(node.id)
+      const isUpstream = traceUpstreamNodes.has(node.id)
+      const isDownstream = traceDownstreamNodes.has(node.id)
+      // const isFocus = node.id === focusEntityId
+
+      // Logic: If trace active, dim everything that is NOT in the trace
+      // BUT: Maybe we shouldn't hide untraced nodes completely in Lineage view?
+      // Default behavior: Dim untraced
+      const isDimmed = !isTraced
+
+      // If node is Upstream and showUpstream is false -> Hidden? 
+      // ReactFlow handles hiding via 'hidden' prop, but we might just want to dim really hard?
+      // Or literally not render?
+      // For now, let's just control dimming/styling.
+
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          isTraced,
+          isDimmed,
+          isUpstream,
+          isDownstream,
+          onLoadMore: () => handleLoadMore(node.id)
+        }
+      }
+    })
+  }, [baseDisplayNodes, focusEntityId, traceUpstreamNodes, traceDownstreamNodes, showUpstream, showDownstream, handleLoadMore])
+
   const displayEdges = visibleEdges.length > 0 ? visibleEdges : rawEdges
 
   // Handle node changes (position, selection, etc.)
@@ -403,12 +473,43 @@ export function LineageCanvas() {
   )
 
   // Handle node double-click for focus/drill
+  // Handle node double-click for focus/drill
   const onNodeDoubleClick: NodeMouseHandler = useCallback(
-    (_event, node) => {
+    async (_event, node) => {
       // Set focus to this node for lineage trace
       setFocus(node.id)
+
+      // Fetch full lineage for visual trace
+      if (provider) {
+        try {
+          // Assume URN is in data.urn, else falls back to ID
+          const urn = (node.data.urn as string) || node.id
+          const result = await provider.getFullLineage(urn, 5, 5) // Fetch deeper?
+
+          // Resolve IDs directly? Lineage view acts on URNs mostly or IDs matching URNs
+          // We'll assume the IDs returned by getFullLineage match the node IDs in the store/backend
+          // Since LineageCanvas nodes usually use IDs from backend.
+
+          const upstream = new Set<string>()
+          const downstream = new Set<string>()
+
+          result.upstreamUrns.forEach((u: string) => upstream.add(u)) // Might need ID resolution if store IDs differ
+          result.downstreamUrns.forEach((u: string) => downstream.add(u))
+
+          // Also need to support mapping URN -> ID if they differ?
+          // For LineageCanvas, we usually assume ID == ID from backend response
+
+          setTraceUpstreamNodes(upstream)
+          setTraceDownstreamNodes(downstream)
+          setShowUpstream(true)
+          setShowDownstream(true)
+
+        } catch (e) {
+          console.error("Failed to fetch trace", e)
+        }
+      }
     },
-    [setFocus]
+    [setFocus, provider]
   )
 
   // Handle pane click to deselect
@@ -451,8 +552,63 @@ export function LineageCanvas() {
     <div className="w-full h-full relative flex flex-col">
       {/* Lineage Exploration Toolbar */}
       {!isEditing && (
-        <div className="absolute top-4 left-4 right-4 z-10">
-          <LineageToolbar />
+        <div className="absolute top-4 left-4 right-4 z-10 pointer-events-none">
+          <div className="pointer-events-auto">
+            <LineageToolbar />
+          </div>
+
+          {/* Trace Toolbar Overlay */}
+          <AnimatePresence>
+            {focusEntityId && (
+              <motion.div
+                initial={{ y: -20, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                exit={{ y: -20, opacity: 0 }}
+                className="absolute top-12 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2 rounded-full glass-panel border border-accent-lineage/30 shadow-lg shadow-accent-lineage/10 pointer-events-auto"
+              >
+                <div className="flex items-center gap-2 text-sm font-medium text-ink">
+                  <span className="w-2 h-2 rounded-full bg-accent-lineage animate-pulse" />
+                  <span>Tracing</span>
+                </div>
+
+                <div className="flex items-center gap-1 bg-black/5 dark:bg-white/5 rounded-lg p-0.5">
+                  <button
+                    onClick={() => setShowUpstream(!showUpstream)}
+                    className={cn(
+                      "p-1.5 rounded-md transition-all text-xs font-medium flex items-center gap-1",
+                      showUpstream ? "bg-accent-lineage text-white shadow-sm" : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
+                    )}
+                    title="Toggle Upstream"
+                  >
+                    <LucideIcons.ArrowLeft className="w-3.5 h-3.5" />
+                    {traceUpstreamNodes.size}
+                  </button>
+                  <button
+                    onClick={() => setShowDownstream(!showDownstream)}
+                    className={cn(
+                      "p-1.5 rounded-md transition-all text-xs font-medium flex items-center gap-1",
+                      showDownstream ? "bg-accent-lineage text-white shadow-sm" : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
+                    )}
+                    title="Toggle Downstream"
+                  >
+                    {traceDownstreamNodes.size}
+                    <LucideIcons.ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <div className="h-4 w-[1px] bg-glass-border" />
+                <button
+                  onClick={() => {
+                    setFocus(null) // Clears focus
+                  }}
+                  className="text-xs font-semibold text-ink-muted hover:text-ink flex items-center gap-1 transition-colors"
+                >
+                  <LucideIcons.X className="w-3.5 h-3.5" />
+                  Exit Trace
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       )}
 

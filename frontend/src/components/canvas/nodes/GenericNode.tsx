@@ -21,6 +21,13 @@ interface GenericNodeData extends EntityInstance {
   isExpanded?: boolean
   isLoading?: boolean
   childCount?: number
+  // Trace flags
+  isTraced?: boolean
+  isDimmed?: boolean
+  isUpstream?: boolean
+  isDownstream?: boolean
+  // Layout triggers
+  onLoadMore?: () => void
 }
 
 import type { Node } from '@xyflow/react'
@@ -44,6 +51,9 @@ export const GenericNode = memo(function GenericNode({
   const entityData: GenericNodeData = rawData.data
     ? (rawData.data as GenericNodeData)
     : (rawData as unknown as GenericNodeData)
+
+  const { isTraced, isDimmed, isUpstream, isDownstream } = entityData
+
 
   const loadMoreNodes = useLineageExplorationStore((s) => s.loadMoreNodes)
   const toggleExpanded = useLineageExplorationStore((s) => s.toggleExpanded)
@@ -153,16 +163,27 @@ export const GenericNode = memo(function GenericNode({
           "bg-canvas-elevated",
           !!selected && "ring-2 ring-offset-2",
           !!dragging && "opacity-80 cursor-grabbing",
-          isGhost && "opacity-60"
+          isGhost && "opacity-60",
+          // Trace Styling
+          isDimmed && "opacity-40 grayscale-[0.5] blur-[0.5px]",
+          isTraced && "shadow-[0_0_20px_rgba(59,130,246,0.5)] ring-2 ring-blue-500 border-blue-500 scale-[1.02] z-50",
+          !isTraced && selected && "ring-2 ring-offset-2"
         )}
         style={{
-          borderColor: visual.color,
+          borderColor: isTraced ? '#3b82f6' : visual.color,
           borderLeftWidth: visual.borderStyle !== 'none' ? '4px' : undefined,
-          boxShadow: selected
-            ? `0 0 20px ${visual.color}40`
-            : '0 4px 12px rgba(0,0,0,0.1)',
-          ['--ring-color' as string]: visual.color,
+          boxShadow: isTraced
+            ? `0 0 20px rgba(59,130,246,0.4)`
+            : selected
+              ? `0 0 20px ${visual.color}40`
+              : '0 4px 12px rgba(0,0,0,0.1)',
+          ['--ring-color' as string]: isTraced ? '#3b82f6' : visual.color,
         }}
+        // Add data attributes for testing/debugging
+        data-traced={isTraced}
+        data-dimmed={isDimmed}
+        data-upstream={isUpstream}
+        data-downstream={isDownstream}
       >
         {/* Header */}
         <div className="flex items-start gap-2">
@@ -281,12 +302,6 @@ export const GenericNode = memo(function GenericNode({
         {/* Load More Button */}
         {hiddenCount > 0 && (
           <button
-            onClick={(e) => {
-              e.stopPropagation()
-              if (paginationId) {
-                loadMoreNodes(paginationId, 5)
-              }
-            }}
             title={`Load ${hiddenCount} more items`}
             className={cn(
               "absolute -bottom-2 -right-2 w-6 h-6 rounded-full flex items-center justify-center",
@@ -294,6 +309,14 @@ export const GenericNode = memo(function GenericNode({
               "hover:scale-110 transition-transform cursor-pointer"
             )}
             style={{ borderColor: visual.color }}
+            onClick={(e) => {
+              e.stopPropagation()
+              if (paginationId) {
+                // Trigger layout stabilization anchor
+                entityData.onLoadMore?.()
+                loadMoreNodes(paginationId, 5)
+              }
+            }}
           >
             <LucideIcons.Plus className="w-3.5 h-3.5" style={{ color: visual.color }} />
           </button>
