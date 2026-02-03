@@ -6,7 +6,7 @@ import { useAuthStore } from '@/store/auth'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
-import { initializeDemoData } from '@/lib/demo-data'
+import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { defaultWorkspaceSchema } from '@/lib/default-schema'
 
 function App() {
@@ -14,6 +14,7 @@ function App() {
   const { theme } = usePreferencesStore()
   const { setNodes, setEdges, setActiveLens } = useCanvasStore()
   const { loadSchema, schema } = useSchemaStore()
+  const provider = useGraphProvider()
 
   // Initialize schema and demo data on mount
   useEffect(() => {
@@ -29,20 +30,55 @@ function App() {
       loadSchema(defaultWorkspaceSchema)
     }
 
-    // Initialize demo data with generator (5 domains, 10 apps each, 5-15 assets per app, 10-100 columns per asset)
-    // CHECK: Only initialize if no nodes exist to prevent regeneration on refresh
+    // Initialize backend data
     const currentNodes = useCanvasStore.getState().nodes
     if (currentNodes.length === 0) {
-      initializeDemoData(setNodes, setEdges, setActiveLens, true, {
-        domainCount: 3,
-        appsPerDomain: 5,
-        assetsPerApp: { min: 3, max: 10 },
-        columnsPerAsset: { min: 5, max: 5 },
-        includeDashboards: true,
-        includeGhostNodes: true,
-      })
+      const fetchInitialGraph = async () => {
+        try {
+          // Fetch initial nodes
+          const initialNodes = await provider.getNodes({ limit: 100 })
+
+          // Fetch edges for these nodes
+          const urns = initialNodes.map(n => n.urn)
+          const edges = await provider.getEdges({
+            sourceUrns: urns,
+            limit: 500
+          })
+
+          if (initialNodes.length > 0) {
+            console.log(`Loaded ${initialNodes.length} nodes and ${edges.length} edges from backend`)
+            setNodes(initialNodes.map(n => ({
+              id: n.urn,
+              type: (n.entityType === 'dataPlatform' || n.entityType === 'system' as any) ? 'system' :
+                (n.entityType === 'dataset' || n.entityType === 'schemaField') ? 'dataset' : 'domain',
+              position: { x: Math.random() * 800, y: Math.random() * 600 },
+              data: {
+                label: n.displayName,
+                type: n.entityType as any,
+                metadata: n.properties,
+                ...n
+              }
+            })))
+
+            setEdges(edges.map(e => ({
+              id: e.id,
+              source: e.sourceUrn,
+              target: e.targetUrn,
+              type: 'lineage',
+              data: {
+                edgeType: e.edgeType,
+                ...e.properties
+              }
+            })))
+          }
+        } catch (err) {
+          console.error("Failed to load initial backend data", err)
+        }
+      }
+
+      fetchInitialGraph()
     }
-  }, [setNodes, setEdges, setActiveLens, loadSchema, schema, isAuthenticated])
+  }, [setNodes, setEdges, setActiveLens, loadSchema, schema, isAuthenticated, provider])
 
   // Apply theme class to document
   useEffect(() => {

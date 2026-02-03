@@ -2,10 +2,16 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import './styles/globals.css'
+import { GraphProvider } from '@/providers/GraphProviderContext'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+
+const remoteProvider = new RemoteGraphProvider()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    <GraphProvider provider={remoteProvider}>
+      <App />
+    </GraphProvider>
   </React.StrictMode>,
 )
 

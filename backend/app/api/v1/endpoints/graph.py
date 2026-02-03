@@ -143,6 +143,13 @@ async def get_nodes_by_layer_endpoint(
 ):
     return await context_engine.get_nodes_by_layer(layer_id, limit=limit, offset=offset)
 
+@router.post("/edges/query", response_model=List[GraphEdge])
+async def query_edges(
+    query: EdgeQuery = Body(..., embed=True)
+):
+    """Advanced edge query (bulk fetch)."""
+    return await context_engine.get_edges(query)
+
 @router.post("/nodes/query", response_model=List[GraphNode])
 async def query_nodes(
     query: NodeQuery = Body(..., embed=True)

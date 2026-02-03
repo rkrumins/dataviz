@@ -15,7 +15,7 @@ import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
-import { useInstanceAssignments } from '@/store/referenceModelStore'
+import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import {
   type GraphNode,
   resolveLayerAssignment,
@@ -113,9 +113,27 @@ export function ReferenceModelCanvas({
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
   const updateView = useSchemaStore((s) => s.updateView)
+  const provider = useGraphProvider()
 
   // Instance-level assignments from store (user drag-and-drop)
   const instanceAssignments = useInstanceAssignments()
+  const effectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
+  const computeAssignments = useReferenceModelStore(s => s.computeAssignments)
+  const assignmentStatus = useReferenceModelStore(s => s.assignmentStatus)
+
+  // Trigger computation when layers or nodes change (debounce?)
+  // Ideally this should be triggered by specific events, not just render.
+  // For migration, we trigger on mount or significant change.
+  useEffect(() => {
+    // Only compute if idle or stale? 
+    // For now, simple trigger if we have nodes and no assignments (or force refresh)
+    if (nodes.length > 0 && provider) {
+      // Debounce or check status to avoid loops
+      if (assignmentStatus === 'idle') {
+        computeAssignments(provider)
+      }
+    }
+  }, [nodes.length, provider, computeAssignments, assignmentStatus])
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
@@ -418,33 +436,29 @@ export function ReferenceModelCanvas({
     // Use a Set to track processed.
     const processed = new Set<string>()
 
-    const calculateEffectiveLayer = (nodeId: string, inheritedLayerId?: string) => {
+    const calculateEffectiveLayer = (nodeId: string) => {
       if (processed.has(nodeId)) return
       processed.add(nodeId)
 
-      let myLayerId = explicitAssignments.get(nodeId)
+      // Use backend-computed effective assignment if available
+      let myLayerId = effectiveAssignments.get(nodeId)?.layerId
 
-      // Check for explicit "Unassigned" override (blocks inheritance)
+      // Fallback to explicit instance assignment if backend hasn't computed yet
+      // or if we have a local override not yet synced (though store should handle this)
+      if (!myLayerId) {
+        myLayerId = explicitAssignments.get(nodeId)
+      }
+
       if (myLayerId === '__UNASSIGNED__') {
         myLayerId = undefined
-      }
-      // If no explicit assignment, check inheritance
-      else if (!myLayerId && inheritedLayerId) {
-        // Check if we SHOULD inherit? (e.g. maybe parent assignment has inheritsChildren=false?)
-        // For now we assume true unless specified. 
-        // We'd need to lookup the specific assignment object to check `inheritsChildren`, 
-        // but `explicitAssignments` is just ID -> ID. 
-        // Simplification: Always inherit unless overridden by explicit.
-        myLayerId = inheritedLayerId
       }
 
       if (myLayerId) {
         effectiveLayer.set(nodeId, myLayerId)
       }
 
-      // Recurse children
       const children = childMap.get(nodeId) || []
-      children.forEach(childId => calculateEffectiveLayer(childId, myLayerId))
+      children.forEach(childId => calculateEffectiveLayer(childId))
     }
 
     // Find true roots (nodes with no parents) and start there
@@ -504,7 +518,7 @@ export function ReferenceModelCanvas({
     grouped.forEach(list => list.sort((a, b) => a.name.localeCompare(b.name)))
 
     return grouped
-  }, [nodes, edges, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap])
+  }, [nodes, edges, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments])
 
   // Flatten logical/physical nodes for search and lookup
   const { displayFlat, displayMap } = useMemo(() => {
@@ -618,7 +632,6 @@ export function ReferenceModelCanvas({
   }, [contextMenu, activeView, displayMap, updateView])
 
   // Toggle node expansion with Lazy Loading
-  const provider = useGraphProvider()
   const addNodes = useCanvasStore((s) => s.addNodes)
   const addEdges = useCanvasStore((s) => s.addEdges)
 

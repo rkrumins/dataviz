@@ -21,7 +21,8 @@ import type {
     GraphEdge,
     EntityAssignment,
     LayerAssignmentResult,
-    LayerAssignmentRequest
+    LayerAssignmentRequest,
+    GraphDataProvider
 } from '@/providers/GraphDataProvider'
 
 // ============================================
@@ -111,6 +112,9 @@ interface ReferenceModelState {
 
     /** Mark assignment computation as error */
     setAssignmentError: (error: string) => void
+
+    /** Trigger backend assignment computation */
+    computeAssignments: (provider: GraphDataProvider) => Promise<void>
 
     // ===== Lazy Loading =====
     toggleNodeExpanded: (nodeId: string) => void
@@ -342,6 +346,24 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
 
             setAssignmentError: (error) => {
                 set({ assignmentStatus: 'error', lastError: error })
+            },
+
+            computeAssignments: async (provider) => {
+                const state = get()
+                set({ assignmentStatus: 'loading', lastError: null })
+
+                try {
+                    const request = state.buildAssignmentRequest()
+                    const result = await provider.computeLayerAssignments(request)
+
+                    state.setAssignmentResult(result) // Using existing setter to update state
+                } catch (error) {
+                    console.error("Assignment computation failed", error)
+                    set({
+                        assignmentStatus: 'error',
+                        lastError: error instanceof Error ? error.message : String(error)
+                    })
+                }
             },
 
             // ===== Lazy Loading =====

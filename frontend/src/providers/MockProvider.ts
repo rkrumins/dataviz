@@ -18,6 +18,8 @@ import type {
     NodeQuery,
     EdgeQuery,
     LineageResult,
+    LayerAssignmentRequest,
+    LayerAssignmentResult,
 } from './GraphDataProvider'
 
 // ============================================
@@ -584,6 +586,27 @@ export class MockProvider implements GraphDataProvider {
             nodeCount: this.nodes.size,
             edgeCount: this.edges.length,
             entityTypeCounts: entityTypeCounts as Record<EntityType, number>,
+        }
+    }
+
+    // ==========================================
+    // Assignment Operations
+    // ==========================================
+
+    async computeLayerAssignments(request: LayerAssignmentRequest): Promise<LayerAssignmentResult> {
+        // Mock implementation: return empty or basic assignments
+        console.warn('[MockProvider] computeLayerAssignments is a stub. Use RemoteGraphProvider for real computation.')
+
+        return {
+            assignments: new Map(),
+            parentMap: new Map(),
+            edges: [],
+            unassignedEntityIds: [],
+            stats: {
+                totalNodes: this.nodes.size,
+                assignedNodes: 0,
+                computeTimeMs: 0
+            }
         }
     }
 }

@@ -7,6 +7,8 @@ import type {
     NodeQuery,
     EdgeQuery,
     LineageResult,
+    LayerAssignmentRequest,
+    LayerAssignmentResult,
 } from './GraphDataProvider'
 
 // Base API URL - typically configured via environment variables
@@ -56,7 +58,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         // Use POST for complex queries
         return await this.fetch<GraphNode[]>('/nodes/query', {
             method: 'POST',
-            body: JSON.stringify(query),
+            body: JSON.stringify({ query }),
         })
     }
 
@@ -72,16 +74,11 @@ export class RemoteGraphProvider implements GraphDataProvider {
     // ==========================================
 
     async getEdges(query: EdgeQuery): Promise<GraphEdge[]> {
-        const params = new URLSearchParams()
-        if (query.offset) params.append('offset', String(query.offset))
-        if (query.limit) params.append('limit', String(query.limit))
-        if (query.edgeTypes) query.edgeTypes.forEach(t => params.append('edgeType', t))
-        if (query.sourceUrns) query.sourceUrns.forEach(u => params.append('sourceUrn', u))
-        if (query.targetUrns) query.targetUrns.forEach(u => params.append('targetUrn', u))
-
-        // Note: GET /edges support limited filters, complex ones should use POST if available
-        // backend implementation supports GET with query params
-        return await this.fetch<GraphEdge[]>(`/edges?${params.toString()}`)
+        // Use POST for complex queries (especially multiple URNs)
+        return await this.fetch<GraphEdge[]>('/edges/query', {
+            method: 'POST',
+            body: JSON.stringify({ query }),
+        })
     }
 
     // ==========================================
@@ -212,5 +209,16 @@ export class RemoteGraphProvider implements GraphDataProvider {
         entityTypeCounts: Record<EntityType, number>
     }> {
         return await this.fetch<any>('/stats')
+    }
+
+    // ==========================================
+    // Assignment Operations
+    // ==========================================
+
+    async computeLayerAssignments(request: LayerAssignmentRequest): Promise<LayerAssignmentResult> {
+        return await this.fetch<LayerAssignmentResult>('/assignments/compute', {
+            method: 'POST',
+            body: JSON.stringify(request)
+        })
     }
 }

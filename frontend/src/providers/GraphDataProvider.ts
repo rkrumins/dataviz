@@ -155,6 +155,12 @@ export interface EdgeQuery {
 
     /** Minimum confidence score */
     minConfidence?: number
+
+    /** Pagination offset */
+    offset?: number
+
+    /** Pagination limit */
+    limit?: number
 }
 
 export interface LineageResult {
@@ -342,6 +348,15 @@ export interface GraphDataProvider {
         edgeCount: number
         entityTypeCounts: Record<EntityType, number>
     }>
+
+    // ==========================================
+    // Assignment Operations
+    // ==========================================
+
+    /**
+     * Compute layer assignments for the graph (server-side)
+     */
+    computeLayerAssignments(request: LayerAssignmentRequest): Promise<LayerAssignmentResult>
 }
 
 // ============================================

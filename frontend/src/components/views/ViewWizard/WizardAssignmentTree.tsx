@@ -33,7 +33,8 @@ import { useSchemaStore } from '@/store/schema'
 import {
     useReferenceModelStore,
     useInstanceAssignments,
-    useAssignmentConflicts
+    useAssignmentConflicts,
+    useEffectiveAssignments
 } from '@/store/referenceModelStore'
 import type { ViewLayerConfig, AssignmentConflict } from '@/types/schema'
 
@@ -307,6 +308,7 @@ export function WizardAssignmentTree({
     const edges = useCanvasStore(s => s.edges)
     const schema = useSchemaStore(s => s.schema)
     const instanceAssignments = useInstanceAssignments()
+    const effectiveAssignments = useEffectiveAssignments()
     const conflicts = useAssignmentConflicts()
     const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
     const removeEntityAssignment = useReferenceModelStore(s => s.removeEntityAssignment)
@@ -354,44 +356,21 @@ export function WizardAssignmentTree({
         conflicts.forEach(c => conflictMap.set(c.entityId, c))
 
         // Recursive tree builder
-        const buildNode = (nodeId: string, depth: number, parentId?: string, inheritedLayerId?: string): EntityTreeNode | null => {
+        const buildNode = (nodeId: string, depth: number, parentId?: string): EntityTreeNode | null => {
             const node = nodeMap.get(nodeId)
             if (!node || node.data.type === 'ghost') return null
 
             const childIds = childMap.get(nodeId) ?? []
 
             // Determine effective assignment (Top-Down)
-            let effectiveLayerId: string | undefined
-            let isInherited = false
-            let isExplicitlyExcluded = false
-
-            const instanceAssignment = instanceAssignments.get(nodeId)
-
-            // Priority 1: Instance Assignment
-            if (instanceAssignment) {
-                if (instanceAssignment.layerId === '__UNASSIGNED__') {
-                    isExplicitlyExcluded = true
-                } else {
-                    effectiveLayerId = instanceAssignment.layerId
-                }
-            }
-            // Priority 2: Config Assignment (if no instance)
-            else {
-                const configLayer = layers.find(l => l.entityAssignments?.some(a => a.entityId === nodeId))
-                if (configLayer) {
-                    effectiveLayerId = configLayer.id
-                }
-            }
-
-            // Priority 3: Inheritance
-            if (!effectiveLayerId && !isExplicitlyExcluded && inheritedLayerId) {
-                effectiveLayerId = inheritedLayerId
-                isInherited = true
-            }
+            // WE NOW USE BACKEND COMPUTED ASSIGNMENTS VIA STORE
+            const effectiveAssignment = effectiveAssignments.get(nodeId)
+            const effectiveLayerId = effectiveAssignment?.layerId
+            const isInherited = effectiveAssignment?.isInherited ?? false
 
             // Recurse children with new effective context
             const children = childIds
-                .map(id => buildNode(id, depth + 1, nodeId, effectiveLayerId))
+                .map(id => buildNode(id, depth + 1, nodeId))
                 .filter((n): n is EntityTreeNode => n !== null)
                 .sort((a, b) => a.name.localeCompare(b.name))
 
@@ -419,7 +398,10 @@ export function WizardAssignmentTree({
             .map(n => buildNode(n.id, 0))
             .filter((n): n is EntityTreeNode => n !== null)
             .sort((a, b) => a.name.localeCompare(b.name))
-    }, [nodes, edges, containmentSet, instanceAssignments, conflicts, layers]) // Added layers dependency
+            .map(n => buildNode(n.id, 0))
+            .filter((n): n is EntityTreeNode => n !== null)
+            .sort((a, b) => a.name.localeCompare(b.name))
+    }, [nodes, edges, containmentSet, instanceAssignments, conflicts, layers, effectiveAssignments]) // Added effectiveAssignments dependency
 
     // Get unique entity types for filter
     const entityTypes = useMemo(() => {
