@@ -601,10 +601,21 @@ class MockGraphProvider(GraphDataProvider):
             if parent_type not in entity_type_hierarchy[child_type].can_be_contained_by:
                 entity_type_hierarchy[child_type].can_be_contained_by.append(parent_type)
         
+        # 4. Identify Root Entity Types
+        # Types that appear in hierarchy but never as a child (target of containment edge)
+        all_hierarchy_types = set(entity_type_hierarchy.keys())
+        contained_types = set()
+        for parent_type, hierarchy in entity_type_hierarchy.items():
+            for child_type in hierarchy.can_contain:
+                contained_types.add(child_type)
+        
+        root_entity_types = list(all_hierarchy_types - contained_types)
+        
         return OntologyMetadata(
             containmentEdgeTypes=containment_types,
             edgeTypeMetadata=edge_type_metadata,
-            entityTypeHierarchy=entity_type_hierarchy
+            entityTypeHierarchy=entity_type_hierarchy,
+            rootEntityTypes=root_entity_types
         )
 
     # ==========================================

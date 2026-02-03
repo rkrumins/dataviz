@@ -228,13 +228,14 @@ export function computeTrace(
   allEdges: Edge[],
   upstreamDepth: number,
   downstreamDepth: number,
-  includeChildLineage: boolean
+  includeChildLineage: boolean,
+  containmentEdgeTypes: string[] = []
 ): TraceResult {
   // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
   // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
   // Use provided containment types or fallback to defaults
-  const containmentTypes = containmentEdgeTypes.length > 0 
-    ? containmentEdgeTypes 
+  const containmentTypes = containmentEdgeTypes.length > 0
+    ? containmentEdgeTypes
     : ['CONTAINS', 'BELONGS_TO']
   const containmentMap = buildContainmentMap(allNodes, allEdges, containmentTypes)
 
@@ -677,8 +678,8 @@ export function useLineageExploration(): UseLineageExplorationResult {
   useEffect(() => {
     const syncPagination = async () => {
       // Use ontology-provided types, fallback to config if available
-      const containmentTypes = containmentEdgeTypes.length > 0 
-        ? containmentEdgeTypes 
+      const containmentTypes = containmentEdgeTypes.length > 0
+        ? containmentEdgeTypes
         : (config.containmentEdgeTypes ?? ['CONTAINS', 'BELONGS_TO'])
 
       for (const [parentId, limit] of Object.entries(pagination)) {
@@ -723,6 +724,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
                       label: child.displayName,
                       type: child.entityType,
                       urn: child.urn,
+                      childCount: child.childCount,
                     }
                   })
 
@@ -772,8 +774,8 @@ export function useLineageExploration(): UseLineageExplorationResult {
     // 1. If focused mode, compute trace first
     if (config.mode === 'focused' && focusEntityId) {
       // Use ontology-provided types for trace
-      const traceContainmentTypes = containmentEdgeTypes.length > 0 
-        ? containmentEdgeTypes 
+      const traceContainmentTypes = containmentEdgeTypes.length > 0
+        ? containmentEdgeTypes
         : ['CONTAINS', 'BELONGS_TO']
       const trace = computeTrace(
         focusEntityId,

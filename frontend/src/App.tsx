@@ -19,9 +19,9 @@ function App() {
   const { containmentEdgeTypes, isLoading: isLoadingOntology, metadata: ontologyMetadata } = useOntologyMetadata()
 
   // Use defaults if no containment types available - memoize to prevent recreation
-  const effectiveContainmentTypes = useMemo(() => 
-    containmentEdgeTypes.length > 0 
-      ? containmentEdgeTypes 
+  const effectiveContainmentTypes = useMemo(() =>
+    containmentEdgeTypes.length > 0
+      ? containmentEdgeTypes
       : ['CONTAINS', 'BELONGS_TO'],
     [containmentEdgeTypes]
   )
@@ -38,7 +38,7 @@ function App() {
       console.log('[App] Waiting for ontology metadata to load...')
       return
     }
-    
+
     // Log what we're using
     if (containmentEdgeTypes.length > 0) {
       console.log('[App] Using containment edge types from backend:', containmentEdgeTypes)
@@ -59,62 +59,54 @@ function App() {
     // Always fetch to ensure we get the latest data from backend, especially during dev/testing
     const fetchInitialGraph = async () => {
       try {
-        // Fetch initial nodes (Root Domains or Platforms)
-        // Hierarchical loading: Start with high-level containers
+        // Fetch initial nodes based on Ontology Roots
+        // Hierarchical loading: Start with high-level containers defined by ontology
+        const rootTypes = ontologyMetadata?.rootEntityTypes?.length && ontologyMetadata.rootEntityTypes.length > 0
+          ? ontologyMetadata.rootEntityTypes
+          : ['domain', 'dataPlatform', 'system'] // Safe defaults
+
+        console.log('[App] Fetching initial graph for root types:', rootTypes)
+
+        // 1. Fetch Root Nodes
         const initialNodes = await provider.getNodes({
-          entityTypes: ['domain'],
-          limit: 100
+          entityTypes: rootTypes as any[],
+          limit: 100 // Reasonable limit for top-level roots
         })
 
-        if (initialNodes.length === 0) return
+        if (initialNodes.length === 0) {
+          console.log('[App] No root nodes found.')
+          return
+        }
 
         const urns = initialNodes.map(n => n.urn)
-        
-        // Fetch edges for these nodes - both incoming and outgoing
-        // Also fetch ALL containment edges (not just those connected to initial nodes)
-        // This ensures we get the full hierarchy even if parent nodes aren't in initial set
-        const [outgoingEdges, incomingEdges, allContainmentEdges] = await Promise.all([
+
+        // 2. Fetch direct edges for these roots (to show initial connectivity/context)
+        // We do NOT fetch the entire containment hierarchy here. That is lazy loaded.
+        const [outgoingEdges, incomingEdges] = await Promise.all([
           provider.getEdges({
             sourceUrns: urns,
-            limit: 1000
+            limit: 500
           }),
           provider.getEdges({
             targetUrns: urns,
-            limit: 1000
-          }),
-          // Fetch ALL containment edges using backend-provided types
-          // Don't filter by URNs - we want the full hierarchy
-          effectiveContainmentTypes.length > 0 ? provider.getEdges({
-            edgeTypes: effectiveContainmentTypes as any,
-            limit: 5000  // Higher limit to get all containment edges
-          }) : Promise.resolve([])
+            limit: 500
+          })
         ])
-        
-        // Also get nodes referenced by containment edges that we don't have yet
-        const containmentNodeUrns = new Set<string>()
-        allContainmentEdges.forEach(e => {
-          containmentNodeUrns.add(e.sourceUrn)
-          containmentNodeUrns.add(e.targetUrn)
-        })
-        const missingUrns = Array.from(containmentNodeUrns).filter(urn => !urns.includes(urn))
-        const additionalNodes = missingUrns.length > 0 
-          ? await provider.getNodes({ urns: missingUrns, limit: 1000 })
-          : []
 
         // Combine all nodes
-        const allNodes = [...initialNodes, ...additionalNodes]
+        const allNodes = [...initialNodes]
         const nodeMap = new Map(allNodes.map(n => [n.urn, n]))
         const uniqueNodes = Array.from(nodeMap.values())
 
         // Combine all edges and deduplicate
-        const allEdges = [...outgoingEdges, ...incomingEdges, ...allContainmentEdges]
+        const allEdges = [...outgoingEdges, ...incomingEdges]
         const edgeMap = new Map<string, typeof allEdges[0]>()
         allEdges.forEach(e => edgeMap.set(e.id, e))
         const uniqueEdges = Array.from(edgeMap.values())
 
-        console.log(`[App] Loaded ${uniqueNodes.length} nodes (${initialNodes.length} initial + ${additionalNodes.length} from containment) and ${uniqueEdges.length} edges from backend`)
+        console.log(`[App] Loaded ${uniqueNodes.length} nodes from backend`)
         console.log(`[App] Containment edge types: ${effectiveContainmentTypes.join(', ')}`)
-        
+
         // Log containment edges specifically
         const containmentCount = uniqueEdges.filter(e => {
           const edgeType = (e.edgeType || '').toUpperCase()
@@ -125,7 +117,7 @@ function App() {
           const edgeType = (e.edgeType || '').toUpperCase()
           return effectiveContainmentTypes.some(type => type.toUpperCase() === edgeType)
         }).map(e => `${e.sourceUrn} -> ${e.targetUrn} (${e.edgeType})`))
-        
+
         setNodes(uniqueNodes.map(n => ({
           id: n.urn,
           type: (n.entityType === 'dataPlatform' || n.entityType === 'system' as any) ? 'system' :
@@ -135,6 +127,8 @@ function App() {
             label: n.displayName,
             type: n.entityType as any,
             metadata: n.properties,
+            urn: n.urn,
+            childCount: n.childCount,
             ...n
           }
         })))

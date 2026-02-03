@@ -238,6 +238,7 @@ class OntologyMetadata(BaseModel):
     containment_edge_types: List[str] = Field(alias="containmentEdgeTypes")
     edge_type_metadata: Dict[str, EdgeTypeMetadata] = Field(alias="edgeTypeMetadata")
     entity_type_hierarchy: Dict[str, EntityTypeHierarchy] = Field(alias="entityTypeHierarchy")
+    root_entity_types: List[str] = Field(default_factory=list, alias="rootEntityTypes")
 
     class Config:
         populate_by_name = True

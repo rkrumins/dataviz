@@ -159,6 +159,7 @@ export interface OntologyMetadata {
     containmentEdgeTypes: string[]
     edgeTypeMetadata: Record<string, EdgeTypeMetadata>
     entityTypeHierarchy: Record<string, EntityTypeHierarchy>
+    rootEntityTypes: string[]
 }
 
 export interface GraphSchemaStats {
