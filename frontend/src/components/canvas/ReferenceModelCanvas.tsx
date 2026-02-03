@@ -144,8 +144,16 @@ export function ReferenceModelCanvas({
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
-  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
   const searchInputRef = useRef<HTMLInputElement>(null)
+
+  // Trace / Focus State
+  const [traceFocusId, setTraceFocusId] = useState<string | null>(null)
+  const [traceNodes, setTraceNodes] = useState<Set<string>>(new Set()) // Combined set for quick lookups
+  const [traceUpstreamNodes, setTraceUpstreamNodes] = useState<Set<string>>(new Set())
+  const [traceDownstreamNodes, setTraceDownstreamNodes] = useState<Set<string>>(new Set())
+  const [showUpstream, setShowUpstream] = useState(true)
+  const [showDownstream, setShowDownstream] = useState(true)
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
 
   // Context Menu State
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, nodeId: string } | null>(null)
@@ -171,10 +179,6 @@ export function ReferenceModelCanvas({
   const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
   const selectEdge = useCanvasStore((s) => s.selectEdge)
 
-  // Trace / Focus State
-  const [traceFocusId, setTraceFocusId] = useState<string | null>(null)
-  const [traceNodes, setTraceNodes] = useState<Set<string>>(new Set())
-
   // Trace Calculation for Double Click
   // We import computeTrace dynamically or assume it's available via utility
   // Since we can't easily import from hook file if it's not exported, we'll implement a lightweight version 
@@ -187,6 +191,8 @@ export function ReferenceModelCanvas({
     if (traceFocusId === nodeId) {
       setTraceFocusId(null)
       setTraceNodes(new Set())
+      setTraceUpstreamNodes(new Set())
+      setTraceDownstreamNodes(new Set())
       return
     }
 
@@ -198,6 +204,8 @@ export function ReferenceModelCanvas({
     // Optimistically highlight the clicked node (using ID)
     setTraceFocusId(nodeId)
     setTraceNodes(new Set([nodeId]))
+    setTraceUpstreamNodes(new Set())
+    setTraceDownstreamNodes(new Set())
 
     if (!provider) return
 
@@ -278,16 +286,29 @@ export function ReferenceModelCanvas({
       })
 
       // Add upstream/downstream URNs (resolved to IDs)
+      const upstreamSet = new Set<string>()
+      const downstreamSet = new Set<string>()
+
       result.upstreamUrns.forEach(u => {
         const id = resolveId(u)
-        if (id) visibleIds.add(id)
+        if (id) {
+          visibleIds.add(id)
+          upstreamSet.add(id)
+        }
       })
       result.downstreamUrns.forEach(u => {
         const id = resolveId(u)
-        if (id) visibleIds.add(id)
+        if (id) {
+          visibleIds.add(id)
+          downstreamSet.add(id)
+        }
       })
 
       setTraceNodes(visibleIds)
+      setTraceUpstreamNodes(upstreamSet)
+      setTraceDownstreamNodes(downstreamSet)
+      setShowUpstream(true) // Reset visibility on new trace
+      setShowDownstream(true)
 
       // 6. Style: Auto-expand ancestors of visible nodes
       const nodesToExpand = new Set(expandedNodes)
@@ -704,18 +725,10 @@ export function ReferenceModelCanvas({
   // 1. The traced nodes themselves (traceNodes)
   // 2. ALL ancestors of traced nodes (so containers stay lit)
   const traceContextSet = useMemo(() => {
-    const set = new Set(traceNodes)
+    const set = new Set<string>()
     if (traceFocusId) set.add(traceFocusId)
 
-    // Add ancestors
-    traceNodes.forEach(id => {
-      let curr = parentMap.get(id)
-      while (curr) {
-        set.add(curr)
-        curr = parentMap.get(curr)
-      }
-    })
-
+    // Add ancestors for the focus node
     if (traceFocusId) {
       let curr = parentMap.get(traceFocusId)
       while (curr) {
@@ -724,8 +737,27 @@ export function ReferenceModelCanvas({
       }
     }
 
+    // Add traced nodes and their ancestors, filtered by direction
+    traceNodes.forEach(id => {
+      const isUpstream = traceUpstreamNodes.has(id)
+      const isDownstream = traceDownstreamNodes.has(id)
+      const isFocus = id === traceFocusId
+
+      if (!isFocus && ((isUpstream && !showUpstream) || (isDownstream && !showDownstream))) {
+        return // Skip if not focus and direction is hidden
+      }
+
+      set.add(id) // Add the node itself
+
+      let curr = parentMap.get(id)
+      while (curr) {
+        set.add(curr)
+        curr = parentMap.get(curr)
+      }
+    })
+
     return set
-  }, [traceNodes, traceFocusId, parentMap])
+  }, [traceNodes, traceFocusId, parentMap, traceUpstreamNodes, traceDownstreamNodes, showUpstream, showDownstream])
   const lineageEdges = useMemo(() => {
     if (!showLineageFlow) return []
     // Filter out containment edges
@@ -935,12 +967,40 @@ export function ReferenceModelCanvas({
                   {displayMap.get(traceFocusId)?.name || 'Unknown Node'}
                 </span>
               </div>
+
+              <div className="flex items-center gap-1 bg-black/5 dark:bg-white/5 rounded-lg p-0.5">
+                <button
+                  onClick={() => setShowUpstream(!showUpstream)}
+                  className={cn(
+                    "p-1.5 rounded-md transition-all text-xs font-medium flex items-center gap-1",
+                    showUpstream ? "bg-accent-lineage text-white shadow-sm" : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
+                  )}
+                  title="Toggle Upstream"
+                >
+                  <LucideIcons.ArrowLeft className="w-3.5 h-3.5" />
+                  {traceUpstreamNodes.size}
+                </button>
+                <button
+                  onClick={() => setShowDownstream(!showDownstream)}
+                  className={cn(
+                    "p-1.5 rounded-md transition-all text-xs font-medium flex items-center gap-1",
+                    showDownstream ? "bg-accent-lineage text-white shadow-sm" : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
+                  )}
+                  title="Toggle Downstream"
+                >
+                  {traceDownstreamNodes.size}
+                  <LucideIcons.ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
               <div className="h-4 w-[1px] bg-glass-border" />
               <button
                 onClick={() => {
                   setTraceFocusId(null)
                   setTraceNodes(new Set())
-                  setExpandedNodes(new Set()) // Optional: Collapse all on exit? Maybe keep context.
+                  setTraceUpstreamNodes(new Set())
+                  setTraceDownstreamNodes(new Set())
+                  setExpandedNodes(new Set())
                 }}
                 className="text-xs font-semibold text-ink-muted hover:text-ink flex items-center gap-1 transition-colors"
               >
