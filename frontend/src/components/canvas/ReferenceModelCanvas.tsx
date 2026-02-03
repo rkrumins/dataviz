@@ -180,7 +180,7 @@ export function ReferenceModelCanvas({
   // Actually, we can assume the user meant "computeTrace" is importable.
   // Checking previous file view: "export function computeTrace" exists in hooks/useLineageExploration.ts
 
-  const handleDoubleClick = useCallback((nodeId: string) => {
+  const handleDoubleClick = useCallback(async (nodeId: string) => {
     // Toggle trace
     if (traceFocusId === nodeId) {
       setTraceFocusId(null)
@@ -189,132 +189,34 @@ export function ReferenceModelCanvas({
     }
 
     setTraceFocusId(nodeId)
+    setTraceNodes(new Set([nodeId])) // optimistically highlight start
 
-    // Simple BFS for trace (upstream/downstream)
-    // Or we could use the full computeTrace if we can import it.
-    // Let's do a simple recursive finder here to avoid heavy dependencies if import fails.
-    // Actually, let's try to do it right.
+    if (!provider) return
 
-    const visited = new Set<string>()
-    // For Trace, we need to include:
-    // 1. The node itself
-    // 2. ALL its descendants (if it's a container)
-    // 3. ALL its ancestors (so the container lights up if a child is traced)
-    // 4. Lineage neighbors of any of the above
+    try {
+      // Use backend Trace API
+      // Default to depth 3 for now, matching Lineage Canvas defaults
+      const result = await provider.getFullLineage(nodeId, 3, 3)
 
-    // Helper to find descendants and ancestors
-    const descendants = new Set<string>()
-    const ancestors = new Set<string>()
+      const visited = new Set<string>()
+      // Add lineage nodes
+      result.nodes.forEach(n => visited.add(n.urn))
+      result.upstreamUrns.forEach(u => visited.add(u))
+      result.downstreamUrns.forEach(u => visited.add(u))
 
-    // Naive tree search from hierarchyTree? 
-    // We can iterate `displayMap` since it has parent/child links usually?
-    // ReferenceModel hierarchy is in `hierarchyTree`.
-    // Let's build a quick map for this trace efficiently.
-    const findFamily = (targetId: string) => {
-      // Find descendants
-      const q = [targetId]
-      descendants.add(targetId)
+      // Also ensure ancestors of these nodes are highlighted (Hierarchy View specific)
+      // Since ReferenceModelCanvas displays hierarchy, tracing just the leaf nodes might be confusing
+      // if their parents are collapsed. 
+      // But for now, let's trust the backend result.
+      visited.add(nodeId)
 
-      // Traverse hierarchyTree to find children? 
-      // We can use the already built `hierarchyTree` via `nodesByLayer` or just `nodes`.
-      // `nodes` from store are flat. Containment edges define structure.
-      const containmentEdges = edges.filter(e => {
-        const edgeType = normalizeEdgeType(e)
-        return isContainmentEdge(edgeType)
-      })
-      const parentMap = new Map<string, string>()
-      const childMap = new Map<string, string[]>()
-      containmentEdges.forEach(e => {
-        if (!childMap.has(e.source)) childMap.set(e.source, [])
-        childMap.get(e.source)!.push(e.target)
-        parentMap.set(e.target, e.source)
-      })
-
-      // Descendants
-      let head = 0
-      while (head < q.length) {
-        const curr = q[head++]
-        const kids = childMap.get(curr) || []
-        kids.forEach(k => {
-          if (!descendants.has(k)) {
-            descendants.add(k)
-            q.push(k)
-          }
-        })
-      }
-
-      // Ancestors
-      let curr = targetId
-      while (parentMap.has(curr)) {
-        curr = parentMap.get(curr)!
-        ancestors.add(curr)
-      }
+      setTraceNodes(visited)
+    } catch (err) {
+      console.error("Failed to fetch trace", err)
+      // Fallback or show error?
     }
+  }, [traceFocusId, provider])
 
-    findFamily(nodeId)
-
-    // Add all family to visited (so they light up)
-    descendants.forEach(d => visited.add(d))
-    ancestors.forEach(a => visited.add(a))
-
-    // Now BFS on Lineage Edges starting from ALL descendants
-    // (Containers don't have lineage, their children do)
-    const traceQueue = Array.from(descendants)
-
-    // Build lineage adj
-    const relevantEdges = edges.filter(e =>
-      !isContainmentEdge(normalizeEdgeType(e))
-    )
-    const adj = new Map<string, string[]>()
-    relevantEdges.forEach(e => {
-      if (!adj.has(e.source)) adj.set(e.source, [])
-      if (!adj.has(e.target)) adj.set(e.target, [])
-      adj.get(e.source)!.push(e.target)
-      adj.get(e.target)!.push(e.source)
-    })
-
-    let items = 0
-    const bfsSeen = new Set<string>(descendants)
-
-    while (traceQueue.length > 0 && items < 1000) {
-      const curr = traceQueue.shift()!
-      items++
-      const neighbors = adj.get(curr) || []
-      for (const n of neighbors) {
-        if (!bfsSeen.has(n)) {
-          bfsSeen.add(n)
-          visited.add(n)
-          traceQueue.push(n)
-
-          // If we found a node, we should also highlight its ancestors!
-          // So the container of the upstream/downstream node also lights up
-          // We need the parentMap again. Re-use or rebuild?
-          // Let's rebuild local lookup or hoisting is messy.
-          // Just minimal calc:
-          // findAncestors(n).forEach(a => visited.add(a))
-          // Optimizing: capture map in closure
-        }
-      }
-    }
-
-    // Re-run ancestor fill for all visited nodes (to ensure containers light up)
-    // Build parent map once
-    const containmentEdges = edges.filter(e => isContainmentEdge(normalizeEdgeType(e)))
-    const parentMap = new Map<string, string>()
-    containmentEdges.forEach(e => parentMap.set(e.target, e.source))
-
-    const finalTrace = new Set(visited)
-    visited.forEach(v => {
-      let curr = v
-      while (parentMap.has(curr)) {
-        curr = parentMap.get(curr)!
-        finalTrace.add(curr)
-      }
-    })
-
-    setTraceNodes(finalTrace)
-
-  }, [traceFocusId, edges])
 
   // Lineage flow toggle
   const [showLineageFlow, setShowLineageFlow] = useState(initialShowLineageFlow)

@@ -61,6 +61,15 @@ interface LineageExplorationState {
   resetToDefault: (preset?: 'overview' | 'technical' | 'impact') => void
   loadMoreNodes: (parentId: string, count?: number) => void
   resetPagination: () => void
+
+  // Backend Trace
+  fetchTrace: (
+    nodeId: string,
+    provider: any,
+    direction?: 'upstream' | 'downstream' | 'both'
+  ) => Promise<any>
+  traceStatus: 'idle' | 'loading' | 'success' | 'error'
+  traceError: string | null
 }
 
 const DEFAULT_CONFIG: LineageExplorationConfig = {
@@ -99,6 +108,10 @@ export const useLineageExplorationStore = create<LineageExplorationState>((set, 
 
   // Pagination
   pagination: {},
+
+  // Trace Status
+  traceStatus: 'idle',
+  traceError: null,
 
   // Actions
   setMode: (mode) =>
@@ -202,6 +215,59 @@ export const useLineageExplorationStore = create<LineageExplorationState>((set, 
     })),
 
   resetPagination: () => set({ pagination: {} }),
+
+  fetchTrace: async (nodeId, provider, direction = 'both') => {
+    set({ traceStatus: 'loading', traceError: null })
+    try {
+      const { config } = get()
+      // Use URN if available in store, otherwise assume ID is URN (legacy)
+      // We need to access the node from canvas store or pass it in? 
+      // For now, let's assume the ID is the URN or we can fetch it.
+      // Better: The caller passes ID. We look it up in useCanvasStore (but we are in a hook, store access is external).
+      // We can trust the passed ID is the URN if the caller ensures it.
+      // OR better: we can use the provider to get the node first? No, too slow.
+      // Let's assume ID == URN for now as per `GraphNode` interface
+
+      const upstreamDepth = config.trace.upstreamDepth
+      const downstreamDepth = config.trace.downstreamDepth
+
+      let result = null
+
+      if (direction === 'upstream') {
+        result = await provider.getUpstream(nodeId, upstreamDepth)
+      } else if (direction === 'downstream') {
+        result = await provider.getDownstream(nodeId, downstreamDepth)
+      } else {
+        result = await provider.getFullLineage(nodeId, upstreamDepth, downstreamDepth)
+      }
+
+      if (result) {
+        // We have nodes and edges. We need to:
+        // 1. Add them to canvas store (if not present) 
+        // 2. Set highlighted path
+
+        const path = new Set<string>()
+        result.nodes.forEach((n: any) => path.add(n.urn))
+        result.upstreamUrns.forEach((u: string) => path.add(u))
+        result.downstreamUrns.forEach((u: string) => path.add(u))
+        path.add(nodeId)
+
+        // Update local state
+        set({
+          highlightedPath: path,
+          traceStatus: 'success',
+          // Optionally update expandedIds to show the trace?
+          // expandedIds: new Set([...get().expandedIds, ...path]) // Maybe too aggressive?
+        })
+
+        // Return result for external handling (e.g. updating canvas nodes)
+        return result
+      }
+    } catch (err: any) {
+      console.error("Trace failed", err)
+      set({ traceStatus: 'error', traceError: err.message })
+    }
+  }
 }))
 
 // ============================================
@@ -665,7 +731,10 @@ export interface UseLineageExplorationResult {
   resetToDefault: (preset?: 'overview' | 'technical' | 'impact') => void
   loadMoreNodes: (parentId: string, count?: number) => void
   resetPagination: () => void
+  fetchTrace: (nodeId: string, provider: any) => Promise<any>
+  traceStatus: 'idle' | 'loading' | 'success' | 'error'
 }
+
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useEffect } from 'react'
@@ -693,6 +762,8 @@ export function useLineageExploration(): UseLineageExplorationResult {
     resetToDefault,
     loadMoreNodes,
     resetPagination,
+    fetchTrace,
+    traceStatus
   } = useLineageExplorationStore()
 
   const rawNodes = useCanvasStore((s) => s.nodes)
@@ -782,6 +853,73 @@ export function useLineageExploration(): UseLineageExplorationResult {
   // Entity Loader for shared logic
   const { loadChildren } = useEntityLoader()
 
+  // Side Effect: Fetch Trace when focused
+  useEffect(() => {
+    if (config.mode === 'focused' && focusEntityId) {
+      const runTrace = async () => {
+        try {
+          // Determine direction based on config?
+          // Usually we want 'both' for full exploration
+          const result = await fetchTrace(focusEntityId, provider, 'both')
+
+          if (result) {
+            const existingIds = new Set(rawNodes.map(n => n.id))
+            const nodesToAdd: any[] = []
+            const edgesToAdd: any[] = []
+
+            const newNodes = result.nodes || []
+            newNodes.forEach((n: any) => {
+              if (!existingIds.has(n.urn)) {
+                nodesToAdd.push({
+                  id: n.urn,
+                  type: 'generic',
+                  position: { x: 0, y: 0 }, // Layout will fix this
+                  data: {
+                    ...n.properties,
+                    label: n.displayName,
+                    type: n.entityType,
+                    urn: n.urn,
+                    childCount: n.childCount
+                  }
+                })
+              }
+            })
+
+            // Also add edges?
+            // Existing edges in store might be partial.
+            // result.edges contains lineage edges.
+            const existingEdgeIds = new Set(rawEdges.map(e => e.id))
+            const newEdges = result.edges || []
+            newEdges.forEach((e: any) => {
+              if (!existingEdgeIds.has(e.id)) {
+                edgesToAdd.push({
+                  id: e.id,
+                  source: e.sourceUrn,
+                  target: e.targetUrn,
+                  type: 'lineage',
+                  data: {
+                    relationship: e.edgeType,
+                    edgeType: e.edgeType,
+                    confidence: e.confidence
+                  }
+                })
+              }
+            })
+
+            if (nodesToAdd.length > 0 || edgesToAdd.length > 0) {
+              setNodes([...rawNodes, ...nodesToAdd])
+              setEdges([...rawEdges, ...edgesToAdd])
+            }
+          }
+        } catch (e) {
+          console.error("Auto-trace failed", e)
+        }
+      }
+
+      runTrace()
+    }
+  }, [focusEntityId, config.mode, provider]) // fetchTrace is stable from store
+
   // Side Effect: Fetch data when nodes are expanded
   useEffect(() => {
     // Debounce to prevent flashing/rapid requests
@@ -812,28 +950,60 @@ export function useLineageExploration(): UseLineageExplorationResult {
     let downCount = 0
 
     // 1. If focused mode, compute trace first
+    // 1. If focused mode, use backend trace result from store
     if (config.mode === 'focused' && focusEntityId) {
-      // Use ontology-provided types for trace
-      const traceContainmentTypes = containmentEdgeTypes.length > 0
-        ? containmentEdgeTypes
-        : ['CONTAINS', 'BELONGS_TO']
-      const trace = computeTrace(
-        focusEntityId,
-        rawNodes,
-        rawEdges,
-        config.trace.upstreamDepth,
-        config.trace.downstreamDepth,
-        config.trace.includeChildLineage,
-        traceContainmentTypes,
-        expandedIds
-      )
-      nodes = trace.nodes as LineageNode[]
-      edges = trace.edges
-      upCount = trace.upstreamNodes.size
-      downCount = trace.downstreamNodes.size
+      // Filter nodes/edges based on highlightedPath populated by fetchTrace
+      const visibleSet = new Set(highlightedPath)
 
-      // Update highlighted path
-      setHighlightedPath(trace.pathNodes)
+      // Also include any expanded nodes and their children
+      // We need to build a containment map to find children
+      if (expandedIds.size > 0) {
+        // Use ontology types for containment if available
+        const containmentTypes = containmentEdgeTypes.length > 0
+          ? containmentEdgeTypes
+          : ['CONTAINS', 'BELONGS_TO']
+
+        // Build simple child map
+        const childrenMap = new Map<string, string[]>()
+        rawEdges.forEach(e => {
+          const type = e.data?.relationship || e.data?.edgeType || ''
+          if (containmentTypes.some(t => t.toLowerCase() === type.toLowerCase())) {
+            if (!childrenMap.has(e.source)) childrenMap.set(e.source, [])
+            childrenMap.get(e.source)!.push(e.target)
+          }
+        })
+
+        // Add children of expanded nodes recursively
+        const addChildren = (parentId: string) => {
+          const kids = childrenMap.get(parentId) || []
+          kids.forEach(kid => {
+            visibleSet.add(kid)
+            // If child is also expanded, add its children
+            if (expandedIds.has(kid)) {
+              addChildren(kid)
+            }
+          })
+        }
+
+        expandedIds.forEach(id => {
+          // Ensure the expanded node itself is visible (usually is, but just in case)
+          visibleSet.add(id)
+          addChildren(id)
+        })
+      }
+
+      nodes = rawNodes.filter(n => visibleSet.has(n.id))
+
+      // Include edges connecting these nodes
+      // (Lineage edges + Containment edges)
+      edges = rawEdges.filter(e =>
+        visibleSet.has(e.source) && visibleSet.has(e.target)
+      )
+
+      // TODO: If we need precise Up/Down counts, we should store them in the state 
+      // along with highlightedPath (e.g. traceStats). For now using simple size.
+      upCount = nodes.length
+      downCount = nodes.length
     }
 
     // 2. Project to target granularity
@@ -893,6 +1063,8 @@ export function useLineageExploration(): UseLineageExplorationResult {
     resetToDefault,
     loadMoreNodes,
     resetPagination,
+    fetchTrace,
+    traceStatus,
   }
 }
 
