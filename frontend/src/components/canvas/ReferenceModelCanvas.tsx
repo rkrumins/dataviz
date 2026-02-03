@@ -23,6 +23,7 @@ import {
   type EntityType,
 } from '@/providers/GraphDataProvider'
 import { useGraphProvider } from '@/providers'
+import { useEntityLoader } from '@/hooks/useEntityLoader'
 import { EdgeDetailPanel } from '../panels/EdgeDetailPanel'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useOntologyMetadata, isContainmentEdgeType, normalizeEdgeType } from '@/services/ontologyService'
@@ -440,17 +441,23 @@ export function ReferenceModelCanvas({
     // Use a Set to track processed.
     const processed = new Set<string>()
 
-    const calculateEffectiveLayer = (nodeId: string) => {
+    const calculateEffectiveLayer = (nodeId: string, inheritedLayerId?: string) => {
+      // Allow revisiting if we are providing a layer assignment where there was none?
+      // For simple containment tree, we visit once.
       if (processed.has(nodeId)) return
       processed.add(nodeId)
 
       // Use backend-computed effective assignment if available
       let myLayerId = effectiveAssignments.get(nodeId)?.layerId
 
-      // Fallback to explicit instance assignment if backend hasn't computed yet
-      // or if we have a local override not yet synced (though store should handle this)
+      // Fallback to explicit instance assignment
       if (!myLayerId) {
         myLayerId = explicitAssignments.get(nodeId)
+      }
+
+      // Fallback to INHERITANCE
+      if (!myLayerId && inheritedLayerId) {
+        myLayerId = inheritedLayerId
       }
 
       if (myLayerId === '__UNASSIGNED__') {
@@ -462,7 +469,7 @@ export function ReferenceModelCanvas({
       }
 
       const children = childMap.get(nodeId) || []
-      children.forEach(childId => calculateEffectiveLayer(childId))
+      children.forEach(childId => calculateEffectiveLayer(childId, myLayerId))
     }
 
     // Find true roots (nodes with no parents) and start there
@@ -640,8 +647,7 @@ export function ReferenceModelCanvas({
   }, [contextMenu, activeView, displayMap, updateView])
 
   // Toggle node expansion with Lazy Loading
-  const addNodes = useCanvasStore((s) => s.addNodes)
-  const addEdges = useCanvasStore((s) => s.addEdges)
+  const { loadChildren } = useEntityLoader()
 
   const toggleNode = useCallback(async (nodeId: string) => {
     // Check if we need to fetch children
@@ -658,62 +664,24 @@ export function ReferenceModelCanvas({
       return
     }
 
-    // If node has childCount metadata but no actual children in the tree, try fetching
-    const childCount = (node?.data?._collapsedChildCount as number) || (node?.data?.childCount as number) || 0
-    const hasNoChildren = (node?.children?.length ?? 0) === 0
-
-    if (node && hasNoChildren && childCount > 0) {
-      try {
-        // Fetch children using backend-provided containment edge types
-        const children = await provider.getChildren(node.urn, {
-          edgeTypes: containmentEdgeTypes
-        })
-
-        // Convert to Canvas Nodes
-        const newNodes = children.map(child => ({
-          id: child.urn, // Use URN as ID
-          position: { x: 0, y: 0 }, // Layout will handle this
-          data: {
-            urn: child.urn,
-            label: child.displayName,
-            type: child.entityType, // Map back if needed
-            ...child.properties,
-            childCount: child.childCount
-          },
-          type: 'custom' // Default type
-        }))
-
-        // Create containment edges using the first containment edge type (typically CONTAINS)
-        const containmentType = containmentEdgeTypes[0] || 'CONTAINS'
-        const newEdges = children.map(child => ({
-          id: `${containmentType.toLowerCase()}-${node.id}-${child.urn}`,
-          source: node.id,
-          target: child.urn,
-          type: containmentType.toLowerCase(),
-          data: {
-            relationship: containmentType,
-            edgeType: containmentType
-          }
-        }))
-
-        addNodes(newNodes as any)
-        addEdges(newEdges as any)
-
-      } catch (err) {
-        console.error('Failed to lazy load children', err)
-      }
-    }
-
+    // Toggle expansion state locally first
     setExpandedNodes((prev) => {
       const next = new Set(prev)
       if (next.has(nodeId)) {
         next.delete(nodeId)
+        return next
       } else {
         next.add(nodeId)
+        return next
       }
-      return next
     })
-  }, [displayMap, provider, addNodes, addEdges, containmentEdgeTypes])
+
+    // Lazy load children if expanding
+    if (!expandedNodes.has(nodeId)) {
+      await loadChildren(nodeId)
+    }
+
+  }, [displayMap, expandedNodes, loadChildren])
 
   // Expand all / collapse all
   const expandAll = useCallback(() => {
@@ -1105,16 +1073,22 @@ function LayerNodeCard({
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
   const isDimmed = traceFocusId !== null && !traceNodes.has(node.id) && node.id !== traceFocusId
-  const hasChildren = node.children.length > 0
+
+  // Logic for expandable state
+  const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || 0
+  const hasChildren = node.children.length > 0 || childCount > 0
+
   const isExpanded = expandedNodes.has(node.id)
   const isSelected = selectedNodeId === node.id
   const isSearchResult = searchResults.includes(node.id)
 
-  // Count nested children
+  // Count nested children - prefer metadata if available and we are collapsed
   const countDescendants = (n: HierarchyNode): number => {
+    // If we have explicit metadata, use it
+    if (n.data.childCount) return n.data.childCount as number
     return n.children.reduce((acc, child) => acc + 1 + countDescendants(child), 0)
   }
-  const descendantCount = hasChildren && !isExpanded ? countDescendants(node) : 0
+  const descendantCount = hasChildren && !isExpanded ? (childCount || countDescendants(node)) : 0
 
   return (
     <motion.div
