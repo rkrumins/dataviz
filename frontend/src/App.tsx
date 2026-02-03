@@ -134,8 +134,10 @@ function App() {
 
         setNodes(uniqueNodes.map(n => ({
           id: n.urn,
-          type: (n.entityType === 'dataPlatform' || n.entityType === 'system' as any) ? 'system' :
-            (n.entityType === 'dataset' || n.entityType === 'schemaField') ? 'dataset' : 'domain',
+          type: n.entityType === 'schemaField' ? 'schemaField' :
+            n.entityType === 'column' ? 'column' :
+              (n.entityType === 'dataPlatform' || n.entityType === 'system' as any) ? 'system' :
+                (n.entityType === 'dataset') ? 'dataset' : 'domain',
           position: { x: Math.random() * 800, y: Math.random() * 600 },
           data: {
             label: n.displayName,

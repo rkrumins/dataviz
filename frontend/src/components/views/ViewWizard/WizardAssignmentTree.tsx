@@ -39,6 +39,9 @@ import {
 import type { ViewLayerConfig, AssignmentConflict } from '@/types/schema'
 import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
 
+import { useEntityLoader } from '@/hooks/useEntityLoader'
+
+
 // ============================================
 // Types
 // ============================================
@@ -305,8 +308,7 @@ export function WizardAssignmentTree({
     className
 }: WizardAssignmentTreeProps) {
     // Store hooks
-    const nodes = useCanvasStore(s => s.nodes)
-    const edges = useCanvasStore(s => s.edges)
+    const { nodes, edges } = useCanvasStore()
     const schema = useSchemaStore(s => s.schema)
     const instanceAssignments = useInstanceAssignments()
     const effectiveAssignments = useEffectiveAssignments()
@@ -327,13 +329,27 @@ export function WizardAssignmentTree({
 
     // Build containment set for efficient lookup - prioritize ontology, then prop, then schema
     const containmentSet = useMemo(() => {
-        const types = ontologyContainmentTypes.length > 0 
-            ? ontologyContainmentTypes 
-            : (containmentEdgeTypes.length > 0 
-                ? containmentEdgeTypes 
+        const types = ontologyContainmentTypes.length > 0
+            ? ontologyContainmentTypes
+            : (containmentEdgeTypes.length > 0
+                ? containmentEdgeTypes
                 : (schema?.containmentEdgeTypes || DEFAULT_CONTAINMENT_TYPES))
         return new Set(types)
     }, [ontologyContainmentTypes, containmentEdgeTypes, schema?.containmentEdgeTypes])
+
+    // Lazy Loading Hook
+    const { loadChildren } = useEntityLoader()
+
+    // Auto-expand effect
+    useEffect(() => {
+        // Debounce slightly to prevent rapid firing during initial render
+        const timer = setTimeout(() => {
+            expandedIds.forEach(id => {
+                loadChildren(id)
+            })
+        }, 100)
+        return () => clearTimeout(timer)
+    }, [expandedIds, loadChildren])
 
     // Build entity tree from canvas nodes/edges
     const entityTree = useMemo<EntityTreeNode[]>(() => {

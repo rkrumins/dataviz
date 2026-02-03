@@ -59,6 +59,7 @@ const nodeTypes = {
   pipeline: GenericNode,
   dashboard: GenericNode,
   column: GenericNode,
+  schemaField: GenericNode,
 }
 
 // Register custom edge types
@@ -179,8 +180,8 @@ export function LineageCanvas() {
 
           if (dx !== 0 || dy !== 0) {
             const { x, y, zoom } = rfInstance.getViewport()
-            // Pan viewport to keep node stationary relative to screen
-            rfInstance.setViewport({ x: x - dx, y: y - dy, zoom })
+            // Pan viewport to keep node stationary relative to screen (account for zoom!)
+            rfInstance.setViewport({ x: x - (dx * zoom), y: y - (dy * zoom), zoom })
             console.log(`[Layout] Stabilized viewport on node ${id}, shifted by ${dx}, ${dy}`)
           }
         }

@@ -725,7 +725,7 @@ const defaultViews: ViewConfiguration[] = [
 export const defaultWorkspaceSchema: WorkspaceSchema = {
   id: 'default-workspace',
   name: 'NexusLineage Workspace',
-  version: '1.1.1',  // Bumped to force schema refresh with new views
+  version: '1.1.2',  // Bumped to force schema refresh with new views
   entityTypes: defaultEntityTypes,
   relationshipTypes: defaultRelationshipTypes,
   views: defaultViews,

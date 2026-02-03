@@ -16,8 +16,9 @@ import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useOntologyMetadata, isContainmentEdgeType } from '@/services/ontologyService'
-import { useGraphProvider } from '@/providers/GraphProviderContext'
+
 // import type { EntityTypeSchema } from '@/types/schema'
+import { useEntityLoader } from '@/hooks/useEntityLoader'
 
 interface HierarchyNode {
   id: string
@@ -49,12 +50,11 @@ function countDescendants(node: HierarchyNode): { total: number; byType: Record<
 }
 
 export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
-  const { nodes, edges, selectNode, selectedNodeIds, addNodes, addEdges } = useCanvasStore()
+  const { nodes, edges, selectNode, selectedNodeIds } = useCanvasStore()
   const selectedNodeId = selectedNodeIds[0] ?? null
   const schema = useSchemaStore((s) => s.schema)
-  const { containmentEdgeTypes, isContainmentEdge } = useOntologyMetadata()
-  const provider = useGraphProvider()
-  const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
+  const { containmentEdgeTypes } = useOntologyMetadata()
+  const { loadChildren, loadingNodes } = useEntityLoader()
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
@@ -201,95 +201,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     // If we are collapsing, stop here
     if (isCurrentlyExpanded) return
 
-    // 2. Check if children need fetching
-    const node = nodes.find(n => n.id === nodeId)
-    if (!node) return
-
-    const childCount = (node.data.childCount as number) || 0
-
-    // Count known children in edges AND verify the child node exists
-    const existingNodeIds = new Set(nodes.map(n => n.id))
-
-    const currentChildrenCount = edges.filter(e =>
-      e.source === nodeId &&
-      existingNodeIds.has(e.target) &&
-      (containmentEdgeTypes.length > 0
-        ? containmentEdgeTypes.some(t => t.toUpperCase() === (e.data?.edgeType || e.data?.relationship || '').toUpperCase())
-        : isContainmentEdge(e.data?.edgeType || e.data?.relationship))
-    ).length
-
-    if (childCount > currentChildrenCount) {
-
-      setLoadingNodes(prev => new Set(prev).add(nodeId))
-
-      try {
-        const urn = (node.data.urn as string) || nodeId
-        // Use effective containment types
-        const typesToFetch = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
-
-        const children = await provider.getChildren(urn, {
-          edgeTypes: typesToFetch,
-          limit: 100
-        })
-
-        if (children.length > 0) {
-          const existingIds = new Set(nodes.map(n => n.id))
-          const existingEdgeSignatures = new Set(edges.map(e => `${e.source}|${e.target}`))
-          const nodesToAdd: any[] = []
-          const edgesToAdd: any[] = []
-
-          children.forEach(child => {
-            // Add Node if not exists
-            if (!existingIds.has(child.urn)) {
-              nodesToAdd.push({
-                id: child.urn,
-                type: 'generic',
-                position: { x: 0, y: 0 },
-                data: {
-                  ...child,
-                  label: child.displayName,
-                  type: child.entityType,
-                  urn: child.urn,
-                  childCount: child.childCount,
-                  metadata: child.properties,
-                }
-              })
-
-              existingIds.add(child.urn) // Prevent duplicates in this batch
-            }
-
-            // Add edge if not exists
-            if (!existingEdgeSignatures.has(`${nodeId}|${child.urn}`)) {
-              edgesToAdd.push({
-                id: `contains-${urn}-${child.urn}`,
-                source: nodeId,
-                target: child.urn,
-                type: 'lineage',
-                data: {
-                  edgeType: 'CONTAINS',
-                  relationship: 'contains'
-                }
-              })
-              existingEdgeSignatures.add(`${nodeId}|${child.urn}`)
-            }
-          })
-
-          if (nodesToAdd.length > 0) addNodes(nodesToAdd)
-          if (edgesToAdd.length > 0) addEdges(edgesToAdd)
-
-          console.log(`[Hierarchy] Loaded ${nodesToAdd.length} new nodes and ${edgesToAdd.length} edges`)
-        }
-      } catch (err) {
-        console.error("Failed to load children", err)
-      } finally {
-        setLoadingNodes(prev => {
-          const next = new Set(prev)
-          next.delete(nodeId)
-          return next
-        })
-      }
-    }
-  }, [nodes, edges, provider, containmentEdgeTypes, isContainmentEdge, addNodes, addEdges, expandedNodes])
+    // 2. Load Children using Generic Hook
+    await loadChildren(nodeId)
+  }, [loadChildren, expandedNodes])
 
   // Expand/collapse all
   const expandAll = useCallback(() => {

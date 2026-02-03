@@ -327,13 +327,8 @@ export function useElkLayout(options: UseElkLayoutOptions = {}): UseElkLayoutRes
                 })
 
                 // Prepare edges - only lineage edges, skip containment
+                // Prepare edges - include ALL edges (lineage AND containment) to ensure connectivity in layout
                 const elkEdges: ElkInputEdge[] = edges
-                    .filter((edge) => {
-                        const rel = (edge.data?.relationship ?? edge.data?.edgeType) as string | undefined
-                        // Skip containment edges
-                        return rel !== 'contains' && rel !== 'has_schema' &&
-                            rel !== 'has_dataset' && rel !== 'has_column'
-                    })
                     .map((edge) => ({
                         id: edge.id,
                         source: edge.source,
