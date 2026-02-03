@@ -46,10 +46,9 @@ async def get_node_children(
     offset: int = Query(0, ge=0)
 ):
     """Lazy load children nodes."""
-    return await context_engine.provider.get_children(
+    return await context_engine.get_children(
         urn, 
         edge_types=edge_types, 
-        offset=offset, 
         limit=limit
     )
 
