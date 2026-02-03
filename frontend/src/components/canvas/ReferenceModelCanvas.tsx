@@ -24,7 +24,9 @@ import {
 } from '@/providers/GraphDataProvider'
 import { useGraphProvider } from '@/providers'
 import { useEntityLoader } from '@/hooks/useEntityLoader'
+import { computeTrace } from '@/hooks/useLineageExploration'
 import { EdgeDetailPanel } from '../panels/EdgeDetailPanel'
+import { EditNodePanel } from '../panels/EditNodePanel'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useOntologyMetadata, isContainmentEdgeType, normalizeEdgeType } from '@/services/ontologyService'
 
@@ -879,6 +881,17 @@ export function ReferenceModelCanvas({
               onToggleFilter={toggleEdgeFilter}
             />
           )}
+
+          {/* Node Details Panel */}
+          {selectedNodeId && (
+            <EditNodePanel
+              key={selectedNodeId}
+              isOpen={!!selectedNodeId}
+              onClose={() => selectNode(null)}
+              nodeId={selectedNodeId}
+              isReadOnly={true} // Reference model view usually readonly for details? Or allow edits.
+            />
+          )}
         </AnimatePresence>
 
         {/* Layer Columns */}
@@ -1107,7 +1120,10 @@ function LayerNodeCard({
         borderLeftWidth: '3px',
         ['--tw-ring-color' as string]: visual?.color ?? layer.color ?? '#6b7280',
       }}
-      onClick={() => onSelect(node.id)}
+      onClick={(e) => {
+        e.stopPropagation()
+        onSelect(node.id)
+      }}
       onContextMenu={(e) => onContextMenu(e, node.id)}
     >
       {/* Node Header */}
