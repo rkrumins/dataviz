@@ -978,7 +978,19 @@ export function ReferenceModelCanvas({
 
         {/* Layer Columns */}
         <div className="flex-1 overflow-auto relative">
-          <div className="flex h-full min-h-0">
+          {/* Lineage Flow Overlay - Render BEFORE columns to be behind them (z-index managed in component to 0, cols should be higher) */}
+          {showLineageFlow && (
+            <LineageFlowOverlay
+              nodes={displayFlat}
+              edges={visibleLineageEdges}
+              expandedNodes={expandedNodes}
+              selectEdge={selectEdge}
+              isEdgePanelOpen={isEdgePanelOpen}
+              toggleEdgePanel={toggleEdgePanel}
+            />
+          )}
+
+          <div className="flex h-full min-h-0 relative z-10">
             {sortedLayers.map((layer) => (
               <LayerColumn
                 key={layer.id}
@@ -1022,17 +1034,7 @@ export function ReferenceModelCanvas({
             </div>
           )}
 
-          {/* Lineage Flow Overlay */}
-          {showLineageFlow && (
-            <LineageFlowOverlay
-              nodes={displayFlat} // Pass rendered nodes for checking existence? Actually Overlay searches DOM.
-              edges={visibleLineageEdges}
-              expandedNodes={expandedNodes}
-              selectEdge={selectEdge}
-              isEdgePanelOpen={isEdgePanelOpen}
-              toggleEdgePanel={toggleEdgePanel}
-            />
-          )}
+
 
         </div>
       </div>
@@ -1377,39 +1379,77 @@ function LineageFlowOverlay({
         const tRect = targetEl.getBoundingClientRect()
 
         // Relative coordinates
+        // Relative coordinates
         const sx = sRect.right - containerRect.left
         const sy = sRect.top + sRect.height / 2 - containerRect.top
-        const tx = tRect.left - containerRect.left
+
+        // Target is normally on the left side of the target node
+        // BUT if we are doing same-column routing, we might want to enter from the right too?
+        let tx = tRect.left - containerRect.left
         const ty = tRect.top + tRect.height / 2 - containerRect.top
 
-        // Bezier curve
-        const curvature = 0.5
+        // Smart Routing Logic
+        let d = ''
+        const isSameColumn = Math.abs(sRect.left - tRect.left) < 50 // Rough check if aligned column
+        const isSelf = edge.source === edge.target
 
-        // If same column or backwards, adjust curvature?
-        // Assuming left-to-right flow mostly
+        if (isSameColumn && !isSelf) {
+          // "Bracket" routing: Right -> Right
+          // Curve out to the right and back in
+          tx = tRect.right - containerRect.left // Target right side
 
-        const d = `M ${sx} ${sy} C ${sx + (tx - sx) * curvature} ${sy}, ${tx - (tx - sx) * curvature} ${ty}, ${tx} ${ty}`
+          const curveDist = 40
+          const cp1x = sx + curveDist
+          const cp1y = sy
+          const cp2x = tx + curveDist // Same extension roughly
+          const cp2y = ty
+
+          d = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
+        } else {
+          // Standard Left-to-Right Bezier
+          // Enhance curvature for nicer look
+          const dist = Math.abs(tx - sx)
+          const curvature = Math.max(0.4, Math.min(0.8, dist / 500)) // Dynamic curvature
+          const cp1x = sx + dist * curvature
+          const cp2x = tx - dist * curvature
+
+          d = `M ${sx} ${sy} C ${cp1x} ${sy}, ${cp2x} ${ty}, ${tx} ${ty}`
+        }
 
         newPaths.push(
           <g
             key={edge.id}
-            className="pointer-events-auto cursor-pointer"
+            className="pointer-events-auto cursor-pointer group"
             onClick={(e) => {
               e.stopPropagation()
               selectEdge(edge.id)
               if (!isEdgePanelOpen) toggleEdgePanel()
             }}
           >
+            {/* Invisible thicker path for easier hover */}
+            <path d={d} fill="none" stroke="transparent" strokeWidth="15" />
+
+            {/* Visible Path */}
             <path
               d={d}
               fill="none"
-              stroke="#6366f1"
+              stroke="#3b82f6"
               strokeWidth="2"
-              strokeOpacity="0.6"
-              className="hover:stroke-[3px] transition-all"
+              className={cn(
+                "transition-all duration-300 opacity-60 group-hover:opacity-100 group-hover:stroke-[3px]",
+                // Add flowing dashed effect if desired. 
+                // Tailwind typically needs custom animation, but we can try simple dasharray
+                "animate-flow"
+              )}
+              style={{
+                strokeDasharray: '8 4',
+                animation: 'dashDraw 30s linear infinite' // Slow flow
+              }}
             />
-            <circle cx={sx} cy={sy} r="2" fill="#6366f1" />
-            <circle cx={tx} cy={ty} r="2" fill="#6366f1" />
+            {/* Terminals */}
+            <circle cx={sx} cy={sy} r="3" fill="#3b82f6" className="opacity-60 group-hover:opacity-100" />
+            <circle cx={tx} cy={ty} r="3" fill="#3b82f6" className="opacity-60 group-hover:opacity-100" />
+
             <title>{edge.source} → {edge.target}</title>
           </g>
         )
@@ -1421,16 +1461,12 @@ function LineageFlowOverlay({
   // Listeners
   useEffect(() => {
     // Initial draw
-    // Delay slightly to allow layout to settle
     const timer = setTimeout(updateFlow, 100)
 
     // Resize
     window.addEventListener('resize', updateFlow)
 
-    // Scroll - Capture phase to detect scroll in columns?
-    // Or just poll? Scroll interaction is tricky. 
-    // Let's add specific listeners to the columns if possible, but we don't have refs here easily.
-    // We can capture global scroll
+    // Scroll
     window.addEventListener('scroll', updateFlow, true)
 
     return () => {
@@ -1438,14 +1474,17 @@ function LineageFlowOverlay({
       window.removeEventListener('scroll', updateFlow, true)
       clearTimeout(timer)
     }
-  }, [updateFlow, nodes, expandedNodes]) // Re-run when nodes change
+  }, [updateFlow, nodes, expandedNodes])
 
   return (
-    <div
-      ref={containerRef}
-      className="absolute inset-0 pointer-events-none z-0 overflow-hidden"
-    >
-      <svg className="w-full h-full">
+    <div ref={containerRef} className="absolute inset-0 pointer-events-none z-0">
+      <style>{`
+          @keyframes dashDraw {
+            from { stroke-dashoffset: 1000; }
+            to { stroke-dashoffset: 0; }
+          }
+        `}</style>
+      <svg className="w-full h-full overflow-visible">
         {paths}
       </svg>
     </div>
