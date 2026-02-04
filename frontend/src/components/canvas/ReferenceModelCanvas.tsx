@@ -111,6 +111,8 @@ export function ReferenceModelCanvas({
 }: ReferenceModelCanvasProps) {
   const nodes = useCanvasStore((s) => s.nodes)
   const edges = useCanvasStore((s) => s.edges)
+  const addNodes = useCanvasStore((s) => s.addNodes)
+  const addEdges = useCanvasStore((s) => s.addEdges)
   const selectNode = useCanvasStore((s) => s.selectNode)
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
@@ -181,41 +183,138 @@ export function ReferenceModelCanvas({
   // Checking previous file view: "export function computeTrace" exists in hooks/useLineageExploration.ts
 
   const handleDoubleClick = useCallback(async (nodeId: string) => {
-    // Toggle trace
+    // Toggle trace off if clicking the same node
     if (traceFocusId === nodeId) {
       setTraceFocusId(null)
       setTraceNodes(new Set())
       return
     }
 
+    // Resolve URN from the clicked node
+    // We assume nodes in store have data.urn. Fallback to ID if not found.
+    const targetNode = nodes.find(n => n.id === nodeId)
+    const targetUrn = (targetNode?.data?.urn as string) || nodeId
+
+    // Optimistically highlight the clicked node (using ID)
     setTraceFocusId(nodeId)
-    setTraceNodes(new Set([nodeId])) // optimistically highlight start
+    setTraceNodes(new Set([nodeId]))
 
     if (!provider) return
 
     try {
-      // Use backend Trace API
-      // Default to depth 3 for now, matching Lineage Canvas defaults
-      const result = await provider.getFullLineage(nodeId, 3, 3)
+      // 1. Fetch Trace Data
+      const result = await provider.getFullLineage(targetUrn, 3, 3)
 
-      const visited = new Set<string>()
-      // Add lineage nodes
-      result.nodes.forEach(n => visited.add(n.urn))
-      result.upstreamUrns.forEach(u => visited.add(u))
-      result.downstreamUrns.forEach(u => visited.add(u))
+      // 2. Resolve IDs (URN -> Existing Store ID or URN)
+      // This maps backend URNs to whatever ID is currently in the store, 
+      // preventing dupes and ensuring traceNodes matches UI IDs.
+      const urnToId = new Map<string, string>()
+      nodes.forEach(n => {
+        if (n.data?.urn) urnToId.set(n.data.urn as string, n.id)
+        // Also map ID acting as URN?
+        urnToId.set(n.id, n.id)
+      })
 
-      // Also ensure ancestors of these nodes are highlighted (Hierarchy View specific)
-      // Since ReferenceModelCanvas displays hierarchy, tracing just the leaf nodes might be confusing
-      // if their parents are collapsed. 
-      // But for now, let's trust the backend result.
-      visited.add(nodeId)
+      const resolveId = (urn: string) => urnToId.get(urn) || urn
 
-      setTraceNodes(visited)
+      // 3. Prepare New Nodes / Edges for Store
+      const newNodes: any[] = []
+      const newEdges: any[] = []
+
+      // Nodes
+      result.nodes.forEach(n => {
+        const existingId = urnToId.get(n.urn)
+        // Only add if we don't know this URN (or ID)
+        if (!existingId) {
+          newNodes.push({
+            id: n.urn, // Use URN as ID for new nodes
+            type: 'generic',
+            position: { x: 0, y: 0 },
+            data: {
+              ...n.properties,
+              label: n.displayName,
+              type: n.entityType,
+              urn: n.urn,
+              childCount: n.childCount
+            }
+          })
+          // Update local map for edges processing
+          urnToId.set(n.urn, n.urn)
+        }
+      })
+
+      // Edges
+      const existingEdgeIds = new Set(edges.map(e => e.id))
+      result.edges.forEach(e => {
+        if (!existingEdgeIds.has(e.id)) {
+          newEdges.push({
+            id: e.id,
+            source: resolveId(e.sourceUrn),
+            target: resolveId(e.targetUrn),
+            type: 'lineage',
+            data: {
+              relationship: e.edgeType,
+              edgeType: e.edgeType,
+              confidence: e.confidence
+            }
+          })
+        }
+      })
+
+      // 4. Update Store
+      if (newNodes.length > 0) addNodes(newNodes)
+      if (newEdges.length > 0) addEdges(newEdges)
+
+      // 5. Update Trace Highlight (using IDs)
+      const visibleIds = new Set<string>()
+
+      // Add the start node ID
+      visibleIds.add(nodeId)
+
+      // Add traced nodes (resolved to IDs)
+      result.nodes.forEach(n => {
+        const id = resolveId(n.urn)
+        if (id) visibleIds.add(id)
+      })
+
+      // Add upstream/downstream URNs (resolved to IDs)
+      result.upstreamUrns.forEach(u => {
+        const id = resolveId(u)
+        if (id) visibleIds.add(id)
+      })
+      result.downstreamUrns.forEach(u => {
+        const id = resolveId(u)
+        if (id) visibleIds.add(id)
+      })
+
+      setTraceNodes(visibleIds)
+
+      // 6. Style: Auto-expand ancestors of visible nodes
+      const nodesToExpand = new Set(expandedNodes)
+
+      const properParentMap = new Map<string, string>()
+      const containmentEdges = edges.filter(e => {
+        const type = normalizeEdgeType(e)
+        return isContainmentEdge(type)
+      })
+      containmentEdges.forEach(e => properParentMap.set(e.target, e.source))
+
+      visibleIds.forEach(id => {
+        let curr = id
+        while (properParentMap.has(curr)) {
+          curr = properParentMap.get(curr)!
+          nodesToExpand.add(curr)
+        }
+      })
+
+      setExpandedNodes(nodesToExpand)
+
     } catch (err) {
       console.error("Failed to fetch trace", err)
-      // Fallback or show error?
+      // Reset if failed?
+      // setTraceFocusId(null)
     }
-  }, [traceFocusId, provider])
+  }, [traceFocusId, provider, nodes, edges, addNodes, addEdges, expandedNodes])
 
 
   // Lineage flow toggle
@@ -597,7 +696,36 @@ export function ReferenceModelCanvas({
     setExpandedNodes(new Set())
   }, [])
 
-  // Lineage Edges for Overlay
+
+
+  // Style: Enhanced Trace Context
+  // Compute the set of all "Contextual Nodes" for the active trace.
+  // This includes:
+  // 1. The traced nodes themselves (traceNodes)
+  // 2. ALL ancestors of traced nodes (so containers stay lit)
+  const traceContextSet = useMemo(() => {
+    const set = new Set(traceNodes)
+    if (traceFocusId) set.add(traceFocusId)
+
+    // Add ancestors
+    traceNodes.forEach(id => {
+      let curr = parentMap.get(id)
+      while (curr) {
+        set.add(curr)
+        curr = parentMap.get(curr)
+      }
+    })
+
+    if (traceFocusId) {
+      let curr = parentMap.get(traceFocusId)
+      while (curr) {
+        set.add(curr)
+        curr = parentMap.get(curr)
+      }
+    }
+
+    return set
+  }, [traceNodes, traceFocusId, parentMap])
   const lineageEdges = useMemo(() => {
     if (!showLineageFlow) return []
     // Filter out containment edges
@@ -671,7 +799,27 @@ export function ReferenceModelCanvas({
       const targetId = ancestorMap.get(edge.target) || (displayMap.has(edge.target) ? edge.target : null)
 
       if (sourceId && targetId && sourceId !== targetId) {
+        // Trace Filtering: If trace is active, ONLY show edges relevant to the trace
+        if (traceFocusId) {
+          // Check if this edge connects two nodes in the trace context?
+          // Ideally, we want edges ON the trace path.
+          // visibleLineageEdges projects edges. 
+          // If the source/target are part of the 'traceNodes', show.
+          // But 'traceNodes' are leaf nodes mostly. 
+          // traceContextSet has ancestors.
+          // Let's rely on 'traceNodes' for the strictest filtering (actual data flow),
+          // OR check if source/target are in 'traceContextSet' AND the edge is part of the path?
+          // Simpler: If source OR target is not in traceContextSet, hide it.
+          // Even stricter: BOTH must be in traceContextSet?
+          // Yes, let's try strictly showing flow between relevant nodes.
+
+          if (!traceContextSet.has(sourceId) || !traceContextSet.has(targetId)) {
+            return
+          }
+        }
+
         const key = `${sourceId}->${targetId}`
+
         if (!seen.has(key)) {
           projected.push({
             ...edge,
@@ -812,8 +960,10 @@ export function ReferenceModelCanvas({
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
                 onDoubleClick={handleDoubleClick}
+
                 traceFocusId={traceFocusId}
                 traceNodes={traceNodes}
+                traceContextSet={traceContextSet}
               />
             ))}
           </div>
@@ -877,6 +1027,7 @@ interface LayerColumnProps {
   onDoubleClick: (id: string) => void
   traceFocusId: string | null
   traceNodes: Set<string>
+  traceContextSet: Set<string>
   isDimmed?: boolean // Computed internally or passed? Computed is better.
 }
 
@@ -892,7 +1043,8 @@ function LayerColumn({
   onContextMenu,
   onDoubleClick,
   traceFocusId,
-  traceNodes
+  traceNodes,
+  traceContextSet
 }: LayerColumnProps) { // No longer LayerColumnProps? Yes it is.
   return (
     <div className="flex-1 min-w-[280px] max-w-[400px] border-r border-glass-border last:border-r-0 flex flex-col">
@@ -948,6 +1100,7 @@ function LayerColumn({
               onDoubleClick={onDoubleClick}
               traceFocusId={traceFocusId}
               traceNodes={traceNodes}
+              traceContextSet={traceContextSet}
             />
           ))
         )}
@@ -969,6 +1122,7 @@ interface LayerNodeCardProps {
   onDoubleClick: (id: string) => void
   traceFocusId: string | null
   traceNodes: Set<string>
+  traceContextSet: Set<string>
 }
 
 function LayerNodeCard({
@@ -983,11 +1137,21 @@ function LayerNodeCard({
   onContextMenu,
   onDoubleClick,
   traceFocusId,
-  traceNodes
+  traceNodes,
+  traceContextSet
 }: LayerNodeCardProps) {
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
-  const isDimmed = traceFocusId !== null && !traceNodes.has(node.id) && node.id !== traceFocusId
+
+  // Style Dimming:
+  // If trace is active:
+  // - Node is highlighted if it is in traceContextSet (traced node OR ancestor)
+  // - Otherwise dimmed
+  const isTraceActive = traceFocusId !== null
+  const isHighlighted = isTraceActive && traceContextSet.has(node.id)
+
+  // Dim if trace is active AND NOT highlighted
+  const isDimmed = isTraceActive && !isHighlighted
 
   // Logic for expandable state
   const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || 0
@@ -1004,6 +1168,19 @@ function LayerNodeCard({
     return n.children.reduce((acc, child) => acc + 1 + countDescendants(child), 0)
   }
   const descendantCount = hasChildren && !isExpanded ? (childCount || countDescendants(node)) : 0
+
+  // Auto-scroll when trace is focused
+  useEffect(() => {
+    if (traceFocusId === node.id) {
+      // Wait slightly for any expansions/layout shifts
+      setTimeout(() => {
+        const el = document.getElementById(`layer-node-${node.id}`)
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' })
+        }
+      }, 100)
+    }
+  }, [traceFocusId, node.id])
 
   return (
     <motion.div
@@ -1025,6 +1202,11 @@ function LayerNodeCard({
       onClick={(e) => {
         e.stopPropagation()
         onSelect(node.id)
+      }}
+
+      onDoubleClick={(e) => {
+        e.stopPropagation()
+        onDoubleClick(node.id)
       }}
       onContextMenu={(e) => onContextMenu(e, node.id)}
     >
@@ -1102,8 +1284,10 @@ function LayerNodeCard({
                     onToggle={onToggle}
                     onContextMenu={onContextMenu}
                     onDoubleClick={onDoubleClick}
+                    onDoubleClick={onDoubleClick}
                     traceFocusId={traceFocusId}
                     traceNodes={traceNodes}
+                    traceContextSet={traceContextSet}
                   />
                 ))}
               </div>
