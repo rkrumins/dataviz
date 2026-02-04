@@ -37,6 +37,7 @@ import {
     useEffectiveAssignments
 } from '@/store/referenceModelStore'
 import type { ViewLayerConfig, AssignmentConflict } from '@/types/schema'
+import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
 
 // ============================================
 // Types
@@ -312,6 +313,7 @@ export function WizardAssignmentTree({
     const conflicts = useAssignmentConflicts()
     const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
     const removeEntityAssignment = useReferenceModelStore(s => s.removeEntityAssignment)
+    const { containmentEdgeTypes: ontologyContainmentTypes } = useOntologyMetadata()
 
     // Local state
     const [searchQuery, setSearchQuery] = useState('')
@@ -323,21 +325,24 @@ export function WizardAssignmentTree({
     const parentRef = useRef<HTMLDivElement>(null)
     const searchInputRef = useRef<HTMLInputElement>(null)
 
-    // Build containment set for efficient lookup
+    // Build containment set for efficient lookup - prioritize ontology, then prop, then schema
     const containmentSet = useMemo(() => {
-        // Get from schema if available, fallback to prop
-        const schemaTypes = schema?.containmentEdgeTypes
-        return new Set(schemaTypes || containmentEdgeTypes)
-    }, [schema?.containmentEdgeTypes, containmentEdgeTypes])
+        const types = ontologyContainmentTypes.length > 0 
+            ? ontologyContainmentTypes 
+            : (containmentEdgeTypes.length > 0 
+                ? containmentEdgeTypes 
+                : (schema?.containmentEdgeTypes || DEFAULT_CONTAINMENT_TYPES))
+        return new Set(types)
+    }, [ontologyContainmentTypes, containmentEdgeTypes, schema?.containmentEdgeTypes])
 
     // Build entity tree from canvas nodes/edges
     const entityTree = useMemo<EntityTreeNode[]>(() => {
         if (!nodes.length) return []
 
-        // Build containment map using configured edge types
+        // Build containment map using backend-provided types
         const containmentEdges = edges.filter(e => {
-            const edgeType = e.data?.relationship || e.data?.edgeType || ''
-            return containmentSet.has(edgeType) || containmentSet.has(edgeType.toUpperCase())
+            const edgeType = normalizeEdgeType(e)
+            return containmentSet.has(edgeType) || Array.from(containmentSet).some(type => type.toUpperCase() === edgeType)
         })
 
         const nodeMap = new Map(nodes.map(n => [n.id, n]))

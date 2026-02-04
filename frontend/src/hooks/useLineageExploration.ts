@@ -25,6 +25,7 @@ import {
   aggregateLineageEdges,
   computeAllNodeCounts,
 } from '@/lib/projection-engine'
+import { useOntologyMetadata, normalizeEdgeType, isContainmentEdgeType } from '@/services/ontologyService'
 
 // ============================================
 // EXPLORATION STORE
@@ -87,7 +88,7 @@ const DEFAULT_CONFIG: LineageExplorationConfig = {
     showCounts: true,
     highlightPath: true,
   },
-  containmentEdgeTypes: ['contains', 'has_schema', 'has_dataset', 'has_column'],
+  containmentEdgeTypes: [], // Will be populated from ontology service
 }
 
 export const useLineageExplorationStore = create<LineageExplorationState>((set, get) => ({
@@ -231,9 +232,11 @@ export function computeTrace(
 ): TraceResult {
   // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
   // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
-  // Use View-Specific containment definition (passed or default?)
-  // Ideally this function should accept config, but for now defaulting is safer than breaking signature
-  const containmentMap = buildContainmentMap(allNodes, allEdges, ['contains', 'has_schema', 'has_dataset'])
+  // Use provided containment types or fallback to defaults
+  const containmentTypes = containmentEdgeTypes.length > 0 
+    ? containmentEdgeTypes 
+    : ['CONTAINS', 'BELONGS_TO']
+  const containmentMap = buildContainmentMap(allNodes, allEdges, containmentTypes)
 
   // Build adjacency lists
   const upstreamEdges = new Map<string, Edge[]>()
@@ -253,9 +256,9 @@ export function computeTrace(
 
   // Build edge maps (skip containment edges)
   allEdges.forEach((edge) => {
-    const rel = edge.data?.relationship ?? edge.data?.edgeType ?? ''
+    const rel = (edge.data?.relationship ?? edge.data?.edgeType ?? '').toUpperCase()
     // Skip containment edges for lineage trace
-    if (rel === 'contains' || rel === 'has_schema' || rel === 'has_dataset' || rel === 'has_column') {
+    if (containmentTypes.some(type => type.toUpperCase() === rel)) {
       return
     }
 
@@ -643,6 +646,7 @@ import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useEffect } from 'react'
 
 export function useLineageExploration(): UseLineageExplorationResult {
+  const { containmentEdgeTypes, isContainmentEdge } = useOntologyMetadata()
   const provider = useGraphProvider()
   const {
     config,
@@ -672,7 +676,10 @@ export function useLineageExploration(): UseLineageExplorationResult {
   // Side Effect: Fetch data when pagination limit increases
   useEffect(() => {
     const syncPagination = async () => {
-      const containmentTypes = config.containmentEdgeTypes ?? ['contains', 'has_schema', 'has_dataset', 'has_column']
+      // Use ontology-provided types, fallback to config if available
+      const containmentTypes = containmentEdgeTypes.length > 0 
+        ? containmentEdgeTypes 
+        : (config.containmentEdgeTypes ?? ['CONTAINS', 'BELONGS_TO'])
 
       for (const [parentId, limit] of Object.entries(pagination)) {
         const parentNode = rawNodes.find(n => n.id === parentId)
@@ -743,7 +750,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
     }
 
     syncPagination()
-  }, [pagination, rawNodes, rawEdges, provider, config.containmentEdgeTypes, setNodes, setEdges])
+  }, [pagination, rawNodes, rawEdges, provider, containmentEdgeTypes, config.containmentEdgeTypes, setNodes, setEdges])
 
   // Compute visible nodes/edges based on configuration
   const { visibleNodes, visibleEdges, aggregatedEdges, upstreamCount, downstreamCount } = useMemo(() => {
@@ -764,13 +771,18 @@ export function useLineageExploration(): UseLineageExplorationResult {
 
     // 1. If focused mode, compute trace first
     if (config.mode === 'focused' && focusEntityId) {
+      // Use ontology-provided types for trace
+      const traceContainmentTypes = containmentEdgeTypes.length > 0 
+        ? containmentEdgeTypes 
+        : ['CONTAINS', 'BELONGS_TO']
       const trace = computeTrace(
         focusEntityId,
         rawNodes,
         rawEdges,
         config.trace.upstreamDepth,
         config.trace.downstreamDepth,
-        config.trace.includeChildLineage
+        config.trace.includeChildLineage,
+        traceContainmentTypes
       )
       nodes = trace.nodes as LineageNode[]
       edges = trace.edges

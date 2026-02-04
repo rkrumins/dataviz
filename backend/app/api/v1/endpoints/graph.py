@@ -2,7 +2,7 @@ from typing import List, Optional, Any
 from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel
 from backend.app.models.graph import (
-    GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats
+    GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata
 )
 from backend.app.services.context_engine import context_engine
 
@@ -178,3 +178,8 @@ async def save_graph(request: SaveGraphRequest):
 async def get_graph_introspection():
     """Get detailed schema statistics for the graph."""
     return await context_engine.get_schema_stats()
+
+@router.get("/metadata/ontology", response_model=OntologyMetadata)
+async def get_ontology_metadata():
+    """Get ontology metadata including containment edge types and entity hierarchies."""
+    return await context_engine.get_ontology_metadata()

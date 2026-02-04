@@ -144,6 +144,23 @@ export interface TagSummary {
     entityTypes: string[]
 }
 
+export interface EdgeTypeMetadata {
+    isContainment: boolean
+    direction: 'parent-to-child' | 'child-to-parent' | 'bidirectional'
+    description?: string
+}
+
+export interface EntityTypeHierarchy {
+    canContain: string[]
+    canBeContainedBy: string[]
+}
+
+export interface OntologyMetadata {
+    containmentEdgeTypes: string[]
+    edgeTypeMetadata: Record<string, EdgeTypeMetadata>
+    entityTypeHierarchy: Record<string, EntityTypeHierarchy>
+}
+
 export interface GraphSchemaStats {
     totalNodes: number
     totalEdges: number
@@ -422,6 +439,11 @@ export interface GraphDataProvider {
      * Get detailed graph schema statistics
      */
     getSchemaStats(): Promise<GraphSchemaStats>
+
+    /**
+     * Get ontology metadata including containment edge types and entity hierarchies
+     */
+    getOntologyMetadata(): Promise<OntologyMetadata>
 
     // ==========================================
     // Assignment Operations

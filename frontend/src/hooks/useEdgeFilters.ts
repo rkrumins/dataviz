@@ -13,6 +13,7 @@ import { persist } from 'zustand/middleware'
 import { useMemo } from 'react'
 import { useCanvasStore, type LineageEdge } from '@/store/canvas'
 import type { EdgeTypeFilter } from '@/components/panels/EdgeDetailPanel'
+import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
 
 // ============================================
 // Types
@@ -246,6 +247,7 @@ export function useFilteredEdges(): {
     const focusedNodeId = useEdgeFiltersStore((s) => s.focusedNodeId)
     const highlightedEdgeIds = useEdgeFiltersStore((s) => s.highlightedEdgeIds)
     const isolateMode = useEdgeFiltersStore((s) => s.isolateMode)
+    const { containmentEdgeTypes } = useOntologyMetadata()
 
     return useMemo(() => {
         const enabledTypes = new Set(
@@ -259,14 +261,17 @@ export function useFilteredEdges(): {
             return enabledTypes.has(edgeType) && confidence >= confidenceThreshold
         })
 
+        // Get containment types from ontology
+        const containmentTypes = containmentEdgeTypes || []
+        
         const containment = edges.filter((e) => {
-            const t = e.data?.edgeType || e.data?.relationship
-            return t === 'contains' || t === 'CONTAINS'
+            const edgeType = normalizeEdgeType(e)
+            return containmentTypes.some(type => type.toUpperCase() === edgeType)
         })
 
         const lineage = edges.filter((e) => {
-            const t = e.data?.edgeType || e.data?.relationship
-            return t !== 'contains' && t !== 'CONTAINS'
+            const edgeType = normalizeEdgeType(e)
+            return !containmentTypes.some(type => type.toUpperCase() === edgeType)
         })
 
         // Apply direction filter if we have a focused node
@@ -304,7 +309,7 @@ export function useFilteredEdges(): {
             directionFilteredEdges: directionFiltered,
             highlightedEdges: highlighted,
         }
-    }, [edges, filters, confidenceThreshold, directionFilter, focusedNodeId, highlightedEdgeIds, isolateMode])
+    }, [edges, filters, confidenceThreshold, directionFilter, focusedNodeId, highlightedEdgeIds, isolateMode, containmentEdgeTypes])
 }
 
 // ============================================

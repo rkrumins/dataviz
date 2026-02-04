@@ -10,6 +10,7 @@ import type {
     LayerAssignmentRequest,
     LayerAssignmentResult,
     GraphSchemaStats,
+    OntologyMetadata,
 } from './GraphDataProvider'
 
 // Base API URL - typically configured via environment variables
@@ -218,6 +219,10 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
     async getSchemaStats(): Promise<GraphSchemaStats> {
         return await this.fetch<GraphSchemaStats>('/introspection')
+    }
+
+    async getOntologyMetadata(): Promise<OntologyMetadata> {
+        return await this.fetch<OntologyMetadata>('/metadata/ontology')
     }
 
     // ==========================================

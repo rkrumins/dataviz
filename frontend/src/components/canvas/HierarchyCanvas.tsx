@@ -15,6 +15,7 @@ import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
+import { useOntologyMetadata, isContainmentEdgeType } from '@/services/ontologyService'
 // import type { EntityTypeSchema } from '@/types/schema'
 
 // Dynamic icon component
@@ -56,6 +57,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const schema = useSchemaStore((s) => s.schema)
+  const { containmentEdgeTypes, isContainmentEdge } = useOntologyMetadata()
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
@@ -67,10 +69,12 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const hierarchyTree = useMemo(() => {
     if (!nodes.length) return []
 
-    // Find containment edges
-    const containmentEdges = edges.filter((e) =>
-      e.data?.relationship === 'contains' || e.data?.edgeType === 'contains'
-    )
+    // Find containment edges using backend-provided types
+    // Use containmentEdgeTypes directly to avoid function dependency issues
+    const containmentEdges = edges.filter((e) => {
+      const edgeType = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
+      return containmentEdgeTypes.some(type => type.toUpperCase() === edgeType)
+    })
 
     // Build tree from containment edges
     const nodeMap = new Map(nodes.map((n) => [n.id, n]))
@@ -112,7 +116,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       .map((n) => buildTree(n.id, 0))
       .filter((n): n is HierarchyNode => n !== null)
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [nodes, edges])
+  }, [nodes, edges, containmentEdgeTypes])
 
   // Flatten tree for search
   const flatNodes = useMemo(() => {

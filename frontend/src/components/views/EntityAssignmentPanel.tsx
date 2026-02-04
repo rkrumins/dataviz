@@ -33,6 +33,7 @@ import {
     useInstanceAssignments,
     useAssignmentConflicts
 } from '@/store/referenceModelStore'
+import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
 
 // ============================================
 // Types
@@ -253,15 +254,16 @@ export function EntityAssignmentPanel({
         [instanceAssignments]
     )
 
+    const { containmentEdgeTypes } = useOntologyMetadata()
+    
     const entityTree = useMemo<EntityTreeNode[]>(() => {
         if (!nodes.length) return []
 
-        // Build containment map
-        const containmentEdges = edges.filter(e =>
-            e.data?.relationship === 'contains' ||
-            e.data?.edgeType === 'contains' ||
-            e.data?.edgeType === 'CONTAINS'
-        )
+        // Build containment map using backend-provided types
+        const containmentEdges = edges.filter(e => {
+            const edgeType = normalizeEdgeType(e)
+            return containmentEdgeTypes.some(type => type.toUpperCase() === edgeType)
+        })
 
         const nodeMap = new Map(nodes.map(n => [n.id, n]))
         const childMap = new Map<string, string[]>()
@@ -310,7 +312,7 @@ export function EntityAssignmentPanel({
             .sort((a, b) => a.name.localeCompare(b.name))
 
         return roots
-    }, [nodes, edges, instanceAssignments, assignmentKey])
+    }, [nodes, edges, instanceAssignments, assignmentKey, containmentEdgeTypes])
 
     // Filter tree by search and granularity
     const filteredTree = useMemo(() => {

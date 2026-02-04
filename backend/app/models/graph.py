@@ -1,6 +1,6 @@
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Union
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 
 # ============================================
 # Enums
@@ -128,6 +128,30 @@ class EdgeQuery(BaseModel):
     offset: Optional[int] = 0
     limit: Optional[int] = 100
 
+    @validator('edge_types', pre=True)
+    def validate_edge_types(cls, v):
+        """Convert string edge types to EdgeType enums"""
+        if v is None:
+            return None
+        if not isinstance(v, list):
+            return v
+        result = []
+        for et in v:
+            if isinstance(et, str):
+                # Try to find matching EdgeType enum
+                try:
+                    result.append(EdgeType(et.upper()))
+                except ValueError:
+                    # If not a valid enum, try to match case-insensitively
+                    for edge_type in EdgeType:
+                        if edge_type.value.upper() == et.upper():
+                            result.append(edge_type)
+                            break
+                    # If no match found, skip it (or could raise error)
+            elif isinstance(et, EdgeType):
+                result.append(et)
+        return result if result else None
+
     class Config:
         populate_by_name = True
 
@@ -188,5 +212,32 @@ class GraphSchemaStats(BaseModel):
     edge_type_stats: List[EdgeTypeSummary] = Field(default_factory=list, alias="edgeTypeStats")
     tag_stats: List[TagSummary] = Field(default_factory=list, alias="tagStats")
     
+    class Config:
+        populate_by_name = True
+
+# ============================================
+# Ontology Metadata Models
+# ============================================
+
+class EdgeTypeMetadata(BaseModel):
+    is_containment: bool = Field(alias="isContainment")
+    direction: str  # 'parent-to-child', 'child-to-parent', 'bidirectional'
+    description: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+class EntityTypeHierarchy(BaseModel):
+    can_contain: List[str] = Field(default_factory=list, alias="canContain")
+    can_be_contained_by: List[str] = Field(default_factory=list, alias="canBeContainedBy")
+
+    class Config:
+        populate_by_name = True
+
+class OntologyMetadata(BaseModel):
+    containment_edge_types: List[str] = Field(alias="containmentEdgeTypes")
+    edge_type_metadata: Dict[str, EdgeTypeMetadata] = Field(alias="edgeTypeMetadata")
+    entity_type_hierarchy: Dict[str, EntityTypeHierarchy] = Field(alias="entityTypeHierarchy")
+
     class Config:
         populate_by_name = True

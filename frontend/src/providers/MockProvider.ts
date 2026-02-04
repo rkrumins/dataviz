@@ -21,6 +21,7 @@ import type {
     LayerAssignmentRequest,
     LayerAssignmentResult,
     GraphSchemaStats,
+    OntologyMetadata,
 } from './GraphDataProvider'
 
 // ============================================
@@ -597,6 +598,80 @@ export class MockProvider implements GraphDataProvider {
             entityTypeStats: [],
             edgeTypeStats: [],
             tagStats: []
+        }
+    }
+
+    async getOntologyMetadata(): Promise<OntologyMetadata> {
+        // Default containment edge types
+        const defaultContainmentTypes = ['CONTAINS', 'BELONGS_TO']
+        
+        // Build edge type metadata
+        const edgeTypeMetadata: Record<string, { isContainment: boolean; direction: string; description?: string }> = {}
+        
+        // Analyze edges to determine metadata
+        const edgeTypes = new Set<string>()
+        this.edges.forEach(edge => {
+            const edgeType = edge.edgeType
+            edgeTypes.add(edgeType)
+            
+            if (!edgeTypeMetadata[edgeType]) {
+                const isContainment = defaultContainmentTypes.includes(edgeType)
+                edgeTypeMetadata[edgeType] = {
+                    isContainment,
+                    direction: edgeType === 'CONTAINS' ? 'parent-to-child' : 
+                              edgeType === 'BELONGS_TO' ? 'child-to-parent' : 
+                              'bidirectional',
+                    description: isContainment ? `Containment relationship: ${edgeType}` : `Non-containment relationship: ${edgeType}`
+                }
+            }
+        })
+        
+        // Build entity type hierarchy from edges
+        const entityTypeHierarchy: Record<string, { canContain: string[]; canBeContainedBy: string[] }> = {}
+        
+        this.edges.forEach(edge => {
+            if (!defaultContainmentTypes.includes(edge.edgeType)) return
+            
+            const sourceNode = this.nodes.get(edge.sourceUrn)
+            const targetNode = this.nodes.get(edge.targetUrn)
+            
+            if (!sourceNode || !targetNode) return
+            
+            const sourceType = sourceNode.entityType
+            const targetType = targetNode.entityType
+            
+            // Determine parent and child based on edge direction
+            let parentType: string, childType: string
+            if (edge.edgeType === 'CONTAINS') {
+                parentType = sourceType
+                childType = targetType
+            } else if (edge.edgeType === 'BELONGS_TO') {
+                parentType = targetType
+                childType = sourceType
+            } else {
+                parentType = sourceType
+                childType = targetType
+            }
+            
+            if (!entityTypeHierarchy[parentType]) {
+                entityTypeHierarchy[parentType] = { canContain: [], canBeContainedBy: [] }
+            }
+            if (!entityTypeHierarchy[childType]) {
+                entityTypeHierarchy[childType] = { canContain: [], canBeContainedBy: [] }
+            }
+            
+            if (!entityTypeHierarchy[parentType].canContain.includes(childType)) {
+                entityTypeHierarchy[parentType].canContain.push(childType)
+            }
+            if (!entityTypeHierarchy[childType].canBeContainedBy.includes(parentType)) {
+                entityTypeHierarchy[childType].canBeContainedBy.push(parentType)
+            }
+        })
+        
+        return {
+            containmentEdgeTypes: defaultContainmentTypes,
+            edgeTypeMetadata,
+            entityTypeHierarchy
         }
     }
 
