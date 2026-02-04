@@ -918,6 +918,38 @@ export function ReferenceModelCanvas({
             )}
           </div>
         )}
+
+        {/* Trace Toolbar */}
+        <AnimatePresence>
+          {traceFocusId && (
+            <motion.div
+              initial={{ y: -20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: -20, opacity: 0 }}
+              className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2 rounded-full glass-panel border border-accent-lineage/30 shadow-lg shadow-accent-lineage/10"
+            >
+              <div className="flex items-center gap-2 text-sm font-medium text-ink">
+                <span className="w-2 h-2 rounded-full bg-accent-lineage animate-pulse" />
+                <span>Tracing:</span>
+                <span className="font-bold text-accent-lineage">
+                  {displayMap.get(traceFocusId)?.name || 'Unknown Node'}
+                </span>
+              </div>
+              <div className="h-4 w-[1px] bg-glass-border" />
+              <button
+                onClick={() => {
+                  setTraceFocusId(null)
+                  setTraceNodes(new Set())
+                  setExpandedNodes(new Set()) // Optional: Collapse all on exit? Maybe keep context.
+                }}
+                className="text-xs font-semibold text-ink-muted hover:text-ink flex items-center gap-1 transition-colors"
+              >
+                <LucideIcons.X className="w-3.5 h-3.5" />
+                Exit Trace
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       <div className="flex-1 w-full h-full relative overflow-hidden bg-canvas flex flex-col">
@@ -1187,17 +1219,23 @@ function LayerNodeCard({
       layout
       id={`layer-node-${node.id}`}
       className={cn(
-        "rounded-lg border transition-all duration-200",
+        "rounded-lg border transition-all duration-300",
         "bg-canvas-elevated hover:shadow-md cursor-pointer",
         isSelected && "ring-2 ring-offset-1",
         isSearchResult && !isSelected && "ring-2 ring-amber-400/50",
-        node.isLogical && "border-dashed bg-black/5 dark:bg-white/5", // Distinct style for logical nodes
-        isDimmed && "opacity-25 grayscale"
+        node.isLogical && "border-dashed bg-black/5 dark:bg-white/5",
+
+        // Highlight logic
+        isHighlighted && "shadow-[0_0_15px_-3px_rgba(var(--accent-lineage-rgb),0.3)] ring-1 ring-accent-lineage border-accent-lineage z-10 scale-[1.02]",
+
+        // Dimming logic
+        isDimmed && "opacity-40 grayscale-[0.8] blur-[0.5px] scale-[0.98]" // Less aggressive opacity (0.4), subtle blur
       )}
       style={{
-        borderColor: visual?.color ?? layer.color ?? '#6b7280',
+        borderColor: isHighlighted ? 'var(--accent-lineage)' : (visual?.color ?? layer.color ?? '#6b7280'),
         borderLeftWidth: '3px',
         ['--tw-ring-color' as string]: visual?.color ?? layer.color ?? '#6b7280',
+        ['--accent-lineage-rgb' as string]: '59, 130, 246', // Fallback if var not set, ideally from theme
       }}
       onClick={(e) => {
         e.stopPropagation()
@@ -1283,7 +1321,7 @@ function LayerNodeCard({
                     onSelect={onSelect}
                     onToggle={onToggle}
                     onContextMenu={onContextMenu}
-                    onDoubleClick={onDoubleClick}
+
                     onDoubleClick={onDoubleClick}
                     traceFocusId={traceFocusId}
                     traceNodes={traceNodes}
