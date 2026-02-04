@@ -229,7 +229,8 @@ export function computeTrace(
   upstreamDepth: number,
   downstreamDepth: number,
   includeChildLineage: boolean,
-  containmentEdgeTypes: string[] = []
+  containmentEdgeTypes: string[] = [],
+  expandedIds?: Set<string>
 ): TraceResult {
   // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
   // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
@@ -380,6 +381,29 @@ export function computeTrace(
       return kids.concat(kids.flatMap(getAllDescendants))
     }
     getAllDescendants(effectiveFocusId).forEach((id) => pathNodes.add(id))
+  }
+
+  // Include manually expanded nodes and their children
+  if (expandedIds) {
+    // Iterative expansion to handle nested expanded nodes
+    const processed = new Set<string>()
+    // Start with all currently visible nodes that are expanded
+    const toProcess = Array.from(pathNodes).filter(id => expandedIds.has(id))
+
+    while (toProcess.length > 0) {
+      const parentId = toProcess.shift()!
+      if (processed.has(parentId)) continue
+      processed.add(parentId)
+
+      const children = childrenMap.get(parentId) || []
+      children.forEach(childId => {
+        pathNodes.add(childId)
+        // If this child is also expanded, process it
+        if (expandedIds.has(childId)) {
+          toProcess.push(childId)
+        }
+      })
+    }
   }
 
   // Filter nodes and edges
@@ -886,7 +910,8 @@ export function useLineageExploration(): UseLineageExplorationResult {
         config.trace.upstreamDepth,
         config.trace.downstreamDepth,
         config.trace.includeChildLineage,
-        traceContainmentTypes
+        traceContainmentTypes,
+        expandedIds
       )
       nodes = trace.nodes as LineageNode[]
       edges = trace.edges

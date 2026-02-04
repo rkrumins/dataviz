@@ -4,11 +4,11 @@ from ..models.graph import GraphNode, GraphEdge, EntityType, EdgeType
 
 # Configuration
 DEFAULT_CONFIG = {
-    "domainCount": 10, 
+    "domainCount": 5, 
     "appsPerDomain": 5,
-    "schemasPerApp": {"min": 1, "max": 4},
-    "assetsPerSchema": {"min": 2, "max": 8},
-    "columnsPerAsset": {"min": 3, "max": 10},
+    "schemasPerApp": {"min": 10, "max": 10},
+    "assetsPerSchema": {"min": 10, "max": 50},
+    "columnsPerAsset": {"min": 10, "max": 100},
     "includeDashboards": True,
     "includeGhostNodes": True
 }
