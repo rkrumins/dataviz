@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any, Set
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery, 
-    LineageResult, EntityType, EdgeType
+    LineageResult, EntityType, EdgeType, GraphSchemaStats
 )
 
 class GraphDataProvider(ABC):
@@ -108,7 +108,12 @@ class GraphDataProvider(ABC):
 
     @abstractmethod
     async def get_stats(self) -> Dict[str, Any]:
-        """Get graph statistics"""
+        """Get simple graph statistics"""
+        pass
+
+    @abstractmethod
+    async def get_schema_stats(self) -> GraphSchemaStats:
+        """Get detailed graph schema statistics"""
         pass
 
     @abstractmethod

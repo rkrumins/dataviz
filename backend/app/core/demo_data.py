@@ -4,10 +4,10 @@ from ..models.graph import GraphNode, GraphEdge, EntityType, EdgeType
 
 # Configuration
 DEFAULT_CONFIG = {
-    "domainCount": 2, # Reduced for slightly smaller default mock
-    "appsPerDomain": 3,
-    "assetsPerApp": {"min": 2, "max": 5},
-    "columnsPerAsset": {"min": 3, "max": 8},
+    "domainCount": 10, # Reduced for slightly smaller default mock
+    "appsPerDomain": 5,
+    "assetsPerApp": {"min": 2, "max": 10},
+    "columnsPerAsset": {"min": 3, "max": 10},
     "includeDashboards": True,
     "includeGhostNodes": True
 }

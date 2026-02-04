@@ -20,6 +20,7 @@ class EntityType(str, Enum):
     DOMAIN = 'domain'      # Added based on specific use cases
     SYSTEM = 'system'      # Added based on specific use cases
     APP = 'app'            # Added based on specific use cases
+    REPORT = 'report'      # Added for Consumption layer validation
 
 class EdgeType(str, Enum):
     CONTAINS = 'CONTAINS'
@@ -37,6 +38,18 @@ class Granularity(str, Enum):
     SCHEMA = 'schema'
     SYSTEM = 'system'
     DOMAIN = 'domain'
+    
+class FilterOperator(str, Enum):
+    EQUALS = 'equals'
+    CONTAINS = 'contains'
+    STARTS_WITH = 'startsWith'
+    ENDS_WITH = 'endsWith'
+    GT = 'gt'
+    LT = 'lt'
+    IN = 'in'
+    NOT_IN = 'notIn'
+    EXISTS = 'exists'
+    NOT_EXISTS = 'notExists'
 
 # ============================================
 # Core Models
@@ -73,12 +86,33 @@ class GraphEdge(BaseModel):
 # Query Models
 # ============================================
 
+# ============================================
+# Query Models
+# ============================================
+
+class PropertyFilter(BaseModel):
+    field: str
+    operator: FilterOperator
+    value: Optional[Any] = None
+
+class TagFilter(BaseModel):
+    mode: str = "any" # any, all, none
+    tags: List[str]
+
+class TextFilter(BaseModel):
+    text: str
+    operator: str = "contains"
+    case_sensitive: bool = False
+
 class NodeQuery(BaseModel):
     urns: Optional[List[str]] = None
     entity_types: Optional[List[EntityType]] = Field(None, alias="entityTypes")
     tags: Optional[List[str]] = None
     layer_id: Optional[str] = Field(None, alias="layerId")
     search_query: Optional[str] = Field(None, alias="searchQuery")
+    property_filters: Optional[List[PropertyFilter]] = Field(None, alias="propertyFilters")
+    tag_filters: Optional[TagFilter] = Field(None, alias="tagFilters")
+    name_filter: Optional[TextFilter] = Field(None, alias="nameFilter")
     offset: Optional[int] = 0
     limit: Optional[int] = 100
 
@@ -120,5 +154,39 @@ class ContainmentResult(BaseModel):
     children: List[GraphNode]
     has_nested_children: bool = Field(alias="hasNestedChildren")
 
+    class Config:
+        populate_by_name = True
+
+# ============================================
+# Introspection Models
+# ============================================
+
+class EntityTypeSummary(BaseModel):
+    id: str
+    name: str
+    count: int
+    icon: Optional[str] = None
+    color: Optional[str] = None
+    sample_names: List[str] = Field(default_factory=list, alias="sampleNames")
+
+class EdgeTypeSummary(BaseModel):
+    id: str
+    name: str
+    count: int
+    source_types: List[str] = Field(default_factory=list, alias="sourceTypes")
+    target_types: List[str] = Field(default_factory=list, alias="targetTypes")
+
+class TagSummary(BaseModel):
+    tag: str
+    count: int
+    entity_types: List[str] = Field(default_factory=list, alias="entityTypes")
+
+class GraphSchemaStats(BaseModel):
+    total_nodes: int = Field(alias="totalNodes")
+    total_edges: int = Field(alias="totalEdges")
+    entity_type_stats: List[EntityTypeSummary] = Field(default_factory=list, alias="entityTypeStats")
+    edge_type_stats: List[EdgeTypeSummary] = Field(default_factory=list, alias="edgeTypeStats")
+    tag_stats: List[TagSummary] = Field(default_factory=list, alias="tagStats")
+    
     class Config:
         populate_by_name = True

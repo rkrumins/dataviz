@@ -475,14 +475,16 @@ export function ReferenceModelCanvas({
     // - AND (Its parent is NOT in Layer L OR it has no parent)
 
     // Helper to build hierarchy node
-    const buildHierarchyNode = (nodeId: string, depth: number): HierarchyNode => {
-      const node = nodeMap.get(nodeId)!
+    const buildHierarchyNode = (nodeId: string, depth: number): HierarchyNode | null => {
+      const node = nodeMap.get(nodeId)
+      if (!node) return null
 
       const childrenIds = childMap.get(nodeId) || []
       // Filter children: Only include those that are effectively in the SAME layer
       const validChildren = childrenIds
         .filter(cid => effectiveLayer.get(cid) === effectiveLayer.get(nodeId))
         .map(cid => buildHierarchyNode(cid, depth + 1))
+        .filter((n): n is HierarchyNode => n !== null)
         .sort((a, b) => a.name.localeCompare(b.name))
 
       return {
@@ -509,8 +511,10 @@ export function ReferenceModelCanvas({
       if (layerId !== parentLayerId) {
         // It's a root in this layer context!
         const hNode = buildHierarchyNode(node.id, 0)
-        const list = grouped.get(layerId)
-        if (list) list.push(hNode)
+        if (hNode) {
+          const list = grouped.get(layerId)
+          if (list) list.push(hNode)
+        }
       }
     })
 

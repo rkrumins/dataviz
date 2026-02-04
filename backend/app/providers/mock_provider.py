@@ -3,7 +3,10 @@ from typing import List, Optional, Dict, Any, Set
 from collections import deque
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery, 
-    LineageResult, EntityType, EdgeType
+    GraphNode, GraphEdge, NodeQuery, EdgeQuery, 
+    LineageResult, EntityType, EdgeType, GraphSchemaStats,
+    PropertyFilter, TagFilter, TextFilter, FilterOperator,
+    EntityTypeSummary, EdgeTypeSummary, TagSummary
 )
 from .base import GraphDataProvider
 from ..core.demo_data import generate_demo_data
@@ -139,12 +142,81 @@ class MockGraphProvider(GraphDataProvider):
                 if term not in node.display_name.lower() and term not in node.urn.lower():
                     continue
             
+            # Advanced Filters
+            if query.property_filters and not self._match_property_filters(node, query.property_filters):
+                continue
+            
+            if query.tag_filters and not self._match_tag_filters(node, query.tag_filters):
+                continue
+                
+            if query.name_filter and not self._match_text_filter(node.display_name, query.name_filter):
+                continue
+
             result.append(node)
             
         # Pagination
         start = query.offset or 0
         limit = query.limit or 100
         return result[start : start + limit]
+
+    def _match_property_filters(self, node: GraphNode, filters: List[PropertyFilter]) -> bool:
+        for f in filters:
+            # Get value from properties or top-level attributes
+            val = node.properties.get(f.field)
+            if hasattr(node, f.field): # e.g. entityType, childCount
+                val = getattr(node, f.field)
+            
+            if not self._match_operator(val, f.operator, f.value):
+                return False
+        return True
+
+    def _match_operator(self, actual: Any, op: FilterOperator, target: Any) -> bool:
+        if op == FilterOperator.EXISTS: return actual is not None
+        if op == FilterOperator.NOT_EXISTS: return actual is None
+        
+        if actual is None: return False # simplistic handling
+        
+        # String comparison adjustments
+        s_actual = str(actual).lower() if isinstance(actual, str) else actual
+        s_target = str(target).lower() if isinstance(target, str) else target
+
+        if op == FilterOperator.EQUALS: return actual == target
+        if op == FilterOperator.CONTAINS: return str(target).lower() in str(actual).lower()
+        if op == FilterOperator.STARTS_WITH: return str(actual).lower().startswith(str(target).lower())
+        if op == FilterOperator.ENDS_WITH: return str(actual).lower().endswith(str(target).lower())
+        
+        # Numeric/Logic
+        try:
+            if op == FilterOperator.GT: return actual > target
+            if op == FilterOperator.LT: return actual < target
+        except: return False
+        
+        if op == FilterOperator.IN: return isinstance(target, list) and actual in target
+        if op == FilterOperator.NOT_IN: return isinstance(target, list) and actual not in target
+        
+        return True
+
+    def _match_tag_filters(self, node: GraphNode, filter: TagFilter) -> bool:
+        node_tags = set(node.tags or [])
+        target_tags = set(filter.tags)
+        
+        if filter.mode == 'any':
+            return not node_tags.isdisjoint(target_tags)
+        if filter.mode == 'all':
+            return target_tags.issubset(node_tags)
+        if filter.mode == 'none':
+            return node_tags.isdisjoint(target_tags)
+        return True
+
+    def _match_text_filter(self, text: str, filter: TextFilter) -> bool:
+        t = text if filter.case_sensitive else text.lower()
+        q = filter.text if filter.case_sensitive else filter.text.lower()
+        
+        if filter.operator == 'equals': return t == q
+        if filter.operator == 'contains': return q in t
+        if filter.operator == 'startsWith': return t.startswith(q)
+        if filter.operator == 'endsWith': return t.endswith(q)
+        return True
 
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
         q = NodeQuery(search_query=query, limit=limit, offset=offset)
@@ -178,11 +250,31 @@ class MockGraphProvider(GraphDataProvider):
         limit: int = 100
     ) -> List[GraphNode]:
         
-        child_urns = self._children_map.get(parent_urn, [])
+        # Default to CONTAINS if no edge types specified
+        # This matches previous behavior but allows override
+        target_edge_types = set(edge_types) if edge_types else {EdgeType.CONTAINS}
+        
+        edges = self._edges_by_source.get(parent_urn, [])
         children = []
         
-        for urn in child_urns:
-            node = self._nodes.get(urn)
+        for edge in edges:
+            # check edge type string vs enum or string
+            # Ensure we handle both string and enum comparison safely
+            etype = edge.edge_type.value if hasattr(edge.edge_type, 'value') else edge.edge_type
+            
+            # Simple check: if edge types were passed, does this match?
+            # We treat everything as string for comparison to be safe
+            is_match = False
+            for t in target_edge_types:
+                t_val = t.value if hasattr(t, 'value') else t
+                if t_val == etype:
+                    is_match = True
+                    break
+            
+            if not is_match:
+                continue
+                
+            node = self._nodes.get(edge.target_urn)
             if node:
                 if entity_types and node.entity_type not in entity_types:
                     continue
@@ -336,6 +428,55 @@ class MockGraphProvider(GraphDataProvider):
                 for t in node.tags:
                     values.add(t)
         return list(values)
+
+    async def get_schema_stats(self) -> GraphSchemaStats:
+        # Entity Type Stats
+        type_counts = {}
+        samples = {} # type -> list of names
+        for node in self._nodes.values():
+            t = node.entity_type.value if hasattr(node.entity_type, 'value') else node.entity_type
+            type_counts[t] = type_counts.get(t, 0) + 1
+            if t not in samples: samples[t] = []
+            if len(samples[t]) < 3: samples[t].append(node.display_name)
+            
+        entity_stats = [
+            EntityTypeSummary(
+                id=t, name=t, count=c, sampleNames=samples[t]
+            ) for t, c in type_counts.items()
+        ]
+        
+        # Edge Type Stats
+        edge_counts = {}
+        for edge in self._edges.values():
+            t = edge.edge_type.value if hasattr(edge.edge_type, 'value') else edge.edge_type
+            edge_counts[t] = edge_counts.get(t, 0) + 1
+            
+        edge_stats = [
+            EdgeTypeSummary(id=t, name=t, count=c) for t, c in edge_counts.items()
+        ]
+        
+        # Tag Stats
+        tag_counts = {} # tag -> count
+        tag_types = {} # tag -> set(types)
+        for node in self._nodes.values():
+            for tag in node.tags:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+                if tag not in tag_types: tag_types[tag] = set()
+                t = node.entity_type.value if hasattr(node.entity_type, 'value') else node.entity_type
+                tag_types[tag].add(t)
+                
+        tag_stats = [
+            TagSummary(tag=t, count=c, entityTypes=list(tag_types[t])) 
+            for t, c in tag_counts.items()
+        ]
+        
+        return GraphSchemaStats(
+            totalNodes=len(self._nodes),
+            totalEdges=len(self._edges),
+            entityTypeStats=entity_stats,
+            edgeTypeStats=edge_stats,
+            tagStats=tag_stats
+        )
 
     # ==========================================
     # Traversal & Filtering Extensions

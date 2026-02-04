@@ -6,7 +6,7 @@
  * other graph data source.
  */
 
-import { LogicalNodeConfig, LayerAssignmentRuleConfig, RuleCondition, ScopeFilterConfig } from '../types/schema'
+import { LogicalNodeConfig, LayerAssignmentRuleConfig, RuleCondition, ScopeFilterConfig, EntityAssignmentConfig } from '../types/schema'
 
 // ============================================
 // URN Types (DataHub Compatible)
@@ -35,6 +35,10 @@ export type EntityType =
     | 'chart'          // Individual chart/visualization
     | 'glossaryTerm'   // Business term
     | 'tag'            // Classification tag
+    | 'domain'         // Business Domain
+    | 'system'         // System
+    | 'app'            // Application
+    | 'report'         // Report
 
 /**
  * Edge types for relationships between entities
@@ -114,8 +118,64 @@ export interface GraphEdge {
 }
 
 // ============================================
+// Introspection Types
+// ============================================
+
+export interface EntityTypeSummary {
+    id: string
+    name: string
+    count: number
+    icon?: string
+    color?: string
+    sampleNames: string[]
+}
+
+export interface EdgeTypeSummary {
+    id: string
+    name: string
+    count: number
+    sourceTypes: string[]
+    targetTypes: string[]
+}
+
+export interface TagSummary {
+    tag: string
+    count: number
+    entityTypes: string[]
+}
+
+export interface GraphSchemaStats {
+    totalNodes: number
+    totalEdges: number
+    entityTypeStats: EntityTypeSummary[]
+    edgeTypeStats: EdgeTypeSummary[]
+    tagStats: TagSummary[]
+}
+
+// ============================================
 // Query Types
 // ============================================
+
+export type FilterOperator =
+    | 'equals' | 'contains' | 'startsWith' | 'endsWith'
+    | 'gt' | 'lt' | 'in' | 'notIn' | 'exists' | 'notExists'
+
+export interface PropertyFilter {
+    field: string
+    operator: FilterOperator
+    value: unknown
+}
+
+export interface TagFilter {
+    mode: 'any' | 'all' | 'none'
+    tags: string[]
+}
+
+export interface TextFilter {
+    text: string
+    operator: 'contains' | 'startsWith' | 'endsWith' | 'equals'
+    caseSensitive?: boolean
+}
 
 export interface NodeQuery {
     /** Filter by URNs */
@@ -132,6 +192,15 @@ export interface NodeQuery {
 
     /** Full-text search query */
     searchQuery?: string
+
+    /** Advanced Property Filters */
+    propertyFilters?: PropertyFilter[]
+
+    /** Advanced Tag Filters */
+    tagFilters?: TagFilter
+
+    /** Specific Name/Text Filter */
+    nameFilter?: TextFilter
 
     /** Pagination offset */
     offset?: number
@@ -348,6 +417,11 @@ export interface GraphDataProvider {
         edgeCount: number
         entityTypeCounts: Record<EntityType, number>
     }>
+
+    /**
+     * Get detailed graph schema statistics
+     */
+    getSchemaStats(): Promise<GraphSchemaStats>
 
     // ==========================================
     // Assignment Operations
@@ -580,11 +654,15 @@ export interface LayerAssignmentResult {
 export interface LayerAssignmentRequest {
     scopeFilter?: ScopeFilterConfig;
     layers: {
-        layerId: string;
+        id: string; // Matches ViewLayerConfig.id
+        name: string;
+        color: string;
+        order: number;
         sequence: number;
         entityTypes: string[];
         rules: LayerAssignmentRuleConfig[];
         logicalNodes?: LogicalNodeConfig[];
+        entityAssignments?: EntityAssignmentConfig[];
     }[];
     includeEdges: boolean;
 }

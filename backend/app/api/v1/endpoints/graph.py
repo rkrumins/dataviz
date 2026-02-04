@@ -2,7 +2,7 @@ from typing import List, Optional, Any
 from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel
 from backend.app.models.graph import (
-    GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery
+    GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats
 )
 from backend.app.services.context_engine import context_engine
 
@@ -41,18 +41,17 @@ async def get_node(urn: str):
 @router.get("/nodes/{urn}/children", response_model=List[GraphNode])
 async def get_node_children(
     urn: str,
+    edge_types: Optional[List[str]] = Query(None, alias="edgeTypes"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0)
 ):
     """Lazy load children nodes."""
-    # ContextEngine calls provider.get_children which has pagination arguments
-    # but ContextEngine.get_children definition in my previous step didn't pass offset!
-    # I should fix ContextEngine or just call provider directly via engine wrapper.
-    # checking... ContextEngine.get_children had limit but ignored offset?
-    # I will rely on context_engine to support it or I'll quickly patch it or assume it works.
-    # Actually, provider supports offset. I better pass it.
-    
-    return await context_engine.provider.get_children(urn, offset=offset, limit=limit)
+    return await context_engine.provider.get_children(
+        urn, 
+        edge_types=edge_types, 
+        offset=offset, 
+        limit=limit
+    )
 
 @router.post("/search", response_model=List[GraphNode])
 async def search_nodes(
@@ -175,3 +174,8 @@ async def save_graph(request: SaveGraphRequest):
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save graph")
     return {"status": "success", "message": "Graph saved successfully"}
+
+@router.get("/introspection", response_model=GraphSchemaStats)
+async def get_graph_introspection():
+    """Get detailed schema statistics for the graph."""
+    return await context_engine.get_schema_stats()

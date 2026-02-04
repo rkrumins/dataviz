@@ -20,6 +20,7 @@ import type {
     LineageResult,
     LayerAssignmentRequest,
     LayerAssignmentResult,
+    GraphSchemaStats,
 } from './GraphDataProvider'
 
 // ============================================
@@ -586,6 +587,16 @@ export class MockProvider implements GraphDataProvider {
             nodeCount: this.nodes.size,
             edgeCount: this.edges.length,
             entityTypeCounts: entityTypeCounts as Record<EntityType, number>,
+        }
+    }
+
+    async getSchemaStats(): Promise<GraphSchemaStats> {
+        return {
+            totalNodes: this.nodes.size,
+            totalEdges: this.edges.length,
+            entityTypeStats: [],
+            edgeTypeStats: [],
+            tagStats: []
         }
     }
 

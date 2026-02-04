@@ -31,8 +31,10 @@ class AssignmentEngine:
         # Requirement: "Migrate mocked behavior... heavy client logic... to backend"
         # The client usually passes full context or we fetch it.
         # Let's fetch all nodes.
-        all_nodes = await context_engine.provider.get_nodes({}) # Empty query = all? Check provider limits.
-        all_edges = await context_engine.provider.get_edges({})
+        from backend.app.models.graph import NodeQuery, EdgeQuery
+        # Use Pydantic models instead of dicts
+        all_nodes = await context_engine.provider.get_nodes(NodeQuery()) 
+        all_edges = await context_engine.provider.get_edges(EdgeQuery())
 
         logging.info(f"Computing assignments for {len(all_nodes)} nodes and {len(all_edges)} edges")
 
@@ -138,7 +140,7 @@ class AssignmentEngine:
 
     def _build_parent_cache(self, edges: List[GraphEdge]) -> Dict[str, Any]:
         parent_map = {}
-        containment_types = {EdgeType.CONTAINS, EdgeType.HAS_CHILD, EdgeType.BELONGS_TO} # Add others if needed
+        containment_types = {EdgeType.CONTAINS, EdgeType.BELONGS_TO} # Add others if needed
         
         # Assume Target IS CHILD OF Source for CONTAINS
         # Assume Source IS CHILD OF Target for BELONGS_TO

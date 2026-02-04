@@ -31,53 +31,55 @@ function App() {
     }
 
     // Initialize backend data
-    const currentNodes = useCanvasStore.getState().nodes
-    if (currentNodes.length === 0) {
-      const fetchInitialGraph = async () => {
-        try {
-          // Fetch initial nodes
-          const initialNodes = await provider.getNodes({ limit: 100 })
+    // Always fetch to ensure we get the latest data from backend, especially during dev/testing
+    const fetchInitialGraph = async () => {
+      try {
+        // Fetch initial nodes (Root Domains or Platforms)
+        // Hierarchical loading: Start with high-level containers
+        const initialNodes = await provider.getNodes({
+          entityTypes: ['domain'],
+          limit: 100
+        })
 
-          // Fetch edges for these nodes
-          const urns = initialNodes.map(n => n.urn)
-          const edges = await provider.getEdges({
-            sourceUrns: urns,
-            limit: 500
-          })
+        // Fetch edges for these nodes
+        const urns = initialNodes.map(n => n.urn)
+        const edges = await provider.getEdges({
+          sourceUrns: urns,
+          limit: 1000
+        })
 
-          if (initialNodes.length > 0) {
-            console.log(`Loaded ${initialNodes.length} nodes and ${edges.length} edges from backend`)
-            setNodes(initialNodes.map(n => ({
-              id: n.urn,
-              type: (n.entityType === 'dataPlatform' || n.entityType === 'system' as any) ? 'system' :
-                (n.entityType === 'dataset' || n.entityType === 'schemaField') ? 'dataset' : 'domain',
-              position: { x: Math.random() * 800, y: Math.random() * 600 },
-              data: {
-                label: n.displayName,
-                type: n.entityType as any,
-                metadata: n.properties,
-                ...n
-              }
-            })))
+        if (initialNodes.length > 0) {
+          console.log(`Loaded ${initialNodes.length} nodes and ${edges.length} edges from backend`)
+          setNodes(initialNodes.map(n => ({
+            id: n.urn,
+            type: (n.entityType === 'dataPlatform' || n.entityType === 'system' as any) ? 'system' :
+              (n.entityType === 'dataset' || n.entityType === 'schemaField') ? 'dataset' : 'domain',
+            position: { x: Math.random() * 800, y: Math.random() * 600 },
+            data: {
+              label: n.displayName,
+              type: n.entityType as any,
+              metadata: n.properties,
+              ...n
+            }
+          })))
 
-            setEdges(edges.map(e => ({
-              id: e.id,
-              source: e.sourceUrn,
-              target: e.targetUrn,
-              type: 'lineage',
-              data: {
-                edgeType: e.edgeType,
-                ...e.properties
-              }
-            })))
-          }
-        } catch (err) {
-          console.error("Failed to load initial backend data", err)
+          setEdges(edges.map(e => ({
+            id: e.id,
+            source: e.sourceUrn,
+            target: e.targetUrn,
+            type: 'lineage',
+            data: {
+              edgeType: e.edgeType,
+              ...e.properties
+            }
+          })))
         }
+      } catch (err) {
+        console.error("Failed to load initial backend data", err)
       }
-
-      fetchInitialGraph()
     }
+
+    fetchInitialGraph()
   }, [setNodes, setEdges, setActiveLens, loadSchema, schema, isAuthenticated, provider])
 
   // Apply theme class to document

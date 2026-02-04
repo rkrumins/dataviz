@@ -9,6 +9,7 @@ import type {
     LineageResult,
     LayerAssignmentRequest,
     LayerAssignmentResult,
+    GraphSchemaStats,
 } from './GraphDataProvider'
 
 // Base API URL - typically configured via environment variables
@@ -97,6 +98,10 @@ export class RemoteGraphProvider implements GraphDataProvider {
         const params = new URLSearchParams()
         if (options?.offset) params.append('offset', String(options.offset))
         if (options?.limit) params.append('limit', String(options.limit))
+
+        if (options?.edgeTypes?.length) {
+            options.edgeTypes.forEach(t => params.append('edgeTypes', t))
+        }
 
         // Note: Backend might ignore edgeTypes/entityTypes in the simple /children endpoint
         // If strict filtering is needed, we might need to filter client-side or add params support
@@ -209,6 +214,10 @@ export class RemoteGraphProvider implements GraphDataProvider {
         entityTypeCounts: Record<EntityType, number>
     }> {
         return await this.fetch<any>('/stats')
+    }
+
+    async getSchemaStats(): Promise<GraphSchemaStats> {
+        return await this.fetch<GraphSchemaStats>('/introspection')
     }
 
     // ==========================================
