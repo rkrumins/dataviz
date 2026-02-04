@@ -25,6 +25,7 @@ import {
   aggregateLineageEdges,
   computeAllNodeCounts,
 } from '@/lib/projection-engine'
+import { useOntologyMetadata, normalizeEdgeType, isContainmentEdgeType } from '@/services/ontologyService'
 
 // ============================================
 // EXPLORATION STORE
@@ -87,7 +88,7 @@ const DEFAULT_CONFIG: LineageExplorationConfig = {
     showCounts: true,
     highlightPath: true,
   },
-  containmentEdgeTypes: ['contains', 'has_schema', 'has_dataset', 'has_column'],
+  containmentEdgeTypes: [], // Will be populated from ontology service
 }
 
 export const useLineageExplorationStore = create<LineageExplorationState>((set, get) => ({
@@ -227,13 +228,17 @@ export function computeTrace(
   allEdges: Edge[],
   upstreamDepth: number,
   downstreamDepth: number,
-  includeChildLineage: boolean
+  includeChildLineage: boolean,
+  containmentEdgeTypes: string[] = [],
+  expandedIds?: Set<string>
 ): TraceResult {
   // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
   // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
-  // Use View-Specific containment definition (passed or default?)
-  // Ideally this function should accept config, but for now defaulting is safer than breaking signature
-  const containmentMap = buildContainmentMap(allNodes, allEdges, ['contains', 'has_schema', 'has_dataset'])
+  // Use provided containment types or fallback to defaults
+  const containmentTypes = containmentEdgeTypes.length > 0
+    ? containmentEdgeTypes
+    : ['CONTAINS', 'BELONGS_TO']
+  const containmentMap = buildContainmentMap(allNodes, allEdges, containmentTypes)
 
   // Build adjacency lists
   const upstreamEdges = new Map<string, Edge[]>()
@@ -253,9 +258,9 @@ export function computeTrace(
 
   // Build edge maps (skip containment edges)
   allEdges.forEach((edge) => {
-    const rel = edge.data?.relationship ?? edge.data?.edgeType ?? ''
+    const rel = (edge.data?.relationship ?? edge.data?.edgeType ?? '').toUpperCase()
     // Skip containment edges for lineage trace
-    if (rel === 'contains' || rel === 'has_schema' || rel === 'has_dataset' || rel === 'has_column') {
+    if (containmentTypes.some(type => type.toUpperCase() === rel)) {
       return
     }
 
@@ -376,6 +381,29 @@ export function computeTrace(
       return kids.concat(kids.flatMap(getAllDescendants))
     }
     getAllDescendants(effectiveFocusId).forEach((id) => pathNodes.add(id))
+  }
+
+  // Include manually expanded nodes and their children
+  if (expandedIds) {
+    // Iterative expansion to handle nested expanded nodes
+    const processed = new Set<string>()
+    // Start with all currently visible nodes that are expanded
+    const toProcess = Array.from(pathNodes).filter(id => expandedIds.has(id))
+
+    while (toProcess.length > 0) {
+      const parentId = toProcess.shift()!
+      if (processed.has(parentId)) continue
+      processed.add(parentId)
+
+      const children = childrenMap.get(parentId) || []
+      children.forEach(childId => {
+        pathNodes.add(childId)
+        // If this child is also expanded, process it
+        if (expandedIds.has(childId)) {
+          toProcess.push(childId)
+        }
+      })
+    }
   }
 
   // Filter nodes and edges
@@ -643,6 +671,7 @@ import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useEffect } from 'react'
 
 export function useLineageExploration(): UseLineageExplorationResult {
+  const { containmentEdgeTypes, isContainmentEdge } = useOntologyMetadata()
   const provider = useGraphProvider()
   const {
     config,
@@ -672,7 +701,10 @@ export function useLineageExploration(): UseLineageExplorationResult {
   // Side Effect: Fetch data when pagination limit increases
   useEffect(() => {
     const syncPagination = async () => {
-      const containmentTypes = config.containmentEdgeTypes ?? ['contains', 'has_schema', 'has_dataset', 'has_column']
+      // Use ontology-provided types, fallback to config if available
+      const containmentTypes = containmentEdgeTypes.length > 0
+        ? containmentEdgeTypes
+        : (config.containmentEdgeTypes ?? ['CONTAINS', 'BELONGS_TO'])
 
       for (const [parentId, limit] of Object.entries(pagination)) {
         const parentNode = rawNodes.find(n => n.id === parentId)
@@ -716,6 +748,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
                       label: child.displayName,
                       type: child.entityType,
                       urn: child.urn,
+                      childCount: child.childCount,
                     }
                   })
 
@@ -743,7 +776,109 @@ export function useLineageExploration(): UseLineageExplorationResult {
     }
 
     syncPagination()
-  }, [pagination, rawNodes, rawEdges, provider, config.containmentEdgeTypes, setNodes, setEdges])
+  }, [pagination, rawNodes, rawEdges, provider, containmentEdgeTypes, config.containmentEdgeTypes, setNodes, setEdges])
+
+  // Side Effect: Fetch data when nodes are expanded
+  useEffect(() => {
+    const syncExpansion = async () => {
+      // Use ontology-provided types, fallback to config if available
+      const containmentTypes = containmentEdgeTypes.length > 0
+        ? containmentEdgeTypes
+        : (config.containmentEdgeTypes ?? ['CONTAINS', 'BELONGS_TO'])
+      const existingNodeIds = new Set(rawNodes.map(n => n.id))
+
+      for (const parentId of expandedIds) {
+        const parentNode = rawNodes.find(n => n.id === parentId)
+        if (!parentNode) continue
+
+        // Check if we need to load children
+        const childCount = (parentNode.data?.childCount as number) || 0
+
+        // Count currently LOADED children (nodes that exist in store)
+        const currentChildrenCount = rawEdges.filter(e =>
+          e.source === parentId &&
+          existingNodeIds.has(e.target) &&
+          containmentTypes.some(t => t.toUpperCase() === (e.data?.relationship || e.data?.edgeType || '').toUpperCase())
+        ).length
+
+        console.log(`[Lineage] Expansion Check for ${parentId}:`, {
+          childCount,
+          currentChildrenCount,
+          shouldFetch: childCount > currentChildrenCount,
+          containmentTypes
+        })
+
+        if (childCount === 0) continue
+
+        // If we have fewer loaded children than expected, fetch
+        if (childCount > currentChildrenCount) {
+          console.log(`[Lineage] Expansion trigger: Fetching children for ${parentId} (${currentChildrenCount}/${childCount})`)
+
+          const parentUrn = (parentNode.data?.urn as string) || parentId
+          try {
+            const newChildren = await provider.getChildren(parentUrn, {
+              edgeTypes: containmentTypes,
+              limit: 100 // Reasonable batch size for expansion
+            })
+
+            if (newChildren.length > 0) {
+              const nodesToAdd: Node[] = []
+              const edgesToAdd: Edge[] = []
+
+              // Re-calculate edge signatures to prevent duplicates
+              const existingEdgeSignatures = new Set(rawEdges.map(e => `${e.source}|${e.target}`))
+
+              newChildren.forEach(child => {
+                // Add Node if not exists
+                if (!existingNodeIds.has(child.urn)) {
+                  nodesToAdd.push({
+                    id: child.urn,
+                    type: 'generic',
+                    position: { x: 0, y: 0 },
+                    data: {
+                      ...child.properties,
+                      label: child.displayName,
+                      type: child.entityType,
+                      urn: child.urn,
+                      childCount: child.childCount,
+                    }
+                  })
+                  existingNodeIds.add(child.urn)
+                }
+
+                // Add Edge if not exists (by signature)
+                if (!existingEdgeSignatures.has(`${parentId}|${child.urn}`)) {
+                  edgesToAdd.push({
+                    id: `contains-${parentUrn}-${child.urn}`,
+                    source: parentId,
+                    target: child.urn,
+                    type: 'lineage',
+                    data: { relationship: 'contains', edgeType: 'contains' }
+                  })
+                  existingEdgeSignatures.add(`${parentId}|${child.urn}`)
+                }
+              })
+
+              if (nodesToAdd.length > 0 || edgesToAdd.length > 0) {
+                console.log(`[Lineage] Expansion loaded ${nodesToAdd.length} nodes and ${edgesToAdd.length} edges for ${parentId}`)
+
+                // Update store (using functional updates would be better but setNodes takes array)
+                // We rely on the fact that rawNodes is fresh due to dependency array
+                if (nodesToAdd.length > 0) setNodes([...rawNodes, ...nodesToAdd] as any)
+                if (edgesToAdd.length > 0) setEdges([...rawEdges, ...edgesToAdd] as any)
+              }
+            }
+          } catch (err) {
+            console.error(`[Lineage] Failed to lazy load children for ${parentId}`, err)
+          }
+        }
+      }
+    }
+
+    if (expandedIds.size > 0) {
+      syncExpansion()
+    }
+  }, [expandedIds, rawNodes, rawEdges, provider, containmentEdgeTypes, config.containmentEdgeTypes, setNodes, setEdges])
 
   // Compute visible nodes/edges based on configuration
   const { visibleNodes, visibleEdges, aggregatedEdges, upstreamCount, downstreamCount } = useMemo(() => {
@@ -764,13 +899,19 @@ export function useLineageExploration(): UseLineageExplorationResult {
 
     // 1. If focused mode, compute trace first
     if (config.mode === 'focused' && focusEntityId) {
+      // Use ontology-provided types for trace
+      const traceContainmentTypes = containmentEdgeTypes.length > 0
+        ? containmentEdgeTypes
+        : ['CONTAINS', 'BELONGS_TO']
       const trace = computeTrace(
         focusEntityId,
         rawNodes,
         rawEdges,
         config.trace.upstreamDepth,
         config.trace.downstreamDepth,
-        config.trace.includeChildLineage
+        config.trace.includeChildLineage,
+        traceContainmentTypes,
+        expandedIds
       )
       nodes = trace.nodes as LineageNode[]
       edges = trace.edges

@@ -1,7 +1,7 @@
 import logging
 from typing import List, Dict, Any, Set, Optional, Tuple
 from ..models.graph import (
-    GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats
+    GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata
 )
 from ..providers.base import GraphDataProvider
 from ..providers.mock_provider import MockGraphProvider
@@ -46,6 +46,9 @@ class ContextEngine:
 
     async def get_schema_stats(self) -> GraphSchemaStats:
         return await self.provider.get_schema_stats()
+    
+    async def get_ontology_metadata(self) -> OntologyMetadata:
+        return await self.provider.get_ontology_metadata()
     
     async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, limit: int = 100) -> List[GraphNode]:
         return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, limit=limit)

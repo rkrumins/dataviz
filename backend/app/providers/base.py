@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any, Set
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery, 
-    LineageResult, EntityType, EdgeType, GraphSchemaStats
+    LineageResult, EntityType, EdgeType, GraphSchemaStats, OntologyMetadata
 )
 
 class GraphDataProvider(ABC):
@@ -114,6 +114,11 @@ class GraphDataProvider(ABC):
     @abstractmethod
     async def get_schema_stats(self) -> GraphSchemaStats:
         """Get detailed graph schema statistics"""
+        pass
+
+    @abstractmethod
+    async def get_ontology_metadata(self) -> OntologyMetadata:
+        """Get ontology metadata including containment edge types and entity hierarchies"""
         pass
 
     @abstractmethod

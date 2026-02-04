@@ -83,6 +83,81 @@ const defaultEntityTypes: EntityTypeSchema[] = [
     },
   },
 
+  // Data Platform (like System)
+  {
+    id: 'dataPlatform',
+    name: 'Data Platform',
+    pluralName: 'Data Platforms',
+    description: 'A data platform or service',
+    visual: {
+      icon: 'Server',
+      color: '#06b6d4',
+      shape: 'rounded',
+      size: 'md',
+      borderStyle: 'solid',
+      showInMinimap: true,
+    },
+    fields: [
+      { id: 'name', name: 'Name', type: 'string', required: true, showInNode: true, showInPanel: true, showInTooltip: true, displayOrder: 1 },
+      { id: 'type', name: 'Type', type: 'badge', required: false, showInNode: true, showInPanel: true, showInTooltip: true, displayOrder: 2 },
+      { id: 'urn', name: 'URN', type: 'urn', required: false, showInNode: false, showInPanel: true, showInTooltip: false, displayOrder: 10 },
+    ],
+    hierarchy: {
+      level: 1,
+      canContain: ['schema', 'container', 'dataset'],
+      canBeContainedBy: ['domain'],
+      defaultExpanded: false,
+      rollUpFields: [
+        { sourceField: 'id', targetField: 'childCount', aggregation: 'count', label: 'items' },
+      ],
+    },
+    behavior: {
+      selectable: true,
+      draggable: true,
+      expandable: true,
+      traceable: true,
+      clickAction: 'select',
+      doubleClickAction: 'expand',
+    },
+  },
+
+  // Container (like Schema)
+  {
+    id: 'container',
+    name: 'Container',
+    pluralName: 'Containers',
+    description: 'A container within a platform',
+    visual: {
+      icon: 'Box',
+      color: '#10b981',
+      shape: 'rounded',
+      size: 'md',
+      borderStyle: 'solid',
+      showInMinimap: true,
+    },
+    fields: [
+      { id: 'name', name: 'Name', type: 'string', required: true, showInNode: true, showInPanel: true, showInTooltip: true, displayOrder: 1 },
+      { id: 'urn', name: 'URN', type: 'urn', required: false, showInNode: false, showInPanel: true, showInTooltip: false, displayOrder: 10 },
+    ],
+    hierarchy: {
+      level: 2,
+      canContain: ['dataset', 'table'],
+      canBeContainedBy: ['dataPlatform', 'system'],
+      defaultExpanded: false,
+      rollUpFields: [
+        { sourceField: 'id', targetField: 'tableCount', aggregation: 'count', label: 'tables' },
+      ],
+    },
+    behavior: {
+      selectable: true,
+      draggable: true,
+      expandable: true,
+      traceable: true,
+      clickAction: 'select',
+      doubleClickAction: 'expand',
+    },
+  },
+
   // Level 2: Schema / Container
   {
     id: 'schema',
@@ -650,7 +725,7 @@ const defaultViews: ViewConfiguration[] = [
 export const defaultWorkspaceSchema: WorkspaceSchema = {
   id: 'default-workspace',
   name: 'NexusLineage Workspace',
-  version: '1.1.0',  // Bumped to force schema refresh with new views
+  version: '1.1.1',  // Bumped to force schema refresh with new views
   entityTypes: defaultEntityTypes,
   relationshipTypes: defaultRelationshipTypes,
   views: defaultViews,

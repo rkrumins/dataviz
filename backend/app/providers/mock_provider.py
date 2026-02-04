@@ -6,7 +6,8 @@ from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery, 
     LineageResult, EntityType, EdgeType, GraphSchemaStats,
     PropertyFilter, TagFilter, TextFilter, FilterOperator,
-    EntityTypeSummary, EdgeTypeSummary, TagSummary
+    EntityTypeSummary, EdgeTypeSummary, TagSummary,
+    OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy
 )
 from .base import GraphDataProvider
 from ..core.demo_data import generate_demo_data
@@ -232,8 +233,15 @@ class MockGraphProvider(GraphDataProvider):
             if query.any_urns:
                  if edge.source_urn not in query.any_urns and edge.target_urn not in query.any_urns:
                      continue
-            if query.edge_types and edge.edge_type not in query.edge_types:
-                continue
+            if query.edge_types:
+                # Handle both EdgeType enum and string comparisons
+                edge_type_value = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
+                query_types = [
+                    t.value if hasattr(t, 'value') else str(t) 
+                    for t in query.edge_types
+                ]
+                if edge_type_value not in query_types:
+                    continue
             
             result.append(edge)
             
@@ -476,6 +484,138 @@ class MockGraphProvider(GraphDataProvider):
             entityTypeStats=entity_stats,
             edgeTypeStats=edge_stats,
             tagStats=tag_stats
+        )
+
+    async def get_ontology_metadata(self) -> OntologyMetadata:
+        """Get ontology metadata including containment edge types and entity hierarchies."""
+        import os
+        
+        # 1. Get containment edge types from config/env or use defaults
+        default_containment = [EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value]
+        config_containment = os.getenv('CONTAINMENT_EDGE_TYPES', '').strip()
+        if config_containment:
+            containment_types = [t.strip() for t in config_containment.split(',') if t.strip()]
+        else:
+            containment_types = default_containment
+        
+        # 2. Build edge type metadata
+        edge_type_metadata: Dict[str, EdgeTypeMetadata] = {}
+        
+        # Analyze edges to determine metadata
+        edge_type_counts: Dict[str, int] = {}
+        edge_type_source_types: Dict[str, Set[str]] = {}
+        edge_type_target_types: Dict[str, Set[str]] = {}
+        
+        for edge in self._edges.values():
+            edge_type = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
+            edge_type_counts[edge_type] = edge_type_counts.get(edge_type, 0) + 1
+            
+            # Get source and target entity types
+            source_node = self._nodes.get(edge.source_urn)
+            target_node = self._nodes.get(edge.target_urn)
+            
+            if source_node:
+                source_type = source_node.entity_type.value if hasattr(source_node.entity_type, 'value') else str(source_node.entity_type)
+                if edge_type not in edge_type_source_types:
+                    edge_type_source_types[edge_type] = set()
+                edge_type_source_types[edge_type].add(source_type)
+            
+            if target_node:
+                target_type = target_node.entity_type.value if hasattr(target_node.entity_type, 'value') else str(target_node.entity_type)
+                if edge_type not in edge_type_target_types:
+                    edge_type_target_types[edge_type] = set()
+                edge_type_target_types[edge_type].add(target_type)
+        
+        # Create metadata for each edge type
+        for edge_type in edge_type_counts.keys():
+            is_containment = edge_type in containment_types
+            
+            # Determine direction based on known containment types
+            if edge_type == EdgeType.CONTAINS.value:
+                direction = 'parent-to-child'
+                description = 'Parent contains child (hierarchical relationship)'
+            elif edge_type == EdgeType.BELONGS_TO.value:
+                direction = 'child-to-parent'
+                description = 'Child belongs to parent (inverse of contains)'
+            elif is_containment:
+                # For other containment types, try to infer direction
+                # If we see patterns where one entity type always appears as source, it's parent-to-child
+                direction = 'parent-to-child'  # Default assumption
+                description = f'Containment relationship: {edge_type}'
+            else:
+                direction = 'bidirectional'
+                description = f'Non-containment relationship: {edge_type}'
+            
+            edge_type_metadata[edge_type] = EdgeTypeMetadata(
+                isContainment=is_containment,
+                direction=direction,
+                description=description
+            )
+        
+        # 3. Build entity type hierarchy
+        entity_type_hierarchy: Dict[str, EntityTypeHierarchy] = {}
+        
+        # Analyze containment edges to determine what can contain what
+        for edge in self._edges.values():
+            edge_type = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
+            
+            if edge_type not in containment_types:
+                continue
+            
+            source_node = self._nodes.get(edge.source_urn)
+            target_node = self._nodes.get(edge.target_urn)
+            
+            if not source_node or not target_node:
+                continue
+            
+            source_type = source_node.entity_type.value if hasattr(source_node.entity_type, 'value') else str(source_node.entity_type)
+            target_type = target_node.entity_type.value if hasattr(target_node.entity_type, 'value') else str(target_node.entity_type)
+            
+            # Determine parent and child based on edge direction
+            if edge_type == EdgeType.CONTAINS.value:
+                parent_type = source_type
+                child_type = target_type
+            elif edge_type == EdgeType.BELONGS_TO.value:
+                parent_type = target_type
+                child_type = source_type
+            else:
+                # Default: assume source is parent (parent-to-child direction)
+                parent_type = source_type
+                child_type = target_type
+            
+            # Update hierarchy
+            if parent_type not in entity_type_hierarchy:
+                entity_type_hierarchy[parent_type] = EntityTypeHierarchy(
+                    canContain=[],
+                    canBeContainedBy=[]
+                )
+            if child_type not in entity_type_hierarchy:
+                entity_type_hierarchy[child_type] = EntityTypeHierarchy(
+                    canContain=[],
+                    canBeContainedBy=[]
+                )
+            
+            # Add relationships
+            if child_type not in entity_type_hierarchy[parent_type].can_contain:
+                entity_type_hierarchy[parent_type].can_contain.append(child_type)
+            if parent_type not in entity_type_hierarchy[child_type].can_be_contained_by:
+                entity_type_hierarchy[child_type].can_be_contained_by.append(parent_type)
+        
+        # 4. Identify Root Entity Types
+        # Types that appear in hierarchy but never as a child (target of containment edge)
+        all_hierarchy_types = set(entity_type_hierarchy.keys())
+        contained_types = set()
+        for parent_type, hierarchy in entity_type_hierarchy.items():
+            for child_type in hierarchy.can_contain:
+                contained_types.add(child_type)
+        
+        root_entity_types = list(all_hierarchy_types - contained_types)
+        
+        return OntologyMetadata(
+            containmentEdgeTypes=containment_types,
+            edgeTypeMetadata=edge_type_metadata,
+            entityTypeHierarchy=entity_type_hierarchy,
+            rootEntityTypes=root_entity_types
         )
 
     # ==========================================

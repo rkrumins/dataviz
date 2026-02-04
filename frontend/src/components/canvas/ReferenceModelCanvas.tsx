@@ -25,6 +25,7 @@ import {
 import { useGraphProvider } from '@/providers'
 import { EdgeDetailPanel } from '../panels/EdgeDetailPanel'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
+import { useOntologyMetadata, isContainmentEdgeType, normalizeEdgeType } from '@/services/ontologyService'
 
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
@@ -114,6 +115,7 @@ export function ReferenceModelCanvas({
   const activeView = useSchemaStore((s) => s.getActiveView())
   const updateView = useSchemaStore((s) => s.updateView)
   const provider = useGraphProvider()
+  const { containmentEdgeTypes, isContainmentEdge } = useOntologyMetadata()
 
   // Instance-level assignments from store (user drag-and-drop)
   const instanceAssignments = useInstanceAssignments()
@@ -213,7 +215,10 @@ export function ReferenceModelCanvas({
       // Traverse hierarchyTree to find children? 
       // We can use the already built `hierarchyTree` via `nodesByLayer` or just `nodes`.
       // `nodes` from store are flat. Containment edges define structure.
-      const containmentEdges = edges.filter(e => e.data?.relationship === 'contains' || e.data?.edgeType === 'contains')
+      const containmentEdges = edges.filter(e => {
+        const edgeType = normalizeEdgeType(e)
+        return isContainmentEdge(edgeType)
+      })
       const parentMap = new Map<string, string>()
       const childMap = new Map<string, string[]>()
       containmentEdges.forEach(e => {
@@ -255,9 +260,7 @@ export function ReferenceModelCanvas({
 
     // Build lineage adj
     const relevantEdges = edges.filter(e =>
-      e.data?.relationship !== 'contains' &&
-      e.data?.edgeType !== 'contains' &&
-      e.data?.edgeType !== 'CONTAINS'
+      !isContainmentEdge(normalizeEdgeType(e))
     )
     const adj = new Map<string, string[]>()
     relevantEdges.forEach(e => {
@@ -293,7 +296,7 @@ export function ReferenceModelCanvas({
 
     // Re-run ancestor fill for all visited nodes (to ensure containers light up)
     // Build parent map once
-    const containmentEdges = edges.filter(e => e.data?.relationship === 'contains' || e.data?.edgeType === 'contains' || e.data?.edgeType === 'CONTAINS')
+    const containmentEdges = edges.filter(e => isContainmentEdge(normalizeEdgeType(e)))
     const parentMap = new Map<string, string>()
     containmentEdges.forEach(e => parentMap.set(e.target, e.source))
 
@@ -332,10 +335,11 @@ export function ReferenceModelCanvas({
     const cMap = new Map<string, string[]>()
     const pMap = new Map<string, string>()
 
-    // Containment logic
-    const containmentEdges = edges.filter((e) =>
-      e.data?.relationship === 'contains' || e.data?.edgeType === 'contains' || e.data?.edgeType === 'CONTAINS'
-    )
+    // Containment logic - use containmentEdgeTypes directly
+    const containmentEdges = edges.filter((e) => {
+      const edgeType = normalizeEdgeType(e)
+      return containmentEdgeTypes.some(type => type.toUpperCase() === edgeType)
+    })
 
     containmentEdges.forEach((edge) => {
       if (!cMap.has(edge.source)) cMap.set(edge.source, [])
@@ -344,7 +348,7 @@ export function ReferenceModelCanvas({
     })
 
     return { nodeMap: nMap, childMap: cMap, parentMap: pMap }
-  }, [nodes, edges])
+  }, [nodes, edges, containmentEdgeTypes])
 
   // Build layer assignment rules
   const layerRules = useMemo<LayerAssignmentRule[]>(() => {
@@ -660,8 +664,10 @@ export function ReferenceModelCanvas({
 
     if (node && hasNoChildren && childCount > 0) {
       try {
-        // Fetch children
-        const children = await provider.getChildren(node.urn)
+        // Fetch children using backend-provided containment edge types
+        const children = await provider.getChildren(node.urn, {
+          edgeTypes: containmentEdgeTypes
+        })
 
         // Convert to Canvas Nodes
         const newNodes = children.map(child => ({
@@ -677,14 +683,16 @@ export function ReferenceModelCanvas({
           type: 'custom' // Default type
         }))
 
-        // Create containment edges
+        // Create containment edges using the first containment edge type (typically CONTAINS)
+        const containmentType = containmentEdgeTypes[0] || 'CONTAINS'
         const newEdges = children.map(child => ({
-          id: `contains-${node.id}-${child.urn}`,
+          id: `${containmentType.toLowerCase()}-${node.id}-${child.urn}`,
           source: node.id,
           target: child.urn,
-          type: 'contains',
+          type: containmentType.toLowerCase(),
           data: {
-            relationship: 'contains'
+            relationship: containmentType,
+            edgeType: containmentType
           }
         }))
 
@@ -705,7 +713,7 @@ export function ReferenceModelCanvas({
       }
       return next
     })
-  }, [displayMap, provider, addNodes, addEdges])
+  }, [displayMap, provider, addNodes, addEdges, containmentEdgeTypes])
 
   // Expand all / collapse all
   const expandAll = useCallback(() => {
@@ -724,7 +732,7 @@ export function ReferenceModelCanvas({
     return edges.filter(edge => {
       const params = edge.data || {}
       const rel = params.relationship || params.edgeType
-      return rel !== 'contains' && rel !== 'CONTAINS'
+      return !isContainmentEdge(normalizeEdgeType(edge))
     })
   }, [edges, showLineageFlow])
 

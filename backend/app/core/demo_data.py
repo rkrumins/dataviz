@@ -4,10 +4,11 @@ from ..models.graph import GraphNode, GraphEdge, EntityType, EdgeType
 
 # Configuration
 DEFAULT_CONFIG = {
-    "domainCount": 10, # Reduced for slightly smaller default mock
+    "domainCount": 5, 
     "appsPerDomain": 5,
-    "assetsPerApp": {"min": 2, "max": 10},
-    "columnsPerAsset": {"min": 3, "max": 10},
+    "schemasPerApp": {"min": 10, "max": 10},
+    "assetsPerSchema": {"min": 10, "max": 50},
+    "columnsPerAsset": {"min": 10, "max": 100},
     "includeDashboards": True,
     "includeGhostNodes": True
 }
@@ -42,6 +43,7 @@ def generate_urn(type_: str, parts: List[str]) -> str:
     prefix = ""
     if type_ == 'domain': prefix = 'urn:li:domain'
     elif type_ == 'app': prefix = 'urn:li:dataPlatform'
+    elif type_ == 'container': prefix = 'urn:li:container' # Added container prefix
     elif type_ == 'asset': prefix = 'urn:li:dataset'
     elif type_ == 'column': prefix = 'urn:li:column'
     elif type_ == 'dashboard': prefix = 'urn:li:dashboard'
@@ -86,15 +88,19 @@ def generate_demo_data(config: Dict[str, Any] = None) -> Tuple[List[GraphNode], 
             app_id = f"app-{domain_name.lower()}-{platform}-{a}"
             app_urn = generate_urn('app', [platform, f"{domain_name.lower()}_{a}"])
             
+            # Pre-calculate schema count
+            schema_count = random.randint(cfg["schemasPerApp"]["min"], cfg["schemasPerApp"]["max"])
+            
             app_node = GraphNode(
                 urn=app_urn,
                 entityType=EntityType.APP if app_type_def["type"] != "database" else EntityType.CONTAINER, # Simplify mapping
                 displayName=f"{platform} {domain_name}",
+                childCount=schema_count, # Child count matches schemas
                 properties={
                     "businessLabel": f"{platform} {domain_name} System",
                     "technicalLabel": f"{platform}.{domain_name.lower()}_{a}",
                     "appType": app_type_def["type"],
-                    "assetCount": random.randint(cfg["assetsPerApp"]["min"], cfg["assetsPerApp"]["max"]),
+                    "schemaCount": schema_count,
                     "lastUpdated": f"{random.randint(1, 60)}m ago"
                 }
             )
@@ -124,79 +130,113 @@ def generate_demo_data(config: Dict[str, Any] = None) -> Tuple[List[GraphNode], 
                 confidence=random.uniform(0.8, 0.95),
                 properties={"animated": True}
             ))
-            
-            # Assets
-            asset_count = random.randint(cfg["assetsPerApp"]["min"], cfg["assetsPerApp"]["max"])
-            for ast in range(asset_count):
-                asset_type = random.choice(ASSET_TYPES)
-                business_term = random.choice(BUSINESS_TERMS)
-                technical_term = random.choice(TECHNICAL_TERMS)
-                asset_name = f"{technical_term}_{business_term.lower()}_{ast}"
-                asset_urn = generate_urn('asset', [platform, f"{domain_name.lower()}.{asset_name}", 'PROD'])
+
+            # Generate Schemas/Containers
+            for s in range(schema_count):
+                schema_name = random.choice(TECHNICAL_TERMS) + f"_{s}"
+                schema_urn = generate_urn('container', [platform, f"{domain_name.lower()}", schema_name])
                 
-                asset_node = GraphNode(
-                    urn=asset_urn,
-                    entityType=EntityType.DATASET,
-                    displayName=asset_name,
-                    tags=random.choice([['PII'], ['Financial'], ['GDPR'], ['SOX'], ['Sensitive'], []]),
+                # Pre-calculate asset count
+                asset_count = random.randint(cfg["assetsPerSchema"]["min"], cfg["assetsPerSchema"]["max"])
+
+                schema_node = GraphNode(
+                    urn=schema_urn,
+                    entityType=EntityType.CONTAINER,
+                    displayName=schema_name,
+                    childCount=asset_count,
                     properties={
-                        "businessLabel": f"{business_term} {asset_type}",
-                        "technicalLabel": f"{platform}.{domain_name.lower()}.{asset_name}",
-                        "assetType": asset_type,
-                        "schema": technical_term,
-                        "rowCount": f"{random.uniform(0.1, 100):.1f}{random.choice(['K', 'M', 'B'])}"
+                        "businessLabel": f"{schema_name} Schema",
+                        "technicalLabel": f"{platform}.{domain_name}.{schema_name}",
+                        "assetCount": asset_count
                     }
                 )
-                nodes.append(asset_node)
-                
-                # App -> Asset (Containment)
+                nodes.append(schema_node)
+
+                # App -> Schema (Containment)
                 edges.append(GraphEdge(
-                    id=f"contains-{app_node.urn}-{asset_node.urn}",
+                    id=f"contains-{app_node.urn}-{schema_node.urn}",
                     sourceUrn=app_node.urn,
-                    targetUrn=asset_node.urn,
-                    edgeType=EdgeType.CONTAINS
+                    targetUrn=schema_node.urn,
+                    edgeType=EdgeType.CONTAINS,
+                    properties={"relationship": "contains"}
                 ))
-                
-                # App -> Asset (Lineage)
-                edges.append(GraphEdge(
-                    id=f"lineage-{app_node.urn}-{asset_node.urn}",
-                    sourceUrn=app_node.urn,
-                    targetUrn=asset_node.urn,
-                    edgeType=EdgeType.PRODUCES,
-                    confidence=random.uniform(0.75, 0.98),
-                    properties={"animated": True}
-                ))
-                
-                # Columns
-                column_count = random.randint(cfg["columnsPerAsset"]["min"], cfg["columnsPerAsset"]["max"])
-                for col in range(column_count):
-                    col_name = f"col_{col}"
-                    if col == 0: col_name = "id"
-                    elif col == 1: col_name = f"{business_term.lower()}_id"
+
+                # Assets
+                for ast in range(asset_count):
+                    asset_type = random.choice(ASSET_TYPES)
+                    business_term = random.choice(BUSINESS_TERMS)
+                    # technical_term = random.choice(TECHNICAL_TERMS) 
+                    asset_name = f"{business_term.lower()}_{ast}"
+                    asset_urn = generate_urn('asset', [platform, f"{domain_name.lower()}.{schema_name}.{asset_name}", 'PROD'])
                     
-                    col_urn = generate_urn('column', [asset_name, col_name])
-                    data_type = random.choice(COLUMN_TYPES)
+                    # Pre-calculate column count
+                    column_count = random.randint(cfg["columnsPerAsset"]["min"], cfg["columnsPerAsset"]["max"])
                     
-                    col_node = GraphNode(
-                        urn=col_urn,
-                        entityType=EntityType.SCHEMA_FIELD,
-                        displayName=col_name,
-                        tags=['PK'] if col < 2 else random.choice([['PII'], ['GDPR'], []]),
+                    asset_node = GraphNode(
+                        urn=asset_urn,
+                        entityType=EntityType.DATASET,
+                        displayName=asset_name,
+                        childCount=column_count, # Populate childCount
+                        tags=random.choice([['PII'], ['Financial'], ['GDPR'], ['SOX'], ['Sensitive'], []]),
                         properties={
-                            "businessLabel": col_name.replace("_", " ").title(),
-                            "technicalLabel": f"{asset_name}.{col_name}",
-                            "dataType": data_type,
-                            "nullable": col > 1
+                            "businessLabel": f"{business_term} {asset_type}",
+                            "technicalLabel": f"{platform}.{domain_name.lower()}.{schema_name}.{asset_name}",
+                            "assetType": asset_type,
+                            "schema": schema_name,
+                            "rowCount": f"{random.uniform(0.1, 100):.1f}{random.choice(['K', 'M', 'B'])}"
                         }
                     )
-                    nodes.append(col_node)
+                    nodes.append(asset_node)
                     
-                    # Asset -> Column (Containment)
+                    # Schema -> Asset (Containment)
                     edges.append(GraphEdge(
-                        id=f"contains-{asset_node.urn}-{col_node.urn}",
-                        sourceUrn=asset_node.urn,
-                        targetUrn=col_node.urn,
+                        id=f"contains-{schema_node.urn}-{asset_node.urn}",
+                        sourceUrn=schema_node.urn,
+                        targetUrn=asset_node.urn,
                         edgeType=EdgeType.CONTAINS
                     ))
+                    
+                    # Schema -> Asset (Lineage) - Optional, maybe not needed for Schema
+                    # App -> Asset (Direct Lineage for logic flow?) -> Maybe keep App->Asset lineage for simplicity in graph view?
+                    # Let's add Schema -> Asset lineage just in case
+                    edges.append(GraphEdge(
+                        id=f"lineage-{schema_node.urn}-{asset_node.urn}",
+                        sourceUrn=schema_node.urn,
+                        targetUrn=asset_node.urn,
+                        edgeType=EdgeType.PRODUCES,
+                        confidence=random.uniform(0.75, 0.98),
+                        properties={"animated": True}
+                    ))
+                    
+                    # Columns
+                    for col in range(column_count):
+                        col_name = f"col_{col}"
+                        if col == 0: col_name = "id"
+                        elif col == 1: col_name = f"{business_term.lower()}_id"
+                        
+                        col_urn = generate_urn('column', [asset_name, col_name])
+                        data_type = random.choice(COLUMN_TYPES)
+                        
+                        col_node = GraphNode(
+                            urn=col_urn,
+                            entityType=EntityType.SCHEMA_FIELD,
+                            displayName=col_name,
+                            tags=['PK'] if col < 2 else random.choice([['PII'], ['GDPR'], []]),
+                            properties={
+                                "businessLabel": col_name.replace("_", " ").title(),
+                                "technicalLabel": f"{asset_name}.{col_name}",
+                                "dataType": data_type,
+                                "nullable": col > 1
+                            }
+                        )
+                        nodes.append(col_node)
+                        
+                        # Asset -> Column (Containment)
+                        edges.append(GraphEdge(
+                            id=f"contains-{asset_node.urn}-{col_node.urn}",
+                            sourceUrn=asset_node.urn,
+                            targetUrn=col_node.urn,
+                            edgeType=EdgeType.CONTAINS
+                        ))
 
     return nodes, edges

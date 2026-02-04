@@ -26,10 +26,14 @@ export const ENTITY_GRANULARITY: Record<string, GranularityLevel> = {
   'dataset': GranularityLevel.Table,
   'asset': GranularityLevel.Table,
   'table': GranularityLevel.Table,
+  'container': GranularityLevel.Schema,
   'schema': GranularityLevel.Schema,
   'system': GranularityLevel.System,
   'app': GranularityLevel.System,
+  'dataPlatform': GranularityLevel.System,
   'domain': GranularityLevel.Domain,
+  'pipeline': GranularityLevel.Table,
+  'dashboard': GranularityLevel.Table,
 }
 
 // Map entity types to their parent type
@@ -38,9 +42,11 @@ export const ENTITY_PARENT_TYPE: Record<string, string> = {
   'dataset': 'schema',
   'asset': 'app',
   'table': 'schema',
+  'container': 'dataPlatform',
   'schema': 'system',
   'system': 'domain',
   'app': 'domain',
+  'dataPlatform': 'domain',
 }
 
 export interface ViewProjectionConfig {
