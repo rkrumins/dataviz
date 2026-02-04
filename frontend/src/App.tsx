@@ -55,6 +55,20 @@ function App() {
       loadSchema(defaultWorkspaceSchema)
     }
 
+    // DEBUG: Diagnose Schema Loading
+    console.log('--- SCHEMA DEBUG ---')
+    console.log('Current Schema Version:', schema?.version)
+    console.log('Default Schema Version:', defaultWorkspaceSchema.version)
+    console.log('Registered Entity Types:', schema?.entityTypes.map(t => t.id))
+    console.log('Has dataPlatform?', schema?.entityTypes.some(t => t.id === 'dataPlatform'))
+    console.log('Has container?', schema?.entityTypes.some(t => t.id === 'container'))
+
+    if (schema?.version !== defaultWorkspaceSchema.version) {
+      console.warn('MISMATCH DETECTED: Triggering loadSchema...')
+      // Force reload if not matching (redundant to main effect but good for debug)
+      loadSchema(defaultWorkspaceSchema)
+    }
+
     // Initialize backend data
     // Always fetch to ensure we get the latest data from backend, especially during dev/testing
     const fetchInitialGraph = async () => {
@@ -127,7 +141,6 @@ function App() {
             label: n.displayName,
             type: n.entityType as any,
             metadata: n.properties,
-            urn: n.urn,
             childCount: n.childCount,
             ...n
           }

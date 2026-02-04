@@ -446,16 +446,20 @@ function ToolbarButton({ icon, label }: { icon: string; label: string }) {
 // Fallback Node for unknown types
 function FallbackNode({ data, selected }: { data: GenericNodeData; selected: boolean }) {
   return (
-    <div className={cn(
-      "px-3 py-2 rounded-lg border-2 border-dashed border-gray-400",
-      "bg-canvas-elevated",
-      selected && "ring-2 ring-offset-2 ring-gray-400"
-    )}>
-      <div className="flex items-center gap-2">
-        <LucideIcons.HelpCircle className="w-4 h-4 text-gray-400" />
-        <span className="text-sm text-gray-500">Unknown: {data.typeId}</span>
+    <>
+      <Handle type="target" position={Position.Left} className="!w-2 !h-2 !bg-gray-400" />
+      <div className={cn(
+        "px-3 py-2 rounded-lg border-2 border-dashed border-gray-400",
+        "bg-canvas-elevated",
+        selected && "ring-2 ring-offset-2 ring-gray-400"
+      )}>
+        <div className="flex items-center gap-2">
+          <LucideIcons.HelpCircle className="w-4 h-4 text-gray-400" />
+          <span className="text-sm text-gray-500">Unknown: {data.typeId || (data as any).type}</span>
+        </div>
       </div>
-    </div>
+      <Handle type="source" position={Position.Right} className="!w-2 !h-2 !bg-gray-400" />
+    </>
   )
 }
 

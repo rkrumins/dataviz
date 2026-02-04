@@ -754,6 +754,108 @@ export function useLineageExploration(): UseLineageExplorationResult {
     syncPagination()
   }, [pagination, rawNodes, rawEdges, provider, containmentEdgeTypes, config.containmentEdgeTypes, setNodes, setEdges])
 
+  // Side Effect: Fetch data when nodes are expanded
+  useEffect(() => {
+    const syncExpansion = async () => {
+      // Use ontology-provided types, fallback to config if available
+      const containmentTypes = containmentEdgeTypes.length > 0
+        ? containmentEdgeTypes
+        : (config.containmentEdgeTypes ?? ['CONTAINS', 'BELONGS_TO'])
+      const existingNodeIds = new Set(rawNodes.map(n => n.id))
+
+      for (const parentId of expandedIds) {
+        const parentNode = rawNodes.find(n => n.id === parentId)
+        if (!parentNode) continue
+
+        // Check if we need to load children
+        const childCount = (parentNode.data?.childCount as number) || 0
+
+        // Count currently LOADED children (nodes that exist in store)
+        const currentChildrenCount = rawEdges.filter(e =>
+          e.source === parentId &&
+          existingNodeIds.has(e.target) &&
+          containmentTypes.some(t => t.toUpperCase() === (e.data?.relationship || e.data?.edgeType || '').toUpperCase())
+        ).length
+
+        console.log(`[Lineage] Expansion Check for ${parentId}:`, {
+          childCount,
+          currentChildrenCount,
+          shouldFetch: childCount > currentChildrenCount,
+          containmentTypes
+        })
+
+        if (childCount === 0) continue
+
+        // If we have fewer loaded children than expected, fetch
+        if (childCount > currentChildrenCount) {
+          console.log(`[Lineage] Expansion trigger: Fetching children for ${parentId} (${currentChildrenCount}/${childCount})`)
+
+          const parentUrn = (parentNode.data?.urn as string) || parentId
+          try {
+            const newChildren = await provider.getChildren(parentUrn, {
+              edgeTypes: containmentTypes,
+              limit: 100 // Reasonable batch size for expansion
+            })
+
+            if (newChildren.length > 0) {
+              const nodesToAdd: Node[] = []
+              const edgesToAdd: Edge[] = []
+
+              // Re-calculate edge signatures to prevent duplicates
+              const existingEdgeSignatures = new Set(rawEdges.map(e => `${e.source}|${e.target}`))
+
+              newChildren.forEach(child => {
+                // Add Node if not exists
+                if (!existingNodeIds.has(child.urn)) {
+                  nodesToAdd.push({
+                    id: child.urn,
+                    type: 'generic',
+                    position: { x: 0, y: 0 },
+                    data: {
+                      ...child.properties,
+                      label: child.displayName,
+                      type: child.entityType,
+                      urn: child.urn,
+                      childCount: child.childCount,
+                    }
+                  })
+                  existingNodeIds.add(child.urn)
+                }
+
+                // Add Edge if not exists (by signature)
+                if (!existingEdgeSignatures.has(`${parentId}|${child.urn}`)) {
+                  edgesToAdd.push({
+                    id: `contains-${parentUrn}-${child.urn}`,
+                    source: parentId,
+                    target: child.urn,
+                    type: 'lineage',
+                    data: { relationship: 'contains', edgeType: 'contains' }
+                  })
+                  existingEdgeSignatures.add(`${parentId}|${child.urn}`)
+                }
+              })
+
+              if (nodesToAdd.length > 0 || edgesToAdd.length > 0) {
+                console.log(`[Lineage] Expansion loaded ${nodesToAdd.length} nodes and ${edgesToAdd.length} edges for ${parentId}`)
+
+                // Update store (using functional updates would be better but setNodes takes array)
+                // We rely on the fact that rawNodes is fresh due to dependency array
+                if (nodesToAdd.length > 0) setNodes([...rawNodes, ...nodesToAdd] as any)
+                if (edgesToAdd.length > 0) setEdges([...rawEdges, ...edgesToAdd] as any)
+              }
+            }
+          } catch (err) {
+            console.error(`[Lineage] Failed to lazy load children for ${parentId}`, err)
+          }
+        }
+      }
+    }
+
+    if (expandedIds.size > 0) {
+      syncExpansion()
+    }
+  }, [expandedIds, rawNodes, rawEdges, provider, containmentEdgeTypes, config.containmentEdgeTypes, setNodes, setEdges])
+
   // Compute visible nodes/edges based on configuration
   const { visibleNodes, visibleEdges, aggregatedEdges, upstreamCount, downstreamCount } = useMemo(() => {
     if (rawNodes.length === 0) {
