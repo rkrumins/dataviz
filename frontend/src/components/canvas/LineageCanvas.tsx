@@ -29,7 +29,7 @@ import { LineageEdge } from './edges/LineageEdge'
 import { AggregatedEdge } from './edges/AggregatedEdge'
 import { CanvasControls } from './CanvasControls'
 import { LineageToolbar } from './LineageToolbar'
-import { EdgeDetailPanel } from '../panels/EdgeDetailPanel'
+import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
 import { EdgeLegend } from './EdgeLegend'
 import { useSpatialLoading } from '@/hooks/useSpatialLoading'
 import { useLineageExploration } from '@/hooks/useLineageExploration'
@@ -42,6 +42,7 @@ import { EditNodePanel } from '../panels/EditNodePanel'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
+import { useOntologyMetadata } from '@/services/ontologyService'
 import { cn } from '@/lib/utils'
 import { useGraphProvider } from '@/providers'
 import * as LucideIcons from 'lucide-react'
@@ -93,10 +94,23 @@ export function LineageCanvas() {
 
   const { showMinimap, showGrid, snapToGrid } = usePreferencesStore()
   const schema = useSchemaStore((s) => s.schema)
+  const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
+  const { containmentEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
 
   // Edge detail panel
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
   const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
+  
+  // Generate dynamic edge filters from actual edges and schema
+  const dynamicEdgeFilters = useMemo(() => {
+    if (rawEdges.length === 0) return edgeFilters
+    return generateEdgeTypeFilters(
+      rawEdges,
+      relationshipTypes,
+      containmentEdgeTypes,
+      ontologyMetadata
+    )
+  }, [rawEdges, relationshipTypes, containmentEdgeTypes, ontologyMetadata, edgeFilters])
 
   const provider = useGraphProvider()
 
@@ -336,8 +350,7 @@ export function LineageCanvas() {
     }
   }, [nodes, edges])
 
-  // Edge Types from Schema
-  const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
+  // Active edge type for editor
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
 
   // Handle new connections (if allowed)
@@ -780,7 +793,7 @@ export function LineageCanvas() {
           <EdgeDetailPanel
             isOpen={isEdgePanelOpen}
             onClose={closeEdgePanel}
-            edgeFilters={edgeFilters}
+            edgeFilters={dynamicEdgeFilters}
             onToggleFilter={toggleEdgeFilter}
           />
         )}

@@ -42,6 +42,9 @@ import {
     EDGE_DIRECTION_FILTERS,
     type EdgeDirection,
 } from '@/hooks/useEdgeFilters'
+import { useSchemaStore } from '@/store/schema'
+import { useOntologyMetadata } from '@/services/ontologyService'
+import { getAllEdgeTypeDefinitions, normalizeEdgeType } from '@/utils/edgeTypeUtils'
 import { cn } from '@/lib/utils'
 
 // ============================================
@@ -55,12 +58,29 @@ export interface EdgeTypeFilter {
     enabled: boolean
 }
 
-export const DEFAULT_EDGE_TYPE_FILTERS: EdgeTypeFilter[] = [
-    { type: 'transforms', label: 'Transforms', color: '#f59e0b', enabled: true },
-    { type: 'produces', label: 'Produces', color: '#22c55e', enabled: true },
-    { type: 'consumes', label: 'Consumes', color: '#3b82f6', enabled: true },
-    { type: 'contains', label: 'Contains', color: '#8b5cf6', enabled: true },
-]
+/**
+ * Generate edge type filters dynamically from discovered edge types
+ */
+export function generateEdgeTypeFilters(
+    edges: LineageEdge[],
+    relationshipTypes: any[],
+    containmentEdgeTypes: string[],
+    ontologyMetadata?: any
+): EdgeTypeFilter[] {
+    const definitions = getAllEdgeTypeDefinitions(
+        edges,
+        relationshipTypes,
+        containmentEdgeTypes,
+        ontologyMetadata ? { edgeTypeMetadata: ontologyMetadata.edgeTypeMetadata } : undefined
+    )
+    
+    return definitions.map(def => ({
+        type: def.type.toLowerCase(), // Use lowercase for filter matching
+        label: def.label,
+        color: def.color,
+        enabled: true, // Default to enabled
+    }))
+}
 
 // ============================================
 // EdgeDetailPanel Component
@@ -78,7 +98,7 @@ export function EdgeDetailPanel({
     isOpen,
     onClose,
     onToggleFilter,
-    edgeFilters = DEFAULT_EDGE_TYPE_FILTERS,
+    edgeFilters: providedFilters,
     className,
 }: EdgeDetailPanelProps) {
     const nodes = useCanvasStore((s) => s.nodes)
@@ -87,6 +107,21 @@ export function EdgeDetailPanel({
     const selectedEdgeIds = useCanvasStore((s) => s.selectedEdgeIds)
     const selectEdge = useCanvasStore((s) => s.selectEdge)
     const clearSelection = useCanvasStore((s) => s.clearSelection)
+    const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
+    const { containmentEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
+
+    // Generate filters dynamically if not provided
+    const edgeFilters = useMemo(() => {
+        if (providedFilters) {
+            return providedFilters
+        }
+        return generateEdgeTypeFilters(
+            edges,
+            relationshipTypes,
+            containmentEdgeTypes,
+            ontologyMetadata
+        )
+    }, [providedFilters, edges, relationshipTypes, containmentEdgeTypes, ontologyMetadata])
 
     // Edge filtering store
     const directionFilter = useEdgeFiltersStore((s) => s.directionFilter)
@@ -139,8 +174,8 @@ export function EdgeDetailPanel({
         )
 
         let filtered = edges.filter(edge => {
-            const edgeType = edge.data?.edgeType || edge.data?.relationship || 'unknown'
-            return enabledTypes.has(edgeType)
+            const normalized = normalizeEdgeType(edge).toLowerCase()
+            return enabledTypes.has(normalized) || enabledTypes.has(normalizeEdgeType(edge))
         })
 
         // Apply direction filter if we have a focused node
@@ -164,12 +199,17 @@ export function EdgeDetailPanel({
         return filtered
     }, [edges, edgeFilters, directionFilter, effectiveFocusedNodeId, nodeEdges])
 
-    // Get edge statistics
+    // Get edge statistics (normalized for matching)
     const edgeStats = useMemo(() => {
         const stats: Record<string, number> = {}
         edges.forEach(edge => {
-            const edgeType = edge.data?.edgeType || edge.data?.relationship || 'unknown'
-            stats[edgeType] = (stats[edgeType] || 0) + 1
+            const normalized = normalizeEdgeType(edge).toLowerCase()
+            stats[normalized] = (stats[normalized] || 0) + 1
+            // Also count by original type for backward compatibility
+            const originalType = edge.data?.edgeType || edge.data?.relationship || 'unknown'
+            if (originalType.toLowerCase() !== normalized) {
+                stats[originalType.toLowerCase()] = (stats[originalType.toLowerCase()] || 0) + 1
+            }
         })
         return stats
     }, [edges])
@@ -356,7 +396,7 @@ export function EdgeDetailPanel({
                                     </div>
                                     <div className="flex items-center gap-2">
                                         <span className="text-xs text-ink-muted">
-                                            {edgeStats[filter.type] || 0}
+                                            {edgeStats[filter.type] || edgeStats[filter.type.toUpperCase()] || 0}
                                         </span>
                                         {filter.enabled ? (
                                             <Eye className="w-3.5 h-3.5 text-ink-muted" />

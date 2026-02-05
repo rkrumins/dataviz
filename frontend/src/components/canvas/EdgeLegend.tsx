@@ -8,7 +8,7 @@
  * - Shows count of edges per type
  */
 
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     GitBranch,
@@ -16,82 +16,13 @@ import {
     ChevronUp,
     Eye,
     EyeOff,
-    Sparkles,
-    ArrowRight,
-    Box,
-    Layers,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
 import { useEdgeFiltersStore } from '@/hooks/useEdgeFilters'
-
-// Edge type definitions with visual styling
-export interface EdgeTypeDefinition {
-    type: string
-    label: string
-    description: string
-    color: string
-    strokeStyle: 'solid' | 'dashed' | 'dotted'
-    animated: boolean
-    icon: React.ReactNode
-}
-
-export const EDGE_TYPE_DEFINITIONS: EdgeTypeDefinition[] = [
-    {
-        type: 'produces',
-        label: 'Produces',
-        description: 'Data flow from source to target',
-        color: '#06b6d4', // cyan-500
-        strokeStyle: 'solid',
-        animated: true,
-        icon: <ArrowRight className="w-3.5 h-3.5" />,
-    },
-    {
-        type: 'consumes',
-        label: 'Consumes',
-        description: 'Target reads data from source',
-        color: '#3b82f6', // blue-500
-        strokeStyle: 'solid',
-        animated: true,
-        icon: <ArrowRight className="w-3.5 h-3.5 rotate-180" />,
-    },
-    {
-        type: 'transforms',
-        label: 'Transforms',
-        description: 'Data transformation/derivation',
-        color: '#8b5cf6', // purple-500
-        strokeStyle: 'solid',
-        animated: true,
-        icon: <Sparkles className="w-3.5 h-3.5" />,
-    },
-    {
-        type: 'derives_from',
-        label: 'Derives From',
-        description: 'Column-level derivation relationship',
-        color: '#a855f7', // purple-400
-        strokeStyle: 'solid',
-        animated: true,
-        icon: <GitBranch className="w-3.5 h-3.5" />,
-    },
-    {
-        type: 'contains',
-        label: 'Contains',
-        description: 'Parent-child containment',
-        color: '#94a3b8', // slate-400
-        strokeStyle: 'dashed',
-        animated: false,
-        icon: <Box className="w-3.5 h-3.5" />,
-    },
-    {
-        type: 'aggregated',
-        label: 'Aggregated',
-        description: 'Roll-up of child-level lineage',
-        color: '#f59e0b', // amber-500
-        strokeStyle: 'dashed',
-        animated: false,
-        icon: <Layers className="w-3.5 h-3.5" />,
-    },
-]
+import { useSchemaStore } from '@/store/schema'
+import { useOntologyMetadata } from '@/services/ontologyService'
+import { getAllEdgeTypeDefinitions, normalizeEdgeType, type EdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
 interface EdgeLegendProps {
     className?: string
@@ -101,6 +32,8 @@ interface EdgeLegendProps {
 export function EdgeLegend({ className, defaultExpanded = false }: EdgeLegendProps) {
     const [isExpanded, setIsExpanded] = useState(defaultExpanded)
     const edges = useCanvasStore((s) => s.edges)
+    const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
+    const { containmentEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
 
     const {
         highlightedEdgeIds,
@@ -110,22 +43,42 @@ export function EdgeLegend({ className, defaultExpanded = false }: EdgeLegendPro
         toggleFilter,
     } = useEdgeFiltersStore()
 
-    // Count edges by type
-    const edgeCountsByType = edges.reduce((acc, edge) => {
-        const edgeType = edge.data?.edgeType ?? edge.data?.relationship ?? 'lineage'
-        acc[edgeType] = (acc[edgeType] ?? 0) + 1
-        return acc
-    }, {} as Record<string, number>)
+    // Get all edge type definitions dynamically from schema and actual edges
+    const edgeTypeDefinitions = useMemo(() => {
+        return getAllEdgeTypeDefinitions(
+            edges,
+            relationshipTypes,
+            containmentEdgeTypes,
+            ontologyMetadata ? { edgeTypeMetadata: ontologyMetadata.edgeTypeMetadata } : undefined
+        )
+    }, [edges, relationshipTypes, containmentEdgeTypes, ontologyMetadata])
 
-    // Get unique edge types in current view
-    const activeEdgeTypes = EDGE_TYPE_DEFINITIONS.filter(
-        (def) => edgeCountsByType[def.type] && edgeCountsByType[def.type] > 0
-    )
+    // Count edges by type (normalized for matching)
+    const edgeCountsByType = useMemo(() => {
+        const counts: Record<string, number> = {}
+        edges.forEach(edge => {
+            const normalized = normalizeEdgeType(edge)
+            if (normalized) {
+            counts[normalized] = (counts[normalized] ?? 0) + 1
+            }
+        })
+        return counts
+    }, [edges])
+
+    // Get unique edge types in current view (only those with edges)
+    const activeEdgeTypes = useMemo(() => {
+        return edgeTypeDefinitions.filter(
+            (def) => edgeCountsByType[def.type] && edgeCountsByType[def.type] > 0
+        )
+    }, [edgeTypeDefinitions, edgeCountsByType])
 
     // Handle legend item click - highlight all edges of that type
     const handleHighlightType = (type: string) => {
         const edgeIds = edges
-            .filter((e) => (e.data?.edgeType ?? e.data?.relationship) === type)
+            .filter((e) => {
+                const normalized = normalizeEdgeType(e)
+                return normalized === type
+            })
             .map((e) => e.id)
 
         // Toggle behavior - if already highlighted, clear
@@ -137,9 +90,10 @@ export function EdgeLegend({ className, defaultExpanded = false }: EdgeLegendPro
         }
     }
 
-    // Check if edge type is visible
+    // Check if edge type is visible (match by normalized type)
     const isTypeVisible = (type: string) => {
-        const filter = filters.find((f) => f.type === type)
+        // Match against filter types (which may be lowercase)
+        const filter = filters.find((f) => f.type.toUpperCase() === type || f.type === type)
         return filter?.enabled ?? true
     }
 
@@ -182,7 +136,10 @@ export function EdgeLegend({ className, defaultExpanded = false }: EdgeLegendPro
                                     const count = edgeCountsByType[def.type] ?? 0
                                     const isVisible = isTypeVisible(def.type)
                                     const isHighlighted = edges
-                                        .filter((e) => (e.data?.edgeType ?? e.data?.relationship) === def.type)
+                                        .filter((e) => {
+                                            const normalized = normalizeEdgeType(e)
+                                            return normalized === def.type
+                                        })
                                         .some((e) => highlightedEdgeIds.has(e.id))
 
                                     return (
@@ -239,7 +196,14 @@ export function EdgeLegend({ className, defaultExpanded = false }: EdgeLegendPro
                                             <button
                                                 onClick={(e) => {
                                                     e.stopPropagation()
-                                                    toggleFilter(def.type)
+                                                    // Toggle filter by matching type (case-insensitive)
+                                                    const filter = filters.find((f) => f.type.toUpperCase() === def.type || f.type === def.type)
+                                                    if (filter) {
+                                                        toggleFilter(filter.type)
+                                                    } else {
+                                                        // If no filter exists, create one by toggling the normalized type
+                                                        toggleFilter(def.type.toLowerCase())
+                                                    }
                                                 }}
                                                 className={cn(
                                                     "p-1 rounded transition-colors",

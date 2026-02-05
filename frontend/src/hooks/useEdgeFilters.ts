@@ -37,7 +37,7 @@ export const EDGE_DIRECTION_FILTERS: EdgeDirectionFilter[] = [
 ]
 
 // ============================================
-// Default Filters
+// Default Filters (fallback when no edges exist)
 // ============================================
 
 export const DEFAULT_EDGE_FILTERS: EdgeTypeFilter[] = [
@@ -48,6 +48,33 @@ export const DEFAULT_EDGE_FILTERS: EdgeTypeFilter[] = [
     { type: 'derives_from', label: 'Derives From', color: '#a855f7', enabled: true },
     { type: 'lineage', label: 'Lineage', color: '#06b6d4', enabled: true },
 ]
+
+/**
+ * Generate edge type filters from discovered edge types
+ * This is used to initialize filters when edges are first loaded
+ */
+export function generateEdgeTypeFiltersFromEdges(
+    edges: LineageEdge[],
+    relationshipTypes: any[],
+    containmentEdgeTypes: string[],
+    ontologyMetadata?: any
+): EdgeTypeFilter[] {
+    // Import here to avoid circular dependency
+    const { getAllEdgeTypeDefinitions } = require('@/utils/edgeTypeUtils')
+    const definitions = getAllEdgeTypeDefinitions(
+        edges,
+        relationshipTypes,
+        containmentEdgeTypes,
+        ontologyMetadata ? { edgeTypeMetadata: ontologyMetadata.edgeTypeMetadata } : undefined
+    )
+    
+    return definitions.map(def => ({
+        type: def.type.toLowerCase(), // Use lowercase for filter matching
+        label: def.label,
+        color: def.color,
+        enabled: true, // Default to enabled
+    }))
+}
 
 // ============================================
 // Store
@@ -254,11 +281,13 @@ export function useFilteredEdges(): {
             filters.filter((f) => f.enabled).map((f) => f.type)
         )
 
-        // Type-filtered edges
+        // Type-filtered edges (case-insensitive matching)
         const typeFiltered = edges.filter((edge) => {
-            const edgeType = edge.data?.edgeType || edge.data?.relationship || 'unknown'
+            const normalized = normalizeEdgeType(edge).toLowerCase()
+            const originalType = (edge.data?.edgeType || edge.data?.relationship || 'unknown').toLowerCase()
             const confidence = edge.data?.confidence ?? 1
-            return enabledTypes.has(edgeType) && confidence >= confidenceThreshold
+            // Match against normalized or original type (case-insensitive)
+            return (enabledTypes.has(normalized) || enabledTypes.has(originalType)) && confidence >= confidenceThreshold
         })
 
         // Get containment types from ontology
@@ -348,10 +377,12 @@ export function useNodeEdges(nodeId: string | null): {
             filters.filter((f) => f.enabled).map((f) => f.type)
         )
 
-        // Filter by type first
+        // Filter by type first (case-insensitive matching)
         const typeFiltered = edges.filter((edge) => {
-            const edgeType = edge.data?.edgeType || edge.data?.relationship || 'unknown'
-            return enabledTypes.has(edgeType)
+            const normalized = normalizeEdgeType(edge).toLowerCase()
+            const originalType = (edge.data?.edgeType || edge.data?.relationship || 'unknown').toLowerCase()
+            // Match against normalized or original type (case-insensitive)
+            return enabledTypes.has(normalized) || enabledTypes.has(originalType)
         })
 
         const incoming = typeFiltered.filter(e => e.target === nodeId)
