@@ -68,6 +68,8 @@ interface WizardAssignmentTreeProps {
     containmentEdgeTypes?: string[]
     /** Callback when assignment changes */
     onAssignmentChange?: (entityId: string, layerId: string | null) => void
+    /** Callback for bulk assignment */
+    onBulkAssign?: (layerId: string, entityIds: string[]) => void
     /** Additional class name */
     className?: string
 }
@@ -305,6 +307,7 @@ export function WizardAssignmentTree({
     layers,
     containmentEdgeTypes = DEFAULT_CONTAINMENT_TYPES,
     onAssignmentChange,
+    onBulkAssign,
     className
 }: WizardAssignmentTreeProps) {
     // Store hooks
@@ -395,22 +398,31 @@ export function WizardAssignmentTree({
         conflicts.forEach(c => conflictMap.set(c.entityId, c))
 
         // Recursive tree builder
-        const buildNode = (nodeId: string, depth: number, parentId?: string): EntityTreeNode | null => {
+        const buildNode = (
+            nodeId: string,
+            depth: number,
+            parentId?: string,
+            parentEffectiveLayerId?: string
+        ): EntityTreeNode | null => {
             const node = nodeMap.get(nodeId)
             if (!node || node.data.type === 'ghost') return null
 
             const childIds = childMap.get(nodeId) ?? []
 
             // Determine effective assignment (Top-Down)
-            // WE NOW USE BACKEND COMPUTED ASSIGNMENTS VIA STORE
-            // BUT FALLBACK TO PROPS FOR WIZARD RESPONSIVENESS
             const effectiveAssignment = effectiveAssignments.get(nodeId)
-            const effectiveLayerId = effectiveAssignment?.layerId ?? manualAssignmentMap.get(nodeId)
-            const isInherited = effectiveAssignment?.isInherited ?? false
+            let effectiveLayerId = effectiveAssignment?.layerId ?? manualAssignmentMap.get(nodeId)
+            let isInherited = effectiveAssignment?.isInherited ?? false
+
+            // Inherit from parent if not explicitly assigned
+            if (!effectiveLayerId && parentEffectiveLayerId) {
+                effectiveLayerId = parentEffectiveLayerId
+                isInherited = true
+            }
 
             // Recurse children with new effective context
             const children = childIds
-                .map(id => buildNode(id, depth + 1, nodeId))
+                .map(id => buildNode(id, depth + 1, nodeId, effectiveLayerId))
                 .filter((n): n is EntityTreeNode => n !== null)
                 .sort((a, b) => a.name.localeCompare(b.name))
 
@@ -583,19 +595,29 @@ export function WizardAssignmentTree({
     }, [assignEntityToLayer, removeEntityAssignment, onAssignmentChange, instanceAssignments, flattenedNodes])
 
     const handleBulkAssign = useCallback((layerId: string) => {
-        selectedIds.forEach(entityId => {
+        const ids = Array.from(selectedIds)
+        if (ids.length === 0) return
+
+        if (onBulkAssign) {
+            onBulkAssign(layerId, ids)
+            // Clear selection after bulk action
+            setSelectedIds(new Set())
+            return
+        }
+
+        // Fallback to one-by-one if onBulkAssign not provided
+        ids.forEach(entityId => {
             if (!layerId) {
-                // Bulk Remove - adhere to same logic? 
-                // For bulk, "Remove" usually means "Clear Explicit". 
-                // Supporting "Exclude" in bulk is complex. Default to Clear.
                 removeEntityAssignment(entityId)
             } else {
                 assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
             }
             onAssignmentChange?.(entityId, layerId || null)
         })
+
+        // Clear selection after bulk action
         setSelectedIds(new Set())
-    }, [selectedIds, assignEntityToLayer, removeEntityAssignment, onAssignmentChange])
+    }, [selectedIds, onBulkAssign, onAssignmentChange, removeEntityAssignment, assignEntityToLayer])
 
     const handleSelectAllChildren = useCallback(() => {
         if (selectedIds.size !== 1) return

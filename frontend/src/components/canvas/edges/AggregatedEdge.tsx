@@ -85,10 +85,11 @@ export const AggregatedEdge = memo(function AggregatedEdge({
         fill="none"
         stroke={edgeColor}
         strokeWidth={2}
-        strokeDasharray="4 12"
-        className="animate-[dash_1.5s_linear_infinite]"
+        strokeDasharray="1 10"
+        className="animate-[flow_2s_linear_infinite]"
         style={{
-          opacity: 0.5,
+          opacity: 0.8,
+          strokeLinecap: 'round',
         }}
       />
 

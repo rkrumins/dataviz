@@ -157,7 +157,7 @@
 
   @keyframes flow {
     from {
-      stroke-dashoffset: 24;
+      stroke-dashoffset: 40;
     }
     to {
       stroke-dashoffset: 0;

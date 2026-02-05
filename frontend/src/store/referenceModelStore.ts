@@ -683,14 +683,16 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                 const state = get()
                 const { inheritsChildren = true } = options
 
-                // Process each entity
-                for (const entityId of entityIds) {
+                const newInstanceAssignments = new Map(state.instanceAssignments)
+                const newEffectiveAssignments = new Map(state.effectiveAssignments)
+
+                // 1. Process assignments in Map first
+                entityIds.forEach(entityId => {
                     const conflict = state.checkAssignmentConflict(entityId, layerId)
                     if (conflict) {
                         conflicts.push(conflict)
                     }
 
-                    // Create the assignment config
                     const assignment: EntityAssignmentConfig = {
                         entityId,
                         layerId,
@@ -700,51 +702,61 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                         assignedAt: new Date().toISOString()
                     }
 
-                    // Update instance assignments
-                    const newAssignments = new Map(state.instanceAssignments)
-                    newAssignments.set(entityId, assignment)
+                    newInstanceAssignments.set(entityId, assignment)
 
-                    // Update state for next iteration
-                    state.instanceAssignments = newAssignments
+                    // Also update effective assignments for immediate tree feedback
+                    newEffectiveAssignments.set(entityId, {
+                        entityId,
+                        layerId,
+                        isInherited: false,
+                        confidence: 1.0
+                    })
+
                     successful.push(entityId)
-                }
+                })
 
-                // Final batch update to layers
-                const finalState = get()
-                const updatedLayers = finalState.layers.map(layer => {
+                // 2. Batch update layers
+                const updatedLayers = state.layers.map(layer => {
                     if (layer.id === layerId) {
+                        // Add all to target layer, filtering existing ones that are in entityIds
                         const existing = layer.entityAssignments?.filter(
                             a => !entityIds.includes(a.entityId)
                         ) ?? []
-                        const newAssignments = entityIds.map(entityId => ({
-                            entityId,
-                            layerId,
+
+                        const newConfigs = entityIds.map(id => ({
+                            entityId: id,
+                            layerId: layer.id,
                             inheritsChildren,
                             priority: 1000,
                             assignedBy: 'user' as const,
                             assignedAt: new Date().toISOString()
                         }))
+
                         return {
                             ...layer,
-                            entityAssignments: [...existing, ...newAssignments]
+                            entityAssignments: [...existing, ...newConfigs]
                         }
                     }
-                    // Remove from other layers
-                    if (layer.entityAssignments?.some(a => entityIds.includes(a.entityId))) {
+
+                    // Remove these entities from any other layer
+                    const hasAny = layer.entityAssignments?.some(a => entityIds.includes(a.entityId))
+                    if (hasAny) {
                         return {
                             ...layer,
-                            entityAssignments: layer.entityAssignments.filter(
+                            entityAssignments: layer.entityAssignments!.filter(
                                 a => !entityIds.includes(a.entityId)
                             )
                         }
                     }
+
                     return layer
                 })
 
                 set({
-                    instanceAssignments: finalState.instanceAssignments,
+                    instanceAssignments: newInstanceAssignments,
+                    effectiveAssignments: newEffectiveAssignments,
                     layers: updatedLayers,
-                    assignmentConflicts: [...finalState.assignmentConflicts, ...conflicts]
+                    assignmentConflicts: [...state.assignmentConflicts, ...conflicts]
                 })
 
                 return { successful, conflicts }

@@ -84,12 +84,38 @@ export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps
     const handleBulkAssignment = useCallback((layerId: string, entityIds: string[]) => {
         if (!formData.layers) return
 
-        // Use store action for bulk (it's more efficient and handles conflicts)
+        // 1. Update store for conflict detection and graph compute
         bulkAssignEntitiesToLayer(entityIds, layerId, { inheritsChildren: true })
 
-        // After store update, we need to sync back to formData.layers
-        // The store update also modifies state.layers which we should read
-        const updatedLayers = useReferenceModelStore.getState().layers
+        // 2. Update local wizard state immediately
+        const updatedLayers = formData.layers.map(layer => {
+            // Remove entity from all layers first
+            const filteredAssignments = (layer.entityAssignments || [])
+                .filter(a => !entityIds.includes(a.entityId))
+
+            if (layer.id === layerId) {
+                // Add all successful to target layer
+                const newConfigs: EntityAssignmentConfig[] = entityIds.map(id => ({
+                    entityId: id,
+                    layerId: layer.id,
+                    inheritsChildren: true,
+                    priority: 1000,
+                    assignedBy: 'user',
+                    assignedAt: new Date().toISOString()
+                }))
+
+                return {
+                    ...layer,
+                    entityAssignments: [...filteredAssignments, ...newConfigs]
+                }
+            }
+
+            return {
+                ...layer,
+                entityAssignments: filteredAssignments
+            }
+        })
+
         updateFormData({ layers: updatedLayers })
     }, [formData.layers, bulkAssignEntitiesToLayer, updateFormData])
 
@@ -101,6 +127,7 @@ export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps
                     layers={formData.layers || []}
                     containmentEdgeTypes={containmentEdgeTypes}
                     onAssignmentChange={handleAssignmentChange}
+                    onBulkAssign={handleBulkAssignment}
                     className="h-full"
                 />
             </div>

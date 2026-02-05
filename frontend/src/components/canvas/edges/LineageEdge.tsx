@@ -149,19 +149,26 @@ export const LineageEdge = memo(function LineageEdge({
           </linearGradient>
         )}
 
-        {/* Animated dash pattern for particle effect */}
+        {/* Animated flow pattern for particle effect - higher performance svg-native flow */}
         <pattern
           id={`flow-pattern-${id}`}
           patternUnits="userSpaceOnUse"
-          width="12"
-          height="4"
+          width="40"
+          height="10"
+          patternTransform="rotate(0)"
         >
-          <circle cx="2" cy="2" r="1.5" fill={isHighlighted ? highlightColor : edgeColor} opacity="0.8">
+          <circle cx="5" cy="5" r="2" fill={isHighlighted ? highlightColor : edgeColor}>
             <animate
               attributeName="cx"
-              from="-2"
-              to="14"
-              dur="1s"
+              from="0"
+              to="40"
+              dur="1.5s"
+              repeatCount="indefinite"
+            />
+            <animate
+              attributeName="opacity"
+              values="0;1;0"
+              dur="1.5s"
               repeatCount="indefinite"
             />
           </circle>
@@ -205,20 +212,19 @@ export const LineageEdge = memo(function LineageEdge({
         }}
       />
 
-      {/* Animated particle overlay */}
+      {/* Animated Flow Layer */}
       {animated && (
         <path
           d={edgePath}
           fill="none"
-          stroke={isHighlighted ? highlightColor : edgeColor}
-          strokeWidth={2}
-          strokeDasharray="4 8"
-          className="nx-edge-animated"
+          stroke={`url(#flow-pattern-${id})`}
+          strokeWidth={4}
           style={{
-            opacity: isHighlighted ? 0.8 : 0.6,
+            pointerEvents: 'none',
           }}
         />
       )}
+
 
       {/* Highlight indicator icon */}
       {isHighlighted && (

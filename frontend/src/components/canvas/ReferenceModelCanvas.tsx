@@ -24,11 +24,10 @@ import {
 } from '@/providers/GraphDataProvider'
 import { useGraphProvider } from '@/providers'
 import { useEntityLoader } from '@/hooks/useEntityLoader'
-import { computeTrace } from '@/hooks/useLineageExploration'
 import { EdgeDetailPanel } from '../panels/EdgeDetailPanel'
 import { EditNodePanel } from '../panels/EditNodePanel'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
-import { useOntologyMetadata, isContainmentEdgeType, normalizeEdgeType } from '@/services/ontologyService'
+import { useOntologyMetadata, isContainmentEdge, normalizeEdgeType } from '@/services/ontologyService'
 
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
@@ -762,8 +761,6 @@ export function ReferenceModelCanvas({
     if (!showLineageFlow) return []
     // Filter out containment edges
     return edges.filter(edge => {
-      const params = edge.data || {}
-      const rel = params.relationship || params.edgeType
       return !isContainmentEdge(normalizeEdgeType(edge))
     })
   }, [edges, showLineageFlow])
@@ -818,6 +815,17 @@ export function ReferenceModelCanvas({
       // Roots are always initially visible anchors
       processNode(root, root.id)
     }))
+
+    // 1.5. Ensure all nodes in displayMap are at least mapped to themselves if visible
+    // This is a safety catch for any nodes that might have been missed by the root traversal
+    displayFlat.forEach(node => {
+      if (!ancestorMap.has(node.id)) {
+        ancestorMap.set(node.id, node.id)
+      }
+      if (node.urn && !ancestorMap.has(node.urn)) {
+        ancestorMap.set(node.urn, node.id)
+      }
+    })
 
     // 2. Project Edges
     const projected: any[] = []
@@ -1052,13 +1060,7 @@ export function ReferenceModelCanvas({
 
           {/* Node Details Panel */}
           {selectedNodeId && (
-            <EditNodePanel
-              key={selectedNodeId}
-              isOpen={!!selectedNodeId}
-              onClose={() => selectNode(null)}
-              nodeId={selectedNodeId}
-              isReadOnly={true} // Reference model view usually readonly for details? Or allow edits.
-            />
+            <EditNodePanel />
           )}
         </AnimatePresence>
 
@@ -1424,6 +1426,7 @@ function LayerNodeCard({
     </motion.div >
   )
 }
+
 // ----------------------------------------------------
 // SVG Overlay Component
 // ----------------------------------------------------
@@ -1465,11 +1468,13 @@ function LineageFlowOverlay({
         const tRect = targetEl.getBoundingClientRect()
 
         // Relative coordinates
-        const sx = sRect.right - containerRect.left
+        // Relative coordinates
+        // Offset sx/tx slightly from the card boundary to make arrowheads/terminals visible
+        const sx = sRect.right - containerRect.left + 2
         const sy = sRect.top + sRect.height / 2 - containerRect.top
 
-        // Target
-        let tx = tRect.left - containerRect.left
+        // Target: point slightly before the card boundary
+        let tx = tRect.left - containerRect.left - 4
         const ty = tRect.top + tRect.height / 2 - containerRect.top
 
         // Smart Routing Logic
@@ -1543,30 +1548,42 @@ function LineageFlowOverlay({
               selectEdge(edge.id)
               if (!isEdgePanelOpen) toggleEdgePanel()
             }}
+            style={{ color }}
           >
             {/* Invisible thicker path for easier hover */}
             <path d={d} fill="none" stroke="transparent" strokeWidth="15" />
 
-            {/* Visible Path */}
+            {/* Main Path */}
             <path
               d={d}
               fill="none"
-              stroke={color}
-              strokeWidth="2"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              markerEnd="url(#arrowhead)"
               className={cn(
-                "transition-all duration-300 opacity-60 group-hover:opacity-100 group-hover:stroke-[3px]",
-                "animate-flow"
+                "transition-all duration-300 opacity-40 group-hover:opacity-100 group-hover:stroke-[2.5px]",
               )}
+            />
+
+            {/* Animated Flow Layer (particles) */}
+            <path
+              d={d}
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeDasharray="1 12"
+              strokeLinecap="round"
+              className="animate-flow"
               style={{
-                strokeDasharray: '8 4',
-                animation: `dashDraw ${30 + index * 5}s linear infinite` // Vary speed slightly
+                opacity: 0.6,
+                animationDuration: `${1.5 + index * 0.2}s`,
+                filter: 'url(#glow)'
               }}
             />
-            {/* Terminals */}
-            <circle cx={sx} cy={sy} r="3" fill={color} className="opacity-60 group-hover:opacity-100" />
-            <circle cx={tx} cy={ty} r="3" fill={color} className="opacity-60 group-hover:opacity-100" />
 
-            {/* Label on hover? */}
+            {/* Terminals */}
+            <circle cx={sx} cy={sy} r="2.5" fill="currentColor" className="opacity-40 group-hover:opacity-80" />
+
             <title>{edge.source} → {edge.target} ({edge.originalType})</title>
           </g>
         )
@@ -1594,7 +1611,7 @@ function LineageFlowOverlay({
   }, [updateFlow, nodes, expandedNodes])
 
   return (
-    <div ref={containerRef} className="absolute inset-0 pointer-events-none z-0">
+    <div ref={containerRef} className="absolute inset-0 pointer-events-none z-20">
       <style>{`
           @keyframes dashDraw {
             from { stroke-dashoffset: 1000; }
@@ -1602,6 +1619,25 @@ function LineageFlowOverlay({
           }
         `}</style>
       <svg className="w-full h-full overflow-visible">
+        <defs>
+          {/* arrowhead marker */}
+          <marker
+            id="arrowhead"
+            markerWidth="10"
+            markerHeight="7"
+            refX="9"
+            refY="3.5"
+            orient="auto"
+          >
+            <polygon points="0 0, 10 3.5, 0 7" fill="currentColor" opacity="0.8" />
+          </marker>
+
+          {/* Glow filter */}
+          <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="2" result="blur" />
+            <feComposite in="SourceGraphic" in2="blur" operator="over" />
+          </filter>
+        </defs>
         {paths}
       </svg>
     </div>
