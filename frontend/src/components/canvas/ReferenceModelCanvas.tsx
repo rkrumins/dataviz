@@ -374,6 +374,19 @@ export function ReferenceModelCanvas({
 
   // Lineage flow toggle
   const [showLineageFlow, setShowLineageFlow] = useState(initialShowLineageFlow)
+  
+  // Ref to trigger edge redraw from child components
+  const triggerEdgeRedrawRef = useRef<(() => void) | null>(null)
+  
+  // Callback for animation completion to trigger edge redraw
+  const handleAnimationComplete = useCallback(() => {
+    // Small delay to ensure DOM is fully updated after animation
+    requestAnimationFrame(() => {
+      if (triggerEdgeRedrawRef.current) {
+        triggerEdgeRedrawRef.current()
+      }
+    })
+  }, [])
 
   // Sort layers by order
   const activeLayers = useMemo(() => {
@@ -1127,6 +1140,7 @@ export function ReferenceModelCanvas({
               selectEdge={selectEdge}
               isEdgePanelOpen={isEdgePanelOpen}
               toggleEdgePanel={toggleEdgePanel}
+              triggerRedrawRef={triggerEdgeRedrawRef}
             />
           )}
 
@@ -1148,6 +1162,7 @@ export function ReferenceModelCanvas({
                 traceFocusId={traceFocusId}
                 traceNodes={traceNodes}
                 traceContextSet={traceContextSet}
+                onAnimationComplete={handleAnimationComplete}
               />
             ))}
           </div>
@@ -1202,6 +1217,7 @@ interface LayerColumnProps {
   traceFocusId: string | null
   traceNodes: Set<string>
   traceContextSet: Set<string>
+  onAnimationComplete?: () => void
   isDimmed?: boolean // Computed internally or passed? Computed is better.
 }
 
@@ -1218,7 +1234,8 @@ function LayerColumn({
   onDoubleClick,
   traceFocusId,
   traceNodes,
-  traceContextSet
+  traceContextSet,
+  onAnimationComplete
 }: LayerColumnProps) { // No longer LayerColumnProps? Yes it is.
   return (
     <div className="flex-1 min-w-[280px] max-w-[400px] border-r border-glass-border last:border-r-0 flex flex-col">
@@ -1275,6 +1292,7 @@ function LayerColumn({
               traceFocusId={traceFocusId}
               traceNodes={traceNodes}
               traceContextSet={traceContextSet}
+              onAnimationComplete={onAnimationComplete}
             />
           ))
         )}
@@ -1297,6 +1315,7 @@ interface LayerNodeCardProps {
   traceFocusId: string | null
   traceNodes: Set<string>
   traceContextSet: Set<string>
+  onAnimationComplete?: () => void
 }
 
 function LayerNodeCard({
@@ -1312,7 +1331,8 @@ function LayerNodeCard({
   onDoubleClick,
   traceFocusId,
   traceNodes,
-  traceContextSet
+  traceContextSet,
+  onAnimationComplete
 }: LayerNodeCardProps) {
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
@@ -1383,12 +1403,12 @@ function LayerNodeCard({
         e.stopPropagation()
         onSelect(node.id)
       }}
-
       onDoubleClick={(e) => {
         e.stopPropagation()
         onDoubleClick(node.id)
       }}
       onContextMenu={(e) => onContextMenu(e, node.id)}
+      onLayoutAnimationComplete={onAnimationComplete}
     >
       {/* Node Header */}
       < div className="flex items-center gap-2 px-3 py-2" >
@@ -1448,6 +1468,7 @@ function LayerNodeCard({
               initial={{ height: 0, opacity: 0 }}
               animate={{ height: 'auto', opacity: 1 }}
               exit={{ height: 0, opacity: 0 }}
+              onAnimationComplete={onAnimationComplete}
               className="overflow-hidden"
             >
               <div className="px-3 pb-2 pl-8 space-y-1.5">
@@ -1468,6 +1489,7 @@ function LayerNodeCard({
                     traceFocusId={traceFocusId}
                     traceNodes={traceNodes}
                     traceContextSet={traceContextSet}
+                    onAnimationComplete={onAnimationComplete}
                   />
                 ))}
               </div>
@@ -1489,37 +1511,71 @@ function LineageFlowOverlay({
   expandedNodes,
   selectEdge,
   isEdgePanelOpen,
-  toggleEdgePanel
+  toggleEdgePanel,
+  triggerRedrawRef
 }: {
   nodes: any[],
   edges: any[],
   expandedNodes: Set<string>,
   selectEdge: (id: string) => void,
   isEdgePanelOpen: boolean,
-  toggleEdgePanel: () => void
+  toggleEdgePanel: () => void,
+  triggerRedrawRef?: React.MutableRefObject<(() => void) | null>
 }) {
   const [paths, setPaths] = useState<React.ReactNode[]>([])
   const containerRef = useRef<HTMLDivElement>(null)
+  const updateFlowRef = useRef<(() => void) | null>(null)
+  const rafIdRef = useRef<number | null>(null)
 
-  // Update paths function
+  // Serialize expandedNodes Set to array for proper React dependency tracking
+  const expandedNodesArray = useMemo(() => {
+    return Array.from(expandedNodes).sort().join(',')
+  }, [expandedNodes])
+
+  // Debounced update function using requestAnimationFrame
+  const scheduleUpdate = useCallback(() => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current)
+    }
+    rafIdRef.current = requestAnimationFrame(() => {
+      rafIdRef.current = null
+      if (updateFlowRef.current) {
+        updateFlowRef.current()
+      }
+    })
+  }, [])
+
+  // Update paths function with optimizations
   const updateFlow = useCallback(() => {
     if (!containerRef.current) return
 
     const containerRect = containerRef.current.getBoundingClientRect()
     const newPaths: React.ReactNode[] = []
 
+    // Batch DOM reads by collecting all elements first
+    const elementCache = new Map<string, HTMLElement>()
+    
     edges.forEach(edge => {
       const sourceId = `layer-node-${edge.source}`
       const targetId = `layer-node-${edge.target}`
 
-      const sourceEl = document.getElementById(sourceId)
-      const targetEl = document.getElementById(targetId)
+      // Cache element lookups
+      let sourceEl = elementCache.get(sourceId)
+      if (!sourceEl) {
+        sourceEl = document.getElementById(sourceId)
+        if (sourceEl) elementCache.set(sourceId, sourceEl)
+      }
+
+      let targetEl = elementCache.get(targetId)
+      if (!targetEl) {
+        targetEl = document.getElementById(targetId)
+        if (targetEl) elementCache.set(targetId, targetEl)
+      }
 
       if (sourceEl && targetEl) {
         const sRect = sourceEl.getBoundingClientRect()
         const tRect = targetEl.getBoundingClientRect()
 
-        // Relative coordinates
         // Relative coordinates
         // Offset sx/tx slightly from the card boundary to make arrowheads/terminals visible
         const sx = sRect.right - containerRect.left + 2
@@ -1539,19 +1595,6 @@ function LineageFlowOverlay({
         // or curve magnitude to separate them.
         const total = edge.groupTotal || 1
         const index = edge.groupIndex || 0
-
-        // Center centered index (e.g. 0 -> -10, 1 -> 0, 2 -> 10)
-        // const offsetStep = 15
-        // const centerOffset = (index - (total - 1) / 2) * offsetStep
-
-        // Actually, for left-to-right flow, vertical offset at control points is best to separate lines
-        // But start/end points are fixed at node centers.
-        // We can slightly offset start/end Y too if nodes are tall enough?
-        // Let's stick to control point variation for "bundled" look.
-
-
-        // Vary curvature slightly for each index to fan them out?
-        // Or vertical CP offset.
 
         // Vertical separation at the midpoint
         const verticalSpread = 30
@@ -1642,25 +1685,69 @@ function LineageFlowOverlay({
       }
     })
     setPaths(newPaths)
-  }, [edges])
+  }, [edges, selectEdge, isEdgePanelOpen, toggleEdgePanel])
 
-  // Listeners
+  // Store updateFlow in ref for ResizeObserver access and expose to parent
   useEffect(() => {
-    // Initial draw
-    const timer = setTimeout(updateFlow, 100)
+    updateFlowRef.current = updateFlow
+    if (triggerRedrawRef) {
+      triggerRedrawRef.current = scheduleUpdate
+    }
+  }, [updateFlow, scheduleUpdate, triggerRedrawRef])
 
-    // Resize
-    window.addEventListener('resize', updateFlow)
+  // ResizeObserver to detect when node elements finish resizing/moving
+  useEffect(() => {
+    if (!containerRef.current) return
 
-    // Scroll
-    window.addEventListener('scroll', updateFlow, true)
+    const observer = new ResizeObserver(() => {
+      // Debounce using requestAnimationFrame to avoid excessive calls
+      scheduleUpdate()
+    })
+
+    // Observe all visible node elements
+    nodes.forEach(node => {
+      const el = document.getElementById(`layer-node-${node.id}`)
+      if (el) {
+        observer.observe(el)
+      }
+    })
 
     return () => {
-      window.removeEventListener('resize', updateFlow)
-      window.removeEventListener('scroll', updateFlow, true)
-      clearTimeout(timer)
+      observer.disconnect()
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current)
+        rafIdRef.current = null
+      }
     }
-  }, [updateFlow, nodes, expandedNodes])
+  }, [nodes, expandedNodesArray, scheduleUpdate])
+
+  // Listeners for window resize and scroll
+  useEffect(() => {
+    // Initial draw with longer timeout to account for animation duration
+    const timer = setTimeout(() => {
+      requestAnimationFrame(() => {
+        updateFlow()
+      })
+    }, 400)
+
+    // Resize
+    const handleResize = () => scheduleUpdate()
+    window.addEventListener('resize', handleResize)
+
+    // Scroll
+    const handleScroll = () => scheduleUpdate()
+    window.addEventListener('scroll', handleScroll, true)
+
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      window.removeEventListener('scroll', handleScroll, true)
+      clearTimeout(timer)
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current)
+        rafIdRef.current = null
+      }
+    }
+  }, [updateFlow, scheduleUpdate, expandedNodesArray])
 
   return (
     <div ref={containerRef} className="absolute inset-0 pointer-events-none z-20">
