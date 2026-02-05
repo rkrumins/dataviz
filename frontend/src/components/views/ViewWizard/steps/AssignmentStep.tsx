@@ -24,6 +24,7 @@ interface AssignmentStepProps {
 export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps) {
     const schema = useSchemaStore(s => s.schema)
     const setLayers = useReferenceModelStore(s => s.setLayers)
+    const bulkAssignEntitiesToLayer = useReferenceModelStore(s => s.bulkAssignEntitiesToLayer)
 
     // Sync layers with store for conflict detection
     useEffect(() => {
@@ -79,6 +80,19 @@ export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps
         updateFormData({ layers: updatedLayers })
     }, [formData.layers, updateFormData])
 
+    // Handle bulk assignment from tree or drops
+    const handleBulkAssignment = useCallback((layerId: string, entityIds: string[]) => {
+        if (!formData.layers) return
+
+        // Use store action for bulk (it's more efficient and handles conflicts)
+        bulkAssignEntitiesToLayer(entityIds, layerId, { inheritsChildren: true })
+
+        // After store update, we need to sync back to formData.layers
+        // The store update also modifies state.layers which we should read
+        const updatedLayers = useReferenceModelStore.getState().layers
+        updateFormData({ layers: updatedLayers })
+    }, [formData.layers, bulkAssignEntitiesToLayer, updateFormData])
+
     return (
         <div className="flex h-[650px] gap-6">
             {/* Left Panel: Entity Tree Browser */}
@@ -105,6 +119,7 @@ export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps
                     <LayerManager
                         layers={formData.layers || []}
                         onUpdate={(layers) => updateFormData({ layers })}
+                        onBulkAssign={handleBulkAssignment}
                         mode="assignment"
                         className="pb-4"
                     />

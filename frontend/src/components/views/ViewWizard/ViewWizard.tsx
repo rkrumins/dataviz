@@ -27,6 +27,8 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
+import { useCanvasStore } from '@/store/canvas'
+import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { viewService } from '@/services/viewService'
 import type { ViewConfiguration, ViewLayerConfig, ScopeEdgeConfig } from '@/types/schema'
 
@@ -115,6 +117,8 @@ const LAYOUT_TYPES = [
 
 export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWizardProps) {
     const schema = useSchemaStore(s => s.schema)
+    const { clearSelection } = useCanvasStore()
+    const { clearAssignments } = useReferenceModelStore()
 
     // Current step
     const [currentStep, setCurrentStep] = useState<WizardStep>('basics')
@@ -173,11 +177,16 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
         if (isOpen) {
             setCurrentStep('basics')
             setPreviousSteps([])
+            clearSelection()
+
+            // Always clear store assignments on opening wizard to avoid stale leakage
+            clearAssignments()
+
             if (mode === 'create') {
                 setFormData(getInitialFormData(schema))
             }
         }
-    }, [isOpen, mode, schema])
+    }, [isOpen, mode, schema, clearSelection, clearAssignments])
 
     // Step validation
     const canProceed = useMemo(() => {

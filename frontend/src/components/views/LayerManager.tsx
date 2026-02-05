@@ -31,6 +31,7 @@ import { AssignmentLayerCard } from './AssignmentLayerCard'
 interface LayerManagerProps {
     layers: ViewLayerConfig[]
     onUpdate: (layers: ViewLayerConfig[]) => void
+    onBulkAssign?: (layerId: string, entityIds: string[]) => void
     className?: string
     mode?: 'config' | 'assignment'
 }
@@ -131,6 +132,7 @@ const LAYER_TEMPLATES: {
 export function LayerManager({
     layers,
     onUpdate,
+    onBulkAssign,
     className,
     mode
 }: LayerManagerProps) {
@@ -248,6 +250,7 @@ export function LayerManager({
                             entityAssignments={layer.entityAssignments || []}
                             onAssign={handleAssignEntity}
                             onUnassign={handleUnassignEntity}
+                            onBulkAssign={onBulkAssign}
                         />
                     ))
                 ) : (

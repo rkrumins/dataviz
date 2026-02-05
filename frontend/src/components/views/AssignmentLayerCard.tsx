@@ -9,6 +9,7 @@ interface AssignmentLayerCardProps {
     entityAssignments: EntityAssignmentConfig[]
     onAssign: (layerId: string, entityId: string) => void
     onUnassign: (layerId: string, entityId: string) => void
+    onBulkAssign?: (layerId: string, entityIds: string[]) => void
     className?: string
 }
 
@@ -17,6 +18,7 @@ export function AssignmentLayerCard({
     entityAssignments,
     onAssign,
     onUnassign,
+    onBulkAssign,
     className
 }: AssignmentLayerCardProps) {
     const [isHovering, setIsHovering] = useState(false)
@@ -40,18 +42,30 @@ export function AssignmentLayerCard({
         setIsHovering(false)
 
         try {
-            const data = e.dataTransfer.getData('application/x-entity-assignment')
-            if (!data) return
+            const dataStr = e.dataTransfer.getData('application/x-entity-assignment')
+            if (!dataStr) return
 
-            const { entityId, entityName } = JSON.parse(data)
+            const data = JSON.parse(dataStr)
+            const { entityId, entityName, entityIds, primaryEntity } = data
 
-            // Check if already assigned to this layer
-            if (layerAssignments.some(a => a.entityId === entityId)) return
+            // Target ID can be from top-level entityId or primaryEntity.id
+            const targetId = entityId || primaryEntity?.id
+            const targetName = entityName || primaryEntity?.name || targetId
 
-            onAssign(layer.id, entityId)
+            if (!targetId && (!entityIds || entityIds.length === 0)) return
+
+            // Handle Bulk
+            if (entityIds && entityIds.length > 1 && onBulkAssign) {
+                onBulkAssign(layer.id, entityIds)
+                setLastDropped(`${entityIds.length} entities`)
+            } else if (targetId) {
+                // Check if already assigned to this layer
+                if (layerAssignments.some(a => a.entityId === targetId)) return
+                onAssign(layer.id, targetId)
+                setLastDropped(targetName)
+            }
 
             // Show success feedback
-            setLastDropped(entityName)
             setTimeout(() => setLastDropped(null), 2000)
         } catch (err) {
             console.error('Failed to parse dropped entity data', err)

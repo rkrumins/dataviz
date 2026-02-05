@@ -20,6 +20,46 @@ export function useEntityLoader(): UseEntityLoaderResult {
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
 
     const loadChildren = useCallback(async (parentId: string) => {
+        // Handle root loading (empty parentId)
+        if (!parentId) {
+            if (loadingNodes.has('ROOT')) return
+            setLoadingNodes(prev => new Set(prev).add('ROOT'))
+            try {
+                // Fetch root entities as defined in ontology or provider defaults
+                const roots = await provider.getNodes({
+                    entityTypes: containmentEdgeTypes.length > 0 ? undefined : ['domain', 'system'],
+                    limit: 50
+                })
+
+                if (roots.length > 0) {
+                    const nodesToAdd: LineageNode[] = roots.map(root => ({
+                        id: root.urn,
+                        type: 'generic',
+                        position: { x: 0, y: 0 },
+                        data: {
+                            ...root,
+                            label: root.displayName,
+                            type: root.entityType,
+                            urn: root.urn,
+                            childCount: root.childCount,
+                            metadata: root.properties,
+                            classifications: root.tags,
+                        }
+                    } as any))
+                    addNodes(nodesToAdd)
+                }
+            } catch (err) {
+                console.error('[EntityLoader] Failed to load roots', err)
+            } finally {
+                setLoadingNodes(prev => {
+                    const next = new Set(prev)
+                    next.delete('ROOT')
+                    return next
+                })
+            }
+            return
+        }
+
         const parentNode = nodes.find(n => n.id === parentId)
         if (!parentNode) return
 

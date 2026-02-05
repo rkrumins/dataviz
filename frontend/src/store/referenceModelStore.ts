@@ -167,6 +167,9 @@ interface ReferenceModelState {
         layerId: string,
         options?: { inheritsChildren?: boolean }
     ) => { successful: string[]; conflicts: AssignmentConflict[] }
+
+    /** Clear all manual assignments and conflicts */
+    clearAssignments: () => void
 }
 
 // ============================================
@@ -202,15 +205,28 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
             _subscribers: new Set(),
 
             setLayers: (layers) => {
-                const prevLayers = get().layers
+                const state = get()
+                const prevLayers = state.layers
                 const sequence = layers
                     .sort((a, b) => (a.sequence ?? a.order) - (b.sequence ?? b.order))
                     .map(l => l.id)
 
-                set({ layers, layerSequence: sequence })
+                // Sync instanceAssignments map from layers
+                const newInstanceMap = new Map<string, EntityAssignmentConfig>()
+                layers.forEach(layer => {
+                    layer.entityAssignments?.forEach(assignment => {
+                        newInstanceMap.set(assignment.entityId, assignment)
+                    })
+                })
+
+                set({
+                    layers,
+                    layerSequence: sequence,
+                    instanceAssignments: newInstanceMap
+                })
 
                 // Notify subscribers
-                get()._subscribers.forEach(cb => cb({
+                state._subscribers.forEach(cb => cb({
                     type: 'update',
                     layers,
                     prevLayers
@@ -536,9 +552,20 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     return layer
                 })
 
+                // Update effective assignments for immediate UI feedback
+                const newEffective = new Map(state.effectiveAssignments)
+                newEffective.set(entityId, {
+                    entityId,
+                    layerId,
+                    logicalNodeId,
+                    isInherited: false,
+                    confidence: 1.0
+                })
+
                 set({
                     instanceAssignments: newAssignments,
-                    layers: updatedLayers
+                    layers: updatedLayers,
+                    effectiveAssignments: newEffective
                 })
 
                 return { success: true, conflict: conflict ?? undefined }
@@ -567,10 +594,15 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     c => c.entityId !== entityId && c.conflictingEntityId !== entityId
                 )
 
+                // Remove from effective assignments for immediate UI feedback
+                const newEffective = new Map(state.effectiveAssignments)
+                newEffective.delete(entityId)
+
                 set({
                     instanceAssignments: newAssignments,
                     layers: updatedLayers,
-                    assignmentConflicts: updatedConflicts
+                    assignmentConflicts: updatedConflicts,
+                    effectiveAssignments: newEffective
                 })
             },
 
@@ -716,6 +748,21 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                 })
 
                 return { successful, conflicts }
+            },
+
+            clearAssignments: () => {
+                const state = get()
+                const resetLayers = state.layers.map(l => ({
+                    ...l,
+                    entityAssignments: []
+                }))
+
+                set({
+                    instanceAssignments: new Map(),
+                    assignmentConflicts: [],
+                    layers: resetLayers,
+                    effectiveAssignments: new Map()
+                })
             }
         }),
         {

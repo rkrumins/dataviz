@@ -313,6 +313,17 @@ export function WizardAssignmentTree({
     const instanceAssignments = useInstanceAssignments()
     const effectiveAssignments = useEffectiveAssignments()
     const conflicts = useAssignmentConflicts()
+
+    // NEW: derive assignments from props to ensure wizard responsiveness
+    const manualAssignmentMap = useMemo(() => {
+        const map = new Map<string, string>() // entityId -> layerId
+        layers.forEach(l => {
+            l.entityAssignments?.forEach(a => {
+                map.set(a.entityId, l.id)
+            })
+        })
+        return map
+    }, [layers])
     const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
     const removeEntityAssignment = useReferenceModelStore(s => s.removeEntityAssignment)
     const { containmentEdgeTypes: ontologyContainmentTypes } = useOntologyMetadata()
@@ -339,6 +350,13 @@ export function WizardAssignmentTree({
 
     // Lazy Loading Hook
     const { loadChildren } = useEntityLoader()
+
+    // Auto-load roots if empty
+    useEffect(() => {
+        if (nodes.length === 0) {
+            loadChildren('')
+        }
+    }, [nodes.length, loadChildren])
 
     // Auto-expand effect
     useEffect(() => {
@@ -385,8 +403,9 @@ export function WizardAssignmentTree({
 
             // Determine effective assignment (Top-Down)
             // WE NOW USE BACKEND COMPUTED ASSIGNMENTS VIA STORE
+            // BUT FALLBACK TO PROPS FOR WIZARD RESPONSIVENESS
             const effectiveAssignment = effectiveAssignments.get(nodeId)
-            const effectiveLayerId = effectiveAssignment?.layerId
+            const effectiveLayerId = effectiveAssignment?.layerId ?? manualAssignmentMap.get(nodeId)
             const isInherited = effectiveAssignment?.isInherited ?? false
 
             // Recurse children with new effective context
@@ -419,10 +438,7 @@ export function WizardAssignmentTree({
             .map(n => buildNode(n.id, 0))
             .filter((n): n is EntityTreeNode => n !== null)
             .sort((a, b) => a.name.localeCompare(b.name))
-            .map(n => buildNode(n.id, 0))
-            .filter((n): n is EntityTreeNode => n !== null)
-            .sort((a, b) => a.name.localeCompare(b.name))
-    }, [nodes, edges, containmentSet, instanceAssignments, conflicts, layers, effectiveAssignments]) // Added effectiveAssignments dependency
+    }, [nodes, edges, containmentSet, instanceAssignments, conflicts, layers, effectiveAssignments, manualAssignmentMap]) // Added manualAssignmentMap dependency
 
     // Get unique entity types for filter
     const entityTypes = useMemo(() => {
@@ -514,7 +530,16 @@ export function WizardAssignmentTree({
                 return next
             })
         } else {
-            setSelectedIds(new Set([id]))
+            setSelectedIds(prev => {
+                const next = new Set(prev)
+                if (next.size === 1 && next.has(id)) {
+                    next.delete(id)
+                } else {
+                    next.clear()
+                    next.add(id)
+                }
+                return next
+            })
         }
     }, [])
 
@@ -603,6 +628,8 @@ export function WizardAssignmentTree({
             : [node.id]
 
         e.dataTransfer.setData('application/x-entity-assignment', JSON.stringify({
+            entityId: node.id,
+            entityName: node.name,
             entityIds: idsToTransfer,
             entityCount: idsToTransfer.length,
             primaryEntity: { id: node.id, name: node.name, type: node.type }
