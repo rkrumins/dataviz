@@ -126,20 +126,55 @@ export function ReferenceModelCanvas({
   const effectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
   const computeAssignments = useReferenceModelStore(s => s.computeAssignments)
   const assignmentStatus = useReferenceModelStore(s => s.assignmentStatus)
+  const setLayers = useReferenceModelStore(s => s.setLayers)
+  const storeLayers = useReferenceModelStore(s => s.layers)
 
-  // Trigger computation when layers or nodes change (debounce?)
-  // Ideally this should be triggered by specific events, not just render.
-  // For migration, we trigger on mount or significant change.
+  // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
-    // Only compute if idle or stale? 
-    // For now, simple trigger if we have nodes and no assignments (or force refresh)
-    if (nodes.length > 0 && provider) {
-      // Debounce or check status to avoid loops
+    if (!activeView) return
+    
+    const viewLayers = activeView.layout?.referenceLayout?.layers
+    if (!viewLayers || viewLayers.length === 0) return
+
+    // Only sync if layers have changed (avoid unnecessary updates)
+    const layersChanged = 
+      storeLayers.length !== viewLayers.length ||
+      storeLayers.some((layer, idx) => {
+        const viewLayer = viewLayers[idx]
+        return !viewLayer || 
+               layer.id !== viewLayer.id ||
+               JSON.stringify(layer.entityAssignments) !== JSON.stringify(viewLayer.entityAssignments)
+      })
+
+    if (layersChanged) {
+      setLayers(viewLayers)
+    }
+  }, [activeView?.id, activeView?.layout?.referenceLayout?.layers, setLayers, storeLayers])
+
+  // Step 2: Load assignments from backend when layers are synced and nodes are available
+  useEffect(() => {
+    // Only compute if:
+    // 1. We have nodes
+    // 2. We have a provider
+    // 3. Layers are synced from view (store has layers)
+    // 4. Status is idle (not already computing)
+    // 5. We don't already have assignments OR layers have changed
+    if (nodes.length > 0 && provider && storeLayers.length > 0) {
       if (assignmentStatus === 'idle') {
-        computeAssignments(provider)
+        // Check if we need to recompute (no assignments or layers changed)
+        const hasAssignments = effectiveAssignments.size > 0
+        const shouldCompute = !hasAssignments || 
+          // Recompute if layers changed (entityAssignments might have changed)
+          storeLayers.some(layer => 
+            layer.entityAssignments && layer.entityAssignments.length > 0
+          )
+        
+        if (shouldCompute) {
+          computeAssignments(provider)
+        }
       }
     }
-  }, [nodes.length, provider, computeAssignments, assignmentStatus])
+  }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers.length, effectiveAssignments.size])
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
@@ -418,27 +453,19 @@ export function ReferenceModelCanvas({
     // Initialize layers
     sortedLayers.forEach(l => grouped.set(l.id, []))
 
-    // 1. Determine "Explicit Assignment" for every node
-    // This ignores inheritance for a moment, just checking rules/manual overrides
+    // 1. Build explicit assignments from view layers (lowest priority, used as fallback)
+    // These come from saved entityAssignments in the view configuration
     const explicitAssignments = new Map<string, string>() // nodeId -> layerId
-
-    // Config assignments
     sortedLayers.forEach(l => {
       l.entityAssignments?.forEach(a => {
         explicitAssignments.set(a.entityId, l.id)
       })
     })
 
-    // Rule assignments
+    // 2. Build rule-based assignments (fallback if no explicit assignment)
+    const ruleAssignments = new Map<string, string>() // nodeId -> layerId
     nodes.forEach(node => {
-      // If manually assigned via instanceAssignments (store), that wins
-      const instanceAssignment = instanceAssignments.get(node.id)
-      if (instanceAssignment) {
-        explicitAssignments.set(node.id, instanceAssignment.layerId)
-        return
-      }
-
-      // If already found in config, skip rules (config > rules)
+      // Skip if already has explicit assignment from view
       if (explicitAssignments.has(node.id)) return
 
       // Rule match 
@@ -452,7 +479,7 @@ export function ReferenceModelCanvas({
 
       const ruleLayerId = resolveLayerAssignment(graphNode, layerRules)
       if (ruleLayerId) {
-        explicitAssignments.set(node.id, ruleLayerId)
+        ruleAssignments.set(node.id, ruleLayerId)
       }
     })
 
@@ -470,15 +497,40 @@ export function ReferenceModelCanvas({
       if (processed.has(nodeId)) return
       processed.add(nodeId)
 
-      // Use backend-computed effective assignment if available
-      let myLayerId = effectiveAssignments.get(nodeId)?.layerId
+      // Priority order (highest to lowest):
+      // 1. effectiveAssignments (from backend computation - source of truth)
+      // 2. instanceAssignments (from store - user drag-and-drop)
+      // 3. explicitAssignments (from view layers - saved assignments)
+      // 4. ruleAssignments (from rules - pattern/tag/type matching)
+      // 5. inheritance (from parent)
 
-      // Fallback to explicit instance assignment
+      let myLayerId: string | undefined
+
+      // 1. Backend-computed effective assignment (highest priority)
+      const backendAssignment = effectiveAssignments.get(nodeId)
+      if (backendAssignment?.layerId) {
+        myLayerId = backendAssignment.layerId
+      }
+
+      // 2. Instance assignment from store (user manual assignment)
+      if (!myLayerId) {
+        const instanceAssignment = instanceAssignments.get(nodeId)
+        if (instanceAssignment) {
+          myLayerId = instanceAssignment.layerId
+        }
+      }
+
+      // 3. Explicit assignment from view layers (saved in view config)
       if (!myLayerId) {
         myLayerId = explicitAssignments.get(nodeId)
       }
 
-      // Fallback to INHERITANCE
+      // 4. Rule-based assignment
+      if (!myLayerId) {
+        myLayerId = ruleAssignments.get(nodeId)
+      }
+
+      // 5. Inheritance from parent
       if (!myLayerId && inheritedLayerId) {
         myLayerId = inheritedLayerId
       }

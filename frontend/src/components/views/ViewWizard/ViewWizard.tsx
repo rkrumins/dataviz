@@ -118,7 +118,7 @@ const LAYOUT_TYPES = [
 export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWizardProps) {
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
-    const { clearAssignments } = useReferenceModelStore()
+    const { clearAssignments, setLayers } = useReferenceModelStore()
 
     // Current step
     const [currentStep, setCurrentStep] = useState<WizardStep>('basics')
@@ -253,6 +253,11 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                     }))
                 })
                 if (result.success && result.data) {
+                    // Sync layers to referenceModelStore after saving
+                    const savedLayers = result.data.layout?.referenceLayout?.layers
+                    if (savedLayers && savedLayers.length > 0) {
+                        setLayers(savedLayers)
+                    }
                     onComplete?.(result.data)
                     onClose()
                 }
@@ -272,6 +277,11 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                     }))
                 })
                 if (result.success && result.data) {
+                    // Sync layers to referenceModelStore after saving
+                    const savedLayers = result.data.layout?.referenceLayout?.layers
+                    if (savedLayers && savedLayers.length > 0) {
+                        setLayers(savedLayers)
+                    }
                     onComplete?.(result.data)
                     onClose()
                 }
