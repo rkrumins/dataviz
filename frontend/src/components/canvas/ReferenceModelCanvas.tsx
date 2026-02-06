@@ -24,8 +24,9 @@ import {
 } from '@/providers/GraphDataProvider'
 import { useGraphProvider } from '@/providers'
 import { useEntityLoader } from '@/hooks/useEntityLoader'
-import { EdgeDetailPanel } from '../panels/EdgeDetailPanel'
+import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
 import { EditNodePanel } from '../panels/EditNodePanel'
+import { EdgeLegend } from './EdgeLegend'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useOntologyMetadata, isContainmentEdge, normalizeEdgeType } from '@/services/ontologyService'
 
@@ -211,7 +212,20 @@ export function ReferenceModelCanvas({
   // Edge details
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
   const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
+  const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
+  const { metadata: ontologyMetadata } = useOntologyMetadata()
   const selectEdge = useCanvasStore((s) => s.selectEdge)
+
+  // Generate dynamic edge filters from actual edges and schema
+  const dynamicEdgeFilters = useMemo(() => {
+    if (edges.length === 0) return edgeFilters
+    return generateEdgeTypeFilters(
+      edges,
+      relationshipTypes,
+      containmentEdgeTypes,
+      ontologyMetadata
+    )
+  }, [edges, relationshipTypes, containmentEdgeTypes, ontologyMetadata, edgeFilters])
 
   // Trace Calculation for Double Click
   // We import computeTrace dynamically or assume it's available via utility
@@ -1118,7 +1132,7 @@ export function ReferenceModelCanvas({
             <EdgeDetailPanel
               isOpen={isEdgePanelOpen}
               onClose={closeEdgePanel}
-              edgeFilters={edgeFilters}
+              edgeFilters={dynamicEdgeFilters}
               onToggleFilter={toggleEdgeFilter}
             />
           )}
@@ -1128,6 +1142,11 @@ export function ReferenceModelCanvas({
             <EditNodePanel />
           )}
         </AnimatePresence>
+
+        {/* Edge Legend - positioned above bottom, fixed position */}
+        <div className="absolute bottom-40 right-4 z-30 w-64 pointer-events-auto">
+          <EdgeLegend defaultExpanded={false} />
+        </div>
 
         {/* Layer Columns */}
         <div className="flex-1 overflow-auto relative">
@@ -1411,7 +1430,7 @@ function LayerNodeCard({
       onLayoutAnimationComplete={onAnimationComplete}
     >
       {/* Node Header */}
-      < div className="flex items-center gap-2 px-3 py-2" >
+      <div className="flex items-center gap-2 px-3 py-2">
         {hasChildren && (
           <button
             onClick={(e) => {
@@ -1458,7 +1477,7 @@ function LayerNodeCard({
             </span>
           )
         }
-      </div >
+      </div>
 
       {/* Expanded Children */}
       <AnimatePresence>
@@ -1484,7 +1503,6 @@ function LayerNodeCard({
                     onSelect={onSelect}
                     onToggle={onToggle}
                     onContextMenu={onContextMenu}
-
                     onDoubleClick={onDoubleClick}
                     traceFocusId={traceFocusId}
                     traceNodes={traceNodes}
@@ -1496,8 +1514,8 @@ function LayerNodeCard({
             </motion.div>
           )
         }
-      </AnimatePresence >
-    </motion.div >
+      </AnimatePresence>
+    </motion.div>
   )
 }
 
