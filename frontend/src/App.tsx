@@ -134,16 +134,20 @@ function App() {
 
         setNodes(uniqueNodes.map(n => ({
           id: n.urn,
-          type: n.entityType === 'schemaField' ? 'schemaField' :
-            n.entityType === 'column' ? 'column' :
+          type: n.entityType === 'schemaField' ? 'column' :
+            n.entityType === 'column' ? 'column' : // Handle legacy/mismatched types
               (n.entityType === 'dataPlatform' || n.entityType === 'system' as any) ? 'system' :
-                (n.entityType === 'dataset') ? 'dataset' : 'domain',
+                (n.entityType === 'dataset' || n.entityType === 'table' as any) ? 'dataset' :
+                  (n.entityType === 'container') ? 'container' : 'domain',
           position: { x: Math.random() * 800, y: Math.random() * 600 },
           data: {
             label: n.displayName,
             type: n.entityType as any,
             metadata: n.properties,
             childCount: n.childCount,
+            // Ensure compatibility with HierarchyCanvas
+            classifications: n.tags,
+            businessLabel: n.properties?.businessLabel as string,
             ...n
           }
         })))

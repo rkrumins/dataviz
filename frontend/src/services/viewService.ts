@@ -5,7 +5,7 @@
  * designed for easy swap to REST/GraphQL backend calls.
  */
 
-import type { ViewConfiguration, ViewLayerConfig } from '@/types/schema'
+import type { ViewConfiguration, ViewLayerConfig, FieldFilter } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
 
 // ============================================
@@ -20,6 +20,7 @@ export interface CreateViewRequest {
     layers?: ViewLayerConfig[]
     visibleEntityTypes?: string[]
     visibleRelationshipTypes?: string[]
+    fieldFilters?: FieldFilter[]
 }
 
 export interface UpdateViewRequest {
@@ -30,6 +31,7 @@ export interface UpdateViewRequest {
     layers?: ViewLayerConfig[]
     visibleEntityTypes?: string[]
     visibleRelationshipTypes?: string[]
+    fieldFilters?: FieldFilter[]
 }
 
 export interface ViewServiceResult<T> {
@@ -78,7 +80,7 @@ class ViewServiceImpl {
                 },
                 filters: {
                     entityTypeFilters: [],
-                    fieldFilters: [],
+                    fieldFilters: request.fieldFilters ?? [],
                     searchableFields: [],
                     quickFilters: []
                 },
@@ -128,6 +130,10 @@ class ViewServiceImpl {
                     ...existingView.layout,
                     type: request.layoutType ?? existingView.layout.type,
                     referenceLayout: request.layers ? { layers: request.layers } : existingView.layout.referenceLayout
+                },
+                filters: {
+                    ...existingView.filters,
+                    fieldFilters: request.fieldFilters ?? existingView.filters.fieldFilters
                 },
                 updatedAt: new Date().toISOString()
             }

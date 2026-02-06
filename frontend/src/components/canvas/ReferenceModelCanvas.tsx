@@ -821,7 +821,10 @@ export function ReferenceModelCanvas({
 
     // 2. Project Edges
     const projected: any[] = []
-    const seen = new Set<string>()
+
+    // Group edges by their VISUAL source->target pair
+    // This allows us to assign an index to each edge for parallel routing
+    const edgeGroups = new Map<string, any[]>()
 
     lineageEdges.forEach(edge => {
       // Resolve source/target to effective visible nodes
@@ -850,23 +853,46 @@ export function ReferenceModelCanvas({
           }
         }
 
-        const key = `${sourceId}->${targetId}`
-
-        if (!seen.has(key)) {
-          projected.push({
-            ...edge,
-            id: `proj-${key}-${edge.id}`,
-            source: sourceId,
-            target: targetId,
-            animated: true // Visual cue for rolled up edges?
-          })
-          seen.add(key)
-        }
+        // Group edges
+        // Key for grouping visual connections
+        const groupKey = `${sourceId}->${targetId}`
+        if (!edgeGroups.has(groupKey)) edgeGroups.set(groupKey, [])
+        edgeGroups.get(groupKey)!.push({
+          ...edge,
+          source: sourceId,
+          target: targetId,
+          // Original edge type for distinction
+          originalType: normalizeEdgeType(edge)
+        })
       }
     })
 
+    // Process groups to assign indices
+    edgeGroups.forEach((groupEdges, key) => {
+      // Deduplicate within group based on edge type
+      const distinctTypes = new Map<string, any>()
+      groupEdges.forEach(e => {
+        const typeKey = e.originalType
+        if (!distinctTypes.has(typeKey)) {
+          distinctTypes.set(typeKey, e)
+        }
+      })
+
+      const distinctEdges = Array.from(distinctTypes.values())
+      const total = distinctEdges.length
+
+      distinctEdges.forEach((edge, index) => {
+        projected.push({
+          ...edge,
+          id: `proj-${key}-${edge.originalType}`,
+          groupIndex: index,
+          groupTotal: total
+        })
+      })
+    })
+
     return projected
-  }, [lineageEdges, nodesByLayer, expandedNodes, displayMap, showLineageFlow])
+  }, [lineageEdges, nodesByLayer, expandedNodes, displayMap, showLineageFlow, traceFocusId, traceContextSet])
 
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-canvas", className)}>
@@ -1439,42 +1465,74 @@ function LineageFlowOverlay({
         const tRect = targetEl.getBoundingClientRect()
 
         // Relative coordinates
-        // Relative coordinates
         const sx = sRect.right - containerRect.left
         const sy = sRect.top + sRect.height / 2 - containerRect.top
 
-        // Target is normally on the left side of the target node
-        // BUT if we are doing same-column routing, we might want to enter from the right too?
+        // Target
         let tx = tRect.left - containerRect.left
         const ty = tRect.top + tRect.height / 2 - containerRect.top
 
         // Smart Routing Logic
         let d = ''
-        const isSameColumn = Math.abs(sRect.left - tRect.left) < 50 // Rough check if aligned column
+        const isSameColumn = Math.abs(sRect.left - tRect.left) < 50
         const isSelf = edge.source === edge.target
+
+        // Multi-edge offsetting
+        // If there are multiple edges (groupTotal > 1), we offset the control points vertically
+        // or curve magnitude to separate them.
+        const total = edge.groupTotal || 1
+        const index = edge.groupIndex || 0
+
+        // Center centered index (e.g. 0 -> -10, 1 -> 0, 2 -> 10)
+        // const offsetStep = 15
+        // const centerOffset = (index - (total - 1) / 2) * offsetStep
+
+        // Actually, for left-to-right flow, vertical offset at control points is best to separate lines
+        // But start/end points are fixed at node centers.
+        // We can slightly offset start/end Y too if nodes are tall enough?
+        // Let's stick to control point variation for "bundled" look.
+
+
+        // Vary curvature slightly for each index to fan them out?
+        // Or vertical CP offset.
+
+        // Vertical separation at the midpoint
+        const verticalSpread = 30
+        const vOffset = (index - (total - 1) / 2) * verticalSpread
 
         if (isSameColumn && !isSelf) {
           // "Bracket" routing: Right -> Right
-          // Curve out to the right and back in
-          tx = tRect.right - containerRect.left // Target right side
+          tx = tRect.right - containerRect.left
 
-          const curveDist = 40
+          const curveDist = 40 + (index * 10) // Push out further for outer lines
           const cp1x = sx + curveDist
           const cp1y = sy
-          const cp2x = tx + curveDist // Same extension roughly
+          const cp2x = tx + curveDist
           const cp2y = ty
 
           d = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
         } else {
           // Standard Left-to-Right Bezier
-          // Enhance curvature for nicer look
           const dist = Math.abs(tx - sx)
-          const curvature = Math.max(0.4, Math.min(0.8, dist / 500)) // Dynamic curvature
+          // Adjust curvature based on distance
+          const curvature = Math.max(0.4, Math.min(0.8, dist / 500))
+
           const cp1x = sx + dist * curvature
           const cp2x = tx - dist * curvature
 
-          d = `M ${sx} ${sy} C ${cp1x} ${sy}, ${cp2x} ${ty}, ${tx} ${ty}`
+          // Apply vertical offset to control points to separate the bundle
+          const cp1y = sy + vOffset
+          const cp2y = ty + vOffset
+
+          d = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
         }
+
+        // Color based on edge type or just consistent?
+        // Default blue-500 (#3b82f6). 
+        // Could map edge.originalType to different colors.
+        const color = edge.originalType === 'TRANSFORMS' ? '#3b82f6' :
+          edge.originalType === 'CONSUMES' ? '#22c55e' :
+            edge.originalType === 'PRODUCES' ? '#f59e0b' : '#3b82f6'
 
         newPaths.push(
           <g
@@ -1493,24 +1551,23 @@ function LineageFlowOverlay({
             <path
               d={d}
               fill="none"
-              stroke="#3b82f6"
+              stroke={color}
               strokeWidth="2"
               className={cn(
                 "transition-all duration-300 opacity-60 group-hover:opacity-100 group-hover:stroke-[3px]",
-                // Add flowing dashed effect if desired. 
-                // Tailwind typically needs custom animation, but we can try simple dasharray
                 "animate-flow"
               )}
               style={{
                 strokeDasharray: '8 4',
-                animation: 'dashDraw 30s linear infinite' // Slow flow
+                animation: `dashDraw ${30 + index * 5}s linear infinite` // Vary speed slightly
               }}
             />
             {/* Terminals */}
-            <circle cx={sx} cy={sy} r="3" fill="#3b82f6" className="opacity-60 group-hover:opacity-100" />
-            <circle cx={tx} cy={ty} r="3" fill="#3b82f6" className="opacity-60 group-hover:opacity-100" />
+            <circle cx={sx} cy={sy} r="3" fill={color} className="opacity-60 group-hover:opacity-100" />
+            <circle cx={tx} cy={ty} r="3" fill={color} className="opacity-60 group-hover:opacity-100" />
 
-            <title>{edge.source} → {edge.target}</title>
+            {/* Label on hover? */}
+            <title>{edge.source} → {edge.target} ({edge.originalType})</title>
           </g>
         )
       }

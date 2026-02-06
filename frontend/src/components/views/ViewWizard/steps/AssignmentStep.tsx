@@ -9,16 +9,16 @@
  */
 
 import { useMemo, useCallback, useEffect } from 'react'
-import type { CreateViewRequest } from '@/services/viewService'
 import { WizardAssignmentTree } from '../WizardAssignmentTree'
 import { LayerManager } from '../../LayerManager'
 import { useSchemaStore } from '@/store/schema'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import type { EntityAssignmentConfig } from '@/types/schema'
+import type { WizardFormData } from '../ViewWizard'
 
 interface AssignmentStepProps {
-    formData: CreateViewRequest
-    updateFormData: (updates: Partial<CreateViewRequest>) => void
+    formData: WizardFormData
+    updateFormData: (updates: Partial<WizardFormData>) => void
 }
 
 export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps) {
@@ -32,15 +32,18 @@ export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps
         }
     }, [formData.layers, setLayers])
 
-    // Get containment edge types from schema with fallback
+    // Get containment edge types from scope configuration or schema with fallback
     const containmentEdgeTypes = useMemo(() => {
+        const configured = formData.scopeEdges?.edgeTypes
+        if (configured && configured.length > 0) return configured
+
         return schema?.containmentEdgeTypes || [
             'contains', 'CONTAINS',
             'has_schema', 'HAS_SCHEMA',
             'has_dataset', 'HAS_DATASET',
             'has_column', 'HAS_COLUMN'
         ]
-    }, [schema?.containmentEdgeTypes])
+    }, [formData.scopeEdges?.edgeTypes, schema?.containmentEdgeTypes])
 
     // Handle assignment changes from tree
     const handleAssignmentChange = useCallback((entityId: string, layerId: string | null) => {

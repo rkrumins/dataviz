@@ -4,9 +4,9 @@ from ..models.graph import GraphNode, GraphEdge, EntityType, EdgeType
 
 # Configuration
 DEFAULT_CONFIG = {
-    "domainCount": 7, 
-    "appsPerDomain": 7,
-    "schemasPerApp": {"min": 10, "max": 10},
+    "domainCount": 3, 
+    "appsPerDomain": 10,
+    "schemasPerApp": {"min": 10, "max": 15},
     "assetsPerSchema": {"min": 10, "max": 50},
     "columnsPerAsset": {"min": 10, "max": 100},
     "includeDashboards": True,
@@ -45,7 +45,7 @@ def generate_urn(type_: str, parts: List[str]) -> str:
     elif type_ == 'app': prefix = 'urn:li:dataPlatform'
     elif type_ == 'container': prefix = 'urn:li:container' # Added container prefix
     elif type_ == 'asset': prefix = 'urn:li:dataset'
-    elif type_ == 'column': prefix = 'urn:li:column'
+    elif type_ == 'column': prefix = 'urn:li:schemaField' # Changed to standard schemaField
     elif type_ == 'dashboard': prefix = 'urn:li:dashboard'
     else: prefix = f'urn:li:{type_}'
     
@@ -59,7 +59,9 @@ def generate_demo_data(config: Dict[str, Any] = None) -> Tuple[List[GraphNode], 
     # Simple deterministic seed for consistency if needed, but python's random is global
     # We'll rely on pseudo-randomness.
     
+    
     domain_nodes = []
+    datasets_by_domain: Dict[str, List[GraphNode]] = {} # domain_urn -> list[asset_nodes]
     
     # Generate Domains
     for d in range(cfg["domainCount"]):
@@ -138,6 +140,9 @@ def generate_demo_data(config: Dict[str, Any] = None) -> Tuple[List[GraphNode], 
                 
                 # Pre-calculate asset count
                 asset_count = random.randint(cfg["assetsPerSchema"]["min"], cfg["assetsPerSchema"]["max"])
+                if domain_node.urn not in datasets_by_domain:
+                    datasets_by_domain[domain_node.urn] = []
+
 
                 schema_node = GraphNode(
                     urn=schema_urn,
@@ -187,6 +192,7 @@ def generate_demo_data(config: Dict[str, Any] = None) -> Tuple[List[GraphNode], 
                         }
                     )
                     nodes.append(asset_node)
+                    datasets_by_domain[domain_node.urn].append(asset_node)
                     
                     # Schema -> Asset (Containment)
                     edges.append(GraphEdge(
@@ -214,7 +220,10 @@ def generate_demo_data(config: Dict[str, Any] = None) -> Tuple[List[GraphNode], 
                         if col == 0: col_name = "id"
                         elif col == 1: col_name = f"{business_term.lower()}_id"
                         
-                        col_urn = generate_urn('column', [asset_name, col_name])
+
+                        # Construct a unique column URN using the full hierarchy
+                        # Format: platform.domain.schema.asset.column
+                        col_urn = generate_urn('column', [platform, f"{domain_name.lower()}", schema_name, asset_name, col_name])
                         data_type = random.choice(COLUMN_TYPES)
                         
                         col_node = GraphNode(
@@ -238,5 +247,60 @@ def generate_demo_data(config: Dict[str, Any] = None) -> Tuple[List[GraphNode], 
                             targetUrn=col_node.urn,
                             edgeType=EdgeType.CONTAINS
                         ))
+
+    # Generate Domain-to-Domain Lineage (Inter-domain movement)
+    for i in range(len(domain_nodes)):
+        # Randomly connect to 1-3 other domains
+        num_connections = random.randint(1, 3)
+        targets = random.sample([d for d in domain_nodes if d != domain_nodes[i]], min(num_connections, len(domain_nodes)-1))
+        
+        for target_domain in targets:
+            edges.append(GraphEdge(
+                id=f"lineage-{domain_nodes[i].urn}-{target_domain.urn}",
+                sourceUrn=domain_nodes[i].urn,
+                targetUrn=target_domain.urn,
+                edgeType=EdgeType.PRODUCES,
+                confidence=random.uniform(0.5, 0.9),
+                properties={
+                    "animated": True,
+                    "description": "Cross-domain data flow"
+                }
+            ))
+
+    # Generate Cross-Domain Dataset Lineage
+    # Pick random source domain, random target domain, ensure they are different
+    # Pick random assets from each and link them
+    total_cross_edges = 50000 # Adjust number of edges to generate
+    
+    domain_urns = list(datasets_by_domain.keys())
+    if len(domain_urns) > 1:
+        for _ in range(total_cross_edges):
+            source_domain = random.choice(domain_urns)
+            target_domain = random.choice(domain_urns)
+            
+            # Retry if same domain
+            while target_domain == source_domain:
+                target_domain = random.choice(domain_urns)
+                
+            source_assets = datasets_by_domain.get(source_domain, [])
+            target_assets = datasets_by_domain.get(target_domain, [])
+            
+            if source_assets and target_assets:
+                source_asset = random.choice(source_assets)
+                target_asset = random.choice(target_assets)
+                
+                edges.append(GraphEdge(
+                    id=f"lineage-{source_asset.urn}-{target_asset.urn}",
+                    sourceUrn=source_asset.urn,
+                    targetUrn=target_asset.urn,
+                    edgeType=EdgeType.PRODUCES,
+                    confidence=random.uniform(0.6, 0.95),
+                    properties={
+                        "animated": True,
+                        "description": "Cross-domain dependency"
+                    }
+                ))
+
+
 
     return nodes, edges

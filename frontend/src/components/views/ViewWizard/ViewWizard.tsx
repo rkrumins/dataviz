@@ -28,7 +28,7 @@ import {
 import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
 import { viewService } from '@/services/viewService'
-import type { ViewConfiguration, ViewLayerConfig } from '@/types/schema'
+import type { ViewConfiguration, ViewLayerConfig, ScopeEdgeConfig } from '@/types/schema'
 
 // Import step components
 import { BasicsStep } from './steps/BasicsStep'
@@ -49,6 +49,13 @@ export interface ViewWizardProps {
     onComplete?: (view: ViewConfiguration) => void
 }
 
+export interface ActiveFilter {
+    id: string
+    type: 'tag' | 'name' | 'property'
+    label: string
+    value: any
+}
+
 export interface WizardFormData {
     // Step 1: Basics
     name: string
@@ -62,6 +69,12 @@ export interface WizardFormData {
     // Step 3: Entities
     visibleEntityTypes: string[]
     visibleRelationshipTypes: string[]
+
+    // Advanced Filtering (New)
+    advancedFilters: ActiveFilter[]
+
+    // Hierarchy Scope (New)
+    scopeEdges?: ScopeEdgeConfig
 
     // Computed
     isValid: boolean
@@ -124,6 +137,13 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                     layers: existingView.layout.referenceLayout?.layers ?? [],
                     visibleEntityTypes: existingView.content.visibleEntityTypes,
                     visibleRelationshipTypes: existingView.content.visibleRelationshipTypes,
+                    advancedFilters: (existingView.filters.fieldFilters || []).map(f => ({
+                        id: `${f.field}-${Date.now()}-${Math.random()}`,
+                        type: f.field === 'tags' ? 'tag' : f.field === 'name' ? 'name' : 'property',
+                        label: f.field === 'tags' ? `Tag: ${f.value}` : f.field === 'name' ? `Name contains "${f.value}"` : `${f.field}=${f.value}`,
+                        value: f.value
+                    })),
+                    scopeEdges: existingView.layout.referenceLayout?.layers?.[0]?.scopeEdges, // Simplified for now, usually per layer but can be globalized
                     isValid: true
                 })
             }
@@ -214,9 +234,14 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                     description: formData.description,
                     icon: formData.icon,
                     layoutType: formData.layoutType,
-                    layers: formData.layers,
+                    layers: formData.layers.map(l => ({ ...l, scopeEdges: formData.scopeEdges })), // Apply scope to all layers
                     visibleEntityTypes: formData.visibleEntityTypes,
-                    visibleRelationshipTypes: formData.visibleRelationshipTypes
+                    visibleRelationshipTypes: formData.visibleRelationshipTypes,
+                    fieldFilters: formData.advancedFilters.map(af => ({
+                        field: af.type === 'tag' ? 'tags' : af.type === 'name' ? 'name' : af.type === 'property' ? String(af.value).split('=')[0] : 'property',
+                        operator: af.type === 'name' ? 'contains' : 'equals',
+                        value: af.type === 'property' && String(af.value).includes('=') ? String(af.value).split('=')[1] : af.value
+                    }))
                 })
                 if (result.success && result.data) {
                     onComplete?.(result.data)
@@ -228,9 +253,14 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                     description: formData.description,
                     icon: formData.icon,
                     layoutType: formData.layoutType,
-                    layers: formData.layers,
+                    layers: formData.layers.map(l => ({ ...l, scopeEdges: formData.scopeEdges })), // Apply scope to all layers
                     visibleEntityTypes: formData.visibleEntityTypes,
-                    visibleRelationshipTypes: formData.visibleRelationshipTypes
+                    visibleRelationshipTypes: formData.visibleRelationshipTypes,
+                    fieldFilters: formData.advancedFilters.map(af => ({
+                        field: af.type === 'tag' ? 'tags' : af.type === 'name' ? 'name' : af.type === 'property' ? String(af.value).split('=')[0] : 'property',
+                        operator: af.type === 'name' ? 'contains' : 'equals',
+                        value: af.type === 'property' && String(af.value).includes('=') ? String(af.value).split('=')[1] : af.value
+                    }))
                 })
                 if (result.success && result.data) {
                     onComplete?.(result.data)
@@ -462,6 +492,11 @@ function getInitialFormData(schema: ReturnType<typeof useSchemaStore.getState>['
         layers: [],
         visibleEntityTypes: schema?.entityTypes.map(e => e.id) ?? [],
         visibleRelationshipTypes: schema?.relationshipTypes.map(r => r.id) ?? [],
+        advancedFilters: [],
+        scopeEdges: {
+            edgeTypes: schema?.containmentEdgeTypes ?? [],
+            includeAll: false
+        },
         isValid: false
     }
 }

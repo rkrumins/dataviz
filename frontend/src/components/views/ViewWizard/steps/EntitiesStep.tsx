@@ -8,7 +8,7 @@
  * - Beautiful card-based selection
  */
 
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Search,
@@ -23,11 +23,14 @@ import {
     Box,
     GitBranch,
     Sparkles,
-    Info
+    Info,
+    ListTree
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
-import type { WizardFormData } from '../ViewWizard'
+import { useGraphProvider } from '@/providers/GraphProviderContext'
+import type { GraphSchemaStats, OntologyMetadata } from '@/providers/GraphDataProvider'
+import type { WizardFormData, ActiveFilter } from '../ViewWizard'
 
 // ============================================
 // Types
@@ -38,12 +41,7 @@ interface EntitiesStepProps {
     updateFormData: (updates: Partial<WizardFormData>) => void
 }
 
-interface ActiveFilter {
-    id: string
-    type: 'tag' | 'name' | 'property'
-    label: string
-    value: unknown
-}
+// interface ActiveFilter moved to ViewWizard.tsx
 
 // ============================================
 // Component
@@ -51,39 +49,114 @@ interface ActiveFilter {
 
 export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
     const schema = useSchemaStore(s => s.schema)
+    const provider = useGraphProvider()
+
+    // Dynamic metadata and stats
+    const [stats, setStats] = useState<GraphSchemaStats | null>(null)
+    const [ontology, setOntology] = useState<OntologyMetadata | null>(null)
+    const [_isLoadingStats, setIsLoadingStats] = useState(true)
+
     const [searchQuery, setSearchQuery] = useState('')
     const [showFilters, setShowFilters] = useState(false)
-    const [activeFilters, setActiveFilters] = useState<ActiveFilter[]>([])
     const [showEdgeTypes, setShowEdgeTypes] = useState(false)
+    const [showScopeConfig, setShowScopeConfig] = useState(false)
 
-    // Entity types with selection state
+    // Load dynamic data
+    useEffect(() => {
+        async function loadDynamicData() {
+            try {
+                setIsLoadingStats(true)
+                const [schemaStats, ontologyMetadata] = await Promise.all([
+                    provider.getSchemaStats(),
+                    provider.getOntologyMetadata()
+                ])
+                setStats(schemaStats)
+                setOntology(ontologyMetadata)
+
+                // Initialize scope if empty
+                if (!formData.scopeEdges?.edgeTypes.length) {
+                    updateFormData({
+                        scopeEdges: {
+                            edgeTypes: ontologyMetadata.containmentEdgeTypes,
+                            includeAll: false
+                        }
+                    })
+                }
+            } catch (error) {
+                console.error('Failed to load dynamic data', error)
+            } finally {
+                setIsLoadingStats(false)
+            }
+        }
+        loadDynamicData()
+    }, [provider])
+
+    // Entity types with selection state and real counts
     const entityTypesWithState = useMemo(() => {
-        return (schema?.entityTypes ?? []).map(et => ({
-            ...et,
-            isSelected: formData.visibleEntityTypes.includes(et.id),
-            count: 0 // Would come from introspection in real data
-        }))
-    }, [schema, formData.visibleEntityTypes])
+        const baseTypes = schema?.entityTypes ?? []
+        return baseTypes.map(et => {
+            const stat = stats?.entityTypeStats.find(s => s.id === et.id)
+            return {
+                ...et,
+                isSelected: formData.visibleEntityTypes.includes(et.id),
+                count: stat?.count ?? 0
+            }
+        })
+    }, [schema, formData.visibleEntityTypes, stats])
 
-    // Edge types with selection state
+    // Edge types with selection state and real counts
     const edgeTypesWithState = useMemo(() => {
-        return (schema?.relationshipTypes ?? []).map(rt => ({
-            ...rt,
-            isSelected: formData.visibleRelationshipTypes.includes(rt.id),
-            count: 0
-        }))
-    }, [schema, formData.visibleRelationshipTypes])
+        const baseTypes = schema?.relationshipTypes ?? []
+        return baseTypes.map(rt => {
+            const stat = stats?.edgeTypeStats.find(s => s.id === rt.id)
+            return {
+                ...rt,
+                isSelected: formData.visibleRelationshipTypes.includes(rt.id),
+                count: stat?.count ?? 0,
+                isContainment: ontology?.containmentEdgeTypes.includes(rt.id)
+            }
+        })
+    }, [schema, formData.visibleRelationshipTypes, stats, ontology])
 
-    // Filter entity types by search
+    // Filter entity types by search and advanced filters
     const filteredEntityTypes = useMemo(() => {
-        if (!searchQuery) return entityTypesWithState
-        const query = searchQuery.toLowerCase()
-        return entityTypesWithState.filter(et =>
-            et.name.toLowerCase().includes(query) ||
-            et.id.toLowerCase().includes(query) ||
-            et.pluralName.toLowerCase().includes(query)
-        )
-    }, [entityTypesWithState, searchQuery])
+        let types = entityTypesWithState
+
+        // 1. Search Query
+        if (searchQuery) {
+            const query = searchQuery.toLowerCase()
+            types = types.filter(et =>
+                et.name.toLowerCase().includes(query) ||
+                et.id.toLowerCase().includes(query) ||
+                et.pluralName.toLowerCase().includes(query)
+            )
+        }
+
+        // 2. Advanced Filters (Name, Tag, Property)
+        if (formData.advancedFilters.length > 0) {
+            formData.advancedFilters.forEach(filter => {
+                const val = String(filter.value).toLowerCase()
+                switch (filter.type) {
+                    case 'name':
+                        types = types.filter(et => et.name.toLowerCase().includes(val))
+                        break
+                    case 'tag':
+                        // In real scenario, would check if entity TYPE has this tag in schema
+                        // For now, filtering the selection list based on direct matches
+                        types = types.filter(et => et.id.toLowerCase().includes(val))
+                        break
+                    case 'property':
+                        if (val.includes('=')) {
+                            const [key] = val.split('=')
+                            types = types.filter(et => et.fields.some(f => f.id.toLowerCase() === key))
+                        }
+                        break
+                }
+            })
+        }
+
+        return types
+    }, [entityTypesWithState, searchQuery, formData.advancedFilters])
 
     // Toggle entity type
     const toggleEntityType = useCallback((typeId: string) => {
@@ -115,8 +188,38 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
 
     // Remove filter
     const removeFilter = useCallback((filterId: string) => {
-        setActiveFilters(prev => prev.filter(f => f.id !== filterId))
-    }, [])
+        updateFormData({
+            advancedFilters: formData.advancedFilters.filter(f => f.id !== filterId)
+        })
+    }, [formData.advancedFilters, updateFormData])
+
+    // Add filter
+    const addFilter = useCallback((type: ActiveFilter['type'], label: string, value: any) => {
+        const newFilter: ActiveFilter = {
+            id: `${type}-${Date.now()}`,
+            type,
+            label,
+            value
+        }
+        updateFormData({
+            advancedFilters: [...formData.advancedFilters, newFilter]
+        })
+    }, [formData.advancedFilters, updateFormData])
+
+    // Toggle scope edge
+    const toggleScopeEdge = useCallback((edgeType: string) => {
+        const current = formData.scopeEdges?.edgeTypes ?? []
+        const updated = current.includes(edgeType)
+            ? current.filter(t => t !== edgeType)
+            : [...current, edgeType]
+
+        updateFormData({
+            scopeEdges: {
+                ...(formData.scopeEdges ?? { includeAll: false }),
+                edgeTypes: updated
+            }
+        })
+    }, [formData.scopeEdges, updateFormData])
 
     // Stats
     const selectedCount = formData.visibleEntityTypes.length
@@ -166,9 +269,9 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                 >
                     <Filter className="w-5 h-5" />
                     Filters
-                    {activeFilters.length > 0 && (
+                    {formData.advancedFilters.length > 0 && (
                         <span className="ml-1 px-2 py-0.5 text-xs font-bold bg-blue-600 text-white rounded-full">
-                            {activeFilters.length}
+                            {formData.advancedFilters.length}
                         </span>
                     )}
                 </button>
@@ -202,12 +305,7 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter' && (e.target as HTMLInputElement).value) {
                                                 const value = (e.target as HTMLInputElement).value
-                                                setActiveFilters(prev => [...prev, {
-                                                    id: `name-${Date.now()}`,
-                                                    type: 'name',
-                                                    label: `Name contains "${value}"`,
-                                                    value
-                                                }])
+                                                addFilter('name', `Name contains "${value}"`, value)
                                                     ; (e.target as HTMLInputElement).value = ''
                                             }
                                         }}
@@ -221,17 +319,12 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                                     </label>
                                     <input
                                         type="text"
-                                        placeholder="e.g., source, pii"
+                                        placeholder="e.g., finance"
                                         className="w-full mt-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm"
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter' && (e.target as HTMLInputElement).value) {
                                                 const value = (e.target as HTMLInputElement).value
-                                                setActiveFilters(prev => [...prev, {
-                                                    id: `tag-${Date.now()}`,
-                                                    type: 'tag',
-                                                    label: `Tag: ${value}`,
-                                                    value
-                                                }])
+                                                addFilter('tag', `Tag: ${value}`, value)
                                                     ; (e.target as HTMLInputElement).value = ''
                                             }
                                         }}
@@ -250,12 +343,7 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter' && (e.target as HTMLInputElement).value) {
                                                 const value = (e.target as HTMLInputElement).value
-                                                setActiveFilters(prev => [...prev, {
-                                                    id: `prop-${Date.now()}`,
-                                                    type: 'property',
-                                                    label: value,
-                                                    value
-                                                }])
+                                                addFilter('property', value, value)
                                                     ; (e.target as HTMLInputElement).value = ''
                                             }
                                         }}
@@ -264,9 +352,9 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                             </div>
 
                             {/* Active Filters */}
-                            {activeFilters.length > 0 && (
+                            {formData.advancedFilters.length > 0 && (
                                 <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-200 dark:border-slate-700">
-                                    {activeFilters.map(filter => (
+                                    {formData.advancedFilters.map(filter => (
                                         <motion.span
                                             key={filter.id}
                                             initial={{ scale: 0 }}
@@ -287,7 +375,7 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                                         </motion.span>
                                     ))}
                                     <button
-                                        onClick={() => setActiveFilters([])}
+                                        onClick={() => updateFormData({ advancedFilters: [] })}
                                         className="text-xs text-slate-500 hover:text-slate-700"
                                     >
                                         Clear all
@@ -313,6 +401,19 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                 </div>
                 <div className="flex items-center gap-2">
                     <button
+                        onClick={() => setShowScopeConfig(!showScopeConfig)}
+                        className={cn(
+                            'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all',
+                            showScopeConfig
+                                ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+                                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                        )}
+                    >
+                        <ListTree className="w-4 h-4" />
+                        Hierarchy Scope
+                    </button>
+                    <span className="text-slate-300">|</span>
+                    <button
                         onClick={handleSelectAll}
                         className="text-sm text-blue-600 hover:text-blue-700 font-medium"
                     >
@@ -327,6 +428,49 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                     </button>
                 </div>
             </motion.div>
+
+            {/* Hierarchy Scope Config */}
+            <AnimatePresence>
+                {showScopeConfig && (
+                    <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="overflow-hidden bg-amber-50 dark:bg-amber-900/10 rounded-xl border border-amber-200 dark:border-amber-900/30 p-4 space-y-3"
+                    >
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-amber-800 dark:text-amber-200 font-semibold">
+                                <ListTree className="w-5 h-5" />
+                                Hierarchy Definition
+                            </div>
+                            <div className="text-xs text-amber-600 dark:text-amber-400 max-w-md text-right">
+                                Select which edge types define the parent-child relationships in this view.
+                            </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                            {edgeTypesWithState.map(edge => (
+                                <button
+                                    key={edge.id}
+                                    onClick={() => toggleScopeEdge(edge.id)}
+                                    className={cn(
+                                        'px-3 py-1.5 rounded-full text-xs font-medium border transition-all flex items-center gap-1.5',
+                                        formData.scopeEdges?.edgeTypes.includes(edge.id)
+                                            ? 'bg-amber-500 border-amber-600 text-white'
+                                            : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-amber-400'
+                                    )}
+                                >
+                                    {formData.scopeEdges?.edgeTypes.includes(edge.id) && <Check className="w-3 h-3" />}
+                                    {edge.name}
+                                    {ontology?.containmentEdgeTypes.includes(edge.id) && (
+                                        <Sparkles className="w-3 h-3 text-amber-200" />
+                                    )}
+                                </button>
+                            ))}
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
 
             {/* Entity Types Grid */}
             <motion.div
@@ -343,7 +487,7 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                         transition={{ delay: index * 0.02 }}
                         onClick={() => toggleEntityType(entityType.id)}
                         className={cn(
-                            'relative p-4 rounded-xl border-2 text-left transition-all',
+                            'relative p-4 rounded-xl border-2 text-left transition-all group',
                             entityType.isSelected
                                 ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
                                 : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 bg-white dark:bg-slate-800'
@@ -360,18 +504,34 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                             </motion.div>
                         )}
 
-                        <div
-                            className="w-10 h-10 rounded-lg flex items-center justify-center mb-2"
-                            style={{ backgroundColor: `${entityType.visual.color}20` }}
-                        >
-                            <Box className="w-5 h-5" style={{ color: entityType.visual.color }} />
+                        <div className="flex items-start justify-between mb-2">
+                            <div
+                                className="w-10 h-10 rounded-lg flex items-center justify-center bg-white dark:bg-slate-700 shadow-sm border border-slate-100 dark:border-slate-600 group-hover:scale-110 transition-transform"
+                                style={{ color: entityType.visual.color }}
+                            >
+                                <Box className="w-5 h-5" />
+                            </div>
+
+                            {entityType.count > 0 && (
+                                <span className="px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-700 text-[10px] font-bold text-slate-500 dark:text-slate-400">
+                                    {entityType.count.toLocaleString()}
+                                </span>
+                            )}
                         </div>
-                        <p className="font-medium text-sm text-slate-800 dark:text-slate-200 truncate">
+
+                        <p className="font-bold text-sm text-slate-800 dark:text-slate-200 truncate">
                             {entityType.name}
                         </p>
-                        <p className="text-xs text-slate-400 truncate">
-                            {entityType.pluralName}
+                        <p className="text-[10px] text-slate-400 truncate uppercase tracking-wider font-semibold">
+                            {entityType.id}
                         </p>
+
+                        {/* Intelligence: Recommended logic */}
+                        {ontology?.rootEntityTypes.includes(entityType.id) && (
+                            <div className="mt-2 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 text-[9px] font-bold uppercase">
+                                <Sparkles className="w-2.5 h-2.5" /> Root
+                            </div>
+                        )}
                     </motion.button>
                 ))}
             </motion.div>
@@ -421,16 +581,24 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                                         key={edgeType.id}
                                         onClick={() => toggleEdgeType(edgeType.id)}
                                         className={cn(
-                                            'p-3 rounded-lg border text-left transition-all flex items-center gap-2',
+                                            'p-3 rounded-lg border text-left transition-all flex items-center gap-2 group',
                                             edgeType.isSelected
                                                 ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
                                                 : 'border-slate-200 dark:border-slate-700 hover:border-slate-300'
                                         )}
                                     >
-                                        {edgeType.isSelected && <Check className="w-4 h-4 text-blue-500" />}
-                                        <span className="text-sm font-medium text-slate-700 dark:text-slate-300 truncate">
+                                        <div className={cn(
+                                            "w-2 h-2 rounded-full",
+                                            edgeType.isSelected ? "bg-blue-500" : "bg-slate-300"
+                                        )} />
+                                        <span className="text-sm font-medium text-slate-700 dark:text-slate-300 truncate flex-1">
                                             {edgeType.name}
                                         </span>
+                                        {edgeType.count > 0 && (
+                                            <span className="text-[10px] text-slate-400 font-bold group-hover:text-blue-500">
+                                                {edgeType.count}
+                                            </span>
+                                        )}
                                     </button>
                                 ))}
                             </div>

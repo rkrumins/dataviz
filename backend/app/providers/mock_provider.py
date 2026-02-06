@@ -23,6 +23,8 @@ class MockGraphProvider(GraphDataProvider):
         self._children_map: Dict[str, List[str]] = {} # parent_urn -> list[child_urn]
         self._parent_map: Dict[str, str] = {} # child_urn -> parent_urn
         
+        self._stats_cache = None
+        
         self._initialize_data()
 
     def _paginate(self, items: List[Any], offset: int, limit: int) -> List[Any]:
@@ -56,6 +58,9 @@ class MockGraphProvider(GraphDataProvider):
             if edge.target_urn not in self._edges_by_target:
                 self._edges_by_target[edge.target_urn] = []
             self._edges_by_target[edge.target_urn].append(edge)
+
+        # Invalidate stats cache
+        self._stats_cache = None
 
         # 2. Persist to Disk
         data = {
@@ -404,6 +409,11 @@ class MockGraphProvider(GraphDataProvider):
         )
 
     async def get_stats(self) -> Dict[str, Any]:
+        # Return cached stats if available
+        if self._stats_cache:
+            return self._stats_cache
+
+        # Calculate and cache
         type_counts = {}
         for node in self._nodes.values():
             t = node.entity_type
@@ -414,12 +424,13 @@ class MockGraphProvider(GraphDataProvider):
             t = edge.edge_type
             edge_type_counts[t] = edge_type_counts.get(t, 0) + 1
             
-        return {
+        self._stats_cache = {
             "nodeCount": len(self._nodes),
             "edgeCount": len(self._edges),
             "entityTypeCounts": type_counts,
             "edgeTypeCounts": edge_type_counts
         }
+        return self._stats_cache
 
     async def get_distinct_values(self, property_name: str) -> List[Any]:
         values = set()

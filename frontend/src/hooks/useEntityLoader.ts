@@ -80,10 +80,13 @@ export function useEntityLoader(): UseEntityLoaderResult {
                             data: {
                                 ...child,
                                 label: child.displayName,
-                                type: child.entityType, // Critical for rendering
+                                type: child.entityType === 'schemaField' ? 'column' : child.entityType, // Critical for rendering
                                 urn: child.urn,
                                 childCount: child.childCount,
                                 metadata: child.properties,
+                                // Correctly map tags to classifications for hierarchy view
+                                classifications: child.tags,
+                                businessLabel: child.properties?.businessLabel,
                             }
                         } as any)
                         newIds.add(child.urn)
