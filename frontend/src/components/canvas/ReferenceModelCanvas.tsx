@@ -24,11 +24,23 @@ import {
 } from '@/providers/GraphDataProvider'
 import { useGraphProvider } from '@/providers'
 import { useEntityLoader } from '@/hooks/useEntityLoader'
+import { useAggregatedLineage, aggregatedEdgeToFlowEdge } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
 import { EditNodePanel } from '../panels/EditNodePanel'
+import { EntityCreationPanel } from '../panels/EntityCreationPanel'
 import { EdgeLegend } from './EdgeLegend'
+import { TraceToolbar } from './TraceToolbar'
+import { useUnifiedTrace, useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useOntologyMetadata, isContainmentEdge, normalizeEdgeType } from '@/services/ontologyService'
+
+// UX-first interaction components
+import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
+import { InlineNodeEditor } from './InlineNodeEditor'
+import { QuickCreateNode } from './QuickCreateNode'
+import { CommandPalette } from './CommandPalette'
+import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
+import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
@@ -121,6 +133,35 @@ export function ReferenceModelCanvas({
   const updateView = useSchemaStore((s) => s.updateView)
   const provider = useGraphProvider()
   const { containmentEdgeTypes, isContainmentEdge } = useOntologyMetadata()
+  
+  // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
+  const interactions = useCanvasInteractions({
+    onTraceNode: (nodeId) => setTraceFocusId(nodeId),
+    onNodeCreated: (nodeId) => selectNode(nodeId),
+    layers: layers,
+    onMoveToLayer: (nodeId, layerId) => {
+      // Implementation handled by the existing moveToLayer function
+    },
+  })
+
+  // Keyboard shortcuts
+  useCanvasKeyboard({
+    enabled: true,
+    handlers: interactions.keyboardHandlers,
+  })
+  
+  // Aggregated lineage for progressive edge disclosure
+  const {
+    aggregatedEdges,
+    fetchAggregated,
+    expandEdge: expandAggregatedEdge,
+    collapseEdge: collapseAggregatedEdge,
+    isExpanded: isAggregatedEdgeExpanded,
+    granularity: lineageGranularity,
+    setGranularity: setLineageGranularity,
+    getEdgeCount,
+    getEdgeTypes,
+  } = useAggregatedLineage({ granularity: 'table' })
 
   // Instance-level assignments from store (user drag-and-drop)
   const instanceAssignments = useInstanceAssignments()
@@ -180,6 +221,11 @@ export function ReferenceModelCanvas({
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
   const searchInputRef = useRef<HTMLInputElement>(null)
+  
+  // Entity creation state
+  const [isCreatingEntity, setIsCreatingEntity] = useState(false)
+  const [creationParentId, setCreationParentId] = useState<string | null>(null)
+  const [creationLayerId, setCreationLayerId] = useState<string | null>(null)
 
   // Trace / Focus State
   const [traceFocusId, setTraceFocusId] = useState<string | null>(null)
@@ -234,8 +280,25 @@ export function ReferenceModelCanvas({
   // Actually, we can assume the user meant "computeTrace" is importable.
   // Checking previous file view: "export function computeTrace" exists in hooks/useLineageExploration.ts
 
-  const handleDoubleClick = useCallback(async (nodeId: string) => {
-    // Toggle trace off if clicking the same node
+  const handleDoubleClick = useCallback(async (nodeId: string, event?: React.MouseEvent) => {
+    // UX-first: Double-click = inline edit (modern approach)
+    // Use Shift+Double-click for trace (power user feature)
+    if (event && !event.shiftKey) {
+      // Find the node element to get its position
+      const element = document.getElementById(`layer-node-${nodeId}`)
+      if (element) {
+        const rect = element.getBoundingClientRect()
+        const targetNode = nodes.find(n => n.id === nodeId)
+        interactions.startInlineEdit(
+          nodeId,
+          (targetNode?.data?.label as string) || nodeId,
+          { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+        )
+        return
+      }
+    }
+    
+    // TRACE MODE: Toggle trace off if clicking the same node
     if (traceFocusId === nodeId) {
       setTraceFocusId(null)
       setTraceNodes(new Set())
@@ -435,6 +498,21 @@ export function ReferenceModelCanvas({
 
     return { nodeMap: nMap, childMap: cMap, parentMap: pMap }
   }, [nodes, edges, containmentEdgeTypes])
+
+  // Fetch aggregated edges when visible nodes change
+  useEffect(() => {
+    if (showLineageFlow && nodes.length > 0) {
+      // Get top-level container URNs for aggregation
+      const containerUrns = nodes
+        .filter(n => !parentMap.has(n.id) || !expandedNodes.has(parentMap.get(n.id) || ''))
+        .map(n => (n.data?.urn as string) || n.id)
+        .filter(Boolean)
+      
+      if (containerUrns.length > 0 && containerUrns.length < 500) {
+        fetchAggregated(containerUrns)
+      }
+    }
+  }, [nodes.length, showLineageFlow, fetchAggregated, parentMap, expandedNodes])
 
   // Build layer assignment rules
   const layerRules = useMemo<LayerAssignmentRule[]>(() => {
@@ -748,6 +826,12 @@ export function ReferenceModelCanvas({
     setContextMenu(null)
   }, [contextMenu, activeView, displayMap, updateView])
 
+  // Handler for adding child entities
+  const handleAddChildEntity = useCallback((parentId: string) => {
+    setCreationParentId(parentId)
+    setIsCreatingEntity(true)
+  }, [])
+  
   // Toggle node expansion with Lazy Loading
   const { loadChildren } = useEntityLoader()
 
@@ -839,10 +923,43 @@ export function ReferenceModelCanvas({
   const lineageEdges = useMemo(() => {
     if (!showLineageFlow) return []
     // Filter out containment edges
-    return edges.filter(edge => {
+    const regularEdges = edges.filter(edge => {
       return !isContainmentEdge(normalizeEdgeType(edge))
     })
-  }, [edges, showLineageFlow])
+    
+    // Add aggregated edges from the hook
+    const aggEdges = Array.from(aggregatedEdges.values())
+      .filter(e => e.state === 'collapsed')
+      .map(e => ({
+        id: e.aggregated.id,
+        source: e.aggregated.sourceUrn,
+        target: e.aggregated.targetUrn,
+        data: {
+          edgeType: 'AGGREGATED',
+          relationship: 'aggregated',
+          isAggregated: true,
+          edgeCount: e.aggregated.edgeCount,
+          edgeTypes: e.aggregated.edgeTypes,
+          confidence: e.aggregated.confidence,
+        }
+      }))
+    
+    // Add expanded detailed edges
+    const expandedDetailedEdges = Array.from(aggregatedEdges.values())
+      .filter(e => e.state === 'expanded')
+      .flatMap(e => e.detailedEdges.map(de => ({
+        id: de.id,
+        source: de.sourceUrn,
+        target: de.targetUrn,
+        data: {
+          edgeType: de.edgeType,
+          relationship: de.edgeType,
+          confidence: de.confidence,
+        }
+      })))
+    
+    return [...regularEdges, ...aggEdges, ...expandedDetailedEdges]
+  }, [edges, showLineageFlow, aggregatedEdges, isContainmentEdge])
 
   // Lineage Roll-up: Project edges to visible ancestors
   const visibleLineageEdges = useMemo(() => {
@@ -982,145 +1099,206 @@ export function ReferenceModelCanvas({
   }, [lineageEdges, nodesByLayer, expandedNodes, displayMap, showLineageFlow, traceFocusId, traceContextSet])
 
   return (
-    <div className={cn("h-full w-full flex flex-col overflow-hidden bg-canvas", className)}>
-      {/* Header */}
-      <div className="flex-shrink-0 bg-canvas-elevated/95 backdrop-blur border-b border-glass-border px-6 py-3">
-        <div className="flex items-center gap-4">
-          <h2 className="text-lg font-display font-semibold text-ink">Reference Model</h2>
-          <span className="px-2 py-1 rounded-md bg-accent-lineage/10 text-accent-lineage text-xs font-medium">
-            Data Flow View
-          </span>
+    <div className={cn("h-full w-full flex flex-col overflow-hidden bg-gradient-to-br from-canvas via-canvas to-canvas-elevated/30", className)}>
+      {/* Header - Modern glass morphism style */}
+      <div className="flex-shrink-0 bg-gradient-to-r from-canvas-elevated/90 via-canvas-elevated/95 to-canvas-elevated/90 backdrop-blur-xl border-b border-white/[0.06] px-6 py-3 relative">
+        {/* Subtle gradient overlay */}
+        <div className="absolute inset-0 bg-gradient-to-r from-accent-lineage/[0.02] via-transparent to-purple-500/[0.02] pointer-events-none" />
+        
+        <div className="flex items-center gap-4 relative">
+          {/* Title with icon */}
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-accent-lineage/20 to-purple-500/20 flex items-center justify-center shadow-lg shadow-accent-lineage/10">
+              <LucideIcons.Network className="w-5 h-5 text-accent-lineage" />
+            </div>
+            <div>
+              <h2 className="text-base font-display font-semibold text-ink tracking-tight">Reference Model</h2>
+              <p className="text-[10px] text-ink-muted/60 flex items-center gap-1.5">
+                <LucideIcons.ArrowRight className="w-3 h-3" />
+                Data Flow View
+              </p>
+            </div>
+          </div>
+          
           <div className="flex-1" />
 
-          {/* Search */}
-          <div className="relative">
-            <LucideIcons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
-            <input
-              ref={searchInputRef}
-              type="text"
-              placeholder="Search... (⌘F)"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="input pl-9 pr-8 py-1.5 w-56 text-sm"
-            />
-            {searchQuery && (
-              <button
-                onClick={() => setSearchQuery('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink"
-              >
-                <LucideIcons.X className="w-4 h-4" />
-              </button>
-            )}
+          {/* Search - Modern glass input */}
+          <div className="relative group">
+            <div className="absolute inset-0 bg-gradient-to-r from-accent-lineage/10 to-purple-500/10 rounded-xl opacity-0 group-focus-within:opacity-100 blur-xl transition-opacity" />
+            <div className="relative">
+              <LucideIcons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted/50 group-focus-within:text-accent-lineage transition-colors" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                placeholder="Search entities..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-52 pl-9 pr-8 py-2 rounded-xl bg-white/[0.04] border border-white/[0.08] text-sm text-ink placeholder:text-ink-muted/40 focus:outline-none focus:border-accent-lineage/40 focus:bg-white/[0.06] transition-all"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-lg hover:bg-white/10 text-ink-muted hover:text-ink transition-all"
+                >
+                  <LucideIcons.X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
           </div>
 
-          {/* Lineage Flow Toggle */}
+          {/* Divider */}
+          <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
+
+          {/* Lineage Flow Toggle - Modern pill button */}
           <button
             onClick={() => setShowLineageFlow(!showLineageFlow)}
             className={cn(
-              "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all",
+              "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
               showLineageFlow
-                ? "bg-accent-lineage/10 text-accent-lineage"
-                : "bg-black/5 dark:bg-white/10 text-ink-muted"
+                ? "bg-gradient-to-r from-accent-lineage/20 to-accent-lineage/10 text-accent-lineage shadow-lg shadow-accent-lineage/20 border border-accent-lineage/30"
+                : "bg-white/[0.04] border border-white/[0.08] text-ink-muted hover:bg-white/[0.08] hover:text-ink"
             )}
           >
-            <LucideIcons.GitBranch className="w-4 h-4" />
-            {showLineageFlow ? 'Flow On' : 'Flow Off'}
+            <motion.div
+              animate={{ rotate: showLineageFlow ? 0 : -180 }}
+              transition={{ duration: 0.3 }}
+            >
+              <LucideIcons.GitBranch className="w-4 h-4" />
+            </motion.div>
+            <span>{showLineageFlow ? 'Flow Active' : 'Show Flow'}</span>
+            <div className={cn(
+              "w-2 h-2 rounded-full transition-colors duration-300",
+              showLineageFlow ? "bg-green-400 shadow-lg shadow-green-400/50" : "bg-ink-muted/30"
+            )} />
+          </button>
+          
+          {/* Granularity Selector - Modern dropdown */}
+          <AnimatePresence>
+            {showLineageFlow && (
+              <motion.div
+                initial={{ opacity: 0, width: 0 }}
+                animate={{ opacity: 1, width: 'auto' }}
+                exit={{ opacity: 0, width: 0 }}
+                className="overflow-hidden"
+              >
+                <select
+                  value={lineageGranularity}
+                  onChange={(e) => setLineageGranularity(e.target.value as any)}
+                  className="px-3 py-2 rounded-xl text-xs font-medium bg-white/[0.04] border border-white/[0.08] text-ink cursor-pointer hover:bg-white/[0.08] focus:outline-none focus:border-accent-lineage/40 transition-all appearance-none pr-8 bg-no-repeat bg-right"
+                  style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%239ca3af'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E")`, backgroundSize: '16px', backgroundPosition: 'right 8px center' }}
+                >
+                  <option value="column">Column Level</option>
+                  <option value="table">Table Level</option>
+                  <option value="schema">Schema Level</option>
+                  <option value="system">System Level</option>
+                  <option value="domain">Domain Level</option>
+                </select>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Divider */}
+          <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
+          
+          {/* Add Entity Button - Accent gradient */}
+          <button
+            onClick={() => {
+              setIsCreatingEntity(true)
+              setCreationParentId(null)
+              setCreationLayerId(null)
+            }}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-gradient-to-r from-green-500/20 to-emerald-500/10 text-green-400 border border-green-500/30 hover:from-green-500/30 hover:to-emerald-500/20 hover:shadow-lg hover:shadow-green-500/20 transition-all duration-300 hover:scale-[1.02] active:scale-[0.98]"
+          >
+            <LucideIcons.Plus className="w-4 h-4" />
+            <span>Add Entity</span>
           </button>
 
-          <div className="flex items-center gap-1">
-            <button onClick={expandAll} className="btn btn-ghost btn-sm" title="Expand All">
+          {/* Expand/Collapse - Icon buttons */}
+          <div className="flex items-center gap-1 p-1 rounded-xl bg-white/[0.03] border border-white/[0.06]">
+            <button 
+              onClick={expandAll} 
+              className="p-1.5 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all" 
+              title="Expand All"
+            >
               <LucideIcons.ChevronsDownUp className="w-4 h-4 rotate-180" />
             </button>
-            <button onClick={collapseAll} className="btn btn-ghost btn-sm" title="Collapse All">
+            <div className="w-px h-4 bg-white/[0.08]" />
+            <button 
+              onClick={collapseAll} 
+              className="p-1.5 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all" 
+              title="Collapse All"
+            >
               <LucideIcons.ChevronsDownUp className="w-4 h-4" />
             </button>
           </div>
-
-          <div className="flex items-center gap-2 text-sm text-ink-muted">
-            <LucideIcons.ArrowRight className="w-4 h-4" />
-            <span>Data Flow</span>
-          </div>
         </div>
 
-        {/* Search Results */}
-        {searchResults.length > 0 && (
-          <div className="mt-3 flex items-center gap-2 flex-wrap">
-            <span className="text-xs text-ink-muted">{searchResults.length} results:</span>
-            {searchResults.slice(0, 5).map((node) => (
-              <button
-                key={node.id}
-                onClick={() => {
-                  selectNode(node.id)
-                  setExpandedNodes((prev) => new Set([...prev, node.id]))
-                }}
-                className="px-2 py-1 rounded-md bg-accent-lineage/10 text-accent-lineage text-xs hover:bg-accent-lineage/20"
-              >
-                {node.name}
-              </button>
-            ))}
-            {searchResults.length > 5 && (
-              <span className="text-xs text-ink-muted">+{searchResults.length - 5} more</span>
-            )}
-          </div>
-        )}
+        {/* Search Results - Modern pill results */}
+        <AnimatePresence>
+          {searchResults.length > 0 && (
+            <motion.div 
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mt-3 flex items-center gap-2 flex-wrap relative"
+            >
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/20">
+                <LucideIcons.Search className="w-3.5 h-3.5 text-amber-500" />
+                <span className="text-xs font-medium text-amber-500">{searchResults.length} found</span>
+              </div>
+              {searchResults.slice(0, 5).map((node, idx) => (
+                <motion.button
+                  key={node.id}
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ delay: idx * 0.05 }}
+                  onClick={() => {
+                    selectNode(node.id)
+                    setExpandedNodes((prev) => new Set([...prev, node.id]))
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-white/[0.04] border border-white/[0.08] text-ink text-xs font-medium hover:bg-accent-lineage/15 hover:border-accent-lineage/30 hover:text-accent-lineage transition-all duration-200 hover:shadow-lg hover:shadow-accent-lineage/10"
+                >
+                  {node.name}
+                </motion.button>
+              ))}
+              {searchResults.length > 5 && (
+                <span className="px-2 py-1 text-xs text-ink-muted/60">+{searchResults.length - 5} more</span>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-        {/* Trace Toolbar */}
+        {/* Trace Toolbar - Using unified TraceToolbar component */}
         <AnimatePresence>
           {traceFocusId && (
-            <motion.div
-              initial={{ y: -20, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
-              exit={{ y: -20, opacity: 0 }}
-              className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2 rounded-full glass-panel border border-accent-lineage/30 shadow-lg shadow-accent-lineage/10"
-            >
-              <div className="flex items-center gap-2 text-sm font-medium text-ink">
-                <span className="w-2 h-2 rounded-full bg-accent-lineage animate-pulse" />
-                <span>Tracing:</span>
-                <span className="font-bold text-accent-lineage">
-                  {displayMap.get(traceFocusId)?.name || 'Unknown Node'}
-                </span>
-              </div>
-
-              <div className="flex items-center gap-1 bg-black/5 dark:bg-white/5 rounded-lg p-0.5">
-                <button
-                  onClick={() => setShowUpstream(!showUpstream)}
-                  className={cn(
-                    "p-1.5 rounded-md transition-all text-xs font-medium flex items-center gap-1",
-                    showUpstream ? "bg-accent-lineage text-white shadow-sm" : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
-                  )}
-                  title="Toggle Upstream"
-                >
-                  <LucideIcons.ArrowLeft className="w-3.5 h-3.5" />
-                  {traceUpstreamNodes.size}
-                </button>
-                <button
-                  onClick={() => setShowDownstream(!showDownstream)}
-                  className={cn(
-                    "p-1.5 rounded-md transition-all text-xs font-medium flex items-center gap-1",
-                    showDownstream ? "bg-accent-lineage text-white shadow-sm" : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
-                  )}
-                  title="Toggle Downstream"
-                >
-                  {traceDownstreamNodes.size}
-                  <LucideIcons.ArrowRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              <div className="h-4 w-[1px] bg-glass-border" />
-              <button
-                onClick={() => {
-                  setTraceFocusId(null)
-                  setTraceNodes(new Set())
-                  setTraceUpstreamNodes(new Set())
-                  setTraceDownstreamNodes(new Set())
-                  setExpandedNodes(new Set())
-                }}
-                className="text-xs font-semibold text-ink-muted hover:text-ink flex items-center gap-1 transition-colors"
-              >
-                <LucideIcons.X className="w-3.5 h-3.5" />
-                Exit Trace
-              </button>
-            </motion.div>
+            <TraceToolbar
+              focusNodeName={displayMap.get(traceFocusId)?.name || 'Unknown Node'}
+              upstreamCount={traceUpstreamNodes.size}
+              downstreamCount={traceDownstreamNodes.size}
+              showUpstream={showUpstream}
+              showDownstream={showDownstream}
+              onToggleUpstream={() => setShowUpstream(!showUpstream)}
+              onToggleDownstream={() => setShowDownstream(!showDownstream)}
+              onExitTrace={() => {
+                setTraceFocusId(null)
+                setTraceNodes(new Set())
+                setTraceUpstreamNodes(new Set())
+                setTraceDownstreamNodes(new Set())
+                setExpandedNodes(new Set())
+              }}
+              config={{
+                upstreamDepth: 5,
+                downstreamDepth: 5,
+                includeColumnLineage: true,
+                autoExpandAncestors: true,
+                pathOnly: false,
+              }}
+              onConfigChange={(newConfig) => {
+                // Could re-trigger trace with new config
+                console.log('Config changed:', newConfig)
+              }}
+              position="floating"
+            />
           )}
         </AnimatePresence>
       </div>
@@ -1141,6 +1319,24 @@ export function ReferenceModelCanvas({
           {selectedNodeId && (
             <EditNodePanel />
           )}
+          
+          {/* Entity Creation Panel */}
+          <EntityCreationPanel
+            isOpen={isCreatingEntity}
+            onClose={() => {
+              setIsCreatingEntity(false)
+              setCreationParentId(null)
+              setCreationLayerId(null)
+            }}
+            parentId={creationParentId}
+            layerId={creationLayerId}
+            onEntityCreated={(nodeId, parentUrn) => {
+              // Auto-expand parent if a child was created
+              if (parentUrn) {
+                setExpandedNodes(prev => new Set([...prev, parentUrn]))
+              }
+            }}
+          />
         </AnimatePresence>
 
         {/* Edge Legend - positioned above bottom, fixed position */}
@@ -1149,7 +1345,7 @@ export function ReferenceModelCanvas({
         </div>
 
         {/* Layer Columns */}
-        <div className="flex-1 overflow-auto relative">
+        <div className="flex-1 overflow-auto relative scroll-smooth">
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them (z-index managed in component to 0, cols should be higher) */}
           {showLineageFlow && (
             <LineageFlowOverlay
@@ -1163,7 +1359,7 @@ export function ReferenceModelCanvas({
             />
           )}
 
-          <div className="flex h-full min-h-0 relative z-10">
+          <div className="flex h-full min-h-0 relative z-10 divide-x divide-glass-border">
             {sortedLayers.map((layer) => (
               <LayerColumn
                 key={layer.id}
@@ -1177,7 +1373,12 @@ export function ReferenceModelCanvas({
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
                 onDoubleClick={handleDoubleClick}
-
+                onAddChild={handleAddChildEntity}
+                onAddToLayer={(layerId) => {
+                  setCreationLayerId(layerId)
+                  setCreationParentId(null)
+                  setIsCreatingEntity(true)
+                }}
                 traceFocusId={traceFocusId}
                 traceNodes={traceNodes}
                 traceContextSet={traceContextSet}
@@ -1186,7 +1387,7 @@ export function ReferenceModelCanvas({
             ))}
           </div>
 
-          {/* Context Menu */}
+          {/* Legacy Context Menu (kept for move-to-layer) */}
           {contextMenu && (
             <div
               className="fixed z-50 min-w-[160px] glass-panel rounded-lg shadow-xl overflow-hidden py-1 border border-glass-border"
@@ -1208,10 +1409,64 @@ export function ReferenceModelCanvas({
             </div>
           )}
 
-
-
         </div>
       </div>
+      
+      {/* === UX-FIRST INTERACTION COMPONENTS === */}
+      
+      {/* Modern Context Menu - Full CRUD operations */}
+      <CanvasContextMenu
+        isOpen={interactions.state.contextMenu.isOpen}
+        position={interactions.state.contextMenu.position}
+        target={interactions.state.contextMenu.target}
+        onClose={interactions.closeContextMenu}
+        onEditNode={interactions.editNode}
+        onDuplicateNode={interactions.duplicateNode}
+        onDeleteNode={interactions.deleteNode}
+        onCreateChild={interactions.createChild}
+        onTraceNode={(id) => setTraceFocusId(id)}
+        onCopyUrn={interactions.copyUrn}
+        onEditEdge={interactions.editEdge}
+        onDeleteEdge={interactions.deleteEdge}
+        onReverseEdge={interactions.reverseEdge}
+        onCreateNode={(pos) => interactions.openQuickCreate(pos)}
+        onSelectAll={interactions.selectAll}
+        layers={sortedLayers}
+        onMoveToLayer={(nodeId, layerId) => {
+          setContextMenu({ x: 0, y: 0, nodeId })
+          moveToLayer(layerId)
+        }}
+      />
+      
+      {/* Inline Node Editor - Double-click to edit names */}
+      <InlineNodeEditor
+        nodeId={interactions.state.inlineEdit.nodeId}
+        value={interactions.state.inlineEdit.value}
+        position={interactions.state.inlineEdit.position}
+        onSave={interactions.saveInlineEdit}
+        onCancel={interactions.cancelInlineEdit}
+      />
+      
+      {/* Quick Create - Press 'N' or use context menu */}
+      <QuickCreateNode
+        isOpen={interactions.state.quickCreate.isOpen}
+        position={interactions.state.quickCreate.position}
+        parentUrn={interactions.state.quickCreate.parentUrn}
+        onClose={interactions.closeQuickCreate}
+        onCreated={(nodeId) => selectNode(nodeId)}
+        variant="centered"
+      />
+      
+      {/* Command Palette - Press Cmd+K */}
+      <CommandPalette
+        isOpen={interactions.state.commandPalette.isOpen}
+        onClose={interactions.closeCommandPalette}
+        onCreateEntity={(typeId) => {
+          interactions.closeCommandPalette()
+          interactions.openQuickCreate({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
+        }}
+        onSelectEntity={(entityId) => selectNode(entityId)}
+      />
     </div>
   )
 }
@@ -1221,6 +1476,17 @@ export function ReferenceModelCanvas({
 // Use memo inside component.
 
 // ... (Rest of file)
+
+// ============================================
+// FLAT TREE NODE ITEM - Single row in the flat tree
+// ============================================
+
+interface FlatTreeNode {
+  node: HierarchyNode
+  depth: number
+  isLast: boolean
+  parentIsLast: boolean[]  // Track which parents are "last" for proper tree lines
+}
 
 interface LayerColumnProps {
   layer: ViewLayerConfig
@@ -1232,12 +1498,15 @@ interface LayerColumnProps {
   onSelect: (id: string) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
-  onDoubleClick: (id: string) => void
+  onDoubleClick: (id: string, event?: React.MouseEvent) => void
+  onAddChild?: (parentId: string) => void
+  onAddToLayer?: (layerId: string) => void
   traceFocusId: string | null
   traceNodes: Set<string>
   traceContextSet: Set<string>
   onAnimationComplete?: () => void
-  isDimmed?: boolean // Computed internally or passed? Computed is better.
+  onFocusNode?: (nodeId: string | null) => void
+  focusedNodeId?: string | null
 }
 
 function LayerColumn({
@@ -1251,172 +1520,459 @@ function LayerColumn({
   onToggle,
   onContextMenu,
   onDoubleClick,
+  onAddChild,
+  onAddToLayer,
   traceFocusId,
   traceNodes,
   traceContextSet,
-  onAnimationComplete
-}: LayerColumnProps) { // No longer LayerColumnProps? Yes it is.
+  onAnimationComplete,
+  onFocusNode,
+  focusedNodeId
+}: LayerColumnProps) {
+  // Local focus state for drilling into subtrees
+  const [localFocusId, setLocalFocusId] = useState<string | null>(null)
+  const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
+  const [isCollapsed, setIsCollapsed] = useState(false)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  
+  // Build flat tree from hierarchy (visible items only)
+  const flatTree = useMemo(() => {
+    const result: FlatTreeNode[] = []
+    
+    // If focused on a specific node, only show that subtree
+    const rootNodes = localFocusId 
+      ? nodes.flatMap(function findNode(n: HierarchyNode): HierarchyNode[] {
+          if (n.id === localFocusId) return [n]
+          return n.children.flatMap(findNode)
+        })
+      : nodes
+    
+    const traverse = (
+      node: HierarchyNode, 
+      depth: number, 
+      isLast: boolean,
+      parentIsLast: boolean[]
+    ) => {
+      result.push({ node, depth, isLast, parentIsLast: [...parentIsLast] })
+      
+      // Only traverse children if expanded
+      if (expandedNodes.has(node.id) && node.children.length > 0) {
+        node.children.forEach((child, idx) => {
+          traverse(
+            child, 
+            depth + 1, 
+            idx === node.children.length - 1,
+            [...parentIsLast, isLast]
+          )
+        })
+      }
+    }
+    
+    rootNodes.forEach((node, idx) => {
+      traverse(node, 0, idx === rootNodes.length - 1, [])
+    })
+    
+    return result
+  }, [nodes, expandedNodes, localFocusId])
+  
+  // Count total including nested
+  const totalCount = useMemo(() => {
+    const count = (n: HierarchyNode): number => 
+      1 + n.children.reduce((acc, c) => acc + count(c), 0)
+    return nodes.reduce((acc, n) => acc + count(n), 0)
+  }, [nodes])
+  
+  // Handle focus (zoom into subtree)
+  const handleFocus = useCallback((node: HierarchyNode | null) => {
+    if (!node) {
+      setLocalFocusId(null)
+      setBreadcrumb([])
+      return
+    }
+    
+    // Build breadcrumb trail
+    const trail: HierarchyNode[] = []
+    const findPath = (n: HierarchyNode, target: string, path: HierarchyNode[]): boolean => {
+      if (n.id === target) {
+        trail.push(...path, n)
+        return true
+      }
+      for (const child of n.children) {
+        if (findPath(child, target, [...path, n])) return true
+      }
+      return false
+    }
+    
+    nodes.forEach(root => findPath(root, node.id, []))
+    
+    setLocalFocusId(node.id)
+    setBreadcrumb(trail.slice(0, -1)) // Exclude current node from breadcrumb
+    
+    // Auto-expand the focused node
+    if (!expandedNodes.has(node.id)) {
+      onToggle(node.id)
+    }
+  }, [nodes, expandedNodes, onToggle])
+  
+  // Navigate breadcrumb
+  const handleBreadcrumbClick = useCallback((node: HierarchyNode | null) => {
+    if (!node) {
+      handleFocus(null)
+    } else {
+      handleFocus(node)
+    }
+  }, [handleFocus])
+  
+  // Get total items at current level
+  const visibleCount = flatTree.length
+  
   return (
-    <div className="flex-1 min-w-[280px] max-w-[400px] border-r border-glass-border last:border-r-0 flex flex-col">
-      {/* Layer Header */}
+    <motion.div 
+      className={cn(
+        "flex flex-col bg-gradient-to-b from-canvas to-canvas-elevated/20 relative group/column transition-all duration-300",
+        isCollapsed ? "min-w-[60px] max-w-[60px]" : "flex-1 min-w-[320px] max-w-[480px]"
+      )}
+      layout
+    >
+      {/* Subtle column separator line with gradient fade */}
+      <div className="absolute right-0 top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-glass-border/50 to-transparent" />
+      
+      {/* Layer Header - Glass morphism style */}
       <div
-        className="flex-shrink-0 px-4 py-3 border-b border-glass-border"
-        style={{ backgroundColor: `${layer.color}10` }}
+        className={cn(
+          "flex-shrink-0 sticky top-0 z-10 backdrop-blur-xl border-b border-white/[0.08] dark:border-white/[0.05] cursor-pointer",
+          isCollapsed ? "px-2 py-4" : "px-4 py-3"
+        )}
+        style={{ 
+          background: `linear-gradient(135deg, ${layer.color}12 0%, ${layer.color}05 100%)`,
+        }}
+        onClick={() => isCollapsed && setIsCollapsed(false)}
       >
-        <div className="flex items-center gap-3">
-          <div
-            className="w-8 h-8 rounded-lg flex items-center justify-center"
-            style={{ backgroundColor: `${layer.color}20` }}
-          >
-            <DynamicIcon
-              name={layer.icon ?? 'Layers'}
-              className="w-4 h-4"
-              style={{ color: layer.color }}
-            />
-          </div>
-          <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold" style={{ color: layer.color }}>
-              {layer.name}
-            </h3>
-            {layer.description && (
-              <p className="text-2xs text-ink-muted truncate">{layer.description}</p>
+        <div className={cn(
+          "flex items-center",
+          isCollapsed ? "flex-col gap-3" : "gap-3"
+        )}>
+          {/* Collapse/Expand Toggle + Icon Container */}
+          <div className="flex items-center gap-2">
+            {!isCollapsed && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setIsCollapsed(true)
+                }}
+                className="p-1 rounded-lg hover:bg-white/[0.1] text-ink-muted hover:text-ink transition-all"
+                title="Collapse layer"
+              >
+                <LucideIcons.PanelLeftClose className="w-4 h-4" />
+              </button>
             )}
+            <div
+              className={cn(
+                "rounded-xl flex items-center justify-center flex-shrink-0 shadow-sm transition-all duration-300",
+                isCollapsed ? "w-10 h-10" : "w-9 h-9 group-hover/column:scale-105 group-hover/column:shadow-md"
+              )}
+              style={{ 
+                background: `linear-gradient(145deg, ${layer.color}25 0%, ${layer.color}15 100%)`,
+                boxShadow: `0 2px 8px ${layer.color}20`
+              }}
+            >
+              <DynamicIcon
+                name={layer.icon ?? 'Layers'}
+                className={cn(
+                  "transition-transform duration-300",
+                  isCollapsed ? "w-5 h-5" : "w-4 h-4 group-hover/column:scale-110"
+                )}
+                style={{ color: layer.color }}
+              />
+            </div>
           </div>
-          <span className="px-2 py-0.5 rounded-full text-2xs font-medium bg-black/5 dark:bg-white/10 text-ink-muted">
-            {nodes.length}
-          </span>
+          
+          {/* Collapsed state - vertical text */}
+          {isCollapsed ? (
+            <div className="flex flex-col items-center gap-2">
+              <span 
+                className="text-xs font-semibold writing-mode-vertical transform rotate-180"
+                style={{ color: layer.color, writingMode: 'vertical-rl' }}
+              >
+                {layer.name}
+              </span>
+              <div 
+                className="px-1.5 py-1 rounded-full text-[10px] font-semibold"
+                style={{ backgroundColor: `${layer.color}20`, color: layer.color }}
+              >
+                {totalCount}
+              </div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setIsCollapsed(false)
+                }}
+                className="p-1.5 rounded-lg hover:bg-white/[0.1] text-ink-muted hover:text-ink transition-all mt-2"
+                title="Expand layer"
+              >
+                <LucideIcons.PanelLeftOpen className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="flex-1 min-w-0">
+                <h3 
+                  className="text-sm font-semibold truncate tracking-tight"
+                  style={{ color: layer.color }}
+                >
+                  {layer.name}
+                </h3>
+                {layer.description && (
+                  <p className="text-[10px] text-ink-muted/70 truncate mt-0.5">{layer.description}</p>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {/* Entity count pill */}
+                <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] backdrop-blur-sm border border-white/[0.08]">
+                  <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
+                    {visibleCount}
+                  </span>
+                  <span className="text-[9px] text-ink-muted/60">/</span>
+                  <span className="text-[10px] text-ink-muted/60">{totalCount}</span>
+                </div>
+                {onAddToLayer && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onAddToLayer(layer.id)
+                    }}
+                    className="p-1.5 rounded-lg bg-green-500/10 hover:bg-green-500/20 text-green-500 transition-all duration-200 hover:scale-110 active:scale-95"
+                    title={`Add entity to ${layer.name}`}
+                  >
+                    <LucideIcons.Plus className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </>
+          )}
         </div>
-      </div>
-
-      {/* Layer Content */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
-        {nodes.length === 0 ? (
-          <div className="text-center py-8 text-ink-muted text-sm">
-            No entities in this layer
-          </div>
-        ) : (
-          nodes.map((node) => (
-            <LayerNodeCard
-              key={node.id}
-              node={node}
-              layer={layer}
-              schema={schema}
-              selectedNodeId={selectedNodeId}
-              expandedNodes={expandedNodes}
-              searchResults={searchResults}
-              onSelect={onSelect}
-              onToggle={onToggle}
-              onContextMenu={onContextMenu}
-              onDoubleClick={onDoubleClick}
-              traceFocusId={traceFocusId}
-              traceNodes={traceNodes}
-              traceContextSet={traceContextSet}
-              onAnimationComplete={onAnimationComplete}
-            />
-          ))
+        
+        {/* Breadcrumb Navigation - Modern pill style (hidden when collapsed) */}
+        {!isCollapsed && (
+          <AnimatePresence>
+            {breadcrumb.length > 0 && (
+              <motion.div 
+                initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                animate={{ opacity: 1, height: 'auto', marginTop: 8 }}
+                exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                className="flex items-center gap-1 overflow-x-auto no-scrollbar"
+              >
+                <button
+                  onClick={() => handleBreadcrumbClick(null)}
+                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.08] text-ink-muted hover:text-ink transition-all duration-200 flex-shrink-0"
+                >
+                  <LucideIcons.Home className="w-3 h-3" />
+                  <span className="text-[10px] font-medium">Root</span>
+                </button>
+                {breadcrumb.map((node, idx) => (
+                  <React.Fragment key={node.id}>
+                    <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40 flex-shrink-0" />
+                  <button
+                    onClick={() => handleBreadcrumbClick(node)}
+                    className="px-2 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-ink-muted hover:text-ink transition-all duration-200 truncate max-w-[100px] flex-shrink-0 text-[10px] font-medium"
+                    title={node.name}
+                  >
+                    {node.name}
+                  </button>
+                </React.Fragment>
+              ))}
+              <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40 flex-shrink-0" />
+              <span 
+                className="px-2 py-1 rounded-lg text-[10px] font-semibold truncate"
+                style={{ backgroundColor: `${layer.color}20`, color: layer.color }}
+              >
+                Current
+              </span>
+            </motion.div>
+          )}
+          </AnimatePresence>
         )}
       </div>
-    </div>
+
+      {/* Flat Tree Content - Hidden when collapsed */}
+      {!isCollapsed && (
+        <div 
+          ref={scrollContainerRef}
+          className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar relative"
+        >
+          {/* Subtle top fade for scroll indication */}
+          <div className="absolute top-0 left-0 right-0 h-4 bg-gradient-to-b from-canvas/80 to-transparent pointer-events-none z-10" />
+          
+          {flatTree.length === 0 ? (
+            <motion.div 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="flex flex-col items-center justify-center py-16 px-4"
+            >
+              <div 
+                className="w-16 h-16 rounded-2xl flex items-center justify-center mb-4"
+                style={{ backgroundColor: `${layer.color}10` }}
+              >
+                <LucideIcons.FolderOpen 
+                  className="w-8 h-8" 
+                  style={{ color: `${layer.color}40` }}
+                />
+              </div>
+              <p className="text-sm font-medium text-ink-muted/60">No entities yet</p>
+              <p className="text-xs text-ink-muted/40 mt-1">Click + to add entities</p>
+          </motion.div>
+        ) : (
+          <div className="py-2 px-1">
+            {flatTree.map(({ node, depth, isLast, parentIsLast }, index) => (
+              <FlatTreeItem
+                key={node.id}
+                node={node}
+                depth={depth}
+                isLast={isLast}
+                parentIsLast={parentIsLast}
+                layer={layer}
+                schema={schema}
+                isSelected={selectedNodeId === node.id}
+                isExpanded={expandedNodes.has(node.id)}
+                isSearchResult={searchResults.includes(node.id)}
+                isTraceActive={traceFocusId !== null}
+                isHighlighted={traceContextSet.has(node.id)}
+                isFocusNode={traceFocusId === node.id}
+                onSelect={onSelect}
+                onToggle={onToggle}
+                onContextMenu={onContextMenu}
+                onDoubleClick={onDoubleClick}
+                onAddChild={onAddChild}
+                onFocus={handleFocus}
+                animationDelay={index * 0.02}
+              />
+            ))}
+          </div>
+        )}
+        
+        {/* Bottom fade */}
+        <div className="absolute bottom-0 left-0 right-0 h-4 bg-gradient-to-t from-canvas/80 to-transparent pointer-events-none z-10" />
+      </div>
+      )}
+    </motion.div>
   )
 }
 
-interface LayerNodeCardProps {
+// ============================================
+// FLAT TREE ITEM - Individual row with tree lines
+// ============================================
+
+interface FlatTreeItemProps {
   node: HierarchyNode
+  depth: number
+  isLast: boolean
+  parentIsLast: boolean[]
   layer: ViewLayerConfig
   schema: ReturnType<typeof useSchemaStore.getState>['schema']
-  selectedNodeId: string | null
-  expandedNodes: Set<string>
-  searchResults: string[]
+  isSelected: boolean
+  isExpanded: boolean
+  isSearchResult: boolean
+  isTraceActive: boolean
+  isHighlighted: boolean
+  isFocusNode: boolean
   onSelect: (id: string) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
-  onDoubleClick: (id: string) => void
-  traceFocusId: string | null
-  traceNodes: Set<string>
-  traceContextSet: Set<string>
-  onAnimationComplete?: () => void
+  onDoubleClick: (id: string, event?: React.MouseEvent) => void
+  onAddChild?: (parentId: string) => void
+  onFocus: (node: HierarchyNode) => void
+  animationDelay?: number
 }
 
-function LayerNodeCard({
+function FlatTreeItem({
   node,
+  depth,
+  isLast,
+  parentIsLast,
   layer,
   schema,
-  selectedNodeId,
-  expandedNodes,
-  searchResults,
+  isSelected,
+  isExpanded,
+  isSearchResult,
+  isTraceActive,
+  isHighlighted,
+  isFocusNode,
   onSelect,
   onToggle,
   onContextMenu,
   onDoubleClick,
-  traceFocusId,
-  traceNodes,
-  traceContextSet,
-  onAnimationComplete
-}: LayerNodeCardProps) {
+  onAddChild,
+  onFocus,
+  animationDelay = 0
+}: FlatTreeItemProps) {
+  const itemRef = useRef<HTMLDivElement>(null)
+  const [isHovered, setIsHovered] = useState(false)
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
-
-  // Style Dimming:
-  // If trace is active:
-  // - Node is highlighted if it is in traceContextSet (traced node OR ancestor)
-  // - Otherwise dimmed
-  const isTraceActive = traceFocusId !== null
-  const isHighlighted = isTraceActive && traceContextSet.has(node.id)
-
-  // Dim if trace is active AND NOT highlighted
-  const isDimmed = isTraceActive && !isHighlighted
-
-  // Logic for expandable state
+  const nodeColor = visual?.color ?? layer.color
+  
   const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || 0
   const hasChildren = node.children.length > 0 || childCount > 0
-
-  const isExpanded = expandedNodes.has(node.id)
-  const isSelected = selectedNodeId === node.id
-  const isSearchResult = searchResults.includes(node.id)
-
-  // Count nested children - prefer metadata if available and we are collapsed
-  const countDescendants = (n: HierarchyNode): number => {
-    // If we have explicit metadata, use it
-    if (n.data.childCount) return n.data.childCount as number
-    return n.children.reduce((acc, child) => acc + 1 + countDescendants(child), 0)
-  }
-  const descendantCount = hasChildren && !isExpanded ? (childCount || countDescendants(node)) : 0
-
-  // Auto-scroll when trace is focused
+  const descendantCount = hasChildren && !isExpanded ? (childCount || node.children.length) : 0
+  
+  // IMPROVED SIZING - Keep items readable at ALL depths
+  // Root items are slightly larger, but children remain very readable
+  const isRoot = depth === 0
+  const heightClass = isRoot ? 'min-h-[52px]' : 'min-h-[44px]'
+  const paddingClass = isRoot ? 'py-3' : 'py-2.5'
+  const textClass = isRoot ? 'text-sm' : 'text-[13px]'
+  const iconSize = isRoot ? 'w-5 h-5' : 'w-4 h-4'
+  const iconContainerSize = isRoot ? 'w-9 h-9' : 'w-7 h-7'
+  
+  // Calculate dimming
+  const isDimmed = isTraceActive && !isHighlighted
+  
+  // Tree line indent - reduced to save horizontal space
+  const indentWidth = depth * 16
+  
+  // Auto-scroll when this node becomes the focus of a trace
   useEffect(() => {
-    if (traceFocusId === node.id) {
-      // Wait slightly for any expansions/layout shifts
+    if (isFocusNode && itemRef.current) {
       setTimeout(() => {
-        const el = document.getElementById(`layer-node-${node.id}`)
-        if (el) {
-          el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' })
-        }
+        itemRef.current?.scrollIntoView({ 
+          behavior: 'smooth', 
+          block: 'center', 
+          inline: 'nearest' 
+        })
       }, 100)
     }
-  }, [traceFocusId, node.id])
-
+  }, [isFocusNode])
+  
   return (
     <motion.div
-      layout
+      ref={itemRef}
       id={`layer-node-${node.id}`}
+      initial={{ opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ duration: 0.2, delay: Math.min(animationDelay, 0.3) }}
       className={cn(
-        "rounded-lg border transition-all duration-300",
-        "bg-canvas-elevated hover:shadow-md cursor-pointer",
-        isSelected && "ring-2 ring-offset-1",
-        isSearchResult && !isSelected && "ring-2 ring-amber-400/50",
-        node.isLogical && "border-dashed bg-black/5 dark:bg-white/5",
-
-        // Highlight logic
-        isHighlighted && "shadow-[0_0_15px_-3px_rgba(var(--accent-lineage-rgb),0.3)] ring-1 ring-accent-lineage border-accent-lineage z-10 scale-[1.02]",
-
-        // Dimming logic
-        isDimmed && "opacity-40 grayscale-[0.8] blur-[0.5px] scale-[0.98]" // Less aggressive opacity (0.4), subtle blur
+        "flex items-center gap-2 mx-1 rounded-xl cursor-pointer transition-all duration-200 group/item relative",
+        heightClass,
+        paddingClass,
+        // Base hover state with gradient
+        "hover:bg-gradient-to-r hover:from-white/[0.06] hover:to-transparent",
+        // Selected state with accent glow
+        isSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
+        // Search result highlight
+        isSearchResult && !isSelected && "bg-gradient-to-r from-amber-500/15 to-transparent shadow-[inset_0_0_0_1px_rgba(245,158,11,0.3)]",
+        // Focus node (trace target)
+        isFocusNode && "ring-2 ring-accent-lineage/60 ring-offset-1 ring-offset-canvas shadow-lg shadow-accent-lineage/20",
+        // Highlighted in trace
+        isHighlighted && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
+        // Dimmed when not in trace path
+        isDimmed && "opacity-30 blur-[0.3px]"
       )}
-      style={{
-        borderColor: isHighlighted ? 'var(--accent-lineage)' : (visual?.color ?? layer.color ?? '#6b7280'),
-        borderLeftWidth: '3px',
-        ['--tw-ring-color' as string]: visual?.color ?? layer.color ?? '#6b7280',
-        ['--accent-lineage-rgb' as string]: '59, 130, 246', // Fallback if var not set, ideally from theme
+      style={{ 
+        paddingLeft: 12 + indentWidth,
+        // Subtle left border accent for root items
+        ...(depth === 0 && {
+          borderLeft: `3px solid ${nodeColor}40`,
+        })
       }}
       onClick={(e) => {
         e.stopPropagation()
@@ -1424,100 +1980,182 @@ function LayerNodeCard({
       }}
       onDoubleClick={(e) => {
         e.stopPropagation()
-        onDoubleClick(node.id)
+        onDoubleClick(node.id, e)
       }}
       onContextMenu={(e) => onContextMenu(e, node.id)}
-      onLayoutAnimationComplete={onAnimationComplete}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
     >
-      {/* Node Header */}
-      <div className="flex items-center gap-2 px-3 py-2">
+      {/* Modern Tree Lines with gradient effect */}
+      <div className="flex items-center absolute left-3" style={{ width: indentWidth }}>
+        {parentIsLast.map((pIsLast, idx) => (
+          <div key={idx} className="w-5 h-full flex justify-center">
+            {!pIsLast && (
+              <div className="w-px h-full bg-gradient-to-b from-white/[0.08] via-white/[0.12] to-white/[0.08]" />
+            )}
+          </div>
+        ))}
+        {depth > 0 && (
+          <div className="w-5 h-full relative">
+            {/* Vertical line with gradient */}
+            <div className={cn(
+              "absolute left-1/2 -translate-x-1/2 w-px",
+              isLast ? "top-0 h-1/2" : "top-0 bottom-0"
+            )} style={{ background: 'linear-gradient(to bottom, transparent, rgba(255,255,255,0.12), transparent)' }} />
+            {/* Horizontal connector with dot */}
+            <div className="absolute left-1/2 top-1/2 -translate-y-1/2 flex items-center">
+              <div className="w-3 h-px bg-gradient-to-r from-white/[0.12] to-white/[0.06]" />
+              <div 
+                className="w-1.5 h-1.5 rounded-full -ml-0.5"
+                style={{ backgroundColor: `${nodeColor}40` }}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+      
+      {/* Expand/Collapse Toggle - Modern circular button */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          onToggle(node.id)
+        }}
+        className={cn(
+          "flex-shrink-0 rounded-lg transition-all duration-200",
+          hasChildren 
+            ? "hover:bg-white/[0.1] hover:scale-110 active:scale-95" 
+            : "opacity-0 pointer-events-none",
+          isRoot ? "w-7 h-7" : "w-6 h-6"
+        )}
+      >
+        {hasChildren && (
+          <motion.div 
+            animate={{ rotate: isExpanded ? 90 : 0 }}
+            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+            className="w-full h-full flex items-center justify-center"
+          >
+            <LucideIcons.ChevronRight 
+              className={cn(
+                "transition-colors",
+                isHovered ? "text-ink" : "text-ink-muted/60",
+                isRoot ? "w-4 h-4" : "w-4 h-4"
+              )} 
+            />
+          </motion.div>
+        )}
+      </button>
+      
+      {/* Entity Icon - Glass morphism container */}
+      <div
+        className={cn(
+          "rounded-xl flex items-center justify-center flex-shrink-0 transition-all duration-200 shadow-sm",
+          iconContainerSize,
+          isSelected && "scale-110 shadow-md",
+          isHovered && "scale-105"
+        )}
+        style={{ 
+          background: `linear-gradient(135deg, ${nodeColor}25 0%, ${nodeColor}10 100%)`,
+          boxShadow: isSelected ? `0 4px 12px ${nodeColor}30` : `0 2px 4px ${nodeColor}15`
+        }}
+      >
+        <DynamicIcon
+          name={visual?.icon ?? 'Box'}
+          className={cn(iconSize, "transition-transform duration-200")}
+          style={{ color: nodeColor }}
+        />
+      </div>
+      
+      {/* Name - IMPROVED: Better visibility with tooltip */}
+      <div className="flex-1 min-w-0 flex flex-col justify-center" title={node.name}>
+        <span className={cn(
+          "font-medium tracking-tight transition-colors duration-200",
+          textClass,
+          isHighlighted ? "text-accent-lineage" : isSelected ? "text-ink" : "text-ink/90",
+          isHovered && !isSelected && "text-ink",
+          // Allow text to wrap to 2 lines for better readability
+          "line-clamp-2"
+        )}>
+          {node.name}
+        </span>
+        {/* Type badge - show for all items to help identify entity types */}
+        <span className={cn(
+          "text-[10px] text-ink-muted/60 truncate mt-0.5 flex items-center gap-1",
+          isRoot && "text-[11px]"
+        )}>
+          <span 
+            className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+            style={{ backgroundColor: nodeColor }}
+          />
+          {entityType?.name ?? node.typeId}
+        </span>
+      </div>
+      
+      {/* Badges - Descendant count */}
+      <AnimatePresence>
+        {descendantCount > 0 && (
+          <motion.span 
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.8 }}
+            className="text-[11px] px-2 py-1 rounded-lg bg-white/[0.06] border border-white/[0.08] text-ink-muted font-semibold tabular-nums flex-shrink-0"
+          >
+            +{descendantCount}
+          </motion.span>
+        )}
+      </AnimatePresence>
+      
+      {/* Action buttons - Glass morphism style, appear on hover */}
+      <motion.div 
+        initial={false}
+        animate={{ opacity: isHovered ? 1 : 0, x: isHovered ? 0 : 8 }}
+        transition={{ duration: 0.15 }}
+        className="flex items-center gap-1 flex-shrink-0"
+      >
+        {/* Focus/Drill button */}
         {hasChildren && (
           <button
             onClick={(e) => {
               e.stopPropagation()
-              onToggle(node.id)
+              onFocus(node)
             }}
-            className="w-5 h-5 rounded flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10"
+            className="p-1.5 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 hover:text-blue-300 transition-all duration-200 hover:scale-110 active:scale-95"
+            title="Focus on this subtree"
           >
-            <motion.div animate={{ rotate: isExpanded ? 90 : 0 }}>
-              <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted" />
-            </motion.div>
+            <LucideIcons.Maximize2 className="w-3 h-3" />
           </button>
         )}
-
-        {!hasChildren && <div className="w-5" />}
-
-        <div
-          className="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0"
-          style={{ backgroundColor: `${visual?.color ?? layer.color}15` }}
-        >
-          <DynamicIcon
-            name={visual?.icon ?? 'Box'}
-            className="w-3.5 h-3.5"
-            style={{ color: visual?.color ?? layer.color }}
-          />
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <span className="text-2xs font-medium uppercase tracking-wider text-ink-muted">
-            {node.isLogical ? 'Group' : (entityType?.name ?? node.typeId)}
-          </span>
-          <h4 className={cn("text-sm font-medium truncate", node.isLogical ? "text-ink font-semibold" : "text-ink")}>
-            {node.name}
-          </h4>
-          {node.isLogical && !!node.data?.description && (
-            <p className="text-2xs text-ink-muted truncate">{String(node.data.description || '')}</p>
-          )}
-        </div>
-
-        {
-          hasChildren && !isExpanded && (
-            <span className="text-2xs text-ink-muted px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10">
-              +{descendantCount}
-            </span>
-          )
-        }
-      </div>
-
-      {/* Expanded Children */}
-      <AnimatePresence>
-        {
-          hasChildren && isExpanded && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              onAnimationComplete={onAnimationComplete}
-              className="overflow-hidden"
-            >
-              <div className="px-3 pb-2 pl-8 space-y-1.5">
-                {node.children.map((child) => (
-                  <LayerNodeCard
-                    key={child.id}
-                    node={child}
-                    layer={layer}
-                    schema={schema}
-                    selectedNodeId={selectedNodeId}
-                    expandedNodes={expandedNodes}
-                    searchResults={searchResults}
-                    onSelect={onSelect}
-                    onToggle={onToggle}
-                    onContextMenu={onContextMenu}
-                    onDoubleClick={onDoubleClick}
-                    traceFocusId={traceFocusId}
-                    traceNodes={traceNodes}
-                    traceContextSet={traceContextSet}
-                    onAnimationComplete={onAnimationComplete}
-                  />
-                ))}
-              </div>
-            </motion.div>
-          )
-        }
-      </AnimatePresence>
+        
+        {/* Add child button */}
+        {entityType?.hierarchy?.canContain && entityType.hierarchy.canContain.length > 0 && onAddChild && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onAddChild(node.id)
+            }}
+            className="p-1.5 rounded-lg bg-green-500/10 hover:bg-green-500/20 text-green-400 hover:text-green-300 transition-all duration-200 hover:scale-110 active:scale-95"
+            title="Add child entity"
+          >
+            <LucideIcons.Plus className="w-3 h-3" />
+          </button>
+        )}
+      </motion.div>
+      
+      {/* Hover indicator line */}
+      <motion.div
+        className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full"
+        style={{ backgroundColor: nodeColor }}
+        initial={false}
+        animate={{ 
+          height: isSelected ? '70%' : isHovered ? '50%' : '0%',
+          opacity: isSelected ? 1 : isHovered ? 0.6 : 0
+        }}
+        transition={{ duration: 0.2 }}
+      />
     </motion.div>
   )
 }
+
+// LayerNodeCard replaced with FlatTreeItem above for better UX
 
 // ----------------------------------------------------
 // SVG Overlay Component

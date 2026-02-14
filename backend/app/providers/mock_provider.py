@@ -687,6 +687,45 @@ class MockGraphProvider(GraphDataProvider):
         matches = [n for n in self._nodes.values() if n.layer_assignment == layer_id]
         return self._paginate(matches, offset, limit)
 
+    async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
+        """Create a new node with optional containment edge."""
+        try:
+            # Add node to store
+            self._nodes[node.urn] = node
+            
+            # Add containment edge if provided
+            if containment_edge:
+                self._edges[containment_edge.id] = containment_edge
+                
+                # Update indexes
+                if containment_edge.source_urn not in self._edges_by_source:
+                    self._edges_by_source[containment_edge.source_urn] = []
+                self._edges_by_source[containment_edge.source_urn].append(containment_edge)
+                
+                if containment_edge.target_urn not in self._edges_by_target:
+                    self._edges_by_target[containment_edge.target_urn] = []
+                self._edges_by_target[containment_edge.target_urn].append(containment_edge)
+                
+                # Update containment indexes
+                if containment_edge.edge_type == EdgeType.CONTAINS:
+                    if containment_edge.source_urn not in self._children_map:
+                        self._children_map[containment_edge.source_urn] = []
+                    self._children_map[containment_edge.source_urn].append(containment_edge.target_urn)
+                    self._parent_map[containment_edge.target_urn] = containment_edge.source_urn
+                    
+                    # Update parent's child count
+                    parent = self._nodes.get(containment_edge.source_urn)
+                    if parent:
+                        parent.child_count = (parent.child_count or 0) + 1
+            
+            # Invalidate stats cache
+            self._stats_cache = None
+            
+            return True
+        except Exception as e:
+            print(f"Error creating node: {e}")
+            return False
+
     def _paginate(self, items: List[Any], offset: int, limit: int) -> List[Any]:
         return items[offset : offset + limit]
 

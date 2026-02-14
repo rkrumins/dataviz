@@ -5,7 +5,7 @@ from ..models.graph import GraphNode, GraphEdge, EntityType, EdgeType
 # Configuration
 DEFAULT_CONFIG = {
     "domainCount": 3, 
-    "appsPerDomain": 10,
+    "appsPerDomain": 11,
     "schemasPerApp": {"min": 10, "max": 15},
     "assetsPerSchema": {"min": 10, "max": 50},
     "columnsPerAsset": {"min": 10, "max": 100},

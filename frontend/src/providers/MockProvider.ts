@@ -22,6 +22,11 @@ import type {
     LayerAssignmentResult,
     GraphSchemaStats,
     OntologyMetadata,
+    GraphSchema,
+    AggregatedEdgeRequest,
+    AggregatedEdgeResult,
+    CreateNodeRequest,
+    CreateNodeResult,
 } from './GraphDataProvider'
 
 // ============================================
@@ -693,6 +698,194 @@ export class MockProvider implements GraphDataProvider {
                 assignedNodes: 0,
                 computeTimeMs: 0
             }
+        }
+    }
+
+    // ==========================================
+    // Schema Operations (Dynamic Schema Loading)
+    // ==========================================
+
+    async getFullSchema(): Promise<GraphSchema> {
+        // Mock implementation: build schema from existing data
+        const entityTypeCounts: Record<string, number> = {}
+        for (const node of this.nodes.values()) {
+            entityTypeCounts[node.entityType] = (entityTypeCounts[node.entityType] ?? 0) + 1
+        }
+
+        const entityTypes = Object.entries(entityTypeCounts).map(([id, count]) => ({
+            id,
+            name: id.charAt(0).toUpperCase() + id.slice(1),
+            pluralName: id.charAt(0).toUpperCase() + id.slice(1) + 's',
+            description: `Entity type: ${id}`,
+            visual: {
+                icon: 'Box',
+                color: '#6366f1',
+                shape: 'rounded',
+                size: 'md',
+                borderStyle: 'solid',
+                showInMinimap: true
+            },
+            fields: [
+                { id: 'name', name: 'Name', type: 'string', required: true, showInNode: true, showInPanel: true, showInTooltip: true, displayOrder: 1 }
+            ],
+            hierarchy: {
+                level: 2,
+                canContain: [],
+                canBeContainedBy: [],
+                defaultExpanded: false
+            },
+            behavior: {
+                selectable: true,
+                draggable: true,
+                expandable: true,
+                traceable: true,
+                clickAction: 'select',
+                doubleClickAction: 'expand'
+            }
+        }))
+
+        const edgeTypes = new Set<string>()
+        this.edges.forEach(e => edgeTypes.add(e.edgeType))
+
+        const relationshipTypes = Array.from(edgeTypes).map(id => ({
+            id: id.toLowerCase(),
+            name: id.charAt(0).toUpperCase() + id.slice(1).toLowerCase(),
+            description: `Relationship type: ${id}`,
+            sourceTypes: ['*'],
+            targetTypes: ['*'],
+            visual: {
+                strokeColor: '#6366f1',
+                strokeWidth: 2,
+                strokeStyle: 'solid',
+                animated: true,
+                animationSpeed: 'normal',
+                arrowType: 'arrow',
+                curveType: 'bezier'
+            },
+            bidirectional: false,
+            showLabel: false,
+            isContainment: id === 'CONTAINS' || id === 'BELONGS_TO'
+        }))
+
+        return {
+            version: '1.0.0',
+            entityTypes,
+            relationshipTypes,
+            rootEntityTypes: ['domain', 'container', 'dataPlatform'],
+            containmentEdgeTypes: ['CONTAINS', 'BELONGS_TO']
+        }
+    }
+
+    // ==========================================
+    // Aggregated Edge Operations
+    // ==========================================
+
+    async getAggregatedEdges(request: AggregatedEdgeRequest): Promise<AggregatedEdgeResult> {
+        // Mock implementation: group edges by source and target container
+        const aggregatedMap: Map<string, { sourceUrn: string; targetUrn: string; edges: GraphEdge[] }> = new Map()
+
+        const sourceSet = new Set(request.sourceUrns)
+
+        for (const edge of this.edges) {
+            // Skip containment edges
+            if (edge.edgeType === 'CONTAINS' || edge.edgeType === 'BELONGS_TO') continue
+
+            // Check if edge involves source URNs
+            if (!sourceSet.has(edge.sourceUrn) && !sourceSet.has(edge.targetUrn)) continue
+
+            // If target URNs specified, filter
+            if (request.targetUrns?.length) {
+                const targetSet = new Set(request.targetUrns)
+                if (!targetSet.has(edge.sourceUrn) && !targetSet.has(edge.targetUrn)) continue
+            }
+
+            const key = `${edge.sourceUrn}->${edge.targetUrn}`
+            if (!aggregatedMap.has(key)) {
+                aggregatedMap.set(key, { sourceUrn: edge.sourceUrn, targetUrn: edge.targetUrn, edges: [] })
+            }
+            aggregatedMap.get(key)!.edges.push(edge)
+        }
+
+        const aggregatedEdges = Array.from(aggregatedMap.entries()).map(([key, data]) => ({
+            id: `agg-${key}`,
+            sourceUrn: data.sourceUrn,
+            targetUrn: data.targetUrn,
+            edgeCount: data.edges.length,
+            edgeTypes: [...new Set(data.edges.map(e => e.edgeType))],
+            confidence: data.edges.reduce((sum, e) => sum + (e.confidence ?? 1), 0) / data.edges.length,
+            sourceEdgeIds: data.edges.map(e => e.id)
+        }))
+
+        return {
+            aggregatedEdges,
+            totalSourceEdges: this.edges.filter(e => sourceSet.has(e.sourceUrn) || sourceSet.has(e.targetUrn)).length
+        }
+    }
+
+    // ==========================================
+    // Node Creation
+    // ==========================================
+
+    async createNode(request: CreateNodeRequest): Promise<CreateNodeResult> {
+        // Mock implementation: create node in memory
+        const urn = `urn:mock:${request.entityType}:${Date.now()}`
+
+        const newNode: GraphNode = {
+            urn,
+            entityType: request.entityType,
+            displayName: request.displayName,
+            qualifiedName: request.displayName,
+            description: request.properties.description as string | undefined,
+            properties: request.properties,
+            tags: request.tags,
+            childCount: 0,
+            sourceSystem: 'manual'
+        }
+
+        this.nodes.set(urn, newNode)
+
+        let containmentEdge: GraphEdge | null = null
+
+        // Create containment edge if parent specified
+        if (request.parentUrn) {
+            const parentNode = this.nodes.get(request.parentUrn)
+            if (!parentNode) {
+                return {
+                    node: null,
+                    containmentEdge: null,
+                    success: false,
+                    error: `Parent node not found: ${request.parentUrn}`
+                }
+            }
+
+            containmentEdge = {
+                id: `contains-${request.parentUrn}-${urn}`,
+                sourceUrn: request.parentUrn,
+                targetUrn: urn,
+                edgeType: 'CONTAINS',
+                confidence: 1.0,
+                properties: {}
+            }
+
+            this.edges.push(containmentEdge)
+
+            // Update indices
+            const downstream = this.downstreamMap.get(request.parentUrn) ?? []
+            downstream.push(containmentEdge)
+            this.downstreamMap.set(request.parentUrn, downstream)
+
+            const upstream = this.upstreamMap.get(urn) ?? []
+            upstream.push(containmentEdge)
+            this.upstreamMap.set(urn, upstream)
+
+            // Update parent's child count
+            parentNode.childCount = (parentNode.childCount ?? 0) + 1
+        }
+
+        return {
+            node: newNode,
+            containmentEdge,
+            success: true
         }
     }
 }

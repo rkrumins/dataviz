@@ -235,4 +235,34 @@ export class RemoteGraphProvider implements GraphDataProvider {
             body: JSON.stringify(request)
         })
     }
+
+    // ==========================================
+    // Schema Operations (Dynamic Schema Loading)
+    // ==========================================
+
+    async getFullSchema(): Promise<GraphSchema> {
+        return await this.fetch<GraphSchema>('/metadata/schema')
+    }
+
+    // ==========================================
+    // Aggregated Edge Operations
+    // ==========================================
+
+    async getAggregatedEdges(request: AggregatedEdgeRequest): Promise<AggregatedEdgeResult> {
+        return await this.fetch<AggregatedEdgeResult>('/edges/aggregated', {
+            method: 'POST',
+            body: JSON.stringify(request)
+        })
+    }
+
+    // ==========================================
+    // Node Creation
+    // ==========================================
+
+    async createNode(request: CreateNodeRequest): Promise<CreateNodeResult> {
+        return await this.fetch<CreateNodeResult>('/nodes/create', {
+            method: 'POST',
+            body: JSON.stringify(request)
+        })
+    }
 }

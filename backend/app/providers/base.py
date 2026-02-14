@@ -165,3 +165,8 @@ class GraphDataProvider(ABC):
     async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:
         """Save a custom graph (nodes and edges) meant for editing/manual creation."""
         pass
+
+    @abstractmethod
+    async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
+        """Create a new node with optional containment edge."""
+        pass

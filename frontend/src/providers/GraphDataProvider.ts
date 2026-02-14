@@ -162,6 +162,132 @@ export interface OntologyMetadata {
     rootEntityTypes: string[]
 }
 
+// ============================================
+// Schema Definition Types (for dynamic loading)
+// ============================================
+
+export interface FieldSchema {
+    id: string
+    name: string
+    type: string
+    required: boolean
+    showInNode: boolean
+    showInPanel: boolean
+    showInTooltip: boolean
+    displayOrder: number
+}
+
+export interface EntityVisualSchema {
+    icon: string
+    color: string
+    shape: string
+    size: string
+    borderStyle: string
+    showInMinimap: boolean
+}
+
+export interface EntityHierarchySchema {
+    level: number
+    canContain: string[]
+    canBeContainedBy: string[]
+    defaultExpanded: boolean
+}
+
+export interface EntityBehaviorSchema {
+    selectable: boolean
+    draggable: boolean
+    expandable: boolean
+    traceable: boolean
+    clickAction: string
+    doubleClickAction: string
+}
+
+export interface EntityTypeDefinition {
+    id: string
+    name: string
+    pluralName: string
+    description?: string
+    visual: EntityVisualSchema
+    fields: FieldSchema[]
+    hierarchy: EntityHierarchySchema
+    behavior: EntityBehaviorSchema
+}
+
+export interface RelationshipVisualSchema {
+    strokeColor: string
+    strokeWidth: number
+    strokeStyle: string
+    animated: boolean
+    animationSpeed: string
+    arrowType: string
+    curveType: string
+}
+
+export interface RelationshipTypeDefinition {
+    id: string
+    name: string
+    description?: string
+    sourceTypes: string[]
+    targetTypes: string[]
+    visual: RelationshipVisualSchema
+    bidirectional: boolean
+    showLabel: boolean
+    isContainment: boolean
+}
+
+export interface GraphSchema {
+    version: string
+    entityTypes: EntityTypeDefinition[]
+    relationshipTypes: RelationshipTypeDefinition[]
+    rootEntityTypes: string[]
+    containmentEdgeTypes: string[]
+}
+
+// ============================================
+// Aggregated Edge Types
+// ============================================
+
+export interface AggregatedEdgeRequest {
+    sourceUrns: string[]
+    targetUrns?: string[]
+    granularity: 'column' | 'table' | 'schema' | 'system' | 'domain'
+    includeEdgeTypes?: string[]
+}
+
+export interface AggregatedEdgeInfo {
+    id: string
+    sourceUrn: string
+    targetUrn: string
+    edgeCount: number
+    edgeTypes: string[]
+    confidence: number
+    sourceEdgeIds: string[]
+}
+
+export interface AggregatedEdgeResult {
+    aggregatedEdges: AggregatedEdgeInfo[]
+    totalSourceEdges: number
+}
+
+// ============================================
+// Node Creation Types
+// ============================================
+
+export interface CreateNodeRequest {
+    entityType: EntityType
+    displayName: string
+    parentUrn?: string
+    properties: Record<string, unknown>
+    tags: string[]
+}
+
+export interface CreateNodeResult {
+    node: GraphNode | null
+    containmentEdge: GraphEdge | null
+    success: boolean
+    error?: string
+}
+
 export interface GraphSchemaStats {
     totalNodes: number
     totalEdges: number
@@ -454,6 +580,36 @@ export interface GraphDataProvider {
      * Compute layer assignments for the graph (server-side)
      */
     computeLayerAssignments(request: LayerAssignmentRequest): Promise<LayerAssignmentResult>
+
+    // ==========================================
+    // Schema Operations (Dynamic Schema Loading)
+    // ==========================================
+
+    /**
+     * Get complete graph schema from backend
+     * Enables dynamic loading of entity types, relationship types, and visual configs
+     */
+    getFullSchema(): Promise<GraphSchema>
+
+    // ==========================================
+    // Aggregated Edge Operations
+    // ==========================================
+
+    /**
+     * Get aggregated edges between containers at a specified granularity
+     * Enables progressive edge disclosure in the UI
+     */
+    getAggregatedEdges(request: AggregatedEdgeRequest): Promise<AggregatedEdgeResult>
+
+    // ==========================================
+    // Node Creation
+    // ==========================================
+
+    /**
+     * Create a new node with optional automatic containment edge
+     * Validates against ontology rules before creation
+     */
+    createNode(request: CreateNodeRequest): Promise<CreateNodeResult>
 }
 
 // ============================================

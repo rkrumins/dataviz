@@ -2,7 +2,8 @@ from typing import List, Optional, Any
 from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel
 from backend.app.models.graph import (
-    GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata
+    GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
+    GraphSchema, AggregatedEdgeRequest, AggregatedEdgeResult, CreateNodeRequest, CreateNodeResult
 )
 from backend.app.services.context_engine import context_engine
 
@@ -183,3 +184,30 @@ async def get_graph_introspection():
 async def get_ontology_metadata():
     """Get ontology metadata including containment edge types and entity hierarchies."""
     return await context_engine.get_ontology_metadata()
+
+@router.get("/metadata/schema", response_model=GraphSchema)
+async def get_graph_schema():
+    """
+    Get complete graph schema including entity types, relationship types,
+    visual configurations, and hierarchy rules.
+    This enables frontend to dynamically load schema from backend.
+    """
+    return await context_engine.get_graph_schema()
+
+@router.post("/edges/aggregated", response_model=AggregatedEdgeResult)
+async def get_aggregated_edges(request: AggregatedEdgeRequest = Body(...)):
+    """
+    Get aggregated edges between containers.
+    Returns summarized edge information showing lineage connections
+    at a higher granularity level (e.g., between datasets instead of columns).
+    """
+    return await context_engine.get_aggregated_edges(request)
+
+@router.post("/nodes/create", response_model=CreateNodeResult)
+async def create_node(request: CreateNodeRequest = Body(...)):
+    """
+    Create a new node with optional containment edge.
+    If parentUrn is provided, automatically creates a CONTAINS edge
+    based on ontology rules.
+    """
+    return await context_engine.create_node(request)
