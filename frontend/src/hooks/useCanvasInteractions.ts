@@ -145,7 +145,6 @@ export function useCanvasInteractions(
         updateNode,
         removeNode,
         removeEdge,
-        setEditing,
     } = useCanvasStore()
     
     // State
@@ -243,13 +242,11 @@ export function useCanvasInteractions(
     // ===================
     
     const editNode = useCallback((nodeId: string) => {
-        const node = nodes.find(n => n.id === nodeId)
-        if (node) {
-            // Enable edit mode and select the node to open EditNodePanel
-            setEditing(true)
-            selectNode(nodeId)
-        }
-    }, [nodes, setEditing, selectNode])
+        // Simply select the node - the NodeDetailsPanel will show automatically
+        // The panel has its own internal edit toggle
+        selectNode(nodeId)
+        closeContextMenu()
+    }, [selectNode, closeContextMenu])
     
     const duplicateNode = useCallback(async (nodeId: string) => {
         const node = nodes.find(n => n.id === nodeId)

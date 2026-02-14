@@ -3,7 +3,6 @@ import { TopBar } from './TopBar'
 import { SidebarNav } from './SidebarNav'
 import { CommandPalette } from './CommandPalette'
 import { CanvasRouter } from '@/components/canvas/CanvasRouter'
-import { DetailPanel } from '@/components/panels/DetailPanel'
 import { ViewWizard } from '@/components/views/ViewWizard'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
@@ -31,9 +30,6 @@ export function AppShell() {
   const [editingViewId, setEditingViewId] = useState<string | undefined>()
 
   const { sidebarCollapsed } = usePreferencesStore()
-  const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
-
-  const showDetailPanel = selectedNodeIds.length === 1
 
   // View editor handlers
   const openViewEditor = (viewId?: string) => {
@@ -74,11 +70,7 @@ export function AppShell() {
             <LoadingOverlay />
           </main>
 
-          {/* Detail Panel (slides in from right) */}
-          <DetailPanel
-            isOpen={showDetailPanel}
-            nodeId={selectedNodeIds[0]}
-          />
+          {/* Entity drawer is now integrated into each canvas component */}
         </div>
 
         {/* Command Palette (modal) */}

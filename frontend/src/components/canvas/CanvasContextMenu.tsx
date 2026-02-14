@@ -136,8 +136,8 @@ export function CanvasContextMenu({
             if (onEditNode) {
                 result.push({
                     id: 'edit',
-                    label: 'Edit',
-                    icon: 'Pencil',
+                    label: 'View & Edit',
+                    icon: 'PanelRight',
                     shortcut: 'Enter',
                     onClick: () => { onEditNode(target.id); onClose() }
                 })

@@ -29,7 +29,7 @@ import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 // Editor components (unified with LineageCanvas)
 import { EditorToolbar } from './EditorToolbar'
 import { NodePalette } from './NodePalette'
-import { EditNodePanel } from '../panels/EditNodePanel'
+import { EntityDrawer } from '../panels/EntityDrawer'
 
 interface HierarchyNode {
   id: string
@@ -422,8 +422,12 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         )}
       </div>
 
-      {/* Edit Node Panel */}
-      <EditNodePanel />
+      {/* Entity Drawer - Unified view & edit */}
+      <EntityDrawer 
+        onTraceUp={(nodeId) => selectNode(nodeId)}
+        onTraceDown={(nodeId) => selectNode(nodeId)}
+        onFullTrace={(nodeId) => selectNode(nodeId)}
+      />
 
       {/* === UX-FIRST INTERACTION COMPONENTS (Unified with LineageCanvas) === */}
       

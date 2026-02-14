@@ -39,7 +39,7 @@ import { useLevelOfDetail } from '@/hooks/useLevelOfDetail'
 import { useElkLayout } from '@/hooks/useElkLayout'
 import { EditorToolbar } from './EditorToolbar'
 import { NodePalette } from './NodePalette'
-import { EditNodePanel } from '../panels/EditNodePanel'
+import { EntityDrawer } from '../panels/EntityDrawer'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
@@ -856,8 +856,12 @@ export function LineageCanvas() {
         )}
       </AnimatePresence>
 
-      {/* Edit Node Panel */}
-      <EditNodePanel />
+      {/* Entity Drawer - Unified view & edit */}
+      <EntityDrawer 
+        onTraceUp={(nodeId) => setFocus(nodeId)}
+        onTraceDown={(nodeId) => setFocus(nodeId)}
+        onFullTrace={(nodeId) => setFocus(nodeId)}
+      />
 
       {/* === UX-FIRST INTERACTION COMPONENTS === */}
       

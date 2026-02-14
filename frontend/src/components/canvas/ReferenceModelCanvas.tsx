@@ -26,7 +26,7 @@ import { useGraphProvider } from '@/providers'
 import { useEntityLoader } from '@/hooks/useEntityLoader'
 import { useAggregatedLineage, aggregatedEdgeToFlowEdge } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
-import { EditNodePanel } from '../panels/EditNodePanel'
+import { EntityDrawer } from '../panels/EntityDrawer'
 import { EntityCreationPanel } from '../panels/EntityCreationPanel'
 import { EdgeLegend } from './EdgeLegend'
 import { TraceToolbar } from './TraceToolbar'
@@ -1358,10 +1358,12 @@ export function ReferenceModelCanvas({
             />
           )}
 
-          {/* Node Details Panel */}
-          {selectedNodeId && (
-            <EditNodePanel />
-          )}
+          {/* Entity Drawer - Unified view & edit */}
+          <EntityDrawer 
+            onTraceUp={(nodeId) => handleDoubleClick(nodeId)}
+            onTraceDown={(nodeId) => handleDoubleClick(nodeId)}
+            onFullTrace={(nodeId) => handleDoubleClick(nodeId)}
+          />
           
           {/* Entity Creation Panel */}
           <EntityCreationPanel
