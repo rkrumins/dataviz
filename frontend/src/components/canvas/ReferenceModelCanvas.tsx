@@ -42,6 +42,10 @@ import { CommandPalette } from './CommandPalette'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
+// Editor components (unified with LineageCanvas)
+import { EditorToolbar } from './EditorToolbar'
+import { NodePalette } from './NodePalette'
+
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
   const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string; style?: React.CSSProperties }>>)[name]
@@ -236,29 +240,46 @@ export function ReferenceModelCanvas({
   const [showDownstream, setShowDownstream] = useState(true)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
 
-  // Context Menu State
-  const [contextMenu, setContextMenu] = useState<{ x: number, y: number, nodeId: string } | null>(null)
 
-  // Handle right click
+  // Edit Mode State (unified with LineageCanvas)
+  const isEditing = useCanvasStore((s) => s.isEditing)
+  const [isPaletteOpen, setPaletteOpen] = useState(false)
+  const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
+  const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
+
+  // Handle save graph
+  const handleSave = useCallback(async () => {
+    try {
+      const response = await fetch('/api/v1/graph/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodes, edges })
+      })
+      if (!response.ok) throw new Error('Failed to save graph')
+      alert('Graph saved successfully!')
+    } catch (error) {
+      console.error('Error saving graph:', error)
+      alert('Failed to save graph')
+    }
+  }, [nodes, edges])
+
+  // Handle right click - now uses unified CanvasContextMenu
   const handleContextMenu = useCallback((e: React.MouseEvent, nodeId: string) => {
     e.preventDefault()
-    e.stopPropagation() // Prevent bubbling
-    setContextMenu({ x: e.clientX, y: e.clientY, nodeId })
-  }, [])
-
-  // Close menu on click elsewhere
-  useEffect(() => {
-    const close = () => setContextMenu(null)
-    window.addEventListener('click', close)
-    return () => window.removeEventListener('click', close)
-  }, [])
+    e.stopPropagation()
+    const node = nodes.find(n => n.id === nodeId)
+    interactions.openContextMenu(e, {
+      type: 'node',
+      id: nodeId,
+      data: node?.data as Record<string, unknown> || {},
+    })
+  }, [nodes, interactions])
 
 
 
   // Edge details
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
   const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
-  const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
   const { metadata: ontologyMetadata } = useOntologyMetadata()
   const selectEdge = useCanvasStore((s) => s.selectEdge)
 
@@ -742,11 +763,11 @@ export function ReferenceModelCanvas({
     )
   }, [searchQuery, displayFlat])
 
-  // Action: Move entity to layer
-  const moveToLayer = useCallback((layerId: string) => {
-    if (!contextMenu || !activeView || !activeView.id) return
+  // Action: Move entity to layer (updated for unified context menu)
+  const moveToLayer = useCallback((nodeId: string, layerId: string) => {
+    if (!activeView || !activeView.id) return
 
-    const entity = displayMap.get(contextMenu.nodeId)
+    const entity = displayMap.get(nodeId)
     if (!entity) return
 
     // If moving a logical node, we might need different logic (e.g. reparenting)
@@ -823,8 +844,9 @@ export function ReferenceModelCanvas({
       }
     })
 
-    setContextMenu(null)
-  }, [contextMenu, activeView, displayMap, updateView])
+    // Close context menu
+    interactions.closeContextMenu()
+  }, [activeView, displayMap, updateView, interactions])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
@@ -1100,6 +1122,27 @@ export function ReferenceModelCanvas({
 
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-gradient-to-br from-canvas via-canvas to-canvas-elevated/30", className)}>
+      {/* Editor Toolbar - Unified with LineageCanvas */}
+      <div className="absolute top-4 left-4 z-30">
+        <EditorToolbar
+          onAddNode={() => setPaletteOpen(true)}
+          onSave={handleSave}
+          edgeTypes={relationshipTypes}
+          activeEdgeType={activeEdgeType}
+          onSelectEdgeType={setActiveEdgeType}
+        />
+      </div>
+
+      {/* Node Palette - Drag and drop entity creation */}
+      <AnimatePresence>
+        {isPaletteOpen && (
+          <NodePalette
+            isOpen={isPaletteOpen}
+            onClose={() => setPaletteOpen(false)}
+          />
+        )}
+      </AnimatePresence>
+
       {/* Header - Modern glass morphism style */}
       <div className="flex-shrink-0 bg-gradient-to-r from-canvas-elevated/90 via-canvas-elevated/95 to-canvas-elevated/90 backdrop-blur-xl border-b border-white/[0.06] px-6 py-3 relative">
         {/* Subtle gradient overlay */}
@@ -1387,27 +1430,6 @@ export function ReferenceModelCanvas({
             ))}
           </div>
 
-          {/* Legacy Context Menu (kept for move-to-layer) */}
-          {contextMenu && (
-            <div
-              className="fixed z-50 min-w-[160px] glass-panel rounded-lg shadow-xl overflow-hidden py-1 border border-glass-border"
-              style={{ top: contextMenu.y, left: contextMenu.x }}
-            >
-              <div className="px-3 py-1.5 border-b border-glass-border text-xs font-semibold text-ink-muted bg-black/5 dark:bg-white/5">
-                Move to Layer...
-              </div>
-              {sortedLayers.map(layer => (
-                <button
-                  key={layer.id}
-                  onClick={() => moveToLayer(layer.id)}
-                  className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent-lineage/10 hover:text-accent-lineage flex items-center gap-2"
-                >
-                  <div className="w-2 h-2 rounded-full" style={{ backgroundColor: layer.color }} />
-                  {layer.name}
-                </button>
-              ))}
-            </div>
-          )}
 
         </div>
       </div>
@@ -1432,10 +1454,7 @@ export function ReferenceModelCanvas({
         onCreateNode={(pos) => interactions.openQuickCreate(pos)}
         onSelectAll={interactions.selectAll}
         layers={sortedLayers}
-        onMoveToLayer={(nodeId, layerId) => {
-          setContextMenu({ x: 0, y: 0, nodeId })
-          moveToLayer(layerId)
-        }}
+        onMoveToLayer={(nodeId, layerId) => moveToLayer(nodeId, layerId)}
       />
       
       {/* Inline Node Editor - Double-click to edit names */}

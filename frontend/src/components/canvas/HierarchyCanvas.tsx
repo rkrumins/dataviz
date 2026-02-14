@@ -16,9 +16,20 @@ import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useOntologyMetadata, isContainmentEdgeType } from '@/services/ontologyService'
-
-// import type { EntityTypeSchema } from '@/types/schema'
 import { useEntityLoader } from '@/hooks/useEntityLoader'
+
+// UX-first interaction components (unified with LineageCanvas)
+import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
+import { InlineNodeEditor } from './InlineNodeEditor'
+import { QuickCreateNode } from './QuickCreateNode'
+import { CommandPalette } from './CommandPalette'
+import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
+import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
+
+// Editor components (unified with LineageCanvas)
+import { EditorToolbar } from './EditorToolbar'
+import { NodePalette } from './NodePalette'
+import { EditNodePanel } from '../panels/EditNodePanel'
 
 interface HierarchyNode {
   id: string
@@ -55,12 +66,46 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const schema = useSchemaStore((s) => s.schema)
   const { containmentEdgeTypes } = useOntologyMetadata()
   const { loadChildren, loadingNodes } = useEntityLoader()
+  const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<string[]>([])
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
   const searchInputRef = useRef<HTMLInputElement>(null)
+
+  // Edit Mode State (unified with LineageCanvas)
+  const isEditing = useCanvasStore((s) => s.isEditing)
+  const [isPaletteOpen, setPaletteOpen] = useState(false)
+  const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
+
+  // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
+  const interactions = useCanvasInteractions({
+    onTraceNode: (nodeId) => selectNode(nodeId),
+    onNodeCreated: (nodeId) => selectNode(nodeId),
+  })
+
+  // Keyboard shortcuts
+  useCanvasKeyboard({
+    enabled: true,
+    handlers: interactions.keyboardHandlers,
+  })
+
+  // Handle save graph
+  const handleSave = useCallback(async () => {
+    try {
+      const response = await fetch('/api/v1/graph/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodes, edges })
+      })
+      if (!response.ok) throw new Error('Failed to save graph')
+      alert('Graph saved successfully!')
+    } catch (error) {
+      console.error('Error saving graph:', error)
+      alert('Failed to save graph')
+    }
+  }, [nodes, edges])
 
   // Build hierarchy tree from nodes and edges
   const hierarchyTree = useMemo(() => {
@@ -233,7 +278,28 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   }, [])
 
   return (
-    <div className={cn("h-full w-full flex flex-col overflow-hidden bg-canvas", className)}>
+    <div className={cn("h-full w-full flex flex-col overflow-hidden bg-canvas relative", className)}>
+      {/* Editor Toolbar - Unified with LineageCanvas */}
+      <div className="absolute top-4 left-4 z-30">
+        <EditorToolbar
+          onAddNode={() => setPaletteOpen(true)}
+          onSave={handleSave}
+          edgeTypes={relationshipTypes}
+          activeEdgeType={activeEdgeType}
+          onSelectEdgeType={setActiveEdgeType}
+        />
+      </div>
+
+      {/* Node Palette - Drag and drop entity creation */}
+      <AnimatePresence>
+        {isPaletteOpen && (
+          <NodePalette
+            isOpen={isPaletteOpen}
+            onClose={() => setPaletteOpen(false)}
+          />
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <div className="flex-shrink-0 bg-canvas-elevated/95 backdrop-blur border-b border-glass-border px-6 py-3">
         <div className="flex items-center gap-4">
@@ -331,11 +397,84 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
                 searchResults={searchResults}
                 onSelect={selectNode}
                 onToggle={toggleNode}
+                onContextMenu={(e, nodeId) => {
+                  interactions.openContextMenu(e, {
+                    type: 'node',
+                    id: nodeId,
+                    data: flatNodes.find(n => n.id === nodeId)?.data || {}
+                  })
+                }}
+                onDoubleClick={(nodeId, e) => {
+                  const node = flatNodes.find(n => n.id === nodeId)
+                  const element = document.getElementById(`hierarchy-node-${nodeId}`)
+                  if (element && node) {
+                    const rect = element.getBoundingClientRect()
+                    interactions.startInlineEdit(
+                      nodeId,
+                      node.name,
+                      { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+                    )
+                  }
+                }}
               />
             ))}
           </div>
         )}
       </div>
+
+      {/* Edit Node Panel */}
+      <EditNodePanel />
+
+      {/* === UX-FIRST INTERACTION COMPONENTS (Unified with LineageCanvas) === */}
+      
+      {/* Context Menu - Right-click on nodes */}
+      <CanvasContextMenu
+        isOpen={interactions.state.contextMenu.isOpen}
+        position={interactions.state.contextMenu.position}
+        target={interactions.state.contextMenu.target}
+        onClose={interactions.closeContextMenu}
+        onEditNode={interactions.editNode}
+        onDuplicateNode={interactions.duplicateNode}
+        onDeleteNode={interactions.deleteNode}
+        onCreateChild={interactions.createChild}
+        onTraceNode={(id) => selectNode(id)}
+        onCopyUrn={interactions.copyUrn}
+        onEditEdge={interactions.editEdge}
+        onDeleteEdge={interactions.deleteEdge}
+        onReverseEdge={interactions.reverseEdge}
+        onCreateNode={(pos) => interactions.openQuickCreate(pos)}
+        onSelectAll={interactions.selectAll}
+      />
+      
+      {/* Inline Node Editor - Double-click to edit names */}
+      <InlineNodeEditor
+        nodeId={interactions.state.inlineEdit.nodeId}
+        value={interactions.state.inlineEdit.value}
+        position={interactions.state.inlineEdit.position}
+        onSave={interactions.saveInlineEdit}
+        onCancel={interactions.cancelInlineEdit}
+      />
+      
+      {/* Quick Create - Press 'N' or use context menu */}
+      <QuickCreateNode
+        isOpen={interactions.state.quickCreate.isOpen}
+        position={interactions.state.quickCreate.position}
+        parentUrn={interactions.state.quickCreate.parentUrn}
+        onClose={interactions.closeQuickCreate}
+        onCreated={(nodeId) => selectNode(nodeId)}
+        variant="centered"
+      />
+      
+      {/* Command Palette - Press Cmd+K */}
+      <CommandPalette
+        isOpen={interactions.state.commandPalette.isOpen}
+        onClose={interactions.closeCommandPalette}
+        onCreateEntity={(typeId) => {
+          interactions.closeCommandPalette()
+          interactions.openQuickCreate({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
+        }}
+        onSelectEntity={(entityId) => selectNode(entityId)}
+      />
     </div>
   )
 }
@@ -348,6 +487,8 @@ interface HierarchyContainerProps {
   searchResults: string[]
   onSelect: (id: string) => void
   onToggle: (id: string) => void
+  onContextMenu?: (e: React.MouseEvent, nodeId: string) => void
+  onDoubleClick?: (nodeId: string, event: React.MouseEvent) => void
   depth?: number
 }
 
@@ -359,6 +500,8 @@ function HierarchyContainer({
   searchResults,
   onSelect,
   onToggle,
+  onContextMenu,
+  onDoubleClick,
   depth = 0,
 }: HierarchyContainerProps) {
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
@@ -431,6 +574,11 @@ function HierarchyContainer({
             "hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
           )}
           onClick={() => onSelect(node.id)}
+          onDoubleClick={(e) => onDoubleClick?.(node.id, e)}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            onContextMenu?.(e, node.id)
+          }}
         >
           {/* Expand/Collapse Button */}
           {hasChildren && (
@@ -529,6 +677,8 @@ function HierarchyContainer({
                     searchResults={searchResults}
                     onSelect={onSelect}
                     onToggle={onToggle}
+                    onContextMenu={onContextMenu}
+                    onDoubleClick={onDoubleClick}
                     depth={depth + 1}
                   />
                 ))}

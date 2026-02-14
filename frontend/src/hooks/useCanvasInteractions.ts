@@ -145,6 +145,7 @@ export function useCanvasInteractions(
         updateNode,
         removeNode,
         removeEdge,
+        setEditing,
     } = useCanvasStore()
     
     // State
@@ -244,17 +245,11 @@ export function useCanvasInteractions(
     const editNode = useCallback((nodeId: string) => {
         const node = nodes.find(n => n.id === nodeId)
         if (node) {
-            // Get node position on screen (simplified - would need actual DOM lookup in real impl)
-            const element = document.querySelector(`[data-id="${nodeId}"]`)
-            if (element) {
-                const rect = element.getBoundingClientRect()
-                startInlineEdit(nodeId, node.data.label || '', {
-                    x: rect.left + rect.width / 2,
-                    y: rect.top + rect.height / 2,
-                })
-            }
+            // Enable edit mode and select the node to open EditNodePanel
+            setEditing(true)
+            selectNode(nodeId)
         }
-    }, [nodes, startInlineEdit])
+    }, [nodes, setEditing, selectNode])
     
     const duplicateNode = useCallback(async (nodeId: string) => {
         const node = nodes.find(n => n.id === nodeId)
