@@ -84,21 +84,45 @@ class MockGraphProvider(GraphDataProvider):
 
         random.seed(42)
         
-        # 1. Check for persisted data first
-        if os.path.exists("custom_graph.json"):
+        # Determine file paths
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        backend_dir = os.path.dirname(os.path.dirname(current_dir))
+        lineage_file = os.path.join(backend_dir, "data", "demo_graph_with_lineage.json")
+        custom_file = "custom_graph.json"
+        
+        nodes = None
+        edges = None
+        
+        # 1. Check for column lineage data file first
+        if os.path.exists(lineage_file):
             try:
-                with open("custom_graph.json", "r") as f:
+                with open(lineage_file, "r") as f:
                     data = json.load(f)
                     
                 # Reconstruct objects
                 nodes = [GraphNode(**n) for n in data.get("nodes", [])]
                 edges = [GraphEdge(**e) for e in data.get("edges", [])]
                 
-                print(f"Loaded {len(nodes)} nodes and {len(edges)} edges from persistence.")
+                print(f"Loaded {len(nodes)} nodes and {len(edges)} edges from {lineage_file}")
             except Exception as e:
-                print(f"Error loading persisted graph: {e}. Falling back to demo data.")
-                nodes, edges = generate_demo_data()
-        else:
+                print(f"Error loading column lineage graph from {lineage_file}: {e}. Trying fallback.")
+        
+        # 2. Fall back to custom_graph.json if lineage file not found or failed
+        if nodes is None and os.path.exists(custom_file):
+            try:
+                with open(custom_file, "r") as f:
+                    data = json.load(f)
+                    
+                # Reconstruct objects
+                nodes = [GraphNode(**n) for n in data.get("nodes", [])]
+                edges = [GraphEdge(**e) for e in data.get("edges", [])]
+                
+                print(f"Loaded {len(nodes)} nodes and {len(edges)} edges from {custom_file}")
+            except Exception as e:
+                print(f"Error loading persisted graph from {custom_file}: {e}. Falling back to demo data.")
+        
+        # 3. Fall back to generating demo data
+        if nodes is None:
             nodes, edges = generate_demo_data()
         
         for node in nodes:

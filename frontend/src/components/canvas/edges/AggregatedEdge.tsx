@@ -23,6 +23,9 @@ interface AggregatedEdgeData {
   sourceEdges?: string[]
   edgeType?: string
   isAggregated?: boolean
+  // Trace flags for consistent highlighting
+  isTraced?: boolean
+  isDimmed?: boolean
   [key: string]: unknown
 }
 
@@ -42,6 +45,8 @@ export const AggregatedEdge = memo(function AggregatedEdge({
 
   const confidence = data?.confidence ?? 0.5
   const sourceCount = data?.sourceEdgeCount ?? 1
+  const isTraced = data?.isTraced ?? false
+  const isDimmed = data?.isDimmed ?? false
 
   // Calculate path
   const [edgePath, labelX, labelY] = getBezierPath({
@@ -62,36 +67,56 @@ export const AggregatedEdge = memo(function AggregatedEdge({
 
   const edgeColor = getConfidenceColor(confidence)
 
+  // Trace color - purple for traced aggregated edges
+  const traceColor = '#c084fc'
+
   return (
     <>
+      {/* Trace Glow Layer */}
+      {isTraced && !isDimmed && (
+        <path
+          d={edgePath}
+          fill="none"
+          stroke={traceColor}
+          strokeWidth={12}
+          strokeOpacity={0.25}
+          style={{
+            filter: 'blur(4px)',
+          }}
+        />
+      )}
+
       {/* Edge Path */}
       <BaseEdge
         id={id}
         path={edgePath}
         style={{
           ...(style as React.CSSProperties),
-          stroke: edgeColor,
-          strokeWidth: selected ? 3 : 2,
+          stroke: isDimmed ? '#9ca3af' : isTraced ? traceColor : edgeColor,
+          strokeWidth: isDimmed ? 1 : isTraced ? 3 : selected ? 3 : 2,
           strokeDasharray: '8 4',
-          opacity: isHovered ? 1 : 0.7,
+          opacity: isDimmed ? 0.2 : isHovered ? 1 : 0.7,
+          filter: isTraced && !isDimmed ? `drop-shadow(0 0 6px ${traceColor})` : undefined,
         }}
         interactionWidth={20}
         className="transition-all duration-200"
       />
 
       {/* Animated Flow Particles */}
-      <path
-        d={edgePath}
-        fill="none"
-        stroke={edgeColor}
-        strokeWidth={2}
-        strokeDasharray="1 10"
-        className="animate-[flow_2s_linear_infinite]"
-        style={{
-          opacity: 0.8,
-          strokeLinecap: 'round',
-        }}
-      />
+      {!isDimmed && (
+        <path
+          d={edgePath}
+          fill="none"
+          stroke={isTraced ? traceColor : edgeColor}
+          strokeWidth={isTraced ? 3 : 2}
+          strokeDasharray="1 10"
+          className="animate-[flow_2s_linear_infinite]"
+          style={{
+            opacity: 0.8,
+            strokeLinecap: 'round',
+          }}
+        />
+      )}
 
       {/* Hover/Interactive Area */}
       <path
@@ -121,9 +146,12 @@ export const AggregatedEdge = memo(function AggregatedEdge({
               "flex items-center gap-1 px-2 py-1 rounded-full",
               "text-2xs font-medium transition-all duration-200",
               "cursor-pointer",
-              selected || isHovered
-                ? "bg-amber-500 text-white shadow-lg scale-110"
-                : "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
+              isDimmed && "opacity-20 grayscale",
+              isTraced && !isDimmed
+                ? "bg-purple-500 text-white shadow-lg ring-2 ring-purple-300"
+                : selected || isHovered
+                  ? "bg-amber-500 text-white shadow-lg scale-110"
+                  : "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
             )}
           >
             <Layers className="w-3 h-3" />

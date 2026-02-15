@@ -26,6 +26,7 @@ interface GenericNodeData extends EntityInstance {
   isDimmed?: boolean
   isUpstream?: boolean
   isDownstream?: boolean
+  isFocus?: boolean
   // Layout triggers
   onLoadMore?: () => void
 }
@@ -52,7 +53,7 @@ export const GenericNode = memo(function GenericNode({
     ? (rawData.data as GenericNodeData)
     : (rawData as unknown as GenericNodeData)
 
-  const { isTraced, isDimmed, isUpstream, isDownstream } = entityData
+  const { isTraced, isDimmed, isUpstream, isDownstream, isFocus } = entityData
 
 
   const loadMoreNodes = useLineageExplorationStore((s) => s.loadMoreNodes)
@@ -161,29 +162,42 @@ export const GenericNode = memo(function GenericNode({
           shapeClasses[visual.shape],
           borderClasses[visual.borderStyle],
           "bg-canvas-elevated",
-          !!selected && "ring-2 ring-offset-2",
+          !!selected && !isTraced && "ring-2 ring-offset-2",
           !!dragging && "opacity-80 cursor-grabbing",
           isGhost && "opacity-60",
-          // Trace Styling
-          isDimmed && "opacity-40 grayscale-[0.5] blur-[0.5px]",
-          isTraced && "shadow-[0_0_20px_rgba(59,130,246,0.5)] ring-2 ring-blue-500 border-blue-500 scale-[1.02] z-50",
-          !isTraced && selected && "ring-2 ring-offset-2"
+          // Trace Styling - Consistent across all views
+          isDimmed && "opacity-30 grayscale-[0.6] blur-[0.5px] scale-[0.98]",
+          // Focus node: Gold ring + pulse
+          isFocus && "ring-4 ring-amber-400 ring-offset-2 shadow-[0_0_30px_rgba(251,191,36,0.6)] scale-[1.05] z-[100]",
+          // Upstream nodes: Blue tint
+          isUpstream && !isFocus && "ring-2 ring-blue-400 ring-offset-1 shadow-[0_0_15px_rgba(96,165,250,0.4)] bg-blue-50 dark:bg-blue-950/30 z-50",
+          // Downstream nodes: Green tint
+          isDownstream && !isFocus && !isUpstream && "ring-2 ring-green-400 ring-offset-1 shadow-[0_0_15px_rgba(74,222,128,0.4)] bg-green-50 dark:bg-green-950/30 z-50",
+          // Generic traced node (neither up nor down but in path)
+          isTraced && !isFocus && !isUpstream && !isDownstream && "ring-2 ring-purple-400 ring-offset-1 shadow-[0_0_15px_rgba(192,132,252,0.4)] z-50"
         )}
         style={{
-          borderColor: isTraced ? '#3b82f6' : visual.color,
+          borderColor: isFocus ? '#fbbf24' : isUpstream ? '#60a5fa' : isDownstream ? '#4ade80' : isTraced ? '#c084fc' : visual.color,
           borderLeftWidth: visual.borderStyle !== 'none' ? '4px' : undefined,
-          boxShadow: isTraced
-            ? `0 0 20px rgba(59,130,246,0.4)`
-            : selected
-              ? `0 0 20px ${visual.color}40`
-              : '0 4px 12px rgba(0,0,0,0.1)',
-          ['--ring-color' as string]: isTraced ? '#3b82f6' : visual.color,
+          boxShadow: isFocus
+            ? '0 0 30px rgba(251,191,36,0.5)'
+            : isUpstream 
+              ? '0 0 20px rgba(96,165,250,0.4)'
+              : isDownstream
+                ? '0 0 20px rgba(74,222,128,0.4)'
+                : isTraced
+                  ? '0 0 20px rgba(192,132,252,0.4)'
+                  : selected
+                    ? `0 0 20px ${visual.color}40`
+                    : '0 4px 12px rgba(0,0,0,0.1)',
+          ['--ring-color' as string]: isFocus ? '#fbbf24' : isUpstream ? '#60a5fa' : isDownstream ? '#4ade80' : isTraced ? '#c084fc' : visual.color,
         }}
         // Add data attributes for testing/debugging
         data-traced={isTraced}
         data-dimmed={isDimmed}
         data-upstream={isUpstream}
         data-downstream={isDownstream}
+        data-focus={isFocus}
       >
         {/* Header */}
         <div className="flex items-start gap-2">

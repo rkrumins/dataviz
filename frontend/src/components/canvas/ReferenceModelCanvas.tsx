@@ -137,10 +137,49 @@ export function ReferenceModelCanvas({
   const updateView = useSchemaStore((s) => s.updateView)
   const provider = useGraphProvider()
   const { containmentEdgeTypes, isContainmentEdge } = useOntologyMetadata()
-  
+
+  // URN resolver for trace
+  const urnResolver = useCallback((nodeId: string) => {
+    const node = nodes.find(n => n.id === nodeId)
+    return (node?.data?.urn as string) || nodeId
+  }, [nodes])
+
+  // Unified Trace System - replaces local trace state
+  const trace = useUnifiedTrace({
+    provider,
+    urnResolver,
+    onTraceComplete: async (result) => {
+      console.log('[ReferenceModelCanvas] Trace complete:', result.traceNodes.size, 'nodes')
+
+      // Auto-expand ancestors of traced nodes
+      if (result.lineageResult) {
+        const nodesToExpand = new Set(expandedNodes)
+
+        // Build parent map from containment edges
+        const parentMap = new Map<string, string>()
+        const containmentEdges = edges.filter(e => {
+          const type = normalizeEdgeType(e)
+          return isContainmentEdge(type)
+        })
+        containmentEdges.forEach(e => parentMap.set(e.target, e.source))
+
+        // For each traced node, expand its ancestors
+        result.traceNodes.forEach(id => {
+          let curr = parentMap.get(id)
+          while (curr) {
+            nodesToExpand.add(curr)
+            curr = parentMap.get(curr)
+          }
+        })
+
+        setExpandedNodes(nodesToExpand)
+      }
+    }
+  })
+
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
   const interactions = useCanvasInteractions({
-    onTraceNode: (nodeId) => setTraceFocusId(nodeId),
+    onTraceNode: (nodeId) => trace.startTrace(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
     layers: layers,
     onMoveToLayer: (nodeId, layerId) => {
@@ -153,7 +192,7 @@ export function ReferenceModelCanvas({
     enabled: true,
     handlers: interactions.keyboardHandlers,
   })
-  
+
   // Aggregated lineage for progressive edge disclosure
   const {
     aggregatedEdges,
@@ -178,18 +217,18 @@ export function ReferenceModelCanvas({
   // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
     if (!activeView) return
-    
+
     const viewLayers = activeView.layout?.referenceLayout?.layers
     if (!viewLayers || viewLayers.length === 0) return
 
     // Only sync if layers have changed (avoid unnecessary updates)
-    const layersChanged = 
+    const layersChanged =
       storeLayers.length !== viewLayers.length ||
       storeLayers.some((layer, idx) => {
         const viewLayer = viewLayers[idx]
-        return !viewLayer || 
-               layer.id !== viewLayer.id ||
-               JSON.stringify(layer.entityAssignments) !== JSON.stringify(viewLayer.entityAssignments)
+        return !viewLayer ||
+          layer.id !== viewLayer.id ||
+          JSON.stringify(layer.entityAssignments) !== JSON.stringify(viewLayer.entityAssignments)
       })
 
     if (layersChanged) {
@@ -209,12 +248,12 @@ export function ReferenceModelCanvas({
       if (assignmentStatus === 'idle') {
         // Check if we need to recompute (no assignments or layers changed)
         const hasAssignments = effectiveAssignments.size > 0
-        const shouldCompute = !hasAssignments || 
+        const shouldCompute = !hasAssignments ||
           // Recompute if layers changed (entityAssignments might have changed)
-          storeLayers.some(layer => 
+          storeLayers.some(layer =>
             layer.entityAssignments && layer.entityAssignments.length > 0
           )
-        
+
         if (shouldCompute) {
           computeAssignments(provider)
         }
@@ -225,19 +264,13 @@ export function ReferenceModelCanvas({
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
   const searchInputRef = useRef<HTMLInputElement>(null)
-  
+
   // Entity creation state
   const [isCreatingEntity, setIsCreatingEntity] = useState(false)
   const [creationParentId, setCreationParentId] = useState<string | null>(null)
   const [creationLayerId, setCreationLayerId] = useState<string | null>(null)
 
-  // Trace / Focus State
-  const [traceFocusId, setTraceFocusId] = useState<string | null>(null)
-  const [traceNodes, setTraceNodes] = useState<Set<string>>(new Set()) // Combined set for quick lookups
-  const [traceUpstreamNodes, setTraceUpstreamNodes] = useState<Set<string>>(new Set())
-  const [traceDownstreamNodes, setTraceDownstreamNodes] = useState<Set<string>>(new Set())
-  const [showUpstream, setShowUpstream] = useState(true)
-  const [showDownstream, setShowDownstream] = useState(true)
+  // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
 
 
@@ -318,164 +351,18 @@ export function ReferenceModelCanvas({
         return
       }
     }
-    
-    // TRACE MODE: Toggle trace off if clicking the same node
-    if (traceFocusId === nodeId) {
-      setTraceFocusId(null)
-      setTraceNodes(new Set())
-      setTraceUpstreamNodes(new Set())
-      setTraceDownstreamNodes(new Set())
-      return
-    }
 
-    // Resolve URN from the clicked node
-    // We assume nodes in store have data.urn. Fallback to ID if not found.
-    const targetNode = nodes.find(n => n.id === nodeId)
-    const targetUrn = (targetNode?.data?.urn as string) || nodeId
-
-    // Optimistically highlight the clicked node (using ID)
-    setTraceFocusId(nodeId)
-    setTraceNodes(new Set([nodeId]))
-    setTraceUpstreamNodes(new Set())
-    setTraceDownstreamNodes(new Set())
-
-    if (!provider) return
-
-    try {
-      // 1. Fetch Trace Data
-      const result = await provider.getFullLineage(targetUrn, 3, 3)
-
-      // 2. Resolve IDs (URN -> Existing Store ID or URN)
-      // This maps backend URNs to whatever ID is currently in the store, 
-      // preventing dupes and ensuring traceNodes matches UI IDs.
-      const urnToId = new Map<string, string>()
-      nodes.forEach(n => {
-        if (n.data?.urn) urnToId.set(n.data.urn as string, n.id)
-        // Also map ID acting as URN?
-        urnToId.set(n.id, n.id)
-      })
-
-      const resolveId = (urn: string) => urnToId.get(urn) || urn
-
-      // 3. Prepare New Nodes / Edges for Store
-      const newNodes: any[] = []
-      const newEdges: any[] = []
-
-      // Nodes
-      result.nodes.forEach(n => {
-        const existingId = urnToId.get(n.urn)
-        // Only add if we don't know this URN (or ID)
-        if (!existingId) {
-          newNodes.push({
-            id: n.urn, // Use URN as ID for new nodes
-            type: 'generic',
-            position: { x: 0, y: 0 },
-            data: {
-              ...n.properties,
-              label: n.displayName,
-              type: n.entityType,
-              urn: n.urn,
-              childCount: n.childCount
-            }
-          })
-          // Update local map for edges processing
-          urnToId.set(n.urn, n.urn)
-        }
-      })
-
-      // Edges
-      const existingEdgeIds = new Set(edges.map(e => e.id))
-      result.edges.forEach(e => {
-        if (!existingEdgeIds.has(e.id)) {
-          newEdges.push({
-            id: e.id,
-            source: resolveId(e.sourceUrn),
-            target: resolveId(e.targetUrn),
-            type: 'lineage',
-            data: {
-              relationship: e.edgeType,
-              edgeType: e.edgeType,
-              confidence: e.confidence
-            }
-          })
-        }
-      })
-
-      // 4. Update Store
-      if (newNodes.length > 0) addNodes(newNodes)
-      if (newEdges.length > 0) addEdges(newEdges)
-
-      // 5. Update Trace Highlight (using IDs)
-      const visibleIds = new Set<string>()
-
-      // Add the start node ID
-      visibleIds.add(nodeId)
-
-      // Add traced nodes (resolved to IDs)
-      result.nodes.forEach(n => {
-        const id = resolveId(n.urn)
-        if (id) visibleIds.add(id)
-      })
-
-      // Add upstream/downstream URNs (resolved to IDs)
-      const upstreamSet = new Set<string>()
-      const downstreamSet = new Set<string>()
-
-      result.upstreamUrns.forEach(u => {
-        const id = resolveId(u)
-        if (id) {
-          visibleIds.add(id)
-          upstreamSet.add(id)
-        }
-      })
-      result.downstreamUrns.forEach(u => {
-        const id = resolveId(u)
-        if (id) {
-          visibleIds.add(id)
-          downstreamSet.add(id)
-        }
-      })
-
-      setTraceNodes(visibleIds)
-      setTraceUpstreamNodes(upstreamSet)
-      setTraceDownstreamNodes(downstreamSet)
-      setShowUpstream(true) // Reset visibility on new trace
-      setShowDownstream(true)
-
-      // 6. Style: Auto-expand ancestors of visible nodes
-      const nodesToExpand = new Set(expandedNodes)
-
-      const properParentMap = new Map<string, string>()
-      const containmentEdges = edges.filter(e => {
-        const type = normalizeEdgeType(e)
-        return isContainmentEdge(type)
-      })
-      containmentEdges.forEach(e => properParentMap.set(e.target, e.source))
-
-      visibleIds.forEach(id => {
-        let curr = id
-        while (properParentMap.has(curr)) {
-          curr = properParentMap.get(curr)!
-          nodesToExpand.add(curr)
-        }
-      })
-
-      setExpandedNodes(nodesToExpand)
-
-    } catch (err) {
-      console.error("Failed to fetch trace", err)
-      // Reset if failed?
-      // setTraceFocusId(null)
-    }
-  }, [traceFocusId, provider, nodes, edges, addNodes, addEdges, expandedNodes])
+    // TRACE MODE: Toggle trace using unified trace hook
+    trace.toggleTrace(nodeId)
+  }, [trace.toggleTrace, nodes, interactions])
 
 
   // Lineage flow toggle
   const [showLineageFlow, setShowLineageFlow] = useState(initialShowLineageFlow)
-  
+
   // Ref to trigger edge redraw from child components
   const triggerEdgeRedrawRef = useRef<(() => void) | null>(null)
-  
+
   // Callback for animation completion to trigger edge redraw
   const handleAnimationComplete = useCallback(() => {
     // Small delay to ensure DOM is fully updated after animation
@@ -528,7 +415,7 @@ export function ReferenceModelCanvas({
         .filter(n => !parentMap.has(n.id) || !expandedNodes.has(parentMap.get(n.id) || ''))
         .map(n => (n.data?.urn as string) || n.id)
         .filter(Boolean)
-      
+
       if (containerUrns.length > 0 && containerUrns.length < 500) {
         fetchAggregated(containerUrns)
       }
@@ -853,7 +740,7 @@ export function ReferenceModelCanvas({
     setCreationParentId(parentId)
     setIsCreatingEntity(true)
   }, [])
-  
+
   // Toggle node expansion with Lazy Loading
   const { loadChildren } = useEntityLoader()
 
@@ -903,34 +790,30 @@ export function ReferenceModelCanvas({
 
 
 
-  // Style: Enhanced Trace Context
+  // Style: Enhanced Trace Context using unified trace hook
   // Compute the set of all "Contextual Nodes" for the active trace.
   // This includes:
-  // 1. The traced nodes themselves (traceNodes)
+  // 1. The traced nodes themselves (from trace.visibleTraceNodes)
   // 2. ALL ancestors of traced nodes (so containers stay lit)
   const traceContextSet = useMemo(() => {
     const set = new Set<string>()
-    if (traceFocusId) set.add(traceFocusId)
+
+    if (!trace.isTracing) return set
+
+    // Add focus node
+    if (trace.focusId) set.add(trace.focusId)
 
     // Add ancestors for the focus node
-    if (traceFocusId) {
-      let curr = parentMap.get(traceFocusId)
+    if (trace.focusId) {
+      let curr = parentMap.get(trace.focusId)
       while (curr) {
         set.add(curr)
         curr = parentMap.get(curr)
       }
     }
 
-    // Add traced nodes and their ancestors, filtered by direction
-    traceNodes.forEach(id => {
-      const isUpstream = traceUpstreamNodes.has(id)
-      const isDownstream = traceDownstreamNodes.has(id)
-      const isFocus = id === traceFocusId
-
-      if (!isFocus && ((isUpstream && !showUpstream) || (isDownstream && !showDownstream))) {
-        return // Skip if not focus and direction is hidden
-      }
-
+    // Add visible traced nodes and their ancestors
+    trace.visibleTraceNodes.forEach(id => {
       set.add(id) // Add the node itself
 
       let curr = parentMap.get(id)
@@ -941,14 +824,14 @@ export function ReferenceModelCanvas({
     })
 
     return set
-  }, [traceNodes, traceFocusId, parentMap, traceUpstreamNodes, traceDownstreamNodes, showUpstream, showDownstream])
+  }, [trace.isTracing, trace.focusId, trace.visibleTraceNodes, parentMap])
   const lineageEdges = useMemo(() => {
     if (!showLineageFlow) return []
     // Filter out containment edges
     const regularEdges = edges.filter(edge => {
       return !isContainmentEdge(normalizeEdgeType(edge))
     })
-    
+
     // Add aggregated edges from the hook
     const aggEdges = Array.from(aggregatedEdges.values())
       .filter(e => e.state === 'collapsed')
@@ -965,7 +848,7 @@ export function ReferenceModelCanvas({
           confidence: e.aggregated.confidence,
         }
       }))
-    
+
     // Add expanded detailed edges
     const expandedDetailedEdges = Array.from(aggregatedEdges.values())
       .filter(e => e.state === 'expanded')
@@ -979,7 +862,7 @@ export function ReferenceModelCanvas({
           confidence: de.confidence,
         }
       })))
-    
+
     return [...regularEdges, ...aggEdges, ...expandedDetailedEdges]
   }, [edges, showLineageFlow, aggregatedEdges, isContainmentEdge])
 
@@ -1061,19 +944,8 @@ export function ReferenceModelCanvas({
 
       if (sourceId && targetId && sourceId !== targetId) {
         // Trace Filtering: If trace is active, ONLY show edges relevant to the trace
-        if (traceFocusId) {
-          // Check if this edge connects two nodes in the trace context?
-          // Ideally, we want edges ON the trace path.
-          // visibleLineageEdges projects edges. 
-          // If the source/target are part of the 'traceNodes', show.
-          // But 'traceNodes' are leaf nodes mostly. 
-          // traceContextSet has ancestors.
-          // Let's rely on 'traceNodes' for the strictest filtering (actual data flow),
-          // OR check if source/target are in 'traceContextSet' AND the edge is part of the path?
-          // Simpler: If source OR target is not in traceContextSet, hide it.
-          // Even stricter: BOTH must be in traceContextSet?
-          // Yes, let's try strictly showing flow between relevant nodes.
-
+        if (trace.isTracing) {
+          // Show edges only between nodes in traceContextSet
           if (!traceContextSet.has(sourceId) || !traceContextSet.has(targetId)) {
             return
           }
@@ -1118,7 +990,7 @@ export function ReferenceModelCanvas({
     })
 
     return projected
-  }, [lineageEdges, nodesByLayer, expandedNodes, displayMap, showLineageFlow, traceFocusId, traceContextSet])
+  }, [lineageEdges, nodesByLayer, expandedNodes, displayMap, showLineageFlow, trace.isTracing, traceContextSet])
 
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-gradient-to-br from-canvas via-canvas to-canvas-elevated/30", className)}>
@@ -1147,7 +1019,7 @@ export function ReferenceModelCanvas({
       <div className="flex-shrink-0 bg-gradient-to-r from-canvas-elevated/90 via-canvas-elevated/95 to-canvas-elevated/90 backdrop-blur-xl border-b border-white/[0.06] px-6 py-3 relative">
         {/* Subtle gradient overlay */}
         <div className="absolute inset-0 bg-gradient-to-r from-accent-lineage/[0.02] via-transparent to-purple-500/[0.02] pointer-events-none" />
-        
+
         <div className="flex items-center gap-4 relative">
           {/* Title with icon */}
           <div className="flex items-center gap-3">
@@ -1162,7 +1034,7 @@ export function ReferenceModelCanvas({
               </p>
             </div>
           </div>
-          
+
           <div className="flex-1" />
 
           {/* Search - Modern glass input */}
@@ -1214,7 +1086,7 @@ export function ReferenceModelCanvas({
               showLineageFlow ? "bg-green-400 shadow-lg shadow-green-400/50" : "bg-ink-muted/30"
             )} />
           </button>
-          
+
           {/* Granularity Selector - Modern dropdown */}
           <AnimatePresence>
             {showLineageFlow && (
@@ -1242,7 +1114,7 @@ export function ReferenceModelCanvas({
 
           {/* Divider */}
           <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
-          
+
           {/* Add Entity Button - Accent gradient */}
           <button
             onClick={() => {
@@ -1258,17 +1130,17 @@ export function ReferenceModelCanvas({
 
           {/* Expand/Collapse - Icon buttons */}
           <div className="flex items-center gap-1 p-1 rounded-xl bg-white/[0.03] border border-white/[0.06]">
-            <button 
-              onClick={expandAll} 
-              className="p-1.5 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all" 
+            <button
+              onClick={expandAll}
+              className="p-1.5 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all"
               title="Expand All"
             >
               <LucideIcons.ChevronsDownUp className="w-4 h-4 rotate-180" />
             </button>
             <div className="w-px h-4 bg-white/[0.08]" />
-            <button 
-              onClick={collapseAll} 
-              className="p-1.5 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all" 
+            <button
+              onClick={collapseAll}
+              className="p-1.5 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all"
               title="Collapse All"
             >
               <LucideIcons.ChevronsDownUp className="w-4 h-4" />
@@ -1279,7 +1151,7 @@ export function ReferenceModelCanvas({
         {/* Search Results - Modern pill results */}
         <AnimatePresence>
           {searchResults.length > 0 && (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: 'auto' }}
               exit={{ opacity: 0, height: 0 }}
@@ -1313,33 +1185,28 @@ export function ReferenceModelCanvas({
 
         {/* Trace Toolbar - Using unified TraceToolbar component */}
         <AnimatePresence>
-          {traceFocusId && (
+          {trace.isTracing && (
             <TraceToolbar
-              focusNodeName={displayMap.get(traceFocusId)?.name || 'Unknown Node'}
-              upstreamCount={traceUpstreamNodes.size}
-              downstreamCount={traceDownstreamNodes.size}
-              showUpstream={showUpstream}
-              showDownstream={showDownstream}
-              onToggleUpstream={() => setShowUpstream(!showUpstream)}
-              onToggleDownstream={() => setShowDownstream(!showDownstream)}
+              focusNodeName={displayMap.get(trace.focusId || '')?.name || trace.focusId || 'Unknown Node'}
+              upstreamCount={trace.upstreamCount}
+              downstreamCount={trace.downstreamCount}
+              showUpstream={trace.showUpstream}
+              showDownstream={trace.showDownstream}
+              onToggleUpstream={() => trace.setShowUpstream(!trace.showUpstream)}
+              onToggleDownstream={() => trace.setShowDownstream(!trace.showDownstream)}
               onExitTrace={() => {
-                setTraceFocusId(null)
-                setTraceNodes(new Set())
-                setTraceUpstreamNodes(new Set())
-                setTraceDownstreamNodes(new Set())
+                trace.clearTrace()
                 setExpandedNodes(new Set())
               }}
-              config={{
-                upstreamDepth: 5,
-                downstreamDepth: 5,
-                includeColumnLineage: true,
-                autoExpandAncestors: true,
-                pathOnly: false,
-              }}
-              onConfigChange={(newConfig) => {
-                // Could re-trigger trace with new config
-                console.log('Config changed:', newConfig)
-              }}
+              onRetrace={trace.retrace}
+              onTraceUpstream={() => trace.focusId && trace.traceUpstream(trace.focusId)}
+              onTraceDownstream={() => trace.focusId && trace.traceDownstream(trace.focusId)}
+              onTraceFullLineage={() => trace.focusId && trace.traceFullLineage(trace.focusId)}
+              config={trace.config}
+              onConfigChange={trace.setConfig}
+              traceResult={trace.result}
+              statistics={trace.statistics}
+              isLoading={trace.isLoading}
               position="floating"
             />
           )}
@@ -1359,12 +1226,12 @@ export function ReferenceModelCanvas({
           )}
 
           {/* Entity Drawer - Unified view & edit */}
-          <EntityDrawer 
-            onTraceUp={(nodeId) => handleDoubleClick(nodeId)}
-            onTraceDown={(nodeId) => handleDoubleClick(nodeId)}
-            onFullTrace={(nodeId) => handleDoubleClick(nodeId)}
+          <EntityDrawer
+            onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
+            onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
+            onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
           />
-          
+
           {/* Entity Creation Panel */}
           <EntityCreationPanel
             isOpen={isCreatingEntity}
@@ -1424,8 +1291,8 @@ export function ReferenceModelCanvas({
                   setCreationParentId(null)
                   setIsCreatingEntity(true)
                 }}
-                traceFocusId={traceFocusId}
-                traceNodes={traceNodes}
+                traceFocusId={trace.focusId}
+                traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
                 onAnimationComplete={handleAnimationComplete}
               />
@@ -1435,9 +1302,9 @@ export function ReferenceModelCanvas({
 
         </div>
       </div>
-      
+
       {/* === UX-FIRST INTERACTION COMPONENTS === */}
-      
+
       {/* Modern Context Menu - Full CRUD operations */}
       <CanvasContextMenu
         isOpen={interactions.state.contextMenu.isOpen}
@@ -1448,7 +1315,7 @@ export function ReferenceModelCanvas({
         onDuplicateNode={interactions.duplicateNode}
         onDeleteNode={interactions.deleteNode}
         onCreateChild={interactions.createChild}
-        onTraceNode={(id) => setTraceFocusId(id)}
+        onTraceNode={(id) => trace.startTrace(id)}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={interactions.deleteEdge}
@@ -1458,7 +1325,7 @@ export function ReferenceModelCanvas({
         layers={sortedLayers}
         onMoveToLayer={(nodeId, layerId) => moveToLayer(nodeId, layerId)}
       />
-      
+
       {/* Inline Node Editor - Double-click to edit names */}
       <InlineNodeEditor
         nodeId={interactions.state.inlineEdit.nodeId}
@@ -1467,7 +1334,7 @@ export function ReferenceModelCanvas({
         onSave={interactions.saveInlineEdit}
         onCancel={interactions.cancelInlineEdit}
       />
-      
+
       {/* Quick Create - Press 'N' or use context menu */}
       <QuickCreateNode
         isOpen={interactions.state.quickCreate.isOpen}
@@ -1477,7 +1344,7 @@ export function ReferenceModelCanvas({
         onCreated={(nodeId) => selectNode(nodeId)}
         variant="centered"
       />
-      
+
       {/* Command Palette - Press Cmd+K */}
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
@@ -1555,54 +1422,54 @@ function LayerColumn({
   const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
   const [isCollapsed, setIsCollapsed] = useState(false)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  
+
   // Build flat tree from hierarchy (visible items only)
   const flatTree = useMemo(() => {
     const result: FlatTreeNode[] = []
-    
+
     // If focused on a specific node, only show that subtree
-    const rootNodes = localFocusId 
+    const rootNodes = localFocusId
       ? nodes.flatMap(function findNode(n: HierarchyNode): HierarchyNode[] {
-          if (n.id === localFocusId) return [n]
-          return n.children.flatMap(findNode)
-        })
+        if (n.id === localFocusId) return [n]
+        return n.children.flatMap(findNode)
+      })
       : nodes
-    
+
     const traverse = (
-      node: HierarchyNode, 
-      depth: number, 
+      node: HierarchyNode,
+      depth: number,
       isLast: boolean,
       parentIsLast: boolean[]
     ) => {
       result.push({ node, depth, isLast, parentIsLast: [...parentIsLast] })
-      
+
       // Only traverse children if expanded
       if (expandedNodes.has(node.id) && node.children.length > 0) {
         node.children.forEach((child, idx) => {
           traverse(
-            child, 
-            depth + 1, 
+            child,
+            depth + 1,
             idx === node.children.length - 1,
             [...parentIsLast, isLast]
           )
         })
       }
     }
-    
+
     rootNodes.forEach((node, idx) => {
       traverse(node, 0, idx === rootNodes.length - 1, [])
     })
-    
+
     return result
   }, [nodes, expandedNodes, localFocusId])
-  
+
   // Count total including nested
   const totalCount = useMemo(() => {
-    const count = (n: HierarchyNode): number => 
+    const count = (n: HierarchyNode): number =>
       1 + n.children.reduce((acc, c) => acc + count(c), 0)
     return nodes.reduce((acc, n) => acc + count(n), 0)
   }, [nodes])
-  
+
   // Handle focus (zoom into subtree)
   const handleFocus = useCallback((node: HierarchyNode | null) => {
     if (!node) {
@@ -1610,7 +1477,7 @@ function LayerColumn({
       setBreadcrumb([])
       return
     }
-    
+
     // Build breadcrumb trail
     const trail: HierarchyNode[] = []
     const findPath = (n: HierarchyNode, target: string, path: HierarchyNode[]): boolean => {
@@ -1623,18 +1490,18 @@ function LayerColumn({
       }
       return false
     }
-    
+
     nodes.forEach(root => findPath(root, node.id, []))
-    
+
     setLocalFocusId(node.id)
     setBreadcrumb(trail.slice(0, -1)) // Exclude current node from breadcrumb
-    
+
     // Auto-expand the focused node
     if (!expandedNodes.has(node.id)) {
       onToggle(node.id)
     }
   }, [nodes, expandedNodes, onToggle])
-  
+
   // Navigate breadcrumb
   const handleBreadcrumbClick = useCallback((node: HierarchyNode | null) => {
     if (!node) {
@@ -1643,12 +1510,12 @@ function LayerColumn({
       handleFocus(node)
     }
   }, [handleFocus])
-  
+
   // Get total items at current level
   const visibleCount = flatTree.length
-  
+
   return (
-    <motion.div 
+    <motion.div
       className={cn(
         "flex flex-col bg-gradient-to-b from-canvas to-canvas-elevated/20 relative group/column transition-all duration-300",
         isCollapsed ? "min-w-[60px] max-w-[60px]" : "flex-1 min-w-[320px] max-w-[480px]"
@@ -1657,14 +1524,14 @@ function LayerColumn({
     >
       {/* Subtle column separator line with gradient fade */}
       <div className="absolute right-0 top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-glass-border/50 to-transparent" />
-      
+
       {/* Layer Header - Glass morphism style */}
       <div
         className={cn(
           "flex-shrink-0 sticky top-0 z-10 backdrop-blur-xl border-b border-white/[0.08] dark:border-white/[0.05] cursor-pointer",
           isCollapsed ? "px-2 py-4" : "px-4 py-3"
         )}
-        style={{ 
+        style={{
           background: `linear-gradient(135deg, ${layer.color}12 0%, ${layer.color}05 100%)`,
         }}
         onClick={() => isCollapsed && setIsCollapsed(false)}
@@ -1692,7 +1559,7 @@ function LayerColumn({
                 "rounded-xl flex items-center justify-center flex-shrink-0 shadow-sm transition-all duration-300",
                 isCollapsed ? "w-10 h-10" : "w-9 h-9 group-hover/column:scale-105 group-hover/column:shadow-md"
               )}
-              style={{ 
+              style={{
                 background: `linear-gradient(145deg, ${layer.color}25 0%, ${layer.color}15 100%)`,
                 boxShadow: `0 2px 8px ${layer.color}20`
               }}
@@ -1707,17 +1574,17 @@ function LayerColumn({
               />
             </div>
           </div>
-          
+
           {/* Collapsed state - vertical text */}
           {isCollapsed ? (
             <div className="flex flex-col items-center gap-2">
-              <span 
+              <span
                 className="text-xs font-semibold writing-mode-vertical transform rotate-180"
                 style={{ color: layer.color, writingMode: 'vertical-rl' }}
               >
                 {layer.name}
               </span>
-              <div 
+              <div
                 className="px-1.5 py-1 rounded-full text-[10px] font-semibold"
                 style={{ backgroundColor: `${layer.color}20`, color: layer.color }}
               >
@@ -1737,7 +1604,7 @@ function LayerColumn({
           ) : (
             <>
               <div className="flex-1 min-w-0">
-                <h3 
+                <h3
                   className="text-sm font-semibold truncate tracking-tight"
                   style={{ color: layer.color }}
                 >
@@ -1772,12 +1639,12 @@ function LayerColumn({
             </>
           )}
         </div>
-        
+
         {/* Breadcrumb Navigation - Modern pill style (hidden when collapsed) */}
         {!isCollapsed && (
           <AnimatePresence>
             {breadcrumb.length > 0 && (
-              <motion.div 
+              <motion.div
                 initial={{ opacity: 0, height: 0, marginTop: 0 }}
                 animate={{ opacity: 1, height: 'auto', marginTop: 8 }}
                 exit={{ opacity: 0, height: 0, marginTop: 0 }}
@@ -1793,87 +1660,87 @@ function LayerColumn({
                 {breadcrumb.map((node, idx) => (
                   <React.Fragment key={node.id}>
                     <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40 flex-shrink-0" />
-                  <button
-                    onClick={() => handleBreadcrumbClick(node)}
-                    className="px-2 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-ink-muted hover:text-ink transition-all duration-200 truncate max-w-[100px] flex-shrink-0 text-[10px] font-medium"
-                    title={node.name}
-                  >
-                    {node.name}
-                  </button>
-                </React.Fragment>
-              ))}
-              <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40 flex-shrink-0" />
-              <span 
-                className="px-2 py-1 rounded-lg text-[10px] font-semibold truncate"
-                style={{ backgroundColor: `${layer.color}20`, color: layer.color }}
-              >
-                Current
-              </span>
-            </motion.div>
-          )}
+                    <button
+                      onClick={() => handleBreadcrumbClick(node)}
+                      className="px-2 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-ink-muted hover:text-ink transition-all duration-200 truncate max-w-[100px] flex-shrink-0 text-[10px] font-medium"
+                      title={node.name}
+                    >
+                      {node.name}
+                    </button>
+                  </React.Fragment>
+                ))}
+                <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40 flex-shrink-0" />
+                <span
+                  className="px-2 py-1 rounded-lg text-[10px] font-semibold truncate"
+                  style={{ backgroundColor: `${layer.color}20`, color: layer.color }}
+                >
+                  Current
+                </span>
+              </motion.div>
+            )}
           </AnimatePresence>
         )}
       </div>
 
       {/* Flat Tree Content - Hidden when collapsed */}
       {!isCollapsed && (
-        <div 
+        <div
           ref={scrollContainerRef}
           className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar relative"
         >
           {/* Subtle top fade for scroll indication */}
           <div className="absolute top-0 left-0 right-0 h-4 bg-gradient-to-b from-canvas/80 to-transparent pointer-events-none z-10" />
-          
+
           {flatTree.length === 0 ? (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               className="flex flex-col items-center justify-center py-16 px-4"
             >
-              <div 
+              <div
                 className="w-16 h-16 rounded-2xl flex items-center justify-center mb-4"
                 style={{ backgroundColor: `${layer.color}10` }}
               >
-                <LucideIcons.FolderOpen 
-                  className="w-8 h-8" 
+                <LucideIcons.FolderOpen
+                  className="w-8 h-8"
                   style={{ color: `${layer.color}40` }}
                 />
               </div>
               <p className="text-sm font-medium text-ink-muted/60">No entities yet</p>
               <p className="text-xs text-ink-muted/40 mt-1">Click + to add entities</p>
-          </motion.div>
-        ) : (
-          <div className="py-2 px-1">
-            {flatTree.map(({ node, depth, isLast, parentIsLast }, index) => (
-              <FlatTreeItem
-                key={node.id}
-                node={node}
-                depth={depth}
-                isLast={isLast}
-                parentIsLast={parentIsLast}
-                layer={layer}
-                schema={schema}
-                isSelected={selectedNodeId === node.id}
-                isExpanded={expandedNodes.has(node.id)}
-                isSearchResult={searchResults.includes(node.id)}
-                isTraceActive={traceFocusId !== null}
-                isHighlighted={traceContextSet.has(node.id)}
-                isFocusNode={traceFocusId === node.id}
-                onSelect={onSelect}
-                onToggle={onToggle}
-                onContextMenu={onContextMenu}
-                onDoubleClick={onDoubleClick}
-                onAddChild={onAddChild}
-                onFocus={handleFocus}
-                animationDelay={index * 0.02}
-              />
-            ))}
-          </div>
-        )}
-        
-        {/* Bottom fade */}
-        <div className="absolute bottom-0 left-0 right-0 h-4 bg-gradient-to-t from-canvas/80 to-transparent pointer-events-none z-10" />
-      </div>
+            </motion.div>
+          ) : (
+            <div className="py-2 px-1">
+              {flatTree.map(({ node, depth, isLast, parentIsLast }, index) => (
+                <FlatTreeItem
+                  key={node.id}
+                  node={node}
+                  depth={depth}
+                  isLast={isLast}
+                  parentIsLast={parentIsLast}
+                  layer={layer}
+                  schema={schema}
+                  isSelected={selectedNodeId === node.id}
+                  isExpanded={expandedNodes.has(node.id)}
+                  isSearchResult={searchResults.includes(node.id)}
+                  isTraceActive={traceFocusId !== null}
+                  isHighlighted={traceContextSet.has(node.id)}
+                  isFocusNode={traceFocusId === node.id}
+                  onSelect={onSelect}
+                  onToggle={onToggle}
+                  onContextMenu={onContextMenu}
+                  onDoubleClick={onDoubleClick}
+                  onAddChild={onAddChild}
+                  onFocus={handleFocus}
+                  animationDelay={index * 0.02}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Bottom fade */}
+          <div className="absolute bottom-0 left-0 right-0 h-4 bg-gradient-to-t from-canvas/80 to-transparent pointer-events-none z-10" />
+        </div>
       )}
     </motion.div>
   )
@@ -1931,11 +1798,11 @@ function FlatTreeItem({
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
   const nodeColor = visual?.color ?? layer.color
-  
+
   const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || 0
   const hasChildren = node.children.length > 0 || childCount > 0
   const descendantCount = hasChildren && !isExpanded ? (childCount || node.children.length) : 0
-  
+
   // IMPROVED SIZING - Keep items readable at ALL depths
   // Root items are slightly larger, but children remain very readable
   const isRoot = depth === 0
@@ -1944,26 +1811,26 @@ function FlatTreeItem({
   const textClass = isRoot ? 'text-sm' : 'text-[13px]'
   const iconSize = isRoot ? 'w-5 h-5' : 'w-4 h-4'
   const iconContainerSize = isRoot ? 'w-9 h-9' : 'w-7 h-7'
-  
+
   // Calculate dimming
   const isDimmed = isTraceActive && !isHighlighted
-  
+
   // Tree line indent - reduced to save horizontal space
   const indentWidth = depth * 16
-  
+
   // Auto-scroll when this node becomes the focus of a trace
   useEffect(() => {
     if (isFocusNode && itemRef.current) {
       setTimeout(() => {
-        itemRef.current?.scrollIntoView({ 
-          behavior: 'smooth', 
-          block: 'center', 
-          inline: 'nearest' 
+        itemRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center',
+          inline: 'nearest'
         })
       }, 100)
     }
   }, [isFocusNode])
-  
+
   return (
     <motion.div
       ref={itemRef}
@@ -1988,7 +1855,7 @@ function FlatTreeItem({
         // Dimmed when not in trace path
         isDimmed && "opacity-30 blur-[0.3px]"
       )}
-      style={{ 
+      style={{
         paddingLeft: 12 + indentWidth,
         // Subtle left border accent for root items
         ...(depth === 0 && {
@@ -2026,7 +1893,7 @@ function FlatTreeItem({
             {/* Horizontal connector with dot */}
             <div className="absolute left-1/2 top-1/2 -translate-y-1/2 flex items-center">
               <div className="w-3 h-px bg-gradient-to-r from-white/[0.12] to-white/[0.06]" />
-              <div 
+              <div
                 className="w-1.5 h-1.5 rounded-full -ml-0.5"
                 style={{ backgroundColor: `${nodeColor}40` }}
               />
@@ -2034,7 +1901,7 @@ function FlatTreeItem({
           </div>
         )}
       </div>
-      
+
       {/* Expand/Collapse Toggle - Modern circular button */}
       <button
         onClick={(e) => {
@@ -2043,29 +1910,29 @@ function FlatTreeItem({
         }}
         className={cn(
           "flex-shrink-0 rounded-lg transition-all duration-200",
-          hasChildren 
-            ? "hover:bg-white/[0.1] hover:scale-110 active:scale-95" 
+          hasChildren
+            ? "hover:bg-white/[0.1] hover:scale-110 active:scale-95"
             : "opacity-0 pointer-events-none",
           isRoot ? "w-7 h-7" : "w-6 h-6"
         )}
       >
         {hasChildren && (
-          <motion.div 
+          <motion.div
             animate={{ rotate: isExpanded ? 90 : 0 }}
             transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
             className="w-full h-full flex items-center justify-center"
           >
-            <LucideIcons.ChevronRight 
+            <LucideIcons.ChevronRight
               className={cn(
                 "transition-colors",
                 isHovered ? "text-ink" : "text-ink-muted/60",
                 isRoot ? "w-4 h-4" : "w-4 h-4"
-              )} 
+              )}
             />
           </motion.div>
         )}
       </button>
-      
+
       {/* Entity Icon - Glass morphism container */}
       <div
         className={cn(
@@ -2074,7 +1941,7 @@ function FlatTreeItem({
           isSelected && "scale-110 shadow-md",
           isHovered && "scale-105"
         )}
-        style={{ 
+        style={{
           background: `linear-gradient(135deg, ${nodeColor}25 0%, ${nodeColor}10 100%)`,
           boxShadow: isSelected ? `0 4px 12px ${nodeColor}30` : `0 2px 4px ${nodeColor}15`
         }}
@@ -2085,7 +1952,7 @@ function FlatTreeItem({
           style={{ color: nodeColor }}
         />
       </div>
-      
+
       {/* Name - IMPROVED: Better visibility with tooltip */}
       <div className="flex-1 min-w-0 flex flex-col justify-center" title={node.name}>
         <span className={cn(
@@ -2103,18 +1970,18 @@ function FlatTreeItem({
           "text-[10px] text-ink-muted/60 truncate mt-0.5 flex items-center gap-1",
           isRoot && "text-[11px]"
         )}>
-          <span 
+          <span
             className="w-1.5 h-1.5 rounded-full flex-shrink-0"
             style={{ backgroundColor: nodeColor }}
           />
           {entityType?.name ?? node.typeId}
         </span>
       </div>
-      
+
       {/* Badges - Descendant count */}
       <AnimatePresence>
         {descendantCount > 0 && (
-          <motion.span 
+          <motion.span
             initial={{ opacity: 0, scale: 0.8 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.8 }}
@@ -2124,9 +1991,9 @@ function FlatTreeItem({
           </motion.span>
         )}
       </AnimatePresence>
-      
+
       {/* Action buttons - Glass morphism style, appear on hover */}
-      <motion.div 
+      <motion.div
         initial={false}
         animate={{ opacity: isHovered ? 1 : 0, x: isHovered ? 0 : 8 }}
         transition={{ duration: 0.15 }}
@@ -2145,7 +2012,7 @@ function FlatTreeItem({
             <LucideIcons.Maximize2 className="w-3 h-3" />
           </button>
         )}
-        
+
         {/* Add child button */}
         {entityType?.hierarchy?.canContain && entityType.hierarchy.canContain.length > 0 && onAddChild && (
           <button
@@ -2160,13 +2027,13 @@ function FlatTreeItem({
           </button>
         )}
       </motion.div>
-      
+
       {/* Hover indicator line */}
       <motion.div
         className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full"
         style={{ backgroundColor: nodeColor }}
         initial={false}
-        animate={{ 
+        animate={{
           height: isSelected ? '70%' : isHovered ? '50%' : '0%',
           opacity: isSelected ? 1 : isHovered ? 0.6 : 0
         }}
@@ -2231,7 +2098,7 @@ function LineageFlowOverlay({
 
     // Batch DOM reads by collecting all elements first
     const elementCache = new Map<string, HTMLElement>()
-    
+
     edges.forEach(edge => {
       const sourceId = `layer-node-${edge.source}`
       const targetId = `layer-node-${edge.target}`

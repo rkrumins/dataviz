@@ -242,30 +242,67 @@ export function EntityDrawer({
             {displayLabel}
           </h2>
 
-          {/* Quick Actions */}
+          {/* Prominent Trace Actions - Industry-Standard One-Click Lineage */}
+          <div className="flex flex-col gap-3 mb-4">
+            <div className="grid grid-cols-3 gap-2">
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => onTraceUp?.(selectedNode.id)}
+                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20 transition-all group"
+              >
+                <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center group-hover:bg-blue-500/30 transition-colors">
+                  <LucideIcons.ArrowUpLeft className="w-5 h-5 text-blue-500" />
+                </div>
+                <span className="text-xs font-medium text-blue-600 dark:text-blue-400">Root Cause</span>
+                <span className="text-[10px] text-blue-500/60">Trace Upstream</span>
+              </motion.button>
+              
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => onTraceDown?.(selectedNode.id)}
+                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-green-500/10 border border-green-500/20 hover:bg-green-500/20 transition-all group"
+              >
+                <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center group-hover:bg-green-500/30 transition-colors">
+                  <LucideIcons.ArrowDownRight className="w-5 h-5 text-green-500" />
+                </div>
+                <span className="text-xs font-medium text-green-600 dark:text-green-400">Impact</span>
+                <span className="text-[10px] text-green-500/60">Trace Downstream</span>
+              </motion.button>
+              
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => onFullTrace?.(selectedNode.id)}
+                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-purple-500/10 border border-purple-500/20 hover:bg-purple-500/20 transition-all group"
+              >
+                <div className="w-10 h-10 rounded-full bg-purple-500/20 flex items-center justify-center group-hover:bg-purple-500/30 transition-colors">
+                  <LucideIcons.GitBranch className="w-5 h-5 text-purple-500" />
+                </div>
+                <span className="text-xs font-medium text-purple-600 dark:text-purple-400">Full Lineage</span>
+                <span className="text-[10px] text-purple-500/60">Both Directions</span>
+              </motion.button>
+            </div>
+          </div>
+
+          {/* Secondary Quick Actions */}
           <div className="flex items-center gap-2 flex-wrap">
-            <ActionButton
-              icon={LucideIcons.ArrowUpRight}
-              label="Trace Up"
-              primary
-              onClick={() => onTraceUp?.(selectedNode.id)}
-            />
-            <ActionButton
-              icon={LucideIcons.ArrowDownLeft}
-              label="Trace Down"
-              onClick={() => onTraceDown?.(selectedNode.id)}
-            />
-            <ActionButton
-              icon={LucideIcons.GitBranch}
-              label="Full Trace"
-              onClick={() => onFullTrace?.(selectedNode.id)}
-            />
-            <div className="flex-1" />
             <ActionButton
               icon={LucideIcons.Pin}
               label={isPinned ? "Unpin" : "Pin"}
               active={isPinned}
               onClick={() => setIsPinned(!isPinned)}
+            />
+            <ActionButton
+              icon={LucideIcons.Copy}
+              label={copiedUrn ? "Copied!" : "Copy URN"}
+              onClick={() => {
+                const urn = (selectedNode.data as Record<string, any>).urn || selectedNode.id
+                navigator.clipboard.writeText(urn)
+                setCopiedUrn(true)
+                setTimeout(() => setCopiedUrn(false), 2000)
+              }}
             />
             {externalUrl && (
               <ActionButton

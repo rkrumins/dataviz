@@ -17,7 +17,7 @@ function App() {
   const { loadSchema, schema, mergeBackendSchema, loadFromBackend } = useSchemaStore()
   const provider = useGraphProvider()
   const { containmentEdgeTypes, isLoading: isLoadingOntology, metadata: ontologyMetadata } = useOntologyMetadata()
-  
+
   // Track if we've attempted to load schema from backend
   const [hasLoadedBackendSchema, setHasLoadedBackendSchema] = useState(false)
   const [isLoadingBackendSchema, setIsLoadingBackendSchema] = useState(false)
@@ -33,21 +33,21 @@ function App() {
   // Load schema from backend on startup
   useEffect(() => {
     if (!isAuthenticated || hasLoadedBackendSchema || isLoadingBackendSchema) return
-    
+
     const loadBackendSchema = async () => {
       setIsLoadingBackendSchema(true)
-      
+
       try {
         console.log('[App] Loading schema from backend...')
         const backendSchema = await provider.getFullSchema()
-        
+
         if (backendSchema && backendSchema.entityTypes.length > 0) {
           console.log('[App] Backend schema loaded:', {
             entityTypes: backendSchema.entityTypes.length,
             relationshipTypes: backendSchema.relationshipTypes.length,
             rootTypes: backendSchema.rootEntityTypes,
           })
-          
+
           // Merge backend schema with any existing local customizations
           if (schema) {
             mergeBackendSchema(backendSchema)
@@ -73,7 +73,7 @@ function App() {
         setIsLoadingBackendSchema(false)
       }
     }
-    
+
     loadBackendSchema()
   }, [isAuthenticated, hasLoadedBackendSchema, isLoadingBackendSchema, provider, schema, mergeBackendSchema, loadFromBackend, loadSchema])
 

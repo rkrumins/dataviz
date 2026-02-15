@@ -108,14 +108,14 @@ export function useOntologyMetadata(): UseOntologyMetadataResult {
         const types = metadata?.containmentEdgeTypes || []
         return types.length > 0 ? [...types] : []
     }, [containmentEdgeTypesKey])
-    
+
     // Memoize isContainmentEdge to prevent function recreation
     const isContainmentEdge = useCallback((edgeType: string): boolean => {
         if (!metadata || !containmentEdgeTypes.length) return false
-        
+
         // Case-insensitive matching
         const normalizedEdgeType = edgeType.toUpperCase()
-        return containmentEdgeTypes.some(type => 
+        return containmentEdgeTypes.some(type =>
             type.toUpperCase() === normalizedEdgeType
         )
     }, [metadata, containmentEdgeTypes])

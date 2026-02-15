@@ -8,10 +8,10 @@
 
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import type { 
-    AggregatedEdgeInfo, 
+import type {
+    AggregatedEdgeInfo,
     AggregatedEdgeResult,
-    GraphEdge 
+    GraphEdge
 } from '@/providers/GraphDataProvider'
 
 // ============================================
@@ -41,43 +41,43 @@ export interface UseAggregatedLineageOptions {
 export interface UseAggregatedLineageResult {
     /** Map of aggregated edge ID to its state */
     aggregatedEdges: Map<string, AggregatedEdgeState>
-    
+
     /** Whether any aggregation request is loading */
     isLoading: boolean
-    
+
     /** Last error encountered */
     error: string | null
-    
+
     /** Current granularity level */
     granularity: 'column' | 'table' | 'schema' | 'system' | 'domain'
-    
+
     /** Fetch aggregated edges for given source URNs */
     fetchAggregated: (sourceUrns: string[], targetUrns?: string[]) => Promise<void>
-    
+
     /** Expand an aggregated edge to show detailed edges */
     expandEdge: (aggregatedEdgeId: string) => Promise<void>
-    
+
     /** Collapse an expanded edge back to aggregated state */
     collapseEdge: (aggregatedEdgeId: string) => void
-    
+
     /** Toggle expansion state of an edge */
     toggleEdge: (aggregatedEdgeId: string) => Promise<void>
-    
+
     /** Check if an edge is expanded */
     isExpanded: (aggregatedEdgeId: string) => boolean
-    
+
     /** Get all visible edges (both aggregated and detailed) */
     getVisibleEdges: () => Array<GraphEdge | AggregatedEdgeInfo>
-    
+
     /** Change granularity level (triggers refetch) */
     setGranularity: (granularity: 'column' | 'table' | 'schema' | 'system' | 'domain') => void
-    
+
     /** Clear all cached data */
     clearCache: () => void
-    
+
     /** Get edge count for a specific aggregated edge */
     getEdgeCount: (aggregatedEdgeId: string) => number
-    
+
     /** Get edge types summary for an aggregated edge */
     getEdgeTypes: (aggregatedEdgeId: string) => string[]
 }
@@ -111,27 +111,27 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         granularity: initialGranularity = 'table',
         cacheTtl = 5 * 60 * 1000, // 5 minutes
     } = options
-    
+
     const provider = useGraphProvider()
-    
+
     // State
     const [aggregatedEdges, setAggregatedEdges] = useState<Map<string, AggregatedEdgeState>>(new Map())
     const [isLoading, setIsLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [granularity, setGranularity] = useState(initialGranularity)
-    
+
     // Track current source URNs for refetch on granularity change
     const currentSourceUrnsRef = useRef<string[]>([])
     const currentTargetUrnsRef = useRef<string[] | undefined>(undefined)
-    
+
     // Fetch aggregated edges from backend
     const fetchAggregated = useCallback(async (sourceUrns: string[], targetUrns?: string[]) => {
         if (!provider || sourceUrns.length === 0) return
-        
+
         // Check cache first
         const cacheKey = getCacheKey(sourceUrns, targetUrns, granularity)
         const cached = aggregatedEdgeCache.get(cacheKey)
-        
+
         if (cached && (Date.now() - cached.timestamp) < cacheTtl) {
             // Use cached result with functional update to avoid dependency on aggregatedEdges
             setAggregatedEdges(prev => {
@@ -148,17 +148,17 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             })
             return
         }
-        
+
         setIsLoading(true)
         setError(null)
-        
+
         try {
             const result = await provider.getAggregatedEdges({
                 sourceUrns,
                 targetUrns,
                 granularity,
             })
-            
+
             // Cache the result
             aggregatedEdgeCache.set(cacheKey, {
                 result,
@@ -167,7 +167,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 targetUrns,
                 granularity,
             })
-            
+
             // Update state with functional update to avoid dependency on aggregatedEdges
             setAggregatedEdges(prev => {
                 const edgeMap = new Map<string, AggregatedEdgeState>()
@@ -181,26 +181,26 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 }
                 return edgeMap
             })
-            
+
             // Track for refetch
             currentSourceUrnsRef.current = sourceUrns
             currentTargetUrnsRef.current = targetUrns
-            
+
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Failed to fetch aggregated edges')
         } finally {
             setIsLoading(false)
         }
     }, [provider, granularity, cacheTtl])
-    
+
     // Expand an aggregated edge to show detailed edges
     const expandEdge = useCallback(async (aggregatedEdgeId: string) => {
         const edgeState = aggregatedEdges.get(aggregatedEdgeId)
         if (!edgeState || !provider) return
-        
+
         // Already expanded or loading
         if (edgeState.state === 'expanded' || edgeState.state === 'loading') return
-        
+
         // Update state to loading
         setAggregatedEdges(prev => {
             const next = new Map(prev)
@@ -210,19 +210,19 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             }
             return next
         })
-        
+
         try {
             // Fetch detailed edges between source and target
             const edges = await provider.getEdges({
                 anyUrns: [edgeState.aggregated.sourceUrn, edgeState.aggregated.targetUrn],
             })
-            
+
             // Filter to only edges between the two URNs
-            const relevantEdges = edges.filter(e => 
+            const relevantEdges = edges.filter(e =>
                 (e.sourceUrn === edgeState.aggregated.sourceUrn && e.targetUrn === edgeState.aggregated.targetUrn) ||
                 (e.sourceUrn === edgeState.aggregated.targetUrn && e.targetUrn === edgeState.aggregated.sourceUrn)
             )
-            
+
             setAggregatedEdges(prev => {
                 const next = new Map(prev)
                 const current = next.get(aggregatedEdgeId)
@@ -248,7 +248,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             setError(err instanceof Error ? err.message : 'Failed to expand edge')
         }
     }, [aggregatedEdges, provider])
-    
+
     // Collapse an expanded edge
     const collapseEdge = useCallback((aggregatedEdgeId: string) => {
         setAggregatedEdges(prev => {
@@ -264,28 +264,28 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             return next
         })
     }, [])
-    
+
     // Toggle expansion
     const toggleEdge = useCallback(async (aggregatedEdgeId: string) => {
         const edgeState = aggregatedEdges.get(aggregatedEdgeId)
         if (!edgeState) return
-        
+
         if (edgeState.state === 'expanded') {
             collapseEdge(aggregatedEdgeId)
         } else if (edgeState.state === 'collapsed') {
             await expandEdge(aggregatedEdgeId)
         }
     }, [aggregatedEdges, expandEdge, collapseEdge])
-    
+
     // Check if expanded
     const isExpanded = useCallback((aggregatedEdgeId: string) => {
         return aggregatedEdges.get(aggregatedEdgeId)?.state === 'expanded'
     }, [aggregatedEdges])
-    
+
     // Get all visible edges
     const getVisibleEdges = useCallback(() => {
         const visible: Array<GraphEdge | AggregatedEdgeInfo> = []
-        
+
         for (const [, edgeState] of aggregatedEdges) {
             if (edgeState.state === 'expanded' && edgeState.detailedEdges.length > 0) {
                 // Show detailed edges when expanded
@@ -295,16 +295,16 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 visible.push(edgeState.aggregated)
             }
         }
-        
+
         return visible
     }, [aggregatedEdges])
-    
+
     // Change granularity and refetch
     const handleSetGranularity = useCallback((newGranularity: 'column' | 'table' | 'schema' | 'system' | 'domain') => {
         if (newGranularity === granularity) return
-        
+
         setGranularity(newGranularity)
-        
+
         // Refetch with new granularity if we have current sources
         if (currentSourceUrnsRef.current.length > 0) {
             // Clear cache for new granularity
@@ -312,7 +312,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             fetchAggregated(currentSourceUrnsRef.current, currentTargetUrnsRef.current)
         }
     }, [granularity, fetchAggregated])
-    
+
     // Clear cache
     const clearCache = useCallback(() => {
         aggregatedEdgeCache.clear()
@@ -320,17 +320,17 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         currentSourceUrnsRef.current = []
         currentTargetUrnsRef.current = undefined
     }, [])
-    
+
     // Get edge count
     const getEdgeCount = useCallback((aggregatedEdgeId: string) => {
         return aggregatedEdges.get(aggregatedEdgeId)?.aggregated.edgeCount ?? 0
     }, [aggregatedEdges])
-    
+
     // Get edge types
     const getEdgeTypes = useCallback((aggregatedEdgeId: string) => {
         return aggregatedEdges.get(aggregatedEdgeId)?.aggregated.edgeTypes ?? []
     }, [aggregatedEdges])
-    
+
     return {
         aggregatedEdges,
         isLoading,
@@ -371,10 +371,10 @@ export function aggregatedEdgeToFlowEdge(
     label?: string
 } {
     const { animated = true, strokeWidth = 2, showLabel = true } = options ?? {}
-    
+
     // Scale stroke width based on edge count
     const scaledStrokeWidth = Math.min(strokeWidth + Math.log2(agg.edgeCount), 8)
-    
+
     return {
         id: agg.id,
         source: agg.sourceUrn,

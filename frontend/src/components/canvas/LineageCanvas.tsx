@@ -34,6 +34,7 @@ import { EdgeLegend } from './EdgeLegend'
 import { TraceToolbar } from './TraceToolbar'
 import { useSpatialLoading } from '@/hooks/useSpatialLoading'
 import { useLineageExploration } from '@/hooks/useLineageExploration'
+import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useLevelOfDetail } from '@/hooks/useLevelOfDetail'
 import { useElkLayout } from '@/hooks/useElkLayout'
@@ -123,19 +124,26 @@ export function LineageCanvas() {
 
   const provider = useGraphProvider()
 
-  // Trace State
-  const [traceUpstreamNodes, setTraceUpstreamNodes] = useState<Set<string>>(new Set())
-  const [traceDownstreamNodes, setTraceDownstreamNodes] = useState<Set<string>>(new Set())
-  const [showUpstream, setShowUpstream] = useState(true)
-  const [showDownstream, setShowDownstream] = useState(true)
-
-  // Clear trace when focus is cleared (external change)
-  useEffect(() => {
-    if (!focusEntityId) {
-      setTraceUpstreamNodes(new Set())
-      setTraceDownstreamNodes(new Set())
+  // Unified Trace System - replaces local trace state
+  const urnResolver = useCallback((nodeId: string) => {
+    const node = rawNodes.find(n => n.id === nodeId)
+    return node?.data?.urn || nodeId
+  }, [rawNodes])
+  
+  const trace = useUnifiedTrace({
+    provider,
+    urnResolver,
+    onTraceComplete: (result) => {
+      console.log('[LineageCanvas] Trace complete:', result.traceNodes.size, 'nodes')
     }
-  }, [focusEntityId])
+  })
+  
+  // Sync trace focus with lineage exploration focus
+  useEffect(() => {
+    if (!focusEntityId && trace.focusId) {
+      trace.clearTrace()
+    }
+  }, [focusEntityId, trace.focusId, trace.clearTrace])
 
 
   // Spatial loading hook
@@ -143,7 +151,7 @@ export function LineageCanvas() {
 
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
   const interactions = useCanvasInteractions({
-    onTraceNode: (nodeId) => setFocus(nodeId),
+    onTraceNode: (nodeId) => trace.startTrace(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
   })
 
@@ -285,29 +293,26 @@ export function LineageCanvas() {
   const baseDisplayNodes = layoutedNodes.length > 0 ? layoutedNodes :
     (visibleNodes.length > 0 ? visibleNodes : rawNodes)
 
-  // Inject Trace Props
+  // Inject Trace Props using unified trace hook
   const displayNodes = useMemo(() => {
-    if (!focusEntityId) return baseDisplayNodes
-
-    const traceNodes = new Set<string>([focusEntityId])
-    if (showUpstream) traceUpstreamNodes.forEach(id => traceNodes.add(id))
-    if (showDownstream) traceDownstreamNodes.forEach(id => traceNodes.add(id))
+    // If no trace is active, use base nodes without trace styling
+    if (!trace.isTracing) return baseDisplayNodes.map(node => ({
+      ...node,
+      data: {
+        ...node.data,
+        onLoadMore: () => handleLoadMore(node.id)
+      }
+    }))
 
     return baseDisplayNodes.map(node => {
-      const isTraced = traceNodes.has(node.id)
-      const isUpstream = traceUpstreamNodes.has(node.id)
-      const isDownstream = traceDownstreamNodes.has(node.id)
-      // const isFocus = node.id === focusEntityId
+      const isTraced = trace.isInTrace(node.id)
+      const isUpstream = trace.isUpstream(node.id)
+      const isDownstream = trace.isDownstream(node.id)
+      const isFocus = trace.isFocus(node.id)
 
-      // Logic: If trace active, dim everything that is NOT in the trace
-      // BUT: Maybe we shouldn't hide untraced nodes completely in Lineage view?
-      // Default behavior: Dim untraced
-      const isDimmed = !isTraced
-
-      // If node is Upstream and showUpstream is false -> Hidden? 
-      // ReactFlow handles hiding via 'hidden' prop, but we might just want to dim really hard?
-      // Or literally not render?
-      // For now, let's just control dimming/styling.
+      // Dim nodes not in the visible trace
+      const isDimmed = !trace.visibleTraceNodes.has(node.id) && 
+                       !trace.visibleTraceNodes.has(node.data?.urn)
 
       return {
         ...node,
@@ -317,13 +322,36 @@ export function LineageCanvas() {
           isDimmed,
           isUpstream,
           isDownstream,
+          isFocus,
           onLoadMore: () => handleLoadMore(node.id)
         }
       }
     })
-  }, [baseDisplayNodes, focusEntityId, traceUpstreamNodes, traceDownstreamNodes, showUpstream, showDownstream, handleLoadMore])
+  }, [baseDisplayNodes, trace.isTracing, trace.isInTrace, trace.isUpstream, trace.isDownstream, trace.isFocus, trace.visibleTraceNodes, handleLoadMore])
 
-  const displayEdges = visibleEdges.length > 0 ? visibleEdges : rawEdges
+  // Inject Trace Props into edges using unified trace hook
+  const displayEdges = useMemo(() => {
+    const baseEdges = visibleEdges.length > 0 ? visibleEdges : rawEdges
+
+    if (!trace.isTracing) return baseEdges
+
+    return baseEdges.map(edge => {
+      const isTraced = trace.traceEdges.has(edge.id)
+      // Edge is dimmed if either source or target is not in the visible trace set
+      const sourceInTrace = trace.visibleTraceNodes.has(edge.source)
+      const targetInTrace = trace.visibleTraceNodes.has(edge.target)
+      const isDimmed = !isTraced || !sourceInTrace || !targetInTrace
+
+      return {
+        ...edge,
+        data: {
+          ...edge.data,
+          isTraced,
+          isDimmed,
+        }
+      }
+    })
+  }, [visibleEdges, rawEdges, trace.isTracing, trace.traceEdges, trace.visibleTraceNodes])
 
   // Handle node changes (position, selection, etc.)
   const onNodesChange: OnNodesChange = useCallback(
@@ -629,27 +657,29 @@ export function LineageCanvas() {
 
           {/* Trace Toolbar Overlay - Using unified TraceToolbar component */}
           <AnimatePresence>
-            {focusEntityId && (
+            {trace.isTracing && (
               <div className="pointer-events-auto absolute top-12 left-1/2 -translate-x-1/2 z-50">
                 <TraceToolbar
-                  focusNodeName={focusEntityId}
-                  upstreamCount={traceUpstreamNodes.size}
-                  downstreamCount={traceDownstreamNodes.size}
-                  showUpstream={showUpstream}
-                  showDownstream={showDownstream}
-                  onToggleUpstream={() => setShowUpstream(!showUpstream)}
-                  onToggleDownstream={() => setShowDownstream(!showDownstream)}
-                  onExitTrace={() => setFocus(null)}
-                  config={{
-                    upstreamDepth: 5,
-                    downstreamDepth: 5,
-                    includeColumnLineage: true,
-                    autoExpandAncestors: true,
-                    pathOnly: false,
+                  focusNodeName={rawNodes.find(n => n.id === trace.focusId)?.data?.label || trace.focusId || 'Unknown'}
+                  upstreamCount={trace.upstreamCount}
+                  downstreamCount={trace.downstreamCount}
+                  showUpstream={trace.showUpstream}
+                  showDownstream={trace.showDownstream}
+                  onToggleUpstream={() => trace.setShowUpstream(!trace.showUpstream)}
+                  onToggleDownstream={() => trace.setShowDownstream(!trace.showDownstream)}
+                  onExitTrace={() => {
+                    trace.clearTrace()
+                    setFocus(null)
                   }}
-                  onConfigChange={(newConfig) => {
-                    console.log('Config changed:', newConfig)
-                  }}
+                  onRetrace={trace.retrace}
+                  onTraceUpstream={() => trace.focusId && trace.traceUpstream(trace.focusId)}
+                  onTraceDownstream={() => trace.focusId && trace.traceDownstream(trace.focusId)}
+                  onTraceFullLineage={() => trace.focusId && trace.traceFullLineage(trace.focusId)}
+                  config={trace.config}
+                  onConfigChange={trace.setConfig}
+                  traceResult={trace.result}
+                  statistics={trace.statistics}
+                  isLoading={trace.isLoading}
                   position="top"
                 />
               </div>
@@ -858,9 +888,9 @@ export function LineageCanvas() {
 
       {/* Entity Drawer - Unified view & edit */}
       <EntityDrawer 
-        onTraceUp={(nodeId) => setFocus(nodeId)}
-        onTraceDown={(nodeId) => setFocus(nodeId)}
-        onFullTrace={(nodeId) => setFocus(nodeId)}
+        onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
+        onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
+        onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
       />
 
       {/* === UX-FIRST INTERACTION COMPONENTS === */}
@@ -875,7 +905,7 @@ export function LineageCanvas() {
         onDuplicateNode={interactions.duplicateNode}
         onDeleteNode={interactions.deleteNode}
         onCreateChild={interactions.createChild}
-        onTraceNode={(id) => setFocus(id)}
+        onTraceNode={(id) => trace.startTrace(id)}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={interactions.deleteEdge}

@@ -30,6 +30,9 @@ import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { EditorToolbar } from './EditorToolbar'
 import { NodePalette } from './NodePalette'
 import { EntityDrawer } from '../panels/EntityDrawer'
+import { TraceToolbar } from './TraceToolbar'
+import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
+import { useGraphProvider } from '@/providers'
 
 interface HierarchyNode {
   id: string
@@ -67,6 +70,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const { containmentEdgeTypes } = useOntologyMetadata()
   const { loadChildren, loadingNodes } = useEntityLoader()
   const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
+  const provider = useGraphProvider()
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
@@ -79,9 +83,77 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const [isPaletteOpen, setPaletteOpen] = useState(false)
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
 
+  // URN resolver for trace
+  const urnResolver = useCallback((nodeId: string) => {
+    const node = nodes.find(n => n.id === nodeId)
+    return (node?.data?.urn as string) || nodeId
+  }, [nodes])
+
+  // Unified Trace System
+  const trace = useUnifiedTrace({
+    provider,
+    urnResolver,
+    onTraceComplete: (result) => {
+      console.log('[HierarchyCanvas] Trace complete:', result.traceNodes.size, 'nodes')
+
+      // Auto-expand ancestors of traced nodes
+      const nodesToExpand = new Set(expandedNodes)
+
+      // Build parent map from hierarchy
+      const parentMap = new Map<string, string>()
+      edges.forEach(e => {
+        const edgeType = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
+        if (containmentEdgeTypes.some(type => type.toUpperCase() === edgeType)) {
+          parentMap.set(e.target, e.source)
+        }
+      })
+
+      result.traceNodes.forEach(id => {
+        let curr = parentMap.get(id)
+        while (curr) {
+          nodesToExpand.add(curr)
+          curr = parentMap.get(curr)
+        }
+      })
+
+      setExpandedNodes(nodesToExpand)
+    }
+  })
+
+  // Build trace context set that includes ancestors of traced nodes
+  // This ensures parent containers stay visible when children are in the trace
+  const traceContextSet = useMemo(() => {
+    const set = new Set<string>()
+
+    if (!trace.isTracing) return set
+
+    // Add all visible trace nodes
+    trace.visibleTraceNodes.forEach(id => set.add(id))
+
+    // Build parent map from edges
+    const parentMap = new Map<string, string>()
+    edges.forEach(e => {
+      const edgeType = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
+      if (containmentEdgeTypes.some(type => type.toUpperCase() === edgeType)) {
+        parentMap.set(e.target, e.source)
+      }
+    })
+
+    // Add all ancestors of traced nodes so containers stay visible
+    trace.visibleTraceNodes.forEach(id => {
+      let curr = parentMap.get(id)
+      while (curr) {
+        set.add(curr)
+        curr = parentMap.get(curr)
+      }
+    })
+
+    return set
+  }, [trace.isTracing, trace.visibleTraceNodes, edges, containmentEdgeTypes])
+
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
   const interactions = useCanvasInteractions({
-    onTraceNode: (nodeId) => selectNode(nodeId),
+    onTraceNode: (nodeId) => trace.startTrace(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
   })
 
@@ -416,21 +488,52 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
                     )
                   }
                 }}
+                isTraceActive={trace.isTracing}
+                traceContextSet={traceContextSet}
+                traceFocusId={trace.focusId}
               />
             ))}
           </div>
         )}
       </div>
 
+      {/* Trace Toolbar */}
+      <AnimatePresence>
+        {trace.isTracing && (
+          <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50">
+            <TraceToolbar
+              focusNodeName={flatNodes.find(n => n.id === trace.focusId)?.name || trace.focusId || 'Unknown'}
+              upstreamCount={trace.upstreamCount}
+              downstreamCount={trace.downstreamCount}
+              showUpstream={trace.showUpstream}
+              showDownstream={trace.showDownstream}
+              onToggleUpstream={() => trace.setShowUpstream(!trace.showUpstream)}
+              onToggleDownstream={() => trace.setShowDownstream(!trace.showDownstream)}
+              onExitTrace={() => trace.clearTrace()}
+              onRetrace={trace.retrace}
+              onTraceUpstream={() => trace.focusId && trace.traceUpstream(trace.focusId)}
+              onTraceDownstream={() => trace.focusId && trace.traceDownstream(trace.focusId)}
+              onTraceFullLineage={() => trace.focusId && trace.traceFullLineage(trace.focusId)}
+              config={trace.config}
+              onConfigChange={trace.setConfig}
+              traceResult={trace.result}
+              statistics={trace.statistics}
+              isLoading={trace.isLoading}
+              position="top"
+            />
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Entity Drawer - Unified view & edit */}
-      <EntityDrawer 
-        onTraceUp={(nodeId) => selectNode(nodeId)}
-        onTraceDown={(nodeId) => selectNode(nodeId)}
-        onFullTrace={(nodeId) => selectNode(nodeId)}
+      <EntityDrawer
+        onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
+        onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
+        onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
       />
 
       {/* === UX-FIRST INTERACTION COMPONENTS (Unified with LineageCanvas) === */}
-      
+
       {/* Context Menu - Right-click on nodes */}
       <CanvasContextMenu
         isOpen={interactions.state.contextMenu.isOpen}
@@ -441,7 +544,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onDuplicateNode={interactions.duplicateNode}
         onDeleteNode={interactions.deleteNode}
         onCreateChild={interactions.createChild}
-        onTraceNode={(id) => selectNode(id)}
+        onTraceNode={(id) => trace.startTrace(id)}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={interactions.deleteEdge}
@@ -449,7 +552,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onCreateNode={(pos) => interactions.openQuickCreate(pos)}
         onSelectAll={interactions.selectAll}
       />
-      
+
       {/* Inline Node Editor - Double-click to edit names */}
       <InlineNodeEditor
         nodeId={interactions.state.inlineEdit.nodeId}
@@ -458,7 +561,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onSave={interactions.saveInlineEdit}
         onCancel={interactions.cancelInlineEdit}
       />
-      
+
       {/* Quick Create - Press 'N' or use context menu */}
       <QuickCreateNode
         isOpen={interactions.state.quickCreate.isOpen}
@@ -468,7 +571,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onCreated={(nodeId) => selectNode(nodeId)}
         variant="centered"
       />
-      
+
       {/* Command Palette - Press Cmd+K */}
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
@@ -494,6 +597,10 @@ interface HierarchyContainerProps {
   onContextMenu?: (e: React.MouseEvent, nodeId: string) => void
   onDoubleClick?: (nodeId: string, event: React.MouseEvent) => void
   depth?: number
+  // Trace highlighting props
+  isTraceActive?: boolean
+  traceContextSet?: Set<string>
+  traceFocusId?: string | null
 }
 
 function HierarchyContainer({
@@ -507,6 +614,9 @@ function HierarchyContainer({
   onContextMenu,
   onDoubleClick,
   depth = 0,
+  isTraceActive = false,
+  traceContextSet = new Set(),
+  traceFocusId = null,
 }: HierarchyContainerProps) {
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
@@ -515,6 +625,11 @@ function HierarchyContainer({
   const isExpanded = expandedNodes.has(node.id)
   const isSelected = selectedNodeId === node.id
   const isSearchResult = searchResults.includes(node.id)
+
+  // Trace highlighting
+  const isHighlighted = isTraceActive && traceContextSet.has(node.id)
+  const isFocusNode = traceFocusId === node.id
+  const isDimmed = isTraceActive && !isHighlighted
 
   // Calculate roll-up counts
   const rollUpCounts = useMemo(() => {
@@ -562,13 +677,17 @@ function HierarchyContainer({
         className={cn(
           "relative rounded-xl border-2 overflow-hidden transition-all duration-200",
           "bg-canvas-elevated",
-          isSelected && "ring-2 ring-offset-2",
+          isSelected && !isFocusNode && "ring-2 ring-offset-2",
           isSearchResult && !isSelected && "ring-2 ring-amber-400/50 ring-offset-1",
+          // Trace styling - consistent across all canvases
+          isFocusNode && "ring-4 ring-amber-400 ring-offset-2 shadow-[0_0_30px_rgba(251,191,36,0.5)] scale-[1.02] z-50",
+          isHighlighted && !isFocusNode && "ring-2 ring-purple-400 ring-offset-1 shadow-[0_0_15px_rgba(192,132,252,0.3)]",
+          isDimmed && "opacity-30 grayscale-[0.6] blur-[0.3px] scale-[0.98]",
         )}
         style={{
-          borderColor: visual?.color ?? '#6b7280',
+          borderColor: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
           borderLeftWidth: '4px',
-          ['--tw-ring-color' as string]: visual?.color ?? '#6b7280',
+          ['--tw-ring-color' as string]: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
         }}
       >
         {/* Header (always visible) */}
@@ -684,6 +803,9 @@ function HierarchyContainer({
                     onContextMenu={onContextMenu}
                     onDoubleClick={onDoubleClick}
                     depth={depth + 1}
+                    isTraceActive={isTraceActive}
+                    traceContextSet={traceContextSet}
+                    traceFocusId={traceFocusId}
                   />
                 ))}
               </div>

@@ -91,10 +91,21 @@ class ContextEngine:
         upstream_depth: int, 
         downstream_depth: int,
         granularity: Granularity = Granularity.TABLE,
-        aggregate_edges: bool = True
+        aggregate_edges: bool = True,
+        exclude_containment_edges: bool = True,
+        include_inherited_lineage: bool = True
     ) -> LineageResult:
         """
         Get lineage and optionally aggregate it to a coarser granularity.
+        
+        Args:
+            urn: Starting entity URN
+            upstream_depth: How many hops upstream to traverse
+            downstream_depth: How many hops downstream to traverse
+            granularity: Target granularity for projection
+            aggregate_edges: Whether to aggregate edges at granularity level
+            exclude_containment_edges: Filter out CONTAINS/BELONGS_TO edges (for pure data lineage)
+            include_inherited_lineage: Aggregate lineage from children to parent
         """
         # Always fetch column lineage at the base to ensure we have data to roll up
         include_cols = True 
@@ -103,24 +114,125 @@ class ContextEngine:
             urn, upstream_depth, downstream_depth, include_column_lineage=include_cols
         )
         
+        # Build containment map BEFORE filtering - needed for column->table aggregation
+        containment_map = self._build_containment_map(result.nodes, result.edges)
+        
+        # Filter containment edges if requested (for pure data lineage view)
+        if exclude_containment_edges:
+            result = self._filter_containment_edges(result)
+        
+        # Handle inherited lineage - if entity has no direct lineage, try parent
+        if include_inherited_lineage:
+            result = await self._apply_inherited_lineage(urn, result, upstream_depth, downstream_depth)
+        
         if not aggregate_edges and granularity == Granularity.COLUMN:
             return result
+        
+        # When projecting from column to table (or higher), ensure ancestor nodes are in the set
+        # so aggregated edges have nodes to connect to
+        if granularity != Granularity.COLUMN:
+            node_map = {n.urn: n for n in result.nodes}
+            ancestor_urns_to_add = set()
+            for node in result.nodes:
+                anc = self._find_ancestor_at_granularity(
+                    node.urn, granularity, result.nodes, containment_map
+                )
+                if anc and anc not in node_map:
+                    ancestor_urns_to_add.add(anc)
+            if ancestor_urns_to_add:
+                extra_nodes = await self.provider.get_nodes(NodeQuery(urns=list(ancestor_urns_to_add)))
+                for n in extra_nodes:
+                    if n.urn not in node_map:
+                        result.nodes.append(n)
+                        node_map[n.urn] = n
             
-        # Perform Server-Side Projection
-        projected_result = self._project_graph(result, granularity, aggregate_edges)
+        # Perform Server-Side Projection (pass containment_map for column aggregation)
+        projected_result = self._project_graph(result, granularity, aggregate_edges, containment_map)
         return projected_result
+    
+    def _filter_containment_edges(self, result: LineageResult) -> LineageResult:
+        """Remove containment edges from result, keeping only data lineage edges."""
+        containment_types = {EdgeType.CONTAINS, EdgeType.BELONGS_TO}
+        filtered_edges = [e for e in result.edges if e.edge_type not in containment_types]
+        
+        return LineageResult(
+            nodes=result.nodes,
+            edges=filtered_edges,
+            upstreamUrns=result.upstream_urns,
+            downstreamUrns=result.downstream_urns,
+            totalCount=result.total_count,
+            hasMore=result.has_more,
+            aggregatedEdges=result.aggregated_edges
+        )
+    
+    async def _apply_inherited_lineage(
+        self, 
+        urn: str, 
+        result: LineageResult, 
+        upstream_depth: int,
+        downstream_depth: int
+    ) -> LineageResult:
+        """
+        If the target entity has no direct lineage edges, inherit from parent.
+        This handles cases like clicking on a column that has no lineage but its table does.
+        """
+        # Check if result has any non-containment lineage edges
+        lineage_edge_types = {EdgeType.TRANSFORMS, EdgeType.PRODUCES, EdgeType.CONSUMES, EdgeType.RELATED_TO}
+        has_direct_lineage = any(e.edge_type in lineage_edge_types for e in result.edges)
+        
+        if has_direct_lineage:
+            return result  # Already has lineage, no need to inherit
+        
+        # Try to get parent's lineage
+        parent = await self.provider.get_parent(urn)
+        if not parent:
+            return result  # No parent, nothing to inherit
+        
+        # Fetch parent's lineage
+        parent_result = await self.provider.get_full_lineage(
+            parent.urn, upstream_depth, downstream_depth, include_column_lineage=True
+        )
+        
+        # Filter containment edges from parent result too
+        parent_result = self._filter_containment_edges(parent_result)
+        
+        # Merge: Add original node to parent's result, mark as inherited
+        merged_nodes = list(parent_result.nodes)
+        original_node = next((n for n in result.nodes if n.urn == urn), None)
+        if original_node and original_node not in merged_nodes:
+            merged_nodes.append(original_node)
+        
+        # Update upstream/downstream to include parent
+        merged_upstream = parent_result.upstream_urns.copy()
+        merged_downstream = parent_result.downstream_urns.copy()
+        
+        # Mark the inheritance in aggregated edges metadata
+        aggregated = parent_result.aggregated_edges or {}
+        aggregated['_inheritedFrom'] = parent.urn
+        
+        return LineageResult(
+            nodes=merged_nodes,
+            edges=parent_result.edges,
+            upstreamUrns=merged_upstream,
+            downstreamUrns=merged_downstream,
+            totalCount=len(merged_nodes),
+            hasMore=parent_result.has_more,
+            aggregatedEdges=aggregated
+        )
 
     def _project_graph(
         self, 
         result: LineageResult, 
         target_granularity: Granularity,
-        aggregate_edges: bool
+        aggregate_edges: bool,
+        containment_map: Optional[Dict[str, str]] = None
     ) -> LineageResult:
         nodes = result.nodes
         edges = result.edges
         
-        # Build containment map
-        containment_map = self._build_containment_map(nodes, edges)
+        # Use provided containment map or build from edges (may be empty if CONTAINS were filtered)
+        if containment_map is None:
+            containment_map = self._build_containment_map(nodes, edges)
         
         # Filter nodes to target granularity
         target_level = GRANULARITY_LEVELS.get(target_granularity, 0)
@@ -218,6 +330,23 @@ class ContextEngine:
                 containment[edge.target_urn] = edge.source_urn
         return containment
 
+    def _infer_granularity_from_urn(self, urn: str) -> Granularity:
+        """Infer granularity from URN pattern when node is not in our set."""
+        if not urn or ":" not in urn:
+            return Granularity.COLUMN
+        lower = urn.lower()
+        if "schemafield" in lower:
+            return Granularity.COLUMN
+        if "dataset" in lower:
+            return Granularity.TABLE
+        if "container" in lower:
+            return Granularity.SCHEMA
+        if "dataplatform" in lower or "app" in lower:
+            return Granularity.SYSTEM
+        if "domain" in lower:
+            return Granularity.DOMAIN
+        return Granularity.COLUMN
+
     def _find_ancestor_at_granularity(
         self, 
         urn: str, 
@@ -234,9 +363,12 @@ class ContextEngine:
         while current_urn and current_urn not in visited:
             visited.add(current_urn)
             node = node_map.get(current_urn)
-            if not node: return None
-            
-            node_gran = ENTITY_GRANULARITY.get(node.entity_type, Granularity.COLUMN)
+            # Use node.entity_type if available, else infer from URN (for ancestors not in our set)
+            if node:
+                entity_key = getattr(node.entity_type, "value", str(node.entity_type))
+                node_gran = ENTITY_GRANULARITY.get(entity_key, Granularity.COLUMN)
+            else:
+                node_gran = self._infer_granularity_from_urn(current_urn)
             node_level = GRANULARITY_LEVELS.get(node_gran, 0)
             
             if node_level >= target_level:

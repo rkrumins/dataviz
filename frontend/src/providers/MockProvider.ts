@@ -18,6 +18,7 @@ import type {
     NodeQuery,
     EdgeQuery,
     LineageResult,
+    TraceOptions,
     LayerAssignmentRequest,
     LayerAssignmentResult,
     GraphSchemaStats,
@@ -390,8 +391,11 @@ export class MockProvider implements GraphDataProvider {
     async getUpstream(
         urn: URN,
         depth: number,
-        includeColumnLineage = true
+        options?: TraceOptions
     ): Promise<LineageResult> {
+        const includeColumnLineage = options?.includeColumnLineage ?? true
+        const excludeContainmentEdges = options?.excludeContainmentEdges ?? true
+        
         const nodes: GraphNode[] = []
         const edges: GraphEdge[] = []
         const upstreamUrns = new Set<URN>()
@@ -410,6 +414,9 @@ export class MockProvider implements GraphDataProvider {
             startUrns.push(...descendants.map((d) => d.urn))
         }
 
+        // Containment edge types to filter
+        const containmentTypes: EdgeType[] = ['CONTAINS', 'BELONGS_TO']
+
         // BFS traversal upstream
         let currentLevel = new Set(startUrns)
         for (let d = 0; d < depth; d++) {
@@ -421,6 +428,11 @@ export class MockProvider implements GraphDataProvider {
 
                 const upstreamEdges = this.upstreamMap.get(currentUrn) ?? []
                 for (const edge of upstreamEdges) {
+                    // Skip containment edges if requested
+                    if (excludeContainmentEdges && containmentTypes.includes(edge.edgeType)) {
+                        continue
+                    }
+                    
                     edges.push(edge)
 
                     const sourceNode = this.nodes.get(edge.sourceUrn)
@@ -449,8 +461,11 @@ export class MockProvider implements GraphDataProvider {
     async getDownstream(
         urn: URN,
         depth: number,
-        includeColumnLineage = true
+        options?: TraceOptions
     ): Promise<LineageResult> {
+        const includeColumnLineage = options?.includeColumnLineage ?? true
+        const excludeContainmentEdges = options?.excludeContainmentEdges ?? true
+        
         const nodes: GraphNode[] = []
         const edges: GraphEdge[] = []
         const downstreamUrns = new Set<URN>()
@@ -469,6 +484,9 @@ export class MockProvider implements GraphDataProvider {
             startUrns.push(...descendants.map((d) => d.urn))
         }
 
+        // Containment edge types to filter
+        const containmentTypes: EdgeType[] = ['CONTAINS', 'BELONGS_TO']
+
         // BFS traversal downstream
         let currentLevel = new Set(startUrns)
         for (let d = 0; d < depth; d++) {
@@ -480,6 +498,11 @@ export class MockProvider implements GraphDataProvider {
 
                 const downstreamEdges = this.downstreamMap.get(currentUrn) ?? []
                 for (const edge of downstreamEdges) {
+                    // Skip containment edges if requested
+                    if (excludeContainmentEdges && containmentTypes.includes(edge.edgeType)) {
+                        continue
+                    }
+                    
                     edges.push(edge)
 
                     const targetNode = this.nodes.get(edge.targetUrn)
@@ -509,11 +532,11 @@ export class MockProvider implements GraphDataProvider {
         urn: URN,
         upstreamDepth: number,
         downstreamDepth: number,
-        includeColumnLineage = true
+        options?: TraceOptions
     ): Promise<LineageResult> {
         const [upstream, downstream] = await Promise.all([
-            this.getUpstream(urn, upstreamDepth, includeColumnLineage),
-            this.getDownstream(urn, downstreamDepth, includeColumnLineage),
+            this.getUpstream(urn, upstreamDepth, options),
+            this.getDownstream(urn, downstreamDepth, options),
         ])
 
         // Merge results

@@ -3,11 +3,20 @@
  * 
  * Consolidates trace logic from ReferenceModelCanvas and LineageCanvas
  * into a single reusable hook with configurable depth and direction.
+ * 
+ * Features:
+ * - Server-side driven trace (calls backend /trace API)
+ * - Auto-sync traced nodes/edges to canvas store
+ * - Configurable upstream/downstream depths
+ * - Direction filtering (show/hide upstream/downstream)
+ * - Re-trace on config change
+ * - URN-to-ID mapping for store synchronization
  */
 
 import { create } from 'zustand'
-import { useCallback, useMemo } from 'react'
-import type { GraphDataProvider, LineageResult } from '@/providers/GraphDataProvider'
+import { useCallback, useMemo, useEffect, useRef } from 'react'
+import type { GraphDataProvider, LineageResult, TraceOptions } from '@/providers/GraphDataProvider'
+import { useCanvasStore } from '@/store/canvas'
 
 // ============================================
 // Types
@@ -23,10 +32,16 @@ export interface TraceConfig {
     downstreamDepth: number
     /** Include column-level lineage in trace */
     includeColumnLineage: boolean
+    /** Exclude containment edges for pure data lineage (default: true) */
+    excludeContainmentEdges: boolean
+    /** Include inherited lineage from parent if no direct lineage */
+    includeInheritedLineage: boolean
     /** Auto-expand ancestors when tracing */
     autoExpandAncestors: boolean
     /** Show only the traced path vs show with context */
     pathOnly: boolean
+    /** Auto-sync traced nodes to canvas store */
+    autoSyncToStore: boolean
 }
 
 export interface TraceResult {
@@ -77,8 +92,11 @@ const DEFAULT_CONFIG: TraceConfig = {
     upstreamDepth: 5,
     downstreamDepth: 5,
     includeColumnLineage: true,
+    excludeContainmentEdges: true,
+    includeInheritedLineage: true,
     autoExpandAncestors: true,
     pathOnly: false,
+    autoSyncToStore: true,
 }
 
 // ============================================
@@ -121,26 +139,38 @@ export const useTraceStore = create<TraceState>((set, get) => ({
             // Resolve URN from node ID
             const urn = urnResolver ? urnResolver(nodeId) : nodeId
             
+            // Build trace options from config
+            const traceOptions: TraceOptions = {
+                includeColumnLineage: config.includeColumnLineage,
+                excludeContainmentEdges: config.excludeContainmentEdges,
+                includeInheritedLineage: config.includeInheritedLineage,
+            }
+            
             // Fetch full lineage from provider
             const result = await provider.getFullLineage(
                 urn,
                 config.upstreamDepth,
                 config.downstreamDepth,
-                config.includeColumnLineage
+                traceOptions
             )
             
-            // Build trace result
+            // Build trace result with URN-to-ID mapping
             const traceNodes = new Set<string>()
             const upstreamNodes = new Set<string>()
             const downstreamNodes = new Set<string>()
             const traceEdges = new Set<string>()
             
-            // Add focus node
+            // Add focus node (use both node ID and URN for matching flexibility)
             traceNodes.add(nodeId)
+            traceNodes.add(urn)
             
-            // Process nodes
+            // Process nodes - add both URN and any potential node ID mappings
             result.nodes.forEach(n => {
                 traceNodes.add(n.urn)
+                // Also add the node's ID if it has one (for canvas sync)
+                if (n.id) {
+                    traceNodes.add(n.id)
+                }
             })
             
             // Process upstream/downstream URNs
@@ -220,6 +250,23 @@ export interface UseUnifiedTraceOptions {
     onTraceComplete?: (result: TraceResult) => void
 }
 
+export interface TraceStatistics {
+    /** Total nodes in trace */
+    totalNodes: number
+    /** Upstream node count */
+    upstreamCount: number
+    /** Downstream node count */
+    downstreamCount: number
+    /** Total edges in trace */
+    totalEdges: number
+    /** Edge types in trace */
+    edgeTypes: string[]
+    /** Whether lineage was inherited from parent */
+    isInherited: boolean
+    /** Parent URN if inherited */
+    inheritedFrom?: string
+}
+
 export interface UseUnifiedTraceResult {
     /** Current trace status */
     status: TraceStatus
@@ -251,6 +298,16 @@ export interface UseUnifiedTraceResult {
     toggleTrace: (nodeId: string) => Promise<void>
     /** Clear current trace */
     clearTrace: () => void
+    /** Re-trace with current focus and updated config */
+    retrace: () => Promise<void>
+    
+    // Preset actions
+    /** Trace upstream only (root cause analysis) */
+    traceUpstream: (nodeId: string) => Promise<void>
+    /** Trace downstream only (impact analysis) */
+    traceDownstream: (nodeId: string) => Promise<void>
+    /** Full trace (both directions) */
+    traceFullLineage: (nodeId: string) => Promise<void>
     
     /** Check if a node is in the trace */
     isInTrace: (nodeId: string) => boolean
@@ -270,6 +327,9 @@ export interface UseUnifiedTraceResult {
     upstreamCount: number
     /** Downstream count */
     downstreamCount: number
+    
+    /** Full trace statistics */
+    statistics: TraceStatistics
 }
 
 export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTraceResult {
@@ -292,6 +352,12 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
     const clearTrace = useTraceStore(s => s.clearTrace)
     const setFocus = useTraceStore(s => s.setFocus)
     
+    // Canvas store for auto-sync
+    const { nodes: canvasNodes } = useCanvasStore()
+    
+    // Track previous config for re-trace detection
+    const prevConfigRef = useRef(config)
+    
     // Derived state
     const isTracing = focusId !== null
     const isLoading = status === 'loading'
@@ -307,6 +373,36 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         }
     }, [provider, urnResolver, fetchTrace, onTraceComplete])
     
+    // Re-trace with current focus and updated config
+    const retrace = useCallback(async () => {
+        if (!focusId || !provider) return
+        await startTrace(focusId)
+    }, [focusId, provider, startTrace])
+    
+    // Preset: Trace upstream only (root cause analysis)
+    const traceUpstream = useCallback(async (nodeId: string) => {
+        setConfig({ upstreamDepth: 10, downstreamDepth: 0 })
+        setShowUpstream(true)
+        setShowDownstream(false)
+        await startTrace(nodeId)
+    }, [setConfig, setShowUpstream, setShowDownstream, startTrace])
+    
+    // Preset: Trace downstream only (impact analysis)
+    const traceDownstream = useCallback(async (nodeId: string) => {
+        setConfig({ upstreamDepth: 0, downstreamDepth: 10 })
+        setShowUpstream(false)
+        setShowDownstream(true)
+        await startTrace(nodeId)
+    }, [setConfig, setShowUpstream, setShowDownstream, startTrace])
+    
+    // Preset: Full trace (both directions)
+    const traceFullLineage = useCallback(async (nodeId: string) => {
+        setConfig({ upstreamDepth: 5, downstreamDepth: 5 })
+        setShowUpstream(true)
+        setShowDownstream(true)
+        await startTrace(nodeId)
+    }, [setConfig, setShowUpstream, setShowDownstream, startTrace])
+    
     // Toggle trace
     const toggleTrace = useCallback(async (nodeId: string) => {
         if (focusId === nodeId) {
@@ -316,22 +412,40 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         }
     }, [focusId, clearTrace, startTrace])
     
-    // Check functions
+    // Check functions - support both node ID and URN matching
     const isInTrace = useCallback((nodeId: string) => {
-        return result?.traceNodes.has(nodeId) ?? false
-    }, [result])
+        if (!result) return false
+        // Check direct match
+        if (result.traceNodes.has(nodeId)) return true
+        // Check via canvas node URN
+        const node = canvasNodes.find(n => n.id === nodeId)
+        if (node?.data?.urn && result.traceNodes.has(node.data.urn)) return true
+        return false
+    }, [result, canvasNodes])
     
     const isUpstream = useCallback((nodeId: string) => {
-        return result?.upstreamNodes.has(nodeId) ?? false
-    }, [result])
+        if (!result) return false
+        if (result.upstreamNodes.has(nodeId)) return true
+        const node = canvasNodes.find(n => n.id === nodeId)
+        if (node?.data?.urn && result.upstreamNodes.has(node.data.urn)) return true
+        return false
+    }, [result, canvasNodes])
     
     const isDownstream = useCallback((nodeId: string) => {
-        return result?.downstreamNodes.has(nodeId) ?? false
-    }, [result])
+        if (!result) return false
+        if (result.downstreamNodes.has(nodeId)) return true
+        const node = canvasNodes.find(n => n.id === nodeId)
+        if (node?.data?.urn && result.downstreamNodes.has(node.data.urn)) return true
+        return false
+    }, [result, canvasNodes])
     
     const isFocus = useCallback((nodeId: string) => {
-        return focusId === nodeId
-    }, [focusId])
+        if (focusId === nodeId) return true
+        // Also check URN match
+        const node = canvasNodes.find(n => n.id === nodeId)
+        if (node?.data?.urn && focusId === node.data.urn) return true
+        return false
+    }, [focusId, canvasNodes])
     
     // Visible trace nodes (filtered by direction)
     const visibleTraceNodes = useMemo(() => {
@@ -377,6 +491,34 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
     const upstreamCount = result?.upstreamNodes.size ?? 0
     const downstreamCount = result?.downstreamNodes.size ?? 0
     
+    // Full statistics
+    const statistics: TraceStatistics = useMemo(() => {
+        if (!result?.lineageResult) {
+            return {
+                totalNodes: 0,
+                upstreamCount: 0,
+                downstreamCount: 0,
+                totalEdges: 0,
+                edgeTypes: [],
+                isInherited: false,
+            }
+        }
+        
+        const lineageResult = result.lineageResult
+        const edgeTypeSet = new Set<string>()
+        lineageResult.edges.forEach(e => edgeTypeSet.add(e.edgeType))
+        
+        return {
+            totalNodes: result.traceNodes.size,
+            upstreamCount,
+            downstreamCount,
+            totalEdges: result.traceEdges.size,
+            edgeTypes: Array.from(edgeTypeSet),
+            isInherited: !!lineageResult.aggregatedEdges?.['_inheritedFrom'],
+            inheritedFrom: lineageResult.aggregatedEdges?.['_inheritedFrom'] as string | undefined,
+        }
+    }, [result, upstreamCount, downstreamCount])
+    
     return {
         status,
         error,
@@ -393,6 +535,10 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         startTrace,
         toggleTrace,
         clearTrace,
+        retrace,
+        traceUpstream,
+        traceDownstream,
+        traceFullLineage,
         isInTrace,
         isUpstream,
         isDownstream,
@@ -401,6 +547,7 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         traceContextSet,
         upstreamCount,
         downstreamCount,
+        statistics,
     }
 }
 

@@ -394,6 +394,32 @@ export interface LineageResult {
 
     /** Whether more results are available */
     hasMore: boolean
+
+    /** Aggregated edges metadata (for progressive disclosure) */
+    aggregatedEdges?: Record<string, unknown>
+
+    /** URN of parent entity if lineage was inherited */
+    inheritedFrom?: string
+}
+
+/**
+ * Options for trace/lineage operations
+ */
+export interface TraceOptions {
+    /** Include column-level lineage (default: true) */
+    includeColumnLineage?: boolean
+
+    /** Exclude containment edges (CONTAINS, BELONGS_TO) for pure data lineage (default: true) */
+    excludeContainmentEdges?: boolean
+
+    /** Include inherited lineage from children (default: true) */
+    includeInheritedLineage?: boolean
+
+    /** Target granularity for aggregation (default: 'table') */
+    granularity?: 'column' | 'table' | 'schema' | 'system' | 'domain'
+
+    /** Aggregate edges at granularity level (default: true) */
+    aggregateEdges?: boolean
 }
 
 export interface ContainmentResult {
@@ -494,34 +520,38 @@ export interface GraphDataProvider {
      * Get upstream lineage (data sources flowing INTO this entity)
      * @param urn - Starting entity URN
      * @param depth - How many hops upstream
-     * @param includeColumnLineage - Include column-level lineage
+     * @param options - Additional trace options
      */
     getUpstream(
         urn: URN,
         depth: number,
-        includeColumnLineage?: boolean
+        options?: TraceOptions
     ): Promise<LineageResult>
 
     /**
      * Get downstream lineage (entities this data flows TO)
      * @param urn - Starting entity URN
      * @param depth - How many hops downstream
-     * @param includeColumnLineage - Include column-level lineage
+     * @param options - Additional trace options
      */
     getDownstream(
         urn: URN,
         depth: number,
-        includeColumnLineage?: boolean
+        options?: TraceOptions
     ): Promise<LineageResult>
 
     /**
      * Get both upstream and downstream lineage
+     * @param urn - Starting entity URN
+     * @param upstreamDepth - How many hops upstream
+     * @param downstreamDepth - How many hops downstream
+     * @param options - Additional trace options
      */
     getFullLineage(
         urn: URN,
         upstreamDepth: number,
         downstreamDepth: number,
-        includeColumnLineage?: boolean
+        options?: TraceOptions
     ): Promise<LineageResult>
 
     // ==========================================

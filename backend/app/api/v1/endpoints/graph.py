@@ -14,22 +14,49 @@ async def get_lineage_trace(
     urn: str = Body(..., embed=True),
     direction: str = Body("both", embed=True),
     depth: int = Body(3, embed=True),
+    upstream_depth: Optional[int] = Body(None, embed=True, alias="upstreamDepth"),
+    downstream_depth: Optional[int] = Body(None, embed=True, alias="downstreamDepth"),
     granularity: Granularity = Body(Granularity.TABLE, embed=True),
-    aggregate_edges: bool = Body(True, embed=True)
+    aggregate_edges: bool = Body(True, embed=True, alias="aggregateEdges"),
+    exclude_containment_edges: bool = Body(True, embed=True, alias="excludeContainmentEdges"),
+    include_inherited_lineage: bool = Body(True, embed=True, alias="includeInheritedLineage")
 ):
     """
-    Trace-99 Lineage Endpoint.
-    Supports server-side aggregation and filtering by granularity.
+    Unified Lineage Trace Endpoint.
+    
+    Supports:
+    - Separate upstream/downstream depth configuration
+    - Server-side aggregation and filtering by granularity
+    - Containment edge filtering (for pure data lineage)
+    - Inherited lineage from children (aggregate child lineage to parent)
+    
+    Args:
+        urn: Starting entity URN
+        direction: "upstream", "downstream", or "both"
+        depth: Default depth (used if upstream_depth/downstream_depth not specified)
+        upstream_depth: Explicit upstream depth (overrides depth for upstream)
+        downstream_depth: Explicit downstream depth (overrides depth for downstream)
+        granularity: Target granularity level for projection
+        aggregate_edges: Whether to aggregate edges at granularity level
+        exclude_containment_edges: Filter out CONTAINS/BELONGS_TO edges (default True for lineage)
+        include_inherited_lineage: Aggregate lineage from child entities (default True)
     """
-    upstream_depth = depth if direction in ["upstream", "both"] else 0
-    downstream_depth = depth if direction in ["downstream", "both"] else 0
+    # Calculate effective depths
+    # When both upstream and downstream are 0, use depth - avoids empty results when user passes 0 for both
+    effective_upstream = upstream_depth if upstream_depth is not None else (depth if direction in ["upstream", "both"] else 0)
+    effective_downstream = downstream_depth if downstream_depth is not None else (depth if direction in ["downstream", "both"] else 0)
+    if effective_upstream == 0 and effective_downstream == 0:
+        effective_upstream = depth if direction in ["upstream", "both"] else 0
+        effective_downstream = depth if direction in ["downstream", "both"] else 0
     
     return await context_engine.get_lineage(
         urn, 
-        upstream_depth, 
-        downstream_depth, 
+        effective_upstream, 
+        effective_downstream, 
         granularity=granularity, 
-        aggregate_edges=aggregate_edges
+        aggregate_edges=aggregate_edges,
+        exclude_containment_edges=exclude_containment_edges,
+        include_inherited_lineage=include_inherited_lineage
     )
 
 @router.get("/nodes/{urn}", response_model=GraphNode)

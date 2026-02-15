@@ -7,10 +7,16 @@ import type {
     NodeQuery,
     EdgeQuery,
     LineageResult,
+    TraceOptions,
     LayerAssignmentRequest,
     LayerAssignmentResult,
     GraphSchemaStats,
     OntologyMetadata,
+    GraphSchema,
+    AggregatedEdgeRequest,
+    AggregatedEdgeResult,
+    CreateNodeRequest,
+    CreateNodeResult,
 } from './GraphDataProvider'
 
 // Base API URL - typically configured via environment variables
@@ -130,19 +136,19 @@ export class RemoteGraphProvider implements GraphDataProvider {
     async getUpstream(
         urn: URN,
         depth: number,
-        _includeColumnLineage = true
+        options?: TraceOptions
     ): Promise<LineageResult> {
         return this.fetch<LineageResult>('/trace', {
             method: 'POST',
             body: JSON.stringify({
                 urn,
                 direction: 'upstream',
-                depth,
-                // includeColumnLineage
-                // Backend 'trace' endpoint signature:
-                // urn, direction, depth, granularity, aggregate_edges
-                // Does NOT explicit have includeColumnLineage, but logic says "Always fetch column lineage"
-                // So we can ignore passing it if backend defaults to it.
+                upstreamDepth: depth,
+                downstreamDepth: 0,
+                granularity: options?.granularity ?? 'table',
+                aggregateEdges: options?.aggregateEdges ?? true,
+                excludeContainmentEdges: options?.excludeContainmentEdges ?? true,
+                includeInheritedLineage: options?.includeInheritedLineage ?? true,
             })
         })
     }
@@ -150,14 +156,19 @@ export class RemoteGraphProvider implements GraphDataProvider {
     async getDownstream(
         urn: URN,
         depth: number,
-        _includeColumnLineage = true
+        options?: TraceOptions
     ): Promise<LineageResult> {
         return this.fetch<LineageResult>('/trace', {
             method: 'POST',
             body: JSON.stringify({
                 urn,
                 direction: 'downstream',
-                depth,
+                upstreamDepth: 0,
+                downstreamDepth: depth,
+                granularity: options?.granularity ?? 'table',
+                aggregateEdges: options?.aggregateEdges ?? true,
+                excludeContainmentEdges: options?.excludeContainmentEdges ?? true,
+                includeInheritedLineage: options?.includeInheritedLineage ?? true,
             })
         })
     }
@@ -166,21 +177,19 @@ export class RemoteGraphProvider implements GraphDataProvider {
         urn: URN,
         upstreamDepth: number,
         downstreamDepth: number,
-        _includeColumnLineage = true
+        options?: TraceOptions
     ): Promise<LineageResult> {
-        // Backend expects single depth param usually, or we need to update backend to support split depth
-        // Checking backend: `upstream_depth = depth if ... else 0`. It takes `depth` as single int.
-        // We should update backend to support separate depths or take the max?
-        // For now using MAX depth.
-        const maxDepth = Math.max(upstreamDepth, downstreamDepth)
-
         return this.fetch<LineageResult>('/trace', {
             method: 'POST',
             body: JSON.stringify({
                 urn,
                 direction: 'both',
-                depth: maxDepth,
-                // We might want to pass granular up/down depths if we update backend
+                upstreamDepth,
+                downstreamDepth,
+                granularity: options?.granularity ?? 'table',
+                aggregateEdges: options?.aggregateEdges ?? true,
+                excludeContainmentEdges: options?.excludeContainmentEdges ?? true,
+                includeInheritedLineage: options?.includeInheritedLineage ?? true,
             })
         })
     }
