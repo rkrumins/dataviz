@@ -42,6 +42,8 @@ export interface TraceConfig {
     pathOnly: boolean
     /** Auto-sync traced nodes to canvas store */
     autoSyncToStore: boolean
+    /** Optional whitelist of lineage edge types to trace (empty = all ontology lineage types) */
+    lineageEdgeTypes: string[]
 }
 
 export interface TraceResult {
@@ -73,7 +75,7 @@ export interface TraceState {
     /** Direction toggle states */
     showUpstream: boolean
     showDownstream: boolean
-    
+
     // Actions
     setFocus: (nodeId: string | null) => void
     setConfig: (config: Partial<TraceConfig>) => void
@@ -97,6 +99,7 @@ const DEFAULT_CONFIG: TraceConfig = {
     autoExpandAncestors: true,
     pathOnly: false,
     autoSyncToStore: true,
+    lineageEdgeTypes: [],  // Empty = use all ontology-classified lineage types
 }
 
 // ============================================
@@ -111,7 +114,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
     config: DEFAULT_CONFIG,
     showUpstream: true,
     showDownstream: true,
-    
+
     setFocus: (nodeId) => {
         if (nodeId === null) {
             // Clear trace
@@ -120,32 +123,34 @@ export const useTraceStore = create<TraceState>((set, get) => ({
             set({ focusId: nodeId })
         }
     },
-    
+
     setConfig: (config) => {
         set(state => ({
             config: { ...state.config, ...config }
         }))
     },
-    
+
     setShowUpstream: (show) => set({ showUpstream: show }),
     setShowDownstream: (show) => set({ showDownstream: show }),
-    
+
     fetchTrace: async (nodeId, provider, urnResolver) => {
         const { config } = get()
-        
+
         set({ status: 'loading', error: null, focusId: nodeId })
-        
+
         try {
             // Resolve URN from node ID
             const urn = urnResolver ? urnResolver(nodeId) : nodeId
-            
-            // Build trace options from config
+
+            // Build trace options from config — ontology-driven edge classification
             const traceOptions: TraceOptions = {
                 includeColumnLineage: config.includeColumnLineage,
                 excludeContainmentEdges: config.excludeContainmentEdges,
                 includeInheritedLineage: config.includeInheritedLineage,
+                // Pass lineage edge type filter if user has selected specific types
+                ...(config.lineageEdgeTypes.length > 0 ? { lineageEdgeTypes: config.lineageEdgeTypes } : {}),
             }
-            
+
             // Fetch full lineage from provider
             const result = await provider.getFullLineage(
                 urn,
@@ -153,42 +158,38 @@ export const useTraceStore = create<TraceState>((set, get) => ({
                 config.downstreamDepth,
                 traceOptions
             )
-            
+
             // Build trace result with URN-to-ID mapping
             const traceNodes = new Set<string>()
             const upstreamNodes = new Set<string>()
             const downstreamNodes = new Set<string>()
             const traceEdges = new Set<string>()
-            
+
             // Add focus node (use both node ID and URN for matching flexibility)
             traceNodes.add(nodeId)
             traceNodes.add(urn)
-            
-            // Process nodes - add both URN and any potential node ID mappings
+
+            // Process nodes - add URNs (GraphNode uses `urn` as identifier)
             result.nodes.forEach(n => {
                 traceNodes.add(n.urn)
-                // Also add the node's ID if it has one (for canvas sync)
-                if (n.id) {
-                    traceNodes.add(n.id)
-                }
             })
-            
+
             // Process upstream/downstream URNs
             result.upstreamUrns.forEach(urn => {
                 traceNodes.add(urn)
                 upstreamNodes.add(urn)
             })
-            
+
             result.downstreamUrns.forEach(urn => {
                 traceNodes.add(urn)
                 downstreamNodes.add(urn)
             })
-            
+
             // Process edges
             result.edges.forEach(e => {
                 traceEdges.add(e.id)
             })
-            
+
             const traceResult: TraceResult = {
                 focusId: nodeId,
                 traceNodes,
@@ -197,12 +198,12 @@ export const useTraceStore = create<TraceState>((set, get) => ({
                 traceEdges,
                 lineageResult: result,
             }
-            
+
             set({
                 status: 'success',
                 result: traceResult,
             })
-            
+
             return traceResult
         } catch (err) {
             set({
@@ -212,7 +213,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
             return null
         }
     },
-    
+
     clearTrace: () => {
         set({
             focusId: null,
@@ -223,7 +224,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
             showDownstream: true,
         })
     },
-    
+
     reset: () => {
         set({
             status: 'idle',
@@ -280,18 +281,18 @@ export interface UseUnifiedTraceResult {
     isTracing: boolean
     /** Is loading */
     isLoading: boolean
-    
+
     /** Trace configuration */
     config: TraceConfig
     /** Update configuration */
     setConfig: (config: Partial<TraceConfig>) => void
-    
+
     /** Direction visibility */
     showUpstream: boolean
     showDownstream: boolean
     setShowUpstream: (show: boolean) => void
     setShowDownstream: (show: boolean) => void
-    
+
     /** Start trace from a node */
     startTrace: (nodeId: string) => Promise<void>
     /** Toggle trace on a node (start if not active, clear if same node) */
@@ -300,7 +301,7 @@ export interface UseUnifiedTraceResult {
     clearTrace: () => void
     /** Re-trace with current focus and updated config */
     retrace: () => Promise<void>
-    
+
     // Preset actions
     /** Trace upstream only (root cause analysis) */
     traceUpstream: (nodeId: string) => Promise<void>
@@ -308,7 +309,7 @@ export interface UseUnifiedTraceResult {
     traceDownstream: (nodeId: string) => Promise<void>
     /** Full trace (both directions) */
     traceFullLineage: (nodeId: string) => Promise<void>
-    
+
     /** Check if a node is in the trace */
     isInTrace: (nodeId: string) => boolean
     /** Check if a node is upstream */
@@ -317,24 +318,24 @@ export interface UseUnifiedTraceResult {
     isDownstream: (nodeId: string) => boolean
     /** Check if a node is the focus */
     isFocus: (nodeId: string) => boolean
-    
+
     /** Get visible trace nodes (filtered by direction toggles) */
     visibleTraceNodes: Set<string>
     /** Get trace context (includes ancestors for dimming logic) */
     traceContextSet: Set<string>
-    
+
     /** Upstream count */
     upstreamCount: number
     /** Downstream count */
     downstreamCount: number
-    
+
     /** Full trace statistics */
     statistics: TraceStatistics
 }
 
 export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTraceResult {
     const { provider, urnResolver, onTraceComplete } = options
-    
+
     // Get store state
     const status = useTraceStore(s => s.status)
     const error = useTraceStore(s => s.error)
@@ -343,7 +344,7 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
     const config = useTraceStore(s => s.config)
     const showUpstream = useTraceStore(s => s.showUpstream)
     const showDownstream = useTraceStore(s => s.showDownstream)
-    
+
     // Actions
     const setConfig = useTraceStore(s => s.setConfig)
     const setShowUpstream = useTraceStore(s => s.setShowUpstream)
@@ -351,34 +352,34 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
     const fetchTrace = useTraceStore(s => s.fetchTrace)
     const clearTrace = useTraceStore(s => s.clearTrace)
     const setFocus = useTraceStore(s => s.setFocus)
-    
+
     // Canvas store for auto-sync
     const { nodes: canvasNodes } = useCanvasStore()
-    
+
     // Track previous config for re-trace detection
     const prevConfigRef = useRef(config)
-    
+
     // Derived state
     const isTracing = focusId !== null
     const isLoading = status === 'loading'
-    
+
     // Start trace
     const startTrace = useCallback(async (nodeId: string) => {
         if (!provider) return
-        
+
         const traceResult = await fetchTrace(nodeId, provider, urnResolver)
-        
+
         if (traceResult && onTraceComplete) {
             onTraceComplete(traceResult)
         }
     }, [provider, urnResolver, fetchTrace, onTraceComplete])
-    
+
     // Re-trace with current focus and updated config
     const retrace = useCallback(async () => {
         if (!focusId || !provider) return
         await startTrace(focusId)
     }, [focusId, provider, startTrace])
-    
+
     // Preset: Trace upstream only (root cause analysis)
     const traceUpstream = useCallback(async (nodeId: string) => {
         setConfig({ upstreamDepth: 10, downstreamDepth: 0 })
@@ -386,7 +387,7 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         setShowDownstream(false)
         await startTrace(nodeId)
     }, [setConfig, setShowUpstream, setShowDownstream, startTrace])
-    
+
     // Preset: Trace downstream only (impact analysis)
     const traceDownstream = useCallback(async (nodeId: string) => {
         setConfig({ upstreamDepth: 0, downstreamDepth: 10 })
@@ -394,7 +395,7 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         setShowDownstream(true)
         await startTrace(nodeId)
     }, [setConfig, setShowUpstream, setShowDownstream, startTrace])
-    
+
     // Preset: Full trace (both directions)
     const traceFullLineage = useCallback(async (nodeId: string) => {
         setConfig({ upstreamDepth: 5, downstreamDepth: 5 })
@@ -402,7 +403,7 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         setShowDownstream(true)
         await startTrace(nodeId)
     }, [setConfig, setShowUpstream, setShowDownstream, startTrace])
-    
+
     // Toggle trace
     const toggleTrace = useCallback(async (nodeId: string) => {
         if (focusId === nodeId) {
@@ -411,7 +412,7 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
             await startTrace(nodeId)
         }
     }, [focusId, clearTrace, startTrace])
-    
+
     // Check functions - support both node ID and URN matching
     const isInTrace = useCallback((nodeId: string) => {
         if (!result) return false
@@ -422,7 +423,7 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         if (node?.data?.urn && result.traceNodes.has(node.data.urn)) return true
         return false
     }, [result, canvasNodes])
-    
+
     const isUpstream = useCallback((nodeId: string) => {
         if (!result) return false
         if (result.upstreamNodes.has(nodeId)) return true
@@ -430,7 +431,7 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         if (node?.data?.urn && result.upstreamNodes.has(node.data.urn)) return true
         return false
     }, [result, canvasNodes])
-    
+
     const isDownstream = useCallback((nodeId: string) => {
         if (!result) return false
         if (result.downstreamNodes.has(nodeId)) return true
@@ -438,7 +439,7 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         if (node?.data?.urn && result.downstreamNodes.has(node.data.urn)) return true
         return false
     }, [result, canvasNodes])
-    
+
     const isFocus = useCallback((nodeId: string) => {
         if (focusId === nodeId) return true
         // Also check URN match
@@ -446,21 +447,21 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         if (node?.data?.urn && focusId === node.data.urn) return true
         return false
     }, [focusId, canvasNodes])
-    
+
     // Visible trace nodes (filtered by direction)
     const visibleTraceNodes = useMemo(() => {
         if (!result) return new Set<string>()
-        
+
         const visible = new Set<string>()
-        
+
         // Always include focus
         if (focusId) visible.add(focusId)
-        
+
         result.traceNodes.forEach(nodeId => {
             const isUp = result.upstreamNodes.has(nodeId)
             const isDown = result.downstreamNodes.has(nodeId)
             const isFocusNode = nodeId === focusId
-            
+
             // Include if focus, or if direction is enabled
             if (isFocusNode) {
                 visible.add(nodeId)
@@ -476,21 +477,21 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
                 }
             }
         })
-        
+
         return visible
     }, [result, focusId, showUpstream, showDownstream])
-    
+
     // Trace context set (includes ancestors for proper highlighting)
     const traceContextSet = useMemo(() => {
         // For now, same as visible trace nodes
         // Could be extended to include ancestors for container highlighting
         return visibleTraceNodes
     }, [visibleTraceNodes])
-    
+
     // Counts
     const upstreamCount = result?.upstreamNodes.size ?? 0
     const downstreamCount = result?.downstreamNodes.size ?? 0
-    
+
     // Full statistics
     const statistics: TraceStatistics = useMemo(() => {
         if (!result?.lineageResult) {
@@ -503,11 +504,11 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
                 isInherited: false,
             }
         }
-        
+
         const lineageResult = result.lineageResult
         const edgeTypeSet = new Set<string>()
         lineageResult.edges.forEach(e => edgeTypeSet.add(e.edgeType))
-        
+
         return {
             totalNodes: result.traceNodes.size,
             upstreamCount,
@@ -518,7 +519,7 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
             inheritedFrom: lineageResult.aggregatedEdges?.['_inheritedFrom'] as string | undefined,
         }
     }, [result, upstreamCount, downstreamCount])
-    
+
     return {
         status,
         error,

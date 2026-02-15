@@ -190,6 +190,8 @@ export class RemoteGraphProvider implements GraphDataProvider {
                 aggregateEdges: options?.aggregateEdges ?? true,
                 excludeContainmentEdges: options?.excludeContainmentEdges ?? true,
                 includeInheritedLineage: options?.includeInheritedLineage ?? true,
+                // Ontology-driven: pass lineage edge type filter to backend
+                ...(options?.lineageEdgeTypes?.length ? { lineageEdgeTypes: options.lineageEdgeTypes } : {}),
             })
         })
     }

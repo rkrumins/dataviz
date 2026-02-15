@@ -146,7 +146,9 @@ export interface TagSummary {
 
 export interface EdgeTypeMetadata {
     isContainment: boolean
-    direction: 'parent-to-child' | 'child-to-parent' | 'bidirectional'
+    isLineage: boolean
+    direction: 'parent-to-child' | 'child-to-parent' | 'source-to-target' | 'bidirectional'
+    category: 'structural' | 'flow' | 'metadata' | 'association'
     description?: string
 }
 
@@ -157,6 +159,7 @@ export interface EntityTypeHierarchy {
 
 export interface OntologyMetadata {
     containmentEdgeTypes: string[]
+    lineageEdgeTypes: string[]
     edgeTypeMetadata: Record<string, EdgeTypeMetadata>
     entityTypeHierarchy: Record<string, EntityTypeHierarchy>
     rootEntityTypes: string[]
@@ -409,7 +412,7 @@ export interface TraceOptions {
     /** Include column-level lineage (default: true) */
     includeColumnLineage?: boolean
 
-    /** Exclude containment edges (CONTAINS, BELONGS_TO) for pure data lineage (default: true) */
+    /** Exclude containment edges for pure data lineage (default: true) */
     excludeContainmentEdges?: boolean
 
     /** Include inherited lineage from children (default: true) */
@@ -420,6 +423,9 @@ export interface TraceOptions {
 
     /** Aggregate edges at granularity level (default: true) */
     aggregateEdges?: boolean
+
+    /** Optional whitelist of lineage edge types to trace (default: all ontology lineage types) */
+    lineageEdgeTypes?: string[]
 }
 
 export interface ContainmentResult {

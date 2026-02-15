@@ -1,0 +1,22 @@
+# FalkorDB for local graph persistence
+# Run: docker compose up -d falkordb
+# Then: GRAPH_PROVIDER=falkordb uvicorn backend.app.main:app --port 8001 --reload
+
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports:
+      - "6379:6379"
+      - "3000:3000"
+    environment:
+      - FALKORDB_ARGS=THREAD_COUNT 4
+    volumes:
+      - falkordb_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  falkordb_data:

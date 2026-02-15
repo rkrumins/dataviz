@@ -6,10 +6,26 @@ from ..models.graph import (
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
     CreateNodeRequest, CreateNodeResult
 )
+import os
+
 from ..providers.base import GraphDataProvider
 from ..providers.mock_provider import MockGraphProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _create_provider() -> GraphDataProvider:
+    """Create graph provider based on GRAPH_PROVIDER env var."""
+    provider_name = os.getenv("GRAPH_PROVIDER", "mock").lower()
+    if provider_name == "falkordb":
+        from ..providers.falkordb_provider import FalkorDBProvider
+        return FalkorDBProvider(
+            host=os.getenv("FALKORDB_HOST", "localhost"),
+            port=int(os.getenv("FALKORDB_PORT", "6379")),
+            graph_name=os.getenv("FALKORDB_GRAPH_NAME", "nexus"),
+            seed_file=os.getenv("FALKORDB_SEED_FILE"),
+        )
+    return MockGraphProvider()
 
 # Granularity mapping (mirrors frontend ENTITY_GRANULARITY)
 ENTITY_GRANULARITY = {
@@ -93,10 +109,14 @@ class ContextEngine:
         granularity: Granularity = Granularity.TABLE,
         aggregate_edges: bool = True,
         exclude_containment_edges: bool = True,
-        include_inherited_lineage: bool = True
+        include_inherited_lineage: bool = True,
+        lineage_edge_types: Optional[List[str]] = None
     ) -> LineageResult:
         """
         Get lineage and optionally aggregate it to a coarser granularity.
+        
+        All edge classification (containment vs lineage) is derived from
+        the ontology metadata — no hardcoded edge type references.
         
         Args:
             urn: Starting entity URN
@@ -104,9 +124,23 @@ class ContextEngine:
             downstream_depth: How many hops downstream to traverse
             granularity: Target granularity for projection
             aggregate_edges: Whether to aggregate edges at granularity level
-            exclude_containment_edges: Filter out CONTAINS/BELONGS_TO edges (for pure data lineage)
+            exclude_containment_edges: Filter out containment edges (for pure data lineage)
             include_inherited_lineage: Aggregate lineage from children to parent
+            lineage_edge_types: Optional whitelist of lineage edge types to include.
+                               When set, only edges of these types are treated as lineage.
+                               When None, all ontology-classified lineage types are used.
         """
+        # Load ontology metadata once — single source of truth for all edge classification
+        ontology = await self.provider.get_ontology_metadata()
+        containment_types = {t.upper() for t in ontology.containment_edge_types}
+        all_lineage_types = {t.upper() for t in ontology.lineage_edge_types}
+        
+        # Apply optional lineage type filter (user can select subset via TraceOptions)
+        if lineage_edge_types:
+            active_lineage_types = {t.upper() for t in lineage_edge_types} & all_lineage_types
+        else:
+            active_lineage_types = all_lineage_types
+        
         # Always fetch column lineage at the base to ensure we have data to roll up
         include_cols = True 
         
@@ -115,15 +149,18 @@ class ContextEngine:
         )
         
         # Build containment map BEFORE filtering - needed for column->table aggregation
-        containment_map = self._build_containment_map(result.nodes, result.edges)
+        containment_map = self._build_containment_map(result.nodes, result.edges, containment_types)
         
         # Filter containment edges if requested (for pure data lineage view)
         if exclude_containment_edges:
-            result = self._filter_containment_edges(result)
+            result = self._filter_containment_edges(result, containment_types)
         
         # Handle inherited lineage - if entity has no direct lineage, try parent
         if include_inherited_lineage:
-            result = await self._apply_inherited_lineage(urn, result, upstream_depth, downstream_depth)
+            result = await self._apply_inherited_lineage(
+                urn, result, upstream_depth, downstream_depth,
+                containment_types, active_lineage_types
+            )
         
         if not aggregate_edges and granularity == Granularity.COLUMN:
             return result
@@ -147,13 +184,19 @@ class ContextEngine:
                         node_map[n.urn] = n
             
         # Perform Server-Side Projection (pass containment_map for column aggregation)
-        projected_result = self._project_graph(result, granularity, aggregate_edges, containment_map)
+        projected_result = self._project_graph(
+            result, granularity, aggregate_edges, containment_map, containment_types
+        )
         return projected_result
     
-    def _filter_containment_edges(self, result: LineageResult) -> LineageResult:
+    def _filter_containment_edges(
+        self, result: LineageResult, containment_types: Set[str]
+    ) -> LineageResult:
         """Remove containment edges from result, keeping only data lineage edges."""
-        containment_types = {EdgeType.CONTAINS, EdgeType.BELONGS_TO}
-        filtered_edges = [e for e in result.edges if e.edge_type not in containment_types]
+        filtered_edges = [
+            e for e in result.edges
+            if self._normalize_edge_type(e.edge_type) not in containment_types
+        ]
         
         return LineageResult(
             nodes=result.nodes,
@@ -165,20 +208,31 @@ class ContextEngine:
             aggregatedEdges=result.aggregated_edges
         )
     
+    @staticmethod
+    def _normalize_edge_type(edge_type) -> str:
+        """Normalize edge type to uppercase string for comparison."""
+        return (edge_type.value if hasattr(edge_type, 'value') else str(edge_type)).upper()
+
     async def _apply_inherited_lineage(
         self, 
         urn: str, 
         result: LineageResult, 
         upstream_depth: int,
-        downstream_depth: int
+        downstream_depth: int,
+        containment_types: Set[str],
+        lineage_types: Set[str]
     ) -> LineageResult:
         """
         If the target entity has no direct lineage edges, inherit from parent.
         This handles cases like clicking on a column that has no lineage but its table does.
+        
+        Edge classification is derived from ontology — no hardcoded type references.
         """
-        # Check if result has any non-containment lineage edges
-        lineage_edge_types = {EdgeType.TRANSFORMS, EdgeType.PRODUCES, EdgeType.CONSUMES, EdgeType.RELATED_TO}
-        has_direct_lineage = any(e.edge_type in lineage_edge_types for e in result.edges)
+        # Check if result has any lineage edges using ontology-derived types
+        has_direct_lineage = any(
+            self._normalize_edge_type(e.edge_type) in lineage_types
+            for e in result.edges
+        )
         
         if has_direct_lineage:
             return result  # Already has lineage, no need to inherit
@@ -194,7 +248,7 @@ class ContextEngine:
         )
         
         # Filter containment edges from parent result too
-        parent_result = self._filter_containment_edges(parent_result)
+        parent_result = self._filter_containment_edges(parent_result, containment_types)
         
         # Merge: Add original node to parent's result, mark as inherited
         merged_nodes = list(parent_result.nodes)
@@ -225,14 +279,18 @@ class ContextEngine:
         result: LineageResult, 
         target_granularity: Granularity,
         aggregate_edges: bool,
-        containment_map: Optional[Dict[str, str]] = None
+        containment_map: Optional[Dict[str, str]] = None,
+        containment_types: Optional[Set[str]] = None
     ) -> LineageResult:
         nodes = result.nodes
         edges = result.edges
         
-        # Use provided containment map or build from edges (may be empty if CONTAINS were filtered)
+        if containment_types is None:
+            containment_types = set()
+        
+        # Use provided containment map or build from edges (may be empty if containment were filtered)
         if containment_map is None:
-            containment_map = self._build_containment_map(nodes, edges)
+            containment_map = self._build_containment_map(nodes, edges, containment_types)
         
         # Filter nodes to target granularity
         target_level = GRANULARITY_LEVELS.get(target_granularity, 0)
@@ -258,7 +316,7 @@ class ContextEngine:
         
         if aggregate_edges:
             aggregated_list = self._aggregate_lineage_edges(
-                edges, nodes, containment_map, target_granularity
+                edges, nodes, containment_map, target_granularity, containment_types
             )
             for agg in aggregated_list:
                 # Only include if both source/target are visible
@@ -280,23 +338,13 @@ class ContextEngine:
                     ))
         
         # Add original edges that are visible at this level
-        # (e.g. Table->Table lineage if it exists natively)
         for edge in edges:
             if edge.source_urn in visible_node_ids and edge.target_urn in visible_node_ids:
-                # Check if we already have an aggregated edge covering this?
-                # Usually we prefer the aggregated one if it exists, or merge.
-                # For simplicity, if we have aggregated edge, we might skip raw edge or let frontend handle.
-                # But here we are the backend.
-                
                 # If it's a containment edge, keep it if it fits
-                if edge.edge_type == EdgeType.CONTAINS:
+                edge_type_normalized = self._normalize_edge_type(edge.edge_type)
+                if edge_type_normalized in containment_types:
                      visible_edges.append(edge)
                 else:
-                    # Generic lineage edge
-                    # Check if covered by aggregation?
-                    edge_key = f"{edge.source_urn}->{edge.target_urn}"
-                    # Aggregated keys are strictly constructed. 
-                    # If this edge is direct (Table A -> Table B), it stays.
                     visible_edges.append(edge)
 
         # Update upstream/downstream URNs to reflect visible nodes?
@@ -322,11 +370,15 @@ class ContextEngine:
             aggregatedEdges=aggregated_edges_map
         )
 
-    def _build_containment_map(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> Dict[str, str]:
-        # child -> parent
+    def _build_containment_map(
+        self, nodes: List[GraphNode], edges: List[GraphEdge],
+        containment_types: Set[str]
+    ) -> Dict[str, str]:
+        """Build child -> parent mapping using ontology-classified containment types."""
         containment = {}
         for edge in edges:
-            if edge.edge_type == EdgeType.CONTAINS or edge.properties.get("relationship") == "contains":
+            edge_type_normalized = self._normalize_edge_type(edge.edge_type)
+            if edge_type_normalized in containment_types or edge.properties.get("relationship") == "contains":
                 containment[edge.target_urn] = edge.source_urn
         return containment
 
@@ -383,14 +435,19 @@ class ContextEngine:
         edges: List[GraphEdge],
         nodes: List[GraphNode],
         containment_map: Dict[str, str],
-        target_granularity: Granularity
+        target_granularity: Granularity,
+        containment_types: Optional[Set[str]] = None
     ) -> List[Dict[str, Any]]:
+        
+        if containment_types is None:
+            containment_types = set()
         
         aggregated_map = {} # key -> data
         
         for edge in edges:
-            # Skip containment
-            if edge.edge_type == EdgeType.CONTAINS:
+            # Skip containment edges — ontology-driven
+            edge_type_normalized = self._normalize_edge_type(edge.edge_type)
+            if edge_type_normalized in containment_types:
                 continue
                 
             source_ancestor = self._find_ancestor_at_granularity(
@@ -603,7 +660,9 @@ class ContextEngine:
             all_urns.add(e.target_urn)
         
         nodes = await self.provider.get_nodes(NodeQuery(urns=list(all_urns)))
-        containment_map = self._build_containment_map(nodes, edges)
+        ontology = await self.provider.get_ontology_metadata()
+        containment_types = {t.upper() for t in ontology.containment_edge_types}
+        containment_map = self._build_containment_map(nodes, edges, containment_types)
         
         # Aggregate edges
         aggregated_map: Dict[str, Dict] = {}
@@ -750,5 +809,5 @@ class ContextEngine:
             error=None
         )
 
-# Singleton instance
-context_engine = ContextEngine()
+# Singleton instance - provider selected via GRAPH_PROVIDER env (mock | falkordb)
+context_engine = ContextEngine(provider=_create_provider())

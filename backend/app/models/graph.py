@@ -221,7 +221,9 @@ class GraphSchemaStats(BaseModel):
 
 class EdgeTypeMetadata(BaseModel):
     is_containment: bool = Field(alias="isContainment")
-    direction: str  # 'parent-to-child', 'child-to-parent', 'bidirectional'
+    is_lineage: bool = Field(default=False, alias="isLineage")
+    direction: str  # 'parent-to-child', 'child-to-parent', 'source-to-target', 'bidirectional'
+    category: str = Field(default="association")  # 'structural', 'flow', 'metadata', 'association'
     description: Optional[str] = None
 
     class Config:
@@ -236,6 +238,7 @@ class EntityTypeHierarchy(BaseModel):
 
 class OntologyMetadata(BaseModel):
     containment_edge_types: List[str] = Field(alias="containmentEdgeTypes")
+    lineage_edge_types: List[str] = Field(default_factory=list, alias="lineageEdgeTypes")
     edge_type_metadata: Dict[str, EdgeTypeMetadata] = Field(alias="edgeTypeMetadata")
     entity_type_hierarchy: Dict[str, EntityTypeHierarchy] = Field(alias="entityTypeHierarchy")
     root_entity_types: List[str] = Field(default_factory=list, alias="rootEntityTypes")

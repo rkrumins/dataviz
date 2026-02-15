@@ -14,11 +14,11 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { 
-    useTraceStore, 
-    type TraceConfig, 
+import {
+    useTraceStore,
+    type TraceConfig,
     type TraceResult,
-    type TraceStatistics 
+    type TraceStatistics
 } from '@/hooks/useUnifiedTrace'
 
 // ============================================
@@ -60,6 +60,8 @@ interface TraceToolbarProps {
     statistics?: TraceStatistics
     /** Is currently loading */
     isLoading?: boolean
+    /** Available lineage edge types from ontology (for filtering) */
+    availableLineageEdgeTypes?: string[]
     /** Additional className */
     className?: string
     /** Position variant */
@@ -88,6 +90,7 @@ export function TraceToolbar({
     traceResult,
     statistics,
     isLoading = false,
+    availableLineageEdgeTypes = [],
     className,
     position = 'floating',
 }: TraceToolbarProps) {
@@ -96,7 +99,7 @@ export function TraceToolbar({
     const [copiedMessage, setCopiedMessage] = useState<string | null>(null)
     const [configChanged, setConfigChanged] = useState(false)
     const prevConfigRef = useRef(config)
-    
+
     // Detect config changes for re-trace prompt
     useEffect(() => {
         const prev = prevConfigRef.current
@@ -104,17 +107,18 @@ export function TraceToolbar({
             prev.upstreamDepth !== config.upstreamDepth ||
             prev.downstreamDepth !== config.downstreamDepth ||
             prev.includeColumnLineage !== config.includeColumnLineage ||
-            prev.excludeContainmentEdges !== config.excludeContainmentEdges
+            prev.excludeContainmentEdges !== config.excludeContainmentEdges ||
+            JSON.stringify(prev.lineageEdgeTypes) !== JSON.stringify(config.lineageEdgeTypes)
         ) {
             setConfigChanged(true)
         }
         prevConfigRef.current = config
     }, [config])
-    
+
     // Copy URNs to clipboard
     const handleCopyUrns = useCallback(async () => {
         if (!traceResult) return
-        
+
         const urns = Array.from(traceResult.traceNodes).join('\n')
         try {
             await navigator.clipboard.writeText(urns)
@@ -125,11 +129,11 @@ export function TraceToolbar({
             setTimeout(() => setCopiedMessage(null), 2000)
         }
     }, [traceResult])
-    
+
     // Export trace as JSON
     const handleExport = useCallback(() => {
         if (!traceResult || !traceResult.lineageResult) return
-        
+
         const exportData = {
             focusId: traceResult.focusId,
             timestamp: new Date().toISOString(),
@@ -139,7 +143,7 @@ export function TraceToolbar({
             upstream: Array.from(traceResult.upstreamNodes),
             downstream: Array.from(traceResult.downstreamNodes),
         }
-        
+
         const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
@@ -150,14 +154,14 @@ export function TraceToolbar({
         document.body.removeChild(a)
         URL.revokeObjectURL(url)
     }, [traceResult, config])
-    
+
     // Position styles
     const positionClasses = {
         top: 'absolute top-4 left-1/2 -translate-x-1/2',
         bottom: 'absolute bottom-4 left-1/2 -translate-x-1/2',
         floating: 'fixed top-16 left-1/2 -translate-x-1/2',
     }
-    
+
     return (
         <motion.div
             initial={{ y: -20, opacity: 0, scale: 0.95 }}
@@ -180,7 +184,7 @@ export function TraceToolbar({
                     </div>
                 ) : (
                     <div className="flex items-center gap-2 text-sm font-medium text-ink">
-                        <motion.span 
+                        <motion.span
                             className="w-2 h-2 rounded-full bg-accent-lineage"
                             animate={{ scale: [1, 1.2, 1] }}
                             transition={{ duration: 1.5, repeat: Infinity }}
@@ -191,10 +195,10 @@ export function TraceToolbar({
                         </span>
                     </div>
                 )}
-                
+
                 {/* Divider */}
                 <div className="h-4 w-[1px] bg-glass-border" />
-                
+
                 {/* Quick Preset Buttons */}
                 {(onTraceUpstream || onTraceDownstream || onTraceFullLineage) && (
                     <>
@@ -233,15 +237,15 @@ export function TraceToolbar({
                         <div className="h-4 w-[1px] bg-glass-border" />
                     </>
                 )}
-                
+
                 {/* Direction Toggles */}
                 <div className="flex items-center gap-1 bg-black/5 dark:bg-white/5 rounded-lg p-0.5">
                     <button
                         onClick={onToggleUpstream}
                         className={cn(
                             "p-1.5 rounded-md transition-all text-xs font-medium flex items-center gap-1",
-                            showUpstream 
-                                ? "bg-blue-500 text-white shadow-sm" 
+                            showUpstream
+                                ? "bg-blue-500 text-white shadow-sm"
                                 : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
                         )}
                         title={`${showUpstream ? 'Hide' : 'Show'} upstream (${upstreamCount})`}
@@ -253,8 +257,8 @@ export function TraceToolbar({
                         onClick={onToggleDownstream}
                         className={cn(
                             "p-1.5 rounded-md transition-all text-xs font-medium flex items-center gap-1",
-                            showDownstream 
-                                ? "bg-green-500 text-white shadow-sm" 
+                            showDownstream
+                                ? "bg-green-500 text-white shadow-sm"
                                 : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
                         )}
                         title={`${showDownstream ? 'Hide' : 'Show'} downstream (${downstreamCount})`}
@@ -263,18 +267,18 @@ export function TraceToolbar({
                         <LucideIcons.ArrowRight className="w-3.5 h-3.5" />
                     </button>
                 </div>
-                
+
                 {/* Divider */}
                 <div className="h-4 w-[1px] bg-glass-border" />
-                
+
                 {/* Statistics Button */}
                 {statistics && (
                     <button
                         onClick={() => setShowStats(!showStats)}
                         className={cn(
                             "p-1.5 rounded-md transition-all flex items-center gap-1",
-                            showStats 
-                                ? "bg-accent-lineage/10 text-accent-lineage" 
+                            showStats
+                                ? "bg-accent-lineage/10 text-accent-lineage"
                                 : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
                         )}
                         title="Trace statistics"
@@ -282,21 +286,21 @@ export function TraceToolbar({
                         <LucideIcons.BarChart3 className="w-4 h-4" />
                     </button>
                 )}
-                
+
                 {/* Expand/Settings Button */}
                 <button
                     onClick={() => setIsExpanded(!isExpanded)}
                     className={cn(
                         "p-1.5 rounded-md transition-all",
-                        isExpanded 
-                            ? "bg-accent-lineage/10 text-accent-lineage" 
+                        isExpanded
+                            ? "bg-accent-lineage/10 text-accent-lineage"
                             : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
                     )}
                     title="Trace settings"
                 >
                     <LucideIcons.Settings className="w-4 h-4" />
                 </button>
-                
+
                 {/* Re-trace Button (shown when config changed) */}
                 {configChanged && onRetrace && (
                     <motion.button
@@ -313,7 +317,7 @@ export function TraceToolbar({
                         Re-trace
                     </motion.button>
                 )}
-                
+
                 {/* Quick Actions */}
                 <div className="flex items-center gap-1">
                     <button
@@ -331,10 +335,10 @@ export function TraceToolbar({
                         <LucideIcons.Download className="w-4 h-4" />
                     </button>
                 </div>
-                
+
                 {/* Divider */}
                 <div className="h-4 w-[1px] bg-glass-border" />
-                
+
                 {/* Exit Button */}
                 <button
                     onClick={onExitTrace}
@@ -344,7 +348,7 @@ export function TraceToolbar({
                     Exit
                 </button>
             </div>
-            
+
             {/* Statistics Panel */}
             <AnimatePresence>
                 {showStats && statistics && (
@@ -361,32 +365,32 @@ export function TraceToolbar({
                                     <div className="text-lg font-bold text-ink">{statistics.totalNodes}</div>
                                     <div className="text-2xs text-ink-muted">Total Nodes</div>
                                 </div>
-                                
+
                                 {/* Upstream */}
                                 <div className="text-center p-2 rounded-lg bg-blue-500/10">
                                     <div className="text-lg font-bold text-blue-600 dark:text-blue-400">{statistics.upstreamCount}</div>
                                     <div className="text-2xs text-blue-600/70 dark:text-blue-400/70">Upstream</div>
                                 </div>
-                                
+
                                 {/* Downstream */}
                                 <div className="text-center p-2 rounded-lg bg-green-500/10">
                                     <div className="text-lg font-bold text-green-600 dark:text-green-400">{statistics.downstreamCount}</div>
                                     <div className="text-2xs text-green-600/70 dark:text-green-400/70">Downstream</div>
                                 </div>
-                                
+
                                 {/* Edges */}
                                 <div className="text-center p-2 rounded-lg bg-black/5 dark:bg-white/5">
                                     <div className="text-lg font-bold text-ink">{statistics.totalEdges}</div>
                                     <div className="text-2xs text-ink-muted">Edges</div>
                                 </div>
                             </div>
-                            
+
                             {/* Edge Types */}
                             {statistics.edgeTypes.length > 0 && (
                                 <div className="mt-3 flex items-center gap-2 flex-wrap">
                                     <span className="text-2xs text-ink-muted">Edge types:</span>
                                     {statistics.edgeTypes.map(type => (
-                                        <span 
+                                        <span
                                             key={type}
                                             className="px-2 py-0.5 rounded text-2xs font-medium bg-accent-lineage/10 text-accent-lineage"
                                         >
@@ -395,7 +399,7 @@ export function TraceToolbar({
                                     ))}
                                 </div>
                             )}
-                            
+
                             {/* Inherited Notice */}
                             {statistics.isInherited && (
                                 <div className="mt-2 flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400">
@@ -407,7 +411,7 @@ export function TraceToolbar({
                     </motion.div>
                 )}
             </AnimatePresence>
-            
+
             {/* Expanded Settings Panel */}
             <AnimatePresence>
                 {isExpanded && (
@@ -444,7 +448,7 @@ export function TraceToolbar({
                                         <span>20</span>
                                     </div>
                                 </div>
-                                
+
                                 {/* Downstream Depth */}
                                 <div className="space-y-2">
                                     <div className="flex items-center justify-between">
@@ -470,7 +474,7 @@ export function TraceToolbar({
                                     </div>
                                 </div>
                             </div>
-                            
+
                             {/* Toggle Options */}
                             <div className="grid grid-cols-2 gap-3">
                                 <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
@@ -485,7 +489,7 @@ export function TraceToolbar({
                                         <span className="text-2xs text-ink-muted">Show field-level dependencies</span>
                                     </div>
                                 </label>
-                                
+
                                 <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                                     <input
                                         type="checkbox"
@@ -495,10 +499,10 @@ export function TraceToolbar({
                                     />
                                     <div>
                                         <span className="text-xs text-ink block">Exclude containment</span>
-                                        <span className="text-2xs text-ink-muted">Hide CONTAINS edges</span>
+                                        <span className="text-2xs text-ink-muted">Hide structural edges</span>
                                     </div>
                                 </label>
-                                
+
                                 <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                                     <input
                                         type="checkbox"
@@ -511,7 +515,7 @@ export function TraceToolbar({
                                         <span className="text-2xs text-ink-muted">Use parent lineage if none</span>
                                     </div>
                                 </label>
-                                
+
                                 <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                                     <input
                                         type="checkbox"
@@ -524,7 +528,7 @@ export function TraceToolbar({
                                         <span className="text-2xs text-ink-muted">Hide non-path context</span>
                                     </div>
                                 </label>
-                                
+
                                 <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                                     <input
                                         type="checkbox"
@@ -537,7 +541,7 @@ export function TraceToolbar({
                                         <span className="text-2xs text-ink-muted">Reveal path containers</span>
                                     </div>
                                 </label>
-                                
+
                                 <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                                     <input
                                         type="checkbox"
@@ -551,11 +555,73 @@ export function TraceToolbar({
                                     </div>
                                 </label>
                             </div>
+
+                            {/* Lineage Edge Type Filter */}
+                            {availableLineageEdgeTypes.length > 0 && (
+                                <div className="space-y-2">
+                                    <div className="flex items-center justify-between">
+                                        <label className="text-xs font-medium text-ink-muted flex items-center gap-1">
+                                            <LucideIcons.Filter className="w-3 h-3 text-accent-lineage" />
+                                            Lineage Edge Types
+                                        </label>
+                                        <button
+                                            onClick={() => {
+                                                const allSelected = config.lineageEdgeTypes.length === availableLineageEdgeTypes.length
+                                                onConfigChange({
+                                                    lineageEdgeTypes: allSelected ? [] : [...availableLineageEdgeTypes]
+                                                })
+                                            }}
+                                            className="text-2xs text-accent-lineage hover:underline"
+                                        >
+                                            {config.lineageEdgeTypes.length === availableLineageEdgeTypes.length ? 'Clear all' : 'Select all'}
+                                        </button>
+                                    </div>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {availableLineageEdgeTypes.map(edgeType => {
+                                            const isSelected = config.lineageEdgeTypes.length === 0 || config.lineageEdgeTypes.includes(edgeType)
+                                            return (
+                                                <button
+                                                    key={edgeType}
+                                                    onClick={() => {
+                                                        let newTypes: string[]
+                                                        if (config.lineageEdgeTypes.length === 0) {
+                                                            // Currently "all" → deselect this one
+                                                            newTypes = availableLineageEdgeTypes.filter(t => t !== edgeType)
+                                                        } else if (isSelected) {
+                                                            newTypes = config.lineageEdgeTypes.filter(t => t !== edgeType)
+                                                        } else {
+                                                            newTypes = [...config.lineageEdgeTypes, edgeType]
+                                                        }
+                                                        // If all selected, reset to empty (meaning "all")
+                                                        if (newTypes.length === availableLineageEdgeTypes.length) {
+                                                            newTypes = []
+                                                        }
+                                                        onConfigChange({ lineageEdgeTypes: newTypes })
+                                                    }}
+                                                    className={cn(
+                                                        "px-2 py-1 rounded-md text-2xs font-medium transition-all border",
+                                                        isSelected
+                                                            ? "bg-accent-lineage/15 text-accent-lineage border-accent-lineage/30"
+                                                            : "bg-black/5 dark:bg-white/5 text-ink-muted border-transparent hover:border-glass-border"
+                                                    )}
+                                                >
+                                                    {edgeType}
+                                                </button>
+                                            )
+                                        })}
+                                    </div>
+                                    <p className="text-2xs text-ink-muted">
+                                        {config.lineageEdgeTypes.length === 0
+                                            ? 'Tracing all lineage edge types'
+                                            : `Tracing ${config.lineageEdgeTypes.length} of ${availableLineageEdgeTypes.length} types`}
+                                    </p>
+                                </div>
+                            )}
                         </div>
                     </motion.div>
                 )}
             </AnimatePresence>
-            
+
             {/* Copy Notification */}
             <AnimatePresence>
                 {copiedMessage && (
@@ -602,7 +668,7 @@ export function CompactTraceToolbar({
                 className
             )}
         >
-            <motion.span 
+            <motion.span
                 className="w-1.5 h-1.5 rounded-full bg-accent-lineage"
                 animate={{ opacity: [1, 0.5, 1] }}
                 transition={{ duration: 1.5, repeat: Infinity }}

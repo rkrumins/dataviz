@@ -329,16 +329,37 @@ class MockGraphProvider(GraphDataProvider):
         return None
 
     # Lineage Helper
+    def _get_containment_edge_types(self) -> Set[str]:
+        """Derive containment edge types from config/env. Single source of truth."""
+        import os
+        config_containment = os.getenv('CONTAINMENT_EDGE_TYPES', '').strip()
+        if config_containment:
+            return {t.strip().upper() for t in config_containment.split(',') if t.strip()}
+        # Default fallback — only used when no ontology config is provided
+        return {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value}
+
     async def _traverse(
         self, 
         start_urn: str, 
         direction: str, 
-        depth: int
+        depth: int,
+        descendant_types: Optional[List[EntityType]] = None
     ) -> Set[str]:
         visited = set()
         queue = deque([(start_urn, 0)])
         
         result_urns = set()
+        
+        # Derive containment types from ontology config — not hardcoded
+        containment_types = self._get_containment_edge_types()
+        
+        # Prepare allowed types for fast lookup if provided
+        allowed_types_set = None
+        if descendant_types:
+            allowed_types_set = {
+                t.value if hasattr(t, 'value') else str(t) 
+                for t in descendant_types
+            }
         
         while queue:
             current_urn, current_depth = queue.popleft()
@@ -357,11 +378,20 @@ class MockGraphProvider(GraphDataProvider):
                 edges = self._edges_by_source.get(current_urn, [])
                 
             for edge in edges:
-                # Skip containment edges for lineage
-                if edge.edge_type == EdgeType.CONTAINS:
+                # Skip containment edges for lineage — driven by ontology config
+                edge_type_val = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
+                if edge_type_val.upper() in containment_types:
                     continue
                     
                 neighbor = edge.source_urn if direction == 'upstream' else edge.target_urn
+                
+                # Check semantic type filtering (Lazy Loading logic)
+                if allowed_types_set:
+                    neighbor_node = self._nodes.get(neighbor)
+                    if neighbor_node:
+                         ntype = neighbor_node.entity_type.value if hasattr(neighbor_node.entity_type, 'value') else str(neighbor_node.entity_type)
+                         if ntype not in allowed_types_set:
+                             continue
                 
                 if neighbor not in visited:
                     result_urns.add(neighbor)
@@ -369,8 +399,14 @@ class MockGraphProvider(GraphDataProvider):
                     
         return result_urns
 
-    async def get_upstream(self, urn: str, depth: int, include_column_lineage: bool = False) -> LineageResult:
-        upstream_urns = await self._traverse(urn, 'upstream', depth)
+    async def get_upstream(
+        self, 
+        urn: str, 
+        depth: int, 
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[EntityType]] = None
+    ) -> LineageResult:
+        upstream_urns = await self._traverse(urn, 'upstream', depth, descendant_types)
         
         nodes = [self._nodes[u] for u in upstream_urns if u in self._nodes]
         # Include source node? Usually yes for graph response
@@ -391,8 +427,14 @@ class MockGraphProvider(GraphDataProvider):
             hasMore=False
         )
 
-    async def get_downstream(self, urn: str, depth: int, include_column_lineage: bool = False) -> LineageResult:
-        downstream_urns = await self._traverse(urn, 'downstream', depth)
+    async def get_downstream(
+        self, 
+        urn: str, 
+        depth: int, 
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[EntityType]] = None
+    ) -> LineageResult:
+        downstream_urns = await self._traverse(urn, 'downstream', depth, descendant_types)
         
         nodes = [self._nodes[u] for u in downstream_urns if u in self._nodes]
         if urn in self._nodes:
@@ -411,9 +453,16 @@ class MockGraphProvider(GraphDataProvider):
             hasMore=False
         )
 
-    async def get_full_lineage(self, urn: str, upstream_depth: int, downstream_depth: int, include_column_lineage: bool = False) -> LineageResult:
-        upstream_urns = await self._traverse(urn, 'upstream', upstream_depth)
-        downstream_urns = await self._traverse(urn, 'downstream', downstream_depth)
+    async def get_full_lineage(
+        self, 
+        urn: str, 
+        upstream_depth: int, 
+        downstream_depth: int, 
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[EntityType]] = None
+    ) -> LineageResult:
+        upstream_urns = await self._traverse(urn, 'upstream', upstream_depth, descendant_types)
+        downstream_urns = await self._traverse(urn, 'downstream', downstream_depth, descendant_types)
         
         all_urns = upstream_urns.union(downstream_urns)
         all_urns.add(urn)
@@ -522,19 +571,38 @@ class MockGraphProvider(GraphDataProvider):
         )
 
     async def get_ontology_metadata(self) -> OntologyMetadata:
-        """Get ontology metadata including containment edge types and entity hierarchies."""
+        """Get ontology metadata including containment edge types, lineage edge types, and entity hierarchies."""
         import os
         
         # 1. Get containment edge types from config/env or use defaults
-        default_containment = [EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value]
-        config_containment = os.getenv('CONTAINMENT_EDGE_TYPES', '').strip()
-        if config_containment:
-            containment_types = [t.strip() for t in config_containment.split(',') if t.strip()]
-        else:
-            containment_types = default_containment
+        containment_types = list(self._get_containment_edge_types())
         
-        # 2. Build edge type metadata
+        # 2. Get lineage edge types from config/env or derive from graph
+        config_lineage = os.getenv('LINEAGE_EDGE_TYPES', '').strip()
+        if config_lineage:
+            lineage_types = [t.strip() for t in config_lineage.split(',') if t.strip()]
+        else:
+            # Derive: any edge type that is NOT containment and NOT metadata is lineage
+            # Metadata types are explicitly excluded (e.g. TAGGED_WITH)
+            config_metadata = os.getenv('METADATA_EDGE_TYPES', '').strip()
+            metadata_types = set()
+            if config_metadata:
+                metadata_types = {t.strip().upper() for t in config_metadata.split(',') if t.strip()}
+            else:
+                metadata_types = {EdgeType.TAGGED_WITH.value}
+            
+            containment_upper = {t.upper() for t in containment_types}
+            lineage_types = []
+            for edge in self._edges.values():
+                et = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
+                if et.upper() not in containment_upper and et.upper() not in metadata_types and et.upper() != EdgeType.AGGREGATED.value:
+                    if et not in lineage_types:
+                        lineage_types.append(et)
+        
+        # 3. Build edge type metadata with full classification
         edge_type_metadata: Dict[str, EdgeTypeMetadata] = {}
+        containment_upper = {t.upper() for t in containment_types}
+        lineage_upper = {t.upper() for t in lineage_types}
         
         # Analyze edges to determine metadata
         edge_type_counts: Dict[str, int] = {}
@@ -561,40 +629,52 @@ class MockGraphProvider(GraphDataProvider):
                     edge_type_target_types[edge_type] = set()
                 edge_type_target_types[edge_type].add(target_type)
         
-        # Create metadata for each edge type
+        # Create metadata for each edge type — fully ontology-driven classification
         for edge_type in edge_type_counts.keys():
-            is_containment = edge_type in containment_types
+            is_containment = edge_type.upper() in containment_upper
+            is_lineage = edge_type.upper() in lineage_upper
             
-            # Determine direction based on known containment types
-            if edge_type == EdgeType.CONTAINS.value:
-                direction = 'parent-to-child'
-                description = 'Parent contains child (hierarchical relationship)'
-            elif edge_type == EdgeType.BELONGS_TO.value:
-                direction = 'child-to-parent'
-                description = 'Child belongs to parent (inverse of contains)'
-            elif is_containment:
-                # For other containment types, try to infer direction
-                # If we see patterns where one entity type always appears as source, it's parent-to-child
-                direction = 'parent-to-child'  # Default assumption
+            # Determine category
+            if is_containment:
+                category = 'structural'
+            elif is_lineage:
+                category = 'flow'
+            elif edge_type.upper() == EdgeType.TAGGED_WITH.value:
+                category = 'metadata'
+            else:
+                category = 'association'
+            
+            # Determine direction from category
+            if is_containment:
+                # Check direction hint from edge type metadata
+                direction = 'parent-to-child'  # Default for containment
+                # Reverse containment types (like BELONGS_TO) go child-to-parent
+                if edge_type.upper() == EdgeType.BELONGS_TO.value:
+                    direction = 'child-to-parent'
                 description = f'Containment relationship: {edge_type}'
+            elif is_lineage:
+                direction = 'source-to-target'
+                description = f'Lineage/flow relationship: {edge_type}'
             else:
                 direction = 'bidirectional'
-                description = f'Non-containment relationship: {edge_type}'
+                description = f'{category.capitalize()} relationship: {edge_type}'
             
             edge_type_metadata[edge_type] = EdgeTypeMetadata(
                 isContainment=is_containment,
+                isLineage=is_lineage,
                 direction=direction,
+                category=category,
                 description=description
             )
         
-        # 3. Build entity type hierarchy
+        # 4. Build entity type hierarchy
         entity_type_hierarchy: Dict[str, EntityTypeHierarchy] = {}
         
         # Analyze containment edges to determine what can contain what
         for edge in self._edges.values():
             edge_type = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
             
-            if edge_type not in containment_types:
+            if edge_type.upper() not in containment_upper:
                 continue
             
             source_node = self._nodes.get(edge.source_urn)
@@ -606,15 +686,13 @@ class MockGraphProvider(GraphDataProvider):
             source_type = source_node.entity_type.value if hasattr(source_node.entity_type, 'value') else str(source_node.entity_type)
             target_type = target_node.entity_type.value if hasattr(target_node.entity_type, 'value') else str(target_node.entity_type)
             
-            # Determine parent and child based on edge direction
-            if edge_type == EdgeType.CONTAINS.value:
-                parent_type = source_type
-                child_type = target_type
-            elif edge_type == EdgeType.BELONGS_TO.value:
+            # Determine parent and child by checking edge direction from metadata
+            edge_meta = edge_type_metadata.get(edge_type)
+            if edge_meta and edge_meta.direction == 'child-to-parent':
                 parent_type = target_type
                 child_type = source_type
             else:
-                # Default: assume source is parent (parent-to-child direction)
+                # Default: source is parent (parent-to-child direction)
                 parent_type = source_type
                 child_type = target_type
             
@@ -636,7 +714,7 @@ class MockGraphProvider(GraphDataProvider):
             if parent_type not in entity_type_hierarchy[child_type].can_be_contained_by:
                 entity_type_hierarchy[child_type].can_be_contained_by.append(parent_type)
         
-        # 4. Identify Root Entity Types
+        # 5. Identify Root Entity Types
         # Types that appear in hierarchy but never as a child (target of containment edge)
         all_hierarchy_types = set(entity_type_hierarchy.keys())
         contained_types = set()
@@ -648,6 +726,7 @@ class MockGraphProvider(GraphDataProvider):
         
         return OntologyMetadata(
             containmentEdgeTypes=containment_types,
+            lineageEdgeTypes=lineage_types,
             edgeTypeMetadata=edge_type_metadata,
             entityTypeHierarchy=entity_type_hierarchy,
             rootEntityTypes=root_entity_types

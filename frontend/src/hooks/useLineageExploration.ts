@@ -296,15 +296,19 @@ export function computeTrace(
   downstreamDepth: number,
   includeChildLineage: boolean,
   containmentEdgeTypes: string[] = [],
-  expandedIds?: Set<string>
+  expandedIds?: Set<string>,
+  lineageEdgeTypes: string[] = []
 ): TraceResult {
-  // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
-  // const nodeMap = new Map(allNodes.map(n => [n.id, n]))
   // Use provided containment types or fallback to defaults
   const containmentTypes = containmentEdgeTypes.length > 0
     ? containmentEdgeTypes
     : ['CONTAINS', 'BELONGS_TO']
   const containmentMap = buildContainmentMap(allNodes, allEdges, containmentTypes)
+
+  // Normalize lineage edge types for filtering (empty = accept all non-containment)
+  const lineageFilter = lineageEdgeTypes.length > 0
+    ? new Set(lineageEdgeTypes.map(t => t.toUpperCase()))
+    : null  // null means accept all non-containment edges
 
   // Build adjacency lists
   const upstreamEdges = new Map<string, Edge[]>()
@@ -322,11 +326,16 @@ export function computeTrace(
     }
   })
 
-  // Build edge maps (skip containment edges)
+  // Build edge maps (skip containment edges, optionally filter by lineage types)
   allEdges.forEach((edge) => {
-    const rel = (edge.data?.relationship ?? edge.data?.edgeType ?? '').toUpperCase()
+    const rel = String(edge.data?.relationship ?? edge.data?.edgeType ?? '').toUpperCase()
     // Skip containment edges for lineage trace
     if (containmentTypes.some(type => type.toUpperCase() === rel)) {
+      return
+    }
+
+    // If lineage filter is active, only include matching edge types
+    if (lineageFilter && !lineageFilter.has(rel)) {
       return
     }
 

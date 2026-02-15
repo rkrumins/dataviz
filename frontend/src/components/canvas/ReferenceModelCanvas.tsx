@@ -136,7 +136,7 @@ export function ReferenceModelCanvas({
   const activeView = useSchemaStore((s) => s.getActiveView())
   const updateView = useSchemaStore((s) => s.updateView)
   const provider = useGraphProvider()
-  const { containmentEdgeTypes, isContainmentEdge } = useOntologyMetadata()
+  const { containmentEdgeTypes, lineageEdgeTypes, isContainmentEdge } = useOntologyMetadata()
 
   // URN resolver for trace
   const urnResolver = useCallback((nodeId: string) => {
@@ -151,24 +151,69 @@ export function ReferenceModelCanvas({
     onTraceComplete: async (result) => {
       console.log('[ReferenceModelCanvas] Trace complete:', result.traceNodes.size, 'nodes')
 
-      // Auto-expand ancestors of traced nodes
+      // Auto-enable lineage flow so edges are visible
+      setShowLineageFlow(true)
+
+      // CRITICAL: Merge trace result nodes/edges into canvas store
+      // Without this, LineageFlowOverlay can't draw trace edges
       if (result.lineageResult) {
+        const lr = result.lineageResult
+
+        // Convert GraphNode[] → LineageNode[] and add to canvas
+        const newCanvasNodes = lr.nodes.map(gn => ({
+          id: gn.urn,
+          type: 'default' as const,
+          position: { x: 0, y: 0 },
+          data: {
+            label: gn.displayName,
+            urn: gn.urn,
+            type: gn.entityType,
+            classifications: gn.tags ?? [],
+            metadata: {
+              ...gn.properties,
+              childCount: gn.childCount,
+              sourceSystem: gn.sourceSystem,
+            },
+          },
+        }))
+        if (newCanvasNodes.length > 0) {
+          addNodes(newCanvasNodes as any[])
+        }
+
+        // Convert GraphEdge[] → LineageEdge[] and add to canvas
+        const newCanvasEdges = lr.edges.map(ge => ({
+          id: ge.id,
+          source: ge.sourceUrn,
+          target: ge.targetUrn,
+          data: {
+            edgeType: ge.edgeType,
+            relationship: ge.edgeType,
+            confidence: ge.confidence,
+          },
+        }))
+        if (newCanvasEdges.length > 0) {
+          addEdges(newCanvasEdges as any[])
+        }
+
+        // Auto-expand ancestors of traced nodes
         const nodesToExpand = new Set(expandedNodes)
 
-        // Build parent map from containment edges
-        const parentMap = new Map<string, string>()
-        const containmentEdges = edges.filter(e => {
-          const type = normalizeEdgeType(e)
-          return isContainmentEdge(type)
+        // Build parent map from ALL edges (including newly added)
+        const allCurrentEdges = [...edges, ...newCanvasEdges]
+        const traceParentMap = new Map<string, string>()
+        allCurrentEdges.forEach(e => {
+          const type = String((e.data as any)?.edgeType ?? (e.data as any)?.relationship ?? '').toUpperCase()
+          if (containmentEdgeTypes.some(ct => ct.toUpperCase() === type)) {
+            traceParentMap.set(e.target ?? (e as any).targetUrn, e.source ?? (e as any).sourceUrn)
+          }
         })
-        containmentEdges.forEach(e => parentMap.set(e.target, e.source))
 
         // For each traced node, expand its ancestors
         result.traceNodes.forEach(id => {
-          let curr = parentMap.get(id)
+          let curr = traceParentMap.get(id)
           while (curr) {
             nodesToExpand.add(curr)
-            curr = parentMap.get(curr)
+            curr = traceParentMap.get(curr)
           }
         })
 
@@ -826,7 +871,8 @@ export function ReferenceModelCanvas({
     return set
   }, [trace.isTracing, trace.focusId, trace.visibleTraceNodes, parentMap])
   const lineageEdges = useMemo(() => {
-    if (!showLineageFlow) return []
+    // When tracing, always compute edges even if flow toggle is off
+    if (!showLineageFlow && !trace.isTracing) return []
     // Filter out containment edges
     const regularEdges = edges.filter(edge => {
       return !isContainmentEdge(normalizeEdgeType(edge))
@@ -864,7 +910,7 @@ export function ReferenceModelCanvas({
       })))
 
     return [...regularEdges, ...aggEdges, ...expandedDetailedEdges]
-  }, [edges, showLineageFlow, aggregatedEdges, isContainmentEdge])
+  }, [edges, showLineageFlow, trace.isTracing, aggregatedEdges, isContainmentEdge])
 
   // Lineage Roll-up: Project edges to visible ancestors
   const visibleLineageEdges = useMemo(() => {
@@ -1207,6 +1253,7 @@ export function ReferenceModelCanvas({
               traceResult={trace.result}
               statistics={trace.statistics}
               isLoading={trace.isLoading}
+              availableLineageEdgeTypes={lineageEdgeTypes}
               position="floating"
             />
           )}
@@ -1259,7 +1306,7 @@ export function ReferenceModelCanvas({
         {/* Layer Columns */}
         <div className="flex-1 overflow-auto relative scroll-smooth">
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them (z-index managed in component to 0, cols should be higher) */}
-          {showLineageFlow && (
+          {(showLineageFlow || trace.isTracing) && (
             <LineageFlowOverlay
               nodes={displayFlat}
               edges={visibleLineageEdges}
@@ -1268,6 +1315,8 @@ export function ReferenceModelCanvas({
               isEdgePanelOpen={isEdgePanelOpen}
               toggleEdgePanel={toggleEdgePanel}
               triggerRedrawRef={triggerEdgeRedrawRef}
+              isTracing={trace.isTracing}
+              traceResult={trace.result}
             />
           )}
 
@@ -2056,7 +2105,9 @@ function LineageFlowOverlay({
   selectEdge,
   isEdgePanelOpen,
   toggleEdgePanel,
-  triggerRedrawRef
+  triggerRedrawRef,
+  isTracing = false,
+  traceResult = null,
 }: {
   nodes: any[],
   edges: any[],
@@ -2065,6 +2116,8 @@ function LineageFlowOverlay({
   isEdgePanelOpen: boolean,
   toggleEdgePanel: () => void,
   triggerRedrawRef?: React.MutableRefObject<(() => void) | null>
+  isTracing?: boolean,
+  traceResult?: any | null,
 }) {
   const [paths, setPaths] = useState<React.ReactNode[]>([])
   const containerRef = useRef<HTMLDivElement>(null)
@@ -2171,12 +2224,32 @@ function LineageFlowOverlay({
           d = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
         }
 
-        // Color based on edge type or just consistent?
-        // Default blue-500 (#3b82f6). 
-        // Could map edge.originalType to different colors.
-        const color = edge.originalType === 'TRANSFORMS' ? '#3b82f6' :
-          edge.originalType === 'CONSUMES' ? '#22c55e' :
-            edge.originalType === 'PRODUCES' ? '#f59e0b' : '#3b82f6'
+        // Color: In trace mode, color by direction (upstream/downstream)
+        // In normal mode, color by edge type
+        let color = '#3b82f6' // default blue
+        const traceOpacity = isTracing ? 'opacity-80' : 'opacity-40'
+        const traceStroke = isTracing ? 2.5 : 1.5
+
+        if (isTracing && traceResult) {
+          // Directional coloring for trace mode
+          const srcInUpstream = traceResult.upstreamNodes?.has(edge.source)
+          const tgtInUpstream = traceResult.upstreamNodes?.has(edge.target)
+          const srcInDownstream = traceResult.downstreamNodes?.has(edge.source)
+          const tgtInDownstream = traceResult.downstreamNodes?.has(edge.target)
+
+          if (srcInUpstream || tgtInUpstream) {
+            color = '#06b6d4' // cyan for upstream
+          } else if (srcInDownstream || tgtInDownstream) {
+            color = '#f59e0b' // amber for downstream
+          } else {
+            color = '#a78bfa' // purple for focus-adjacent
+          }
+        } else {
+          // Normal mode: color by edge type
+          color = edge.originalType === 'TRANSFORMS' ? '#3b82f6' :
+            edge.originalType === 'CONSUMES' ? '#22c55e' :
+              edge.originalType === 'PRODUCES' ? '#f59e0b' : '#3b82f6'
+        }
 
         newPaths.push(
           <g
@@ -2197,11 +2270,12 @@ function LineageFlowOverlay({
               d={d}
               fill="none"
               stroke="currentColor"
-              strokeWidth="1.5"
+              strokeWidth={traceStroke}
               markerEnd="url(#arrowhead)"
               className={cn(
-                "transition-all duration-300 opacity-40 group-hover:opacity-100 group-hover:stroke-[2.5px]",
+                `transition-all duration-300 ${traceOpacity} group-hover:opacity-100`,
               )}
+              style={{ strokeWidth: traceStroke }}
             />
 
             {/* Animated Flow Layer (particles) */}

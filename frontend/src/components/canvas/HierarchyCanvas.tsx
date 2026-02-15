@@ -64,10 +64,10 @@ function countDescendants(node: HierarchyNode): { total: number; byType: Record<
 }
 
 export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
-  const { nodes, edges, selectNode, selectedNodeIds } = useCanvasStore()
+  const { nodes, edges, selectNode, selectedNodeIds, addNodes, addEdges } = useCanvasStore()
   const selectedNodeId = selectedNodeIds[0] ?? null
   const schema = useSchemaStore((s) => s.schema)
-  const { containmentEdgeTypes } = useOntologyMetadata()
+  const { containmentEdgeTypes, lineageEdgeTypes } = useOntologyMetadata()
   const { loadChildren, loadingNodes } = useEntityLoader()
   const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
   const provider = useGraphProvider()
@@ -96,27 +96,69 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     onTraceComplete: (result) => {
       console.log('[HierarchyCanvas] Trace complete:', result.traceNodes.size, 'nodes')
 
-      // Auto-expand ancestors of traced nodes
-      const nodesToExpand = new Set(expandedNodes)
+      // CRITICAL: Merge trace result nodes/edges into canvas store
+      if (result.lineageResult) {
+        const lr = result.lineageResult
 
-      // Build parent map from hierarchy
-      const parentMap = new Map<string, string>()
-      edges.forEach(e => {
-        const edgeType = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
-        if (containmentEdgeTypes.some(type => type.toUpperCase() === edgeType)) {
-          parentMap.set(e.target, e.source)
+        // Convert GraphNode[] → LineageNode[] and add to canvas
+        const newCanvasNodes = lr.nodes.map((gn: any) => ({
+          id: gn.urn,
+          type: 'default' as const,
+          position: { x: 0, y: 0 },
+          data: {
+            label: gn.displayName,
+            urn: gn.urn,
+            type: gn.entityType,
+            classifications: gn.tags ?? [],
+            metadata: {
+              ...gn.properties,
+              childCount: gn.childCount,
+              sourceSystem: gn.sourceSystem,
+            },
+          },
+        }))
+        if (newCanvasNodes.length > 0) {
+          addNodes(newCanvasNodes as any[])
         }
-      })
 
-      result.traceNodes.forEach(id => {
-        let curr = parentMap.get(id)
-        while (curr) {
-          nodesToExpand.add(curr)
-          curr = parentMap.get(curr)
+        // Convert GraphEdge[] → LineageEdge[] and add to canvas
+        const newCanvasEdges = lr.edges.map((ge: any) => ({
+          id: ge.id,
+          source: ge.sourceUrn,
+          target: ge.targetUrn,
+          data: {
+            edgeType: ge.edgeType,
+            relationship: ge.edgeType,
+            confidence: ge.confidence,
+          },
+        }))
+        if (newCanvasEdges.length > 0) {
+          addEdges(newCanvasEdges as any[])
         }
-      })
 
-      setExpandedNodes(nodesToExpand)
+        // Auto-expand ancestors of traced nodes
+        const nodesToExpand = new Set(expandedNodes)
+
+        // Build parent map from ALL edges (including newly added)
+        const allCurrentEdges = [...edges, ...newCanvasEdges]
+        const traceParentMap = new Map<string, string>()
+        allCurrentEdges.forEach(e => {
+          const type = String((e.data as any)?.edgeType ?? (e.data as any)?.relationship ?? '').toUpperCase()
+          if (containmentEdgeTypes.some(ct => ct.toUpperCase() === type)) {
+            traceParentMap.set(e.target ?? (e as any).targetUrn, e.source ?? (e as any).sourceUrn)
+          }
+        })
+
+        result.traceNodes.forEach(id => {
+          let curr = traceParentMap.get(id)
+          while (curr) {
+            nodesToExpand.add(curr)
+            curr = traceParentMap.get(curr)
+          }
+        })
+
+        setExpandedNodes(nodesToExpand)
+      }
     }
   })
 
@@ -519,6 +561,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               traceResult={trace.result}
               statistics={trace.statistics}
               isLoading={trace.isLoading}
+              availableLineageEdgeTypes={lineageEdgeTypes}
               position="top"
             />
           </div>

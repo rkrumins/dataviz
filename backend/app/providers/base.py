@@ -76,7 +76,8 @@ class GraphDataProvider(ABC):
         self, 
         urn: str, 
         depth: int, 
-        include_column_lineage: bool = False
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[EntityType]] = None
     ) -> LineageResult:
         """Get upstream lineage"""
         pass
@@ -86,7 +87,8 @@ class GraphDataProvider(ABC):
         self, 
         urn: str, 
         depth: int, 
-        include_column_lineage: bool = False
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[EntityType]] = None
     ) -> LineageResult:
         """Get downstream lineage"""
         pass
@@ -97,7 +99,8 @@ class GraphDataProvider(ABC):
         urn: str, 
         upstream_depth: int, 
         downstream_depth: int, 
-        include_column_lineage: bool = False
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[EntityType]] = None
     ) -> LineageResult:
         """Get both upstream and downstream lineage"""
         pass

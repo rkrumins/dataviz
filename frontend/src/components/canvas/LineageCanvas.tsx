@@ -105,7 +105,7 @@ export function LineageCanvas() {
   const { showMinimap, showGrid, snapToGrid } = usePreferencesStore()
   const schema = useSchemaStore((s) => s.schema)
   const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
-  const { containmentEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
+  const { containmentEdgeTypes, lineageEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
 
   // Edge detail panel
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
@@ -129,7 +129,7 @@ export function LineageCanvas() {
     const node = rawNodes.find(n => n.id === nodeId)
     return node?.data?.urn || nodeId
   }, [rawNodes])
-  
+
   const trace = useUnifiedTrace({
     provider,
     urnResolver,
@@ -137,7 +137,7 @@ export function LineageCanvas() {
       console.log('[LineageCanvas] Trace complete:', result.traceNodes.size, 'nodes')
     }
   })
-  
+
   // Sync trace focus with lineage exploration focus
   useEffect(() => {
     if (!focusEntityId && trace.focusId) {
@@ -311,8 +311,8 @@ export function LineageCanvas() {
       const isFocus = trace.isFocus(node.id)
 
       // Dim nodes not in the visible trace
-      const isDimmed = !trace.visibleTraceNodes.has(node.id) && 
-                       !trace.visibleTraceNodes.has(node.data?.urn)
+      const isDimmed = !trace.visibleTraceNodes.has(node.id) &&
+        !trace.visibleTraceNodes.has(node.data?.urn)
 
       return {
         ...node,
@@ -680,6 +680,7 @@ export function LineageCanvas() {
                   traceResult={trace.result}
                   statistics={trace.statistics}
                   isLoading={trace.isLoading}
+                  availableLineageEdgeTypes={lineageEdgeTypes}
                   position="top"
                 />
               </div>
@@ -887,14 +888,14 @@ export function LineageCanvas() {
       </AnimatePresence>
 
       {/* Entity Drawer - Unified view & edit */}
-      <EntityDrawer 
+      <EntityDrawer
         onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
         onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
         onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
       />
 
       {/* === UX-FIRST INTERACTION COMPONENTS === */}
-      
+
       {/* Context Menu - Right-click on nodes/edges/canvas */}
       <CanvasContextMenu
         isOpen={interactions.state.contextMenu.isOpen}
@@ -913,7 +914,7 @@ export function LineageCanvas() {
         onCreateNode={(pos) => interactions.openQuickCreate(pos)}
         onSelectAll={interactions.selectAll}
       />
-      
+
       {/* Inline Node Editor - Double-click to edit names */}
       <InlineNodeEditor
         nodeId={interactions.state.inlineEdit.nodeId}
@@ -922,7 +923,7 @@ export function LineageCanvas() {
         onSave={interactions.saveInlineEdit}
         onCancel={interactions.cancelInlineEdit}
       />
-      
+
       {/* Quick Create - Double-click canvas or press 'N' */}
       <QuickCreateNode
         isOpen={interactions.state.quickCreate.isOpen}
@@ -931,7 +932,7 @@ export function LineageCanvas() {
         onClose={interactions.closeQuickCreate}
         onCreated={(nodeId) => selectNode(nodeId)}
       />
-      
+
       {/* Command Palette - Press Cmd+K */}
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
