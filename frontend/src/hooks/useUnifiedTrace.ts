@@ -42,6 +42,8 @@ export interface TraceConfig {
     pathOnly: boolean
     /** Auto-sync traced nodes to canvas store */
     autoSyncToStore: boolean
+    /** Optional granularity override (default: 'column' for full detail) */
+    granularity?: 'column' | 'table' | 'schema' | 'system' | 'domain'
     /** Optional whitelist of lineage edge types to trace (empty = all ontology lineage types) */
     lineageEdgeTypes: string[]
 }
@@ -100,6 +102,7 @@ const DEFAULT_CONFIG: TraceConfig = {
     pathOnly: false,
     autoSyncToStore: true,
     lineageEdgeTypes: [],  // Empty = use all ontology-classified lineage types
+    granularity: 'column', // Default to column to ensure we see the full path
 }
 
 // ============================================
@@ -149,6 +152,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
                 includeInheritedLineage: config.includeInheritedLineage,
                 // Pass lineage edge type filter if user has selected specific types
                 ...(config.lineageEdgeTypes.length > 0 ? { lineageEdgeTypes: config.lineageEdgeTypes } : {}),
+                granularity: config.granularity ?? 'column',
             }
 
             // Fetch full lineage from provider

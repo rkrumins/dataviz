@@ -174,8 +174,11 @@ class ContextEngine:
         containment_map = self._build_containment_map(result.nodes, result.edges, containment_types)
         
         # Filter containment edges if requested (for pure data lineage view)
-        if exclude_containment_edges:
-            result = self._filter_containment_edges(result, containment_types)
+        # Filter containment edges if requested (for pure data lineage view)
+        # We DO NOT filter containment edges here because they are needed for structural context (nesting nodes).
+        # "exclude_containment_edges" implies broad traversal behavior, not visual suppression.
+        # if exclude_containment_edges:
+        #    result = self._filter_containment_edges(result, containment_types)
         
         # Handle inherited lineage - if entity has no direct lineage, try parent
         if include_inherited_lineage:
@@ -274,7 +277,7 @@ class ContextEngine:
         )
         
         # Filter containment edges from parent result too
-        parent_result = self._filter_containment_edges(parent_result, containment_types)
+        # parent_result = self._filter_containment_edges(parent_result, containment_types)
         
         # Merge: Add original node to parent's result, mark as inherited
         merged_nodes = list(parent_result.nodes)
