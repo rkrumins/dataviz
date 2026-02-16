@@ -30,22 +30,46 @@ export class RemoteGraphProvider implements GraphDataProvider {
     // Internal Fetch Helper
     // ==========================================
 
-    private async fetch<T>(endpoint: string, options?: RequestInit): Promise<T> {
-        const url = `${API_BASE}${endpoint}`
-        const response = await fetch(url, {
-            ...options,
-            headers: {
-                'Content-Type': 'application/json',
-                ...options?.headers,
-            },
-        })
+    private inflightRequests = new Map<string, Promise<any>>()
 
-        if (!response.ok) {
-            const errorText = await response.text()
-            throw new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
+    private async fetch<T>(endpoint: string, options?: RequestInit): Promise<T> {
+        // Create a unique key for deduplication
+        // Include method and body to differentiate requests
+        const method = options?.method || 'GET'
+        const body = options?.body ? String(options.body) : ''
+        const key = `${method}:${endpoint}:${body}`
+
+        // Return existing promise if request is already in flight
+        const existingPromise = this.inflightRequests.get(key)
+        if (existingPromise) {
+            return existingPromise
         }
 
-        return response.json()
+        const fetchPromise = (async () => {
+            try {
+                const url = `${API_BASE}${endpoint}`
+                const response = await fetch(url, {
+                    ...options,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...options?.headers,
+                    },
+                })
+
+                if (!response.ok) {
+                    const errorText = await response.text()
+                    throw new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
+                }
+
+                return response.json()
+            } finally {
+                // Remove from map when done (success or failure)
+                this.inflightRequests.delete(key)
+            }
+        })()
+
+        this.inflightRequests.set(key, fetchPromise)
+        return fetchPromise
     }
 
     // ==========================================

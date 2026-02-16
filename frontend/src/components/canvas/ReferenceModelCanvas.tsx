@@ -32,7 +32,7 @@ import { EdgeLegend } from './EdgeLegend'
 import { TraceToolbar } from './TraceToolbar'
 import { useUnifiedTrace, useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
-import { useOntologyMetadata, isContainmentEdge, normalizeEdgeType } from '@/services/ontologyService'
+import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
 
 // UX-first interaction components
 import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
@@ -452,19 +452,34 @@ export function ReferenceModelCanvas({
     return { nodeMap: nMap, childMap: cMap, parentMap: pMap }
   }, [nodes, edges, containmentEdgeTypes])
 
+  // Ref to track previous container URNs to prevent duplicate fetches
+  const prevContainerUrnsRef = useRef<string>('')
+
   // Fetch aggregated edges when visible nodes change
   useEffect(() => {
-    if (showLineageFlow && nodes.length > 0) {
+    if (!showLineageFlow || nodes.length === 0) return
+
+    // Debounce the fetch to prevent rapid firing during updates
+    const timeoutId = setTimeout(() => {
       // Get top-level container URNs for aggregation
       const containerUrns = nodes
         .filter(n => !parentMap.has(n.id) || !expandedNodes.has(parentMap.get(n.id) || ''))
         .map(n => (n.data?.urn as string) || n.id)
         .filter(Boolean)
+        .sort() // Sort to ensure consistent key generation
 
-      if (containerUrns.length > 0 && containerUrns.length < 500) {
-        fetchAggregated(containerUrns)
+      const urnsKey = containerUrns.join(',')
+
+      // Only fetch if the set of URNs has actually changed
+      if (urnsKey !== prevContainerUrnsRef.current) {
+        if (containerUrns.length > 0 && containerUrns.length < 500) {
+          fetchAggregated(containerUrns)
+          prevContainerUrnsRef.current = urnsKey
+        }
       }
-    }
+    }, 300) // 300ms debounce
+
+    return () => clearTimeout(timeoutId)
   }, [nodes.length, showLineageFlow, fetchAggregated, parentMap, expandedNodes])
 
   // Build layer assignment rules
