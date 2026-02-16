@@ -518,6 +518,12 @@ export interface GraphDataProvider {
      */
     getDescendants(urn: URN, depth?: number): Promise<GraphNode[]>
 
+    /**
+     * Get containment context: parent + children matching optional search
+     * Used for SearchChildrenPanel and similar UIs
+     */
+    getContainment?(params: { parentUrn: URN; searchQuery?: string; limit?: number }): Promise<ContainmentResult>
+
     // ==========================================
     // Lineage Traversal
     // ==========================================

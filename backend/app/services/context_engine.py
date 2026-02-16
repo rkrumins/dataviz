@@ -144,8 +144,30 @@ class ContextEngine:
         # Always fetch column lineage at the base to ensure we have data to roll up
         include_cols = True 
         
-        result = await self.provider.get_full_lineage(
-            urn, upstream_depth, downstream_depth, include_column_lineage=include_cols
+        # Use new Targeted Trace method
+        # Convert sets to lists for the provider
+        containment_list = list(containment_types)
+        lineage_list = list(active_lineage_types)
+        
+        
+        # If specific direction requested, we might need to filter the result?
+        # get_trace_lineage takes 'direction'.
+        trace_direction = "both"
+        if upstream_depth > 0 and downstream_depth == 0:
+            trace_direction = "upstream"
+        elif downstream_depth > 0 and upstream_depth == 0:
+            trace_direction = "downstream"
+            
+        # Re-call with correct direction if needed, or just let it return everything?
+        # The provider's get_trace_lineage takes 'direction' but I didn't pass it above.
+        # Let's correct the call.
+        
+        result = await self.provider.get_trace_lineage(
+            urn,
+            trace_direction,
+            max(upstream_depth, downstream_depth),
+            containment_list,
+            lineage_list
         )
         
         # Build containment map BEFORE filtering - needed for column->table aggregation
@@ -217,8 +239,8 @@ class ContextEngine:
         self, 
         urn: str, 
         result: LineageResult, 
-        upstream_depth: int,
-        downstream_depth: int,
+        upstream_depth: int, 
+        downstream_depth: int, 
         containment_types: Set[str],
         lineage_types: Set[str]
     ) -> LineageResult:
@@ -235,7 +257,11 @@ class ContextEngine:
         )
         
         if has_direct_lineage:
-            return result  # Already has lineage, no need to inherit
+            # Check if we should merge with parent anyway? 
+            # Usually strict inheritance means "use parent if child has none".
+            # But if we want comprehensive "context", maybe we always add parent?
+            # For now, stick to standard inheritance pattern.
+            return result
         
         # Try to get parent's lineage
         parent = await self.provider.get_parent(urn)
@@ -254,6 +280,7 @@ class ContextEngine:
         merged_nodes = list(parent_result.nodes)
         original_node = next((n for n in result.nodes if n.urn == urn), None)
         if original_node and original_node not in merged_nodes:
+            # We want to insert it, but ensure we don't duplicate
             merged_nodes.append(original_node)
         
         # Update upstream/downstream to include parent
@@ -300,8 +327,9 @@ class ContextEngine:
         
         for node in nodes:
             # Map entity type to granularity
-            # Fallback to COLUMN if unknown
-            node_gran = ENTITY_GRANULARITY.get(node.entity_type, Granularity.COLUMN)
+            # Handle Enum or String
+            entity_key = node.entity_type.value if hasattr(node.entity_type, 'value') else str(node.entity_type)
+            node_gran = ENTITY_GRANULARITY.get(entity_key, Granularity.COLUMN)
             node_level = GRANULARITY_LEVELS.get(node_gran, 0)
             
             if node_level >= target_level:

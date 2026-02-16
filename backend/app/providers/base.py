@@ -105,6 +105,21 @@ class GraphDataProvider(ABC):
         """Get both upstream and downstream lineage"""
         pass
     
+    @abstractmethod
+    async def get_trace_lineage(
+        self,
+        urn: str,
+        direction: str,
+        depth: int,
+        containment_edges: List[str],
+        lineage_edges: List[str],
+    ) -> LineageResult:
+        """
+        Execute a targeted lineage trace using dynamic edge lists.
+        Used for ontology-driven tracing.
+        """
+        pass
+    
     # ==========================================
     # Metadata Operations
     # ==========================================

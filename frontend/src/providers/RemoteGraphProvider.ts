@@ -7,6 +7,7 @@ import type {
     NodeQuery,
     EdgeQuery,
     LineageResult,
+    ContainmentResult,
     TraceOptions,
     LayerAssignmentRequest,
     LayerAssignmentResult,
@@ -127,6 +128,26 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
     async getDescendants(urn: URN, depth = 10): Promise<GraphNode[]> {
         return await this.fetch<GraphNode[]>(`/nodes/${encodeURIComponent(urn)}/descendants?depth=${depth}`)
+    }
+
+    async getContainment(params: { parentUrn: URN; searchQuery?: string; limit?: number }): Promise<ContainmentResult> {
+        const { parentUrn, searchQuery, limit = 50 } = params
+        const [parent, children] = await Promise.all([
+            this.getNode(parentUrn),
+            this.getChildren(parentUrn, { limit }),
+        ])
+        const filtered = searchQuery?.trim()
+            ? children.filter(
+                (c) =>
+                    c.displayName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                    c.urn?.toLowerCase().includes(searchQuery.toLowerCase())
+            )
+            : children
+        return {
+            parent,
+            children: filtered.slice(0, limit),
+            hasNestedChildren: filtered.some((c) => (c.childCount ?? 0) > 0),
+        }
     }
 
     // ==========================================

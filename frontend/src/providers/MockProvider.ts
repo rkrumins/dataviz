@@ -18,6 +18,7 @@ import type {
     NodeQuery,
     EdgeQuery,
     LineageResult,
+    ContainmentResult,
     TraceOptions,
     LayerAssignmentRequest,
     LayerAssignmentResult,
@@ -382,6 +383,24 @@ export class MockProvider implements GraphDataProvider {
 
         traverse(urn, 0)
         return descendants
+    }
+
+    async getContainment(params: { parentUrn: URN; searchQuery?: string; limit?: number }): Promise<ContainmentResult> {
+        const { parentUrn, searchQuery, limit = 50 } = params
+        const parent = await this.getNode(parentUrn)
+        let children = await this.getChildren(parentUrn, { limit })
+        if (searchQuery?.trim()) {
+            const q = searchQuery.toLowerCase()
+            children = children.filter(
+                (c) =>
+                    c.displayName?.toLowerCase().includes(q) || c.urn?.toLowerCase().includes(q)
+            )
+        }
+        return {
+            parent,
+            children: children.slice(0, limit),
+            hasNestedChildren: children.some((c) => (c.childCount ?? 0) > 0),
+        }
     }
 
     // ==========================================

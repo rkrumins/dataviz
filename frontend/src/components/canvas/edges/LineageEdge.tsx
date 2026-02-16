@@ -223,21 +223,21 @@ export const LineageEdge = memo(function LineageEdge({
         path={edgePath}
         markerEnd={markerEnd}
         style={{
-          stroke: isDimmed 
-            ? '#9ca3af' 
-            : isTraced 
-              ? '#c084fc' 
-              : isHighlighted 
-                ? `url(#${highlightGradientId})` 
+          stroke: isDimmed
+            ? '#9ca3af'
+            : isTraced
+              ? '#c084fc'
+              : isHighlighted
+                ? `url(#${highlightGradientId})`
                 : `url(#${gradientId})`,
           strokeWidth: isDimmed ? 1 : selected ? 3 : isTraced ? 3 : (isHighlighted && highlightMode === 'bold' ? 4 : 2),
           strokeOpacity: isDimmed ? 0.2 : 1,
-          filter: isDimmed 
-            ? 'grayscale(1)' 
-            : isTraced 
-              ? 'drop-shadow(0 0 6px #c084fc)' 
-              : selected 
-                ? `drop-shadow(0 0 6px ${edgeColor})` 
+          filter: isDimmed
+            ? 'grayscale(1)'
+            : isTraced
+              ? 'drop-shadow(0 0 6px #c084fc)'
+              : selected
+                ? `drop-shadow(0 0 6px ${edgeColor})`
                 : undefined,
           transition: 'stroke-width 0.15s, filter 0.15s, stroke-opacity 0.15s',
           ...highlightStyles,

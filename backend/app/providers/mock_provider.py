@@ -480,6 +480,69 @@ class MockGraphProvider(GraphDataProvider):
             totalCount=len(nodes),
             hasMore=False
         )
+    
+    async def get_trace_lineage(
+        self,
+        urn: str,
+        direction: str,
+        depth: int,
+        containment_edges: List[str],
+        lineage_edges: List[str],
+    ) -> LineageResult:
+        """
+        Mock implementation of trace lineage with proper context awareness.
+        1. Reuse get_full_lineage to get lineage nodes/edges.
+        2. Traverse UP diagram (Step 4) to include structural context (parents).
+        """
+        # Map direction to depths
+        up_depth = depth if direction in ['upstream', 'both'] else 0
+        down_depth = depth if direction in ['downstream', 'both'] else 0
+        
+        # 1. Get base lineage
+        result = await self.get_full_lineage(urn, up_depth, down_depth, include_column_lineage=True)
+        
+        nodes = list(result.nodes)
+        edges = list(result.edges)
+        
+        # Optimized lookup
+        node_map = {n.urn: n for n in nodes}
+        edge_map = {e.id: e for e in edges}
+        
+        # 2. Structural Context (Upward Traversal)
+        # For every node in the lineage, we must find its containers recursively
+        queue = deque([n.urn for n in nodes])
+        visited = set(node_map.keys())
+        
+        while queue:
+            curr_urn = queue.popleft()
+            
+            # Find parent (Mock uses internal parent map)
+            parent_urn = self._parent_map.get(curr_urn)
+            if parent_urn:
+                # Add parent node
+                parent_node = self._nodes.get(parent_urn)
+                if parent_node:
+                    if parent_urn not in node_map:
+                        node_map[parent_urn] = parent_node
+                        queue.append(parent_urn) # Continue up
+                    
+                    # Find containment edge (Parent -> Child)
+                    if parent_urn in self._edges_by_source:
+                         for e in self._edges_by_source[parent_urn]:
+                             if e.target_urn == curr_urn:
+                                 # This is the containment edge
+                                 if e.id not in edge_map:
+                                     edge_map[e.id] = e
+                                 break
+        
+        return LineageResult(
+            nodes=list(node_map.values()),
+            edges=list(edge_map.values()),
+            upstreamUrns=result.upstream_urns,
+            downstreamUrns=result.downstream_urns,
+            totalCount=len(node_map),
+            hasMore=False
+        )
 
     async def get_stats(self) -> Dict[str, Any]:
         # Return cached stats if available

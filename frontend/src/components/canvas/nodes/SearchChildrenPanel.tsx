@@ -30,12 +30,23 @@ export function SearchChildrenPanel({ parentId, parentName, onClose }: SearchChi
         const timer = setTimeout(async () => {
             setIsLoading(true)
             try {
-                const response = await provider.getContainment({
-                    parentUrn: parentId,
-                    searchQuery: query,
-                    limit: 10
-                })
-                setResults(response.children)
+                if (provider.getContainment) {
+                    const response = await provider.getContainment({
+                        parentUrn: parentId,
+                        searchQuery: query,
+                        limit: 10
+                    })
+                    setResults(response.children)
+                } else {
+                    const children = await provider.getChildren(parentId, { limit: 50 })
+                    const q = query.toLowerCase()
+                    const filtered = children.filter(
+                        (c) =>
+                            c.displayName?.toLowerCase().includes(q) ||
+                            c.urn?.toLowerCase().includes(q)
+                    )
+                    setResults(filtered.slice(0, 10))
+                }
             } catch (err) {
                 console.error('Search failed', err)
             } finally {

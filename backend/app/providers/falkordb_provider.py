@@ -459,7 +459,7 @@ class FalkorDBProvider(GraphDataProvider):
             if n:
                 nodes.append(n)
         node_ids = {n.urn for n in nodes}
-        edges = await self.get_edges(EdgeQuery(limit=10000))
+        edges = await self.get_edges(EdgeQuery(limit=100000))
         edges = [e for e in edges if e.source_urn in node_ids and e.target_urn in node_ids]
         return LineageResult(
             nodes=nodes,
@@ -485,7 +485,7 @@ class FalkorDBProvider(GraphDataProvider):
             if n:
                 nodes.append(n)
         node_ids = {n.urn for n in nodes}
-        edges = await self.get_edges(EdgeQuery(limit=10000))
+        edges = await self.get_edges(EdgeQuery(limit=100000))
         edges = [e for e in edges if e.source_urn in node_ids and e.target_urn in node_ids]
         return LineageResult(
             nodes=nodes,
@@ -513,7 +513,7 @@ class FalkorDBProvider(GraphDataProvider):
             if n:
                 nodes.append(n)
         node_ids = {n.urn for n in nodes}
-        edges = await self.get_edges(EdgeQuery(limit=10000))
+        edges = await self.get_edges(EdgeQuery(limit=100000))
         edges = [e for e in edges if e.source_urn in node_ids and e.target_urn in node_ids]
         return LineageResult(
             nodes=nodes,
@@ -522,6 +522,228 @@ class FalkorDBProvider(GraphDataProvider):
             downstreamUrns=down,
             totalCount=len(nodes),
             hasMore=False,
+        )
+
+    async def get_trace_lineage(
+        self,
+        urn: str,
+        direction: str,
+        depth: int,
+        containment_edges: List[str],
+        lineage_edges: List[str],
+    ) -> LineageResult:
+        """
+        Execute a targeted lineage trace using dynamic edge lists.
+        1. Start at target URN.
+        2. Traverse DOWN containment to find children (if any).
+        3. Traverse ACROSS lineage edges (upstream/downstream).
+        4. Traverse UP containment to find structural context.
+        """
+        await self._ensure_connected()
+        
+        safe_containment = [_sanitize_label(t) for t in containment_edges]
+        safe_lineage = [_sanitize_label(t) for t in lineage_edges]
+        
+        # If no lineage edges defined, return just the node
+        if not safe_lineage:
+            node = await self.get_node(urn)
+            return LineageResult(
+                nodes=[node] if node else [],
+                edges=[],
+                upstreamUrns=set(), 
+                downstreamUrns=set(),
+                totalCount=1 if node else 0,
+                hasMore=False
+            )
+
+        # 1. Expand Scope: Target + Children
+        # Find children using containment edges
+        start_urns = {urn}
+        if safe_containment:
+            # Get children (depth 1 for now, or use *1.. if needed)
+            cypher_kids = (
+                f"MATCH (p)-[r]->(c) "
+                f"WHERE p.urn = $urn AND type(r) IN $containment "
+                f"RETURN c.urn"
+            )
+            res_kids = await self._graph.ro_query(
+                cypher_kids, 
+                params={"urn": urn, "containment": safe_containment}
+            )
+            for row in (res_kids.result_set or []):
+                start_urns.add(row[0])
+        
+        # 2. Trace Lineage
+        collected_nodes: Dict[str, GraphNode] = {}
+        collected_edges: Dict[str, GraphEdge] = {}
+        
+        upstream_urns = set()
+        downstream_urns = set()
+        
+        if not start_urns:
+             return LineageResult(nodes=[], edges=[], upstreamUrns=set(), downstreamUrns=set(), totalCount=0, hasMore=False)
+
+        # We can do BFS from the set of start_urns
+        # Note: We treat start_urns as depth 0
+        
+        search_queue = deque([(u, 0) for u in start_urns])
+        visited_lineage = set(start_urns)
+        
+        # Populate initial nodes
+        # Optimization: Fetch them in bulk later, or fetch as we go? 
+        # FalkorDB is fast, fetching as we go or bulk at end. 
+        # Let's match nodes during traversal.
+        
+        while search_queue:
+            curr_urn, curr_depth = search_queue.popleft()
+            
+            if curr_depth >= depth:
+                continue
+                
+            # Construct query based on direction
+            # For "both", we can just do (a)-[r]-(b) but we need to know direction for result classification
+            
+            queries = []
+            if direction in ["upstream", "both"]:
+                queries.append(("upstream", f"MATCH (curr)-[r]->(next) WHERE next.urn = $urn AND type(r) IN $lineage RETURN curr, r, next")) # Incoming to current
+            if direction in ["downstream", "both"]:
+                queries.append(("downstream", f"MATCH (curr)-[r]->(next) WHERE curr.urn = $urn AND type(r) IN $lineage RETURN curr, r, next")) # Outgoing from current
+                
+            for dir_label, cypher_q in queries:
+                res = await self._graph.ro_query(cypher_q, params={"urn": curr_urn, "lineage": safe_lineage})
+                
+                for row in (res.result_set or []):
+                    # Extract node/edge
+                    # upstream: next.urn=$urn, so curr is the dependency (upstream node)
+                    # downstream: curr.urn=$urn, so next is the dependent (downstream node)
+                    
+                    # Row: [StartNode, Edge, EndNode]
+                    # But wait, my query variable names might be confusing.
+                    # Let's map standard Cypher return: SOURCE, EDGE, TARGET
+                    
+                    src_node_obj = self._extract_node_from_result(row[0])
+                    edge_obj_raw = row[1]
+                    tgt_node_obj = self._extract_node_from_result(row[2])
+                    
+                    if not src_node_obj or not tgt_node_obj:
+                        continue
+                        
+                    # Build edge object
+                    # edge_obj_raw is the relation object or properties dict
+                    # FalkorDB python client returns Relation object or similar
+                    # We need to parse it. 
+                    # row[1] is relation.
+                    
+                    r_type = getattr(edge_obj_raw, "relation", None) or getattr(edge_obj_raw, "type", None) or "RELATED_TO"
+                    r_props = getattr(edge_obj_raw, "properties", {})
+                    
+                    edge = _edge_from_row(src_node_obj.urn, tgt_node_obj.urn, r_type, r_props)
+                    
+                    if edge.id not in collected_edges:
+                        collected_edges[edge.id] = edge
+                        
+                        # Determine neighbor
+                        if dir_label == "upstream":
+                            neighbor = src_node_obj
+                            if neighbor.urn not in visited_lineage:
+                                visited_lineage.add(neighbor.urn)
+                                upstream_urns.add(neighbor.urn)
+                                search_queue.append((neighbor.urn, curr_depth + 1))
+                        else:
+                            neighbor = tgt_node_obj
+                            if neighbor.urn not in visited_lineage:
+                                visited_lineage.add(neighbor.urn)
+                                downstream_urns.add(neighbor.urn)
+                                search_queue.append((neighbor.urn, curr_depth + 1))
+                                
+                        collected_nodes[src_node_obj.urn] = src_node_obj
+                        collected_nodes[tgt_node_obj.urn] = tgt_node_obj
+
+        # 3. Structural Context (Traverse UP)
+        # For all collected nodes, find their parents/containers
+        all_lineage_urns = list(collected_nodes.keys())
+        if all_lineage_urns and safe_containment:
+             # Find parents recursively or just immediate? 
+             # Usually tracing up to Root is good. keyspace -> table -> column
+             
+             # Cypher to find ancestors:
+             # MATCH (child)<-[r*1..5]-(parent) WHERE child.urn IN $urns AND type(r) IN $containment RETURN parent, r
+             # Note: variable length relationship with type filter might be syntax sensitive in FalkorDB
+             # MATCH (child)<-[r*1..5]-(parent) ...
+             # We can just fetch all ancestors.
+             
+             # We can process in batches if many nodes
+             batch_urns = all_lineage_urns # optimize if huge
+             
+             # We assume containment is child<-parent (parent IS SOURCE of CONTAINS edge)
+             # So we match (parent)-[:CONTAINS]->(child)
+             
+             cypher_structure = (
+                 f"MATCH (parent)-[r]->(child) "
+                 f"WHERE child.urn IN $urns AND type(r) IN $containment "
+                 f"RETURN parent, r, child"
+             )
+             
+             # We might need to iterate this to go up multiple levels?
+             # Or use *1..5
+             # Let's try to get full hierarchy for the visible nodes.
+             
+             # For simpler implementation: Use a loop to climb up.
+             # Or rely on get_ancestors if it wasn't one-by-one.
+             
+             # Let's do a single pass for immediate parents, then loop?
+             # Actually, simpler: Just fetch all ancestors for these nodes.
+             
+             # Let's do a generic ancestor fetch
+             current_level_urns = all_lineage_urns
+             for _ in range(3): # limit hierarchy depth to 3 levels up from lineage
+                 if not current_level_urns:
+                     break
+                 
+                 res_struct = await self._graph.ro_query(
+                     cypher_structure,
+                     params={"urns": current_level_urns, "containment": safe_containment}
+                 )
+                 
+                 next_level_urns = []
+                 found_any = False
+                 
+                 for row in (res_struct.result_set or []):
+                     parent = self._extract_node_from_result(row[0])
+                     r_raw = row[1]
+                     child = self._extract_node_from_result(row[2])
+                     
+                     if parent and child:
+                         collected_nodes[parent.urn] = parent
+                         collected_nodes[child.urn] = child # Ensure child is there
+                         
+                         r_type = getattr(r_raw, "relation", None) or getattr(r_raw, "type", None) or "CONTAINS"
+                         r_props = getattr(r_raw, "properties", {})
+                         
+                         edge = _edge_from_row(parent.urn, child.urn, r_type, r_props)
+                         collected_edges[edge.id] = edge
+                         
+                         if parent.urn not in collected_nodes: # New node found
+                             next_level_urns.append(parent.urn)
+                         found_any = True
+                 
+                 if not found_any:
+                     break
+                 current_level_urns = next_level_urns
+
+        # Ensure original urn is in collected nodes
+        if urn not in collected_nodes:
+            start_node = await self.get_node(urn)
+            if start_node:
+                collected_nodes[urn] = start_node
+
+        return LineageResult(
+            nodes=list(collected_nodes.values()),
+            edges=list(collected_edges.values()),
+            upstreamUrns=upstream_urns,
+            downstreamUrns=downstream_urns,
+            totalCount=len(collected_nodes),
+            hasMore=False
         )
 
     async def get_stats(self) -> Dict[str, Any]:
@@ -617,7 +839,7 @@ class FalkorDBProvider(GraphDataProvider):
             metadata_types = {t.strip().upper() for t in config_metadata.split(",") if t.strip()} if config_metadata else {EdgeType.TAGGED_WITH.value}
             containment_upper = {t.upper() for t in containment}
             lineage_types = []
-            edges = await self.get_edges(EdgeQuery(limit=10000))
+            edges = await self.get_edges(EdgeQuery(limit=100000))
             seen = set()
             for e in edges:
                 et = e.edge_type.value if hasattr(e.edge_type, "value") else str(e.edge_type)
@@ -653,7 +875,7 @@ class FalkorDBProvider(GraphDataProvider):
             )
 
         entity_type_hierarchy: Dict[str, EntityTypeHierarchy] = {}
-        edges = await self.get_edges(EdgeQuery(limit=10000))
+        edges = await self.get_edges(EdgeQuery(limit=100000))
         for e in edges:
             et = e.edge_type.value if hasattr(e.edge_type, "value") else str(e.edge_type)
             if et.upper() not in containment_upper:
