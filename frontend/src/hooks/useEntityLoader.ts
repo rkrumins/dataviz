@@ -68,7 +68,12 @@ export function useEntityLoader(): UseEntityLoaderResult {
 
         // 1. Check if we really need to load
         const nodeData = parentNode.data as any
-        const childCount = (nodeData.childCount as number) || 0
+        // Check for childCount in data root OR metadata (handle different loading sources)
+        const childCount = (nodeData.childCount as number) ?? (nodeData.metadata?.childCount as number) ?? 0
+
+        // Debug logging to help trace issues
+        // console.log(`[EntityLoader] Checking ${parentId}: childCount=${childCount}, loaded=${currentChildrenCount}`)
+
         if (childCount === 0) return
 
         const existingNodeIds = new Set(nodes.map(n => n.id))
@@ -137,14 +142,17 @@ export function useEntityLoader(): UseEntityLoaderResult {
                     const edgeExists = edges.some(e => e.id === edgeId) || edgesToAdd.some(e => e.id === edgeId)
 
                     if (!edgeExists) {
+                        // Use ontology-defined containment type if available, else CONTAINS
+                        const relationType = containmentEdgeTypes.length > 0 ? containmentEdgeTypes[0] : 'CONTAINS'
+
                         edgesToAdd.push({
                             id: edgeId,
                             source: parentId, // Use the ID from the store
                             target: child.urn,
                             type: 'lineage',
                             data: {
-                                edgeType: 'CONTAINS',
-                                relationship: 'contains'
+                                edgeType: relationType,
+                                relationship: relationType.toLowerCase()
                             }
                         })
                     }

@@ -221,7 +221,9 @@ class GraphSchemaStats(BaseModel):
 
 class EdgeTypeMetadata(BaseModel):
     is_containment: bool = Field(alias="isContainment")
-    direction: str  # 'parent-to-child', 'child-to-parent', 'bidirectional'
+    is_lineage: bool = Field(default=False, alias="isLineage")
+    direction: str  # 'parent-to-child', 'child-to-parent', 'source-to-target', 'bidirectional'
+    category: str = Field(default="association")  # 'structural', 'flow', 'metadata', 'association'
     description: Optional[str] = None
 
     class Config:
@@ -236,9 +238,164 @@ class EntityTypeHierarchy(BaseModel):
 
 class OntologyMetadata(BaseModel):
     containment_edge_types: List[str] = Field(alias="containmentEdgeTypes")
+    lineage_edge_types: List[str] = Field(default_factory=list, alias="lineageEdgeTypes")
     edge_type_metadata: Dict[str, EdgeTypeMetadata] = Field(alias="edgeTypeMetadata")
     entity_type_hierarchy: Dict[str, EntityTypeHierarchy] = Field(alias="entityTypeHierarchy")
     root_entity_types: List[str] = Field(default_factory=list, alias="rootEntityTypes")
 
+    class Config:
+        populate_by_name = True
+
+# ============================================
+# Schema Definition Models (for frontend schema sync)
+# ============================================
+
+class FieldSchema(BaseModel):
+    id: str
+    name: str
+    type: str  # 'string', 'number', 'boolean', 'tags', 'badge', etc.
+    required: bool = False
+    show_in_node: bool = Field(default=True, alias="showInNode")
+    show_in_panel: bool = Field(default=True, alias="showInPanel")
+    show_in_tooltip: bool = Field(default=False, alias="showInTooltip")
+    display_order: int = Field(default=0, alias="displayOrder")
+    
+    class Config:
+        populate_by_name = True
+
+class EntityVisualSchema(BaseModel):
+    icon: str = "Box"
+    color: str = "#6366f1"
+    shape: str = "rounded"  # 'rounded', 'rectangle', 'diamond'
+    size: str = "md"  # 'xs', 'sm', 'md', 'lg', 'xl'
+    border_style: str = Field(default="solid", alias="borderStyle")
+    show_in_minimap: bool = Field(default=True, alias="showInMinimap")
+    
+    class Config:
+        populate_by_name = True
+
+class EntityHierarchySchema(BaseModel):
+    level: int = 0
+    can_contain: List[str] = Field(default_factory=list, alias="canContain")
+    can_be_contained_by: List[str] = Field(default_factory=list, alias="canBeContainedBy")
+    default_expanded: bool = Field(default=False, alias="defaultExpanded")
+    
+    class Config:
+        populate_by_name = True
+
+class EntityBehaviorSchema(BaseModel):
+    selectable: bool = True
+    draggable: bool = True
+    expandable: bool = True
+    traceable: bool = True
+    click_action: str = Field(default="select", alias="clickAction")
+    double_click_action: str = Field(default="expand", alias="doubleClickAction")
+    
+    class Config:
+        populate_by_name = True
+
+class EntityTypeDefinition(BaseModel):
+    id: str
+    name: str
+    plural_name: str = Field(alias="pluralName")
+    description: Optional[str] = None
+    visual: EntityVisualSchema
+    fields: List[FieldSchema] = Field(default_factory=list)
+    hierarchy: EntityHierarchySchema
+    behavior: EntityBehaviorSchema
+    
+    class Config:
+        populate_by_name = True
+
+class RelationshipVisualSchema(BaseModel):
+    stroke_color: str = Field(default="#6366f1", alias="strokeColor")
+    stroke_width: int = Field(default=2, alias="strokeWidth")
+    stroke_style: str = Field(default="solid", alias="strokeStyle")
+    animated: bool = True
+    animation_speed: str = Field(default="normal", alias="animationSpeed")
+    arrow_type: str = Field(default="arrow", alias="arrowType")
+    curve_type: str = Field(default="bezier", alias="curveType")
+    
+    class Config:
+        populate_by_name = True
+
+class RelationshipTypeDefinition(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    source_types: List[str] = Field(default_factory=list, alias="sourceTypes")
+    target_types: List[str] = Field(default_factory=list, alias="targetTypes")
+    visual: RelationshipVisualSchema
+    bidirectional: bool = False
+    show_label: bool = Field(default=False, alias="showLabel")
+    is_containment: bool = Field(default=False, alias="isContainment")
+    
+    class Config:
+        populate_by_name = True
+
+class GraphSchema(BaseModel):
+    version: str = "1.0.0"
+    entity_types: List[EntityTypeDefinition] = Field(alias="entityTypes")
+    relationship_types: List[RelationshipTypeDefinition] = Field(alias="relationshipTypes")
+    root_entity_types: List[str] = Field(default_factory=list, alias="rootEntityTypes")
+    containment_edge_types: List[str] = Field(default_factory=list, alias="containmentEdgeTypes")
+    
+    class Config:
+        populate_by_name = True
+
+# ============================================
+# Aggregated Edge Models
+# ============================================
+
+class AggregatedEdgeRequest(BaseModel):
+    source_urns: List[str] = Field(alias="sourceUrns")
+    target_urns: Optional[List[str]] = Field(None, alias="targetUrns")
+    granularity: Granularity = Granularity.TABLE
+    include_edge_types: Optional[List[EdgeType]] = Field(None, alias="includeEdgeTypes")
+    lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
+    containment_edge_types: Optional[List[str]] = Field(None, alias="containmentEdgeTypes")
+    
+    class Config:
+        populate_by_name = True
+
+class AggregatedEdgeInfo(BaseModel):
+    id: str
+    source_urn: str = Field(alias="sourceUrn")
+    target_urn: str = Field(alias="targetUrn")
+    edge_count: int = Field(alias="edgeCount")
+    edge_types: List[str] = Field(default_factory=list, alias="edgeTypes")
+    confidence: float = 1.0
+    source_edge_ids: List[str] = Field(default_factory=list, alias="sourceEdgeIds")
+    
+    class Config:
+        populate_by_name = True
+
+class AggregatedEdgeResult(BaseModel):
+    aggregated_edges: List[AggregatedEdgeInfo] = Field(alias="aggregatedEdges")
+    total_source_edges: int = Field(alias="totalSourceEdges")
+    
+    class Config:
+        populate_by_name = True
+
+# ============================================
+# Node Creation Models
+# ============================================
+
+class CreateNodeRequest(BaseModel):
+    entity_type: EntityType = Field(alias="entityType")
+    display_name: str = Field(alias="displayName")
+    parent_urn: Optional[str] = Field(None, alias="parentUrn")
+    properties: Dict[str, Any] = Field(default_factory=dict)
+    tags: List[str] = Field(default_factory=list)
+    
+    class Config:
+        populate_by_name = True
+
+class CreateNodeResult(BaseModel):
+    node: GraphNode
+    containment_edge: Optional[GraphEdge] = Field(None, alias="containmentEdge")
+    success: bool = True
+    error: Optional[str] = None
+    
     class Config:
         populate_by_name = True

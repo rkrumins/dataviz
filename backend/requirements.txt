@@ -1,0 +1,8 @@
+# Core backend
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+
+# FalkorDB graph provider (persistent graph backend)
+FalkorDB>=1.4.0
+redis>=5.0

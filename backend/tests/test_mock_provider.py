@@ -8,21 +8,21 @@ async def test_mock_provider_filtering():
     provider = MockGraphProvider()
     
     # Test Basic Filter
-    nodes = await provider.getNodes(NodeQuery(entity_types=[EntityType.DATASET]))
+    nodes = await provider.get_nodes(NodeQuery(entity_types=[EntityType.DATASET]))
     assert len(nodes) > 0
     assert all(n.entity_type == EntityType.DATASET for n in nodes)
     
-    # Test Property Filter (Contains)
+    # Test Property Filter (Contains) - use businessLabel which is in properties
     q = NodeQuery(
         property_filters=[
-            PropertyFilter(field="displayName", operator=FilterOperator.CONTAINS, value="Table")
+            PropertyFilter(field="businessLabel", operator=FilterOperator.CONTAINS, value="Invoice")
         ]
     )
     nodes = await provider.get_nodes(q)
     assert len(nodes) > 0
-    assert "Table" in nodes[0].display_name
+    assert "Invoice" in str(nodes[0].properties.get("businessLabel", ""))
     
     # Test Introspection
     stats = await provider.get_schema_stats()
-    assert stats.totalNodes > 0
-    assert len(stats.entityTypeStats) > 0
+    assert stats.total_nodes > 0
+    assert len(stats.entity_type_stats) > 0

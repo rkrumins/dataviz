@@ -31,14 +31,16 @@ import { CanvasControls } from './CanvasControls'
 import { LineageToolbar } from './LineageToolbar'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
 import { EdgeLegend } from './EdgeLegend'
+import { TraceToolbar } from './TraceToolbar'
 import { useSpatialLoading } from '@/hooks/useSpatialLoading'
 import { useLineageExploration } from '@/hooks/useLineageExploration'
+import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useLevelOfDetail } from '@/hooks/useLevelOfDetail'
 import { useElkLayout } from '@/hooks/useElkLayout'
 import { EditorToolbar } from './EditorToolbar'
 import { NodePalette } from './NodePalette'
-import { EditNodePanel } from '../panels/EditNodePanel'
+import { EntityDrawer } from '../panels/EntityDrawer'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
@@ -46,6 +48,14 @@ import { useOntologyMetadata } from '@/services/ontologyService'
 import { cn } from '@/lib/utils'
 import { useGraphProvider } from '@/providers'
 import * as LucideIcons from 'lucide-react'
+
+// New UX-first interaction components
+import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
+import { InlineNodeEditor } from './InlineNodeEditor'
+import { QuickCreateNode } from './QuickCreateNode'
+import { CommandPalette } from './CommandPalette'
+import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
+import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
 
 // Register custom node types - includes both legacy and generic
@@ -95,12 +105,12 @@ export function LineageCanvas() {
   const { showMinimap, showGrid, snapToGrid } = usePreferencesStore()
   const schema = useSchemaStore((s) => s.schema)
   const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
-  const { containmentEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
+  const { containmentEdgeTypes, lineageEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
 
   // Edge detail panel
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
   const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
-  
+
   // Generate dynamic edge filters from actual edges and schema
   const dynamicEdgeFilters = useMemo(() => {
     if (rawEdges.length === 0) return edgeFilters
@@ -114,23 +124,42 @@ export function LineageCanvas() {
 
   const provider = useGraphProvider()
 
-  // Trace State
-  const [traceUpstreamNodes, setTraceUpstreamNodes] = useState<Set<string>>(new Set())
-  const [traceDownstreamNodes, setTraceDownstreamNodes] = useState<Set<string>>(new Set())
-  const [showUpstream, setShowUpstream] = useState(true)
-  const [showDownstream, setShowDownstream] = useState(true)
+  // Unified Trace System - replaces local trace state
+  const urnResolver = useCallback((nodeId: string) => {
+    const node = rawNodes.find(n => n.id === nodeId)
+    return node?.data?.urn || nodeId
+  }, [rawNodes])
 
-  // Clear trace when focus is cleared (external change)
-  useEffect(() => {
-    if (!focusEntityId) {
-      setTraceUpstreamNodes(new Set())
-      setTraceDownstreamNodes(new Set())
+  const trace = useUnifiedTrace({
+    provider,
+    urnResolver,
+    onTraceComplete: (result) => {
+      console.log('[LineageCanvas] Trace complete:', result.traceNodes.size, 'nodes')
     }
-  }, [focusEntityId])
+  })
+
+  // Sync trace focus with lineage exploration focus
+  useEffect(() => {
+    if (!focusEntityId && trace.focusId) {
+      trace.clearTrace()
+    }
+  }, [focusEntityId, trace.focusId, trace.clearTrace])
 
 
   // Spatial loading hook
   const { isLoadingRegion } = useSpatialLoading()
+
+  // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
+  const interactions = useCanvasInteractions({
+    onTraceNode: (nodeId) => trace.startTrace(nodeId),
+    onNodeCreated: (nodeId) => selectNode(nodeId),
+  })
+
+  // Keyboard shortcuts
+  useCanvasKeyboard({
+    enabled: true,
+    handlers: interactions.keyboardHandlers,
+  })
 
   // ELK layout hook
   const { applyLayout, isLayouting, direction, toggleDirection } = useElkLayout()
@@ -264,29 +293,26 @@ export function LineageCanvas() {
   const baseDisplayNodes = layoutedNodes.length > 0 ? layoutedNodes :
     (visibleNodes.length > 0 ? visibleNodes : rawNodes)
 
-  // Inject Trace Props
+  // Inject Trace Props using unified trace hook
   const displayNodes = useMemo(() => {
-    if (!focusEntityId) return baseDisplayNodes
-
-    const traceNodes = new Set<string>([focusEntityId])
-    if (showUpstream) traceUpstreamNodes.forEach(id => traceNodes.add(id))
-    if (showDownstream) traceDownstreamNodes.forEach(id => traceNodes.add(id))
+    // If no trace is active, use base nodes without trace styling
+    if (!trace.isTracing) return baseDisplayNodes.map(node => ({
+      ...node,
+      data: {
+        ...node.data,
+        onLoadMore: () => handleLoadMore(node.id)
+      }
+    }))
 
     return baseDisplayNodes.map(node => {
-      const isTraced = traceNodes.has(node.id)
-      const isUpstream = traceUpstreamNodes.has(node.id)
-      const isDownstream = traceDownstreamNodes.has(node.id)
-      // const isFocus = node.id === focusEntityId
+      const isTraced = trace.isInTrace(node.id)
+      const isUpstream = trace.isUpstream(node.id)
+      const isDownstream = trace.isDownstream(node.id)
+      const isFocus = trace.isFocus(node.id)
 
-      // Logic: If trace active, dim everything that is NOT in the trace
-      // BUT: Maybe we shouldn't hide untraced nodes completely in Lineage view?
-      // Default behavior: Dim untraced
-      const isDimmed = !isTraced
-
-      // If node is Upstream and showUpstream is false -> Hidden? 
-      // ReactFlow handles hiding via 'hidden' prop, but we might just want to dim really hard?
-      // Or literally not render?
-      // For now, let's just control dimming/styling.
+      // Dim nodes not in the visible trace
+      const isDimmed = !trace.visibleTraceNodes.has(node.id) &&
+        !trace.visibleTraceNodes.has(node.data?.urn)
 
       return {
         ...node,
@@ -296,13 +322,36 @@ export function LineageCanvas() {
           isDimmed,
           isUpstream,
           isDownstream,
+          isFocus,
           onLoadMore: () => handleLoadMore(node.id)
         }
       }
     })
-  }, [baseDisplayNodes, focusEntityId, traceUpstreamNodes, traceDownstreamNodes, showUpstream, showDownstream, handleLoadMore])
+  }, [baseDisplayNodes, trace.isTracing, trace.isInTrace, trace.isUpstream, trace.isDownstream, trace.isFocus, trace.visibleTraceNodes, handleLoadMore])
 
-  const displayEdges = visibleEdges.length > 0 ? visibleEdges : rawEdges
+  // Inject Trace Props into edges using unified trace hook
+  const displayEdges = useMemo(() => {
+    const baseEdges = visibleEdges.length > 0 ? visibleEdges : rawEdges
+
+    if (!trace.isTracing) return baseEdges
+
+    return baseEdges.map(edge => {
+      const isTraced = trace.traceEdges.has(edge.id)
+      // Edge is dimmed if either source or target is not in the visible trace set
+      const sourceInTrace = trace.visibleTraceNodes.has(edge.source)
+      const targetInTrace = trace.visibleTraceNodes.has(edge.target)
+      const isDimmed = !isTraced || !sourceInTrace || !targetInTrace
+
+      return {
+        ...edge,
+        data: {
+          ...edge.data,
+          isTraced,
+          isDimmed,
+        }
+      }
+    })
+  }, [visibleEdges, rawEdges, trace.isTracing, trace.traceEdges, trace.visibleTraceNodes])
 
   // Handle node changes (position, selection, etc.)
   const onNodesChange: OnNodesChange = useCallback(
@@ -326,7 +375,7 @@ export function LineageCanvas() {
 
   const onSave = useCallback(async () => {
     try {
-      const response = await fetch('http://localhost:8001/api/v1/graph/save', {
+      const response = await fetch('http://localhost:8002/api/v1/graph/save', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -485,44 +534,80 @@ export function LineageCanvas() {
     [selectNode]
   )
 
-  // Handle node double-click for focus/drill
-  // Handle node double-click for focus/drill
+  // Handle node double-click - INLINE EDIT for UX-first experience
   const onNodeDoubleClick: NodeMouseHandler = useCallback(
-    async (_event, node) => {
-      // Set focus to this node for lineage trace
-      setFocus(node.id)
-
-      // Fetch full lineage for visual trace
-      if (provider) {
-        try {
-          // Assume URN is in data.urn, else falls back to ID
-          const urn = (node.data.urn as string) || node.id
-          const result = await provider.getFullLineage(urn, 5, 5) // Fetch deeper?
-
-          // Resolve IDs directly? Lineage view acts on URNs mostly or IDs matching URNs
-          // We'll assume the IDs returned by getFullLineage match the node IDs in the store/backend
-          // Since LineageCanvas nodes usually use IDs from backend.
-
-          const upstream = new Set<string>()
-          const downstream = new Set<string>()
-
-          result.upstreamUrns.forEach((u: string) => upstream.add(u)) // Might need ID resolution if store IDs differ
-          result.downstreamUrns.forEach((u: string) => downstream.add(u))
-
-          // Also need to support mapping URN -> ID if they differ?
-          // For LineageCanvas, we usually assume ID == ID from backend response
-
-          setTraceUpstreamNodes(upstream)
-          setTraceDownstreamNodes(downstream)
-          setShowUpstream(true)
-          setShowDownstream(true)
-
-        } catch (e) {
-          console.error("Failed to fetch trace", e)
-        }
+    (event, node) => {
+      // Get node element position for inline editing
+      const element = document.querySelector(`[data-id="${node.id}"]`)
+      if (element) {
+        const rect = element.getBoundingClientRect()
+        interactions.startInlineEdit(
+          node.id,
+          (node.data.label as string) || node.id,
+          { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+        )
       }
     },
-    [setFocus, provider]
+    [interactions]
+  )
+
+  // Handle node right-click for context menu
+  const onNodeContextMenu: NodeMouseHandler = useCallback(
+    (event, node) => {
+      event.preventDefault()
+      interactions.openContextMenu(event as unknown as React.MouseEvent, {
+        type: 'node',
+        id: node.id,
+        data: node.data as Record<string, unknown>,
+      })
+    },
+    [interactions]
+  )
+
+  // Handle edge right-click for context menu
+  const onEdgeContextMenu: EdgeMouseHandler = useCallback(
+    (event, edge) => {
+      event.preventDefault()
+      interactions.openContextMenu(event as unknown as React.MouseEvent, {
+        type: 'edge',
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+      })
+    },
+    [interactions]
+  )
+
+  // Handle pane right-click for quick create
+  const onPaneContextMenu = useCallback(
+    (event: React.MouseEvent) => {
+      event.preventDefault()
+      if (rfInstance) {
+        const position = rfInstance.screenToFlowPosition({
+          x: event.clientX,
+          y: event.clientY,
+        })
+        interactions.openContextMenu(event, {
+          type: 'canvas',
+          position,
+        })
+      }
+    },
+    [rfInstance, interactions]
+  )
+
+  // Handle pane double-click for quick create
+  const onPaneDoubleClick = useCallback(
+    (event: React.MouseEvent) => {
+      if (rfInstance) {
+        const position = rfInstance.screenToFlowPosition({
+          x: event.clientX,
+          y: event.clientY,
+        })
+        interactions.openQuickCreate(position)
+      }
+    },
+    [rfInstance, interactions]
   )
 
   // Handle pane click to deselect
@@ -570,56 +655,35 @@ export function LineageCanvas() {
             <LineageToolbar />
           </div>
 
-          {/* Trace Toolbar Overlay */}
+          {/* Trace Toolbar Overlay - Using unified TraceToolbar component */}
           <AnimatePresence>
-            {focusEntityId && (
-              <motion.div
-                initial={{ y: -20, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                exit={{ y: -20, opacity: 0 }}
-                className="absolute top-12 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2 rounded-full glass-panel border border-accent-lineage/30 shadow-lg shadow-accent-lineage/10 pointer-events-auto"
-              >
-                <div className="flex items-center gap-2 text-sm font-medium text-ink">
-                  <span className="w-2 h-2 rounded-full bg-accent-lineage animate-pulse" />
-                  <span>Tracing</span>
-                </div>
-
-                <div className="flex items-center gap-1 bg-black/5 dark:bg-white/5 rounded-lg p-0.5">
-                  <button
-                    onClick={() => setShowUpstream(!showUpstream)}
-                    className={cn(
-                      "p-1.5 rounded-md transition-all text-xs font-medium flex items-center gap-1",
-                      showUpstream ? "bg-accent-lineage text-white shadow-sm" : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
-                    )}
-                    title="Toggle Upstream"
-                  >
-                    <LucideIcons.ArrowLeft className="w-3.5 h-3.5" />
-                    {traceUpstreamNodes.size}
-                  </button>
-                  <button
-                    onClick={() => setShowDownstream(!showDownstream)}
-                    className={cn(
-                      "p-1.5 rounded-md transition-all text-xs font-medium flex items-center gap-1",
-                      showDownstream ? "bg-accent-lineage text-white shadow-sm" : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
-                    )}
-                    title="Toggle Downstream"
-                  >
-                    {traceDownstreamNodes.size}
-                    <LucideIcons.ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-
-                <div className="h-4 w-[1px] bg-glass-border" />
-                <button
-                  onClick={() => {
-                    setFocus(null) // Clears focus
+            {trace.isTracing && (
+              <div className="pointer-events-auto absolute top-12 left-1/2 -translate-x-1/2 z-50">
+                <TraceToolbar
+                  focusNodeName={rawNodes.find(n => n.id === trace.focusId)?.data?.label || trace.focusId || 'Unknown'}
+                  upstreamCount={trace.upstreamCount}
+                  downstreamCount={trace.downstreamCount}
+                  showUpstream={trace.showUpstream}
+                  showDownstream={trace.showDownstream}
+                  onToggleUpstream={() => trace.setShowUpstream(!trace.showUpstream)}
+                  onToggleDownstream={() => trace.setShowDownstream(!trace.showDownstream)}
+                  onExitTrace={() => {
+                    trace.clearTrace()
+                    setFocus(null)
                   }}
-                  className="text-xs font-semibold text-ink-muted hover:text-ink flex items-center gap-1 transition-colors"
-                >
-                  <LucideIcons.X className="w-3.5 h-3.5" />
-                  Exit Trace
-                </button>
-              </motion.div>
+                  onRetrace={trace.retrace}
+                  onTraceUpstream={() => trace.focusId && trace.traceUpstream(trace.focusId)}
+                  onTraceDownstream={() => trace.focusId && trace.traceDownstream(trace.focusId)}
+                  onTraceFullLineage={() => trace.focusId && trace.traceFullLineage(trace.focusId)}
+                  config={trace.config}
+                  onConfigChange={trace.setConfig}
+                  traceResult={trace.result}
+                  statistics={trace.statistics}
+                  isLoading={trace.isLoading}
+                  availableLineageEdgeTypes={lineageEdgeTypes}
+                  position="top"
+                />
+              </div>
             )}
           </AnimatePresence>
         </div>
@@ -638,8 +702,11 @@ export function LineageCanvas() {
           onConnect={onConnect}
           onNodeClick={onNodeClick}
           onNodeDoubleClick={onNodeDoubleClick}
+          onNodeContextMenu={onNodeContextMenu}
           onEdgeClick={onEdgeClick}
+          onEdgeContextMenu={onEdgeContextMenu}
           onPaneClick={onPaneClick}
+          onPaneContextMenu={onPaneContextMenu}
           onDrop={onDrop}
           onDragOver={onDragOver}
           onReconnect={onReconnect}
@@ -820,10 +887,67 @@ export function LineageCanvas() {
         )}
       </AnimatePresence>
 
-      {/* Edit Node Panel */}
-      <AnimatePresence>
-        <EditNodePanel />
-      </AnimatePresence>
+      {/* Entity Drawer - Unified view & edit */}
+      <EntityDrawer
+        onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
+        onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
+        onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
+      />
+
+      {/* === UX-FIRST INTERACTION COMPONENTS === */}
+
+      {/* Context Menu - Right-click on nodes/edges/canvas */}
+      <CanvasContextMenu
+        isOpen={interactions.state.contextMenu.isOpen}
+        position={interactions.state.contextMenu.position}
+        target={interactions.state.contextMenu.target}
+        onClose={interactions.closeContextMenu}
+        onEditNode={interactions.editNode}
+        onDuplicateNode={interactions.duplicateNode}
+        onDeleteNode={interactions.deleteNode}
+        onCreateChild={interactions.createChild}
+        onTraceNode={(id) => trace.startTrace(id)}
+        onCopyUrn={interactions.copyUrn}
+        onEditEdge={interactions.editEdge}
+        onDeleteEdge={interactions.deleteEdge}
+        onReverseEdge={interactions.reverseEdge}
+        onCreateNode={(pos) => interactions.openQuickCreate(pos)}
+        onSelectAll={interactions.selectAll}
+      />
+
+      {/* Inline Node Editor - Double-click to edit names */}
+      <InlineNodeEditor
+        nodeId={interactions.state.inlineEdit.nodeId}
+        value={interactions.state.inlineEdit.value}
+        position={interactions.state.inlineEdit.position}
+        onSave={interactions.saveInlineEdit}
+        onCancel={interactions.cancelInlineEdit}
+      />
+
+      {/* Quick Create - Double-click canvas or press 'N' */}
+      <QuickCreateNode
+        isOpen={interactions.state.quickCreate.isOpen}
+        position={interactions.state.quickCreate.position}
+        parentUrn={interactions.state.quickCreate.parentUrn}
+        onClose={interactions.closeQuickCreate}
+        onCreated={(nodeId) => selectNode(nodeId)}
+      />
+
+      {/* Command Palette - Press Cmd+K */}
+      <CommandPalette
+        isOpen={interactions.state.commandPalette.isOpen}
+        onClose={interactions.closeCommandPalette}
+        onCreateEntity={(typeId) => {
+          interactions.closeCommandPalette()
+          interactions.openQuickCreate({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
+        }}
+        onSelectEntity={(entityId) => selectNode(entityId)}
+        onRunAction={(actionId) => {
+          if (actionId === 'fit-view' && rfInstance) {
+            rfInstance.fitView()
+          }
+        }}
+      />
     </div>
   )
 }

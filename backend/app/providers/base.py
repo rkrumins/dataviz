@@ -76,7 +76,8 @@ class GraphDataProvider(ABC):
         self, 
         urn: str, 
         depth: int, 
-        include_column_lineage: bool = False
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[EntityType]] = None
     ) -> LineageResult:
         """Get upstream lineage"""
         pass
@@ -86,7 +87,8 @@ class GraphDataProvider(ABC):
         self, 
         urn: str, 
         depth: int, 
-        include_column_lineage: bool = False
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[EntityType]] = None
     ) -> LineageResult:
         """Get downstream lineage"""
         pass
@@ -97,9 +99,40 @@ class GraphDataProvider(ABC):
         urn: str, 
         upstream_depth: int, 
         downstream_depth: int, 
-        include_column_lineage: bool = False
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[EntityType]] = None
     ) -> LineageResult:
         """Get both upstream and downstream lineage"""
+        pass
+    
+    @abstractmethod
+    async def get_aggregated_edges_between(
+        self,
+        source_urns: List[str],
+        target_urns: Optional[List[str]],
+        granularity: Any,  # Avoid circular import, usually Granularity Enum
+        containment_edges: List[str],
+        lineage_edges: List[str],
+    ) -> Any:  # Returns AggregatedEdgeResult
+        """
+        Get aggregated edges between sets of nodes.
+        Used for scalable lazy loading.
+        """
+        pass
+
+    @abstractmethod
+    async def get_trace_lineage(
+        self,
+        urn: str,
+        direction: str,
+        depth: int,
+        containment_edges: List[str],
+        lineage_edges: List[str],
+    ) -> LineageResult:
+        """
+        Execute a targeted lineage trace using dynamic edge lists.
+        Used for ontology-driven tracing.
+        """
         pass
     
     # ==========================================
@@ -164,4 +197,9 @@ class GraphDataProvider(ABC):
     @abstractmethod
     async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:
         """Save a custom graph (nodes and edges) meant for editing/manual creation."""
+        pass
+
+    @abstractmethod
+    async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
+        """Create a new node with optional containment edge."""
         pass

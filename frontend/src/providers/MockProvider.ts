@@ -18,10 +18,17 @@ import type {
     NodeQuery,
     EdgeQuery,
     LineageResult,
+    ContainmentResult,
+    TraceOptions,
     LayerAssignmentRequest,
     LayerAssignmentResult,
     GraphSchemaStats,
     OntologyMetadata,
+    GraphSchema,
+    AggregatedEdgeRequest,
+    AggregatedEdgeResult,
+    CreateNodeRequest,
+    CreateNodeResult,
 } from './GraphDataProvider'
 
 // ============================================
@@ -378,6 +385,24 @@ export class MockProvider implements GraphDataProvider {
         return descendants
     }
 
+    async getContainment(params: { parentUrn: URN; searchQuery?: string; limit?: number }): Promise<ContainmentResult> {
+        const { parentUrn, searchQuery, limit = 50 } = params
+        const parent = await this.getNode(parentUrn)
+        let children = await this.getChildren(parentUrn, { limit })
+        if (searchQuery?.trim()) {
+            const q = searchQuery.toLowerCase()
+            children = children.filter(
+                (c) =>
+                    c.displayName?.toLowerCase().includes(q) || c.urn?.toLowerCase().includes(q)
+            )
+        }
+        return {
+            parent,
+            children: children.slice(0, limit),
+            hasNestedChildren: children.some((c) => (c.childCount ?? 0) > 0),
+        }
+    }
+
     // ==========================================
     // Lineage Traversal
     // ==========================================
@@ -385,8 +410,11 @@ export class MockProvider implements GraphDataProvider {
     async getUpstream(
         urn: URN,
         depth: number,
-        includeColumnLineage = true
+        options?: TraceOptions
     ): Promise<LineageResult> {
+        const includeColumnLineage = options?.includeColumnLineage ?? true
+        const excludeContainmentEdges = options?.excludeContainmentEdges ?? true
+
         const nodes: GraphNode[] = []
         const edges: GraphEdge[] = []
         const upstreamUrns = new Set<URN>()
@@ -405,6 +433,10 @@ export class MockProvider implements GraphDataProvider {
             startUrns.push(...descendants.map((d) => d.urn))
         }
 
+        // Containment edge types to filter — derive from ontology
+        const ontology = await this.getOntologyMetadata()
+        const containmentTypes: EdgeType[] = ontology.containmentEdgeTypes as EdgeType[]
+
         // BFS traversal upstream
         let currentLevel = new Set(startUrns)
         for (let d = 0; d < depth; d++) {
@@ -416,6 +448,11 @@ export class MockProvider implements GraphDataProvider {
 
                 const upstreamEdges = this.upstreamMap.get(currentUrn) ?? []
                 for (const edge of upstreamEdges) {
+                    // Skip containment edges if requested
+                    if (excludeContainmentEdges && containmentTypes.includes(edge.edgeType)) {
+                        continue
+                    }
+
                     edges.push(edge)
 
                     const sourceNode = this.nodes.get(edge.sourceUrn)
@@ -444,8 +481,11 @@ export class MockProvider implements GraphDataProvider {
     async getDownstream(
         urn: URN,
         depth: number,
-        includeColumnLineage = true
+        options?: TraceOptions
     ): Promise<LineageResult> {
+        const includeColumnLineage = options?.includeColumnLineage ?? true
+        const excludeContainmentEdges = options?.excludeContainmentEdges ?? true
+
         const nodes: GraphNode[] = []
         const edges: GraphEdge[] = []
         const downstreamUrns = new Set<URN>()
@@ -464,6 +504,10 @@ export class MockProvider implements GraphDataProvider {
             startUrns.push(...descendants.map((d) => d.urn))
         }
 
+        // Containment edge types to filter — derive from ontology
+        const ontology = await this.getOntologyMetadata()
+        const containmentTypes: EdgeType[] = ontology.containmentEdgeTypes as EdgeType[]
+
         // BFS traversal downstream
         let currentLevel = new Set(startUrns)
         for (let d = 0; d < depth; d++) {
@@ -475,6 +519,11 @@ export class MockProvider implements GraphDataProvider {
 
                 const downstreamEdges = this.downstreamMap.get(currentUrn) ?? []
                 for (const edge of downstreamEdges) {
+                    // Skip containment edges if requested
+                    if (excludeContainmentEdges && containmentTypes.includes(edge.edgeType)) {
+                        continue
+                    }
+
                     edges.push(edge)
 
                     const targetNode = this.nodes.get(edge.targetUrn)
@@ -504,11 +553,11 @@ export class MockProvider implements GraphDataProvider {
         urn: URN,
         upstreamDepth: number,
         downstreamDepth: number,
-        includeColumnLineage = true
+        options?: TraceOptions
     ): Promise<LineageResult> {
         const [upstream, downstream] = await Promise.all([
-            this.getUpstream(urn, upstreamDepth, includeColumnLineage),
-            this.getDownstream(urn, downstreamDepth, includeColumnLineage),
+            this.getUpstream(urn, upstreamDepth, options),
+            this.getDownstream(urn, downstreamDepth, options),
         ])
 
         // Merge results
@@ -604,42 +653,69 @@ export class MockProvider implements GraphDataProvider {
     async getOntologyMetadata(): Promise<OntologyMetadata> {
         // Default containment edge types
         const defaultContainmentTypes = ['CONTAINS', 'BELONGS_TO']
-        
-        // Build edge type metadata
-        const edgeTypeMetadata: Record<string, { isContainment: boolean; direction: string; description?: string }> = {}
-        
-        // Analyze edges to determine metadata
-        const edgeTypes = new Set<string>()
-        this.edges.forEach(edge => {
-            const edgeType = edge.edgeType
-            edgeTypes.add(edgeType)
-            
-            if (!edgeTypeMetadata[edgeType]) {
-                const isContainment = defaultContainmentTypes.includes(edgeType)
-                edgeTypeMetadata[edgeType] = {
-                    isContainment,
-                    direction: edgeType === 'CONTAINS' ? 'parent-to-child' : 
-                              edgeType === 'BELONGS_TO' ? 'child-to-parent' : 
-                              'bidirectional',
-                    description: isContainment ? `Containment relationship: ${edgeType}` : `Non-containment relationship: ${edgeType}`
-                }
+
+        // Determine lineage edge types by excluding containment and metadata types
+        const containmentUpper = new Set(defaultContainmentTypes.map(t => t.toUpperCase()))
+        const metadataTypes = new Set(['TAGGED_WITH'])
+        const allEdgeTypes = new Set<string>()
+        this.edges.forEach(edge => allEdgeTypes.add(edge.edgeType))
+
+        const lineageEdgeTypes = Array.from(allEdgeTypes).filter(t =>
+            !containmentUpper.has(t.toUpperCase()) && !metadataTypes.has(t.toUpperCase())
+        )
+
+        // Build edge type metadata with full classification
+        type Direction = 'parent-to-child' | 'child-to-parent' | 'source-to-target' | 'bidirectional'
+        type Category = 'structural' | 'flow' | 'metadata' | 'association'
+        const edgeTypeMetadata: Record<string, { isContainment: boolean; isLineage: boolean; direction: Direction; category: Category; description?: string }> = {}
+
+        const lineageUpper = new Set(lineageEdgeTypes.map(t => t.toUpperCase()))
+
+        allEdgeTypes.forEach(edgeType => {
+            const isContainment = containmentUpper.has(edgeType.toUpperCase())
+            const isLineage = lineageUpper.has(edgeType.toUpperCase())
+
+            let category: Category
+            let direction: Direction
+
+            if (isContainment) {
+                category = 'structural'
+                direction = edgeType === 'CONTAINS' ? 'parent-to-child' :
+                    edgeType === 'BELONGS_TO' ? 'child-to-parent' : 'parent-to-child'
+            } else if (isLineage) {
+                category = 'flow'
+                direction = 'source-to-target'
+            } else if (metadataTypes.has(edgeType.toUpperCase())) {
+                category = 'metadata'
+                direction = 'bidirectional'
+            } else {
+                category = 'association'
+                direction = 'bidirectional'
+            }
+
+            edgeTypeMetadata[edgeType] = {
+                isContainment,
+                isLineage,
+                direction,
+                category,
+                description: `${category.charAt(0).toUpperCase() + category.slice(1)} relationship: ${edgeType}`
             }
         })
-        
+
         // Build entity type hierarchy from edges
         const entityTypeHierarchy: Record<string, { canContain: string[]; canBeContainedBy: string[] }> = {}
-        
+
         this.edges.forEach(edge => {
             if (!defaultContainmentTypes.includes(edge.edgeType)) return
-            
+
             const sourceNode = this.nodes.get(edge.sourceUrn)
             const targetNode = this.nodes.get(edge.targetUrn)
-            
+
             if (!sourceNode || !targetNode) return
-            
+
             const sourceType = sourceNode.entityType
             const targetType = targetNode.entityType
-            
+
             // Determine parent and child based on edge direction
             let parentType: string, childType: string
             if (edge.edgeType === 'CONTAINS') {
@@ -652,14 +728,14 @@ export class MockProvider implements GraphDataProvider {
                 parentType = sourceType
                 childType = targetType
             }
-            
+
             if (!entityTypeHierarchy[parentType]) {
                 entityTypeHierarchy[parentType] = { canContain: [], canBeContainedBy: [] }
             }
             if (!entityTypeHierarchy[childType]) {
                 entityTypeHierarchy[childType] = { canContain: [], canBeContainedBy: [] }
             }
-            
+
             if (!entityTypeHierarchy[parentType].canContain.includes(childType)) {
                 entityTypeHierarchy[parentType].canContain.push(childType)
             }
@@ -667,11 +743,21 @@ export class MockProvider implements GraphDataProvider {
                 entityTypeHierarchy[childType].canBeContainedBy.push(parentType)
             }
         })
-        
+
+        // Find root entity types
+        const allHierarchyTypes = new Set(Object.keys(entityTypeHierarchy))
+        const containedTypes = new Set<string>()
+        for (const hierarchy of Object.values(entityTypeHierarchy)) {
+            hierarchy.canContain.forEach(t => containedTypes.add(t))
+        }
+        const rootEntityTypes = Array.from(allHierarchyTypes).filter(t => !containedTypes.has(t))
+
         return {
             containmentEdgeTypes: defaultContainmentTypes,
+            lineageEdgeTypes,
             edgeTypeMetadata,
-            entityTypeHierarchy
+            entityTypeHierarchy,
+            rootEntityTypes
         }
     }
 
@@ -693,6 +779,198 @@ export class MockProvider implements GraphDataProvider {
                 assignedNodes: 0,
                 computeTimeMs: 0
             }
+        }
+    }
+
+    // ==========================================
+    // Schema Operations (Dynamic Schema Loading)
+    // ==========================================
+
+    async getFullSchema(): Promise<GraphSchema> {
+        // Mock implementation: build schema from existing data
+        const entityTypeCounts: Record<string, number> = {}
+        for (const node of this.nodes.values()) {
+            entityTypeCounts[node.entityType] = (entityTypeCounts[node.entityType] ?? 0) + 1
+        }
+
+        const entityTypes = Object.entries(entityTypeCounts).map(([id, count]) => ({
+            id,
+            name: id.charAt(0).toUpperCase() + id.slice(1),
+            pluralName: id.charAt(0).toUpperCase() + id.slice(1) + 's',
+            description: `Entity type: ${id}`,
+            visual: {
+                icon: 'Box',
+                color: '#6366f1',
+                shape: 'rounded',
+                size: 'md',
+                borderStyle: 'solid',
+                showInMinimap: true
+            },
+            fields: [
+                { id: 'name', name: 'Name', type: 'string', required: true, showInNode: true, showInPanel: true, showInTooltip: true, displayOrder: 1 }
+            ],
+            hierarchy: {
+                level: 2,
+                canContain: [],
+                canBeContainedBy: [],
+                defaultExpanded: false
+            },
+            behavior: {
+                selectable: true,
+                draggable: true,
+                expandable: true,
+                traceable: true,
+                clickAction: 'select',
+                doubleClickAction: 'expand'
+            }
+        }))
+
+        const edgeTypes = new Set<string>()
+        this.edges.forEach(e => edgeTypes.add(e.edgeType))
+
+        const relationshipTypes = Array.from(edgeTypes).map(id => ({
+            id: id.toLowerCase(),
+            name: id.charAt(0).toUpperCase() + id.slice(1).toLowerCase(),
+            description: `Relationship type: ${id}`,
+            sourceTypes: ['*'],
+            targetTypes: ['*'],
+            visual: {
+                strokeColor: '#6366f1',
+                strokeWidth: 2,
+                strokeStyle: 'solid',
+                animated: true,
+                animationSpeed: 'normal',
+                arrowType: 'arrow',
+                curveType: 'bezier'
+            },
+            bidirectional: false,
+            showLabel: false,
+            isContainment: id === 'CONTAINS' || id === 'BELONGS_TO'
+        }))
+
+        return {
+            version: '1.0.0',
+            entityTypes,
+            relationshipTypes,
+            rootEntityTypes: ['domain', 'container', 'dataPlatform'],
+            containmentEdgeTypes: ['CONTAINS', 'BELONGS_TO']
+        }
+    }
+
+    // ==========================================
+    // Aggregated Edge Operations
+    // ==========================================
+
+    async getAggregatedEdges(request: AggregatedEdgeRequest): Promise<AggregatedEdgeResult> {
+        // Mock implementation: group edges by source and target container
+        const aggregatedMap: Map<string, { sourceUrn: string; targetUrn: string; edges: GraphEdge[] }> = new Map()
+
+        const sourceSet = new Set(request.sourceUrns)
+
+        // Derive containment types from ontology — no hardcoding
+        const ontology = await this.getOntologyMetadata()
+        const containmentSet = new Set(ontology.containmentEdgeTypes.map(t => t.toUpperCase()))
+
+        for (const edge of this.edges) {
+            // Skip containment edges — ontology-driven
+            if (containmentSet.has(edge.edgeType.toUpperCase())) continue
+
+            // Check if edge involves source URNs
+            if (!sourceSet.has(edge.sourceUrn) && !sourceSet.has(edge.targetUrn)) continue
+
+            // If target URNs specified, filter
+            if (request.targetUrns?.length) {
+                const targetSet = new Set(request.targetUrns)
+                if (!targetSet.has(edge.sourceUrn) && !targetSet.has(edge.targetUrn)) continue
+            }
+
+            const key = `${edge.sourceUrn}->${edge.targetUrn}`
+            if (!aggregatedMap.has(key)) {
+                aggregatedMap.set(key, { sourceUrn: edge.sourceUrn, targetUrn: edge.targetUrn, edges: [] })
+            }
+            aggregatedMap.get(key)!.edges.push(edge)
+        }
+
+        const aggregatedEdges = Array.from(aggregatedMap.entries()).map(([key, data]) => ({
+            id: `agg-${key}`,
+            sourceUrn: data.sourceUrn,
+            targetUrn: data.targetUrn,
+            edgeCount: data.edges.length,
+            edgeTypes: [...new Set(data.edges.map(e => e.edgeType))],
+            confidence: data.edges.reduce((sum, e) => sum + (e.confidence ?? 1), 0) / data.edges.length,
+            sourceEdgeIds: data.edges.map(e => e.id)
+        }))
+
+        return {
+            aggregatedEdges,
+            totalSourceEdges: this.edges.filter(e => sourceSet.has(e.sourceUrn) || sourceSet.has(e.targetUrn)).length
+        }
+    }
+
+    // ==========================================
+    // Node Creation
+    // ==========================================
+
+    async createNode(request: CreateNodeRequest): Promise<CreateNodeResult> {
+        // Mock implementation: create node in memory
+        const urn = `urn:mock:${request.entityType}:${Date.now()}`
+
+        const newNode: GraphNode = {
+            urn,
+            entityType: request.entityType,
+            displayName: request.displayName,
+            qualifiedName: request.displayName,
+            description: request.properties.description as string | undefined,
+            properties: request.properties,
+            tags: request.tags,
+            childCount: 0,
+            sourceSystem: 'manual'
+        }
+
+        this.nodes.set(urn, newNode)
+
+        let containmentEdge: GraphEdge | null = null
+
+        // Create containment edge if parent specified
+        if (request.parentUrn) {
+            const parentNode = this.nodes.get(request.parentUrn)
+            if (!parentNode) {
+                return {
+                    node: null,
+                    containmentEdge: null,
+                    success: false,
+                    error: `Parent node not found: ${request.parentUrn}`
+                }
+            }
+
+            containmentEdge = {
+                id: `contains-${request.parentUrn}-${urn}`,
+                sourceUrn: request.parentUrn,
+                targetUrn: urn,
+                edgeType: 'CONTAINS',
+                confidence: 1.0,
+                properties: {}
+            }
+
+            this.edges.push(containmentEdge)
+
+            // Update indices
+            const downstream = this.downstreamMap.get(request.parentUrn) ?? []
+            downstream.push(containmentEdge)
+            this.downstreamMap.set(request.parentUrn, downstream)
+
+            const upstream = this.upstreamMap.get(urn) ?? []
+            upstream.push(containmentEdge)
+            this.upstreamMap.set(urn, upstream)
+
+            // Update parent's child count
+            parentNode.childCount = (parentNode.childCount ?? 0) + 1
+        }
+
+        return {
+            node: newNode,
+            containmentEdge,
+            success: true
         }
     }
 }

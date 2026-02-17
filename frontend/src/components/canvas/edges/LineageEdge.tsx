@@ -14,6 +14,9 @@ interface LineageEdgeData {
   edgeType?: 'produces' | 'consumes' | 'transforms'
   animated?: boolean
   label?: string
+  // Trace flags for consistent highlighting
+  isTraced?: boolean
+  isDimmed?: boolean
   [key: string]: unknown
 }
 
@@ -42,11 +45,13 @@ export const LineageEdge = memo(function LineageEdge({
   const confidence = data?.confidence ?? 1
   const animated = data?.animated !== false
   const edgeType = data?.edgeType || 'produces'
+  const isTraced = data?.isTraced ?? false
+  const isDimmed = data?.isDimmed ?? false
 
   // Get highlighting state from store
   const highlightedEdgeIds = useEdgeFiltersStore((s) => s.highlightedEdgeIds)
   const highlightMode = useEdgeFiltersStore((s) => s.highlightMode)
-  const isHighlighted = highlightedEdgeIds.has(id)
+  const isHighlighted = highlightedEdgeIds.has(id) || isTraced
 
   // Calculate bezier path
   const [edgePath, labelX, labelY] = getBezierPath({
@@ -198,27 +203,54 @@ export const LineageEdge = memo(function LineageEdge({
         />
       )}
 
+      {/* Trace glow layer (when traced) */}
+      {isTraced && !isDimmed && (
+        <path
+          d={edgePath}
+          fill="none"
+          stroke="#c084fc"
+          strokeWidth={10}
+          strokeOpacity={0.25}
+          style={{
+            filter: 'blur(4px)',
+          }}
+        />
+      )}
+
       {/* Main edge path */}
       <BaseEdge
         id={id}
         path={edgePath}
         markerEnd={markerEnd}
         style={{
-          stroke: isHighlighted ? `url(#${highlightGradientId})` : `url(#${gradientId})`,
-          strokeWidth: selected ? 3 : (isHighlighted && highlightMode === 'bold' ? 4 : 2),
-          filter: selected ? `drop-shadow(0 0 6px ${edgeColor})` : undefined,
-          transition: 'stroke-width 0.15s, filter 0.15s',
+          stroke: isDimmed
+            ? '#9ca3af'
+            : isTraced
+              ? '#c084fc'
+              : isHighlighted
+                ? `url(#${highlightGradientId})`
+                : `url(#${gradientId})`,
+          strokeWidth: isDimmed ? 1 : selected ? 3 : isTraced ? 3 : (isHighlighted && highlightMode === 'bold' ? 4 : 2),
+          strokeOpacity: isDimmed ? 0.2 : 1,
+          filter: isDimmed
+            ? 'grayscale(1)'
+            : isTraced
+              ? 'drop-shadow(0 0 6px #c084fc)'
+              : selected
+                ? `drop-shadow(0 0 6px ${edgeColor})`
+                : undefined,
+          transition: 'stroke-width 0.15s, filter 0.15s, stroke-opacity 0.15s',
           ...highlightStyles,
         }}
       />
 
       {/* Animated Flow Layer */}
-      {animated && (
+      {animated && !isDimmed && (
         <path
           d={edgePath}
           fill="none"
           stroke={`url(#flow-pattern-${id})`}
-          strokeWidth={4}
+          strokeWidth={isTraced ? 5 : 4}
           style={{
             pointerEvents: 'none',
           }}

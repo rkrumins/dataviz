@@ -7,10 +7,17 @@ import type {
     NodeQuery,
     EdgeQuery,
     LineageResult,
+    ContainmentResult,
+    TraceOptions,
     LayerAssignmentRequest,
     LayerAssignmentResult,
     GraphSchemaStats,
     OntologyMetadata,
+    GraphSchema,
+    AggregatedEdgeRequest,
+    AggregatedEdgeResult,
+    CreateNodeRequest,
+    CreateNodeResult,
 } from './GraphDataProvider'
 
 // Base API URL - typically configured via environment variables
@@ -123,6 +130,26 @@ export class RemoteGraphProvider implements GraphDataProvider {
         return await this.fetch<GraphNode[]>(`/nodes/${encodeURIComponent(urn)}/descendants?depth=${depth}`)
     }
 
+    async getContainment(params: { parentUrn: URN; searchQuery?: string; limit?: number }): Promise<ContainmentResult> {
+        const { parentUrn, searchQuery, limit = 50 } = params
+        const [parent, children] = await Promise.all([
+            this.getNode(parentUrn),
+            this.getChildren(parentUrn, { limit }),
+        ])
+        const filtered = searchQuery?.trim()
+            ? children.filter(
+                (c) =>
+                    c.displayName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                    c.urn?.toLowerCase().includes(searchQuery.toLowerCase())
+            )
+            : children
+        return {
+            parent,
+            children: filtered.slice(0, limit),
+            hasNestedChildren: filtered.some((c) => (c.childCount ?? 0) > 0),
+        }
+    }
+
     // ==========================================
     // Lineage Traversal
     // ==========================================
@@ -130,19 +157,19 @@ export class RemoteGraphProvider implements GraphDataProvider {
     async getUpstream(
         urn: URN,
         depth: number,
-        _includeColumnLineage = true
+        options?: TraceOptions
     ): Promise<LineageResult> {
         return this.fetch<LineageResult>('/trace', {
             method: 'POST',
             body: JSON.stringify({
                 urn,
                 direction: 'upstream',
-                depth,
-                // includeColumnLineage
-                // Backend 'trace' endpoint signature:
-                // urn, direction, depth, granularity, aggregate_edges
-                // Does NOT explicit have includeColumnLineage, but logic says "Always fetch column lineage"
-                // So we can ignore passing it if backend defaults to it.
+                upstreamDepth: depth,
+                downstreamDepth: 0,
+                granularity: options?.granularity ?? 'table',
+                aggregateEdges: options?.aggregateEdges ?? true,
+                excludeContainmentEdges: options?.excludeContainmentEdges ?? true,
+                includeInheritedLineage: options?.includeInheritedLineage ?? true,
             })
         })
     }
@@ -150,14 +177,19 @@ export class RemoteGraphProvider implements GraphDataProvider {
     async getDownstream(
         urn: URN,
         depth: number,
-        _includeColumnLineage = true
+        options?: TraceOptions
     ): Promise<LineageResult> {
         return this.fetch<LineageResult>('/trace', {
             method: 'POST',
             body: JSON.stringify({
                 urn,
                 direction: 'downstream',
-                depth,
+                upstreamDepth: 0,
+                downstreamDepth: depth,
+                granularity: options?.granularity ?? 'table',
+                aggregateEdges: options?.aggregateEdges ?? true,
+                excludeContainmentEdges: options?.excludeContainmentEdges ?? true,
+                includeInheritedLineage: options?.includeInheritedLineage ?? true,
             })
         })
     }
@@ -166,21 +198,21 @@ export class RemoteGraphProvider implements GraphDataProvider {
         urn: URN,
         upstreamDepth: number,
         downstreamDepth: number,
-        _includeColumnLineage = true
+        options?: TraceOptions
     ): Promise<LineageResult> {
-        // Backend expects single depth param usually, or we need to update backend to support split depth
-        // Checking backend: `upstream_depth = depth if ... else 0`. It takes `depth` as single int.
-        // We should update backend to support separate depths or take the max?
-        // For now using MAX depth.
-        const maxDepth = Math.max(upstreamDepth, downstreamDepth)
-
         return this.fetch<LineageResult>('/trace', {
             method: 'POST',
             body: JSON.stringify({
                 urn,
                 direction: 'both',
-                depth: maxDepth,
-                // We might want to pass granular up/down depths if we update backend
+                upstreamDepth,
+                downstreamDepth,
+                granularity: options?.granularity ?? 'table',
+                aggregateEdges: options?.aggregateEdges ?? true,
+                excludeContainmentEdges: options?.excludeContainmentEdges ?? true,
+                includeInheritedLineage: options?.includeInheritedLineage ?? true,
+                // Ontology-driven: pass lineage edge type filter to backend
+                ...(options?.lineageEdgeTypes?.length ? { lineageEdgeTypes: options.lineageEdgeTypes } : {}),
             })
         })
     }
@@ -231,6 +263,36 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
     async computeLayerAssignments(request: LayerAssignmentRequest): Promise<LayerAssignmentResult> {
         return await this.fetch<LayerAssignmentResult>('/assignments/compute', {
+            method: 'POST',
+            body: JSON.stringify(request)
+        })
+    }
+
+    // ==========================================
+    // Schema Operations (Dynamic Schema Loading)
+    // ==========================================
+
+    async getFullSchema(): Promise<GraphSchema> {
+        return await this.fetch<GraphSchema>('/metadata/schema')
+    }
+
+    // ==========================================
+    // Aggregated Edge Operations
+    // ==========================================
+
+    async getAggregatedEdges(request: AggregatedEdgeRequest): Promise<AggregatedEdgeResult> {
+        return await this.fetch<AggregatedEdgeResult>('/edges/aggregated', {
+            method: 'POST',
+            body: JSON.stringify(request)
+        })
+    }
+
+    // ==========================================
+    // Node Creation
+    // ==========================================
+
+    async createNode(request: CreateNodeRequest): Promise<CreateNodeResult> {
+        return await this.fetch<CreateNodeResult>('/nodes/create', {
             method: 'POST',
             body: JSON.stringify(request)
         })

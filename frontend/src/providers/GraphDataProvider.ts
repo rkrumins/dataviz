@@ -146,7 +146,9 @@ export interface TagSummary {
 
 export interface EdgeTypeMetadata {
     isContainment: boolean
-    direction: 'parent-to-child' | 'child-to-parent' | 'bidirectional'
+    isLineage: boolean
+    direction: 'parent-to-child' | 'child-to-parent' | 'source-to-target' | 'bidirectional'
+    category: 'structural' | 'flow' | 'metadata' | 'association'
     description?: string
 }
 
@@ -157,9 +159,138 @@ export interface EntityTypeHierarchy {
 
 export interface OntologyMetadata {
     containmentEdgeTypes: string[]
+    lineageEdgeTypes: string[]
     edgeTypeMetadata: Record<string, EdgeTypeMetadata>
     entityTypeHierarchy: Record<string, EntityTypeHierarchy>
     rootEntityTypes: string[]
+}
+
+// ============================================
+// Schema Definition Types (for dynamic loading)
+// ============================================
+
+export interface FieldSchema {
+    id: string
+    name: string
+    type: string
+    required: boolean
+    showInNode: boolean
+    showInPanel: boolean
+    showInTooltip: boolean
+    displayOrder: number
+}
+
+export interface EntityVisualSchema {
+    icon: string
+    color: string
+    shape: string
+    size: string
+    borderStyle: string
+    showInMinimap: boolean
+}
+
+export interface EntityHierarchySchema {
+    level: number
+    canContain: string[]
+    canBeContainedBy: string[]
+    defaultExpanded: boolean
+}
+
+export interface EntityBehaviorSchema {
+    selectable: boolean
+    draggable: boolean
+    expandable: boolean
+    traceable: boolean
+    clickAction: string
+    doubleClickAction: string
+}
+
+export interface EntityTypeDefinition {
+    id: string
+    name: string
+    pluralName: string
+    description?: string
+    visual: EntityVisualSchema
+    fields: FieldSchema[]
+    hierarchy: EntityHierarchySchema
+    behavior: EntityBehaviorSchema
+}
+
+export interface RelationshipVisualSchema {
+    strokeColor: string
+    strokeWidth: number
+    strokeStyle: string
+    animated: boolean
+    animationSpeed: string
+    arrowType: string
+    curveType: string
+}
+
+export interface RelationshipTypeDefinition {
+    id: string
+    name: string
+    description?: string
+    sourceTypes: string[]
+    targetTypes: string[]
+    visual: RelationshipVisualSchema
+    bidirectional: boolean
+    showLabel: boolean
+    isContainment: boolean
+}
+
+export interface GraphSchema {
+    version: string
+    entityTypes: EntityTypeDefinition[]
+    relationshipTypes: RelationshipTypeDefinition[]
+    rootEntityTypes: string[]
+    containmentEdgeTypes: string[]
+}
+
+// ============================================
+// Aggregated Edge Types
+// ============================================
+
+export interface AggregatedEdgeRequest {
+    sourceUrns: string[]
+    targetUrns?: string[]
+    granularity: 'column' | 'table' | 'schema' | 'system' | 'domain'
+    includeEdgeTypes?: string[]
+    lineageEdgeTypes?: string[]
+    containmentEdgeTypes?: string[]
+}
+
+export interface AggregatedEdgeInfo {
+    id: string
+    sourceUrn: string
+    targetUrn: string
+    edgeCount: number
+    edgeTypes: string[]
+    confidence: number
+    sourceEdgeIds: string[]
+}
+
+export interface AggregatedEdgeResult {
+    aggregatedEdges: AggregatedEdgeInfo[]
+    totalSourceEdges: number
+}
+
+// ============================================
+// Node Creation Types
+// ============================================
+
+export interface CreateNodeRequest {
+    entityType: EntityType
+    displayName: string
+    parentUrn?: string
+    properties: Record<string, unknown>
+    tags: string[]
+}
+
+export interface CreateNodeResult {
+    node: GraphNode | null
+    containmentEdge: GraphEdge | null
+    success: boolean
+    error?: string
 }
 
 export interface GraphSchemaStats {
@@ -268,6 +399,35 @@ export interface LineageResult {
 
     /** Whether more results are available */
     hasMore: boolean
+
+    /** Aggregated edges metadata (for progressive disclosure) */
+    aggregatedEdges?: Record<string, unknown>
+
+    /** URN of parent entity if lineage was inherited */
+    inheritedFrom?: string
+}
+
+/**
+ * Options for trace/lineage operations
+ */
+export interface TraceOptions {
+    /** Include column-level lineage (default: true) */
+    includeColumnLineage?: boolean
+
+    /** Exclude containment edges for pure data lineage (default: true) */
+    excludeContainmentEdges?: boolean
+
+    /** Include inherited lineage from children (default: true) */
+    includeInheritedLineage?: boolean
+
+    /** Target granularity for aggregation (default: 'table') */
+    granularity?: 'column' | 'table' | 'schema' | 'system' | 'domain'
+
+    /** Aggregate edges at granularity level (default: true) */
+    aggregateEdges?: boolean
+
+    /** Optional whitelist of lineage edge types to trace (default: all ontology lineage types) */
+    lineageEdgeTypes?: string[]
 }
 
 export interface ContainmentResult {
@@ -360,6 +520,12 @@ export interface GraphDataProvider {
      */
     getDescendants(urn: URN, depth?: number): Promise<GraphNode[]>
 
+    /**
+     * Get containment context: parent + children matching optional search
+     * Used for SearchChildrenPanel and similar UIs
+     */
+    getContainment?(params: { parentUrn: URN; searchQuery?: string; limit?: number }): Promise<ContainmentResult>
+
     // ==========================================
     // Lineage Traversal
     // ==========================================
@@ -368,34 +534,38 @@ export interface GraphDataProvider {
      * Get upstream lineage (data sources flowing INTO this entity)
      * @param urn - Starting entity URN
      * @param depth - How many hops upstream
-     * @param includeColumnLineage - Include column-level lineage
+     * @param options - Additional trace options
      */
     getUpstream(
         urn: URN,
         depth: number,
-        includeColumnLineage?: boolean
+        options?: TraceOptions
     ): Promise<LineageResult>
 
     /**
      * Get downstream lineage (entities this data flows TO)
      * @param urn - Starting entity URN
      * @param depth - How many hops downstream
-     * @param includeColumnLineage - Include column-level lineage
+     * @param options - Additional trace options
      */
     getDownstream(
         urn: URN,
         depth: number,
-        includeColumnLineage?: boolean
+        options?: TraceOptions
     ): Promise<LineageResult>
 
     /**
      * Get both upstream and downstream lineage
+     * @param urn - Starting entity URN
+     * @param upstreamDepth - How many hops upstream
+     * @param downstreamDepth - How many hops downstream
+     * @param options - Additional trace options
      */
     getFullLineage(
         urn: URN,
         upstreamDepth: number,
         downstreamDepth: number,
-        includeColumnLineage?: boolean
+        options?: TraceOptions
     ): Promise<LineageResult>
 
     // ==========================================
@@ -454,6 +624,36 @@ export interface GraphDataProvider {
      * Compute layer assignments for the graph (server-side)
      */
     computeLayerAssignments(request: LayerAssignmentRequest): Promise<LayerAssignmentResult>
+
+    // ==========================================
+    // Schema Operations (Dynamic Schema Loading)
+    // ==========================================
+
+    /**
+     * Get complete graph schema from backend
+     * Enables dynamic loading of entity types, relationship types, and visual configs
+     */
+    getFullSchema(): Promise<GraphSchema>
+
+    // ==========================================
+    // Aggregated Edge Operations
+    // ==========================================
+
+    /**
+     * Get aggregated edges between containers at a specified granularity
+     * Enables progressive edge disclosure in the UI
+     */
+    getAggregatedEdges(request: AggregatedEdgeRequest): Promise<AggregatedEdgeResult>
+
+    // ==========================================
+    // Node Creation
+    // ==========================================
+
+    /**
+     * Create a new node with optional automatic containment edge
+     * Validates against ontology rules before creation
+     */
+    createNode(request: CreateNodeRequest): Promise<CreateNodeResult>
 }
 
 // ============================================

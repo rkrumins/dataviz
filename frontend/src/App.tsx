@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { AppShell } from '@/components/layout/AppShell'
 import { LoginPage } from '@/components/auth/LoginPage'
@@ -14,9 +14,13 @@ function App() {
   const { isAuthenticated } = useAuthStore()
   const { theme } = usePreferencesStore()
   const { setNodes, setEdges, setActiveLens } = useCanvasStore()
-  const { loadSchema, schema } = useSchemaStore()
+  const { loadSchema, schema, mergeBackendSchema, loadFromBackend } = useSchemaStore()
   const provider = useGraphProvider()
   const { containmentEdgeTypes, isLoading: isLoadingOntology, metadata: ontologyMetadata } = useOntologyMetadata()
+
+  // Track if we've attempted to load schema from backend
+  const [hasLoadedBackendSchema, setHasLoadedBackendSchema] = useState(false)
+  const [isLoadingBackendSchema, setIsLoadingBackendSchema] = useState(false)
 
   // Use defaults if no containment types available - memoize to prevent recreation
   const effectiveContainmentTypes = useMemo(() =>
@@ -26,10 +30,58 @@ function App() {
     [containmentEdgeTypes]
   )
 
-  // Initialize schema and demo data on mount
+  // Load schema from backend on startup
   useEffect(() => {
-    // Only initialize if authenticated
+    if (!isAuthenticated || hasLoadedBackendSchema || isLoadingBackendSchema) return
+
+    const loadBackendSchema = async () => {
+      setIsLoadingBackendSchema(true)
+
+      try {
+        console.log('[App] Loading schema from backend...')
+        const backendSchema = await provider.getFullSchema()
+
+        if (backendSchema && backendSchema.entityTypes.length > 0) {
+          console.log('[App] Backend schema loaded:', {
+            entityTypes: backendSchema.entityTypes.length,
+            relationshipTypes: backendSchema.relationshipTypes.length,
+            rootTypes: backendSchema.rootEntityTypes,
+          })
+
+          // Merge backend schema with any existing local customizations
+          if (schema) {
+            mergeBackendSchema(backendSchema)
+            console.log('[App] Merged backend schema with existing schema')
+          } else {
+            loadFromBackend(backendSchema)
+            console.log('[App] Loaded fresh schema from backend')
+          }
+        } else {
+          console.warn('[App] Backend returned empty schema, using defaults')
+          if (!schema) {
+            loadSchema(defaultWorkspaceSchema)
+          }
+        }
+      } catch (err) {
+        console.warn('[App] Failed to load schema from backend, using defaults:', err)
+        // Fall back to default schema
+        if (!schema) {
+          loadSchema(defaultWorkspaceSchema)
+        }
+      } finally {
+        setHasLoadedBackendSchema(true)
+        setIsLoadingBackendSchema(false)
+      }
+    }
+
+    loadBackendSchema()
+  }, [isAuthenticated, hasLoadedBackendSchema, isLoadingBackendSchema, provider, schema, mergeBackendSchema, loadFromBackend, loadSchema])
+
+  // Initialize graph data on mount (after schema is loaded)
+  useEffect(() => {
+    // Only initialize if authenticated and schema loading is complete
     if (!isAuthenticated) return
+    if (!hasLoadedBackendSchema && !schema) return // Wait for schema
 
     // Wait for ontology metadata to finish loading (either success or error)
     // If still loading and no cached metadata, wait
@@ -46,26 +98,8 @@ function App() {
       console.warn('[App] No containment edge types from backend, using defaults:', effectiveContainmentTypes)
     }
 
-    // Load/refresh schema - check version to handle updates
-    const currentVersion = schema?.version
-    const defaultVersion = defaultWorkspaceSchema.version
-
-    if (!schema || currentVersion !== defaultVersion) {
-      // Force refresh schema when version changes or not loaded
-      loadSchema(defaultWorkspaceSchema)
-    }
-
-    // DEBUG: Diagnose Schema Loading
-    console.log('--- SCHEMA DEBUG ---')
-    console.log('Current Schema Version:', schema?.version)
-    console.log('Default Schema Version:', defaultWorkspaceSchema.version)
-    console.log('Registered Entity Types:', schema?.entityTypes.map(t => t.id))
-    console.log('Has dataPlatform?', schema?.entityTypes.some(t => t.id === 'dataPlatform'))
-    console.log('Has container?', schema?.entityTypes.some(t => t.id === 'container'))
-
-    if (schema?.version !== defaultWorkspaceSchema.version) {
-      console.warn('MISMATCH DETECTED: Triggering loadSchema...')
-      // Force reload if not matching (redundant to main effect but good for debug)
+    // If schema still not loaded (edge case), load defaults
+    if (!schema) {
       loadSchema(defaultWorkspaceSchema)
     }
 
@@ -169,7 +203,7 @@ function App() {
     }
 
     fetchInitialGraph()
-  }, [isAuthenticated, isLoadingOntology, ontologyMetadata, provider, effectiveContainmentTypes.join(','), setNodes, setEdges, setActiveLens, loadSchema, schema])
+  }, [isAuthenticated, hasLoadedBackendSchema, isLoadingOntology, ontologyMetadata, provider, effectiveContainmentTypes.join(','), setNodes, setEdges, setActiveLens, loadSchema, schema])
   // Note: Using effectiveContainmentTypes.join(',') as dependency to avoid array reference issues
 
   // Apply theme class to document
