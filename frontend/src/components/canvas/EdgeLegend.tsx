@@ -59,7 +59,7 @@ export function EdgeLegend({ className, defaultExpanded = false }: EdgeLegendPro
         edges.forEach(edge => {
             const normalized = normalizeEdgeType(edge)
             if (normalized) {
-            counts[normalized] = (counts[normalized] ?? 0) + 1
+                counts[normalized] = (counts[normalized] ?? 0) + 1
             }
         })
         return counts

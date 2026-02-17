@@ -83,7 +83,7 @@ class FalkorDBProvider(GraphDataProvider):
         self,
         host: str = "localhost",
         port: int = 6379,
-        graph_name: str = "nexus",
+        graph_name: str = "nexus_lineage",
         seed_file: Optional[str] = None,
     ):
         self._host = host

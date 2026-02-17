@@ -67,7 +67,7 @@ export function generateEdgeTypeFiltersFromEdges(
         containmentEdgeTypes,
         ontologyMetadata ? { edgeTypeMetadata: ontologyMetadata.edgeTypeMetadata } : undefined
     )
-    
+
     return definitions.map(def => ({
         type: def.type.toLowerCase(), // Use lowercase for filter matching
         label: def.label,
@@ -292,7 +292,7 @@ export function useFilteredEdges(): {
 
         // Get containment types from ontology
         const containmentTypes = containmentEdgeTypes || []
-        
+
         const containment = edges.filter((e) => {
             const edgeType = normalizeEdgeType(e)
             return containmentTypes.some(type => type.toUpperCase() === edgeType)
