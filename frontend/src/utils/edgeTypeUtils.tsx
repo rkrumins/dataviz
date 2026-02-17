@@ -107,7 +107,7 @@ function getDefaultColor(type: string): string {
     for (let i = 0; i < normalized.length; i++) {
         hash = normalized.charCodeAt(i) + ((hash << 5) - hash)
     }
-    
+
     // Generate a color in the blue-purple range
     const hue = Math.abs(hash % 360)
     return `hsl(${hue}, 65%, 50%)`
@@ -118,7 +118,7 @@ function getDefaultColor(type: string): string {
  */
 function getDefaultIcon(type: string): React.ReactNode {
     const normalized = type.toUpperCase()
-    
+
     const iconMap: Record<string, React.ReactNode> = {
         'PRODUCES': <ArrowRight className="w-3.5 h-3.5" />,
         'CONSUMES': <ArrowRight className="w-3.5 h-3.5 rotate-180" />,
@@ -141,7 +141,7 @@ function getDefaultIcon(type: string): React.ReactNode {
 function getDefaultAnimated(type: string, isContainment: boolean): boolean {
     // Containment edges are typically not animated
     if (isContainment) return false
-    
+
     // Lineage edges are typically animated
     const lineageTypes = ['PRODUCES', 'CONSUMES', 'TRANSFORMS', 'DERIVES_FROM', 'LINEAGE']
     return lineageTypes.includes(type.toUpperCase())
@@ -153,10 +153,10 @@ function getDefaultAnimated(type: string, isContainment: boolean): boolean {
 function getDefaultStrokeStyle(type: string, isContainment: boolean): 'solid' | 'dashed' | 'dotted' {
     // Containment edges are typically dashed
     if (isContainment) return 'dashed'
-    
+
     // Aggregated edges are dashed
     if (type.toUpperCase() === 'AGGREGATED') return 'dashed'
-    
+
     // Most lineage edges are solid
     return 'solid'
 }
@@ -171,7 +171,7 @@ export function createDefaultEdgeTypeDefinition(
 ): EdgeTypeDefinition {
     const normalized = edgeType.toUpperCase()
     const isContainment = containmentEdgeTypes.some(ct => ct.toUpperCase() === normalized)
-    
+
     // Try to get description from ontology metadata
     let description = `Edge type: ${formatEdgeTypeLabel(edgeType)}`
     if (ontologyMetadata?.edgeTypeMetadata?.[normalized]?.description) {
@@ -204,7 +204,7 @@ export function getEdgeTypeDefinition(
     ontologyMetadata?: { edgeTypeMetadata?: Record<string, { description?: string }> }
 ): EdgeTypeDefinition {
     const schemaType = getEdgeTypeFromSchema(edgeType, relationshipTypes)
-    
+
     if (schemaType) {
         // Use schema definition
         return {
@@ -217,7 +217,7 @@ export function getEdgeTypeDefinition(
             icon: getDefaultIcon(schemaType.id), // Could be enhanced to use schema icon if available
         }
     }
-    
+
     // Create default definition
     return createDefaultEdgeTypeDefinition(edgeType, containmentEdgeTypes, ontologyMetadata)
 }
@@ -236,7 +236,7 @@ export function getAllEdgeTypeDefinitions(
     const definitions = Array.from(discoveredTypes).map(type =>
         getEdgeTypeDefinition(type, relationshipTypes, containmentEdgeTypes, ontologyMetadata)
     )
-    
+
     // Sort by label for consistent display
     return definitions.sort((a, b) => a.label.localeCompare(b.label))
 }

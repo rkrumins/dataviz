@@ -2288,28 +2288,38 @@ function LineageFlowOverlay({
         const vOffset = (index - (total - 1) / 2) * verticalSpread
 
         if (isSameColumn && !isSelf) {
-          // "Bracket" routing: Right -> Right
+          // "Bracket" routing: Right -> Right (Cleaner layout)
+          // Use a tighter loop for same-column edges
           tx = tRect.right - containerRect.left
 
-          const curveDist = 40 + (index * 10) // Push out further for outer lines
+          const curveDist = 30 + (index * 8)
           const cp1x = sx + curveDist
-          const cp1y = sy
           const cp2x = tx + curveDist
+
+          // Keep Y aligned with source/target for straight horizontal exit/entry
+          const cp1y = sy
           const cp2y = ty
 
           d = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
         } else {
-          // Standard Left-to-Right Bezier
+          // Standard Left-to-Right S-Curve (Sigmoid)
+          // This creates a beautiful, simple flow without "ballooning"
           const dist = Math.abs(tx - sx)
-          // Adjust curvature based on distance
-          const curvature = Math.max(0.4, Math.min(0.8, dist / 500))
+
+          // Fixed curvature creates a uniform look. 0.5 = standard S-curve.
+          const curvature = 0.5
 
           const cp1x = sx + dist * curvature
           const cp2x = tx - dist * curvature
 
-          // Apply vertical offset to control points to separate the bundle
-          const cp1y = sy + vOffset
-          const cp2y = ty + vOffset
+          // CRITICAL: Keep control point Ys aligned with Source/Target Ys
+          // This ensures the line leaves horizontally and enters horizontally.
+          // We apply vOffset ONLY to the middle if we wanted separation, 
+          // but for "prettiness", pure S-curves usually look best.
+          // If we really need separation for multi-edges, we can adjust the CP x-values slightly
+          // or just let them overlap cleanly as "highways".
+          const cp1y = sy
+          const cp2y = ty
 
           d = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
         }
@@ -2375,12 +2385,12 @@ function LineageFlowOverlay({
               fill="none"
               stroke="currentColor"
               strokeWidth="2.5"
-              strokeDasharray="1 12"
+              strokeDasharray="4 8" // Shorter dash, more frequent
               strokeLinecap="round"
               className="animate-flow"
               style={{
-                opacity: 0.6,
-                animationDuration: `${1.5 + index * 0.2}s`,
+                opacity: 0.8, // Slightly brighter
+                animationDuration: '1.5s', // Constant smooth speed
                 filter: 'url(#glow)'
               }}
             />

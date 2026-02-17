@@ -212,7 +212,7 @@ async def seed_falkordb(generator: EnterpriseDataGenerator):
     provider = FalkorDBProvider(
         host=os.getenv("FALKORDB_HOST", "localhost"),
         port=int(os.getenv("FALKORDB_PORT", "6379")),
-        graph_name=os.getenv("FALKORDB_GRAPH_NAME", "nexus"),
+        graph_name=os.getenv("FALKORDB_GRAPH_NAME", "nexus_lineage"),
     )
     await provider._ensure_connected()
     
