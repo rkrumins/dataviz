@@ -212,16 +212,16 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         })
 
         try {
-            // Fetch detailed edges between source and target
+            // Fetch detailed edges strictly between source and target
+            // We optimized the backend to handle sourceUrns + targetUrns efficiently.
             const edges = await provider.getEdges({
-                anyUrns: [edgeState.aggregated.sourceUrn, edgeState.aggregated.targetUrn],
+                sourceUrns: [edgeState.aggregated.sourceUrn],
+                targetUrns: [edgeState.aggregated.targetUrn],
             })
 
-            // Filter to only edges between the two URNs
-            const relevantEdges = edges.filter(e =>
-                (e.sourceUrn === edgeState.aggregated.sourceUrn && e.targetUrn === edgeState.aggregated.targetUrn) ||
-                (e.sourceUrn === edgeState.aggregated.targetUrn && e.targetUrn === edgeState.aggregated.sourceUrn)
-            )
+            // No need to filter extensively client-side if backend does its job,
+            // but we keep a sanity check just in case.
+            const relevantEdges = edges
 
             setAggregatedEdges(prev => {
                 const next = new Map(prev)

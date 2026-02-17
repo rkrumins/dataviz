@@ -468,37 +468,40 @@ export function ReferenceModelCanvas({
   const prevVisibleUrnsRef = useRef<Set<string>>(new Set())
 
   // Optimized Effect: Fetch aggregated edges only for NEWLY visible nodes
+  // Optimized Effect: Fetch aggregated edges only for visible nodes with Debounce
   useEffect(() => {
     if (!showLineageFlow || nodes.length === 0) return
 
-    const currentVisibleList = getVisibleContainerUrns()
-    const currentVisibleSet = new Set(currentVisibleList)
-    const prevVisibleSet = prevVisibleUrnsRef.current || new Set()
+    const fetchDebounced = setTimeout(() => {
+      const currentVisibleList = getVisibleContainerUrns()
+      const currentVisibleSet = new Set(currentVisibleList)
+      const prevVisibleSet = prevVisibleUrnsRef.current || new Set()
 
-    if (currentVisibleList.length > 500) return
+      // Limit to avoid massive queries, though backend is optimized now
+      if (currentVisibleList.length > 500) return
 
-    // Calculate Delta
-    const newlyVisible = currentVisibleList.filter(urn => !prevVisibleSet.has(urn))
-    const stableVisible = currentVisibleList.filter(urn => prevVisibleSet.has(urn))
+      // Calculate Delta or Refresh
+      const newlyVisible = currentVisibleList.filter(urn => !prevVisibleSet.has(urn))
 
-    if (prevVisibleSet.size === 0 && newlyVisible.length > 0) {
-      // Initial: Fetch all-to-all
-      // Using fetchAggregated(source, target)
-      // If target is provided, we fetch edges BETWEEN source and target
-      fetchAggregated(newlyVisible, newlyVisible)
-    }
-    else if (newlyVisible.length > 0) {
-      // 1. Edges FROM new nodes TO (stable + new)
-      fetchAggregated(newlyVisible, currentVisibleList)
+      // If we have new nodes, or if it's the first load, we should fetch.
+      // Optimization: Just fetch for ALL visible to ALL visible.
+      // The backend "Unwind" strategy is fast enough to handle this "clique" check 
+      // for 50-100 nodes easily.
+      // If the delta is small, maybe we could optimize, but "Refresh View" is safer 
+      // to ensure all connections are shown.
 
-      // 2. Edges FROM stable nodes TO new nodes
-      if (stableVisible.length > 0) {
-        fetchAggregated(stableVisible, newlyVisible)
+      const shouldRefetch = newlyVisible.length > 0 || prevVisibleSet.size === 0
+
+      if (shouldRefetch) {
+        // Flatten lookup: Fetch edges where Source is Visible AND Target is Visible
+        fetchAggregated(currentVisibleList, currentVisibleList)
       }
-    }
 
-    prevVisibleUrnsRef.current = currentVisibleSet
-  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated /* stable */])
+      prevVisibleUrnsRef.current = currentVisibleSet
+    }, 300) // 300ms debounce
+
+    return () => clearTimeout(fetchDebounced)
+  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes.length])
 
   // Build layer assignment rules
   const layerRules = useMemo<LayerAssignmentRule[]>(() => {
@@ -904,14 +907,10 @@ export function ReferenceModelCanvas({
     return set
   }, [trace.isTracing, trace.focusId, trace.visibleTraceNodes, parentMap])
   const lineageEdges = useMemo(() => {
-    // When tracing, always compute edges even if flow toggle is off
+    // When tracing, always compute edges even if flow toggle is off (Trace overrides)
     if (!showLineageFlow && !trace.isTracing) return []
-    // Filter out containment edges
-    const regularEdges = edges.filter(edge => {
-      return !isContainmentEdge(normalizeEdgeType(edge))
-    })
 
-    // Add aggregated edges from the hook
+    // 1. Aggregated Edges (Always show if Flow is ON)
     const aggEdges = Array.from(aggregatedEdges.values())
       .filter(e => e.state === 'collapsed')
       .map(e => ({
@@ -928,21 +927,34 @@ export function ReferenceModelCanvas({
         }
       }))
 
-    // Add expanded detailed edges
+    // 2. Expanded Detailed Edges (User explicitly expanded an edge)
     const expandedDetailedEdges = Array.from(aggregatedEdges.values())
       .filter(e => e.state === 'expanded')
-      .flatMap(e => e.detailedEdges.map(de => ({
-        id: de.id,
-        source: de.sourceUrn,
-        target: de.targetUrn,
-        data: {
-          edgeType: de.edgeType,
-          relationship: de.edgeType,
-          confidence: de.confidence,
-        }
-      })))
+      .flatMap(e => e.detailedEdges
+        // Filter out containment edges from detailed view to avoid "sneaky" structural edges
+        .filter(de => !isContainmentEdge(de.edgeType))
+        .map(de => ({
+          id: de.id,
+          source: de.sourceUrn,
+          target: de.targetUrn,
+          data: {
+            edgeType: de.edgeType,
+            relationship: de.edgeType,
+            confidence: de.confidence,
+          }
+        })))
 
-    return [...regularEdges, ...aggEdges, ...expandedDetailedEdges]
+    // 3. Trace / Regular Edges (ONLY when Tracing is Active)
+    // "Sneaky" edges fix: Don't show raw granular edges in the high-level view 
+    // unless we are specifically in a granular trace mode.
+    let regularEdges: any[] = []
+    if (trace.isTracing) {
+      regularEdges = edges.filter(edge => {
+        return !isContainmentEdge(normalizeEdgeType(edge))
+      })
+    }
+
+    return [...aggEdges, ...expandedDetailedEdges, ...regularEdges]
   }, [edges, showLineageFlow, trace.isTracing, aggregatedEdges, isContainmentEdge])
 
   // Lineage Roll-up: Project edges to visible ancestors
