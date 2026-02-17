@@ -41,206 +41,223 @@ DATA_TYPES = ["string", "int", "boolean", "float", "timestamp", "array", "struct
 BATCH_SIZE = 5000  # Nodes/Edges per batch to FalkorDB
 
 
-class SyntheticDataGenerator:
-    def __init__(self, scale_factor: int = 1, density: float = 0.05):
+SCENARIOS = {
+    "finance": {
+        "domain": "Finance",
+        "sources": [
+            {"platform": "SAP ERP", "container": "ECC_PROD", "datasets": ["VBAP_Sales", "BKPF_Accounting", "MARA_Materials"]},
+            {"platform": "NetSuite", "container": "NS_ANALYTICS", "datasets": ["Transactions", "Customers", "Vendors"]}
+        ],
+        "consumption": ["CFO Dashboard", "Monthly Variance Report", "Tax Audit Log"]
+    },
+    "hr": {
+        "domain": "Human Resources",
+        "sources": [
+            {"platform": "Workday", "container": "WD_PROD", "datasets": ["Workers", "Compensation", "Org_Hierarchy"]},
+            {"platform": "Greenhouse", "container": "GH_RECROOT", "datasets": ["Applications", "Requisitions"]}
+        ],
+        "consumption": ["Headcount Overview", "Recruitment Funnel", "Attrition Predictor"]
+    },
+    "marketing": {
+        "domain": "Marketing",
+        "sources": [
+            {"platform": "Google Ads", "container": "AD_WORDS_LOGS", "datasets": ["Campaigns", "Keywords", "Clicks"]},
+            {"platform": "HubSpot", "container": "HS_CRM", "datasets": ["Contacts", "Leads", "Deals"]}
+        ],
+        "consumption": ["Marketing ROI", "Lead Attribution", "Campaign Performance"]
+    },
+    "ecommerce": {
+        "domain": "eCommerce",
+        "sources": [
+            {"platform": "Shopify", "container": "SHOPIFY_STORE", "datasets": ["Orders", "Products", "Collections"]},
+            {"platform": "Stripe", "container": "STRIPE_PAYMENTS", "datasets": ["Charges", "Payouts", "Refunds"]}
+        ],
+        "consumption": ["Sales Dashboard", "Inventory Health", "Payment Reconciliation"]
+    }
+}
+
+class EnterpriseDataGenerator:
+    def __init__(self, scenarios: List[str] = ["finance"], scale: int = 1, breadth: int = 1, depth: int = 1):
         """
-        :param scale_factor: Multiplier for data volume (1 = ~10k nodes, 100 = ~1m nodes)
-        :param density: Probability of lineage connection
+        :param scenarios: List of scenario keys to generate
+        :param scale: Overall multiplier for number of nodes
+        :param breadth: Multiplier for parallel systems within a scenario
+        :param depth: Multiplier for transformation layers
         """
-        self.scale = scale_factor
-        self.density = density
+        self.scenarios = scenarios
+        self.scale = scale
+        self.breadth = breadth
+        self.depth = depth
         self.nodes: List[GraphNode] = []
         self.edges: List[GraphEdge] = []
-        
-        # Track counts
-        self.counts = {
-            "domain": 0,
-            "platform": 0,
-            "container": 0,
-            "dataset": 0,
-            "field": 0,
-            "edges": 0
-        }
-
-        # Keep track of URNs for lineage generation
-        self.field_urns: List[str] = []
 
     def _create_node(self, entity_type: EntityType, name: str, parent_urn: str = None, props: Dict = None) -> GraphNode:
-        urn = f"urn:li:{entity_type.value}:{name}"
-        props = props or {}
-        
+        urn = f"urn:li:{entity_type.value}:{name.lower().replace(' ', '_')}_{uuid.uuid4().hex[:8]}"
         node = GraphNode(
             urn=urn,
             entityType=entity_type,
             displayName=name,
             qualifiedName=name,
-            properties=props,
+            properties=props or {},
             tags=[]
         )
         self.nodes.append(node)
-        self.counts[entity_type.value if hasattr(entity_type, "value") else str(entity_type)] = \
-            self.counts.get(entity_type.value if hasattr(entity_type, "value") else str(entity_type), 0) + 1
         
         if parent_urn:
-            # Create CONTAINS edge from Parent -> Child
-            edge_id = f"contains-{parent_urn}-{urn}"
             edge = GraphEdge(
-                id=edge_id,
+                id=f"contains-{parent_urn}-{urn}",
                 sourceUrn=parent_urn,
                 targetUrn=urn,
                 edgeType=EdgeType.CONTAINS,
                 properties={}
             )
             self.edges.append(edge)
-            self.counts["edges"] += 1
-            
         return node
 
+    def _create_lineage(self, source_urn: str, target_urn: str, logic: str = "Transformation"):
+        edge = GraphEdge(
+            id=f"transforms-{source_urn}-{target_urn}",
+            sourceUrn=source_urn,
+            targetUrn=target_urn,
+            edgeType=EdgeType.TRANSFORMS,
+            properties={"logic": logic}
+        )
+        self.edges.append(edge)
+
     def generate(self):
-        logger.info(f"Starting generation with scale factor {self.scale}...")
-        start_time = time.time()
-
-        # 1. Domains
-        # Fixed set of top-level domains
-        domain_urns = []
-        for d in DOMAINS:
-            node = self._create_node(EntityType.DOMAIN, d)
-            domain_urns.append(node.urn)
-            
-        # 2. Platforms (per domain)
-        # Each domain has a few platforms
-        platform_urns = []
-        for d_urn in domain_urns:
-            # 1-3 platforms per domain
-            num_platforms = random.randint(1, 3)
-            for i in range(num_platforms):
-                p_name = f"{d_urn.split(':')[-1]}-{random.choice(PLATFORMS)}-{i}"
-                node = self._create_node(EntityType.DATA_PLATFORM, p_name, parent_urn=d_urn)
-                platform_urns.append(node.urn)
-
-        # 3. Containers (Databases) per Platform
-        container_urns = []
-        for p_urn in platform_urns:
-            # Scale affects number of containers
-            num_containers = random.randint(2, 5 * self.scale)
-            for i in range(num_containers):
-                c_name = f"{p_urn.split(':')[-1]}-db-{i}"
-                node = self._create_node(EntityType.CONTAINER, c_name, parent_urn=p_urn)
-                container_urns.append(node.urn)
-
-        # 4. Datasets (Tables) per Container
-        dataset_urns = []
-        for c_urn in container_urns:
-            num_tables = random.randint(5, 20) # Keeping tables per DB reasonable, scale comes from DBs
-            for i in range(num_tables):
-                t_name = f"{c_urn.split(':')[-1]}-table-{i}"
-                node = self._create_node(EntityType.DATASET, t_name, parent_urn=c_urn)
-                dataset_urns.append(node.urn)
-
-        # 5. Schema Fields (Columns) per Dataset
-        for t_urn in dataset_urns:
-            num_cols = random.randint(5, 30)
-            for i in range(num_cols):
-                col_name = f"{t_urn.split(':')[-1]}-col-{i}"
-                props = {"dataType": random.choice(DATA_TYPES)}
-                node = self._create_node(EntityType.SCHEMA_FIELD, col_name, parent_urn=t_urn, props=props)
-                self.field_urns.append(node.urn)
-
-        # 6. Random Lineage (TRANSFORMS)
-        # Randomly connect columns
-        logger.info(f"Generated {len(self.field_urns)} columns. Generating lineage...")
+        logger.info(f"Generating scenarios: {self.scenarios} (B:{self.breadth}, D:{self.depth}, S:{self.scale})")
         
-        num_lineage_edges = int(len(self.field_urns) * self.density * self.scale)
-        logger.info(f"Targeting ~{num_lineage_edges} lineage edges...")
-
-        for _ in range(num_lineage_edges):
-            src = random.choice(self.field_urns)
-            tgt = random.choice(self.field_urns)
+        # Shared Platforms
+        snowflake = self._create_node(EntityType.DATA_PLATFORM, "Snowflake")
+        
+        for s_key in self.scenarios:
+            if s_key not in SCENARIOS: continue
+            config = SCENARIOS[s_key]
+            domain = self._create_node(EntityType.DOMAIN, config["domain"])
             
-            if src == tgt: continue
-            
-            # Simple DAG-ish check: avoid obvious cycles if we want? 
-            # For pure scale test, cycles are fine, but let's try to flow Left->Right based on list index
-            # (Assuming list is somewhat ordered by creation, which mimics flow)
-            idx_src = self.field_urns.index(src)
-            idx_tgt = self.field_urns.index(tgt)
-            
-            if idx_src < idx_tgt:
-                edge_id = f"transforms-{src}-{tgt}"
-                edge = GraphEdge(
-                    id=edge_id,
-                    sourceUrn=src,
-                    targetUrn=tgt,
-                    edgeType=EdgeType.TRANSFORMS,
-                    properties={"logic": "random_transform"}
-                )
-                self.edges.append(edge)
-                self.counts["edges"] += 1
+            # For each domain, we can have multiple parallel "chains" (Breadth)
+            for b_idx in range(self.breadth):
+                chain_suffix = f"_{b_idx}" if self.breadth > 1 else ""
+                
+                # 1. Source Platforms & Containers
+                src_fields_layer = [] # Track the latest fields to link forward
+                
+                for src_cfg in config["sources"]:
+                    plat = self._create_node(EntityType.DATA_PLATFORM, f"{src_cfg['platform']}{chain_suffix}", parent_urn=domain.urn)
+                    cont = self._create_node(EntityType.CONTAINER, f"{src_cfg['container']}{chain_suffix}", parent_urn=plat.urn)
+                    
+                    for ds_name in src_cfg["datasets"]:
+                        ds = self._create_node(EntityType.DATASET, f"{ds_name}{chain_suffix}", parent_urn=cont.urn)
+                        # Add columns
+                        cols = []
+                        for i in range(5):
+                            c = self._create_node(EntityType.SCHEMA_FIELD, f"{ds_name}_col_{i}", parent_urn=ds.urn)
+                            cols.append(c)
+                        src_fields_layer.extend(cols)
 
-        duration = time.time() - start_time
-        logger.info(f"Generation complete in {duration:.2f}s")
-        logger.info(f"Stats: {self.counts}")
+                # 2. Transformation Layers (Depth)
+                prev_layer_fields = src_fields_layer
+                
+                # Intermediate Staging/Integration
+                for d_idx in range(self.depth):
+                    stg_db = self._create_node(EntityType.CONTAINER, f"STAGING_{s_key.upper()}_{d_idx}{chain_suffix}", parent_urn=snowflake.urn)
+                    next_layer_fields = []
+                    
+                    # Create datasets that consume from previous layer
+                    num_datasets = max(1, len(prev_layer_fields) // 10)
+                    for ds_idx in range(num_datasets):
+                        ds = self._create_node(EntityType.DATASET, f"TRANSFORMED_{s_key.upper()}_{d_idx}_{ds_idx}{chain_suffix}", parent_urn=stg_db.urn)
+                        for i in range(5):
+                            c = self._create_node(EntityType.SCHEMA_FIELD, f"field_{i}", parent_urn=ds.urn)
+                            next_layer_fields.append(c)
+                            
+                            # Randomly link to a few source fields from previous layer
+                            sources = random.sample(prev_layer_fields, min(3, len(prev_layer_fields)))
+                            for src in sources:
+                                self._create_lineage(src.urn, c.urn, f"dbt Tier {d_idx}")
+                    
+                    prev_layer_fields = next_layer_fields
+
+                # 3. Consumption Layer
+                tableau = self._create_node(EntityType.DATA_PLATFORM, f"Tableau_{s_key}{chain_suffix}", parent_urn=domain.urn)
+                for dash_name in config["consumption"]:
+                    dash = self._create_node(EntityType.DASHBOARD, f"{dash_name}{chain_suffix}", parent_urn=tableau.urn)
+                    chart = self._create_node(EntityType.CHART, f"{dash_name}_Summary_Chart", parent_urn=dash.urn)
+                    
+                    # Link chart to some final layer fields
+                    sample_sources = random.sample(prev_layer_fields, min(5, len(prev_layer_fields)))
+                    for src in sample_sources:
+                        self._create_lineage(src.urn, chart.urn, "Direct Query")
+
+        # 4. Pure Scale (Total Volume Filler)
+        current_node_count = len(self.nodes)
+        target_node_count = self.scale * 1000
+        if current_node_count < target_node_count:
+            logger.info(f"Filling scale gap: {current_node_count} -> {target_node_count}")
+            raw_plat = self._create_node(EntityType.DATA_PLATFORM, "Legacy_Archive")
+            remaining = target_node_count - current_node_count
+            num_containers = (remaining // 100) + 1
+            for ci in range(num_containers):
+                cont = self._create_node(EntityType.CONTAINER, f"Archive_DB_{ci}", parent_urn=raw_plat.urn)
+                for di in range(10):
+                    ds = self._create_node(EntityType.DATASET, f"Archive_Table_{ci}_{di}", parent_urn=cont.urn)
+                    for fi in range(10):
+                        self._create_node(EntityType.SCHEMA_FIELD, f"col_{fi}", parent_urn=ds.urn)
+
+        logger.info(f"Generation complete: {len(self.nodes)} nodes, {len(self.edges)} edges.")
 
 
-async def seed_falkordb(generator: SyntheticDataGenerator):
+async def seed_falkordb(generator: EnterpriseDataGenerator):
     from backend.app.providers.falkordb_provider import FalkorDBProvider
-    
     provider = FalkorDBProvider(
         host=os.getenv("FALKORDB_HOST", "localhost"),
         port=int(os.getenv("FALKORDB_PORT", "6379")),
         graph_name=os.getenv("FALKORDB_GRAPH_NAME", "nexus"),
     )
-    
     await provider._ensure_connected()
     
-    # Batch chunks
+    # Large scale push in chunks to avoid memory issues
+    CHUNK = 10000
     total_nodes = len(generator.nodes)
     total_edges = len(generator.edges)
     
-    logger.info(f"Pushing {total_nodes} nodes and {total_edges} edges to FalkorDB in batches of {BATCH_SIZE}...")
-    
-    # Push nodes
-    for i in range(0, total_nodes, BATCH_SIZE):
-        batch = generator.nodes[i : i + BATCH_SIZE]
-        try:
-            # We use save_custom_graph which handles both, but splitting them is fine 
-            # actually save_custom_graph does efficient UNWIND
-            await provider.save_custom_graph(batch, [])
-            if i % (BATCH_SIZE * 5) == 0:
-                logger.info(f"Pushed {i}/{total_nodes} nodes...")
-        except Exception as e:
-            logger.error(f"Failed to push node batch {i}: {e}")
+    logger.info(f"Pushing {total_nodes} nodes...")
+    for i in range(0, total_nodes, CHUNK):
+        batch = generator.nodes[i:i+CHUNK]
+        await provider.save_custom_graph(batch, [])
+        if i % (CHUNK*2) == 0: logger.info(f"  Progress: {i}/{total_nodes}")
 
-    # Push edges
-    for i in range(0, total_edges, BATCH_SIZE):
-        batch = generator.edges[i : i + BATCH_SIZE]
-        try:
-            await provider.save_custom_graph([], batch)
-            if i % (BATCH_SIZE * 5) == 0:
-                logger.info(f"Pushed {i}/{total_edges} edges...")
-        except Exception as e:
-            logger.error(f"Failed to push edge batch {i}: {e}")
+    logger.info(f"Pushing {total_edges} edges...")
+    for i in range(0, total_edges, CHUNK):
+        batch = generator.edges[i:i+CHUNK]
+        await provider.save_custom_graph([], batch)
+        if i % (CHUNK*2) == 0: logger.info(f"  Progress: {i}/{total_edges}")
 
-    # Ensure indices are created/updated
     await provider.ensure_indices()
-    
     logger.info("Seeding complete!")
 
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Seed FalkorDB with massive synthetic data")
-    parser.add_argument("--scale", type=int, default=1, help="Scale factor (1 = ~10k nodes)")
-    parser.add_argument("--density", type=float, default=0.05, help="Lineage density")
+    parser = argparse.ArgumentParser(description="Scalable Enterprise Seeding")
+    parser.add_argument("--scenarios", type=str, default="finance", help="Comma-separated scenarios (finance, hr, marketing, ecommerce, all)")
+    parser.add_argument("--scale", type=int, default=1, help="Scale factor (1 = ~1k nodes)")
+    parser.add_argument("--breadth", type=int, default=1, help="Parallel system factor")
+    parser.add_argument("--depth", type=int, default=1, help="Transformation depth")
     
     args = parser.parse_args()
     
-    gen = SyntheticDataGenerator(scale_factor=args.scale, density=args.density)
+    scenario_list = args.scenarios.split(",")
+    if "all" in scenario_list:
+        scenario_list = list(SCENARIOS.keys())
+    
+    gen = EnterpriseDataGenerator(scenarios=scenario_list, scale=args.scale, breadth=args.breadth, depth=args.depth)
     gen.generate()
     
     try:
         asyncio.run(seed_falkordb(gen))
     except KeyboardInterrupt:
-        logger.warn("Seeding interrupted.")
+        logger.warning("Interrupted.")
     except Exception as e:
-        logger.error(f"Seeding failed: {e}")
+        logger.error(f"Failed: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)

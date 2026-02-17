@@ -255,22 +255,37 @@ class FalkorDBProvider(GraphDataProvider):
         limit = query.limit or 100
         params["skip"] = offset
         params["limit"] = limit
-        clauses.append("RETURN n SKIP $skip LIMIT $limit")
+        
+        # Determine containment relationships to count children
+        containment = list(self._get_containment_edge_types())
+        containment_rel_types = "|".join([_sanitize_label(t) for t in containment]) if containment else "CONTAINS"
+        
+        # Dynamic Child Count Calculation
+        # OPTIONAL MATCH (n)-[:CONTAINS]->(c) RETURN n, count(c)
+        # We need to inject this into the return statement or use a subquery approach if supported
+        # FalkorDB 2.x supports subqueries or we can just do OPTIONAL MATCH in the main query
+        
+        # Modified Query Construction
+        # Original: MATCH (n) ... RETURN n
+        # New: MATCH (n) ... OPTIONAL MATCH (n)-[:...]->(child) RETURN n, count(child)
+        
+        clauses.append(f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)")
+        clauses.append("RETURN n, count(child) as childCount SKIP $skip LIMIT $limit")
 
         cypher = " ".join(clauses)
 
         try:
             result = await self._graph.ro_query(cypher, params=params)
         except Exception as e:
-            logger.warning(f"get_nodes query failed, falling back to simpler query: {e}")
-            result = await self._graph.ro_query(
-                "MATCH (n) RETURN n SKIP $skip LIMIT $limit",
-                params={"skip": offset, "limit": limit * 2},
-            )
+            logger.warning(f"get_nodes query failed: {e}")
+            # Fallback to simpler query without count if complex one fails
+            # But we really need the count for UI to work...
+            return []
 
         nodes = []
         for row in (result.result_set or []):
-            n = self._extract_node_from_result(row)
+            n = self._extract_node_from_result(row[0])
+            child_count = row[1]
             if n:
                 if query.property_filters and not self._match_property_filters(n, query.property_filters):
                     continue
@@ -278,6 +293,13 @@ class FalkorDBProvider(GraphDataProvider):
                     continue
                 if query.name_filter and not self._match_text_filter(n.display_name, query.name_filter):
                     continue
+                
+                # Apply dynamic child count
+                if child_count is not None:
+                    n.child_count = int(child_count)
+                    if n.properties:
+                        n.properties['childCount'] = int(child_count)
+                        
                 nodes.append(n)
                 if len(nodes) >= limit:
                     break
@@ -399,17 +421,35 @@ class FalkorDBProvider(GraphDataProvider):
 
         if len(rel_list) == 1:
             rel = _sanitize_label(rel_list[0])
-            cypher = f"MATCH (p)-[r:{rel}]->(c) WHERE p.urn = $parent RETURN c SKIP $skip LIMIT $lim"
-            params: Dict[str, Any] = {"parent": parent_urn, "skip": offset, "lim": limit}
+            cypher = (
+                f"MATCH (p)-[r:{rel}]->(c) "
+                f"WHERE p.urn = $parent "
+                f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
+                f"RETURN c, count(gc) as childCount SKIP $skip LIMIT $lim"
+            )
+            params: Dict[str, Any] = {"parent": parent_urn, "skip": offset, "lim": limit, "relTypes": rel_list}
         else:
-            cypher = "MATCH (p)-[r]->(c) WHERE p.urn = $parent AND type(r) IN $relTypes RETURN c SKIP $skip LIMIT $lim"
+            cypher = (
+                f"MATCH (p)-[r]->(c) "
+                f"WHERE p.urn = $parent AND type(r) IN $relTypes "
+                f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
+                f"RETURN c, count(gc) as childCount SKIP $skip LIMIT $lim"
+            )
             params = {"parent": parent_urn, "relTypes": rel_list, "skip": offset, "lim": limit}
 
         result = await self._graph.ro_query(cypher, params=params)
         nodes = []
         for row in (result.result_set or []):
-            n = self._extract_node_from_result(row)
+            # Extract node and childCount
+            n = self._extract_node_from_result(row[0])
+            child_count = row[1]
             if n and (not entity_types or n.entity_type in entity_types):
+                # Valid dynamic child count overrides static property if present, or fills gap
+                if child_count is not None:
+                    n.child_count = int(child_count)
+                    # Also update properties so it serializes correctly if needed (though Pydantic model uses field)
+                    if n.properties:
+                        n.properties['childCount'] = int(child_count)
                 nodes.append(n)
         nodes.sort(key=lambda x: x.display_name)
         return nodes
