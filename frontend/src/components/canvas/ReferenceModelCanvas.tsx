@@ -474,34 +474,38 @@ export function ReferenceModelCanvas({
 
     const fetchDebounced = setTimeout(() => {
       const currentVisibleList = getVisibleContainerUrns()
-      const currentVisibleSet = new Set(currentVisibleList)
       const prevVisibleSet = prevVisibleUrnsRef.current || new Set()
 
       // Limit to avoid massive queries, though backend is optimized now
       if (currentVisibleList.length > 500) return
 
-      // Calculate Delta or Refresh
-      const newlyVisible = currentVisibleList.filter(urn => !prevVisibleSet.has(urn))
+      // UX Improvement: Filter out expanded nodes from aggregation
+      // If a node is expanded, we want to show edges for its *children*, not the parent itself.
+      // So we exclude expanded nodes from the "aggregation input".
+      const urnToIdMap = new Map(nodes.map(n => [(n.data?.urn as string) || n.id, n.id]))
 
-      // If we have new nodes, or if it's the first load, we should fetch.
-      // Optimization: Just fetch for ALL visible to ALL visible.
-      // The backend "Unwind" strategy is fast enough to handle this "clique" check 
-      // for 50-100 nodes easily.
-      // If the delta is small, maybe we could optimize, but "Refresh View" is safer 
-      // to ensure all connections are shown.
+      const aggregationTargets = currentVisibleList.filter(urn => {
+        const nodeId = urnToIdMap.get(urn)
+        // If node is expanded, exclude it so we see its children's edges instead
+        return nodeId && !expandedNodes.has(nodeId)
+      })
 
-      const shouldRefetch = newlyVisible.length > 0 || prevVisibleSet.size === 0
+      // Calculate Delta or Refresh based on the *filtered* list
+      // actually, we should just fetch for the filtered list.
+      // The "newly visible" check is optimization, but with the filtering logic changing dynamically
+      // (as user expands/collapses), we might just want to refetch for the current set.
+      // Since "expandedNodes" changing will trigger getVisibleContainerUrns -> trigger this effect.
 
-      if (shouldRefetch) {
-        // Flatten lookup: Fetch edges where Source is Visible AND Target is Visible
-        fetchAggregated(currentVisibleList, currentVisibleList)
+      // We use aggregationTargets for both source and target to find edges WITHIN the visible set (clique)
+      if (aggregationTargets.length > 0) {
+        fetchAggregated(aggregationTargets, aggregationTargets)
       }
 
-      prevVisibleUrnsRef.current = currentVisibleSet
+      prevVisibleUrnsRef.current = new Set(currentVisibleList)
     }, 300) // 300ms debounce
 
     return () => clearTimeout(fetchDebounced)
-  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes.length])
+  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes, expandedNodes])
 
   // Build layer assignment rules
   const layerRules = useMemo<LayerAssignmentRule[]>(() => {
