@@ -100,8 +100,8 @@ export function useOntologyMetadata(): UseOntologyMetadataResult {
             cachePromise = null
             // Set default fallback metadata — only used when backend is unreachable
             const fallbackMetadata: OntologyMetadata = {
-                containmentEdgeTypes: ['CONTAINS', 'BELONGS_TO'],
-                lineageEdgeTypes: ['TRANSFORMS', 'PRODUCES', 'CONSUMES', 'RELATED_TO'],
+                containmentEdgeTypes: ['CONTAINS', 'BELONGS_TO', 'PRODUCES'],
+                lineageEdgeTypes: ['TRANSFORMS', 'CONSUMES', 'RELATED_TO'],
                 edgeTypeMetadata: {},
                 entityTypeHierarchy: {},
                 rootEntityTypes: []

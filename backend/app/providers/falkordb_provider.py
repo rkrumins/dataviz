@@ -112,6 +112,9 @@ class FalkorDBProvider(GraphDataProvider):
             self._db = FalkorDB(connection_pool=self._pool)
             self._graph = self._db.select_graph(self._graph_name)
 
+            # Ensure indices exist
+            await self.ensure_indices()
+
             # Optional lazy seed
             if self._seed_file:
                 count_result = await self._graph.ro_query(
@@ -146,6 +149,28 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception as e:
             logger.error(f"Seed failed: {e}")
 
+    async def ensure_indices(self):
+        """Create indices for standard node labels and properties."""
+        labels = [
+            EntityType.DOMAIN.value,
+            EntityType.DATA_PLATFORM.value,
+            EntityType.CONTAINER.value,
+            EntityType.DATASET.value,
+            EntityType.SCHEMA_FIELD.value
+        ]
+        properties = ["urn", "displayName", "qualifiedName"]
+        
+        for label in labels:
+            for prop in properties:
+                try:
+                    # CREATE INDEX FOR (n:Label) ON (n.property)
+                    # Using query instead of ro_query as it's a schema change
+                    await self._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
+                except Exception as e:
+                    # If index already exists, FalkorDB 2.x+ might throw or just be silent.
+                    # We catch all and continue.
+                    pass
+
     @property
     def name(self) -> str:
         return "FalkorDBProvider"
@@ -154,7 +179,8 @@ class FalkorDBProvider(GraphDataProvider):
         config = os.getenv("CONTAINMENT_EDGE_TYPES", "").strip()
         if config:
             return {t.strip().upper() for t in config.split(",") if t.strip()}
-        return {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value}
+        # Include PRODUCES by default as requested
+        return {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value, EdgeType.PRODUCES.value}
 
     def _extract_node_from_result(self, row) -> Optional[GraphNode]:
         """Extract GraphNode from a FalkorDB result row (Node or dict of properties)."""
@@ -525,6 +551,7 @@ class FalkorDBProvider(GraphDataProvider):
             hasMore=False,
         )
 
+
     async def materialize_lineage_for_edge(
         self,
         source_urn: str,
@@ -550,6 +577,8 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         
         containment = list(self._get_containment_edge_types())
+        # Format for Cypher: :TYPE1|TYPE2|...
+        containment_cypher = "|".join(containment)
         
         # Cypher Logic:
         # 1. Match source leaf and its ancestors 
@@ -565,8 +594,8 @@ class FalkorDBProvider(GraphDataProvider):
             "MATCH (s_leaf {urn: $sourceUrn}) "
             "MATCH (t_leaf {urn: $targetUrn}) "
             # Find ancestors (0..5 hops up). 0 means the node itself (if it's a Table matching a Table).
-            "MATCH (s_anc)-[:CONTAINS*0..5]->(s_leaf) "
-            "MATCH (t_anc)-[:CONTAINS*0..5]->(t_leaf) "
+            f"MATCH (s_anc)-[:{containment_cypher}*0..5]->(s_leaf) "
+            f"MATCH (t_anc)-[:{containment_cypher}*0..5]->(t_leaf) "
             # Filter: structural entities (containers/roots) + Match Levels
             "WHERE s_anc.urn <> t_anc.urn "  # No self-loops (internal lineage)
             # Ensure we are linking equivalent types (Table to Table, DB to DB)
@@ -604,58 +633,76 @@ class FalkorDBProvider(GraphDataProvider):
         lineage_edges: List[str],
     ) -> AggregatedEdgeResult:
         """
-        Optimized Read Path:
-        Reads directly from 'AGGREGATED' edges.
+        Optimized On-The-Fly Aggregation:
+        Instead of reading from 'AGGREGATED' edges (which might be missing or stale),
+        we compute the rollup dynamically by traversing the containment hierarchy.
+        
+        This handles the "Mega-Payload Wall" by letting the database do the heavy lifting.
         """
         await self._ensure_connected()
 
-        # If we have AGGREGATED edges, we don't need deep traversal!
-        # We just look for AGGREGATED edges connected to the requested source_urns.
+        # Sanitize edge types for inclusion in Cypher string if needed, 
+        # but here we pass them as parameters which is safer.
         
-        # Case 1: Source URNs are the containers themselves (e.g. Tables).
-        # We just pull the edges.
+        # Cypher Strategy:
+        # 1. Start from $sourceUrns.
+        # 2. Traverse DOWN containment to all descendant leaves.
+        # 3. Traverse ACROSS lineage edges to target leaves.
+        # 4. Traverse UP containment to find ancestors that match $targetUrns.
         
-        query_params = {
-            "sourceUrns": source_urns
-        }
+        # Note: We use *0..5 for containment traversal to handle multi-level hierarchies 
+        # (Platform -> DB -> Table -> Column).
         
-        # We assume the requested 'granularity' matches the source_urns provided.
-        # (e.g. frontend asks for Table-level lineage and provides Table URNs).
+        # Advanced Cypher Strategy:
+        # We need to leverage indices, but we don't know the labels of all URNs.
+        # We use a trick: MATCH (n) WHERE n.urn IN $sourceUrns is usually okay,
+        # but in FalkorDB, label-specific indices are much stronger.
+        
+        # We'll use a slightly safer but still generic MATCH, 
+        # but ensure the WHERE clause is efficient.
         
         cypher = (
-            "MATCH (s)-[r:AGGREGATED]->(t) "
-            "WHERE s.urn IN $sourceUrns "
+            "MATCH (s_parent) "
+            "WHERE s_parent.urn IN $sourceUrns "
+            "MATCH (s_parent)-[:CONTAINS*0..5]->(leaf_s) "
+            "MATCH (leaf_s)-[r]->(leaf_t) "
+            "WHERE type(r) IN $lineageEdges "
+            "MATCH (t_parent)-[:CONTAINS*0..5]->(leaf_t) "
+            "WHERE t_parent.urn IN $targetUrns "
+            "AND s_parent.urn <> t_parent.urn "
+            "RETURN s_parent.urn, t_parent.urn, count(r), collect(DISTINCT type(r))"
         )
         
-        if target_urns:
-            query_params["targetUrns"] = target_urns
-            cypher += "AND t.urn IN $targetUrns "
-            
-        cypher += (
-            "RETURN s.urn, t.urn, r.weight, r.sourceEdgeTypes, r.properties "
-        )
-        
-        # print(f"DEBUG READ AGG: {cypher} params={query_params}")
-        
-        result = await self._graph.ro_query(cypher, params=query_params)
+        params = {
+            "sourceUrns": source_urns,
+            "targetUrns": target_urns if target_urns else [],
+            "lineageEdges": lineage_edges
+        }
+
+        try:
+            result = await self._graph.ro_query(cypher, params=params)
+        except Exception as e:
+            logger.error(f"On-the-fly aggregation failed: {e}")
+            # Fallback to minimal result or empty
+            return AggregatedEdgeResult(aggregatedEdges=[], totalSourceEdges=0)
         
         aggregated = []
         total_edges = 0
         
         for row in (result.result_set or []):
-            s_urn, t_urn, weight, types, props = row[0], row[1], row[2], row[3], row[4]
+            s_urn, t_urn, weight, types = row[0], row[1], row[2], row[3]
             
             agg_entry = AggregatedEdgeInfo(
                 id=f"agg-{s_urn}-{t_urn}",
                 sourceUrn=s_urn,
                 targetUrn=t_urn,
-                edgeCount=int(weight) if weight else 1,
+                edgeCount=int(weight),
                 edgeTypes=types if isinstance(types, list) else [str(types)],
-                confidence=1.0, # Pre-calculated is high confidence
-                sourceEdgeIds=[] 
+                confidence=1.0, 
+                sourceEdgeIds=[] # We don't fetch IDs for performance on large payloads
             )
             aggregated.append(agg_entry)
-            total_edges += int(weight) if weight else 1
+            total_edges += int(weight)
             
         return AggregatedEdgeResult(
             aggregatedEdges=aggregated,
@@ -886,26 +933,30 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def get_stats(self) -> Dict[str, Any]:
         await self._ensure_connected()
-        nr = await self._graph.ro_query("MATCH (n) RETURN count(n) AS c")
-        er = await self._graph.ro_query("MATCH ()-[r]->() RETURN count(r) AS c")
-        node_count = nr.result_set[0][0] if nr.result_set else 0
-        edge_count = er.result_set[0][0] if er.result_set else 0
-
+        
+        # Optimize: Combine node counting with type aggregation
         type_res = await self._graph.ro_query(
             "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c"
         )
         entity_type_counts = {}
+        node_count = 0
         for row in (type_res.result_set or []):
             lbl = row[0] or "unknown"
-            entity_type_counts[lbl] = row[1]
+            cnt = row[1]
+            entity_type_counts[lbl] = cnt
+            node_count += cnt
 
+        # Optimize: Combine edge counting with type aggregation
         edge_type_res = await self._graph.ro_query(
             "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"
         )
         edge_type_counts = {}
+        edge_count = 0
         for row in (edge_type_res.result_set or []):
             t = row[0] or "UNKNOWN"
-            edge_type_counts[t] = row[1]
+            cnt = row[1]
+            edge_type_counts[t] = cnt
+            edge_count += cnt
 
         return {
             "nodeCount": node_count,
@@ -916,48 +967,68 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def get_schema_stats(self) -> GraphSchemaStats:
         await self._ensure_connected()
-        nr = await self._graph.ro_query("MATCH (n) RETURN count(n) AS c")
-        er = await self._graph.ro_query("MATCH ()-[r]->() RETURN count(r) AS c")
-        total_nodes = nr.result_set[0][0] if nr.result_set else 0
-        total_edges = er.result_set[0][0] if er.result_set else 0
-
+        
+        # Optimize: Get totals from breakdown instead of separate scans
         type_res = await self._graph.ro_query(
-            "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c, collect(n.displayName) AS samples"
+            "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c"
         )
+        
         entity_stats = []
+        total_nodes = 0
+        
         for row in (type_res.result_set or []):
-            lbl, cnt, samples = row[0] or "unknown", row[1], (row[2] if len(row) > 2 else [])
-            if isinstance(samples, str):
-                samples = [samples]
-            sample_list = (list(samples)[:3] if hasattr(samples, "__iter__") and not isinstance(samples, str) else []) or []
-            entity_stats.append(EntityTypeSummary(id=lbl, name=lbl, count=cnt, sampleNames=sample_list))
+            lbl = row[0] or "unknown"
+            cnt = row[1]
+            total_nodes += cnt
+            
+            # Optimization: Fetch samples in a separate lightweight query 
+            # instead of aggregation over all nodes in the heavy query
+            try:
+                # Sanitize label for query injection
+                safe_lbl = _sanitize_label(lbl)
+                sample_res = await self._graph.ro_query(
+                    f"MATCH (n:{safe_lbl}) RETURN n.displayName LIMIT 3"
+                )
+                samples = [r[0] for r in (sample_res.result_set or []) if r[0]]
+            except Exception:
+                samples = []
+                
+            entity_stats.append(EntityTypeSummary(id=lbl, name=lbl, count=cnt, sampleNames=samples))
 
         edge_type_res = await self._graph.ro_query(
             "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"
         )
-        edge_stats = [
-            EdgeTypeSummary(id=row[0], name=row[0], count=row[1])
-            for row in (edge_type_res.result_set or [])
-        ]
+        edge_stats = []
+        total_edges = 0
+        
+        for row in (edge_type_res.result_set or []):
+            t = row[0] or "UNKNOWN"
+            cnt = row[1]
+            edge_stats.append(EdgeTypeSummary(id=t, name=t, count=cnt))
+            total_edges += cnt
 
-        tag_res = await self._graph.ro_query(
-            "MATCH (n) WHERE n.tags IS NOT NULL AND n.tags <> '[]' RETURN n.tags"
-        )
-        tag_counts: Dict[str, int] = {}
-        tag_types: Dict[str, Set[str]] = {}
-        for row in (tag_res.result_set or []):
-            tags_raw = row[0]
-            try:
-                tags = json.loads(tags_raw) if isinstance(tags_raw, str) else (tags_raw or [])
-            except Exception:
-                continue
-            for tag in tags:
-                tag_counts[tag] = tag_counts.get(tag, 0) + 1
-                if tag not in tag_types:
-                    tag_types[tag] = set()
-                # Get node type from a sample - simplified
-                tag_types[tag].add("entity")
-        tag_stats = [TagSummary(tag=t, count=c, entityTypes=list(tag_types.get(t, {"entity"}))) for t, c in tag_counts.items()]
+        # Tag stats - kept as is for now, but ensured safe execution
+        try:
+            tag_res = await self._graph.ro_query(
+                "MATCH (n) WHERE n.tags IS NOT NULL AND n.tags <> '[]' RETURN n.tags"
+            )
+            tag_counts: Dict[str, int] = {}
+            tag_types: Dict[str, Set[str]] = {}
+            for row in (tag_res.result_set or []):
+                tags_raw = row[0]
+                try:
+                    tags = json.loads(tags_raw) if isinstance(tags_raw, str) else (tags_raw or [])
+                except Exception:
+                    continue
+                for tag in tags:
+                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
+                    if tag not in tag_types:
+                        tag_types[tag] = set()
+                    tag_types[tag].add("entity")
+            tag_stats = [TagSummary(tag=t, count=c, entityTypes=list(tag_types.get(t, {"entity"}))) for t, c in tag_counts.items()]
+        except Exception as e:
+            logger.warning(f"Failed to fetch tag stats: {e}")
+            tag_stats = []
 
         return GraphSchemaStats(
             totalNodes=total_nodes,
@@ -968,30 +1039,41 @@ class FalkorDBProvider(GraphDataProvider):
         )
 
     async def get_ontology_metadata(self) -> OntologyMetadata:
+        """
+        Build ontology metadata including containment and lineage roles.
+        Optimized to use Cypher aggregations instead of full scans.
+        """
+        await self._ensure_connected()
+        
         containment = list(self._get_containment_edge_types())
+        containment_upper = {t.upper() for t in containment}
+        
+        # 1. Determine Lineage Types
+        # Instead of fetching all edges, we query distinct types
+        type_res = await self._graph.ro_query("MATCH ()-[r]->() RETURN DISTINCT type(r)")
+        all_types = [row[0] for row in (type_res.result_set or [])]
+        
         config_lineage = os.getenv("LINEAGE_EDGE_TYPES", "").strip()
         if config_lineage:
             lineage_types = [t.strip() for t in config_lineage.split(",") if t.strip()]
         else:
+            # Infer lineage: anything not containment, not metadata, and not AGGREGATED
             config_metadata = os.getenv("METADATA_EDGE_TYPES", "").strip()
             metadata_types = {t.strip().upper() for t in config_metadata.split(",") if t.strip()} if config_metadata else {EdgeType.TAGGED_WITH.value}
-            containment_upper = {t.upper() for t in containment}
+            
             lineage_types = []
-            edges = await self.get_edges(EdgeQuery(limit=100000))
-            seen = set()
-            for e in edges:
-                et = e.edge_type.value if hasattr(e.edge_type, "value") else str(e.edge_type)
-                if et.upper() not in containment_upper and et.upper() not in metadata_types and et.upper() != EdgeType.AGGREGATED.value and et not in seen:
-                    lineage_types.append(et)
-                    seen.add(et)
+            for t in all_types:
+                if t.upper() not in containment_upper and t.upper() not in metadata_types and t.upper() != EdgeType.AGGREGATED.value:
+                    lineage_types.append(t)
 
-        containment_upper = {t.upper() for t in containment}
         lineage_upper = {t.upper() for t in lineage_types}
+        
+        # 2. Build Edge Metadata
         edge_type_metadata: Dict[str, EdgeTypeMetadata] = {}
-        all_edge_types = set(containment) | set(lineage_types) | {EdgeType.TAGGED_WITH.value}
-        for et in all_edge_types:
+        for et in all_types:
             is_containment = et.upper() in containment_upper
             is_lineage = et.upper() in lineage_upper
+            
             if is_containment:
                 category = "structural"
                 direction = "child-to-parent" if et.upper() == EdgeType.BELONGS_TO.value else "parent-to-child"
@@ -1004,6 +1086,7 @@ class FalkorDBProvider(GraphDataProvider):
             else:
                 category = "association"
                 direction = "bidirectional"
+                
             edge_type_metadata[et] = EdgeTypeMetadata(
                 isContainment=is_containment,
                 isLineage=is_lineage,
@@ -1012,37 +1095,47 @@ class FalkorDBProvider(GraphDataProvider):
                 description=f"{category} relationship: {et}",
             )
 
+        # 3. Build Entity Hierarchy
+        # Query containment relationships directly
+        hierarchy_cypher = (
+            "MATCH (p)-[r]->(c) "
+            "WHERE type(r) IN $containment "
+            "RETURN labels(p)[0], labels(c)[0], type(r)"
+        )
+        hierarchy_res = await self._graph.ro_query(
+            hierarchy_cypher, 
+            params={"containment": containment}
+        )
+        
         entity_type_hierarchy: Dict[str, EntityTypeHierarchy] = {}
-        edges = await self.get_edges(EdgeQuery(limit=100000))
-        for e in edges:
-            et = e.edge_type.value if hasattr(e.edge_type, "value") else str(e.edge_type)
-            if et.upper() not in containment_upper:
-                continue
-            source_node = await self.get_node(e.source_urn)
-            target_node = await self.get_node(e.target_urn)
-            if not source_node or not target_node:
-                continue
-            st = source_node.entity_type.value if hasattr(source_node.entity_type, "value") else str(source_node.entity_type)
-            tt = target_node.entity_type.value if hasattr(target_node.entity_type, "value") else str(target_node.entity_type)
-            meta = edge_type_metadata.get(et)
+        found_parent_types = set()
+        found_child_types = set()
+        
+        for row in (hierarchy_res.result_set or []):
+            p_type, c_type, r_type = row[0], row[1], row[2]
+            if not p_type or not c_type: continue
+            
+            # Normalize for direction
+            meta = edge_type_metadata.get(r_type)
             if meta and meta.direction == "child-to-parent":
-                parent_type, child_type = tt, st
+                parent_t, child_t = c_type, p_type
             else:
-                parent_type, child_type = st, tt
-            if parent_type not in entity_type_hierarchy:
-                entity_type_hierarchy[parent_type] = EntityTypeHierarchy(canContain=[], canBeContainedBy=[])
-            if child_type not in entity_type_hierarchy:
-                entity_type_hierarchy[child_type] = EntityTypeHierarchy(canContain=[], canBeContainedBy=[])
-            if child_type not in entity_type_hierarchy[parent_type].can_contain:
-                entity_type_hierarchy[parent_type].can_contain.append(child_type)
-            if parent_type not in entity_type_hierarchy[child_type].can_be_contained_by:
-                entity_type_hierarchy[child_type].can_be_contained_by.append(parent_type)
+                parent_t, child_t = p_type, c_type
+                
+            if parent_t not in entity_type_hierarchy:
+                entity_type_hierarchy[parent_t] = EntityTypeHierarchy(canContain=[], canBeContainedBy=[])
+            if child_t not in entity_type_hierarchy:
+                entity_type_hierarchy[child_t] = EntityTypeHierarchy(canContain=[], canBeContainedBy=[])
+                
+            if child_t not in entity_type_hierarchy[parent_t].can_contain:
+                entity_type_hierarchy[parent_t].can_contain.append(child_t)
+            if parent_t not in entity_type_hierarchy[child_t].can_be_contained_by:
+                entity_type_hierarchy[child_t].can_be_contained_by.append(parent_t)
+                
+            found_parent_types.add(parent_t)
+            found_child_types.add(child_t)
 
-        all_hierarchy = set(entity_type_hierarchy.keys())
-        contained = set()
-        for hi in entity_type_hierarchy.values():
-            contained.update(hi.can_contain)
-        root_entity_types = list(all_hierarchy - contained)
+        root_entity_types = list(found_parent_types - found_child_types)
 
         return OntologyMetadata(
             containmentEdgeTypes=containment,

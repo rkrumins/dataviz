@@ -337,7 +337,7 @@ class MockGraphProvider(GraphDataProvider):
         if config_containment:
             return {t.strip().upper() for t in config_containment.split(',') if t.strip()}
         # Default fallback — only used when no ontology config is provided
-        return {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value}
+        return {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value, EdgeType.PRODUCES.value}
 
     async def _traverse(
         self, 

@@ -221,6 +221,9 @@ async def seed_falkordb(generator: SyntheticDataGenerator):
         except Exception as e:
             logger.error(f"Failed to push edge batch {i}: {e}")
 
+    # Ensure indices are created/updated
+    await provider.ensure_indices()
+    
     logger.info("Seeding complete!")
 
 
