@@ -32,7 +32,7 @@ import { EdgeLegend } from './EdgeLegend'
 import { TraceToolbar } from './TraceToolbar'
 import { useUnifiedTrace, useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
-import { useOntologyMetadata, isContainmentEdge, normalizeEdgeType } from '@/services/ontologyService'
+import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
 
 // UX-first interaction components
 import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
@@ -452,20 +452,53 @@ export function ReferenceModelCanvas({
     return { nodeMap: nMap, childMap: cMap, parentMap: pMap }
   }, [nodes, edges, containmentEdgeTypes])
 
-  // Fetch aggregated edges when visible nodes change
-  useEffect(() => {
-    if (showLineageFlow && nodes.length > 0) {
-      // Get top-level container URNs for aggregation
-      const containerUrns = nodes
-        .filter(n => !parentMap.has(n.id) || !expandedNodes.has(parentMap.get(n.id) || ''))
-        .map(n => (n.data?.urn as string) || n.id)
-        .filter(Boolean)
+  // Helper: Calculate currently visible top-level nodes (containers)
+  const getVisibleContainerUrns = useCallback(() => {
+    return nodes
+      .filter(n => {
+        const parentId = parentMap.get(n.id)
+        if (!parentId) return true // Root
+        return expandedNodes.has(parentId)
+      })
+      .map(n => (n.data?.urn as string) || n.id)
+      .filter(Boolean)
+  }, [nodes, parentMap, expandedNodes])
 
-      if (containerUrns.length > 0 && containerUrns.length < 500) {
-        fetchAggregated(containerUrns)
+  // Track previous visible nodes for delta updates
+  const prevVisibleUrnsRef = useRef<Set<string>>(new Set())
+
+  // Optimized Effect: Fetch aggregated edges only for NEWLY visible nodes
+  useEffect(() => {
+    if (!showLineageFlow || nodes.length === 0) return
+
+    const currentVisibleList = getVisibleContainerUrns()
+    const currentVisibleSet = new Set(currentVisibleList)
+    const prevVisibleSet = prevVisibleUrnsRef.current || new Set()
+
+    if (currentVisibleList.length > 500) return
+
+    // Calculate Delta
+    const newlyVisible = currentVisibleList.filter(urn => !prevVisibleSet.has(urn))
+    const stableVisible = currentVisibleList.filter(urn => prevVisibleSet.has(urn))
+
+    if (prevVisibleSet.size === 0 && newlyVisible.length > 0) {
+      // Initial: Fetch all-to-all
+      // Using fetchAggregated(source, target)
+      // If target is provided, we fetch edges BETWEEN source and target
+      fetchAggregated(newlyVisible, newlyVisible)
+    }
+    else if (newlyVisible.length > 0) {
+      // 1. Edges FROM new nodes TO (stable + new)
+      fetchAggregated(newlyVisible, currentVisibleList)
+
+      // 2. Edges FROM stable nodes TO new nodes
+      if (stableVisible.length > 0) {
+        fetchAggregated(stableVisible, newlyVisible)
       }
     }
-  }, [nodes.length, showLineageFlow, fetchAggregated, parentMap, expandedNodes])
+
+    prevVisibleUrnsRef.current = currentVisibleSet
+  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated /* stable */])
 
   // Build layer assignment rules
   const layerRules = useMemo<LayerAssignmentRule[]>(() => {
@@ -914,41 +947,32 @@ export function ReferenceModelCanvas({
 
   // Lineage Roll-up: Project edges to visible ancestors
   const visibleLineageEdges = useMemo(() => {
-    if (!showLineageFlow) return []
+    if (!showLineageFlow && !trace.isTracing) return []
 
     // 1. Build Ancestor Map: Physical URN -> Visible Node ID
+    // ONLY needed for granular edges (Trace) or if we have non-aggregated edges mixed in.
     const ancestorMap = new Map<string, string>()
 
+    // We only need to build this map if we have Regular (non-aggregated) edges to project
+    // OR if we want to validte aggregated edges against visible nodes (safety)
+
     // Helper to traverse and map
-    // currentVisibleAnchor: The ID of the node that 'node' should roll up to
     const processNode = (node: HierarchyNode, currentVisibleAnchor: string) => {
       // Map current node to the anchor
       if (node.urn) ancestorMap.set(node.urn, currentVisibleAnchor)
       ancestorMap.set(node.id, currentVisibleAnchor)
-
-      // Determine anchor for children
-      // Logic:
-      // 1. If I am the current anchor (i.e. I am visible)
-      // 2. AND I am expanded
-      // -> My children become their own anchors (initially)
-      // Else -> My children roll up to me (if I'm anchor) or whoever I rolled up to
 
       let childAnchor = currentVisibleAnchor
 
       // If I am the visible node, check if I allow my children to be seen
       if (node.id === currentVisibleAnchor) {
         if (expandedNodes.has(node.id)) {
-          // I am expanded. Children are revealed. 
-          // BUT we pass the child's ID as the NEW anchor in the recursion loop
-          // Special flag to indicate "Use Child ID"
-          childAnchor = 'USE_CHILD_ID'
+          childAnchor = 'USE_CHILD_ID' // Special flag
         } else {
-          // I am collapsed. Children roll up to me.
           childAnchor = node.id
         }
       }
 
-      // Recurse
       if (node.children) {
         node.children.forEach(child => {
           const nextAnchor = childAnchor === 'USE_CHILD_ID' ? child.id : childAnchor
@@ -957,67 +981,117 @@ export function ReferenceModelCanvas({
       }
     }
 
-    // Process all layers
+    // Always build map for consistency and to handle Trace edges
     nodesByLayer.forEach(roots => roots.forEach(root => {
-      // Roots are always initially visible anchors
       processNode(root, root.id)
     }))
 
-    // 1.5. Ensure all nodes in displayMap are at least mapped to themselves if visible
-    // This is a safety catch for any nodes that might have been missed by the root traversal
+    // Ensure all visible nodes map to themselves
     displayFlat.forEach(node => {
-      if (!ancestorMap.has(node.id)) {
-        ancestorMap.set(node.id, node.id)
-      }
-      if (node.urn && !ancestorMap.has(node.urn)) {
-        ancestorMap.set(node.urn, node.id)
-      }
+      if (!ancestorMap.has(node.id)) ancestorMap.set(node.id, node.id)
+      if (node.urn && !ancestorMap.has(node.urn)) ancestorMap.set(node.urn, node.id)
     })
 
     // 2. Project Edges
     const projected: any[] = []
-
-    // Group edges by their VISUAL source->target pair
-    // This allows us to assign an index to each edge for parallel routing
     const edgeGroups = new Map<string, any[]>()
 
-    lineageEdges.forEach(edge => {
-      // Resolve source/target to effective visible nodes
-      // If not in map, fallback to edge source (might be a node that isn't in hierarchy but is on canvas?)
-      // Actually strictly rely on map for consistency logic
-      const sourceId = ancestorMap.get(edge.source) || (displayMap.has(edge.source) ? edge.source : null)
-      const targetId = ancestorMap.get(edge.target) || (displayMap.has(edge.target) ? edge.target : null)
+    // Helper to add edge to group
+    const addEdgeToGroup = (sourceId: string, targetId: string, edge: any, type: string) => {
+      const groupKey = `${sourceId}->${targetId}`
+      if (!edgeGroups.has(groupKey)) edgeGroups.set(groupKey, [])
+      edgeGroups.get(groupKey)!.push({
+        ...edge,
+        source: sourceId,
+        target: targetId,
+        originalType: type
+      })
+    }
 
-      if (sourceId && targetId && sourceId !== targetId) {
-        // Trace Filtering: If trace is active, ONLY show edges relevant to the trace
-        if (trace.isTracing) {
-          // Show edges only between nodes in traceContextSet
-          if (!traceContextSet.has(sourceId) || !traceContextSet.has(targetId)) {
-            return
+    // Process Edges
+    // A. Aggregated Edges (Optimization: Skip lookup if possible, or fast lookup)
+    const aggEdgesRaw = Array.from(aggregatedEdges.values())
+      .filter(e => e.state === 'collapsed')
+
+    aggEdgesRaw.forEach(e => {
+      const agg = e.aggregated
+      // For Aggregated Edges, the backend guarantees they match the requested visible URNs.
+      // However, we verify they map to valid visible nodes to avoid dangling edges.
+      // Usually sourceUrn == visibleNodeId (or URN).
+
+      // Fast check: Is the source/target directly in displayMap (visible)?
+      let sId = displayMap.has(agg.sourceUrn) ? agg.sourceUrn : ancestorMap.get(agg.sourceUrn)
+      let tId = displayMap.has(agg.targetUrn) ? agg.targetUrn : ancestorMap.get(agg.targetUrn)
+
+      // Fallback for ID vs URN mismatch if map keys differ
+      if (!sId) sId = displayFlat.find(n => n.urn === agg.sourceUrn)?.id
+      if (!tId) tId = displayFlat.find(n => n.urn === agg.targetUrn)?.id
+
+      if (sId && tId && sId !== tId) {
+        // Create flow edge directly
+        addEdgeToGroup(sId, tId, {
+          id: agg.id,
+          data: {
+            edgeType: 'AGGREGATED',
+            relationship: 'aggregated',
+            isAggregated: true,
+            edgeCount: agg.edgeCount,
+            edgeTypes: agg.edgeTypes,
+            confidence: agg.confidence,
+            sourceEdgeIds: agg.sourceEdgeIds
           }
-        }
-
-        // Group edges
-        // Key for grouping visual connections
-        const groupKey = `${sourceId}->${targetId}`
-        if (!edgeGroups.has(groupKey)) edgeGroups.set(groupKey, [])
-        edgeGroups.get(groupKey)!.push({
-          ...edge,
-          source: sourceId,
-          target: targetId,
-          // Original edge type for distinction
-          originalType: normalizeEdgeType(edge)
-        })
+        }, 'AGGREGATED')
       }
     })
 
-    // Process groups to assign indices
+    // B. Regular / Trace Edges
+    // These require full ancestor projection
+    const regularEdges = edges.filter(edge => !isContainmentEdge(normalizeEdgeType(edge)))
+
+    regularEdges.forEach(edge => {
+      const sId = ancestorMap.get(edge.source) || (displayMap.has(edge.source) ? edge.source : null)
+      const tId = ancestorMap.get(edge.target) || (displayMap.has(edge.target) ? edge.target : null)
+
+      if (sId && tId && sId !== tId) {
+        if (trace.isTracing) {
+          if (!traceContextSet.has(sId) || !traceContextSet.has(tId)) return
+        }
+
+        addEdgeToGroup(sId, tId, {
+          ...edge,
+          data: edge.data || {}
+        }, normalizeEdgeType(edge))
+      }
+    })
+
+    // C. Expanded Detailed Edges from Aggregation
+    Array.from(aggregatedEdges.values())
+      .filter(e => e.state === 'expanded')
+      .flatMap(e => e.detailedEdges)
+      .forEach(edge => {
+        // These are real edges, need projection just in case, though they likely connect visible children
+        const sId = ancestorMap.get(edge.sourceUrn)
+        const tId = ancestorMap.get(edge.targetUrn)
+        if (sId && tId && sId !== tId) {
+          addEdgeToGroup(sId, tId, {
+            id: edge.id,
+            data: {
+              edgeType: edge.edgeType,
+              relationship: edge.edgeType,
+              confidence: edge.confidence
+            }
+          }, edge.edgeType)
+        }
+      })
+
+    // Finalize Groups
     edgeGroups.forEach((groupEdges, key) => {
-      // Deduplicate within group based on edge type
       const distinctTypes = new Map<string, any>()
       groupEdges.forEach(e => {
         const typeKey = e.originalType
-        if (!distinctTypes.has(typeKey)) {
+        if (!distinctTypes.has(typeKey) || e.data.isAggregated) {
+          // If aggregated, it takes precedence or we keep it. 
+          // Logic: keep one per type
           distinctTypes.set(typeKey, e)
         }
       })
@@ -1036,7 +1110,7 @@ export function ReferenceModelCanvas({
     })
 
     return projected
-  }, [lineageEdges, nodesByLayer, expandedNodes, displayMap, showLineageFlow, trace.isTracing, traceContextSet])
+  }, [lineageEdges, edges, aggregatedEdges, nodesByLayer, expandedNodes, displayFlat, displayMap, showLineageFlow, trace.isTracing, traceContextSet])
 
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-gradient-to-br from-canvas via-canvas to-canvas-elevated/30", className)}>
@@ -2246,9 +2320,10 @@ function LineageFlowOverlay({
           }
         } else {
           // Normal mode: color by edge type
-          color = edge.originalType === 'TRANSFORMS' ? '#3b82f6' :
-            edge.originalType === 'CONSUMES' ? '#22c55e' :
-              edge.originalType === 'PRODUCES' ? '#f59e0b' : '#3b82f6'
+          color = edge.originalType === 'AGGREGATED' ? '#8b5cf6' : // Purple for aggregated
+            edge.originalType === 'TRANSFORMS' ? '#3b82f6' :
+              edge.originalType === 'CONSUMES' ? '#22c55e' :
+                edge.originalType === 'PRODUCES' ? '#f59e0b' : '#3b82f6'
         }
 
         newPaths.push(

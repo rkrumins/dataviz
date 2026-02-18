@@ -106,6 +106,21 @@ class GraphDataProvider(ABC):
         pass
     
     @abstractmethod
+    async def get_aggregated_edges_between(
+        self,
+        source_urns: List[str],
+        target_urns: Optional[List[str]],
+        granularity: Any,  # Avoid circular import, usually Granularity Enum
+        containment_edges: List[str],
+        lineage_edges: List[str],
+    ) -> Any:  # Returns AggregatedEdgeResult
+        """
+        Get aggregated edges between sets of nodes.
+        Used for scalable lazy loading.
+        """
+        pass
+
+    @abstractmethod
     async def get_trace_lineage(
         self,
         urn: str,

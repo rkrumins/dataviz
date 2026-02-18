@@ -14,7 +14,8 @@ from ..models.graph import (
     LineageResult, EntityType, EdgeType, GraphSchemaStats,
     PropertyFilter, TagFilter, TextFilter, FilterOperator,
     EntityTypeSummary, EdgeTypeSummary, TagSummary,
-    OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy
+    OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy,
+    AggregatedEdgeResult, AggregatedEdgeInfo
 )
 from .base import GraphDataProvider
 
@@ -522,6 +523,143 @@ class FalkorDBProvider(GraphDataProvider):
             downstreamUrns=down,
             totalCount=len(nodes),
             hasMore=False,
+        )
+
+    async def materialize_lineage_for_edge(
+        self,
+        source_urn: str,
+        target_urn: str,
+        lineage_edge_type: str
+    ) -> bool:
+        """
+        Write Path Aggregation:
+        When a granular edge (source)->(target) is created, we "rollup" this connection
+        to all matching structural ancestors.
+        
+        Logic:
+        1. Find all ancestors of Source (s_anc).
+        2. Find all ancestors of Target (t_anc).
+        3. Match ancestors that are at the SAME LEVEL (e.g. Table-Table, Domain-Domain).
+           (We infer level equivalence by EntityType or Label).
+        4. MERGE (s_anc)-[:AGGREGATED]->(t_anc).
+        5. Increment weight.
+        
+        Optimization:
+        We perform this in a SINGLE Cypher query for atomicity and speed.
+        """
+        await self._ensure_connected()
+        
+        containment = list(self._get_containment_edge_types())
+        
+        # Cypher Logic:
+        # 1. Match source leaf and its ancestors 
+        # 2. Match target leaf and its ancestors
+        # 3. Filter for pairs where labels(s_anc) == labels(t_anc) (Horizontal Aggregation)
+        #    OR specific EntityType matching if labels are messy.
+        #    Simpler: We just blindly agg between all ancestors and let the "Same Level" check happen via logic or just agg everything? 
+        #    User requirement: "Match Equivalent Tiers".
+        #    We can check "WHERE s_anc.entityType = t_anc.entityType".
+        # 4. EXCLUDE self-loops (s_anc <> t_anc).
+        
+        cypher = (
+            "MATCH (s_leaf {urn: $sourceUrn}) "
+            "MATCH (t_leaf {urn: $targetUrn}) "
+            # Find ancestors (0..5 hops up). 0 means the node itself (if it's a Table matching a Table).
+            "MATCH (s_anc)-[:CONTAINS*0..5]->(s_leaf) "
+            "MATCH (t_anc)-[:CONTAINS*0..5]->(t_leaf) "
+            # Filter: structural entities (containers/roots) + Match Levels
+            "WHERE s_anc.urn <> t_anc.urn "  # No self-loops (internal lineage)
+            # Ensure we are linking equivalent types (Table to Table, DB to DB)
+            # Use labels comparison as entityType property might be missing
+            "AND labels(s_anc) = labels(t_anc) " 
+            # Create/Merge the Aggregated Edge
+            "MERGE (s_anc)-[r:AGGREGATED {targetUrn: t_anc.urn}]->(t_anc) "
+            "ON CREATE SET r.weight = 1, r.sourceEdgeTypes = [$edgeType], r.latestUpdate = timestamp() "
+            "ON MATCH SET r.weight = r.weight + 1, "
+            # Append edgeType if not present? (Set logic simulation)
+            "r.sourceEdgeTypes = CASE WHEN NOT $edgeType IN r.sourceEdgeTypes THEN r.sourceEdgeTypes + $edgeType ELSE r.sourceEdgeTypes END, "
+            "r.latestUpdate = timestamp() "
+            "RETURN count(r)"
+        )
+        
+        params = {
+            "sourceUrn": source_urn,
+            "targetUrn": target_urn,
+            "edgeType": lineage_edge_type
+        }
+        
+        try:
+            await self._graph.query(cypher, params=params)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to materialize lineage: {e}")
+            return False
+
+    async def get_aggregated_edges_between(
+        self,
+        source_urns: List[str],
+        target_urns: Optional[List[str]],
+        granularity: Any,
+        containment_edges: List[str],
+        lineage_edges: List[str],
+    ) -> AggregatedEdgeResult:
+        """
+        Optimized Read Path:
+        Reads directly from 'AGGREGATED' edges.
+        """
+        await self._ensure_connected()
+
+        # If we have AGGREGATED edges, we don't need deep traversal!
+        # We just look for AGGREGATED edges connected to the requested source_urns.
+        
+        # Case 1: Source URNs are the containers themselves (e.g. Tables).
+        # We just pull the edges.
+        
+        query_params = {
+            "sourceUrns": source_urns
+        }
+        
+        # We assume the requested 'granularity' matches the source_urns provided.
+        # (e.g. frontend asks for Table-level lineage and provides Table URNs).
+        
+        cypher = (
+            "MATCH (s)-[r:AGGREGATED]->(t) "
+            "WHERE s.urn IN $sourceUrns "
+        )
+        
+        if target_urns:
+            query_params["targetUrns"] = target_urns
+            cypher += "AND t.urn IN $targetUrns "
+            
+        cypher += (
+            "RETURN s.urn, t.urn, r.weight, r.sourceEdgeTypes, r.properties "
+        )
+        
+        # print(f"DEBUG READ AGG: {cypher} params={query_params}")
+        
+        result = await self._graph.ro_query(cypher, params=query_params)
+        
+        aggregated = []
+        total_edges = 0
+        
+        for row in (result.result_set or []):
+            s_urn, t_urn, weight, types, props = row[0], row[1], row[2], row[3], row[4]
+            
+            agg_entry = AggregatedEdgeInfo(
+                id=f"agg-{s_urn}-{t_urn}",
+                sourceUrn=s_urn,
+                targetUrn=t_urn,
+                edgeCount=int(weight) if weight else 1,
+                edgeTypes=types if isinstance(types, list) else [str(types)],
+                confidence=1.0, # Pre-calculated is high confidence
+                sourceEdgeIds=[] 
+            )
+            aggregated.append(agg_entry)
+            total_edges += int(weight) if weight else 1
+            
+        return AggregatedEdgeResult(
+            aggregatedEdges=aggregated,
+            totalSourceEdges=total_edges
         )
 
     async def get_trace_lineage(

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 def _create_provider() -> GraphDataProvider:
     """Create graph provider based on GRAPH_PROVIDER env var."""
-    provider_name = os.getenv("GRAPH_PROVIDER", "mock").lower()
+    provider_name = os.getenv("GRAPH_PROVIDER", "falkordb").lower()
     if provider_name == "falkordb":
         from ..providers.falkordb_provider import FalkorDBProvider
         return FalkorDBProvider(
@@ -666,86 +666,34 @@ class ContextEngine:
     async def get_aggregated_edges(self, request: AggregatedEdgeRequest) -> AggregatedEdgeResult:
         """
         Get aggregated edges between containers at a specified granularity.
-        This enables progressive edge disclosure in the UI.
+        Delegates to provider for optimized Cypher execution.
         """
-        # Fetch all edges involving the source URNs
-        all_source_urns = request.source_urns
-        
-        # Get edges where these URNs are sources or targets
-        edges = await self.provider.get_edges(EdgeQuery(anyUrns=all_source_urns))
-        
-        # If target URNs specified, filter to only edges connecting to those targets
-        if request.target_urns:
-            target_set = set(request.target_urns)
-            edges = [e for e in edges if e.target_urn in target_set or e.source_urn in target_set]
-        
-        # Filter by edge types if specified
-        if request.include_edge_types:
-            type_set = {t.value for t in request.include_edge_types}
-            edges = [e for e in edges if e.edge_type.value in type_set]
-        
-        # Get all nodes involved to build containment map
-        all_urns = set()
-        for e in edges:
-            all_urns.add(e.source_urn)
-            all_urns.add(e.target_urn)
-        
-        nodes = await self.provider.get_nodes(NodeQuery(urns=list(all_urns)))
+        # Load ontology metadata for edge classification
         ontology = await self.provider.get_ontology_metadata()
-        containment_types = {t.upper() for t in ontology.containment_edge_types}
-        containment_map = self._build_containment_map(nodes, edges, containment_types)
         
-        # Aggregate edges
-        aggregated_map: Dict[str, Dict] = {}
-        
-        for edge in edges:
-            # Skip containment edges for lineage aggregation
-            if edge.edge_type == EdgeType.CONTAINS or edge.edge_type == EdgeType.BELONGS_TO:
-                continue
-            
-            # Find ancestors at target granularity
-            source_ancestor = self._find_ancestor_at_granularity(
-                edge.source_urn, request.granularity, nodes, containment_map
-            )
-            target_ancestor = self._find_ancestor_at_granularity(
-                edge.target_urn, request.granularity, nodes, containment_map
-            )
-            
-            if source_ancestor and target_ancestor and source_ancestor != target_ancestor:
-                key = f"{source_ancestor}->{target_ancestor}"
-                
-                if key not in aggregated_map:
-                    aggregated_map[key] = {
-                        'source_urn': source_ancestor,
-                        'target_urn': target_ancestor,
-                        'edge_ids': [],
-                        'edge_types': set(),
-                        'confidences': []
-                    }
-                
-                aggregated_map[key]['edge_ids'].append(edge.id)
-                aggregated_map[key]['edge_types'].add(edge.edge_type.value)
-                if edge.confidence:
-                    aggregated_map[key]['confidences'].append(edge.confidence)
-        
-        # Build result
-        aggregated_edges = []
-        for key, data in aggregated_map.items():
-            avg_confidence = sum(data['confidences']) / len(data['confidences']) if data['confidences'] else 1.0
-            
-            aggregated_edges.append(AggregatedEdgeInfo(
-                id=f"agg-{key}",
-                sourceUrn=data['source_urn'],
-                targetUrn=data['target_urn'],
-                edgeCount=len(data['edge_ids']),
-                edgeTypes=list(data['edge_types']),
-                confidence=avg_confidence,
-                sourceEdgeIds=data['edge_ids']
-            ))
-        
-        return AggregatedEdgeResult(
-            aggregatedEdges=aggregated_edges,
-            totalSourceEdges=len(edges)
+        # Determine active lineage types
+        if request.lineage_edge_types:
+            lineage_types = request.lineage_edge_types
+        else:
+            # Default: use all known lineage types from ontology
+            # If user passed include_edge_types (legacy), use that?
+            if request.include_edge_types:
+                lineage_types = [t.value if hasattr(t, "value") else str(t) for t in request.include_edge_types]
+            else:
+                lineage_types = ontology.lineage_edge_types
+
+        # Determine containment types
+        if request.containment_edge_types:
+            containment_types = request.containment_edge_types
+        else:
+            containment_types = ontology.containment_edge_types
+
+        return await self.provider.get_aggregated_edges_between(
+            source_urns=request.source_urns,
+            target_urns=request.target_urns,
+            granularity=request.granularity,
+            containment_edges=list(containment_types),
+            lineage_edges=list(lineage_types)
         )
 
     async def create_node(self, request: CreateNodeRequest) -> CreateNodeResult:

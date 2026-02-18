@@ -255,6 +255,8 @@ export interface AggregatedEdgeRequest {
     targetUrns?: string[]
     granularity: 'column' | 'table' | 'schema' | 'system' | 'domain'
     includeEdgeTypes?: string[]
+    lineageEdgeTypes?: string[]
+    containmentEdgeTypes?: string[]
 }
 
 export interface AggregatedEdgeInfo {

@@ -7,7 +7,8 @@ from ..models.graph import (
     LineageResult, EntityType, EdgeType, GraphSchemaStats,
     PropertyFilter, TagFilter, TextFilter, FilterOperator,
     EntityTypeSummary, EdgeTypeSummary, TagSummary,
-    OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy
+    OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy,
+    AggregatedEdgeResult, AggregatedEdgeInfo
 )
 from .base import GraphDataProvider
 from ..core.demo_data import generate_demo_data
@@ -481,6 +482,98 @@ class MockGraphProvider(GraphDataProvider):
             hasMore=False
         )
     
+    async def get_aggregated_edges_between(
+        self,
+        source_urns: List[str],
+        target_urns: Optional[List[str]],
+        granularity: Any,
+        containment_edges: List[str],
+        lineage_edges: List[str],
+    ) -> AggregatedEdgeResult:
+        """
+        Mock implementation of aggregated edges.
+        Does in-memory traversal to simulate Cypher aggregation.
+        """
+        # 1. Expand sources to granular descendants
+        # We need a helper to find all descendants of a node
+        
+        # 2. Match lineage edges
+        # 3. Aggregate back to top
+        
+        # PROTOTYPE: For now, just finding direct edges between sources/targets if they exist
+        # Or simplistic aggregation if we have the data.
+        
+        # Since this is a Mock, and implementing full localized aggregation is complex,
+        # we will implement a simplified version that returns edges if the nodes themselves are connected,
+        # OR if we can easily find children.
+        
+        # Let's just return empty for now to satisfy the interface, 
+        # unless we want to simulate the "Google Maps" feel.
+        # To simulate it, we can just look at edges between the passed URNs?
+        # No, that's not aggregation.
+        
+        # Helper: Get all descendants of a node 
+        # (Naive implementation: just getting direct children for 1 level deep)
+        
+        aggregated = []
+        total = 0
+        
+        # For the mock, we will cheat and just look for direct edges between the requested URNs
+        # OR edges between their direct children.
+        
+        sources = set(source_urns)
+        targets = set(target_urns) if target_urns else set(self._nodes.keys())
+        
+        # Basic O(N^2) check on edges - ok for small mock data
+        for edge in self._edges.values():
+             et = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
+             if et in containment_edges: continue
+             if lineage_edges and et not in lineage_edges: continue
+             
+             s_parent = self._find_ancestor_in_set(edge.source_urn, sources)
+             t_parent = self._find_ancestor_in_set(edge.target_urn, targets)
+             
+             if s_parent and t_parent and s_parent != t_parent:
+                 # Found a granular match!
+                 key = f"{s_parent}->{t_parent}"
+                 
+                 # Aggregate
+                 existing = next((a for a in aggregated if a.id == f"agg-{key}"), None)
+                 if existing:
+                     existing.edge_count += 1
+                     if et not in existing.edge_types: existing.edge_types.append(et)
+                     existing.source_edge_ids.append(edge.id)
+                 else:
+                     aggregated.append(AggregatedEdgeInfo(
+                         id=f"agg-{key}",
+                         sourceUrn=s_parent,
+                         targetUrn=t_parent,
+                         edgeCount=1,
+                         edgeTypes=[et],
+                         confidence=edge.confidence or 1.0,
+                         sourceEdgeIds=[edge.id]
+                     ))
+                     
+                 total += 1
+                 
+        return AggregatedEdgeResult(
+            aggregatedEdges=aggregated,
+            totalSourceEdges=total
+        )
+
+    def _find_ancestor_in_set(self, urn: str, candidates: Set[str]) -> Optional[str]:
+        """Simple helper to check if urn or its parent is in the candidate set"""
+        if urn in candidates: return urn
+        
+        # Check up to 3 levels?
+        curr = urn
+        for _ in range(3):
+            parent = self._parent_map.get(curr)
+            if not parent: break
+            if parent in candidates: return parent
+            curr = parent
+        return None
+
     async def get_trace_lineage(
         self,
         urn: str,

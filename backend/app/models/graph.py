@@ -352,6 +352,8 @@ class AggregatedEdgeRequest(BaseModel):
     target_urns: Optional[List[str]] = Field(None, alias="targetUrns")
     granularity: Granularity = Granularity.TABLE
     include_edge_types: Optional[List[EdgeType]] = Field(None, alias="includeEdgeTypes")
+    lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
+    containment_edge_types: Optional[List[str]] = Field(None, alias="containmentEdgeTypes")
     
     class Config:
         populate_by_name = True
