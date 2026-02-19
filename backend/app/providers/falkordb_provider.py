@@ -1360,3 +1360,29 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception as e:
             logger.error(f"create_node failed: {e}")
             return False
+
+    # ------------------------------------------------------------------ #
+    # ProviderRegistry lifecycle helpers                                   #
+    # ------------------------------------------------------------------ #
+
+    async def list_graphs(self) -> list:
+        """Return all graph keys on this FalkorDB instance via GRAPH.LIST."""
+        await self._ensure_connected()
+        try:
+            result = await self._db.execute_command("GRAPH.LIST")
+            return list(result) if result else []
+        except Exception as exc:
+            logger.warning("GRAPH.LIST failed: %s", exc)
+            return []
+
+    async def close(self) -> None:
+        """Release the Redis connection pool held by this provider."""
+        try:
+            if self._pool is not None:
+                await self._pool.aclose()
+        except Exception as exc:
+            logger.warning("Error closing FalkorDB pool: %s", exc)
+        finally:
+            self._graph = None
+            self._pool = None
+            self._db = None

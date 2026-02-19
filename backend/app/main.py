@@ -1,42 +1,130 @@
+import logging
+import time
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+
 from .api.v1.api import api_router
+from .db.engine import init_db, close_db, get_async_session
+from .middleware.request_id import RequestIdMiddleware
+from .middleware.logging import StructuredLoggingMiddleware, configure_json_logging
+from .registry.provider_registry import provider_registry
+
+logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------------ #
+# Lifespan                                                             #
+# ------------------------------------------------------------------ #
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Startup / shutdown lifecycle."""
+    configure_json_logging()
+
+    # 1. Initialise management DB tables (idempotent — safe to run every restart)
+    await init_db()
+
+    # 2. Ensure a primary connection exists; bootstrap from env vars if DB is empty
+    async with get_async_session() as session:
+        try:
+            await provider_registry._resolve_primary_id(session)
+        except Exception as exc:
+            logger.warning("Primary connection bootstrap warning: %s", exc)
+
+    logger.info("Synodic Visualization Service started")
+    yield
+
+    # Shutdown — release all provider connection pools
+    await provider_registry.evict_all()
+    await close_db()
+    logger.info("Synodic Visualization Service stopped")
+
+
+# ------------------------------------------------------------------ #
+# App                                                                  #
+# ------------------------------------------------------------------ #
 
 app = FastAPI(
-    title="NexusLineage Graph API",
-    description="Backend service for billion-node graph metadata and lineage.",
-    version="0.1.0"
+    title="Synodic Visualization Service",
+    description=(
+        "Graph metadata, lineage, ontology, and reference model API. "
+        "Supports multiple graph database connections via ProviderRegistry."
+    ),
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
-# CORS Configuration
-origins = [
-    "http://localhost:3000",
-    "http://localhost:5173", # Vite default
-    "*"
-]
+# ------------------------------------------------------------------ #
+# Middleware (outermost → innermost order)                             #
+# ------------------------------------------------------------------ #
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["http://localhost:3000", "http://localhost:5173", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include API Router
+# GZip compression for responses > 1 KB
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# Structured JSON access log + X-Process-Time header
+app.add_middleware(StructuredLoggingMiddleware)
+
+# X-Request-ID generation / propagation
+app.add_middleware(RequestIdMiddleware)
+
+# ------------------------------------------------------------------ #
+# Routers                                                              #
+# ------------------------------------------------------------------ #
+
 app.include_router(api_router, prefix="/api/v1")
 
-@app.middleware("http")
-async def add_process_time_header(request: "Request", call_next):
-    from fastapi import Request
-    import time
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(process_time)
-    print(f"Path: {request.url.path} | Method: {request.method} | Time: {process_time:.4f}s")
-    return response
 
-@app.get("/health")
+# ------------------------------------------------------------------ #
+# Health endpoint                                                       #
+# ------------------------------------------------------------------ #
+
+@app.get("/health", tags=["health"])
 async def health_check():
-    return {"status": "ok"}
+    """
+    Enhanced health check — returns management DB + primary provider status.
+    """
+    from .db.engine import get_engine
+    from sqlalchemy import text
+
+    result: dict = {"status": "healthy", "version": "0.2.0", "dependencies": {}}
+
+    # Management DB ping
+    try:
+        engine = get_engine()
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        result["dependencies"]["management_db"] = "healthy"
+    except Exception as exc:
+        result["dependencies"]["management_db"] = f"unhealthy: {exc}"
+        result["status"] = "degraded"
+
+    # Primary provider ping
+    try:
+        async with get_async_session() as session:
+            primary_id = await provider_registry._resolve_primary_id(session)
+            provider = await provider_registry.get_provider(primary_id, session)
+            t0 = time.perf_counter()
+            await provider.get_stats()
+            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+            result["dependencies"]["primary_provider"] = {
+                "id": primary_id,
+                "type": provider.name,
+                "status": "healthy",
+                "latencyMs": latency_ms,
+            }
+    except Exception as exc:
+        result["dependencies"]["primary_provider"] = {"status": f"unhealthy: {exc}"}
+        result["status"] = "degraded"
+
+    return result

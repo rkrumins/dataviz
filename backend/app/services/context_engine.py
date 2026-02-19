@@ -1,5 +1,5 @@
 import logging
-from typing import List, Dict, Any, Set, Optional, Tuple
+from typing import List, Dict, Any, Set, Optional, Tuple, TYPE_CHECKING
 from ..models.graph import (
     GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
@@ -10,6 +10,9 @@ import os
 
 from ..providers.base import GraphDataProvider
 from ..providers.mock_provider import MockGraphProvider
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,144 @@ GRANULARITY_LEVELS = {
 class ContextEngine:
     def __init__(self, provider: GraphDataProvider = None):
         self.provider = provider or MockGraphProvider()
+        self._connection_id: Optional[str] = None
+        self._workspace_id: Optional[str] = None
+        self._db_session: Optional["AsyncSession"] = None
+
+    # ------------------------------------------------------------------ #
+    # Workspace-aware factory (new)                                        #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    async def for_workspace(
+        cls,
+        workspace_id: str,
+        registry: Any,  # ProviderRegistry — avoid circular import
+        session: "AsyncSession",
+    ) -> "ContextEngine":
+        """
+        Create a ContextEngine scoped to a workspace (provider + graph + blueprint).
+        """
+        provider = await registry.get_provider_for_workspace(workspace_id, session)
+        engine = cls(provider=provider)
+        engine._workspace_id = workspace_id
+        engine._db_session = session
+        return engine
+
+    # ------------------------------------------------------------------ #
+    # Connection-aware factory (legacy compat)                             #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    async def for_connection(
+        cls,
+        connection_id: Optional[str],
+        registry: Any,  # ProviderRegistry — avoid circular import
+        session: "AsyncSession",
+    ) -> "ContextEngine":
+        """
+        Create a ContextEngine backed by the specified connection.
+        When connection_id is None, uses the primary connection from registry.
+        """
+        provider = await registry.get_provider(connection_id, session)
+        engine = cls(provider=provider)
+        engine._connection_id = connection_id
+        engine._db_session = session
+        return engine
+
+    # ------------------------------------------------------------------ #
+    # Enhanced ontology with blueprint/DB override merging                  #
+    # ------------------------------------------------------------------ #
+
+    async def get_ontology_metadata(self) -> OntologyMetadata:
+        """
+        Return ontology metadata, merging stored config with graph introspection.
+
+        Priority order:
+        1. Workspace path: load blueprint → merge with introspection
+        2. Connection path (legacy): load ontology_config → merge with introspection
+        3. Singleton path: introspection only
+        """
+        introspected = await self.provider.get_ontology_metadata()
+
+        if self._workspace_id and self._db_session:
+            try:
+                return await self._load_blueprint_ontology(introspected)
+            except Exception as exc:
+                logger.warning("Failed to load blueprint ontology: %s", exc)
+                return introspected
+
+        if self._connection_id and self._db_session:
+            try:
+                from ..db.repositories.ontology_repo import get_ontology_config
+                db_config = await get_ontology_config(self._db_session, self._connection_id)
+                if db_config:
+                    return self._merge_ontology(introspected, db_config)
+            except Exception as exc:
+                logger.warning("Failed to load DB ontology override: %s", exc)
+
+        return introspected
+
+    async def _load_blueprint_ontology(self, introspected: OntologyMetadata) -> OntologyMetadata:
+        """Load blueprint from workspace and merge with introspected metadata."""
+        from ..db.repositories.workspace_repo import get_workspace_orm
+        from ..db.repositories.blueprint_repo import get_blueprint_orm
+
+        ws = await get_workspace_orm(self._db_session, self._workspace_id)
+        if not ws or not ws.blueprint_id:
+            return introspected
+
+        bp = await get_blueprint_orm(self._db_session, ws.blueprint_id)
+        if not bp:
+            return introspected
+
+        # Use blueprint as override source (same merge logic as ontology_config)
+        return self._merge_ontology(introspected, bp)
+
+    def _merge_ontology(self, base: OntologyMetadata, db_config: Any) -> OntologyMetadata:
+        """
+        Merge DB ontology config with introspected metadata.
+        override_mode='merge'   → union edge type lists; DB metadata wins on conflicts.
+        override_mode='replace' → DB config replaces introspection entirely.
+        """
+        import json
+
+        db_containment = json.loads(db_config.containment_edge_types or "[]")
+        db_lineage = json.loads(db_config.lineage_edge_types or "[]")
+        db_meta = json.loads(db_config.edge_type_metadata or "{}")
+        db_hierarchy = json.loads(db_config.entity_type_hierarchy or "{}")
+        db_root = json.loads(db_config.root_entity_types or "[]")
+        mode = db_config.override_mode or "merge"
+
+        if mode == "replace":
+            return OntologyMetadata(
+                containmentEdgeTypes=db_containment or base.containment_edge_types,
+                lineageEdgeTypes=db_lineage or base.lineage_edge_types,
+                edgeTypeMetadata=db_meta or {e: v.model_dump(by_alias=True) for e, v in base.edge_type_metadata.items()},
+                entityTypeHierarchy=db_hierarchy or {e: v.model_dump(by_alias=True) for e, v in base.entity_type_hierarchy.items()},
+                rootEntityTypes=db_root or base.root_entity_types,
+            )
+
+        # merge mode: union lists, DB additions win on metadata conflicts
+        merged_containment = list(
+            dict.fromkeys(base.containment_edge_types + [t for t in db_containment if t not in base.containment_edge_types])
+        )
+        merged_lineage = list(
+            dict.fromkeys(base.lineage_edge_types + [t for t in db_lineage if t not in base.lineage_edge_types])
+        )
+        merged_meta = {e: v.model_dump(by_alias=True) for e, v in base.edge_type_metadata.items()}
+        merged_meta.update(db_meta)
+        merged_hierarchy = {e: v.model_dump(by_alias=True) for e, v in base.entity_type_hierarchy.items()}
+        merged_hierarchy.update(db_hierarchy)
+        merged_root = list(dict.fromkeys(base.root_entity_types + [t for t in db_root if t not in base.root_entity_types]))
+
+        return OntologyMetadata(
+            containmentEdgeTypes=merged_containment,
+            lineageEdgeTypes=merged_lineage,
+            edgeTypeMetadata=merged_meta,
+            entityTypeHierarchy=merged_hierarchy,
+            rootEntityTypes=merged_root,
+        )
 
     async def get_node(self, urn: str) -> Optional[GraphNode]:
         return await self.provider.get_node(urn)
@@ -130,8 +271,8 @@ class ContextEngine:
                                When set, only edges of these types are treated as lineage.
                                When None, all ontology-classified lineage types are used.
         """
-        # Load ontology metadata once — single source of truth for all edge classification
-        ontology = await self.provider.get_ontology_metadata()
+        # Load ontology metadata once — merges DB overrides + introspection
+        ontology = await self.get_ontology_metadata()
         containment_types = {t.upper() for t in ontology.containment_edge_types}
         all_lineage_types = {t.upper() for t in ontology.lineage_edge_types}
         
@@ -532,9 +673,9 @@ class ContextEngine:
         Build a complete graph schema from introspection data and ontology metadata.
         This enables frontend to load schema dynamically from the backend.
         """
-        # Get introspection stats and ontology
+        # Get introspection stats and ontology (merged with DB overrides)
         stats = await self.provider.get_schema_stats()
-        ontology = await self.provider.get_ontology_metadata()
+        ontology = await self.get_ontology_metadata()
         
         # Build entity type definitions from introspection
         entity_types: List[EntityTypeDefinition] = []
@@ -669,8 +810,8 @@ class ContextEngine:
         Delegates to provider for optimized Cypher execution.
         """
         # Load ontology metadata for edge classification
-        ontology = await self.provider.get_ontology_metadata()
-        
+        ontology = await self.get_ontology_metadata()
+
         # Determine active lineage types
         if request.lineage_edge_types:
             lineage_types = request.lineage_edge_types

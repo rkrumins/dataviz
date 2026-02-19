@@ -20,23 +20,61 @@ import type {
     CreateNodeResult,
 } from './GraphDataProvider'
 
-// Base API URL - typically configured via environment variables
 const API_BASE = '/api/v1'
+
+export interface RemoteGraphProviderOptions {
+    /** Workspace ID. When set, routes through /v1/{ws_id}/graph/... */
+    workspaceId?: string
+    /** @deprecated Legacy connection ID. Use workspaceId instead. */
+    connectionId?: string
+}
 
 export class RemoteGraphProvider implements GraphDataProvider {
     readonly name = 'RemoteGraphProvider'
+
+    private readonly workspaceId?: string
+    private readonly connectionId?: string
+
+    constructor(options?: RemoteGraphProviderOptions) {
+        this.workspaceId = options?.workspaceId
+        this.connectionId = options?.connectionId
+    }
+
+    // ==========================================
+    // URL builder — workspace path or legacy query param
+    // ==========================================
+
+    private buildUrl(path: string, extraParams?: Record<string, string>): string {
+        // Workspace-scoped: /api/v1/v1/{ws_id}/graph/...
+        const base = this.workspaceId
+            ? `${API_BASE}/v1/${this.workspaceId}/graph`
+            : API_BASE
+
+        const url = new URL(`${base}${path}`, window.location.origin)
+
+        // Legacy fallback: append connectionId as query param
+        if (!this.workspaceId && this.connectionId) {
+            url.searchParams.set('connectionId', this.connectionId)
+        }
+
+        if (extraParams) {
+            Object.entries(extraParams).forEach(([k, v]) => url.searchParams.set(k, v))
+        }
+        return url.pathname + url.search
+    }
 
     // ==========================================
     // Internal Fetch Helper
     // ==========================================
 
-    private async fetch<T>(endpoint: string, options?: RequestInit): Promise<T> {
-        const url = `${API_BASE}${endpoint}`
+    private async fetch<T>(path: string, options?: RequestInit & { extraParams?: Record<string, string> }): Promise<T> {
+        const { extraParams, ...fetchOptions } = options ?? {}
+        const url = this.buildUrl(path, extraParams)
         const response = await fetch(url, {
-            ...options,
+            ...fetchOptions,
             headers: {
                 'Content-Type': 'application/json',
-                ...options?.headers,
+                ...fetchOptions?.headers,
             },
         })
 
