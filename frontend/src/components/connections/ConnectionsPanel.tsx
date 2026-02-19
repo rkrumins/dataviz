@@ -10,8 +10,9 @@
  * - FalkorDB graph picker: fetches GRAPH.LIST after entering host/port
  */
 import { useState, useCallback, type FC } from 'react'
+import { Network, Plus, Trash2, CheckCircle, AlertCircle, X, Activity, Shield, Database } from 'lucide-react'
 import { useConnections } from '@/hooks/useConnections'
-import { connectionService, type ConnectionCreateRequest } from '@/services/connectionService'
+import { type ConnectionCreateRequest } from '@/services/connectionService'
 
 type ProviderType = 'falkordb' | 'neo4j' | 'datahub' | 'mock'
 
@@ -62,9 +63,9 @@ const DEFAULT_PORTS: Record<ProviderType, string> = {
 // ============================================================
 
 function statusBadge(conn: { isActive: boolean; isPrimary: boolean }) {
-    if (!conn.isActive) return <span className="text-xs text-red-500">Inactive</span>
-    if (conn.isPrimary) return <span className="text-xs text-emerald-500 font-medium">Primary</span>
-    return <span className="text-xs text-muted-foreground">Active</span>
+    if (!conn.isActive) return <span className="flex items-center gap-1 rounded-full bg-red-500/10 border border-red-500/20 px-2 py-0.5 text-[10px] font-medium text-red-500"><AlertCircle className="w-3 h-3" /> Inactive</span>
+    if (conn.isPrimary) return <span className="flex items-center gap-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-[10px] font-medium text-emerald-500"><CheckCircle className="w-3 h-3" /> Primary</span>
+    return <span className="flex items-center gap-1 rounded-full bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 text-[10px] font-medium text-blue-500">Active</span>
 }
 
 // ============================================================
@@ -190,266 +191,331 @@ export const ConnectionsPanel: FC<ConnectionsPanelProps> = ({ onClose }) => {
     // ── Render ────────────────────────────────────────────────
 
     return (
-        <div className="flex flex-col gap-4 p-4 min-w-[480px]">
-            <div className="flex items-center justify-between">
-                <h2 className="text-lg font-semibold">Graph Connections</h2>
+        <div className="flex flex-col h-full bg-canvas text-ink relative">
+            {/* Header */}
+            <div className="flex items-center justify-between p-5 border-b border-glass-border bg-canvas-elevated sticky top-0 z-10">
+                <div>
+                    <h2 className="text-lg font-bold flex items-center gap-2">
+                        <Network className="w-5 h-5 text-accent-business" />
+                        Legacy Connections
+                    </h2>
+                    <p className="text-xs text-ink-muted mt-1">Manage global direct graph connection credentials and endpoints.</p>
+                </div>
                 {onClose && (
-                    <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
-                        ✕
+                    <button onClick={onClose} className="p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-ink-secondary transition-colors">
+                        <X className="w-5 h-5" />
                     </button>
                 )}
             </div>
 
-            {/* Connection list */}
-            {isLoading ? (
-                <p className="text-sm text-muted-foreground animate-pulse">Loading…</p>
-            ) : connections.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No connections registered yet.</p>
-            ) : (
-                <ul className="flex flex-col gap-2">
-                    {connections.map((conn) => (
-                        <li
-                            key={conn.id}
-                            className={`flex items-center justify-between rounded-md border p-3 ${
-                                conn.id === activeConnectionId ? 'border-primary bg-primary/5' : 'border-border'
-                            }`}
+            <div className="flex flex-col gap-5 p-5 overflow-y-auto">
+                {/* Connection list */}
+                {isLoading ? (
+                    <div className="flex flex-col items-center justify-center py-12 gap-3 opacity-60">
+                        <div className="w-6 h-6 border-2 border-accent-business border-t-transparent rounded-full animate-spin" />
+                        <span className="text-sm font-medium">Loading connections...</span>
+                    </div>
+                ) : connections.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center p-10 mt-4 rounded-2xl border border-dashed border-glass-border bg-black/5 dark:bg-white/5 text-center">
+                        <div className="w-12 h-12 rounded-full bg-accent-business/10 flex items-center justify-center mb-4">
+                            <Network className="w-6 h-6 text-accent-business" />
+                        </div>
+                        <h3 className="text-base font-semibold mb-1">No Connections Found</h3>
+                        <p className="text-sm text-ink-muted max-w-sm mb-5">
+                            Connect standard databases like FalkorDB, Neo4j, or DataHub to fetch remote lineages directly.
+                        </p>
+                        <button
+                            onClick={() => setShowForm(true)}
+                            className="rounded-lg bg-gradient-to-r from-accent-business to-accent-lineage px-5 py-2.5 text-sm font-semibold text-white shadow-md hover:shadow-lg transition-all"
                         >
-                            <div className="flex flex-col gap-0.5">
-                                <div className="flex items-center gap-2">
-                                    <span className="font-medium text-sm">{conn.name}</span>
-                                    {statusBadge(conn)}
-                                </div>
-                                <span className="text-xs text-muted-foreground">
-                                    {PROVIDER_LABELS[conn.providerType] ?? conn.providerType}
-                                    {conn.host ? ` · ${conn.host}${conn.port ? `:${conn.port}` : ''}` : ''}
-                                    {conn.graphName ? ` · ${conn.graphName}` : ''}
-                                </span>
-                                {testResults[conn.id] && (
-                                    <span
-                                        className={`text-xs ${testResults[conn.id].ok ? 'text-emerald-500' : 'text-red-500'}`}
-                                    >
-                                        {testResults[conn.id].msg}
-                                    </span>
-                                )}
-                            </div>
-                            <div className="flex items-center gap-2 shrink-0">
-                                {conn.id !== activeConnectionId && (
-                                    <button
-                                        onClick={() => setActiveConnection(conn.id)}
-                                        className="text-xs text-primary hover:underline"
-                                    >
-                                        Use
-                                    </button>
-                                )}
+                            Add Connection
+                        </button>
+                    </div>
+                ) : (
+                    <div className="flex flex-col gap-4">
+                        <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-ink-muted uppercase tracking-wider">Registered Endpoints</span>
+                            {!showForm && (
                                 <button
-                                    onClick={() => handleTest(conn.id)}
-                                    disabled={actionLoading}
-                                    className="text-xs text-muted-foreground hover:text-foreground"
+                                    onClick={() => setShowForm(true)}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-business/10 text-accent-business hover:bg-accent-business/20 transition-colors"
                                 >
-                                    Test
+                                    <Plus className="w-3.5 h-3.5" /> New Connection
                                 </button>
-                                {!conn.isPrimary && (
-                                    <button
-                                        onClick={() => setPrimary(conn.id)}
-                                        disabled={actionLoading}
-                                        className="text-xs text-muted-foreground hover:text-foreground"
-                                    >
-                                        Set Primary
-                                    </button>
-                                )}
-                                <button
-                                    onClick={() => handleDelete(conn.id)}
-                                    disabled={actionLoading}
-                                    className="text-xs text-red-500 hover:text-red-700"
+                            )}
+                        </div>
+                        <ul className="flex flex-col gap-3">
+                            {connections.map((conn) => (
+                                <li
+                                    key={conn.id}
+                                    className={`flex flex-col rounded-xl border p-4 transition-all duration-200 ${conn.id === activeConnectionId
+                                        ? 'border-accent-business/50 bg-accent-business/5 shadow-md shadow-accent-business/5'
+                                        : 'border-glass-border bg-canvas-elevated hover:shadow-md'
+                                        }`}
                                 >
-                                    Delete
-                                </button>
-                            </div>
-                        </li>
-                    ))}
-                </ul>
-            )}
+                                    <div className="flex items-start justify-between">
+                                        <div className="flex gap-3">
+                                            <div className={`mt-0.5 w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-inner border ${conn.id === activeConnectionId ? 'bg-accent-business/20 border-accent-business/30 text-accent-business' : 'bg-black/5 dark:bg-white/5 border-glass-border text-ink-secondary'}`}>
+                                                <Database className="w-5 h-5" />
+                                            </div>
+                                            <div className="flex flex-col gap-1.5 min-w-0">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="font-bold text-base text-ink">{conn.name}</span>
+                                                    {statusBadge(conn)}
+                                                </div>
+                                                <p className="text-xs text-ink-muted font-mono bg-black/5 dark:bg-white/5 px-2 py-0.5 rounded border border-glass-border/50 max-w-fit mt-0.5">
+                                                    {PROVIDER_LABELS[conn.providerType] ?? conn.providerType}
+                                                    {conn.host ? ` · ${conn.host}${conn.port ? `:${conn.port}` : ''}` : ''}
+                                                    {conn.graphName ? ` · ${conn.graphName}` : ''}
+                                                </p>
+                                                {testResults[conn.id] && (
+                                                    <span className={`text-[10px] font-semibold mt-1 flex items-center gap-1 px-2 py-0.5 rounded-full border max-w-fit ${testResults[conn.id].ok ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' : 'bg-red-500/10 text-red-500 border-red-500/20'}`}>
+                                                        {testResults[conn.id].ok ? <CheckCircle className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
+                                                        {testResults[conn.id].msg}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
 
-            {/* Action error */}
-            {actionError && (
-                <p className="text-sm text-red-500">{actionError}</p>
-            )}
-
-            {/* New connection form toggle */}
-            {!showForm ? (
-                <button
-                    onClick={() => setShowForm(true)}
-                    className="self-start rounded-md border border-dashed border-border px-3 py-1.5 text-sm text-muted-foreground hover:border-primary hover:text-primary transition-colors"
-                >
-                    + Add connection
-                </button>
-            ) : (
-                <div className="flex flex-col gap-3 rounded-md border border-border p-4">
-                    <h3 className="font-medium text-sm">New Connection</h3>
-
-                    {/* Name */}
-                    <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                        Name *
-                        <input
-                            type="text"
-                            value={form.name}
-                            onChange={(e) => updateField('name', e.target.value)}
-                            placeholder="Production FalkorDB"
-                            className="rounded border border-border bg-background px-2 py-1 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                        />
-                    </label>
-
-                    {/* Provider type */}
-                    <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                        Provider *
-                        <select
-                            value={form.providerType}
-                            onChange={(e) => updateField('providerType', e.target.value as ProviderType)}
-                            className="rounded border border-border bg-background px-2 py-1 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                        >
-                            {(Object.keys(PROVIDER_LABELS) as ProviderType[]).map((p) => (
-                                <option key={p} value={p}>{PROVIDER_LABELS[p]}</option>
+                                        <div className="flex items-center gap-2 shrink-0 ml-4">
+                                            {conn.id !== activeConnectionId && (
+                                                <button
+                                                    onClick={() => setActiveConnection(conn.id)}
+                                                    className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-accent-business/10 text-accent-business hover:bg-accent-business/20 transition-colors"
+                                                >
+                                                    Attach
+                                                </button>
+                                            )}
+                                            <button
+                                                onClick={() => handleTest(conn.id)}
+                                                disabled={actionLoading}
+                                                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-canvas border border-glass-border text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                                            >
+                                                Test PING
+                                            </button>
+                                            <div className="w-px h-6 bg-glass-border mx-1" />
+                                            {!conn.isPrimary && (
+                                                <button
+                                                    onClick={() => setPrimary(conn.id)}
+                                                    disabled={actionLoading}
+                                                    className="p-1.5 text-ink-muted hover:text-ink rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50 title-tooltip"
+                                                    title="Set as Default Connection"
+                                                >
+                                                    <Shield className="w-4 h-4" />
+                                                </button>
+                                            )}
+                                            <button
+                                                onClick={() => handleDelete(conn.id)}
+                                                disabled={actionLoading}
+                                                className="p-1.5 text-red-500 hover:bg-red-500/10 rounded-lg transition-colors disabled:opacity-50"
+                                                title="Delete Connection"
+                                            >
+                                                <Trash2 className="w-4 h-4" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                </li>
                             ))}
-                        </select>
-                    </label>
+                        </ul>
+                    </div>
+                )}
 
-                    {/* Host / port (not shown for mock) */}
-                    {form.providerType !== 'mock' && (
-                        <div className="flex gap-2">
-                            <label className="flex flex-1 flex-col gap-1 text-xs text-muted-foreground">
-                                {form.providerType === 'datahub' ? 'Base URL' : 'Host'}
-                                <input
-                                    type="text"
-                                    value={form.host}
-                                    onChange={(e) => updateField('host', e.target.value)}
-                                    placeholder={form.providerType === 'datahub' ? 'http://localhost:9002' : 'localhost'}
-                                    className="rounded border border-border bg-background px-2 py-1 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                                />
-                            </label>
-                            {form.providerType !== 'datahub' && (
-                                <label className="flex w-24 flex-col gap-1 text-xs text-muted-foreground">
-                                    Port
+                {/* Action error general */}
+                {actionError && (
+                    <div className="p-3 mt-2 rounded-xl bg-red-500/10 border border-red-500/20 flex items-start gap-2 text-red-500 text-sm">
+                        <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                        <p>{actionError}</p>
+                    </div>
+                )}
+
+                {/* New connection form inline */}
+                {showForm && (
+                    <div className="mt-4 p-6 rounded-2xl bg-canvas-elevated border border-glass-border shadow-xl animate-in slide-in-from-bottom-4 fade-in duration-300 relative overflow-hidden">
+                        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-accent-business to-accent-lineage" />
+
+                        <div className="flex items-center justify-between mb-5">
+                            <div>
+                                <h3 className="text-lg font-bold text-ink">New Connection</h3>
+                                <p className="text-xs text-ink-muted">Enter networking details to securely access your graph data.</p>
+                            </div>
+                            <Activity className="w-6 h-6 text-accent-business/30" />
+                        </div>
+
+                        <div className="space-y-4">
+                            <div className="grid grid-cols-2 gap-4">
+                                {/* Name */}
+                                <label className="flex flex-col gap-1.5 text-xs font-medium text-ink-muted">
+                                    CONNECTION ALIAS *
                                     <input
-                                        type="number"
-                                        value={form.port}
-                                        onChange={(e) => updateField('port', e.target.value)}
-                                        className="rounded border border-border bg-background px-2 py-1 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                                        type="text"
+                                        value={form.name}
+                                        onChange={(e) => updateField('name', e.target.value)}
+                                        placeholder="e.g. Neo4j Staging"
+                                        className="rounded-lg border border-glass-border bg-canvas px-3 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-business/50 focus:border-accent-business transition-all duration-200"
+                                    />
+                                </label>
+
+                                {/* Provider type */}
+                                <label className="flex flex-col gap-1.5 text-xs font-medium text-ink-muted">
+                                    DBMS PROVIDER *
+                                    <select
+                                        value={form.providerType}
+                                        onChange={(e) => updateField('providerType', e.target.value as ProviderType)}
+                                        className="rounded-lg border border-glass-border bg-canvas px-3 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-business/50 focus:border-accent-business transition-all duration-200"
+                                    >
+                                        {(Object.keys(PROVIDER_LABELS) as ProviderType[]).map((p) => (
+                                            <option key={p} value={p}>{PROVIDER_LABELS[p]}</option>
+                                        ))}
+                                    </select>
+                                </label>
+                            </div>
+
+                            {/* Host / port (not shown for mock) */}
+                            {form.providerType !== 'mock' && (
+                                <div className="flex gap-4">
+                                    <label className="flex flex-1 flex-col gap-1.5 text-xs font-medium text-ink-muted">
+                                        {form.providerType === 'datahub' ? 'BASE API URL *' : 'HOST URI *'}
+                                        <input
+                                            type="text"
+                                            value={form.host}
+                                            onChange={(e) => updateField('host', e.target.value)}
+                                            placeholder={form.providerType === 'datahub' ? 'http://localhost:9002' : 'localhost'}
+                                            className="rounded-lg border border-glass-border bg-canvas px-3 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-business/50 focus:border-accent-business transition-all duration-200"
+                                        />
+                                    </label>
+                                    {form.providerType !== 'datahub' && (
+                                        <label className="flex w-32 flex-col gap-1.5 text-xs font-medium text-ink-muted">
+                                            PORT
+                                            <input
+                                                type="number"
+                                                value={form.port}
+                                                onChange={(e) => updateField('port', e.target.value)}
+                                                className="rounded-lg border border-glass-border bg-canvas px-3 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-business/50 focus:border-accent-business transition-all duration-200"
+                                            />
+                                        </label>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Graph name (FalkorDB / Neo4j) */}
+                            {(form.providerType === 'falkordb' || form.providerType === 'neo4j') && (
+                                <label className="flex flex-col gap-1.5 text-xs font-medium text-ink-muted">
+                                    {form.providerType === 'neo4j' ? 'DATABASE NAME' : 'DEFAULT GRAPH NAME'}
+                                    <div className="flex gap-2">
+                                        {form.providerType === 'falkordb' && availableGraphs.length > 0 ? (
+                                            <select
+                                                value={form.graphName}
+                                                onChange={(e) => updateField('graphName', e.target.value)}
+                                                className="flex-1 rounded-lg border border-glass-border bg-canvas px-3 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-business/50 focus:border-accent-business transition-all duration-200"
+                                            >
+                                                {availableGraphs.map((g) => (
+                                                    <option key={g} value={g}>{g}</option>
+                                                ))}
+                                            </select>
+                                        ) : (
+                                            <input
+                                                type="text"
+                                                value={form.graphName}
+                                                onChange={(e) => updateField('graphName', e.target.value)}
+                                                placeholder="nexus_lineage"
+                                                className="flex-1 rounded-lg border border-glass-border bg-canvas px-3 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-business/50 focus:border-accent-business transition-all duration-200"
+                                            />
+                                        )}
+                                        {form.providerType === 'falkordb' && (
+                                            <button
+                                                type="button"
+                                                onClick={handleFetchGraphs}
+                                                disabled={graphsLoading}
+                                                className="rounded-lg border border-glass-border px-4 py-2 text-xs font-medium bg-canvas hover:bg-black/5 dark:hover:bg-white/5 transition-all text-ink-secondary"
+                                                title="Fetch available graphs from this instance"
+                                            >
+                                                {graphsLoading ? 'Scanning...' : 'Fetch List'}
+                                            </button>
+                                        )}
+                                    </div>
+                                </label>
+                            )}
+
+                            {/* Credentials */}
+                            {form.providerType === 'datahub' && (
+                                <label className="flex flex-col gap-1.5 text-xs font-medium text-ink-muted">
+                                    BEARER TOKEN (OPTIONAL)
+                                    <input
+                                        type="password"
+                                        value={form.token}
+                                        onChange={(e) => updateField('token', e.target.value)}
+                                        placeholder="••••••••••••••••"
+                                        className="rounded-lg border border-glass-border bg-canvas px-3 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-business/50 focus:border-accent-business transition-all duration-200"
                                     />
                                 </label>
                             )}
-                        </div>
-                    )}
+                            {form.providerType === 'neo4j' && (
+                                <div className="grid grid-cols-2 gap-4">
+                                    <label className="flex flex-col gap-1.5 text-xs font-medium text-ink-muted">
+                                        USERNAME
+                                        <input
+                                            type="text"
+                                            value={form.username}
+                                            onChange={(e) => updateField('username', e.target.value)}
+                                            placeholder="neo4j"
+                                            className="rounded-lg border border-glass-border bg-canvas px-3 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-business/50 focus:border-accent-business transition-all duration-200"
+                                        />
+                                    </label>
+                                    <label className="flex flex-col gap-1.5 text-xs font-medium text-ink-muted">
+                                        PASSWORD
+                                        <input
+                                            type="password"
+                                            value={form.password}
+                                            onChange={(e) => updateField('password', e.target.value)}
+                                            placeholder="••••••••"
+                                            className="rounded-lg border border-glass-border bg-canvas px-3 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-business/50 focus:border-accent-business transition-all duration-200"
+                                        />
+                                    </label>
+                                </div>
+                            )}
 
-                    {/* Graph name (FalkorDB / Neo4j) */}
-                    {(form.providerType === 'falkordb' || form.providerType === 'neo4j') && (
-                        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                            {form.providerType === 'neo4j' ? 'Database' : 'Graph name'}
-                            <div className="flex gap-2">
-                                {availableGraphs.length > 0 ? (
-                                    <select
-                                        value={form.graphName}
-                                        onChange={(e) => updateField('graphName', e.target.value)}
-                                        className="flex-1 rounded border border-border bg-background px-2 py-1 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                                    >
-                                        {availableGraphs.map((g) => (
-                                            <option key={g} value={g}>{g}</option>
-                                        ))}
-                                    </select>
-                                ) : (
+                            {/* TLS */}
+                            {(form.providerType === 'falkordb' || form.providerType === 'neo4j') && (
+                                <label className="flex items-center gap-2 mt-4 text-xs font-medium text-ink-secondary cursor-pointer hover:text-ink transition-colors max-w-fit">
+                                    <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${form.tlsEnabled ? 'bg-accent-business border-accent-business text-white' : 'border-glass-border bg-transparent'}`}>
+                                        {form.tlsEnabled && <CheckCircle className="w-3 h-3" />}
+                                    </div>
                                     <input
-                                        type="text"
-                                        value={form.graphName}
-                                        onChange={(e) => updateField('graphName', e.target.value)}
-                                        placeholder="nexus_lineage"
-                                        className="flex-1 rounded border border-border bg-background px-2 py-1 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                                        type="checkbox"
+                                        className="hidden"
+                                        checked={form.tlsEnabled}
+                                        onChange={(e) => updateField('tlsEnabled', e.target.checked)}
                                     />
-                                )}
-                                {form.providerType === 'falkordb' && (
-                                    <button
-                                        type="button"
-                                        onClick={handleFetchGraphs}
-                                        disabled={graphsLoading}
-                                        className="rounded border border-border px-2 py-1 text-xs hover:bg-muted"
-                                        title="Fetch available graphs from this FalkorDB instance"
-                                    >
-                                        {graphsLoading ? '…' : 'Browse'}
-                                    </button>
-                                )}
-                            </div>
-                        </label>
-                    )}
-
-                    {/* Credentials */}
-                    {form.providerType === 'datahub' && (
-                        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                            Bearer token (optional)
-                            <input
-                                type="password"
-                                value={form.token}
-                                onChange={(e) => updateField('token', e.target.value)}
-                                className="rounded border border-border bg-background px-2 py-1 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                            />
-                        </label>
-                    )}
-                    {form.providerType === 'neo4j' && (
-                        <div className="flex gap-2">
-                            <label className="flex flex-1 flex-col gap-1 text-xs text-muted-foreground">
-                                Username
-                                <input
-                                    type="text"
-                                    value={form.username}
-                                    onChange={(e) => updateField('username', e.target.value)}
-                                    placeholder="neo4j"
-                                    className="rounded border border-border bg-background px-2 py-1 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                                />
-                            </label>
-                            <label className="flex flex-1 flex-col gap-1 text-xs text-muted-foreground">
-                                Password
-                                <input
-                                    type="password"
-                                    value={form.password}
-                                    onChange={(e) => updateField('password', e.target.value)}
-                                    className="rounded border border-border bg-background px-2 py-1 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                                />
-                            </label>
+                                    Require TLS / SSL Encryption
+                                </label>
+                            )}
                         </div>
-                    )}
 
-                    {/* TLS */}
-                    {(form.providerType === 'falkordb' || form.providerType === 'neo4j') && (
-                        <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
-                            <input
-                                type="checkbox"
-                                checked={form.tlsEnabled}
-                                onChange={(e) => updateField('tlsEnabled', e.target.checked)}
-                            />
-                            TLS / SSL
-                        </label>
-                    )}
-
-                    {/* Form actions */}
-                    <div className="flex gap-2 pt-1">
-                        <button
-                            onClick={handleCreate}
-                            disabled={!form.name || actionLoading}
-                            className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50 hover:bg-primary/90 transition-colors"
-                        >
-                            {actionLoading ? 'Saving…' : 'Add Connection'}
-                        </button>
-                        <button
-                            onClick={() => {
-                                setShowForm(false)
-                                setForm(DEFAULT_FORM)
-                                setAvailableGraphs([])
-                                clearError()
-                            }}
-                            className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted transition-colors"
-                        >
-                            Cancel
-                        </button>
+                        {/* Form actions */}
+                        <div className="flex items-center justify-end gap-3 mt-8 pt-4 border-t border-glass-border">
+                            <button
+                                onClick={() => {
+                                    setShowForm(false)
+                                    setForm(DEFAULT_FORM)
+                                    setAvailableGraphs([])
+                                    clearError()
+                                }}
+                                className="rounded-lg px-5 py-2.5 text-sm font-medium bg-canvas border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleCreate}
+                                disabled={!form.name || actionLoading}
+                                className="rounded-lg bg-gradient-to-r from-accent-business to-accent-lineage px-6 py-2.5 text-sm font-semibold text-white shadow-md hover:shadow-lg disabled:opacity-50 disabled:grayscale transition-all flex items-center gap-2"
+                            >
+                                {actionLoading && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
+                                {actionLoading ? 'Connecting...' : 'Save Connection'}
+                            </button>
+                        </div>
                     </div>
-                </div>
-            )}
+                )}
+            </div>
         </div>
     )
 }
