@@ -18,13 +18,18 @@ api_router.include_router(
 )
 
 # ── Workspace-scoped data routers ───────────────────────────────────
-# Graph endpoints: /v1/{ws_id}/graph/trace, /v1/{ws_id}/graph/nodes, etc.
+# Graph endpoints: /api/v1/{ws_id}/graph/trace, /api/v1/{ws_id}/graph/nodes, etc.
+# (api_router is already mounted at /api/v1, so prefix is just /{ws_id}/graph)
 api_router.include_router(
-    graph.router, prefix="/v1/{ws_id}/graph", tags=["graph:workspace"],
+    graph.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
 )
-# Asset endpoints: /v1/{ws_id}/assets/views, /v1/{ws_id}/assets/rule-sets
+# Assignment compute (workspace-scoped)
 api_router.include_router(
-    assets.router, prefix="/v1/{ws_id}/assets", tags=["assets:workspace"],
+    assignments.router, prefix="/{ws_id}/graph/assignments", tags=["assignments:workspace"],
+)
+# Asset endpoints: /api/v1/{ws_id}/assets/views, /api/v1/{ws_id}/assets/rule-sets
+api_router.include_router(
+    assets.router, prefix="/{ws_id}/assets", tags=["assets:workspace"],
 )
 
 # ── Legacy routers (backward compat, kept during migration) ─────────

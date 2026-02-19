@@ -3,6 +3,8 @@
  *
  * When only one workspace exists it renders a static label.
  * When multiple workspaces exist it renders a select dropdown.
+ * When the active workspace has multiple data sources, a second
+ * selector appears to pick the active data source.
  * Clicking "Manage" opens the WorkspacePanel (passed as onManage callback).
  */
 import { type FC } from 'react'
@@ -17,7 +19,9 @@ interface WorkspaceSelectorProps {
 export const WorkspaceSelector: FC<WorkspaceSelectorProps> = ({ onManage, className }) => {
     const workspaces = useWorkspacesStore((s) => s.workspaces)
     const activeWorkspaceId = useWorkspacesStore((s) => s.activeWorkspaceId)
+    const activeDataSourceId = useWorkspacesStore((s) => s.activeDataSourceId)
     const setActiveWorkspace = useWorkspacesStore((s) => s.setActiveWorkspace)
+    const setActiveDataSource = useWorkspacesStore((s) => s.setActiveDataSource)
     const isLoading = useWorkspacesStore((s) => s.isLoading)
 
     if (isLoading) {
@@ -45,6 +49,8 @@ export const WorkspaceSelector: FC<WorkspaceSelectorProps> = ({ onManage, classN
     }
 
     const active = workspaces.find((w) => w.id === activeWorkspaceId)
+    const dataSources = active?.dataSources ?? []
+    const showDsSelector = dataSources.length > 1
 
     return (
         <div className={`flex items-center gap-2 text-sm ${className ?? ''}`}>
@@ -52,11 +58,6 @@ export const WorkspaceSelector: FC<WorkspaceSelectorProps> = ({ onManage, classN
                 // Single workspace — static label
                 <span className="font-medium">
                     {active?.name ?? workspaces[0].name}
-                    {(active?.graphName ?? workspaces[0].graphName) && (
-                        <span className="ml-1 text-xs text-muted-foreground">
-                            ({active?.graphName ?? workspaces[0].graphName})
-                        </span>
-                    )}
                 </span>
             ) : (
                 // Multiple workspaces — dropdown
@@ -70,10 +71,33 @@ export const WorkspaceSelector: FC<WorkspaceSelectorProps> = ({ onManage, classN
                         <option key={ws.id} value={ws.id}>
                             {ws.name}
                             {ws.isDefault ? ' (default)' : ''}
-                            {ws.graphName ? ` · ${ws.graphName}` : ''}
                         </option>
                     ))}
                 </select>
+            )}
+
+            {/* Data source sub-selector — only shown when workspace has multiple sources */}
+            {showDsSelector && (
+                <select
+                    value={activeDataSourceId ?? ''}
+                    onChange={(e) => setActiveDataSource(e.target.value || null)}
+                    className="rounded border border-border bg-background px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                    aria-label="Active data source"
+                >
+                    {dataSources.map((ds) => (
+                        <option key={ds.id} value={ds.id}>
+                            {ds.label || ds.graphName || ds.providerId}
+                            {ds.isPrimary ? ' (primary)' : ''}
+                        </option>
+                    ))}
+                </select>
+            )}
+
+            {/* Single data source — show graph name inline */}
+            {!showDsSelector && dataSources.length === 1 && dataSources[0].graphName && (
+                <span className="text-xs text-muted-foreground">
+                    ({dataSources[0].label || dataSources[0].graphName})
+                </span>
             )}
 
             {onManage && (

@@ -304,15 +304,54 @@ class BlueprintResponse(BaseModel):
 
 
 # ============================================
+# Data Source Models (workspace data sources)
+# ============================================
+
+class DataSourceCreateRequest(BaseModel):
+    provider_id: str = Field(alias="providerId")
+    graph_name: str = Field(alias="graphName")
+    blueprint_id: Optional[str] = Field(None, alias="blueprintId")
+    label: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class DataSourceUpdateRequest(BaseModel):
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    graph_name: Optional[str] = Field(None, alias="graphName")
+    blueprint_id: Optional[str] = Field(None, alias="blueprintId")
+    label: Optional[str] = None
+    is_active: Optional[bool] = Field(None, alias="isActive")
+
+    class Config:
+        populate_by_name = True
+
+
+class DataSourceResponse(BaseModel):
+    id: str
+    workspace_id: str = Field(alias="workspaceId")
+    provider_id: str = Field(alias="providerId")
+    graph_name: Optional[str] = Field(None, alias="graphName")
+    blueprint_id: Optional[str] = Field(None, alias="blueprintId")
+    label: Optional[str] = None
+    is_primary: bool = Field(alias="isPrimary")
+    is_active: bool = Field(alias="isActive")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+    class Config:
+        populate_by_name = True
+
+
+# ============================================
 # Workspace Models (workspace-centric)
 # ============================================
 
 class WorkspaceCreateRequest(BaseModel):
     name: str
-    provider_id: str = Field(alias="providerId")
-    graph_name: str = Field(alias="graphName")
-    blueprint_id: Optional[str] = Field(None, alias="blueprintId")
     description: Optional[str] = None
+    data_sources: List[DataSourceCreateRequest] = Field(alias="dataSources")
 
     class Config:
         populate_by_name = True
@@ -321,9 +360,6 @@ class WorkspaceCreateRequest(BaseModel):
 class WorkspaceUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
-    provider_id: Optional[str] = Field(None, alias="providerId")
-    graph_name: Optional[str] = Field(None, alias="graphName")
-    blueprint_id: Optional[str] = Field(None, alias="blueprintId")
     is_active: Optional[bool] = Field(None, alias="isActive")
 
     class Config:
@@ -334,9 +370,7 @@ class WorkspaceResponse(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
-    provider_id: str = Field(alias="providerId")
-    graph_name: Optional[str] = Field(None, alias="graphName")
-    blueprint_id: Optional[str] = Field(None, alias="blueprintId")
+    data_sources: List[DataSourceResponse] = Field(default_factory=list, alias="dataSources")
     is_default: bool = Field(alias="isDefault")
     is_active: bool = Field(alias="isActive")
     created_at: str = Field(alias="createdAt")
@@ -344,3 +378,29 @@ class WorkspaceResponse(BaseModel):
 
     class Config:
         populate_by_name = True
+
+    @property
+    def primary_data_source(self) -> Optional[DataSourceResponse]:
+        """Return the primary data source, or first if none marked primary."""
+        return next(
+            (ds for ds in self.data_sources if ds.is_primary),
+            self.data_sources[0] if self.data_sources else None,
+        )
+
+    @property
+    def provider_id(self) -> Optional[str]:
+        """Convenience: provider_id from primary data source (backward compat)."""
+        ds = self.primary_data_source
+        return ds.provider_id if ds else None
+
+    @property
+    def graph_name(self) -> Optional[str]:
+        """Convenience: graph_name from primary data source (backward compat)."""
+        ds = self.primary_data_source
+        return ds.graph_name if ds else None
+
+    @property
+    def blueprint_id(self) -> Optional[str]:
+        """Convenience: blueprint_id from primary data source (backward compat)."""
+        ds = self.primary_data_source
+        return ds.blueprint_id if ds else None

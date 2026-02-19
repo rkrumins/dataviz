@@ -42,17 +42,24 @@ class ProviderRegistry:
         self,
         workspace_id: str,
         session: AsyncSession,
+        data_source_id: Optional[str] = None,
     ) -> GraphDataProvider:
         """
-        Resolve workspace → (provider_id, graph_name) → cached provider.
+        Resolve workspace → data source → (provider_id, graph_name) → cached provider.
+        If data_source_id is given, uses that specific source; otherwise uses the primary.
         """
-        from ..db.repositories.workspace_repo import get_workspace_orm
+        from ..db.repositories import data_source_repo
 
-        ws = await get_workspace_orm(session, workspace_id)
-        if ws is None:
-            raise KeyError(f"Workspace not found: {workspace_id}")
+        if data_source_id:
+            ds = await data_source_repo.get_data_source_orm(session, data_source_id)
+            if ds is None:
+                raise KeyError(f"Data source not found: {data_source_id}")
+        else:
+            ds = await data_source_repo.get_primary_data_source(session, workspace_id)
+            if ds is None:
+                raise KeyError(f"No data source for workspace: {workspace_id}")
 
-        cache_key = (ws.provider_id, ws.graph_name or "")
+        cache_key = (ds.provider_id, ds.graph_name or "")
 
         if cache_key not in self._locks:
             self._locks[cache_key] = asyncio.Lock()
@@ -60,11 +67,11 @@ class ProviderRegistry:
         async with self._locks[cache_key]:
             if cache_key not in self._providers:
                 logger.info(
-                    "Instantiating provider for workspace=%s provider=%s graph=%s",
-                    workspace_id, ws.provider_id, ws.graph_name,
+                    "Instantiating provider for workspace=%s ds=%s provider=%s graph=%s",
+                    workspace_id, ds.id, ds.provider_id, ds.graph_name,
                 )
                 self._providers[cache_key] = await self._instantiate_from_provider(
-                    ws.provider_id, ws.graph_name, session
+                    ds.provider_id, ds.graph_name, session
                 )
 
         return self._providers[cache_key]
@@ -155,7 +162,7 @@ class ProviderRegistry:
     # Eviction                                                             #
     # ------------------------------------------------------------------ #
 
-    async def evict_workspace(self, provider_id: str, graph_name: str) -> None:
+    async def evict_data_source(self, provider_id: str, graph_name: str) -> None:
         """Evict cached provider for a (provider_id, graph_name) pair."""
         cache_key = (provider_id, graph_name or "")
         provider = self._providers.pop(cache_key, None)
@@ -167,11 +174,18 @@ class ProviderRegistry:
         self._locks.pop(cache_key, None)
         logger.info("Evicted provider for key=%s", cache_key)
 
+    async def evict_workspace(self, workspace_id: str, session: AsyncSession) -> None:
+        """Evict all cached providers for all data sources in a workspace."""
+        from ..db.repositories import data_source_repo
+        sources = await data_source_repo.list_data_sources(session, workspace_id)
+        for ds in sources:
+            await self.evict_data_source(ds.provider_id, ds.graph_name or "")
+
     async def evict_provider(self, provider_id: str) -> None:
         """Evict all cached providers for a given provider_id (any graph_name)."""
         keys_to_evict = [k for k in self._providers if k[0] == provider_id]
         for key in keys_to_evict:
-            await self.evict_workspace(key[0], key[1])
+            await self.evict_data_source(key[0], key[1])
 
     async def evict(self, connection_id: str) -> None:
         """Legacy: evict by connection_id."""
@@ -186,7 +200,7 @@ class ProviderRegistry:
     async def evict_all(self) -> None:
         """Evict all cached providers (workspace + legacy)."""
         for key in list(self._providers.keys()):
-            await self.evict_workspace(key[0], key[1])
+            await self.evict_data_source(key[0], key[1])
         for conn_id in list(self._legacy_providers.keys()):
             await self.evict(conn_id)
         self._default_ws_id = None
@@ -328,12 +342,15 @@ class ProviderRegistry:
             )
         bp = await blueprint_repo.create_blueprint(session, bp_req)
 
-        # Create Workspace
+        # Create Workspace with data source
+        from backend.common.models.management import DataSourceCreateRequest
         ws = await workspace_repo.create_workspace(session, WorkspaceCreateRequest(
             name=connection_orm.name,
-            providerId=prov.id,
-            graphName=connection_orm.graph_name or "nexus_lineage",
-            blueprintId=bp.id,
+            dataSources=[DataSourceCreateRequest(
+                providerId=prov.id,
+                graphName=connection_orm.graph_name or "nexus_lineage",
+                blueprintId=bp.id,
+            )],
         ), make_default=True)
 
         logger.info(
@@ -394,12 +411,15 @@ class ProviderRegistry:
             containmentEdgeTypes=containment_types,
         ))
 
-        # 3. Create Workspace (default)
+        # 3. Create Workspace with data source (default)
+        from backend.common.models.management import DataSourceCreateRequest
         ws = await workspace_repo.create_workspace(session, WorkspaceCreateRequest(
             name="Default Workspace",
-            providerId=prov.id,
-            graphName=graph_name,
-            blueprintId=bp.id,
+            dataSources=[DataSourceCreateRequest(
+                providerId=prov.id,
+                graphName=graph_name,
+                blueprintId=bp.id,
+            )],
         ), make_default=True)
 
         # 4. Also create legacy connection for backward compat

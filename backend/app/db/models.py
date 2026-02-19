@@ -121,6 +121,11 @@ class AssignmentRuleSetORM(Base):
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=True,  # nullable during migration
     )
+    data_source_id = Column(
+        Text,
+        ForeignKey("workspace_data_sources.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     name = Column(Text, nullable=False)
     description = Column(Text, nullable=True)
     is_default = Column(Boolean, nullable=False, default=False)
@@ -137,6 +142,7 @@ class AssignmentRuleSetORM(Base):
     __table_args__ = (
         Index("idx_rule_sets_connection", "connection_id"),
         Index("idx_rule_sets_workspace", "workspace_id"),
+        Index("idx_rule_sets_data_source", "data_source_id"),
     )
 
     def __repr__(self) -> str:
@@ -161,6 +167,11 @@ class SavedViewORM(Base):
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=True,  # nullable during migration
     )
+    data_source_id = Column(
+        Text,
+        ForeignKey("workspace_data_sources.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     name = Column(Text, nullable=False)
     description = Column(Text, nullable=True)
     view_type = Column(Text, nullable=False, default="canvas")  # canvas | reference_model | scope
@@ -178,6 +189,7 @@ class SavedViewORM(Base):
     __table_args__ = (
         Index("idx_views_connection", "connection_id"),
         Index("idx_views_workspace", "workspace_id"),
+        Index("idx_views_data_source", "data_source_id"),
     )
 
     def __repr__(self) -> str:
@@ -227,8 +239,8 @@ class ProviderORM(Base):
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     # Relationships
-    workspaces = relationship(
-        "WorkspaceORM", back_populates="provider",
+    data_sources = relationship(
+        "WorkspaceDataSourceORM", back_populates="provider",
         cascade="all, delete-orphan",
     )
 
@@ -261,8 +273,8 @@ class OntologyBlueprintORM(Base):
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     # Relationships
-    workspaces = relationship(
-        "WorkspaceORM", back_populates="blueprint",
+    data_sources = relationship(
+        "WorkspaceDataSourceORM", back_populates="blueprint",
     )
 
     __table_args__ = (
@@ -274,7 +286,7 @@ class OntologyBlueprintORM(Base):
 
 
 # ------------------------------------------------------------------ #
-# workspaces  (binding: provider + graph_name + blueprint)             #
+# workspaces  (operational context — a team's "project")               #
 # ------------------------------------------------------------------ #
 
 class WorkspaceORM(Base):
@@ -283,6 +295,46 @@ class WorkspaceORM(Base):
     id = Column(Text, primary_key=True, default=lambda: f"ws_{uuid.uuid4().hex[:12]}")
     name = Column(Text, nullable=False)
     description = Column(Text, nullable=True)
+    is_default = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    # Relationships
+    data_sources = relationship(
+        "WorkspaceDataSourceORM", back_populates="workspace",
+        cascade="all, delete-orphan",
+    )
+    saved_views = relationship(
+        "SavedViewORM", back_populates="workspace",
+        foreign_keys="SavedViewORM.workspace_id",
+    )
+    assignment_rule_sets = relationship(
+        "AssignmentRuleSetORM", back_populates="workspace",
+        foreign_keys="AssignmentRuleSetORM.workspace_id",
+    )
+
+    __table_args__ = (
+        Index("idx_workspaces_is_default", "is_default"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Workspace id={self.id!r} name={self.name!r}>"
+
+
+# ------------------------------------------------------------------ #
+# workspace_data_sources  (binds provider + graph + blueprint)         #
+# ------------------------------------------------------------------ #
+
+class WorkspaceDataSourceORM(Base):
+    __tablename__ = "workspace_data_sources"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ds_{uuid.uuid4().hex[:12]}")
+    workspace_id = Column(
+        Text,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     provider_id = Column(
         Text,
         ForeignKey("providers.id", ondelete="CASCADE"),
@@ -294,27 +346,19 @@ class WorkspaceORM(Base):
         ForeignKey("ontology_blueprints.id", ondelete="SET NULL"),
         nullable=True,
     )
-    is_default = Column(Boolean, nullable=False, default=False)
+    label = Column(Text, nullable=True)
+    is_primary = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     # Relationships
-    provider = relationship("ProviderORM", back_populates="workspaces")
-    blueprint = relationship("OntologyBlueprintORM", back_populates="workspaces")
-    saved_views = relationship(
-        "SavedViewORM", back_populates="workspace",
-        foreign_keys="SavedViewORM.workspace_id",
-    )
-    assignment_rule_sets = relationship(
-        "AssignmentRuleSetORM", back_populates="workspace",
-        foreign_keys="AssignmentRuleSetORM.workspace_id",
-    )
+    workspace = relationship("WorkspaceORM", back_populates="data_sources")
+    provider = relationship("ProviderORM", back_populates="data_sources")
+    blueprint = relationship("OntologyBlueprintORM", back_populates="data_sources")
 
     __table_args__ = (
-        Index("idx_workspaces_provider", "provider_id"),
-        Index("idx_workspaces_is_default", "is_default"),
+        UniqueConstraint("workspace_id", "provider_id", "graph_name", name="uq_ds_ws_prov_graph"),
+        Index("idx_ds_workspace", "workspace_id"),
+        Index("idx_ds_provider", "provider_id"),
     )
-
-    def __repr__(self) -> str:
-        return f"<Workspace id={self.id!r} name={self.name!r} graph={self.graph_name!r}>"

@@ -1,6 +1,7 @@
 """
 Repository for workspaces table.
-Workspaces bind a Provider + Graph Name + Blueprint into a queryable context.
+Workspaces are operational contexts that contain one or more data sources
+(each binding a Provider + Graph Name + Blueprint).
 """
 import logging
 from datetime import datetime, timezone
@@ -8,12 +9,14 @@ from typing import List, Optional
 
 from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from ..models import WorkspaceORM
+from ..models import WorkspaceORM, WorkspaceDataSourceORM
 from backend.common.models.management import (
     WorkspaceCreateRequest,
     WorkspaceUpdateRequest,
     WorkspaceResponse,
+    DataSourceResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -23,14 +26,28 @@ logger = logging.getLogger(__name__)
 # ORM → Pydantic conversion                                           #
 # ------------------------------------------------------------------ #
 
+def _ds_to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
+    return DataSourceResponse(
+        id=row.id,
+        workspaceId=row.workspace_id,
+        providerId=row.provider_id,
+        graphName=row.graph_name,
+        blueprintId=row.blueprint_id,
+        label=row.label,
+        isPrimary=bool(row.is_primary),
+        isActive=bool(row.is_active),
+        createdAt=row.created_at,
+        updatedAt=row.updated_at,
+    )
+
+
 def _to_response(row: WorkspaceORM) -> WorkspaceResponse:
+    ds_list = [_ds_to_response(ds) for ds in (row.data_sources or [])]
     return WorkspaceResponse(
         id=row.id,
         name=row.name,
         description=row.description,
-        providerId=row.provider_id,
-        graphName=row.graph_name,
-        blueprintId=row.blueprint_id,
+        dataSources=ds_list,
         isDefault=bool(row.is_default),
         isActive=bool(row.is_active),
         createdAt=row.created_at,
@@ -39,21 +56,25 @@ def _to_response(row: WorkspaceORM) -> WorkspaceResponse:
 
 
 # ------------------------------------------------------------------ #
-# CRUD                                                                 #
+# Queries (with eager loading of data_sources)                         #
 # ------------------------------------------------------------------ #
+
+def _ws_query():
+    return select(WorkspaceORM).options(selectinload(WorkspaceORM.data_sources))
+
 
 async def list_workspaces(session: AsyncSession) -> List[WorkspaceResponse]:
     result = await session.execute(
-        select(WorkspaceORM).order_by(WorkspaceORM.created_at)
+        _ws_query().order_by(WorkspaceORM.created_at)
     )
-    return [_to_response(r) for r in result.scalars().all()]
+    return [_to_response(r) for r in result.scalars().unique().all()]
 
 
 async def get_workspace(
     session: AsyncSession, workspace_id: str
 ) -> Optional[WorkspaceResponse]:
     result = await session.execute(
-        select(WorkspaceORM).where(WorkspaceORM.id == workspace_id)
+        _ws_query().where(WorkspaceORM.id == workspace_id)
     )
     row = result.scalar_one_or_none()
     return _to_response(row) if row else None
@@ -62,9 +83,9 @@ async def get_workspace(
 async def get_workspace_orm(
     session: AsyncSession, workspace_id: str
 ) -> Optional[WorkspaceORM]:
-    """Return the raw ORM row (used by ProviderRegistry)."""
+    """Return the raw ORM row with data_sources eagerly loaded."""
     result = await session.execute(
-        select(WorkspaceORM).where(WorkspaceORM.id == workspace_id)
+        _ws_query().where(WorkspaceORM.id == workspace_id)
     )
     return result.scalar_one_or_none()
 
@@ -74,7 +95,7 @@ async def get_default_workspace(
 ) -> Optional[WorkspaceORM]:
     """Return the default workspace (is_default=True, is_active=True)."""
     result = await session.execute(
-        select(WorkspaceORM).where(
+        _ws_query().where(
             WorkspaceORM.is_default == True,  # noqa: E712
             WorkspaceORM.is_active == True,
         )
@@ -82,22 +103,44 @@ async def get_default_workspace(
     return result.scalar_one_or_none()
 
 
+# ------------------------------------------------------------------ #
+# CRUD                                                                 #
+# ------------------------------------------------------------------ #
+
 async def create_workspace(
     session: AsyncSession,
     req: WorkspaceCreateRequest,
     make_default: bool = False,
 ) -> WorkspaceResponse:
-    row = WorkspaceORM(
+    ws = WorkspaceORM(
         name=req.name,
         description=req.description,
-        provider_id=req.provider_id,
-        graph_name=req.graph_name,
-        blueprint_id=req.blueprint_id,
         is_default=make_default,
         is_active=True,
     )
-    session.add(row)
+    session.add(ws)
+    await session.flush()  # assigns ws.id
+
+    # Create data source rows
+    for i, ds_req in enumerate(req.data_sources):
+        ds = WorkspaceDataSourceORM(
+            workspace_id=ws.id,
+            provider_id=ds_req.provider_id,
+            graph_name=ds_req.graph_name,
+            blueprint_id=ds_req.blueprint_id,
+            label=ds_req.label,
+            is_primary=(i == 0),  # first data source is primary by default
+            is_active=True,
+        )
+        session.add(ds)
+
     await session.flush()
+
+    # Reload with data_sources
+    result = await session.execute(
+        _ws_query().where(WorkspaceORM.id == ws.id)
+    )
+    row = result.scalar_one_or_none()
     return _to_response(row)
 
 
@@ -114,12 +157,6 @@ async def update_workspace(
         row.name = req.name
     if req.description is not None:
         row.description = req.description
-    if req.provider_id is not None:
-        row.provider_id = req.provider_id
-    if req.graph_name is not None:
-        row.graph_name = req.graph_name
-    if req.blueprint_id is not None:
-        row.blueprint_id = req.blueprint_id
     if req.is_active is not None:
         row.is_active = req.is_active
 

@@ -1,25 +1,29 @@
 /**
  * Workspaces store — manages registered workspaces and tracks the active one.
  *
- * A workspace binds a Provider + Graph Name + Blueprint into a queryable context.
- * Only `activeWorkspaceId` is persisted to localStorage so the user's last-selected
- * workspace is restored on reload. The workspace list is always fetched fresh.
+ * A workspace is an operational context containing one or more data sources.
+ * Both `activeWorkspaceId` and `activeDataSourceId` are persisted to localStorage
+ * so the user's last selection is restored on reload. The workspace list is always
+ * fetched fresh.
  */
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
+import { workspaceService, type WorkspaceResponse, type DataSourceResponse } from '@/services/workspaceService'
 
 interface WorkspacesState {
     workspaces: WorkspaceResponse[]
     activeWorkspaceId: string | null
+    activeDataSourceId: string | null
     isLoading: boolean
     error: string | null
 
     // Actions
     loadWorkspaces: () => Promise<void>
     setActiveWorkspace: (id: string | null) => void
+    setActiveDataSource: (id: string | null) => void
     getDefaultWorkspace: () => WorkspaceResponse | null
     getActiveWorkspace: () => WorkspaceResponse | null
+    getActiveDataSource: () => DataSourceResponse | null
 
     // Mutation helpers (called after CRUD from WorkspacePanel)
     addWorkspace: (ws: WorkspaceResponse) => void
@@ -32,6 +36,7 @@ export const useWorkspacesStore = create<WorkspacesState>()(
         (set, get) => ({
             workspaces: [],
             activeWorkspaceId: null,
+            activeDataSourceId: null,
             isLoading: false,
             error: null,
 
@@ -42,11 +47,25 @@ export const useWorkspacesStore = create<WorkspacesState>()(
                     set({ workspaces, isLoading: false })
 
                     // Auto-select: keep existing if still valid, otherwise use default
-                    const { activeWorkspaceId } = get()
+                    const { activeWorkspaceId, activeDataSourceId } = get()
                     const stillExists = workspaces.some((w) => w.id === activeWorkspaceId)
                     if (!stillExists) {
                         const defaultWs = workspaces.find((w) => w.isDefault) ?? workspaces[0] ?? null
-                        set({ activeWorkspaceId: defaultWs?.id ?? null })
+                        const primaryDs = defaultWs?.dataSources?.find((ds) => ds.isPrimary)
+                            ?? defaultWs?.dataSources?.[0] ?? null
+                        set({
+                            activeWorkspaceId: defaultWs?.id ?? null,
+                            activeDataSourceId: primaryDs?.id ?? null,
+                        })
+                    } else if (activeDataSourceId) {
+                        // Verify active data source still exists in active workspace
+                        const ws = workspaces.find((w) => w.id === activeWorkspaceId)
+                        const dsExists = ws?.dataSources?.some((ds) => ds.id === activeDataSourceId)
+                        if (!dsExists) {
+                            const primaryDs = ws?.dataSources?.find((ds) => ds.isPrimary)
+                                ?? ws?.dataSources?.[0] ?? null
+                            set({ activeDataSourceId: primaryDs?.id ?? null })
+                        }
                     }
                 } catch (err) {
                     set({
@@ -56,7 +75,17 @@ export const useWorkspacesStore = create<WorkspacesState>()(
                 }
             },
 
-            setActiveWorkspace: (id) => set({ activeWorkspaceId: id }),
+            setActiveWorkspace: (id) => {
+                const ws = id ? get().workspaces.find((w) => w.id === id) : null
+                const primaryDs = ws?.dataSources?.find((ds) => ds.isPrimary)
+                    ?? ws?.dataSources?.[0] ?? null
+                set({
+                    activeWorkspaceId: id,
+                    activeDataSourceId: primaryDs?.id ?? null,
+                })
+            },
+
+            setActiveDataSource: (id) => set({ activeDataSourceId: id }),
 
             getDefaultWorkspace: () => {
                 return get().workspaces.find((w) => w.isDefault) ?? null
@@ -65,6 +94,17 @@ export const useWorkspacesStore = create<WorkspacesState>()(
             getActiveWorkspace: () => {
                 const { workspaces, activeWorkspaceId } = get()
                 return workspaces.find((w) => w.id === activeWorkspaceId) ?? null
+            },
+
+            getActiveDataSource: () => {
+                const ws = get().getActiveWorkspace()
+                if (!ws) return null
+                const { activeDataSourceId } = get()
+                if (activeDataSourceId) {
+                    return ws.dataSources?.find((ds) => ds.id === activeDataSourceId) ?? null
+                }
+                return ws.dataSources?.find((ds) => ds.isPrimary)
+                    ?? ws.dataSources?.[0] ?? null
             },
 
             addWorkspace: (ws) =>
@@ -78,16 +118,23 @@ export const useWorkspacesStore = create<WorkspacesState>()(
             removeWorkspace: (id) =>
                 set((state) => {
                     const next = state.workspaces.filter((w) => w.id !== id)
-                    const activeWorkspaceId =
-                        state.activeWorkspaceId === id
-                            ? (next.find((w) => w.isDefault) ?? next[0])?.id ?? null
-                            : state.activeWorkspaceId
-                    return { workspaces: next, activeWorkspaceId }
+                    let activeWorkspaceId = state.activeWorkspaceId
+                    let activeDataSourceId = state.activeDataSourceId
+                    if (state.activeWorkspaceId === id) {
+                        const fallback = next.find((w) => w.isDefault) ?? next[0]
+                        activeWorkspaceId = fallback?.id ?? null
+                        activeDataSourceId = fallback?.dataSources?.find((ds) => ds.isPrimary)?.id
+                            ?? fallback?.dataSources?.[0]?.id ?? null
+                    }
+                    return { workspaces: next, activeWorkspaceId, activeDataSourceId }
                 }),
         }),
         {
             name: 'synodic-active-workspace',
-            partialize: (state) => ({ activeWorkspaceId: state.activeWorkspaceId }),
+            partialize: (state) => ({
+                activeWorkspaceId: state.activeWorkspaceId,
+                activeDataSourceId: state.activeDataSourceId,
+            }),
         }
     )
 )

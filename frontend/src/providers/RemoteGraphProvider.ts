@@ -25,6 +25,8 @@ const API_BASE = '/api/v1'
 export interface RemoteGraphProviderOptions {
     /** Workspace ID. When set, routes through /v1/{ws_id}/graph/... */
     workspaceId?: string
+    /** Data source ID. When set, appended as ?dataSourceId= to workspace-scoped routes. */
+    dataSourceId?: string
     /** @deprecated Legacy connection ID. Use workspaceId instead. */
     connectionId?: string
 }
@@ -33,10 +35,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
     readonly name = 'RemoteGraphProvider'
 
     private readonly workspaceId?: string
+    private readonly dataSourceId?: string
     private readonly connectionId?: string
 
     constructor(options?: RemoteGraphProviderOptions) {
         this.workspaceId = options?.workspaceId
+        this.dataSourceId = options?.dataSourceId
         this.connectionId = options?.connectionId
     }
 
@@ -45,12 +49,17 @@ export class RemoteGraphProvider implements GraphDataProvider {
     // ==========================================
 
     private buildUrl(path: string, extraParams?: Record<string, string>): string {
-        // Workspace-scoped: /api/v1/v1/{ws_id}/graph/...
+        // Workspace-scoped: /api/v1/{ws_id}/graph/...
         const base = this.workspaceId
-            ? `${API_BASE}/v1/${this.workspaceId}/graph`
+            ? `/api/v1/${this.workspaceId}/graph`
             : API_BASE
 
         const url = new URL(`${base}${path}`, window.location.origin)
+
+        // Data source targeting within a workspace
+        if (this.workspaceId && this.dataSourceId) {
+            url.searchParams.set('dataSourceId', this.dataSourceId)
+        }
 
         // Legacy fallback: append connectionId as query param
         if (!this.workspaceId && this.connectionId) {

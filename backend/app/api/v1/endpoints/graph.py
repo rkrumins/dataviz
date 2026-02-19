@@ -22,6 +22,7 @@ router = APIRouter()
 
 async def get_context_engine(
     ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     connectionId: Optional[str] = Query(None, description="Legacy connection ID. Prefer workspace-scoped routes."),
     session: AsyncSession = Depends(get_db_session),
 ) -> ContextEngine:
@@ -30,11 +31,14 @@ async def get_context_engine(
 
     Priority:
     - `ws_id` (path param from /v1/{ws_id}/graph routes) → workspace-scoped engine
+      - `dataSourceId` (optional query param) → targets specific data source within workspace
     - `connectionId` (query param, legacy) → connection-scoped engine
     - Neither → module-level singleton (primary connection)
     """
     if ws_id:
-        return await ContextEngine.for_workspace(ws_id, provider_registry, session)
+        return await ContextEngine.for_workspace(
+            ws_id, provider_registry, session, data_source_id=dataSourceId
+        )
     if connectionId:
         return await ContextEngine.for_connection(connectionId, provider_registry, session)
     return context_engine

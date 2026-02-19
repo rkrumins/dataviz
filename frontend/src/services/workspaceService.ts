@@ -1,24 +1,56 @@
 /**
- * Workspace Service — CRUD for workspaces.
- * A workspace binds a Provider + Graph Name + Blueprint.
+ * Workspace Service — CRUD for workspaces and their data sources.
+ * A workspace is an operational context containing one or more data sources,
+ * each binding a Provider + Graph Name + Blueprint.
  */
 
 const ADMIN_API = '/api/v1/admin/workspaces'
 
-export interface WorkspaceCreateRequest {
-    name: string
+// ============================================================
+// Data Source types
+// ============================================================
+
+export interface DataSourceCreateRequest {
     providerId: string
     graphName: string
     blueprintId?: string
+    label?: string
+}
+
+export interface DataSourceUpdateRequest {
+    providerId?: string
+    graphName?: string
+    blueprintId?: string
+    label?: string
+    isActive?: boolean
+}
+
+export interface DataSourceResponse {
+    id: string
+    workspaceId: string
+    providerId: string
+    graphName?: string
+    blueprintId?: string
+    label?: string
+    isPrimary: boolean
+    isActive: boolean
+    createdAt: string
+    updatedAt: string
+}
+
+// ============================================================
+// Workspace types
+// ============================================================
+
+export interface WorkspaceCreateRequest {
+    name: string
     description?: string
+    dataSources: DataSourceCreateRequest[]
 }
 
 export interface WorkspaceUpdateRequest {
     name?: string
     description?: string
-    providerId?: string
-    graphName?: string
-    blueprintId?: string
     isActive?: boolean
 }
 
@@ -26,14 +58,19 @@ export interface WorkspaceResponse {
     id: string
     name: string
     description?: string
-    providerId: string
-    graphName?: string
-    blueprintId?: string
+    dataSources: DataSourceResponse[]
     isDefault: boolean
     isActive: boolean
     createdAt: string
     updatedAt: string
+    /** Convenience: from primary data source (backward compat) */
+    providerId?: string
+    graphName?: string
 }
+
+// ============================================================
+// HTTP helper
+// ============================================================
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
     const res = await fetch(url, {
@@ -48,7 +85,13 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     return res.json()
 }
 
+// ============================================================
+// Service
+// ============================================================
+
 export const workspaceService = {
+    // ── Workspace CRUD ────────────────────────────────────────
+
     list(): Promise<WorkspaceResponse[]> {
         return request<WorkspaceResponse[]>(ADMIN_API)
     },
@@ -77,6 +120,38 @@ export const workspaceService = {
 
     setDefault(id: string): Promise<WorkspaceResponse> {
         return request<WorkspaceResponse>(`${ADMIN_API}/${id}/set-default`, {
+            method: 'POST',
+        })
+    },
+
+    // ── Data Source CRUD ──────────────────────────────────────
+
+    listDataSources(wsId: string): Promise<DataSourceResponse[]> {
+        return request<DataSourceResponse[]>(`${ADMIN_API}/${wsId}/data-sources`)
+    },
+
+    addDataSource(wsId: string, req: DataSourceCreateRequest): Promise<DataSourceResponse> {
+        return request<DataSourceResponse>(`${ADMIN_API}/${wsId}/data-sources`, {
+            method: 'POST',
+            body: JSON.stringify(req),
+        })
+    },
+
+    updateDataSource(wsId: string, dsId: string, req: DataSourceUpdateRequest): Promise<DataSourceResponse> {
+        return request<DataSourceResponse>(`${ADMIN_API}/${wsId}/data-sources/${dsId}`, {
+            method: 'PUT',
+            body: JSON.stringify(req),
+        })
+    },
+
+    removeDataSource(wsId: string, dsId: string): Promise<void> {
+        return request<void>(`${ADMIN_API}/${wsId}/data-sources/${dsId}`, {
+            method: 'DELETE',
+        })
+    },
+
+    setPrimaryDataSource(wsId: string, dsId: string): Promise<DataSourceResponse> {
+        return request<DataSourceResponse>(`${ADMIN_API}/${wsId}/data-sources/${dsId}/set-primary`, {
             method: 'POST',
         })
     },

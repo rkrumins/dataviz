@@ -3,10 +3,17 @@
  *
  * Wraps useWorkspacesStore and workspaceService with loading/error state
  * and action helpers so components don't need to import both.
+ * Includes data source management actions for multi-source workspaces.
  */
 import { useCallback, useState } from 'react'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { workspaceService, type WorkspaceCreateRequest, type WorkspaceUpdateRequest } from '@/services/workspaceService'
+import {
+    workspaceService,
+    type WorkspaceCreateRequest,
+    type WorkspaceUpdateRequest,
+    type DataSourceCreateRequest,
+    type DataSourceUpdateRequest,
+} from '@/services/workspaceService'
 
 export function useWorkspaces() {
     const store = useWorkspacesStore()
@@ -78,10 +85,77 @@ export function useWorkspaces() {
         }
     }, [store])
 
+    // ── Data Source Actions ──────────────────────────────────
+
+    const addDataSource = useCallback(async (wsId: string, req: DataSourceCreateRequest) => {
+        setActionLoading(true)
+        setActionError(null)
+        try {
+            const ds = await workspaceService.addDataSource(wsId, req)
+            await store.loadWorkspaces()
+            return ds
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Failed to add data source'
+            setActionError(msg)
+            throw err
+        } finally {
+            setActionLoading(false)
+        }
+    }, [store])
+
+    const updateDataSource = useCallback(async (wsId: string, dsId: string, req: DataSourceUpdateRequest) => {
+        setActionLoading(true)
+        setActionError(null)
+        try {
+            const ds = await workspaceService.updateDataSource(wsId, dsId, req)
+            await store.loadWorkspaces()
+            return ds
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Failed to update data source'
+            setActionError(msg)
+            throw err
+        } finally {
+            setActionLoading(false)
+        }
+    }, [store])
+
+    const removeDataSource = useCallback(async (wsId: string, dsId: string) => {
+        setActionLoading(true)
+        setActionError(null)
+        try {
+            await workspaceService.removeDataSource(wsId, dsId)
+            await store.loadWorkspaces()
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Failed to remove data source'
+            setActionError(msg)
+            throw err
+        } finally {
+            setActionLoading(false)
+        }
+    }, [store])
+
+    const setPrimaryDataSource = useCallback(async (wsId: string, dsId: string) => {
+        setActionLoading(true)
+        setActionError(null)
+        try {
+            const ds = await workspaceService.setPrimaryDataSource(wsId, dsId)
+            await store.loadWorkspaces()
+            return ds
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Failed to set primary data source'
+            setActionError(msg)
+            throw err
+        } finally {
+            setActionLoading(false)
+        }
+    }, [store])
+
     return {
         workspaces: store.workspaces,
         activeWorkspaceId: store.activeWorkspaceId,
+        activeDataSourceId: store.activeDataSourceId,
         activeWorkspace: store.getActiveWorkspace(),
+        activeDataSource: store.getActiveDataSource(),
         defaultWorkspace: store.getDefaultWorkspace(),
         isLoading: store.isLoading,
         loadError: store.error,
@@ -90,9 +164,14 @@ export function useWorkspaces() {
         clearError,
         loadWorkspaces: store.loadWorkspaces,
         setActiveWorkspace: store.setActiveWorkspace,
+        setActiveDataSource: store.setActiveDataSource,
         createWorkspace,
         updateWorkspace,
         deleteWorkspace,
         setDefault,
+        addDataSource,
+        updateDataSource,
+        removeDataSource,
+        setPrimaryDataSource,
     }
 }

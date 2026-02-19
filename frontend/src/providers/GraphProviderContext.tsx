@@ -23,6 +23,8 @@ import { useConnectionsStore } from '@/store/connections'
 export interface GraphProviderContextValueExtended extends GraphProviderContextValue {
     workspaceId: string | null
     setWorkspaceId: (id: string | null) => void
+    dataSourceId: string | null
+    setDataSourceId: (id: string | null) => void
     /** @deprecated Use workspaceId — kept for backward compat */
     connectionId: string | null
     /** @deprecated Use setWorkspaceId — kept for backward compat */
@@ -42,8 +44,10 @@ interface GraphProviderProps {
 export function GraphProvider({ children }: GraphProviderProps) {
     // Workspace-centric (primary)
     const activeWorkspaceId = useWorkspacesStore((s) => s.activeWorkspaceId)
+    const activeDataSourceId = useWorkspacesStore((s) => s.activeDataSourceId)
     const loadWorkspaces = useWorkspacesStore((s) => s.loadWorkspaces)
     const setActiveWorkspace = useWorkspacesStore((s) => s.setActiveWorkspace)
+    const setActiveDataSource = useWorkspacesStore((s) => s.setActiveDataSource)
 
     // Connection-based (legacy fallback)
     const activeConnectionId = useConnectionsStore((s) => s.activeConnectionId)
@@ -56,6 +60,7 @@ export function GraphProvider({ children }: GraphProviderProps) {
 
     // Track previous IDs so we only rebuild the provider when it changes
     const prevWorkspaceId = useRef<string | null | undefined>(undefined)
+    const prevDataSourceId = useRef<string | null | undefined>(undefined)
     const prevConnectionId = useRef<string | null | undefined>(undefined)
 
     // Load both workspace and connection lists on mount
@@ -64,16 +69,15 @@ export function GraphProvider({ children }: GraphProviderProps) {
         loadConnections()
     }, [loadWorkspaces, loadConnections])
 
-    // Derive the effective ID (workspace takes precedence over connection)
-    const effectiveId = activeWorkspaceId || activeConnectionId
-
-    // Rebuild provider when effectiveId changes
+    // Rebuild provider when workspace, data source, or connection changes
     useEffect(() => {
         if (
             prevWorkspaceId.current === activeWorkspaceId &&
+            prevDataSourceId.current === activeDataSourceId &&
             prevConnectionId.current === activeConnectionId
         ) return
         prevWorkspaceId.current = activeWorkspaceId
+        prevDataSourceId.current = activeDataSourceId
         prevConnectionId.current = activeConnectionId
 
         const initProvider = async () => {
@@ -83,8 +87,11 @@ export function GraphProvider({ children }: GraphProviderProps) {
 
                 let p: RemoteGraphProvider
                 if (activeWorkspaceId) {
-                    // Workspace-scoped: /v1/{ws_id}/graph/...
-                    p = new RemoteGraphProvider({ workspaceId: activeWorkspaceId })
+                    // Workspace-scoped: /v1/{ws_id}/graph/... with optional dataSourceId
+                    p = new RemoteGraphProvider({
+                        workspaceId: activeWorkspaceId,
+                        dataSourceId: activeDataSourceId ?? undefined,
+                    })
                 } else if (activeConnectionId) {
                     // Legacy connection-scoped: ?connectionId=xxx
                     p = new RemoteGraphProvider({ connectionId: activeConnectionId })
@@ -104,7 +111,7 @@ export function GraphProvider({ children }: GraphProviderProps) {
         }
 
         initProvider()
-    }, [activeWorkspaceId, activeConnectionId])
+    }, [activeWorkspaceId, activeDataSourceId, activeConnectionId])
 
     if (!currentProvider && isLoading) {
         return null
@@ -116,6 +123,8 @@ export function GraphProvider({ children }: GraphProviderProps) {
         error,
         workspaceId: activeWorkspaceId,
         setWorkspaceId: setActiveWorkspace,
+        dataSourceId: activeDataSourceId,
+        setDataSourceId: setActiveDataSource,
         connectionId: activeConnectionId,
         setConnectionId: setActiveConnection,
     }
@@ -158,6 +167,8 @@ export function useGraphProviderContext(): GraphProviderContextValueExtended {
             error: null,
             workspaceId: null,
             setWorkspaceId: () => {},
+            dataSourceId: null,
+            setDataSourceId: () => {},
             connectionId: null,
             setConnectionId: () => {},
         }

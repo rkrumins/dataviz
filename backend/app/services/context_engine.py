@@ -58,6 +58,7 @@ class ContextEngine:
         self.provider = provider or MockGraphProvider()
         self._connection_id: Optional[str] = None
         self._workspace_id: Optional[str] = None
+        self._data_source_id: Optional[str] = None
         self._db_session: Optional["AsyncSession"] = None
 
     # ------------------------------------------------------------------ #
@@ -70,13 +71,18 @@ class ContextEngine:
         workspace_id: str,
         registry: Any,  # ProviderRegistry — avoid circular import
         session: "AsyncSession",
+        data_source_id: Optional[str] = None,
     ) -> "ContextEngine":
         """
-        Create a ContextEngine scoped to a workspace (provider + graph + blueprint).
+        Create a ContextEngine scoped to a workspace data source.
+        If data_source_id is given, uses that specific source; otherwise the primary.
         """
-        provider = await registry.get_provider_for_workspace(workspace_id, session)
+        provider = await registry.get_provider_for_workspace(
+            workspace_id, session, data_source_id
+        )
         engine = cls(provider=provider)
         engine._workspace_id = workspace_id
+        engine._data_source_id = data_source_id
         engine._db_session = session
         return engine
 
@@ -135,15 +141,20 @@ class ContextEngine:
         return introspected
 
     async def _load_blueprint_ontology(self, introspected: OntologyMetadata) -> OntologyMetadata:
-        """Load blueprint from workspace and merge with introspected metadata."""
-        from ..db.repositories.workspace_repo import get_workspace_orm
+        """Load blueprint from the resolved data source and merge with introspected metadata."""
+        from ..db.repositories import data_source_repo
         from ..db.repositories.blueprint_repo import get_blueprint_orm
 
-        ws = await get_workspace_orm(self._db_session, self._workspace_id)
-        if not ws or not ws.blueprint_id:
+        # Resolve the data source to find its blueprint
+        if self._data_source_id:
+            ds = await data_source_repo.get_data_source_orm(self._db_session, self._data_source_id)
+        else:
+            ds = await data_source_repo.get_primary_data_source(self._db_session, self._workspace_id)
+
+        if not ds or not ds.blueprint_id:
             return introspected
 
-        bp = await get_blueprint_orm(self._db_session, ws.blueprint_id)
+        bp = await get_blueprint_orm(self._db_session, ds.blueprint_id)
         if not bp:
             return introspected
 
