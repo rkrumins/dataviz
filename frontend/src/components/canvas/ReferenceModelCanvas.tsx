@@ -740,6 +740,15 @@ export function ReferenceModelCanvas({
     return { displayFlat: flat, displayMap: map }
   }, [nodesByLayer])
 
+  // O(1) URN→ID lookup (replaces O(N) displayFlat.find() per edge)
+  const urnToIdMap = useMemo(() => {
+    const map = new Map<string, string>()
+    displayFlat.forEach(node => {
+      if (node.urn) map.set(node.urn, node.id)
+    })
+    return map
+  }, [displayFlat])
+
   // Search results
   const searchResults = useMemo(() => {
     if (!searchQuery.trim()) return []
@@ -1055,8 +1064,8 @@ export function ReferenceModelCanvas({
       let tId = displayMap.has(agg.targetUrn) ? agg.targetUrn : ancestorMap.get(agg.targetUrn)
 
       // Fallback for ID vs URN mismatch if map keys differ
-      if (!sId) sId = displayFlat.find(n => n.urn === agg.sourceUrn)?.id
-      if (!tId) tId = displayFlat.find(n => n.urn === agg.targetUrn)?.id
+      if (!sId) sId = urnToIdMap.get(agg.sourceUrn)
+      if (!tId) tId = urnToIdMap.get(agg.targetUrn)
 
       if (sId && tId && sId !== tId) {
         // Create flow edge directly
@@ -1141,7 +1150,7 @@ export function ReferenceModelCanvas({
     })
 
     return projected
-  }, [lineageEdges, edges, aggregatedEdges, nodesByLayer, expandedNodes, displayFlat, displayMap, showLineageFlow, trace.isTracing, traceContextSet])
+  }, [lineageEdges, edges, aggregatedEdges, nodesByLayer, expandedNodes, displayFlat, displayMap, urnToIdMap, showLineageFlow, trace.isTracing, traceContextSet])
 
   // Click-to-highlight: compute connected nodes/edges for selected node (client-side only, no backend call)
   const highlightState = useMemo(() => {

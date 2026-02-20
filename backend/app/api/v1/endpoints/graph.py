@@ -1,12 +1,13 @@
 from typing import List, Optional, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.graph import (
     GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity,
-    NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
-    GraphSchema, AggregatedEdgeRequest, AggregatedEdgeResult,
+    NodeQuery, EdgeQuery, GraphSchemaStats,
+    AggregatedEdgeRequest, AggregatedEdgeResult,
     CreateNodeRequest, CreateNodeResult,
 )
 from backend.app.services.context_engine import context_engine, ContextEngine
@@ -304,15 +305,19 @@ async def get_graph_introspection(
     return await engine.get_schema_stats()
 
 
-@router.get("/metadata/ontology", response_model=OntologyMetadata, response_model_by_alias=True)
+@router.get("/metadata/ontology")
 async def get_ontology_metadata(
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Get ontology metadata including containment edge types and entity hierarchies."""
-    return await engine.get_ontology_metadata()
+    result = await engine.get_ontology_metadata()
+    return JSONResponse(
+        content=result.model_dump(by_alias=True),
+        headers={"Cache-Control": "private, max-age=300"},
+    )
 
 
-@router.get("/metadata/schema", response_model=GraphSchema, response_model_by_alias=True)
+@router.get("/metadata/schema")
 async def get_graph_schema(
     engine: ContextEngine = Depends(get_context_engine),
 ):
@@ -321,7 +326,11 @@ async def get_graph_schema(
     visual configurations, and hierarchy rules.
     This enables frontend to dynamically load schema from backend.
     """
-    return await engine.get_graph_schema()
+    result = await engine.get_graph_schema()
+    return JSONResponse(
+        content=result.model_dump(by_alias=True),
+        headers={"Cache-Control": "private, max-age=300"},
+    )
 
 
 @router.post("/edges/aggregated", response_model=AggregatedEdgeResult, response_model_by_alias=True)

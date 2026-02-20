@@ -520,13 +520,9 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> LineageResult:
         upstream_urns = await self._traverse_lineage(urn, "upstream", depth, descendant_types)
         all_urns = upstream_urns | {urn}
-        nodes = []
-        for u in all_urns:
-            n = await self.get_node(u)
-            if n:
-                nodes.append(n)
+        nodes = await self.get_nodes(NodeQuery(urns=list(all_urns), limit=len(all_urns)))
         node_ids = {n.urn for n in nodes}
-        edges = await self.get_edges(EdgeQuery(limit=100000))
+        edges = await self.get_edges(EdgeQuery(any_urns=list(all_urns), limit=len(all_urns) * 10))
         edges = [e for e in edges if e.source_urn in node_ids and e.target_urn in node_ids]
         return LineageResult(
             nodes=nodes,
@@ -546,13 +542,9 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> LineageResult:
         downstream_urns = await self._traverse_lineage(urn, "downstream", depth, descendant_types)
         all_urns = downstream_urns | {urn}
-        nodes = []
-        for u in all_urns:
-            n = await self.get_node(u)
-            if n:
-                nodes.append(n)
+        nodes = await self.get_nodes(NodeQuery(urns=list(all_urns), limit=len(all_urns)))
         node_ids = {n.urn for n in nodes}
-        edges = await self.get_edges(EdgeQuery(limit=100000))
+        edges = await self.get_edges(EdgeQuery(any_urns=list(all_urns), limit=len(all_urns) * 10))
         edges = [e for e in edges if e.source_urn in node_ids and e.target_urn in node_ids]
         return LineageResult(
             nodes=nodes,
@@ -574,13 +566,9 @@ class FalkorDBProvider(GraphDataProvider):
         up = await self._traverse_lineage(urn, "upstream", upstream_depth, descendant_types)
         down = await self._traverse_lineage(urn, "downstream", downstream_depth, descendant_types)
         all_urns = up | down | {urn}
-        nodes = []
-        for u in all_urns:
-            n = await self.get_node(u)
-            if n:
-                nodes.append(n)
+        nodes = await self.get_nodes(NodeQuery(urns=list(all_urns), limit=len(all_urns)))
         node_ids = {n.urn for n in nodes}
-        edges = await self.get_edges(EdgeQuery(limit=100000))
+        edges = await self.get_edges(EdgeQuery(any_urns=list(all_urns), limit=len(all_urns) * 10))
         edges = [e for e in edges if e.source_urn in node_ids and e.target_urn in node_ids]
         return LineageResult(
             nodes=nodes,

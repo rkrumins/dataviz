@@ -38,6 +38,13 @@ export class RemoteGraphProvider implements GraphDataProvider {
     private readonly dataSourceId?: string
     private readonly connectionId?: string
 
+    /** In-flight request deduplication: identical concurrent requests share one Promise */
+    private _inflight = new Map<string, Promise<unknown>>()
+
+    /** Short-lived response cache for GET requests (prevents rapid re-fetches during re-renders) */
+    private _responseCache = new Map<string, { data: unknown; ts: number }>()
+    private static RESPONSE_CACHE_TTL = 2000 // 2 seconds
+
     constructor(options?: RemoteGraphProviderOptions) {
         this.workspaceId = options?.workspaceId
         this.dataSourceId = options?.dataSourceId
@@ -78,21 +85,53 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
     private async fetch<T>(path: string, options?: RequestInit & { extraParams?: Record<string, string> }): Promise<T> {
         const { extraParams, ...fetchOptions } = options ?? {}
+        const method = (fetchOptions.method ?? 'GET').toUpperCase()
         const url = this.buildUrl(path, extraParams)
-        const response = await fetch(url, {
-            ...fetchOptions,
-            headers: {
-                'Content-Type': 'application/json',
-                ...fetchOptions?.headers,
-            },
-        })
+        const cacheKey = `${method}:${url}:${fetchOptions.body ?? ''}`
 
-        if (!response.ok) {
-            const errorText = await response.text()
-            throw new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
+        // Check short-lived response cache for GET requests
+        if (method === 'GET') {
+            const cached = this._responseCache.get(cacheKey)
+            if (cached && Date.now() - cached.ts < RemoteGraphProvider.RESPONSE_CACHE_TTL) {
+                return cached.data as T
+            }
         }
 
-        return response.json()
+        // Deduplicate identical in-flight requests
+        const existing = this._inflight.get(cacheKey)
+        if (existing) return existing as Promise<T>
+
+        const promise = this._doFetch<T>(url, fetchOptions, method, cacheKey)
+        this._inflight.set(cacheKey, promise)
+        return promise
+    }
+
+    private async _doFetch<T>(url: string, fetchOptions: RequestInit, method: string, cacheKey: string): Promise<T> {
+        try {
+            const response = await fetch(url, {
+                ...fetchOptions,
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...fetchOptions?.headers,
+                },
+            })
+
+            if (!response.ok) {
+                const errorText = await response.text()
+                throw new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
+            }
+
+            const data = await response.json() as T
+
+            // Cache GET responses briefly to handle rapid re-renders
+            if (method === 'GET') {
+                this._responseCache.set(cacheKey, { data, ts: Date.now() })
+            }
+
+            return data
+        } finally {
+            this._inflight.delete(cacheKey)
+        }
     }
 
     // ==========================================

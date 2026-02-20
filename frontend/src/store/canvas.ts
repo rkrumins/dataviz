@@ -222,10 +222,8 @@ export const useCanvasStore = create<CanvasState>()(
       name: 'canvas-storage',
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
-        nodes: state.nodes,
-        edges: state.edges,
         viewport: state.viewport,
-        activeLensId: state.activeLensId
+        activeLensId: state.activeLensId,
       }),
     }
   )

@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import time
 from typing import List, Dict, Any, Set, Optional, Tuple, TYPE_CHECKING
 from ..models.graph import (
     GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
@@ -54,12 +56,16 @@ GRANULARITY_LEVELS = {
 }
 
 class ContextEngine:
+    _ONTOLOGY_CACHE_TTL = 300  # 5 minutes
+
     def __init__(self, provider: GraphDataProvider = None):
         self.provider = provider or MockGraphProvider()
         self._connection_id: Optional[str] = None
         self._workspace_id: Optional[str] = None
         self._data_source_id: Optional[str] = None
         self._db_session: Optional["AsyncSession"] = None
+        self._ontology_cache: Optional[OntologyMetadata] = None
+        self._ontology_cache_ts: float = 0.0
 
     # ------------------------------------------------------------------ #
     # Workspace-aware factory (new)                                        #
@@ -114,12 +120,28 @@ class ContextEngine:
     async def get_ontology_metadata(self) -> OntologyMetadata:
         """
         Return ontology metadata, merging stored config with graph introspection.
+        Results are cached with a TTL to avoid repeated DB/graph queries.
 
         Priority order:
         1. Workspace path: load blueprint → merge with introspection
         2. Connection path (legacy): load ontology_config → merge with introspection
         3. Singleton path: introspection only
         """
+        now = time.monotonic()
+        if self._ontology_cache and (now - self._ontology_cache_ts) < self._ONTOLOGY_CACHE_TTL:
+            return self._ontology_cache
+
+        result = await self._fetch_ontology_metadata()
+        self._ontology_cache = result
+        self._ontology_cache_ts = now
+        return result
+
+    def invalidate_ontology_cache(self) -> None:
+        """Clear cached ontology so the next call re-fetches from source."""
+        self._ontology_cache = None
+
+    async def _fetch_ontology_metadata(self) -> OntologyMetadata:
+        """Internal: fetch and merge ontology metadata (uncached)."""
         introspected = await self.provider.get_ontology_metadata()
 
         if self._workspace_id and self._db_session:
@@ -218,9 +240,6 @@ class ContextEngine:
     async def get_schema_stats(self) -> GraphSchemaStats:
         return await self.provider.get_schema_stats()
     
-    async def get_ontology_metadata(self) -> OntologyMetadata:
-        return await self.provider.get_ontology_metadata()
-    
     async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, limit: int = 100) -> List[GraphNode]:
         return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, limit=limit)
 
@@ -228,25 +247,27 @@ class ContextEngine:
         if query is None: query = EdgeQuery()
         return await self.provider.get_edges(query)
 
-    async def get_neighborhood(self, urn: str) -> Dict[str, Any]:
+    async def get_neighborhood(self, urn: str) -> Optional[Dict[str, Any]]:
         """Get the node and its immediate edges (incoming/outgoing)."""
-        node = await self.get_node(urn)
-        if not node: return None
-        
-        # Get incoming and outgoing edges
-        incoming = await self.provider.get_edges(EdgeQuery(targetUrns=[urn]))
-        outgoing = await self.provider.get_edges(EdgeQuery(sourceUrns=[urn]))
-        
-        all_edges = incoming + outgoing
-        
+        # Run node fetch and edge fetch concurrently (2 round-trips instead of 4)
+        node, all_edges = await asyncio.gather(
+            self.get_node(urn),
+            self.provider.get_edges(EdgeQuery(any_urns=[urn])),
+        )
+        if not node:
+            return None
+
         # Determine neighbor URNs to fetch their details
         neighbor_urns = set()
         for e in all_edges:
             neighbor_urns.add(e.source_urn)
             neighbor_urns.add(e.target_urn)
-            
-        neighbor_nodes = await self.provider.get_nodes(NodeQuery(urns=list(neighbor_urns)))
-        
+        neighbor_urns.discard(urn)  # Don't re-fetch the central node
+
+        neighbor_nodes = await self.provider.get_nodes(
+            NodeQuery(urns=list(neighbor_urns), limit=len(neighbor_urns) or 1)
+        ) if neighbor_urns else []
+
         return {
             "node": node,
             "edges": all_edges,
