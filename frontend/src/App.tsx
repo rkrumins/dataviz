@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from 'react'
+import { useEffect, useMemo, useState, useRef } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { AppShell } from '@/components/layout/AppShell'
 import { LoginPage } from '@/components/auth/LoginPage'
@@ -21,6 +21,9 @@ function App() {
   // Track if we've attempted to load schema from backend
   const [hasLoadedBackendSchema, setHasLoadedBackendSchema] = useState(false)
   const [isLoadingBackendSchema, setIsLoadingBackendSchema] = useState(false)
+
+  // Track which provider instance we've loaded graph data for (prevents re-fetch cascades)
+  const graphLoadedForProviderRef = useRef<typeof provider | null>(null)
 
   // Use defaults if no containment types available - memoize to prevent recreation
   const effectiveContainmentTypes = useMemo(() =>
@@ -78,18 +81,23 @@ function App() {
   }, [isAuthenticated, hasLoadedBackendSchema, isLoadingBackendSchema, provider, schema, mergeBackendSchema, loadFromBackend, loadSchema])
 
   // Initialize graph data on mount (after schema is loaded)
+  // Runs ONCE per provider instance — subsequent dep changes (ontology, schema) do NOT re-fetch.
   useEffect(() => {
     // Only initialize if authenticated and schema loading is complete
     if (!isAuthenticated) return
     if (!hasLoadedBackendSchema && !schema) return // Wait for schema
 
     // Wait for ontology metadata to finish loading (either success or error)
-    // If still loading and no cached metadata, wait
     const cachedMeta = getCachedOntologyMetadata()
     if (isLoadingOntology && !ontologyMetadata && !cachedMeta) {
       console.log('[App] Waiting for ontology metadata to load...')
       return
     }
+
+    // Only fetch once per provider instance (prevents cascading re-fetches
+    // when ontology, schema, or other deps change after initial load)
+    if (graphLoadedForProviderRef.current === provider) return
+    graphLoadedForProviderRef.current = provider
 
     // Log what we're using
     if (containmentEdgeTypes.length > 0) {
@@ -103,83 +111,108 @@ function App() {
       loadSchema(defaultWorkspaceSchema)
     }
 
-    // Initialize backend data
-    // Always fetch to ensure we get the latest data from backend, especially during dev/testing
+    // Initialize backend data — loads the top 2 levels of the hierarchy
+    // so the user immediately sees roots + their direct children.
     const fetchInitialGraph = async () => {
       try {
-        // Fetch initial nodes based on Ontology Roots
-        // Hierarchical loading: Start with high-level containers defined by ontology
         const rootTypes = ontologyMetadata?.rootEntityTypes?.length && ontologyMetadata.rootEntityTypes.length > 0
           ? ontologyMetadata.rootEntityTypes
           : ['domain', 'dataPlatform', 'system'] // Safe defaults
 
-        console.log('[App] Fetching initial graph for root types:', rootTypes)
+        // Also determine child types from ontology hierarchy so we can load
+        // orphaned nodes that exist at the top level without a parent.
+        const childTypes = new Set<string>()
+        if (ontologyMetadata?.entityTypeHierarchy) {
+          for (const rootType of rootTypes) {
+            const hierarchy = ontologyMetadata.entityTypeHierarchy[rootType]
+            if (hierarchy?.canContain) {
+              hierarchy.canContain.forEach((t: string) => childTypes.add(t))
+            }
+          }
+        }
 
-        // 1. Fetch Root Nodes
-        const initialNodes = await provider.getNodes({
+        console.log('[App] Fetching initial graph for root types:', rootTypes, 'child types:', [...childTypes])
+
+        // Step 1: Fetch root nodes
+        const rootNodes = await provider.getNodes({
           entityTypes: rootTypes as any[],
-          limit: 100 // Reasonable limit for top-level roots
+          limit: 200
         })
 
-        if (initialNodes.length === 0) {
-          console.log('[App] No root nodes found.')
+        // Step 2: Fetch first-level children for all roots (parallel)
+        const childrenPromises = rootNodes.map(root =>
+          provider.getChildren(root.urn, { limit: 100 })
+        )
+        const childrenResults = await Promise.all(childrenPromises)
+        const allChildren = childrenResults.flat()
+
+        // Step 3: Fetch orphaned nodes of child types (e.g. dataPlatforms without a domain parent).
+        // These won't be found by getChildren since they have no parent in our root set.
+        let orphanNodes: typeof rootNodes = []
+        if (childTypes.size > 0) {
+          const childTypeNodes = await provider.getNodes({
+            entityTypes: [...childTypes] as any[],
+            limit: 200
+          })
+          // Filter out nodes we already have from children
+          const knownUrns = new Set([
+            ...rootNodes.map(n => n.urn),
+            ...allChildren.map(n => n.urn)
+          ])
+          orphanNodes = childTypeNodes.filter(n => !knownUrns.has(n.urn))
+        }
+
+        // Combine all discovered nodes
+        const nodeMap = new Map<string, typeof rootNodes[0]>()
+        for (const n of [...rootNodes, ...allChildren, ...orphanNodes]) {
+          nodeMap.set(n.urn, n)
+        }
+        const uniqueNodes = Array.from(nodeMap.values())
+
+        if (uniqueNodes.length === 0) {
+          console.log('[App] No nodes found.')
           return
         }
 
-        const urns = initialNodes.map(n => n.urn)
+        // Step 4: Fetch edges between loaded nodes only.
+        // We fetch outgoing edges from all loaded URNs, then filter to only keep
+        // edges where BOTH source AND target are in our loaded set. This avoids
+        // pulling thousands of containment edges to unloaded descendants.
+        const urnSet = new Set(uniqueNodes.map(n => n.urn))
+        const outgoingEdges = await provider.getEdges({ sourceUrns: [...urnSet], limit: 2000 })
 
-        // 2. Fetch direct edges for these roots (to show initial connectivity/context)
-        // We do NOT fetch the entire containment hierarchy here. That is lazy loaded.
-        const [outgoingEdges, incomingEdges] = await Promise.all([
-          provider.getEdges({
-            sourceUrns: urns,
-            limit: 500
-          }),
-          provider.getEdges({
-            targetUrns: urns,
-            limit: 500
-          })
-        ])
+        // Keep only edges whose target is also a loaded node
+        const uniqueEdges = outgoingEdges.filter(e => urnSet.has(e.targetUrn))
 
-        // Combine all nodes
-        const allNodes = [...initialNodes]
-        const nodeMap = new Map(allNodes.map(n => [n.urn, n]))
-        const uniqueNodes = Array.from(nodeMap.values())
+        console.log(`[App] Loaded ${uniqueNodes.length} nodes (${rootNodes.length} roots, ${allChildren.length} children, ${orphanNodes.length} orphans), ${uniqueEdges.length} edges`)
 
-        // Combine all edges and deduplicate
-        const allEdges = [...outgoingEdges, ...incomingEdges]
-        const edgeMap = new Map<string, typeof allEdges[0]>()
-        allEdges.forEach(e => edgeMap.set(e.id, e))
-        const uniqueEdges = Array.from(edgeMap.values())
-
-        console.log(`[App] Loaded ${uniqueNodes.length} nodes from backend`)
-        console.log(`[App] Containment edge types: ${effectiveContainmentTypes.join(', ')}`)
-
-        // Log containment edges specifically
-        const containmentCount = uniqueEdges.filter(e => {
-          const edgeType = (e.edgeType || '').toUpperCase()
-          return effectiveContainmentTypes.some(type => type.toUpperCase() === edgeType)
-        }).length
-        console.log(`[App] Found ${containmentCount} containment edges out of ${uniqueEdges.length} total edges`)
-        console.log(`[App] Containment edges:`, uniqueEdges.filter(e => {
-          const edgeType = (e.edgeType || '').toUpperCase()
-          return effectiveContainmentTypes.some(type => type.toUpperCase() === edgeType)
-        }).map(e => `${e.sourceUrn} -> ${e.targetUrn} (${e.edgeType})`))
+        const toNodeType = (entityType: string) => {
+          switch (entityType) {
+            case 'schemaField':
+            case 'column':
+              return 'column'
+            case 'dataPlatform':
+            case 'system':
+              return 'system'
+            case 'dataset':
+            case 'table':
+              return 'dataset'
+            case 'container':
+              return 'container'
+            default:
+              return 'domain'
+          }
+        }
 
         setNodes(uniqueNodes.map(n => ({
           id: n.urn,
-          type: n.entityType === 'schemaField' ? 'column' :
-            n.entityType === 'column' ? 'column' : // Handle legacy/mismatched types
-              (n.entityType === 'dataPlatform' || n.entityType === 'system' as any) ? 'system' :
-                (n.entityType === 'dataset' || n.entityType === 'table' as any) ? 'dataset' :
-                  (n.entityType === 'container') ? 'container' : 'domain',
+          type: toNodeType(n.entityType as string),
           position: { x: Math.random() * 800, y: Math.random() * 600 },
           data: {
             label: n.displayName,
             type: n.entityType as any,
             metadata: n.properties,
             childCount: n.childCount,
-            // Ensure compatibility with HierarchyCanvas
             classifications: n.tags,
             businessLabel: n.properties?.businessLabel as string,
             ...n
@@ -193,7 +226,7 @@ function App() {
           type: 'lineage',
           data: {
             edgeType: e.edgeType,
-            relationship: e.edgeType, // Also set relationship for compatibility
+            relationship: e.edgeType,
             ...e.properties
           }
         })))
@@ -204,7 +237,6 @@ function App() {
 
     fetchInitialGraph()
   }, [isAuthenticated, hasLoadedBackendSchema, isLoadingOntology, ontologyMetadata, provider, effectiveContainmentTypes.join(','), setNodes, setEdges, setActiveLens, loadSchema, schema])
-  // Note: Using effectiveContainmentTypes.join(',') as dependency to avoid array reference issues
 
   // Apply theme class to document
   useEffect(() => {

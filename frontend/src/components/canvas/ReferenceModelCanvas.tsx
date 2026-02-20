@@ -282,29 +282,21 @@ export function ReferenceModelCanvas({
   }, [activeView?.id, activeView?.layout?.referenceLayout?.layers, setLayers, storeLayers])
 
   // Step 2: Load assignments from backend when layers are synced and nodes are available
+  // Uses a ref to track what we've computed for, preventing cascading re-fetches.
+  const assignmentComputedRef = useRef<string | null>(null)
   useEffect(() => {
-    // Only compute if:
-    // 1. We have nodes
-    // 2. We have a provider
-    // 3. Layers are synced from view (store has layers)
-    // 4. Status is idle (not already computing)
-    // 5. We don't already have assignments OR layers have changed
-    if (nodes.length > 0 && provider && storeLayers.length > 0) {
-      if (assignmentStatus === 'idle') {
-        // Check if we need to recompute (no assignments or layers changed)
-        const hasAssignments = effectiveAssignments.size > 0
-        const shouldCompute = !hasAssignments ||
-          // Recompute if layers changed (entityAssignments might have changed)
-          storeLayers.some(layer =>
-            layer.entityAssignments && layer.entityAssignments.length > 0
-          )
+    if (nodes.length === 0 || !provider || storeLayers.length === 0) return
+    if (assignmentStatus !== 'idle') return
 
-        if (shouldCompute) {
-          computeAssignments(provider)
-        }
-      }
-    }
-  }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers.length, effectiveAssignments.size])
+    // Build a fingerprint of layers that affect assignment computation
+    const layerFingerprint = storeLayers.map(l => l.id).join(',')
+
+    // Only compute once per unique layer configuration
+    if (assignmentComputedRef.current === layerFingerprint) return
+    assignmentComputedRef.current = layerFingerprint
+
+    computeAssignments(provider)
+  }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers])
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
@@ -464,48 +456,49 @@ export function ReferenceModelCanvas({
       .filter(Boolean)
   }, [nodes, parentMap, expandedNodes])
 
-  // Track previous visible nodes for delta updates
-  const prevVisibleUrnsRef = useRef<Set<string>>(new Set())
+  // Track previous aggregation target fingerprint to avoid redundant fetches
+  const prevAggregationKeyRef = useRef<string>('')
 
-  // Optimized Effect: Fetch aggregated edges only for NEWLY visible nodes
-  // Optimized Effect: Fetch aggregated edges only for visible nodes with Debounce
+  // Stable node URN-to-ID map (updated via ref to avoid effect dependency on nodes)
+  const nodesRef = useRef(nodes)
+  nodesRef.current = nodes
+
+  // Optimized Effect: Fetch aggregated edges only when the visible set actually changes
+  // Uses expandedNodes (user-driven) as the primary trigger, not nodes array reference.
+  // A 500ms debounce coalesces rapid expand/collapse actions.
   useEffect(() => {
     if (!showLineageFlow || nodes.length === 0) return
 
     const fetchDebounced = setTimeout(() => {
       const currentVisibleList = getVisibleContainerUrns()
-      const prevVisibleSet = prevVisibleUrnsRef.current || new Set()
 
-      // Limit to avoid massive queries, though backend is optimized now
       if (currentVisibleList.length > 500) return
 
-      // UX Improvement: Filter out expanded nodes from aggregation
-      // If a node is expanded, we want to show edges for its *children*, not the parent itself.
-      // So we exclude expanded nodes from the "aggregation input".
-      const urnToIdMap = new Map(nodes.map(n => [(n.data?.urn as string) || n.id, n.id]))
-
+      // Exclude expanded nodes from aggregation targets.
+      // When a node is expanded, its children are already in the visible list and will
+      // represent it. Including BOTH parent and children causes the Cypher CONTAINS*0..5
+      // traversal to find the same TRANSFORMS edges at multiple hierarchy levels,
+      // producing duplicate/inflated aggregated edge counts.
+      // (Earlier this caused missing lineage because orphan nodes like Snowflake weren't
+      // loaded — that's now fixed by the initial graph load fetching orphan nodes.)
+      const urnToIdMap = new Map(nodesRef.current.map(n => [(n.data?.urn as string) || n.id, n.id]))
       const aggregationTargets = currentVisibleList.filter(urn => {
         const nodeId = urnToIdMap.get(urn)
-        // If node is expanded, exclude it so we see its children's edges instead
         return nodeId && !expandedNodes.has(nodeId)
       })
 
-      // Calculate Delta or Refresh based on the *filtered* list
-      // actually, we should just fetch for the filtered list.
-      // The "newly visible" check is optimization, but with the filtering logic changing dynamically
-      // (as user expands/collapses), we might just want to refetch for the current set.
-      // Since "expandedNodes" changing will trigger getVisibleContainerUrns -> trigger this effect.
+      // Only fetch if the target set actually changed
+      const aggregationKey = aggregationTargets.sort().join(',')
+      if (aggregationKey === prevAggregationKeyRef.current) return
+      prevAggregationKeyRef.current = aggregationKey
 
-      // We use aggregationTargets for both source and target to find edges WITHIN the visible set (clique)
       if (aggregationTargets.length > 0) {
         fetchAggregated(aggregationTargets, aggregationTargets)
       }
-
-      prevVisibleUrnsRef.current = new Set(currentVisibleList)
-    }, 300) // 300ms debounce
+    }, 500) // 500ms debounce — coalesces rapid expand/collapse
 
     return () => clearTimeout(fetchDebounced)
-  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes, expandedNodes])
+  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes.length, expandedNodes])
 
   // Build layer assignment rules
   const layerRules = useMemo<LayerAssignmentRule[]>(() => {
