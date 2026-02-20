@@ -109,6 +109,7 @@ class NodeQuery(BaseModel):
     property_filters: Optional[List[PropertyFilter]] = Field(None, alias="propertyFilters")
     tag_filters: Optional[TagFilter] = Field(None, alias="tagFilters")
     name_filter: Optional[TextFilter] = Field(None, alias="nameFilter")
+    include_child_count: bool = Field(True, alias="includeChildCount")
     offset: Optional[int] = 0
     limit: Optional[int] = 100
 
