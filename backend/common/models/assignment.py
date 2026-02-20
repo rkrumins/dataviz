@@ -22,7 +22,7 @@ class RuleCondition(BaseModel):
 class LayerAssignmentRuleConfig(BaseModel):
     id: str
     priority: int
-    entity_types: Optional[List[EntityType]] = Field(None, alias="entityTypes")
+    entity_types: Optional[List[str]] = Field(None, alias="entityTypes")
     tags: Optional[List[str]] = None
     urn_pattern: Optional[str] = Field(None, alias="urnPattern")
     conditions: Optional[List[RuleCondition]] = None
@@ -62,7 +62,7 @@ class ViewLayerConfig(BaseModel):
     color: str
     order: int
     sequence: Optional[int] = None
-    entity_types: Optional[List[EntityType]] = Field(None, alias="entityTypes")
+    entity_types: Optional[List[str]] = Field(None, alias="entityTypes")
     rules: Optional[List[LayerAssignmentRuleConfig]] = None
     logical_nodes: Optional[List[LogicalNodeConfig]] = Field(None, alias="logicalNodes")
     entity_assignments: Optional[List[EntityAssignmentConfig]] = Field(None, alias="entityAssignments")

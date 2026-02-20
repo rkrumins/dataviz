@@ -1361,61 +1361,6 @@ class FalkorDBProvider(GraphDataProvider):
             logger.error(f"create_node failed: {e}")
             return False
 
-    async def update_node(self, urn: str, updates: Dict[str, Any]) -> Optional[GraphNode]:
-        await self._ensure_connected()
-        try:
-            if not updates:
-                return await self.get_node(urn)
-
-            set_clauses = []
-            params = {"urn": urn}
-            for k, v in updates.items():
-                if k in ["properties", "tags"]:
-                    params[k] = json.dumps(v)
-                    set_clauses.append(f"n.{k} = ${k}")
-                elif k == "display_name":
-                    params["displayName"] = v
-                    set_clauses.append("n.displayName = $displayName")
-                elif k == "description":
-                    params["description"] = v
-                    set_clauses.append("n.description = $description")
-            
-            if not set_clauses:
-                return await self.get_node(urn)
-                
-            set_query = ", ".join(set_clauses)
-            query = f"MATCH (n {{urn: $urn}}) SET {set_query}"
-            await self._graph.query(query, params=params)
-            
-            return await self.get_node(urn)
-        except Exception as e:
-            logger.error(f"update_node failed: {e}")
-            return None
-
-    async def create_edge(self, edge: GraphEdge) -> bool:
-        await self._ensure_connected()
-        try:
-            rel_type = _sanitize_label(edge.edge_type.value if hasattr(edge.edge_type, "value") else str(edge.edge_type))
-            params = {
-                "src": edge.source_urn,
-                "tgt": edge.target_urn,
-                "eid": edge.id,
-                "conf": edge.confidence if edge.confidence is not None else 1.0,
-                "props": json.dumps(edge.properties or {}),
-            }
-            await self._graph.query(
-                f"""
-                MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}})
-                MERGE (a)-[r:{rel_type}]->(b)
-                SET r.id = $eid, r.confidence = $conf, r.properties = $props
-                """,
-                params=params,
-            )
-            return True
-        except Exception as e:
-            logger.error(f"create_edge failed: {e}")
-            return False
-
     # ------------------------------------------------------------------ #
     # ProviderRegistry lifecycle helpers                                   #
     # ------------------------------------------------------------------ #

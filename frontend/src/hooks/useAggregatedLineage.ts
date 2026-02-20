@@ -95,6 +95,7 @@ interface CacheEntry {
 }
 
 const aggregatedEdgeCache = new Map<string, CacheEntry>()
+const CACHE_MAX_ENTRIES = 50
 
 function getCacheKey(sourceUrns: string[], targetUrns: string[] | undefined, granularity: string): string {
     const sortedSources = [...sourceUrns].sort().join(',')
@@ -159,7 +160,11 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 granularity,
             })
 
-            // Cache the result
+            // Cache the result (LRU eviction when full)
+            if (aggregatedEdgeCache.size >= CACHE_MAX_ENTRIES) {
+                const oldestKey = aggregatedEdgeCache.keys().next().value
+                if (oldestKey !== undefined) aggregatedEdgeCache.delete(oldestKey)
+            }
             aggregatedEdgeCache.set(cacheKey, {
                 result,
                 timestamp: Date.now(),

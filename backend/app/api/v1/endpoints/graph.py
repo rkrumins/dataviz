@@ -8,8 +8,6 @@ from backend.app.models.graph import (
     NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, AggregatedEdgeRequest, AggregatedEdgeResult,
     CreateNodeRequest, CreateNodeResult,
-    UpdateNodeRequest, UpdateNodeResult,
-    CreateEdgeRequest, CreateEdgeResult,
 )
 from backend.app.services.context_engine import context_engine, ContextEngine
 from backend.app.db.engine import get_db_session
@@ -350,27 +348,3 @@ async def create_node(
     based on ontology rules.
     """
     return await engine.create_node(request)
-
-@router.patch("/nodes/{urn:path}", response_model=UpdateNodeResult, response_model_by_alias=True)
-async def update_node(
-    urn: str,
-    request: UpdateNodeRequest = Body(...),
-    engine: ContextEngine = Depends(get_context_engine),
-):
-    """
-    Update an existing node's properties, display name, etc.
-    urn:path captures the full string including slashes to avoid path param truncation.
-    """
-    return await engine.update_node(urn, request)
-
-
-@router.post("/edges/create", response_model=CreateEdgeResult, response_model_by_alias=True)
-async def create_edge(
-    request: CreateEdgeRequest = Body(...),
-    engine: ContextEngine = Depends(get_context_engine),
-):
-    """
-    Create a new manual edge between two nodes.
-    Used for manual lineage or user-defined relationships.
-    """
-    return await engine.create_edge(request)

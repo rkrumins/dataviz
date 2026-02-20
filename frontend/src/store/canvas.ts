@@ -40,6 +40,8 @@ interface CanvasState {
   // Nodes and Edges
   nodes: LineageNode[]
   edges: LineageEdge[]
+  _nodeIndex: Set<string>
+  _edgeIndex: Set<string>
   setNodes: (nodes: LineageNode[]) => void
   setEdges: (edges: LineageEdge[]) => void
   addNodes: (nodes: LineageNode[]) => void
@@ -99,17 +101,25 @@ export const useCanvasStore = create<CanvasState>()(
       // Nodes and Edges
       nodes: [],
       edges: [],
-      setNodes: (nodes) => set({ nodes }),
-      setEdges: (edges) => set({ edges }),
+      _nodeIndex: new Set(),
+      _edgeIndex: new Set(),
+      setNodes: (nodes) => set({ nodes, _nodeIndex: new Set(nodes.map((n) => n.id)) }),
+      setEdges: (edges) => set({ edges, _edgeIndex: new Set(edges.map((e) => e.id)) }),
       addNodes: (newNodes) => set((state) => {
-        const existingIds = new Set(state.nodes.map((n) => n.id))
+        const existingIds = state._nodeIndex
         const uniqueNodes = newNodes.filter((n) => !existingIds.has(n.id))
-        return { nodes: [...state.nodes, ...uniqueNodes] }
+        if (uniqueNodes.length === 0) return state // No-op: prevent unnecessary re-render
+        const nextIndex = new Set(existingIds)
+        uniqueNodes.forEach((n) => nextIndex.add(n.id))
+        return { nodes: [...state.nodes, ...uniqueNodes], _nodeIndex: nextIndex }
       }),
       addEdges: (newEdges) => set((state) => {
-        const existingIds = new Set(state.edges.map((e) => e.id))
+        const existingIds = state._edgeIndex
         const uniqueEdges = newEdges.filter((e) => !existingIds.has(e.id))
-        return { edges: [...state.edges, ...uniqueEdges] }
+        if (uniqueEdges.length === 0) return state // No-op: prevent unnecessary re-render
+        const nextIndex = new Set(existingIds)
+        uniqueEdges.forEach((e) => nextIndex.add(e.id))
+        return { edges: [...state.edges, ...uniqueEdges], _edgeIndex: nextIndex }
       }),
 
       // Selection
@@ -187,13 +197,26 @@ export const useCanvasStore = create<CanvasState>()(
           n.id === id ? { ...n, data: { ...n.data, ...data } } : n
         )
       })),
-      removeNode: (id) => set((state) => ({
-        nodes: state.nodes.filter((n) => n.id !== id),
-        edges: state.edges.filter((e) => e.source !== id && e.target !== id)
-      })),
-      removeEdge: (id) => set((state) => ({
-        edges: state.edges.filter((e) => e.id !== id)
-      })),
+      removeNode: (id) => set((state) => {
+        const nextNodeIndex = new Set(state._nodeIndex)
+        nextNodeIndex.delete(id)
+        const remainingEdges = state.edges.filter((e) => e.source !== id && e.target !== id)
+        const nextEdgeIndex = new Set(remainingEdges.map((e) => e.id))
+        return {
+          nodes: state.nodes.filter((n) => n.id !== id),
+          edges: remainingEdges,
+          _nodeIndex: nextNodeIndex,
+          _edgeIndex: nextEdgeIndex,
+        }
+      }),
+      removeEdge: (id) => set((state) => {
+        const nextEdgeIndex = new Set(state._edgeIndex)
+        nextEdgeIndex.delete(id)
+        return {
+          edges: state.edges.filter((e) => e.id !== id),
+          _edgeIndex: nextEdgeIndex,
+        }
+      }),
     }),
     {
       name: 'canvas-storage',

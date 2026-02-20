@@ -33,10 +33,6 @@ from backend.common.models.graph import (
     AggregatedEdgeResult,
     CreateNodeRequest,
     CreateNodeResult,
-    UpdateNodeRequest,
-    UpdateNodeResult,
-    CreateEdgeRequest,
-    CreateEdgeResult,
 )
 
 __all__ = [
@@ -51,6 +47,4 @@ __all__ = [
     "RelationshipVisualSchema", "RelationshipTypeDefinition", "GraphSchema",
     "AggregatedEdgeRequest", "AggregatedEdgeInfo", "AggregatedEdgeResult",
     "CreateNodeRequest", "CreateNodeResult",
-    "UpdateNodeRequest", "UpdateNodeResult",
-    "CreateEdgeRequest", "CreateEdgeResult",
 ]

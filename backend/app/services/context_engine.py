@@ -4,7 +4,7 @@ from ..models.graph import (
     GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
-    CreateNodeRequest, CreateNodeResult, UpdateNodeRequest, UpdateNodeResult, CreateEdgeRequest, CreateEdgeResult
+    CreateNodeRequest, CreateNodeResult
 )
 import os
 
@@ -939,66 +939,6 @@ class ContextEngine:
             success=True,
             error=None
         )
-
-    async def update_node(self, urn: str, request: UpdateNodeRequest) -> UpdateNodeResult:
-        """Update an existing node's properties and tags."""
-        updates = request.model_dump(exclude_unset=True, by_alias=False)
-        # Handle alias mapping if needed (displayName vs display_name)
-        if "display_name" in updates:
-            updates["display_name"] = request.display_name
-            
-        if not updates:
-            node = await self.provider.get_node(urn)
-            return UpdateNodeResult(node=node, success=True)
-            
-        try:
-            updated_node = await self.provider.update_node(urn, updates)
-            if not updated_node:
-                return UpdateNodeResult(node=None, success=False, error="Provider returned no updated node")
-            return UpdateNodeResult(node=updated_node, success=True)
-        except Exception as e:
-            return UpdateNodeResult(node=None, success=False, error=str(e))
-
-    async def create_edge(self, request: CreateEdgeRequest) -> CreateEdgeResult:
-        """Create a new manual edge between two existing nodes."""
-        import uuid
-        
-        # Sanitize edge_type into EdgeType format or keep as string
-        edge_type_val = request.edge_type.upper() if isinstance(request.edge_type, str) else request.edge_type
-
-        # Since EdgeType enum might not contain dynamic values, we dynamically wrap.
-        # GraphEdge model allows EdgeType enum values. Since Pydantic validates it strictly against enum, 
-        # we might need to bypass it or use string. Assuming EdgeType has dynamic support.
-        # Actually our GraphEdge enforces EdgeType enum rigidly. Let's see if we can coerce it.
-        # We'll just construct a dict and validate or rely on GraphEdge's parsing.
-        
-        # GraphEdge model
-        edge_id = f"edge-{uuid.uuid4().hex[:12]}"
-        
-        # Wait, if `edge_type` is dynamic, GraphEdge won't validate unless it's in the enum.
-        # Let's see how FalkorDB provider handles dict vs GraphEdge. GraphEdge is used throughout.
-        try:
-            new_edge = GraphEdge(
-                id=edge_id,
-                sourceUrn=request.source_urn,
-                targetUrn=request.target_urn,
-                edgeType=edge_type_val,
-                properties=request.properties,
-                confidence=1.0
-            )
-        except ValueError as e:
-            # If dynamic edge type is not in enum, fallback?
-            # We'll try to add it or fail gracefully.
-            return CreateEdgeResult(edge=None, success=False, error=f"Invalid edgeType for GraphEdge: {e}")
-        
-        try:
-            success = await self.provider.create_edge(new_edge)
-            if not success:
-                return CreateEdgeResult(edge=None, success=False, error="Provider failed to create edge")
-            return CreateEdgeResult(edge=new_edge, success=True)
-        except Exception as e:
-            return CreateEdgeResult(edge=None, success=False, error=str(e))
-
 
 # Singleton instance - provider selected via GRAPH_PROVIDER env (mock | falkordb)
 context_engine = ContextEngine(provider=_create_provider())

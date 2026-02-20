@@ -33,6 +33,7 @@ import { TraceToolbar } from './TraceToolbar'
 import { useUnifiedTrace, useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
+import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
 // UX-first interaction components
 import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
@@ -364,6 +365,17 @@ export function ReferenceModelCanvas({
     )
   }, [edges, relationshipTypes, containmentEdgeTypes, ontologyMetadata, edgeFilters])
 
+  // Schema-driven edge color resolver — used by LineageFlowOverlay
+  // Resolves edge type → color from backend schema, falling back to defaults
+  const resolveEdgeColor = useCallback((edgeType: string) => {
+    return getEdgeTypeDefinition(
+      edgeType,
+      relationshipTypes,
+      containmentEdgeTypes,
+      ontologyMetadata ? { edgeTypeMetadata: ontologyMetadata.edgeTypeMetadata } : undefined
+    ).color
+  }, [relationshipTypes, containmentEdgeTypes, ontologyMetadata])
+
   // Trace Calculation for Double Click
   // We import computeTrace dynamically or assume it's available via utility
   // Since we can't easily import from hook file if it's not exported, we'll implement a lightweight version 
@@ -422,6 +434,14 @@ export function ReferenceModelCanvas({
     [activeLayers]
   )
 
+  // Stable fingerprint: only changes when the actual node/edge set changes,
+  // not on every array reference swap (which happens on addNodes even with 0 new items)
+  const nodeEdgeFingerprint = useMemo(() => {
+    const firstNodeId = nodes.length > 0 ? nodes[0].id : ''
+    const lastNodeId = nodes.length > 0 ? nodes[nodes.length - 1].id : ''
+    return `${nodes.length}:${edges.length}:${firstNodeId}:${lastNodeId}`
+  }, [nodes, edges])
+
   // Build generic hierarchy tree from nodes and containment edges
   // We keep this to visualize structure, but layer assignment is calculated independently
   const { nodeMap, childMap, parentMap } = useMemo(() => {
@@ -442,7 +462,8 @@ export function ReferenceModelCanvas({
     })
 
     return { nodeMap: nMap, childMap: cMap, parentMap: pMap }
-  }, [nodes, edges, containmentEdgeTypes])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeEdgeFingerprint, containmentEdgeTypes])
 
   // Helper: Calculate currently visible top-level nodes (containers)
   const getVisibleContainerUrns = useCallback(() => {
@@ -699,7 +720,8 @@ export function ReferenceModelCanvas({
     grouped.forEach(list => list.sort((a, b) => a.name.localeCompare(b.name)))
 
     return grouped
-  }, [nodes, edges, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments])
 
   // Flatten logical/physical nodes for search and lookup
   const { displayFlat, displayMap } = useMemo(() => {
@@ -1121,6 +1143,38 @@ export function ReferenceModelCanvas({
     return projected
   }, [lineageEdges, edges, aggregatedEdges, nodesByLayer, expandedNodes, displayFlat, displayMap, showLineageFlow, trace.isTracing, traceContextSet])
 
+  // Click-to-highlight: compute connected nodes/edges for selected node (client-side only, no backend call)
+  const highlightState = useMemo(() => {
+    if (trace.isTracing || !selectedNodeId) {
+      return { nodes: new Set<string>(), edges: new Set<string>() }
+    }
+    const connectedNodes = new Set<string>([selectedNodeId])
+    const connectedEdges = new Set<string>()
+    const selectedUrn = displayMap.get(selectedNodeId)?.urn
+
+    visibleLineageEdges.forEach((edge: any) => {
+      const matches = edge.source === selectedNodeId || edge.target === selectedNodeId ||
+        (selectedUrn && (edge.source === selectedUrn || edge.target === selectedUrn))
+      if (matches) {
+        connectedEdges.add(edge.id)
+        connectedNodes.add(edge.source)
+        connectedNodes.add(edge.target)
+      }
+    })
+    return { nodes: connectedNodes, edges: connectedEdges }
+  }, [selectedNodeId, visibleLineageEdges, trace.isTracing, displayMap])
+
+  const isHighlightActive = highlightState.edges.size > 0
+  const clearSelection = useCanvasStore((s) => s.clearSelection)
+
+  // Background click handler to clear selection/highlight
+  const handleBackgroundClick = useCallback((e: React.MouseEvent) => {
+    // Only clear if clicking directly on the background container, not a child
+    if (e.target === e.currentTarget) {
+      clearSelection()
+    }
+  }, [clearSelection])
+
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-gradient-to-br from-canvas via-canvas to-canvas-elevated/30", className)}>
       {/* Editor Toolbar - Unified with LineageCanvas */}
@@ -1387,7 +1441,7 @@ export function ReferenceModelCanvas({
         </div>
 
         {/* Layer Columns */}
-        <div className="flex-1 overflow-auto relative scroll-smooth">
+        <div className="flex-1 overflow-auto relative scroll-smooth" onClick={handleBackgroundClick}>
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them (z-index managed in component to 0, cols should be higher) */}
           {(showLineageFlow || trace.isTracing) && (
             <LineageFlowOverlay
@@ -1400,6 +1454,9 @@ export function ReferenceModelCanvas({
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={trace.isTracing}
               traceResult={trace.result}
+              highlightedEdges={highlightState.edges}
+              isHighlightActive={isHighlightActive}
+              resolveEdgeColor={resolveEdgeColor}
             />
           )}
 
@@ -1426,6 +1483,8 @@ export function ReferenceModelCanvas({
                 traceFocusId={trace.focusId}
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
+                highlightedNodes={highlightState.nodes}
+                isHighlightActive={isHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
               />
             ))}
@@ -1524,12 +1583,14 @@ interface LayerColumnProps {
   traceFocusId: string | null
   traceNodes: Set<string>
   traceContextSet: Set<string>
+  highlightedNodes?: Set<string>
+  isHighlightActive?: boolean
   onAnimationComplete?: () => void
   onFocusNode?: (nodeId: string | null) => void
   focusedNodeId?: string | null
 }
 
-function LayerColumn({
+const LayerColumn = React.memo(function LayerColumn({
   layer,
   nodes,
   schema,
@@ -1545,6 +1606,8 @@ function LayerColumn({
   traceFocusId,
   traceNodes,
   traceContextSet,
+  highlightedNodes,
+  isHighlightActive = false,
   onAnimationComplete,
   onFocusNode,
   focusedNodeId
@@ -1858,6 +1921,8 @@ function LayerColumn({
                   isTraceActive={traceFocusId !== null}
                   isHighlighted={traceContextSet.has(node.id)}
                   isFocusNode={traceFocusId === node.id}
+                  isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
+                  isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
                   onSelect={onSelect}
                   onToggle={onToggle}
                   onContextMenu={onContextMenu}
@@ -1876,7 +1941,7 @@ function LayerColumn({
       )}
     </motion.div>
   )
-}
+})
 
 // ============================================
 // FLAT TREE ITEM - Individual row with tree lines
@@ -1895,6 +1960,8 @@ interface FlatTreeItemProps {
   isTraceActive: boolean
   isHighlighted: boolean
   isFocusNode: boolean
+  isClickHighlighted?: boolean
+  isDimmedByHighlight?: boolean
   onSelect: (id: string) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
@@ -1904,7 +1971,7 @@ interface FlatTreeItemProps {
   animationDelay?: number
 }
 
-function FlatTreeItem({
+const FlatTreeItem = React.memo(function FlatTreeItem({
   node,
   depth,
   isLast,
@@ -1917,6 +1984,8 @@ function FlatTreeItem({
   isTraceActive,
   isHighlighted,
   isFocusNode,
+  isClickHighlighted = false,
+  isDimmedByHighlight = false,
   onSelect,
   onToggle,
   onContextMenu,
@@ -1944,8 +2013,8 @@ function FlatTreeItem({
   const iconSize = isRoot ? 'w-5 h-5' : 'w-4 h-4'
   const iconContainerSize = isRoot ? 'w-9 h-9' : 'w-7 h-7'
 
-  // Calculate dimming
-  const isDimmed = isTraceActive && !isHighlighted
+  // Calculate dimming — trace takes priority over click-highlight
+  const isDimmed = (isTraceActive && !isHighlighted) || isDimmedByHighlight
 
   // Tree line indent - reduced to save horizontal space
   const indentWidth = depth * 16
@@ -1984,8 +2053,10 @@ function FlatTreeItem({
         isFocusNode && "ring-2 ring-accent-lineage/60 ring-offset-1 ring-offset-canvas shadow-lg shadow-accent-lineage/20",
         // Highlighted in trace
         isHighlighted && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
-        // Dimmed when not in trace path
-        isDimmed && "opacity-30 blur-[0.3px]"
+        // Click-highlight: subtle glow on connected nodes
+        isClickHighlighted && !isSelected && "ring-1 ring-blue-400/40 bg-gradient-to-r from-blue-500/10 to-transparent",
+        // Dimmed when not in trace path or not connected to highlighted node
+        isDimmed && "opacity-40"
       )}
       style={{
         paddingLeft: 12 + indentWidth,
@@ -2173,7 +2244,7 @@ function FlatTreeItem({
       />
     </motion.div>
   )
-}
+})
 
 // LayerNodeCard replaced with FlatTreeItem above for better UX
 
@@ -2191,6 +2262,9 @@ function LineageFlowOverlay({
   triggerRedrawRef,
   isTracing = false,
   traceResult = null,
+  highlightedEdges,
+  isHighlightActive = false,
+  resolveEdgeColor,
 }: {
   nodes: any[],
   edges: any[],
@@ -2201,6 +2275,9 @@ function LineageFlowOverlay({
   triggerRedrawRef?: React.MutableRefObject<(() => void) | null>
   isTracing?: boolean,
   traceResult?: any | null,
+  highlightedEdges?: Set<string>,
+  isHighlightActive?: boolean,
+  resolveEdgeColor?: (edgeType: string) => string,
 }) {
   const [paths, setPaths] = useState<React.ReactNode[]>([])
   const containerRef = useRef<HTMLDivElement>(null)
@@ -2255,6 +2332,14 @@ function LineageFlowOverlay({
       if (sourceEl && targetEl) {
         const sRect = sourceEl.getBoundingClientRect()
         const tRect = targetEl.getBoundingClientRect()
+
+        // Viewport culling: skip edges where BOTH endpoints are far outside visible area
+        const viewportMargin = 200
+        const viewportTop = -viewportMargin
+        const viewportBottom = window.innerHeight + viewportMargin
+        const bothAbove = sRect.bottom < viewportTop && tRect.bottom < viewportTop
+        const bothBelow = sRect.top > viewportBottom && tRect.top > viewportBottom
+        if (bothAbove || bothBelow) return
 
         // Relative coordinates
         // Offset sx/tx slightly from the card boundary to make arrowheads/terminals visible
@@ -2317,14 +2402,25 @@ function LineageFlowOverlay({
           d = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
         }
 
-        // Color: In trace mode, color by direction (upstream/downstream)
-        // In normal mode, color by edge type
-        let color = '#3b82f6' // default blue
-        const traceOpacity = isTracing ? 'opacity-80' : 'opacity-40'
-        const traceStroke = isTracing ? 2.5 : 1.5
+        // Color priority: trace > highlight > normal
+        // Edge type color resolved from backend schema via resolveEdgeColor prop
+        const typeColor = resolveEdgeColor
+          ? resolveEdgeColor(edge.originalType || '')
+          : '#3b82f6'
+
+        let color = typeColor
+        let edgeOpacity = 0.4
+        let strokeWidth = 1.5
+        let showAnimatedFlow = true
+
+        // Determine if this edge is highlighted (click-to-highlight)
+        const isEdgeHighlighted = isHighlightActive && highlightedEdges?.has(edge.id)
+        const isEdgeDimmed = isHighlightActive && !isEdgeHighlighted
 
         if (isTracing && traceResult) {
-          // Directional coloring for trace mode
+          // TRACE MODE: highest priority — color by direction (upstream/downstream)
+          edgeOpacity = 0.8
+          strokeWidth = 2.5
           const srcInUpstream = traceResult.upstreamNodes?.has(edge.source)
           const tgtInUpstream = traceResult.upstreamNodes?.has(edge.target)
           const srcInDownstream = traceResult.downstreamNodes?.has(edge.source)
@@ -2338,11 +2434,15 @@ function LineageFlowOverlay({
             color = '#a78bfa' // purple for focus-adjacent
           }
         } else {
-          // Normal mode: color by edge type
-          color = edge.originalType === 'AGGREGATED' ? '#8b5cf6' : // Purple for aggregated
-            edge.originalType === 'TRANSFORMS' ? '#3b82f6' :
-              edge.originalType === 'CONSUMES' ? '#22c55e' :
-                edge.originalType === 'PRODUCES' ? '#f59e0b' : '#3b82f6'
+          // Normal/highlight mode: use schema-resolved type color
+          if (isEdgeHighlighted) {
+            edgeOpacity = 0.9
+            strokeWidth = 2.5
+          } else if (isEdgeDimmed) {
+            edgeOpacity = 0.1
+            strokeWidth = 1
+            showAnimatedFlow = false
+          }
         }
 
         newPaths.push(
@@ -2364,32 +2464,32 @@ function LineageFlowOverlay({
               d={d}
               fill="none"
               stroke="currentColor"
-              strokeWidth={traceStroke}
+              strokeWidth={strokeWidth}
               markerEnd="url(#arrowhead)"
-              className={cn(
-                `transition-all duration-300 ${traceOpacity} group-hover:opacity-100`,
-              )}
-              style={{ strokeWidth: traceStroke }}
+              className="transition-all duration-300 group-hover:opacity-100"
+              style={{ strokeWidth, opacity: edgeOpacity }}
             />
 
-            {/* Animated Flow Layer (particles) */}
-            <path
-              d={d}
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeDasharray="4 8" // Shorter dash, more frequent
-              strokeLinecap="round"
-              className="animate-flow"
-              style={{
-                opacity: 0.8, // Slightly brighter
-                animationDuration: '1.5s', // Constant smooth speed
-                filter: 'url(#glow)'
-              }}
-            />
+            {/* Animated Flow Layer (particles) — only for highlighted/active edges */}
+            {showAnimatedFlow && (
+              <path
+                d={d}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeDasharray="4 8"
+                strokeLinecap="round"
+                className="animate-flow"
+                style={{
+                  opacity: 0.8,
+                  animationDuration: '1.5s',
+                  filter: 'url(#glow)'
+                }}
+              />
+            )}
 
             {/* Terminals */}
-            <circle cx={sx} cy={sy} r="2.5" fill="currentColor" className="opacity-40 group-hover:opacity-80" />
+            <circle cx={sx} cy={sy} r="2.5" fill="currentColor" style={{ opacity: edgeOpacity }} className="group-hover:opacity-80" />
 
             <title>{edge.source} → {edge.target} ({edge.originalType})</title>
           </g>
@@ -2397,7 +2497,7 @@ function LineageFlowOverlay({
       }
     })
     setPaths(newPaths)
-  }, [edges, selectEdge, isEdgePanelOpen, toggleEdgePanel])
+  }, [edges, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor])
 
   // Store updateFlow in ref for ResizeObserver access and expose to parent
   useEffect(() => {

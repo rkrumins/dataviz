@@ -17,7 +17,7 @@ import { cn } from '@/lib/utils'
 // Types
 // ============================================
 
-export type ContextMenuTarget = 
+export type ContextMenuTarget =
     | { type: 'node'; id: string; data?: Record<string, unknown> }
     | { type: 'edge'; id: string; source: string; target: string }
     | { type: 'canvas'; position: { x: number; y: number } }
@@ -91,46 +91,46 @@ export function CanvasContextMenu({
 }: CanvasContextMenuProps) {
     const menuRef = useRef<HTMLDivElement>(null)
     const [showLayerSubmenu, setShowLayerSubmenu] = React.useState(false)
-    
+
     // Close on click outside
     useEffect(() => {
         if (!isOpen) return
-        
+
         const handleClickOutside = (e: MouseEvent) => {
             if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
                 onClose()
             }
         }
-        
+
         const handleEscape = (e: KeyboardEvent) => {
             if (e.key === 'Escape') {
                 onClose()
             }
         }
-        
+
         // Delay to prevent immediate close from the same click
         setTimeout(() => {
             document.addEventListener('mousedown', handleClickOutside)
             document.addEventListener('keydown', handleEscape)
         }, 0)
-        
+
         return () => {
             document.removeEventListener('mousedown', handleClickOutside)
             document.removeEventListener('keydown', handleEscape)
         }
     }, [isOpen, onClose])
-    
+
     // Reset submenu when menu closes
     useEffect(() => {
         if (!isOpen) setShowLayerSubmenu(false)
     }, [isOpen])
-    
+
     // Build actions based on target type
     const actions = useCallback((): ContextMenuAction[] => {
         if (!target) return []
-        
+
         const result: ContextMenuAction[] = []
-        
+
         if (target.type === 'node') {
             // Node actions
             if (onEditNode) {
@@ -142,7 +142,7 @@ export function CanvasContextMenu({
                     onClick: () => { onEditNode(target.id); onClose() }
                 })
             }
-            
+
             if (onTraceNode) {
                 result.push({
                     id: 'trace',
@@ -152,7 +152,7 @@ export function CanvasContextMenu({
                     onClick: () => { onTraceNode(target.id); onClose() }
                 })
             }
-            
+
             if (onCopyUrn) {
                 result.push({
                     id: 'copy-urn',
@@ -163,7 +163,7 @@ export function CanvasContextMenu({
                     onClick: () => { onCopyUrn(target.id); onClose() }
                 })
             }
-            
+
             if (onCreateChild) {
                 result.push({
                     id: 'create-child',
@@ -172,7 +172,7 @@ export function CanvasContextMenu({
                     onClick: () => { onCreateChild(target.id); onClose() }
                 })
             }
-            
+
             if (onDuplicateNode) {
                 result.push({
                     id: 'duplicate',
@@ -182,7 +182,7 @@ export function CanvasContextMenu({
                     onClick: () => { onDuplicateNode(target.id); onClose() }
                 })
             }
-            
+
             if (layers.length > 0 && onMoveToLayer) {
                 result.push({
                     id: 'move-to-layer',
@@ -192,7 +192,7 @@ export function CanvasContextMenu({
                     onClick: () => setShowLayerSubmenu(true)
                 })
             }
-            
+
             if (onDeleteNode) {
                 result.push({
                     id: 'delete',
@@ -213,7 +213,7 @@ export function CanvasContextMenu({
                     onClick: () => { onEditEdge(target.id); onClose() }
                 })
             }
-            
+
             if (onReverseEdge) {
                 result.push({
                     id: 'reverse-edge',
@@ -222,7 +222,7 @@ export function CanvasContextMenu({
                     onClick: () => { onReverseEdge(target.id); onClose() }
                 })
             }
-            
+
             if (onDeleteEdge) {
                 result.push({
                     id: 'delete-edge',
@@ -244,7 +244,7 @@ export function CanvasContextMenu({
                     onClick: () => { onCreateNode(target.position); onClose() }
                 })
             }
-            
+
             if (onPaste) {
                 result.push({
                     id: 'paste',
@@ -255,7 +255,7 @@ export function CanvasContextMenu({
                     onClick: () => { onPaste(target.position); onClose() }
                 })
             }
-            
+
             if (onSelectAll) {
                 result.push({
                     id: 'select-all',
@@ -266,27 +266,27 @@ export function CanvasContextMenu({
                 })
             }
         }
-        
+
         // Add custom actions
         result.push(...customActions)
-        
+
         return result
-    }, [target, onEditNode, onDuplicateNode, onDeleteNode, onCreateChild, onTraceNode, 
-        onCopyUrn, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste, 
+    }, [target, onEditNode, onDuplicateNode, onDeleteNode, onCreateChild, onTraceNode,
+        onCopyUrn, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
         onSelectAll, customActions, layers, onMoveToLayer, onClose])
-    
+
     // Get icon component
     const getIcon = (iconName: keyof typeof LucideIcons) => {
         const IconComponent = LucideIcons[iconName] as React.ComponentType<{ className?: string }>
         return IconComponent ? <IconComponent className="w-4 h-4" /> : null
     }
-    
+
     // Adjust position to keep menu in viewport
     const adjustedPosition = {
         x: Math.min(position.x, window.innerWidth - 220),
         y: Math.min(position.y, window.innerHeight - 300)
     }
-    
+
     return (
         <AnimatePresence>
             {isOpen && target && (
@@ -302,19 +302,19 @@ export function CanvasContextMenu({
                         "border border-glass-border rounded-xl shadow-2xl",
                         "overflow-hidden"
                     )}
-                    style={{ 
-                        left: adjustedPosition.x, 
+                    style={{
+                        left: adjustedPosition.x,
                         top: adjustedPosition.y,
                     }}
                 >
                     {/* Menu Header */}
                     <div className="px-3 py-1.5 border-b border-glass-border bg-black/5 dark:bg-white/5">
                         <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
-                            {target.type === 'node' ? 'Node Actions' : 
-                             target.type === 'edge' ? 'Edge Actions' : 'Canvas Actions'}
+                            {target.type === 'node' ? 'Node Actions' :
+                                target.type === 'edge' ? 'Edge Actions' : 'Canvas Actions'}
                         </span>
                     </div>
-                    
+
                     {/* Layer Submenu */}
                     {showLayerSubmenu && target.type === 'node' ? (
                         <div className="py-1">
@@ -335,9 +335,9 @@ export function CanvasContextMenu({
                                     }}
                                     className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent-lineage/10 hover:text-accent-lineage transition-colors"
                                 >
-                                    <div 
-                                        className="w-3 h-3 rounded-full border border-white/20" 
-                                        style={{ backgroundColor: layer.color }} 
+                                    <div
+                                        className="w-3 h-3 rounded-full border border-white/20"
+                                        style={{ backgroundColor: layer.color }}
                                     />
                                     {layer.name}
                                 </button>
@@ -352,7 +352,7 @@ export function CanvasContextMenu({
                                         disabled={action.disabled}
                                         className={cn(
                                             "w-full flex items-center justify-between gap-3 px-3 py-2 text-sm transition-colors",
-                                            action.disabled 
+                                            action.disabled
                                                 ? "text-ink-muted cursor-not-allowed opacity-50"
                                                 : action.danger
                                                     ? "text-red-500 hover:bg-red-500/10"

@@ -478,25 +478,15 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
             buildAssignmentRequest: () => {
                 const state = get()
 
-                // Helper to map frontend types to backend EntityType enum
-                const mapEntityType = (type: string): string => {
-                    const t = type.toLowerCase()
-                    if (['table', 'view', 'file', 'topic'].includes(t)) return 'dataset'
-                    if (['database', 'schema', 'folder', 'bucket'].includes(t)) return 'container'
-                    if (['column', 'field'].includes(t)) return 'schemaField'
-                    return type // Default pass-through (domain, system, app, dashboard, etc.)
-                }
-
                 return {
                     scopeFilter: state.scopeFilter ?? undefined,
                     layers: state.layers.map(layer => ({
                         id: layer.id, // Backend expects 'id'
-                        // layerId: layer.id, // Removed: Backend model uses 'id'
                         name: layer.name,
                         color: layer.color ?? '#808080',
                         order: layer.order,
                         sequence: layer.sequence ?? layer.order,
-                        entityTypes: layer.entityTypes?.map(mapEntityType),
+                        entityTypes: layer.entityTypes,
                         rules: layer.rules ?? [],
                         logicalNodes: layer.logicalNodes,
                         entityAssignments: layer.entityAssignments ?? []
