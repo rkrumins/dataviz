@@ -183,6 +183,14 @@ class GraphDataProvider(ABC):
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         pass
 
+    @abstractmethod
+    async def update_node(self, urn: str, updates: Dict[str, Any]) -> Optional[GraphNode]:
+        pass
+
+    @abstractmethod
+    async def create_edge(self, edge: GraphEdge) -> bool:
+        pass
+
     # ==========================================
     # Optional Extension Methods
     # (concrete implementations are optional — default no-ops)

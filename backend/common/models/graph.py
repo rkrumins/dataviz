@@ -382,10 +382,39 @@ class CreateNodeRequest(BaseModel):
         populate_by_name = True
 
 class CreateNodeResult(BaseModel):
-    node: GraphNode
+    node: Optional[GraphNode] = None
     containment_edge: Optional[GraphEdge] = Field(None, alias="containmentEdge")
     success: bool = True
     error: Optional[str] = None
 
     class Config:
         populate_by_name = True
+
+class UpdateNodeRequest(BaseModel):
+    display_name: Optional[str] = Field(None, alias="displayName")
+    description: Optional[str] = None
+    properties: Optional[Dict[str, Any]] = None
+    tags: Optional[List[str]] = None
+
+    class Config:
+        populate_by_name = True
+
+class UpdateNodeResult(BaseModel):
+    node: Optional[GraphNode] = None
+    success: bool = True
+    error: Optional[str] = None
+
+class CreateEdgeRequest(BaseModel):
+    source_urn: str = Field(alias="sourceUrn")
+    target_urn: str = Field(alias="targetUrn")
+    edge_type: str = Field(alias="edgeType")
+    properties: Dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        populate_by_name = True
+
+class CreateEdgeResult(BaseModel):
+    edge: Optional[GraphEdge] = None
+    success: bool = True
+    error: Optional[str] = None
+
