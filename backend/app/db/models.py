@@ -362,3 +362,45 @@ class WorkspaceDataSourceORM(Base):
         Index("idx_ds_workspace", "workspace_id"),
         Index("idx_ds_provider", "provider_id"),
     )
+
+
+# ------------------------------------------------------------------ #
+# context_models  (how to visualize/organize the graph)               #
+# ------------------------------------------------------------------ #
+
+class ContextModelORM(Base):
+    __tablename__ = "context_models"
+
+    id = Column(Text, primary_key=True, default=lambda: f"cm_{uuid.uuid4().hex[:12]}")
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    workspace_id = Column(
+        Text,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=True,  # null = global template
+    )
+    data_source_id = Column(
+        Text,
+        ForeignKey("workspace_data_sources.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    is_template = Column(Boolean, nullable=False, default=False)
+    category = Column(Text, nullable=True)                           # e.g. "data-engineering"
+    layers_config = Column(Text, nullable=False, default="[]")       # JSON: ViewLayerConfig[]
+    scope_filter = Column(Text, nullable=True)                       # JSON: ScopeFilterConfig
+    instance_assignments = Column(Text, nullable=False, default="{}") # JSON: entityId→assignment
+    scope_edge_config = Column(Text, nullable=True)                  # JSON: ScopeEdgeConfig
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    # Relationships
+    workspace = relationship(
+        "WorkspaceORM",
+        foreign_keys=[workspace_id],
+    )
+
+    __table_args__ = (
+        Index("idx_cm_workspace", "workspace_id"),
+        Index("idx_cm_template", "is_template"),
+    )

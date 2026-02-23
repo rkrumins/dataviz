@@ -16,7 +16,6 @@ import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
-import { useWorkspacesStore } from '@/store/workspaces'
 import {
   type GraphNode,
   resolveLayerAssignment,
@@ -260,10 +259,6 @@ export function ReferenceModelCanvas({
   const assignmentStatus = useReferenceModelStore(s => s.assignmentStatus)
   const setLayers = useReferenceModelStore(s => s.setLayers)
   const storeLayers = useReferenceModelStore(s => s.layers)
-  const syncStatus = useReferenceModelStore(s => s.syncStatus)
-  const activeContextModelName = useReferenceModelStore(s => s.activeContextModelName)
-  const saveToBackend = useReferenceModelStore(s => s.saveToBackend)
-  const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
 
   // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
@@ -1341,55 +1336,6 @@ export function ReferenceModelCanvas({
               title="Collapse All"
             >
               <LucideIcons.ChevronsDownUp className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Divider */}
-          <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
-
-          {/* Save Blueprint */}
-          <div className="flex items-center gap-2">
-            {activeContextModelName && (
-              <span className="text-xs text-ink-muted truncate max-w-[120px]" title={activeContextModelName}>
-                {activeContextModelName}
-              </span>
-            )}
-            <button
-              onClick={() => activeWorkspaceId && saveToBackend(activeWorkspaceId)}
-              disabled={(syncStatus !== 'dirty' && syncStatus !== 'error') || !activeWorkspaceId}
-              className={cn(
-                "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
-                syncStatus === 'dirty'
-                  ? "bg-gradient-to-r from-blue-500/20 to-cyan-500/10 text-blue-400 border border-blue-500/30 hover:from-blue-500/30 hover:to-cyan-500/20 hover:shadow-lg hover:shadow-blue-500/20 hover:scale-[1.02] active:scale-[0.98]"
-                  : syncStatus === 'error'
-                    ? "bg-gradient-to-r from-red-500/20 to-red-500/10 text-red-400 border border-red-500/30"
-                    : "bg-white/[0.03] border border-white/[0.06] text-ink-muted/50 cursor-not-allowed"
-              )}
-              title={
-                !activeWorkspaceId ? 'No workspace selected'
-                : syncStatus === 'dirty' ? 'Save changes to backend'
-                : syncStatus === 'error' ? 'Save failed — click to retry'
-                : 'All changes saved'
-              }
-            >
-              {syncStatus === 'saving' ? (
-                <LucideIcons.Loader2 className="w-4 h-4 animate-spin" />
-              ) : syncStatus === 'error' ? (
-                <LucideIcons.AlertCircle className="w-4 h-4" />
-              ) : syncStatus === 'synced' ? (
-                <LucideIcons.CheckCircle className="w-4 h-4" />
-              ) : (
-                <LucideIcons.Save className="w-4 h-4" />
-              )}
-              <span>
-                {syncStatus === 'saving' ? 'Saving...'
-                  : syncStatus === 'error' ? 'Retry Save'
-                  : syncStatus === 'synced' ? 'Saved'
-                  : 'Save Blueprint'}
-              </span>
-              {syncStatus === 'dirty' && (
-                <div className="w-2 h-2 rounded-full bg-blue-400 shadow-lg shadow-blue-400/50" />
-              )}
             </button>
           </div>
         </div>

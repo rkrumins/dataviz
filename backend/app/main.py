@@ -8,6 +8,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from .api.v1.api import api_router
 from .db.engine import init_db, close_db, get_async_session
+from .db.seed_templates import seed_templates
 from .middleware.request_id import RequestIdMiddleware
 from .middleware.logging import StructuredLoggingMiddleware, configure_json_logging
 from .registry.provider_registry import provider_registry
@@ -27,7 +28,11 @@ async def lifespan(_app: FastAPI):
     # 1. Initialise management DB tables (idempotent — safe to run every restart)
     await init_db()
 
-    # 2. Ensure a primary connection exists; bootstrap from env vars if DB is empty
+    # 2. Seed Quick Start Templates (idempotent — skips if already present)
+    async with get_async_session() as session:
+        await seed_templates(session)
+
+    # 3. Ensure a primary connection exists; bootstrap from env vars if DB is empty
     async with get_async_session() as session:
         try:
             await provider_registry._resolve_primary_id(session)

@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from .endpoints import (
     graph, assignments, connections, ontology, views,
-    providers, blueprints, workspaces, assets,
+    providers, blueprints, workspaces, assets, context_models,
 )
 
 api_router = APIRouter()
@@ -15,6 +15,10 @@ api_router.include_router(
 )
 api_router.include_router(
     workspaces.router, prefix="/admin/workspaces", tags=["admin:workspaces"],
+)
+api_router.include_router(
+    context_models.template_router, prefix="/admin/context-model-templates",
+    tags=["admin:context-model-templates"],
 )
 
 # ── Workspace-scoped data routers ───────────────────────────────────
@@ -30,6 +34,10 @@ api_router.include_router(
 # Asset endpoints: /api/v1/{ws_id}/assets/views, /api/v1/{ws_id}/assets/rule-sets
 api_router.include_router(
     assets.router, prefix="/{ws_id}/assets", tags=["assets:workspace"],
+)
+# Context models: /api/v1/{ws_id}/context-models
+api_router.include_router(
+    context_models.router, prefix="/{ws_id}/context-models", tags=["context-models"],
 )
 
 # ── Legacy routers (backward compat, kept during migration) ─────────

@@ -14,7 +14,7 @@
  * - Lazy loading support
  */
 
-import { create, type StateCreator } from 'zustand'
+import { create } from 'zustand'
 import { generateId } from '@/lib/utils'
 import type { ViewLayerConfig, ScopeFilterConfig, EntityAssignmentConfig, AssignmentConflict, ScopeEdgeConfig } from '@/types/schema'
 import type {
@@ -24,8 +24,6 @@ import type {
     LayerAssignmentRequest,
     GraphDataProvider
 } from '@/providers/GraphDataProvider'
-import type { ContextModel } from '@/services/contextModelService'
-import * as contextModelService from '@/services/contextModelService'
 
 // ============================================
 // Types
@@ -45,9 +43,6 @@ type UnsubscribeFn = () => void
 
 /** Pending assignment request (for async backend calls) */
 type AssignmentStatus = 'idle' | 'loading' | 'success' | 'error'
-
-/** Backend persistence state machine */
-type SyncStatus = 'synced' | 'dirty' | 'saving' | 'error'
 
 // ============================================
 // Store State
@@ -91,11 +86,6 @@ interface ReferenceModelState {
 
     /** Current scope edge configuration */
     scopeEdgeConfig: ScopeEdgeConfig | null
-
-    // ===== Backend Sync =====
-    activeContextModelId: string | null
-    activeContextModelName: string | null
-    syncStatus: SyncStatus
 
     // ===== Subscription Management =====
     _subscribers: Set<LayerChangeCallback>
@@ -180,53 +170,7 @@ interface ReferenceModelState {
 
     /** Clear all manual assignments and conflicts */
     clearAssignments: () => void
-
-    // ===== Backend Sync Actions =====
-    /** Save current state to backend (Save Blueprint button) */
-    saveToBackend: (wsId: string) => Promise<void>
-    /** Load a context model from backend */
-    loadFromBackend: (wsId: string, contextModelId: string) => Promise<void>
-    /** Instantiate a Quick Start Template */
-    loadTemplate: (wsId: string, templateId: string, name: string) => Promise<void>
-    /** List available context models for a workspace */
-    listAvailable: (wsId: string) => Promise<ContextModel[]>
-    /** List Quick Start Templates */
-    listTemplates: () => Promise<ContextModel[]>
 }
-
-// ============================================
-// Auto-dirty middleware
-// ============================================
-// Wraps set() to detect blueprint-relevant mutations and automatically
-// transition syncStatus → 'dirty'. Actions that explicitly set syncStatus
-// (save, load, loadTemplate) are left alone.
-
-const BLUEPRINT_KEYS: ReadonlySet<string> = new Set([
-    'layers', 'layerSequence', 'scopeFilter', 'scopeEdgeConfig', 'instanceAssignments',
-])
-
-const autoDirty: (
-    config: StateCreator<ReferenceModelState, [], []>,
-) => StateCreator<ReferenceModelState, [], []> =
-    (config) => (rawSet, get, api) => {
-        const wrappedSet: typeof rawSet = (partial, replace) => {
-            const update: Record<string, unknown> =
-                typeof partial === 'function' ? partial(get()) : partial
-
-            // If this set() explicitly sets syncStatus, the caller owns the transition
-            if ('syncStatus' in update) {
-                return rawSet(partial, replace)
-            }
-
-            const touchesBlueprint = Object.keys(update).some(k => BLUEPRINT_KEYS.has(k))
-            if (touchesBlueprint && get().syncStatus !== 'saving') {
-                return rawSet({ ...update, syncStatus: 'dirty' } as Partial<ReferenceModelState>, replace as false)
-            }
-
-            return rawSet(partial, replace)
-        }
-        return config(wrappedSet, get, api)
-    }
 
 // ============================================
 // Store Implementation
@@ -238,8 +182,10 @@ const DEFAULT_LAYOUT = {
     gap: 16
 }
 
+import { persist, createJSONStorage } from 'zustand/middleware'
+
 export const useReferenceModelStore = create<ReferenceModelState>()(
-    autoDirty(
+    persist(
         (set, get) => ({
             // ===== Initial State =====
             layers: [],
@@ -256,9 +202,6 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
             instanceAssignments: new Map(),
             assignmentConflicts: [],
             scopeEdgeConfig: null,
-            activeContextModelId: null,
-            activeContextModelName: null,
-            syncStatus: 'synced' as SyncStatus,
             _subscribers: new Set(),
 
             setLayers: (layers) => {
@@ -279,8 +222,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                 set({
                     layers,
                     layerSequence: sequence,
-                    instanceAssignments: newInstanceMap,
-
+                    instanceAssignments: newInstanceMap
                 })
 
                 // Notify subscribers
@@ -307,7 +249,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                 const layers = [...state.layers, newLayer]
                 const layerSequence = [...state.layerSequence, id]
 
-                set({ layers, layerSequence})
+                set({ layers, layerSequence })
 
                 // Notify subscribers
                 state._subscribers.forEach(cb => cb({
@@ -336,7 +278,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
 
                 const layerSequence = state.layerSequence.filter(lid => lid !== id)
 
-                set({ layers, layerSequence})
+                set({ layers, layerSequence })
 
                 // Notify subscribers
                 state._subscribers.forEach(cb => cb({
@@ -353,7 +295,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     l.id === id ? { ...l, ...updates } : l
                 )
 
-                set({ layers})
+                set({ layers })
 
                 // Notify subscribers
                 state._subscribers.forEach(cb => cb({
@@ -377,7 +319,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                         sequence: idx
                     }))
 
-                set({ layers, layerSequence: newSequence})
+                set({ layers, layerSequence: newSequence })
 
                 // Notify subscribers
                 state._subscribers.forEach(cb => cb({
@@ -613,8 +555,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                 set({
                     instanceAssignments: newAssignments,
                     layers: updatedLayers,
-                    effectiveAssignments: newEffective,
-
+                    effectiveAssignments: newEffective
                 })
 
                 return { success: true, conflict: conflict ?? undefined }
@@ -651,8 +592,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     instanceAssignments: newAssignments,
                     layers: updatedLayers,
                     assignmentConflicts: updatedConflicts,
-                    effectiveAssignments: newEffective,
-
+                    effectiveAssignments: newEffective
                 })
             },
 
@@ -806,8 +746,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     instanceAssignments: newInstanceAssignments,
                     effectiveAssignments: newEffectiveAssignments,
                     layers: updatedLayers,
-                    assignmentConflicts: [...state.assignmentConflicts, ...conflicts],
-
+                    assignmentConflicts: [...state.assignmentConflicts, ...conflicts]
                 })
 
                 return { successful, conflicts }
@@ -824,133 +763,27 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     instanceAssignments: new Map(),
                     assignmentConflicts: [],
                     layers: resetLayers,
-                    effectiveAssignments: new Map(),
-
+                    effectiveAssignments: new Map()
                 })
-            },
-
-            // ===== Backend Sync Actions =====
-
-            saveToBackend: async (wsId: string) => {
-                const state = get()
-                if (state.syncStatus === 'saving') return
-
-                set({ syncStatus: 'saving' })
-                try {
-                    // Serialize layers and assignments for the API
-                    const layersConfig = state.layers.map(l => ({ ...l }))
-                    const instanceAssignments: Record<string, EntityAssignmentConfig> = {}
-                    state.instanceAssignments.forEach((val, key) => {
-                        instanceAssignments[key] = val
-                    })
-
-                    if (state.activeContextModelId) {
-                        // Update existing
-                        const updated = await contextModelService.updateContextModel(
-                            wsId,
-                            state.activeContextModelId,
-                            {
-                                name: state.activeContextModelName ?? undefined,
-                                layersConfig,
-                                scopeFilter: state.scopeFilter,
-                                instanceAssignments,
-                                scopeEdgeConfig: state.scopeEdgeConfig,
-                            }
-                        )
-                        set({
-                            syncStatus: 'synced',
-                            activeContextModelName: updated.name,
-                        })
-                    } else {
-                        // Create new
-                        const created = await contextModelService.createContextModel(wsId, {
-                            name: state.activeContextModelName ?? 'Untitled Context Model',
-                            layersConfig,
-                            scopeFilter: state.scopeFilter,
-                            instanceAssignments,
-                            scopeEdgeConfig: state.scopeEdgeConfig,
-                        })
-                        set({
-                            activeContextModelId: created.id,
-                            activeContextModelName: created.name,
-                            syncStatus: 'synced',
-                        })
-                    }
-                } catch (err) {
-                    console.error('[ReferenceModelStore] saveToBackend failed:', err)
-                    set({ syncStatus: 'error' })
-                    throw err
+            }
+        }),
+        {
+            name: 'reference-model-storage',
+            storage: createJSONStorage(() => localStorage),
+            partialize: (state) => ({
+                layers: state.layers,
+                layerSequence: state.layerSequence,
+                instanceAssignments: Array.from(state.instanceAssignments.entries()), // Maps don't JSON stringify well by default, need support or conversion
+                preservedEdges: state.preservedEdges,
+                scopeFilter: state.scopeFilter
+            }),
+            onRehydrateStorage: () => (state) => {
+                // Must convert Array back to Map for instanceAssignments
+                if (state && Array.isArray(state.instanceAssignments)) {
+                    state.instanceAssignments = new Map(state.instanceAssignments)
                 }
-            },
-
-            loadFromBackend: async (wsId: string, contextModelId: string) => {
-                try {
-                    const model = await contextModelService.getContextModel(wsId, contextModelId)
-
-                    // Rebuild instanceAssignments Map from the API response
-                    const instanceMap = new Map<string, EntityAssignmentConfig>()
-                    if (model.instanceAssignments) {
-                        Object.entries(model.instanceAssignments).forEach(([key, val]) => {
-                            instanceMap.set(key, val as EntityAssignmentConfig)
-                        })
-                    }
-
-                    const layers = (model.layersConfig ?? []) as ViewLayerConfig[]
-                    const sequence = layers
-                        .sort((a, b) => (a.sequence ?? a.order) - (b.sequence ?? b.order))
-                        .map(l => l.id)
-
-                    set({
-                        activeContextModelId: model.id,
-                        activeContextModelName: model.name,
-                        layers,
-                        layerSequence: sequence,
-                        instanceAssignments: instanceMap,
-                        scopeFilter: (model.scopeFilter as ScopeFilterConfig) ?? null,
-                        scopeEdgeConfig: (model.scopeEdgeConfig as ScopeEdgeConfig) ?? null,
-                        syncStatus: 'synced' as SyncStatus,
-                        assignmentConflicts: [],
-                    })
-                } catch (err) {
-                    console.error('[ReferenceModelStore] loadFromBackend failed:', err)
-                    throw err
-                }
-            },
-
-            loadTemplate: async (wsId: string, templateId: string, name: string) => {
-                try {
-                    const model = await contextModelService.instantiateTemplate(wsId, templateId, name)
-
-                    const layers = (model.layersConfig ?? []) as ViewLayerConfig[]
-                    const sequence = layers
-                        .sort((a, b) => (a.sequence ?? a.order) - (b.sequence ?? b.order))
-                        .map(l => l.id)
-
-                    set({
-                        activeContextModelId: model.id,
-                        activeContextModelName: model.name,
-                        layers,
-                        layerSequence: sequence,
-                        instanceAssignments: new Map(),
-                        scopeFilter: (model.scopeFilter as ScopeFilterConfig) ?? null,
-                        scopeEdgeConfig: (model.scopeEdgeConfig as ScopeEdgeConfig) ?? null,
-                        syncStatus: 'synced' as SyncStatus,
-                        assignmentConflicts: [],
-                    })
-                } catch (err) {
-                    console.error('[ReferenceModelStore] loadTemplate failed:', err)
-                    throw err
-                }
-            },
-
-            listAvailable: async (wsId: string) => {
-                return contextModelService.listContextModels(wsId)
-            },
-
-            listTemplates: async () => {
-                return contextModelService.listTemplates()
-            },
-        })
+            }
+        }
     )
 )
 
