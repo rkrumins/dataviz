@@ -108,7 +108,7 @@ function ViewBadge({ name, layoutType, entityCount }: ViewBadgeProps) {
     grid: 'Grid',
     timeline: 'Timeline',
     'layered-lineage': 'Layered Lineage',
-    reference: 'Reference Model',
+    reference: 'Context View',
   }
 
   return (

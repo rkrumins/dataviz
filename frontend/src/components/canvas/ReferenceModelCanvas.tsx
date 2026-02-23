@@ -1,12 +1,16 @@
 /**
- * ReferenceModelCanvas - Hierarchy-style Reference Model with User-Defined Layers
- * 
+ * ContextViewCanvas - Enterprise-grade Context View with User-Defined Layers
+ *
  * Displays entities in a horizontal left-to-right flow with:
  * - User-defined layer columns (Source → Staging → Refinery → Report)
  * - Collapsible containers within each layer
  * - Entities flow from left (sources) to right (consumers)
  * - Configurable layer definitions via schema
  * - Lineage flow overlay support
+ * - Backend-persisted blueprints (Save / Load / Quick Start Templates)
+ *
+ * Single authoritative canvas — ContextViewCanvas.tsx deleted as dead code.
+ * Store: referenceModelStore.ts (autoDirty + backend sync, no localStorage).
  */
 
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
@@ -116,17 +120,17 @@ interface HierarchyNode {
   logicalConfig?: LogicalNodeConfig
 }
 
-interface ReferenceModelCanvasProps {
+interface ContextViewCanvasProps {
   className?: string
   layers?: ViewLayerConfig[]
   showLineageFlow?: boolean
 }
 
-export function ReferenceModelCanvas({
+export function ContextViewCanvas({
   className,
   layers = defaultReferenceModelLayers,
   showLineageFlow: initialShowLineageFlow = true
-}: ReferenceModelCanvasProps) {
+}: ContextViewCanvasProps) {
   const nodes = useCanvasStore((s) => s.nodes)
   const edges = useCanvasStore((s) => s.edges)
   const addNodes = useCanvasStore((s) => s.addNodes)
@@ -263,6 +267,10 @@ export function ReferenceModelCanvas({
   const syncStatus = useReferenceModelStore(s => s.syncStatus)
   const activeContextModelName = useReferenceModelStore(s => s.activeContextModelName)
   const saveToBackend = useReferenceModelStore(s => s.saveToBackend)
+  const loadFromBackend = useReferenceModelStore(s => s.loadFromBackend)
+  const loadTemplate = useReferenceModelStore(s => s.loadTemplate)
+  const listAvailable = useReferenceModelStore(s => s.listAvailable)
+  const listTemplates = useReferenceModelStore(s => s.listTemplates)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
 
   // Step 1: Sync view layers to store when activeView changes
@@ -315,6 +323,73 @@ export function ReferenceModelCanvas({
 
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
+
+  // Load Blueprint dropdown state
+  const [showLoadDropdown, setShowLoadDropdown] = useState(false)
+  const [savedModels, setSavedModels] = useState<Array<{ id: string; name: string }>>([])
+  const [isLoadingModels, setIsLoadingModels] = useState(false)
+  const [loadingModelId, setLoadingModelId] = useState<string | null>(null)
+
+  // Quick Start Templates dropdown state
+  const [showTemplatesDropdown, setShowTemplatesDropdown] = useState(false)
+  const [templates, setTemplates] = useState<Array<{ id: string; name: string; category?: string }>>([])
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState(false)
+  const [loadingTemplateId, setLoadingTemplateId] = useState<string | null>(null)
+
+  // Fetch saved models when Load dropdown opens
+  const handleOpenLoadDropdown = useCallback(async () => {
+    if (!activeWorkspaceId) return
+    setShowLoadDropdown(v => !v)
+    setShowTemplatesDropdown(false)
+    if (!showLoadDropdown && savedModels.length === 0) {
+      setIsLoadingModels(true)
+      try {
+        const models = await listAvailable(activeWorkspaceId)
+        setSavedModels(models.map(m => ({ id: m.id, name: m.name })))
+      } catch { /* silent */ } finally {
+        setIsLoadingModels(false)
+      }
+    }
+  }, [activeWorkspaceId, showLoadDropdown, savedModels.length, listAvailable])
+
+  // Load a saved blueprint
+  const handleLoadModel = useCallback(async (id: string) => {
+    if (!activeWorkspaceId) return
+    setLoadingModelId(id)
+    try {
+      await loadFromBackend(activeWorkspaceId, id)
+      setShowLoadDropdown(false)
+    } catch { /* silent */ } finally {
+      setLoadingModelId(null)
+    }
+  }, [activeWorkspaceId, loadFromBackend])
+
+  // Fetch templates when Templates dropdown opens
+  const handleOpenTemplatesDropdown = useCallback(async () => {
+    setShowTemplatesDropdown(v => !v)
+    setShowLoadDropdown(false)
+    if (!showTemplatesDropdown && templates.length === 0) {
+      setIsLoadingTemplates(true)
+      try {
+        const tmpl = await listTemplates()
+        setTemplates(tmpl.map(m => ({ id: m.id, name: m.name, category: m.category ?? undefined })))
+      } catch { /* silent */ } finally {
+        setIsLoadingTemplates(false)
+      }
+    }
+  }, [showTemplatesDropdown, templates.length, listTemplates])
+
+  // Instantiate a Quick Start Template
+  const handleLoadTemplate = useCallback(async (templateId: string, templateName: string) => {
+    if (!activeWorkspaceId) return
+    setLoadingTemplateId(templateId)
+    try {
+      await loadTemplate(activeWorkspaceId, templateId, `${templateName} (copy)`)
+      setShowTemplatesDropdown(false)
+    } catch { /* silent */ } finally {
+      setLoadingTemplateId(null)
+    }
+  }, [activeWorkspaceId, loadTemplate])
 
 
   // Edit Mode State (unified with LineageCanvas)
@@ -1224,10 +1299,10 @@ export function ReferenceModelCanvas({
               <LucideIcons.Network className="w-5 h-5 text-accent-lineage" />
             </div>
             <div>
-              <h2 className="text-base font-display font-semibold text-ink tracking-tight">Reference Model</h2>
+              <h2 className="text-base font-display font-semibold text-ink tracking-tight">Context View</h2>
               <p className="text-[10px] text-ink-muted/60 flex items-center gap-1.5">
                 <LucideIcons.ArrowRight className="w-3 h-3" />
-                Data Flow View
+                Data Flow Blueprint
               </p>
             </div>
           </div>
@@ -1347,6 +1422,174 @@ export function ReferenceModelCanvas({
           {/* Divider */}
           <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
 
+          {/* Load Blueprint dropdown */}
+          <div className="relative">
+            <button
+              onClick={handleOpenLoadDropdown}
+              disabled={!activeWorkspaceId}
+              className={cn(
+                "flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all duration-200",
+                showLoadDropdown
+                  ? "bg-purple-500/15 text-purple-400 border border-purple-500/30"
+                  : "bg-white/[0.04] border border-white/[0.08] text-ink-muted hover:bg-white/[0.08] hover:text-ink"
+              )}
+              title={!activeWorkspaceId ? 'No workspace selected' : 'Load a saved blueprint'}
+            >
+              {isLoadingModels ? (
+                <LucideIcons.Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <LucideIcons.FolderOpen className="w-4 h-4" />
+              )}
+              <span>Load</span>
+              <LucideIcons.ChevronDown className={cn("w-3.5 h-3.5 transition-transform", showLoadDropdown && "rotate-180")} />
+            </button>
+
+            <AnimatePresence>
+              {showLoadDropdown && (
+                <motion.div
+                  initial={{ opacity: 0, y: -4, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -4, scale: 0.97 }}
+                  transition={{ duration: 0.15 }}
+                  className="absolute right-0 top-full mt-2 w-64 z-50 rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-white/[0.1] shadow-2xl shadow-black/40 overflow-hidden"
+                >
+                  <div className="px-3 py-2 border-b border-white/[0.06]">
+                    <p className="text-[11px] font-medium text-ink-muted uppercase tracking-wider">Saved Blueprints</p>
+                  </div>
+                  <div className="max-h-52 overflow-y-auto py-1">
+                    {isLoadingModels ? (
+                      <div className="flex items-center justify-center py-6">
+                        <LucideIcons.Loader2 className="w-4 h-4 animate-spin text-ink-muted" />
+                      </div>
+                    ) : savedModels.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-6 px-4 text-center">
+                        <LucideIcons.FolderOpen className="w-8 h-8 text-ink-muted/30 mb-2" />
+                        <p className="text-xs text-ink-muted/60">No saved blueprints yet</p>
+                        <p className="text-[10px] text-ink-muted/40 mt-1">Use Save Blueprint to persist your configuration</p>
+                      </div>
+                    ) : (
+                      savedModels.map(model => (
+                        <button
+                          key={model.id}
+                          onClick={() => handleLoadModel(model.id)}
+                          disabled={loadingModelId === model.id}
+                          className={cn(
+                            "w-full flex items-center gap-3 px-3 py-2 text-left text-sm transition-colors",
+                            activeContextModelName === model.name
+                              ? "bg-purple-500/10 text-purple-400"
+                              : "text-ink hover:bg-white/[0.05] hover:text-ink"
+                          )}
+                        >
+                          {loadingModelId === model.id ? (
+                            <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
+                          ) : activeContextModelName === model.name ? (
+                            <LucideIcons.CheckCircle className="w-3.5 h-3.5 flex-shrink-0 text-purple-400" />
+                          ) : (
+                            <LucideIcons.FileCode2 className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted" />
+                          )}
+                          <span className="truncate">{model.name}</span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                  <div className="border-t border-white/[0.06] px-3 py-2">
+                    <button
+                      onClick={() => {
+                        setSavedModels([])
+                        if (activeWorkspaceId) {
+                          setIsLoadingModels(true)
+                          listAvailable(activeWorkspaceId).then(m => {
+                            setSavedModels(m.map(x => ({ id: x.id, name: x.name })))
+                          }).finally(() => setIsLoadingModels(false))
+                        }
+                      }}
+                      className="w-full flex items-center justify-center gap-1.5 py-1 text-[11px] text-ink-muted/60 hover:text-ink-muted transition-colors"
+                    >
+                      <LucideIcons.RefreshCw className="w-3 h-3" />
+                      Refresh
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Quick Start Templates dropdown */}
+          <div className="relative">
+            <button
+              onClick={handleOpenTemplatesDropdown}
+              className={cn(
+                "flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all duration-200",
+                showTemplatesDropdown
+                  ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                  : "bg-white/[0.04] border border-white/[0.08] text-ink-muted hover:bg-white/[0.08] hover:text-ink"
+              )}
+              title="Apply a Quick Start Template"
+            >
+              {isLoadingTemplates ? (
+                <LucideIcons.Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <LucideIcons.Wand2 className="w-4 h-4" />
+              )}
+              <span>Templates</span>
+              <LucideIcons.ChevronDown className={cn("w-3.5 h-3.5 transition-transform", showTemplatesDropdown && "rotate-180")} />
+            </button>
+
+            <AnimatePresence>
+              {showTemplatesDropdown && (
+                <motion.div
+                  initial={{ opacity: 0, y: -4, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -4, scale: 0.97 }}
+                  transition={{ duration: 0.15 }}
+                  className="absolute right-0 top-full mt-2 w-72 z-50 rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-white/[0.1] shadow-2xl shadow-black/40 overflow-hidden"
+                >
+                  <div className="px-3 py-2 border-b border-white/[0.06]">
+                    <p className="text-[11px] font-medium text-ink-muted uppercase tracking-wider">Quick Start Templates</p>
+                    <p className="text-[10px] text-ink-muted/50 mt-0.5">Replaces current layers — save first if needed</p>
+                  </div>
+                  <div className="max-h-72 overflow-y-auto py-1">
+                    {isLoadingTemplates ? (
+                      <div className="flex items-center justify-center py-6">
+                        <LucideIcons.Loader2 className="w-4 h-4 animate-spin text-ink-muted" />
+                      </div>
+                    ) : templates.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-6 px-4 text-center">
+                        <LucideIcons.Wand2 className="w-8 h-8 text-ink-muted/30 mb-2" />
+                        <p className="text-xs text-ink-muted/60">No templates available</p>
+                        <p className="text-[10px] text-ink-muted/40 mt-1">Ask your admin to seed Quick Start Templates</p>
+                      </div>
+                    ) : (
+                      templates.map(tmpl => (
+                        <button
+                          key={tmpl.id}
+                          onClick={() => handleLoadTemplate(tmpl.id, tmpl.name)}
+                          disabled={loadingTemplateId === tmpl.id || !activeWorkspaceId}
+                          className="w-full flex items-start gap-3 px-3 py-2.5 text-left text-sm text-ink hover:bg-white/[0.05] transition-colors"
+                        >
+                          {loadingTemplateId === tmpl.id ? (
+                            <LucideIcons.Loader2 className="w-4 h-4 animate-spin flex-shrink-0 mt-0.5 text-amber-400" />
+                          ) : (
+                            <LucideIcons.LayoutTemplate className="w-4 h-4 flex-shrink-0 mt-0.5 text-amber-400" />
+                          )}
+                          <div className="min-w-0">
+                            <p className="font-medium truncate">{tmpl.name}</p>
+                            {tmpl.category && (
+                              <p className="text-[10px] text-ink-muted/60 mt-0.5 capitalize">{tmpl.category.replace(/-/g, ' ')}</p>
+                            )}
+                          </div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Divider */}
+          <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
+
           {/* Save Blueprint */}
           <div className="flex items-center gap-2">
             {activeContextModelName && (
@@ -1367,9 +1610,9 @@ export function ReferenceModelCanvas({
               )}
               title={
                 !activeWorkspaceId ? 'No workspace selected'
-                : syncStatus === 'dirty' ? 'Save changes to backend'
-                : syncStatus === 'error' ? 'Save failed — click to retry'
-                : 'All changes saved'
+                  : syncStatus === 'dirty' ? 'Save changes to backend'
+                    : syncStatus === 'error' ? 'Save failed — click to retry'
+                      : 'All changes saved'
               }
             >
               {syncStatus === 'saving' ? (
@@ -1384,8 +1627,8 @@ export function ReferenceModelCanvas({
               <span>
                 {syncStatus === 'saving' ? 'Saving...'
                   : syncStatus === 'error' ? 'Retry Save'
-                  : syncStatus === 'synced' ? 'Saved'
-                  : 'Save Blueprint'}
+                    : syncStatus === 'synced' ? 'Saved'
+                      : 'Save Blueprint'}
               </span>
               {syncStatus === 'dirty' && (
                 <div className="w-2 h-2 rounded-full bg-blue-400 shadow-lg shadow-blue-400/50" />
@@ -2658,5 +2901,6 @@ function LineageFlowOverlay({
   )
 }
 
-export default ReferenceModelCanvas
-
+// Backward-compat named export for existing imports (CanvasRouter etc.)
+export { ContextViewCanvas as ReferenceModelCanvas }
+export default ContextViewCanvas
