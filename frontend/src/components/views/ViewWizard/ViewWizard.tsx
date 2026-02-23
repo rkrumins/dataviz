@@ -119,6 +119,7 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
     const { clearAssignments, setLayers } = useReferenceModelStore()
+    const visibleViews = useSchemaStore(s => s.visibleViews)
 
     // Current step
     const [currentStep, setCurrentStep] = useState<WizardStep>('basics')
@@ -131,7 +132,7 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
     // Load existing view for edit mode
     useEffect(() => {
         if (mode === 'edit' && viewId && schema) {
-            const existingView = schema.views.find(v => v.id === viewId)
+            const existingView = visibleViews().find(v => v.id === viewId)
             if (existingView) {
                 setFormData({
                     name: existingView.name,

@@ -9,6 +9,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { workspaceService, type WorkspaceResponse, type DataSourceResponse } from '@/services/workspaceService'
+import { useSchemaStore } from '@/store/schema'
 
 interface WorkspacesState {
     workspaces: WorkspaceResponse[]
@@ -57,6 +58,7 @@ export const useWorkspacesStore = create<WorkspacesState>()(
                             activeWorkspaceId: defaultWs?.id ?? null,
                             activeDataSourceId: primaryDs?.id ?? null,
                         })
+                        useSchemaStore.getState().setActiveScopeKey(defaultWs?.id ?? null, primaryDs?.id ?? null)
                     } else if (activeDataSourceId) {
                         // Verify active data source still exists in active workspace
                         const ws = workspaces.find((w) => w.id === activeWorkspaceId)
@@ -65,6 +67,10 @@ export const useWorkspacesStore = create<WorkspacesState>()(
                             const primaryDs = ws?.dataSources?.find((ds) => ds.isPrimary)
                                 ?? ws?.dataSources?.[0] ?? null
                             set({ activeDataSourceId: primaryDs?.id ?? null })
+                            useSchemaStore.getState().setActiveScopeKey(activeWorkspaceId, primaryDs?.id ?? null)
+                        } else {
+                            // Scope already valid — still sync in case of cold start
+                            useSchemaStore.getState().setActiveScopeKey(activeWorkspaceId, activeDataSourceId)
                         }
                     }
                 } catch (err) {
@@ -83,9 +89,14 @@ export const useWorkspacesStore = create<WorkspacesState>()(
                     activeWorkspaceId: id,
                     activeDataSourceId: primaryDs?.id ?? null,
                 })
+                useSchemaStore.getState().setActiveScopeKey(id, primaryDs?.id ?? null)
             },
 
-            setActiveDataSource: (id) => set({ activeDataSourceId: id }),
+            setActiveDataSource: (id) => {
+                set({ activeDataSourceId: id })
+                const wsId = get().activeWorkspaceId
+                useSchemaStore.getState().setActiveScopeKey(wsId, id)
+            },
 
             getDefaultWorkspace: () => {
                 return get().workspaces.find((w) => w.isDefault) ?? null

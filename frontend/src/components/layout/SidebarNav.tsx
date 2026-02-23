@@ -206,14 +206,14 @@ function EnvironmentSwitcher({
 export function SidebarNav() {
   const { sidebarCollapsed, toggleSidebar } = usePreferencesStore()
   const activeLensId = useCanvasStore((s) => s.activeLensId)
-  const schema = useSchemaStore((s) => s.schema)
+  const visibleViews = useSchemaStore((s) => s.visibleViews)
   const { openViewEditor } = useViewEditorModal()
 
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false)
   const [showConnectionPanel, setShowConnectionPanel] = useState(false)
 
-  // Get views from schema
-  const savedViews = schema?.views ?? []
+  // Get views scoped to the active workspace+datasource (global/legacy views always included)
+  const savedViews = visibleViews()
   const pinnedViews = savedViews.filter((v) => v.isDefault)
 
   // Entity types from schema for quick access

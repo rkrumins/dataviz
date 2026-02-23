@@ -4,7 +4,7 @@
  * Beautiful card-based layout selection with recommended badge
  */
 
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import {
     Check,
@@ -18,6 +18,7 @@ import {
 import { cn, generateId } from '@/lib/utils'
 import type { WizardFormData } from '../ViewWizard'
 import type { ViewLayerConfig } from '@/types/schema'
+import { listTemplates as fetchBackendTemplates } from '@/services/contextModelService'
 
 // ============================================
 // Types
@@ -40,14 +41,20 @@ interface LayerTemplate {
     id: string
     name: string
     description: string
+    category?: string
     layers: Omit<ViewLayerConfig, 'id' | 'order'>[]
 }
 
-const LAYER_TEMPLATES: LayerTemplate[] = [
+// ============================================
+// Local fallback templates (used when backend returns 0 templates)
+// ============================================
+
+const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
     {
         id: 'data-flow',
         name: 'Data Flow',
         description: 'Source → Staging → Transform → Consumption',
+        category: 'data-engineering',
         layers: [
             { name: 'Source', description: 'Raw data sources', color: '#3b82f6', entityTypes: ['database', 'file'] },
             { name: 'Staging', description: 'Intermediate storage', color: '#8b5cf6', entityTypes: ['schema', 'table'] },
@@ -59,6 +66,7 @@ const LAYER_TEMPLATES: LayerTemplate[] = [
         id: 'medallion',
         name: 'Medallion',
         description: 'Bronze → Silver → Gold',
+        category: 'data-engineering',
         layers: [
             { name: 'Bronze', description: 'Raw data', color: '#CD7F32', entityTypes: ['database', 'file'] },
             { name: 'Silver', description: 'Cleansed', color: '#C0C0C0', entityTypes: ['table'] },
@@ -69,6 +77,7 @@ const LAYER_TEMPLATES: LayerTemplate[] = [
         id: 'simple',
         name: 'Simple',
         description: 'Input → Output',
+        category: undefined,
         layers: [
             { name: 'Input', description: 'Source systems', color: '#3b82f6', entityTypes: [] },
             { name: 'Output', description: 'Target systems', color: '#22c55e', entityTypes: [] }
@@ -84,6 +93,41 @@ const LAYER_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#0
 
 export function LayoutStep({ formData, updateFormData, layoutTypes }: LayoutStepProps) {
     const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null)
+
+    // ── Backend templates ────────────────────────────────────────────────────
+    const [backendTemplates, setBackendTemplates] = useState<LayerTemplate[]>([])
+    const [templatesLoading, setTemplatesLoading] = useState(false)
+
+    useEffect(() => {
+        setTemplatesLoading(true)
+        fetchBackendTemplates()
+            .then(results => {
+                if (results.length > 0) {
+                    // Map backend ContextModel → LayerTemplate
+                    const mapped: LayerTemplate[] = results.map(cm => ({
+                        id: cm.id,
+                        name: cm.name,
+                        description: cm.description ?? '',
+                        category: cm.category ?? undefined,
+                        layers: (cm.layersConfig ?? []).map(l => ({
+                            name: l.name,
+                            description: l.description,
+                            color: l.color ?? '#6366f1',
+                            icon: l.icon,
+                            entityTypes: l.entityTypes ?? [],
+                            rules: l.rules,
+                        }))
+                    }))
+                    setBackendTemplates(mapped)
+                }
+            })
+            .catch(() => { /* silent — fallback to local */ })
+            .finally(() => setTemplatesLoading(false))
+    }, [])
+
+    // Use backend templates if available, otherwise local fallbacks
+    const activeTemplates = backendTemplates.length > 0 ? backendTemplates : LOCAL_FALLBACK_TEMPLATES
+    // ────────────────────────────────────────────────────────────────────────
 
     const handleSelectLayoutType = useCallback((type: 'graph' | 'hierarchy' | 'reference') => {
         updateFormData({ layoutType: type })
@@ -232,7 +276,7 @@ export function LayoutStep({ formData, updateFormData, layoutTypes }: LayoutStep
                             </button>
                         </div>
 
-                        {/* Templates */}
+                        {/* Templates — shown when no layers yet */}
                         {formData.layers.length === 0 && (
                             <motion.div
                                 initial={{ opacity: 0 }}
@@ -242,18 +286,36 @@ export function LayoutStep({ formData, updateFormData, layoutTypes }: LayoutStep
                                 <div className="flex items-center gap-2 mb-3">
                                     <Wand2 className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
                                     <span className="font-semibold text-slate-800 dark:text-slate-200">Quick Start Templates</span>
+                                    {templatesLoading && (
+                                        <span className="ml-auto text-[10px] text-indigo-500 animate-pulse">Loading from backend…</span>
+                                    )}
                                 </div>
                                 <div className="grid grid-cols-3 gap-3">
-                                    {LAYER_TEMPLATES.map(template => (
-                                        <button
-                                            key={template.id}
-                                            onClick={() => handleApplyTemplate(template)}
-                                            className="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-indigo-300 dark:hover:border-indigo-700 transition-colors text-left"
-                                        >
-                                            <p className="font-medium text-sm text-slate-800 dark:text-slate-200">{template.name}</p>
-                                            <p className="text-xs text-slate-500">{template.description}</p>
-                                        </button>
-                                    ))}
+                                    {templatesLoading ? (
+                                        // Skeleton cards while fetching
+                                        Array.from({ length: 3 }).map((_, i) => (
+                                            <div key={i} className="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 animate-pulse">
+                                                <div className="h-3 w-2/3 bg-slate-200 dark:bg-slate-600 rounded mb-2" />
+                                                <div className="h-2 w-full bg-slate-100 dark:bg-slate-700 rounded" />
+                                            </div>
+                                        ))
+                                    ) : (
+                                        activeTemplates.map(template => (
+                                            <button
+                                                key={template.id}
+                                                onClick={() => handleApplyTemplate(template)}
+                                                className="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-indigo-300 dark:hover:border-indigo-700 transition-colors text-left"
+                                            >
+                                                <p className="font-medium text-sm text-slate-800 dark:text-slate-200">{template.name}</p>
+                                                <p className="text-xs text-slate-500 leading-snug mt-0.5">{template.description}</p>
+                                                {template.category && (
+                                                    <span className="inline-block mt-1.5 px-1.5 py-0.5 text-[10px] font-medium bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 rounded capitalize">
+                                                        {template.category.replace(/-/g, ' ')}
+                                                    </span>
+                                                )}
+                                            </button>
+                                        ))
+                                    )}
                                 </div>
                             </motion.div>
                         )}
