@@ -136,3 +136,97 @@ export async function createTemplate(data: ContextModelCreateRequest): Promise<C
         body: JSON.stringify({ ...data, isTemplate: true }),
     })
 }
+
+// ============================================
+// Draft Save (Autosave)
+// ============================================
+
+/**
+ * createOrUpdate — upsert helper.
+ * If `existingId` provided → PATCH, otherwise POST.
+ * Returns the full ContextModel (including the ID assigned by the backend).
+ */
+export async function createOrUpdate(
+    wsId: string,
+    data: ContextModelCreateRequest,
+    existingId?: string | null
+): Promise<ContextModel> {
+    if (existingId) {
+        return updateContextModel(wsId, existingId, {
+            name: data.name,
+            description: data.description,
+            layersConfig: data.layersConfig,
+            scopeFilter: data.scopeFilter,
+            instanceAssignments: data.instanceAssignments,
+            scopeEdgeConfig: data.scopeEdgeConfig,
+        })
+    }
+    return createContextModel(wsId, data)
+}
+
+/**
+ * makeDraftSave — closure factory that returns a debounced autosave function.
+ *
+ * `delayMs` defaults to 800 ms. The returned function can be called freely;
+ * only the last call within the debounce window hits the network.
+ *
+ * The returned function also exposes `.flush()` to force an immediate write
+ * (call on wizard submit / step change).
+ *
+ * Usage:
+ *   const autosave = makeDraftSave(wsId, 800)
+ *   autosave({ name, layersConfig, instanceAssignments }, draftIdRef)
+ *   autosave.flush()
+ */
+export function makeDraftSave(wsId: string, delayMs = 800) {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let pending: (() => Promise<void>) | null = null
+
+    async function run(
+        data: ContextModelCreateRequest,
+        draftIdRef: React.MutableRefObject<string | null>,
+        onSaved?: (model: ContextModel) => void,
+        onError?: (err: Error) => void
+    ) {
+        try {
+            const saved = await createOrUpdate(wsId, data, draftIdRef.current)
+            draftIdRef.current = saved.id
+            onSaved?.(saved)
+        } catch (err) {
+            console.error('[draftSave] autosave failed:', err)
+            onError?.(err instanceof Error ? err : new Error(String(err)))
+        }
+    }
+
+    function schedule(
+        data: ContextModelCreateRequest,
+        draftIdRef: React.MutableRefObject<string | null>,
+        onSaved?: (model: ContextModel) => void,
+        onError?: (err: Error) => void
+    ) {
+        pending = () => run(data, draftIdRef, onSaved, onError)
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(() => {
+            pending?.()
+            pending = null
+            timer = null
+        }, delayMs)
+    }
+
+    schedule.flush = async () => {
+        if (timer) {
+            clearTimeout(timer)
+            timer = null
+        }
+        if (pending) {
+            await pending()
+            pending = null
+        }
+    }
+
+    return schedule
+}
+
+// React import needed for MutableRefObject typing — imported via the consumer. 
+// If tree-shaking strips this, consumers must import React themselves.
+import type React from 'react'
