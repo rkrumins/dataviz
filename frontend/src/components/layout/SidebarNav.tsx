@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import { useNavigationStore, type NavigationTab } from '@/store/navigation'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
@@ -25,7 +26,7 @@ import { useConnections } from '@/hooks/useConnections'
 import { cn } from '@/lib/utils'
 
 interface NavItem {
-  id: string
+  id: NavigationTab
   label: string
   icon: React.ComponentType<{ className?: string }>
   badge?: number
@@ -203,6 +204,7 @@ function EnvironmentSwitcher({
 }
 
 export function SidebarNav() {
+  const { activeTab, setActiveTab } = useNavigationStore()
   const { sidebarCollapsed, toggleSidebar } = usePreferencesStore()
   const activeLensId = useCanvasStore((s) => s.activeLensId)
   const visibleViews = useSchemaStore((s) => s.visibleViews)
@@ -250,7 +252,8 @@ export function SidebarNav() {
               key={item.id}
               item={item}
               collapsed={sidebarCollapsed}
-              active={item.id === 'explore'}
+              active={activeTab === item.id}
+              onClick={() => setActiveTab(item.id)}
             />
           ))}
         </div>
@@ -366,13 +369,15 @@ interface NavButtonProps {
   item: NavItem
   collapsed: boolean
   active?: boolean
+  onClick?: () => void
 }
 
-function NavButton({ item, collapsed, active }: NavButtonProps) {
+function NavButton({ item, collapsed, active, onClick }: NavButtonProps) {
   const Icon = item.icon
 
   return (
     <button
+      onClick={onClick}
       className={cn(
         "w-full flex items-center gap-3 px-3 py-2.5 rounded-lg",
         "transition-all duration-150",
