@@ -15,7 +15,7 @@
  * - Collapse/expand per node
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence, Reorder, useDragControls } from 'framer-motion'
 import {
     ChevronRight,
@@ -28,10 +28,19 @@ import {
     FolderOpen,
     Layers,
     FolderPlus,
+    Database,
+    Table,
+    Columns,
+    Box,
+    Loader2,
+    X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig } from '@/types/schema'
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
+import { useCanvasStore } from '@/store/canvas'
+import { useEntityLoader } from '@/hooks/useEntityLoader'
+import { useOntologyMetadata } from '@/services/ontologyService'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -54,6 +63,8 @@ interface LayerHierarchyPanelProps {
     onSetActiveTarget: (target: ActiveTarget) => void
     /** Called when entities are dropped onto a layer or logical node */
     onDrop: (layerId: string, nodeId: string | undefined, payload: DropPayload) => void
+    /** Called when user clicks the X button on an assigned entity */
+    onUnassign: (entityId: string) => void
     onReorderLayers: (layerIds: string[]) => void
     className?: string
 }
@@ -68,6 +79,30 @@ function parseTransfer(e: React.DragEvent): DropPayload | null {
     } catch {
         return null
     }
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const TYPE_ICONS: Record<string, React.ReactNode> = {
+    domain: <Database className="w-3 h-3" />,
+    system: <Folder className="w-3 h-3" />,
+    schema: <Folder className="w-3 h-3" />,
+    table: <Table className="w-3 h-3" />,
+    column: <Columns className="w-3 h-3" />,
+    dataset: <Table className="w-3 h-3" />,
+    dashboard: <Box className="w-3 h-3" />,
+    default: <Box className="w-3 h-3" />
+}
+
+const TYPE_COLORS: Record<string, string> = {
+    domain: '#8b5cf6',    // Purple
+    system: '#3b82f6',    // Blue
+    schema: '#0ea5e9',    // Sky
+    table: '#22c55e',     // Green
+    column: '#64748b',    // Slate
+    dataset: '#22c55e',
+    dashboard: '#f97316', // Orange
+    default: '#94a3b8'
 }
 
 // ─── Inline Text Input ────────────────────────────────────────────────────────
@@ -109,6 +144,123 @@ function InlineInput({
     )
 }
 
+// ─── Assigned Entity Item ─────────────────────────────────────────────────────
+
+function AssignedEntityItem({
+    entityId,
+    depth,
+    onUnassign,
+}: {
+    entityId: string
+    depth: number
+    onUnassign: (entityId: string) => void
+}) {
+    const [isExpanded, setIsExpanded] = useState(false)
+    const node = useCanvasStore(s => s.nodes.find(n => n.id === entityId))
+    const edges = useCanvasStore(s => s.edges)
+    const { containmentEdgeTypes } = useOntologyMetadata()
+    const { loadChildren, loadingNodes } = useEntityLoader()
+
+    const isNodeLoading = loadingNodes.has(entityId)
+
+    // Find children
+    const childrenIds = useMemo(() => {
+        const validEdges = edges.filter(e => {
+            if (e.source !== entityId) return false
+            const type = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
+            if (containmentEdgeTypes && containmentEdgeTypes.length > 0) {
+                return containmentEdgeTypes.some(t => t.toUpperCase() === type)
+            }
+            return ['CONTAINS', 'HAS_CHILD', 'HAS_COLUMN', 'HAS_TABLE', 'HAS_SCHEMA', 'HAS_DATASET'].includes(type)
+        })
+        return [...new Set(validEdges.map(e => e.target))]
+    }, [edges, entityId, containmentEdgeTypes])
+
+    const name = node?.data?.label ?? node?.data?.businessLabel ?? entityId.split(',').pop()?.replace(')', '') ?? entityId
+    const type = (node?.data?.type as string) ?? 'unknown'
+    const childCount = (node?.data as any)?.childCount ?? childrenIds.length
+    const hasChildren = childCount > 0
+
+    const handleToggle = (e: React.MouseEvent) => {
+        e.stopPropagation()
+        if (!isExpanded) {
+            loadChildren(entityId)
+        }
+        setIsExpanded(v => !v)
+    }
+
+    const icon = TYPE_ICONS[type] || TYPE_ICONS.default
+    const color = TYPE_COLORS[type] || TYPE_COLORS.default
+
+    return (
+        <div>
+            <div
+                className={cn(
+                    'flex items-center gap-1.5 px-2 py-1 rounded-lg transition-colors cursor-default',
+                    'hover:bg-slate-100 dark:hover:bg-slate-800/50'
+                )}
+                style={{ paddingLeft: `${depth * 16 + 8}px` }}
+            >
+                <div
+                    onClick={hasChildren ? handleToggle : undefined}
+                    className={cn(
+                        'w-4 h-4 flex items-center justify-center shrink-0',
+                        hasChildren ? 'cursor-pointer text-slate-400 hover:text-slate-600 dark:hover:text-slate-200' : ''
+                    )}
+                >
+                    {isNodeLoading ? (
+                        <Loader2 className="w-3 h-3 animate-spin text-slate-400" />
+                    ) : hasChildren ? (
+                        isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />
+                    ) : null}
+                </div>
+                <div
+                    className="w-4 h-4 flex items-center justify-center rounded shrink-0 text-white shadow-sm"
+                    style={{ backgroundColor: color }}
+                >
+                    {icon}
+                </div>
+                <div className="flex-1 min-w-0 flex flex-col justify-center">
+                    <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300 truncate" title={String(name)}>
+                        {name}
+                    </span>
+                </div>
+                {/* Unassign button */}
+                <button
+                    onClick={(e) => {
+                        e.stopPropagation()
+                        onUnassign(entityId)
+                    }}
+                    className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-slate-400 hover:text-red-500 shrink-0 transition-all"
+                    title="Remove assignment"
+                >
+                    <X className="w-3 h-3" />
+                </button>
+            </div>
+
+            <AnimatePresence>
+                {isExpanded && childrenIds.length > 0 && (
+                    <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="overflow-hidden"
+                    >
+                        {childrenIds.map((childId: string) => (
+                            <AssignedEntityItem
+                                key={childId}
+                                entityId={childId}
+                                depth={depth + 1}
+                                onUnassign={onUnassign}
+                            />
+                        ))}
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </div>
+    )
+}
+
 // ─── Logical Node Item ────────────────────────────────────────────────────────
 
 interface LogicalNodeItemProps {
@@ -122,6 +274,7 @@ interface LogicalNodeItemProps {
     entityAssignments: EntityAssignmentConfig[]
     onSetActiveTarget: (target: ActiveTarget) => void
     onDrop: (layerId: string, nodeId: string | undefined, payload: DropPayload) => void
+    onUnassign: (entityId: string) => void
 }
 
 function LogicalNodeItem({
@@ -135,6 +288,7 @@ function LogicalNodeItem({
     entityAssignments,
     onSetActiveTarget,
     onDrop,
+    onUnassign,
 }: LogicalNodeItemProps) {
     const [isRenaming, setIsRenaming] = useState(false)
     const [showAddChild, setShowAddChild] = useState(false)
@@ -142,8 +296,10 @@ function LogicalNodeItem({
 
     const isActive = activeTarget?.layerId === layerId && activeTarget?.nodeId === node.id
     const isCollapsed = node.collapsed ?? false
-    const assignedCount = entityAssignments.filter(a => a.logicalNodeId === node.id).length
-    const hasChildren = !!(node.children && node.children.length > 0)
+    // Get actual assigned identities
+    const assignedEntities = entityAssignments.filter(a => a.logicalNodeId === node.id).map(a => a.entityId)
+    const assignedCount = assignedEntities.length
+    const hasChildren = !!(node.children && node.children.length > 0) || assignedCount > 0
 
     // Build the display label for this node's path
     const pathLabel = `${layerName} → ${logicalNodes.nodePathLabel(layerId, node.id)}`
@@ -310,24 +466,48 @@ function LogicalNodeItem({
                 )}
             </AnimatePresence>
 
-            {/* Children */}
-            {!isCollapsed && node.children && node.children.length > 0 && (
+            {/* Children & Assigned Entities */}
+            {!isCollapsed && (
                 <AnimatePresence>
-                    {node.children.map(child => (
-                        <LogicalNodeItem
-                            key={child.id}
-                            node={child}
-                            layerId={layerId}
-                            layerName={layerName}
-                            layerColor={layerColor}
-                            depth={depth + 1}
-                            activeTarget={activeTarget}
-                            logicalNodes={logicalNodes}
-                            entityAssignments={entityAssignments}
-                            onSetActiveTarget={onSetActiveTarget}
-                            onDrop={onDrop}
-                        />
-                    ))}
+                    <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="overflow-hidden"
+                    >
+                        {node.children && node.children.length > 0 && (
+                            <div className="space-y-0.5">
+                                {node.children.map(child => (
+                                    <LogicalNodeItem
+                                        key={child.id}
+                                        node={child}
+                                        layerId={layerId}
+                                        layerName={layerName}
+                                        layerColor={layerColor}
+                                        depth={depth + 1}
+                                        activeTarget={activeTarget}
+                                        logicalNodes={logicalNodes}
+                                        entityAssignments={entityAssignments}
+                                        onSetActiveTarget={onSetActiveTarget}
+                                        onDrop={onDrop}
+                                        onUnassign={onUnassign}
+                                    />
+                                ))}
+                            </div>
+                        )}
+                        {assignedEntities.length > 0 && (
+                            <div className="mt-1">
+                                {assignedEntities.map(entityId => (
+                                    <AssignedEntityItem
+                                        key={entityId}
+                                        entityId={entityId}
+                                        depth={depth + 1}
+                                        onUnassign={onUnassign}
+                                    />
+                                ))}
+                            </div>
+                        )}
+                    </motion.div>
                 </AnimatePresence>
             )}
         </div>
@@ -342,9 +522,10 @@ interface LayerRowProps {
     logicalNodes: UseLogicalNodesReturn
     onSetActiveTarget: (target: ActiveTarget) => void
     onDrop: (layerId: string, nodeId: string | undefined, payload: DropPayload) => void
+    onUnassign: (entityId: string) => void
 }
 
-function LayerRow({ layer, activeTarget, logicalNodes, onSetActiveTarget, onDrop }: LayerRowProps) {
+function LayerRow({ layer, activeTarget, logicalNodes, onSetActiveTarget, onDrop, onUnassign }: LayerRowProps) {
     const [isExpanded, setIsExpanded] = useState(true)
     const [showAddRoot, setShowAddRoot] = useState(false)
     const [isDragOver, setIsDragOver] = useState(false)
@@ -352,7 +533,7 @@ function LayerRow({ layer, activeTarget, logicalNodes, onSetActiveTarget, onDrop
 
     const isLayerActive = activeTarget?.layerId === layer.id && !activeTarget?.nodeId
     const nodes = logicalNodes.nodesForLayer(layer.id)
-    const unassignedCount = (layer.entityAssignments ?? []).filter(a => !a.logicalNodeId).length
+    const unassignedEntities = (layer.entityAssignments ?? []).filter(a => !a.logicalNodeId).map(a => a.entityId)
     const totalAssigned = (layer.entityAssignments ?? []).length
     const color = layer.color || '#3b82f6'
 
@@ -480,14 +661,25 @@ function LayerRow({ layer, activeTarget, logicalNodes, onSetActiveTarget, onDrop
                                         entityAssignments={layer.entityAssignments ?? []}
                                         onSetActiveTarget={onSetActiveTarget}
                                         onDrop={onDrop}
+                                        onUnassign={onUnassign}
                                     />
                                 ))}
 
-                                {/* Unorganised entity count */}
-                                {unassignedCount > 0 && (
-                                    <div className="flex items-center gap-1.5 px-2 py-1 ml-6 text-xs text-slate-400 italic">
-                                        <Layers className="w-3 h-3" />
-                                        {unassignedCount} unorganised
+                                {/* Entities placed directly in the layer */}
+                                {unassignedEntities.length > 0 && (
+                                    <div className="mt-2 space-y-0.5 border-t border-slate-100 dark:border-slate-800 pt-1">
+                                        <div className="flex items-center gap-1.5 px-3 py-1 text-[10px] font-semibold tracking-wide text-slate-400 uppercase">
+                                            <Layers className="w-3 h-3" />
+                                            Layer Entities ({unassignedEntities.length})
+                                        </div>
+                                        {unassignedEntities.map(entityId => (
+                                            <AssignedEntityItem
+                                                key={entityId}
+                                                entityId={entityId}
+                                                depth={0}
+                                                onUnassign={onUnassign}
+                                            />
+                                        ))}
                                     </div>
                                 )}
 
@@ -543,6 +735,7 @@ export function LayerHierarchyPanel({
     logicalNodes,
     onSetActiveTarget,
     onDrop,
+    onUnassign,
     onReorderLayers,
     className,
 }: LayerHierarchyPanelProps) {
@@ -605,6 +798,7 @@ export function LayerHierarchyPanel({
                                 logicalNodes={logicalNodes}
                                 onSetActiveTarget={onSetActiveTarget}
                                 onDrop={onDrop}
+                                onUnassign={onUnassign}
                             />
                         ))}
                     </Reorder.Group>

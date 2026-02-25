@@ -20,7 +20,6 @@ import { useSchemaStore } from '@/store/schema'
 import { ViewSelector } from '@/components/views/ViewSelector'
 import { useViewEditorModal } from './AppShell'
 import { WorkspacePanel } from '@/components/workspaces/WorkspacePanel'
-import { ConnectionsPanel } from '@/components/connections/ConnectionsPanel'
 import { useWorkspaces } from '@/hooks/useWorkspaces'
 import { useConnections } from '@/hooks/useConnections'
 import { cn } from '@/lib/utils'
@@ -344,8 +343,8 @@ export function SidebarNav() {
 
       {/* Workspace Panel Modal */}
       {showWorkspacePanel && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl max-h-[90vh] overflow-y-auto max-w-2xl w-full m-4 animate-in zoom-in-95 duration-200">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 animate-in fade-in duration-200">
+          <div className="bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl h-[90vh] max-w-5xl w-full mx-4 animate-in zoom-in-95 duration-200 overflow-hidden">
             <WorkspacePanel onClose={() => setShowWorkspacePanel(false)} />
           </div>
         </div>
@@ -353,9 +352,9 @@ export function SidebarNav() {
 
       {/* Connections Panel Modal */}
       {showConnectionPanel && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl max-h-[90vh] overflow-y-auto max-w-2xl w-full m-4 animate-in zoom-in-95 duration-200">
-            <ConnectionsPanel onClose={() => setShowConnectionPanel(false)} />
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 animate-in fade-in duration-200">
+          <div className="bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl h-[90vh] max-w-5xl w-full mx-4 animate-in zoom-in-95 duration-200 overflow-hidden">
+            <WorkspacePanel initialTab="connections" onClose={() => setShowConnectionPanel(false)} />
           </div>
         </div>
       )}

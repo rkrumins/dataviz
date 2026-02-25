@@ -257,9 +257,17 @@ export function LayerStudio({
     // ── Assignment from entity tree ─────────────────────────────────────────────
     const handleAssignmentChange = useCallback(
         (entityId: string, layerId: string | null) => {
-            const targetLayerId = layerId ?? activeTarget?.layerId
-            if (!targetLayerId) return
+            // Unassign explicitly if layerId is empty or null (e.g. clicking 'X')
+            if (!layerId) {
+                const next = layers.map(l => ({
+                    ...l,
+                    entityAssignments: (l.entityAssignments ?? []).filter(a => a.entityId !== entityId)
+                }))
+                handleUpdateLayers(next)
+                return
+            }
 
+            const targetLayerId = layerId
             const targetNodeId =
                 layerId === activeTarget?.layerId ? activeTarget?.nodeId : undefined
 
@@ -509,6 +517,7 @@ export function LayerStudio({
                         logicalNodes={logicalNodes}
                         onSetActiveTarget={setActiveTarget}
                         onDrop={handleHierarchyDrop}
+                        onUnassign={(entityId) => handleAssignmentChange(entityId, null)}
                         onReorderLayers={handleReorderLayers}
                         className="min-h-0"
                     />
