@@ -59,7 +59,7 @@ function useOpenView() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// Hero Search
+// Hero Search — controlled with live results dropdown
 // ───────────────────────────────────────────────────────────────────────────────
 const QUICK_SUGGESTIONS = [
     { icon: TrendingUp, label: 'Sales Pipeline', category: 'Model' },
@@ -68,9 +68,37 @@ const QUICK_SUGGESTIONS = [
     { icon: Star, label: 'Templates', category: 'Library' },
 ]
 
-export function DashboardHero() {
+export type DashboardSearchResult = {
+    id: string
+    label: string
+    sublabel?: string
+    category: 'Workspace' | 'Data Source' | 'View' | 'Template'
+    icon: React.ComponentType<{ className?: string }>
+    onSelect: () => void
+}
+
+const CATEGORY_COLORS: Record<DashboardSearchResult['category'], string> = {
+    Workspace: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
+    'Data Source': 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20',
+    View: 'bg-violet-500/10 text-violet-500 border-violet-500/20',
+    Template: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
+}
+
+export function DashboardHero({ value, onChange, results }: {
+    value: string
+    onChange: (q: string) => void
+    results: DashboardSearchResult[]
+}) {
     const [focused, setFocused] = useState(false)
     const inputRef = useRef<HTMLInputElement>(null)
+    const containerRef = useRef<HTMLDivElement>(null)
+    const showDropdown = focused && value.trim().length > 0
+
+    // Close dropdown when clicking outside
+    const handleBlur = () => {
+        // Delay so click on result fires first
+        setTimeout(() => setFocused(false), 150)
+    }
 
     return (
         <section className="relative w-full flex flex-col items-center justify-center pt-14 pb-10 px-4 text-center overflow-visible">
@@ -99,54 +127,126 @@ export function DashboardHero() {
                     </span>
                 </h1>
                 <p className="text-base text-ink-muted mb-8 max-w-md mx-auto">
-                    Search across workspaces, models, views, and data sources.
+                    Search across workspaces, views, and data sources — or jump to a template.
                 </p>
-                <div className={cn('relative group transition-all duration-500', focused ? 'scale-[1.02]' : 'scale-100')}>
+
+                {/* Search box + dropdown */}
+                <div ref={containerRef} className={cn('relative group transition-all duration-500', focused ? 'scale-[1.02]' : 'scale-100')}>
+                    {/* Glow */}
                     <div className={cn(
                         'absolute -inset-1 rounded-3xl blur-md transition-opacity duration-700',
                         focused
                             ? 'opacity-100 bg-gradient-to-r from-accent-business/40 via-accent-explore/30 to-accent-lineage/40'
                             : 'opacity-0 group-hover:opacity-50 bg-gradient-to-r from-accent-business/20 to-accent-lineage/10'
                     )} />
+
+                    {/* Input bar */}
                     <div className={cn(
-                        'relative flex items-center bg-canvas/95 backdrop-blur-2xl rounded-2xl border shadow-2xl transition-all duration-300 overflow-hidden',
-                        focused ? 'border-accent-business/60' : 'border-glass-border'
+                        'relative flex items-center bg-canvas/95 backdrop-blur-2xl border shadow-2xl transition-all duration-300 overflow-hidden',
+                        showDropdown ? 'rounded-t-2xl rounded-b-none border-accent-business/60 border-b-glass-border/30' : 'rounded-2xl',
+                        focused && !showDropdown ? 'border-accent-business/60' : !focused ? 'border-glass-border' : ''
                     )}>
                         <Search className={cn('w-6 h-6 ml-5 shrink-0 transition-colors duration-200', focused ? 'text-accent-business' : 'text-ink-muted')} />
                         <input
                             ref={inputRef}
                             type="text"
-                            placeholder="Search workspaces, models, views, data sources…"
+                            value={value}
+                            onChange={e => onChange(e.target.value)}
                             onFocus={() => setFocused(true)}
-                            onBlur={() => setFocused(false)}
+                            onBlur={handleBlur}
+                            placeholder="Search workspaces, views, data sources, templates…"
                             className="flex-1 bg-transparent border-none py-5 px-4 text-lg text-ink outline-none placeholder:text-ink-muted/40 font-medium"
                         />
+                        {value && (
+                            <button
+                                onMouseDown={e => { e.preventDefault(); onChange('') }}
+                                className="mr-2 w-7 h-7 rounded-lg flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/10 transition-all"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        )}
                         <div className="mr-4">
                             <kbd className="hidden sm:flex items-center gap-1 rounded-lg border border-glass-border bg-black/5 dark:bg-white/5 px-2.5 py-1 text-sm font-medium text-ink-muted">
                                 <span className="text-base leading-none">⌘</span>K
                             </kbd>
                         </div>
                     </div>
+
+                    {/* Results dropdown */}
+                    <AnimatePresence>
+                        {showDropdown && (
+                            <motion.div
+                                initial={{ opacity: 0, y: -4 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: -4 }}
+                                transition={{ duration: 0.15 }}
+                                className="absolute left-0 right-0 top-full z-50 bg-canvas/98 backdrop-blur-2xl border border-t-0 border-accent-business/40 rounded-b-2xl shadow-2xl max-h-80 overflow-y-auto"
+                            >
+                                {results.length === 0 ? (
+                                    <div className="flex flex-col items-center justify-center py-10 gap-2">
+                                        <Search className="w-7 h-7 text-ink-muted/30" />
+                                        <p className="text-sm font-semibold text-ink">No results for "{value}"</p>
+                                        <p className="text-xs text-ink-muted">Try a workspace name, view, or data source</p>
+                                    </div>
+                                ) : (
+                                    <div className="py-2">
+                                        {results.map((r, i) => (
+                                            <button
+                                                key={r.id}
+                                                onMouseDown={e => { e.preventDefault(); r.onSelect(); onChange('') }}
+                                                className={cn(
+                                                    'w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-black/5 dark:hover:bg-white/5 transition-colors group/res',
+                                                    i > 0 && results[i - 1].category !== r.category ? 'border-t border-glass-border/40' : ''
+                                                )}
+                                            >
+                                                <div className={cn('w-8 h-8 rounded-xl border flex items-center justify-center shrink-0', CATEGORY_COLORS[r.category])}>
+                                                    <r.icon className="w-4 h-4" />
+                                                </div>
+                                                <div className="flex-1 min-w-0 text-left">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-sm font-semibold text-ink group-hover/res:text-accent-business transition-colors truncate">{r.label}</span>
+                                                        <span className={cn('text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full border shrink-0', CATEGORY_COLORS[r.category])}>{r.category}</span>
+                                                    </div>
+                                                    {r.sublabel && <p className="text-xs text-ink-muted truncate mt-0.5">{r.sublabel}</p>}
+                                                </div>
+                                                <ArrowRight className="w-4 h-4 text-ink-muted/0 group-hover/res:text-accent-business transition-all group-hover/res:translate-x-0.5 shrink-0" />
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                                <div className="px-4 py-2 border-t border-glass-border/30 flex items-center justify-between">
+                                    <span className="text-[11px] text-ink-muted">{results.length} result{results.length !== 1 ? 's' : ''}</span>
+                                    <span className="text-[11px] text-ink-muted">↵ to select · Esc to close</span>
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
                 </div>
-                <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
-                    <span className="text-[11px] font-bold text-ink-muted uppercase tracking-widest mr-1">Jump to:</span>
-                    {QUICK_SUGGESTIONS.map((s, i) => (
-                        <motion.button
-                            key={s.label}
-                            initial={{ opacity: 0, y: 8 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: 0.4 + i * 0.08 }}
-                            className="group flex items-center gap-1.5 px-3.5 py-1.5 rounded-full glass-panel border border-glass-border text-sm font-medium text-ink-muted hover:text-accent-business hover:border-accent-business/40 hover:bg-accent-business/5 transition-all"
-                        >
-                            <s.icon className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" />
-                            {s.label}
-                        </motion.button>
-                    ))}
-                </div>
+
+                {/* Quick suggestions — hide while searching */}
+                {!value && (
+                    <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+                        <span className="text-[11px] font-bold text-ink-muted uppercase tracking-widest mr-1">Jump to:</span>
+                        {QUICK_SUGGESTIONS.map((s, i) => (
+                            <motion.button
+                                key={s.label}
+                                initial={{ opacity: 0, y: 8 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                transition={{ delay: 0.4 + i * 0.08 }}
+                                className="group flex items-center gap-1.5 px-3.5 py-1.5 rounded-full glass-panel border border-glass-border text-sm font-medium text-ink-muted hover:text-accent-business hover:border-accent-business/40 hover:bg-accent-business/5 transition-all"
+                            >
+                                <s.icon className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" />
+                                {s.label}
+                            </motion.button>
+                        ))}
+                    </div>
+                )}
             </motion.div>
         </section>
     )
 }
+
+
 
 // ───────────────────────────────────────────────────────────────────────────────
 // Insight Cards
@@ -198,7 +298,7 @@ export function InsightCards({ stats, templatesCount, viewsCount }: {
 // ───────────────────────────────────────────────────────────────────────────────
 // Data Source Search Popover (inside workspace card)
 // ───────────────────────────────────────────────────────────────────────────────
-function DataSourceList({ dataSources, wsId, activeDataSourceId, isActiveWs, stats, onSelect, palette }: {
+function DataSourceList({ dataSources, wsId, activeDataSourceId, isActiveWs, stats, onSelect, palette, viewsByDs }: {
     dataSources: DataSourceResponse[]
     wsId: string
     activeDataSourceId: string | null
@@ -206,6 +306,7 @@ function DataSourceList({ dataSources, wsId, activeDataSourceId, isActiveWs, sta
     stats: Record<string, DataSourceStats>
     onSelect: (dsId: string) => void
     palette: typeof WORKSPACE_PALETTES[0]
+    viewsByDs: Record<string, number>   // dsId -> view count
 }) {
     const [query, setQuery] = useState('')
     const filtered = useMemo(() => {
@@ -245,6 +346,7 @@ function DataSourceList({ dataSources, wsId, activeDataSourceId, isActiveWs, sta
                     const key = `${wsId}/${ds.id}`
                     const dsStats = stats[key]
                     const isActive = isActiveWs && ds.id === activeDataSourceId
+                    const viewCount = viewsByDs[ds.id] ?? 0
                     return (
                         <button
                             key={ds.id}
@@ -277,23 +379,38 @@ function DataSourceList({ dataSources, wsId, activeDataSourceId, isActiveWs, sta
                                     <span className="text-[11px] text-ink-muted/70 font-mono block truncate">{ds.graphName}</span>
                                 )}
                             </div>
-                            {dsStats ? (
-                                <div className="flex flex-col items-end shrink-0 gap-0.5">
-                                    <span className="text-xs font-bold text-ink tabular-nums">{dsStats.nodeCount.toLocaleString()}<span className="text-ink-muted/50 font-normal text-[10px]"> n</span></span>
-                                    <span className="text-[10px] text-ink-muted tabular-nums">{dsStats.edgeCount.toLocaleString()}<span className="opacity-50"> e</span></span>
-                                </div>
-                            ) : (
-                                <div className="flex flex-col items-end shrink-0 gap-0.5 opacity-25">
-                                    <span className="text-xs font-bold text-ink">— n</span>
-                                    <span className="text-[10px] text-ink-muted">— e</span>
-                                </div>
-                            )}
+                            {/* Stats column: nodes · edges · views */}
+                            <div className="flex flex-col items-end shrink-0 gap-0.5">
+                                {dsStats ? (
+                                    <>
+                                        <span className="text-xs font-bold text-ink tabular-nums">{dsStats.nodeCount.toLocaleString()} <span className="text-ink-muted/50 font-normal text-[10px]">nodes</span></span>
+                                        <span className="text-[10px] text-ink-muted tabular-nums">{dsStats.edgeCount.toLocaleString()} <span className="opacity-50">edges</span></span>
+                                    </>
+                                ) : (
+                                    <span className="text-xs text-ink-muted/30">—</span>
+                                )}
+                                {viewCount > 0 && (
+                                    <span className="flex items-center gap-0.5 text-[10px] font-bold text-violet-500 tabular-nums">
+                                        <Eye className="w-2.5 h-2.5" />{viewCount} view{viewCount !== 1 ? 's' : ''}
+                                    </span>
+                                )}
+                            </div>
                         </button>
                     )
                 })}
             </div>
         </div>
     )
+}
+
+
+
+/** Format large numbers compactly: 263982 → "264k", 1234567 → "1.2M" */
+function compactNum(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`
+    if (n >= 10_000) return `${Math.round(n / 1_000)}k`
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+    return n.toString()
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -307,13 +424,14 @@ const WORKSPACE_PALETTES = [
     { icon: 'text-amber-500 bg-amber-500/10 border-amber-500/20', accent: 'bg-amber-500', label: 'text-amber-500', ring: 'hover:border-amber-500/40', shadow: 'hover:shadow-amber-500/10' },
 ]
 
-function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceId, onSelect }: {
+function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceId, onSelect, viewsByScope }: {
     ws: WorkspaceResponse
     index: number
     dataSourceStats: Record<string, DataSourceStats>
     isActive: boolean
     activeDataSourceId: string | null
-    onSelect: (wsId: string) => void   // select without navigating
+    onSelect: (wsId: string) => void
+    viewsByScope: Record<string, number>  // scopeKey (wsId/dsId) -> count
 }) {
     const [expanded, setExpanded] = useState(isActive)
     const palette = WORKSPACE_PALETTES[index % WORKSPACE_PALETTES.length]
@@ -324,6 +442,13 @@ function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceI
 
     const totalNodes = dataSources.reduce((acc, ds) => acc + (dataSourceStats[`${ws.id}/${ds.id}`]?.nodeCount ?? 0), 0)
     const totalEdges = dataSources.reduce((acc, ds) => acc + (dataSourceStats[`${ws.id}/${ds.id}`]?.edgeCount ?? 0), 0)
+
+    // Count views scoped to this workspace (across all its data sources)
+    const totalViews = dataSources.reduce((acc, ds) => acc + (viewsByScope[`${ws.id}/${ds.id}`] ?? 0), 0)
+
+    // Per-DS view counts for DataSourceList
+    const viewsByDs: Record<string, number> = {}
+    dataSources.forEach(ds => { viewsByDs[ds.id] = viewsByScope[`${ws.id}/${ds.id}`] ?? 0 })
 
     const handleOpenCanvas = (e: React.MouseEvent) => {
         e.stopPropagation()
@@ -408,25 +533,53 @@ function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceI
                     <p className="text-xs text-ink-muted leading-relaxed mb-4 line-clamp-2">{ws.description}</p>
                 )}
 
-                {/* Stats grid — full label names */}
-                <div className="grid grid-cols-3 gap-px bg-glass-border rounded-2xl overflow-hidden mb-5">
+                {/* Stats grid — 4 cols: Sources · Nodes · Edges · Views */}
+                <div className="grid grid-cols-4 gap-px bg-glass-border rounded-2xl overflow-visible mb-5">
                     {[
-                        { val: dsCount, lbl: 'Sources', sub: 'data sources', icon: Server },
-                        { val: totalNodes, lbl: 'Nodes', sub: 'total entities', icon: CircleDot },
-                        { val: totalEdges, lbl: 'Edges', sub: 'relationships', icon: GitBranch },
+                        { val: dsCount, lbl: 'Sources', sub: 'data sources', icon: Server, tip: 'Connected data pipelines feeding this workspace' },
+                        { val: totalNodes, lbl: 'Nodes', sub: 'total entities', icon: CircleDot, tip: 'Unique entities tracked across all data sources' },
+                        { val: totalEdges, lbl: 'Edges', sub: 'relationships', icon: GitBranch, tip: 'Relationships and lineage connections mapped' },
+                        { val: totalViews, lbl: 'Views', sub: 'context views', icon: Eye, tip: 'Saved context views scoped to this workspace' },
                     ].map(s => (
-                        <div key={s.lbl} className="bg-canvas/80 dark:bg-canvas/60 px-4 py-3 flex flex-col gap-1">
+                        <div
+                            key={s.lbl}
+                            className="relative group/stat bg-canvas/80 dark:bg-canvas/60 px-3 py-3 flex flex-col gap-1 cursor-default"
+                        >
+                            {/* Custom tooltip — appears below the stat tile */}
+                            {s.val > 0 && (
+                                <div className="pointer-events-none absolute top-full left-1/2 -translate-x-1/2 mt-2.5 z-50
+                                                opacity-0 group-hover/stat:opacity-100 -translate-y-1 group-hover/stat:translate-y-0
+                                                transition-all duration-200 ease-out w-44">
+                                    {/* Caret pointing up */}
+                                    <div className="w-3 h-3 mx-auto mb-[-6px] rotate-45 bg-canvas/98 dark:bg-[#111]/95 border-t border-l border-glass-border rounded-tl-sm" />
+                                    <div className="bg-canvas/98 dark:bg-[#111]/95 backdrop-blur-2xl rounded-2xl border border-glass-border shadow-2xl shadow-black/20 px-3.5 py-3">
+                                        <div className="text-base font-black text-ink tabular-nums tracking-tight">
+                                            {s.val.toLocaleString()}
+                                        </div>
+                                        <div className="text-[11px] font-semibold text-ink-muted mt-0.5 leading-snug">
+                                            {s.tip}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+
                             <div className="flex items-center gap-1.5">
                                 <s.icon className="w-3 h-3 text-ink-muted shrink-0" />
                                 <span className="text-[9px] uppercase font-black tracking-widest text-ink-muted">{s.lbl}</span>
                             </div>
-                            <span className={cn('text-2xl font-black leading-none', s.val > 0 ? (isActive ? 'text-accent-business' : palette.label) : 'text-ink-muted/30')}>
-                                {s.val > 0 ? s.val.toLocaleString() : '—'}
+                            <span className={cn('text-2xl font-black leading-none tabular-nums',
+                                s.lbl === 'Views' && s.val > 0
+                                    ? 'text-violet-500'
+                                    : s.val > 0 ? (isActive ? 'text-accent-business' : palette.label) : 'text-ink-muted/30'
+                            )}>
+                                {s.val > 0 ? compactNum(s.val) : '—'}
                             </span>
                             <span className="text-[10px] text-ink-muted/60">{s.sub}</span>
                         </div>
                     ))}
                 </div>
+
 
                 {/* Data sources toggle */}
                 <button
@@ -459,6 +612,7 @@ function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceI
                                 stats={dataSourceStats}
                                 onSelect={handleSelectDs}
                                 palette={palette}
+                                viewsByDs={viewsByDs}
                             />
                         </motion.div>
                     )}
@@ -493,8 +647,19 @@ export function WorkspaceGrid({ workspaces, dataSourceStats }: {
     const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
     const activeDataSourceId = useWorkspacesStore(s => s.activeDataSourceId)
     const setActiveWorkspace = useWorkspacesStore(s => s.setActiveWorkspace)
+    // Safely read schema views (stable: only recomputes when view count changes)
+    const schemaViews = useSchemaStore(s => s.schema?.views ?? [])
     const [wsQuery, setWsQuery] = useState('')
     const [page, setPage] = useState(0)
+
+    // Build scopeKey -> viewCount map from all known views
+    const viewsByScope = useMemo(() => {
+        const map: Record<string, number> = {}
+        schemaViews.forEach(v => {
+            if (v.scopeKey) map[v.scopeKey] = (map[v.scopeKey] ?? 0) + 1
+        })
+        return map
+    }, [schemaViews])
 
     const PAGE_SIZE = 6
 
@@ -581,6 +746,7 @@ export function WorkspaceGrid({ workspaces, dataSourceStats }: {
                             isActive={ws.id === activeWorkspaceId}
                             activeDataSourceId={activeDataSourceId}
                             onSelect={handleSelectWorkspace}
+                            viewsByScope={viewsByScope}
                         />
                     ))}
                 </div>
