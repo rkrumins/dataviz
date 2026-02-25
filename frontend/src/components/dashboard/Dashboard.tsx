@@ -53,7 +53,7 @@ export function Dashboard() {
                 <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.15, duration: 0.5, ease: 'easeOut' }}
+                    transition={{ delay: 0.1, duration: 0.5, ease: 'easeOut' }}
                 >
                     <InsightCards
                         stats={stats}
@@ -62,35 +62,35 @@ export function Dashboard() {
                     />
                 </motion.div>
 
-                {/* 3. Active Environments — with real per-datasource stats */}
+                {/* 3. Active Environments — horizontal scrollable + searchable */}
                 <motion.div
-                    initial={{ opacity: 0, y: 24 }}
+                    initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.25, duration: 0.5, ease: 'easeOut' }}
+                    transition={{ delay: 0.2, duration: 0.5, ease: 'easeOut' }}
                 >
                     <WorkspaceGrid workspaces={workspaces} dataSourceStats={dataSourceStats} />
                 </motion.div>
 
-                {/* 4. Jump Back In — Recent Views */}
+                {/* 4. Jump Back In — context views (correctly routed to specific view) */}
                 <motion.div
-                    initial={{ opacity: 0, y: 24 }}
+                    initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.35, duration: 0.5, ease: 'easeOut' }}
+                    transition={{ delay: 0.3, duration: 0.5, ease: 'easeOut' }}
                 >
                     <ViewGrid
                         title="Jump Back In"
-                        subtitle="Your recently accessed context views"
+                        subtitle="Context views scoped to your active workspace"
                         views={recentViews}
                         icon={Monitor}
-                        emptyMessage="No recent views yet. Start exploring to create some."
+                        emptyMessage="No views for the current scope. Select a workspace and data source to see its views."
                     />
                 </motion.div>
 
                 {/* 5. Starter Templates */}
                 <motion.div
-                    initial={{ opacity: 0, y: 24 }}
+                    initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.45, duration: 0.5, ease: 'easeOut' }}
+                    transition={{ delay: 0.4, duration: 0.5, ease: 'easeOut' }}
                 >
                     <BlueprintGrid
                         title="Starter Templates"
