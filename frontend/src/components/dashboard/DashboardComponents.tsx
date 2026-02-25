@@ -230,6 +230,12 @@ export function DashboardHero({ value, onChange, results }: {
                         {QUICK_SUGGESTIONS.map((s, i) => (
                             <motion.button
                                 key={s.label}
+                                onClick={(e) => {
+                                    e.preventDefault()
+                                    onChange(s.label)
+                                    setFocused(true)
+                                    setTimeout(() => inputRef.current?.focus(), 50)
+                                }}
                                 initial={{ opacity: 0, y: 8 }}
                                 animate={{ opacity: 1, y: 0 }}
                                 transition={{ delay: 0.4 + i * 0.08 }}
