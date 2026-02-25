@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { 
-  WorkspaceSchema, 
-  EntityTypeSchema, 
+import type {
+  WorkspaceSchema,
+  EntityTypeSchema,
   RelationshipTypeSchema,
   ViewConfiguration,
   EntityVisualConfig,
@@ -17,33 +17,44 @@ import { generateId } from '@/lib/utils'
 interface SchemaState {
   // Current workspace schema
   schema: WorkspaceSchema | null;
-  
+
   // Active view
   activeViewId: string | null;
-  
+
+  // Active scope key for per-datasource view isolation
+  // Format: "${workspaceId}/${dataSourceId}" | null (null = global)
+  activeScopeKey: string | null;
+
   // Loading state for backend schema
   isLoadingFromBackend: boolean;
   backendSchemaError: string | null;
-  
+
   // Actions
   loadSchema: (schema: WorkspaceSchema) => void;
   setActiveView: (viewId: string) => void;
-  
+
+  // Set scope key (called by workspacesStore when ws/ds changes)
+  setActiveScopeKey: (workspaceId: string | null, dataSourceId: string | null) => void;
+
+  // Returns only the views visible in the current scope:
+  // views where !view.scopeKey (global/legacy) OR view.scopeKey === activeScopeKey
+  visibleViews: () => ViewConfiguration[];
+
   // Backend schema loading
   loadFromBackend: (backendSchema: GraphSchema) => void;
   mergeBackendSchema: (backendSchema: GraphSchema) => void;
-  
+
   // Entity Types
   addEntityType: (entityType: EntityTypeSchema) => void;
   updateEntityType: (id: string, updates: Partial<EntityTypeSchema>) => void;
   removeEntityType: (id: string) => void;
   getEntityType: (id: string) => EntityTypeSchema | undefined;
-  
+
   // Relationship Types
   addRelationshipType: (relType: RelationshipTypeSchema) => void;
   updateRelationshipType: (id: string, updates: Partial<RelationshipTypeSchema>) => void;
   removeRelationshipType: (id: string) => void;
-  
+
   // Views
   addView: (view: ViewConfiguration) => void;
   updateView: (id: string, updates: Partial<ViewConfiguration>) => void;
@@ -51,7 +62,7 @@ interface SchemaState {
   removeView: (id: string) => void;
   duplicateView: (id: string) => string;
   getActiveView: () => ViewConfiguration | undefined;
-  
+
   // Helpers
   getVisibleEntityTypes: () => EntityTypeSchema[];
   getEntityVisual: (typeId: string) => EntityVisualConfig | undefined;
@@ -129,24 +140,64 @@ export const useSchemaStore = create<SchemaState>()(
     (set, get) => ({
       schema: null,
       activeViewId: null,
+      activeScopeKey: null,
       isLoadingFromBackend: false,
       backendSchemaError: null,
-      
-      loadSchema: (schema) => set({ 
-        schema, 
-        activeViewId: schema.defaultViewId 
+
+      loadSchema: (schema) => set({
+        schema,
+        activeViewId: schema.defaultViewId
       }),
-      
+
+      setActiveScopeKey: (workspaceId, dataSourceId) => {
+        const key = workspaceId && dataSourceId
+          ? `${workspaceId}/${dataSourceId}`
+          : workspaceId
+            ? `${workspaceId}/default`
+            : null
+
+        if (key) {
+          // Migration: tag any unscoped views with the current scope on first set.
+          // This prevents views created before scoping was introduced from bleeding
+          // across data sources. They are attributed to whichever scope is active
+          // when the user first runs the updated app.
+          const { schema } = get()
+          if (schema) {
+            const hasUnscopedViews = schema.views.some(v => !v.scopeKey)
+            if (hasUnscopedViews) {
+              const migratedViews = schema.views.map(v =>
+                v.scopeKey ? v : { ...v, scopeKey: key }
+              )
+              set({
+                schema: { ...schema, views: migratedViews },
+                activeScopeKey: key,
+              })
+              return
+            }
+          }
+        }
+
+        set({ activeScopeKey: key })
+      },
+
+      visibleViews: () => {
+        const { schema, activeScopeKey } = get()
+        if (!schema) return []
+        return schema.views.filter(
+          v => !v.scopeKey || v.scopeKey === activeScopeKey
+        )
+      },
+
       // Load backend schema and create new workspace schema from it
       loadFromBackend: (backendSchema) => {
         try {
           const entityTypes = backendSchema.entityTypes.map(convertBackendEntityType)
           const relationshipTypes = backendSchema.relationshipTypes.map(convertBackendRelationshipType)
-          
+
           // Create default view
           const defaultViewId = generateId('view')
           const now = new Date().toISOString()
-          
+
           const defaultView: ViewConfiguration = {
             id: defaultViewId,
             name: 'Default View',
@@ -176,7 +227,7 @@ export const useSchemaStore = create<SchemaState>()(
             createdAt: now,
             updatedAt: now,
           }
-          
+
           const workspaceSchema: WorkspaceSchema = {
             id: generateId('workspace'),
             name: 'Dynamic Workspace',
@@ -195,39 +246,39 @@ export const useSchemaStore = create<SchemaState>()(
             },
             containmentEdgeTypes: backendSchema.containmentEdgeTypes,
           }
-          
-          set({ 
-            schema: workspaceSchema, 
+
+          set({
+            schema: workspaceSchema,
             activeViewId: defaultViewId,
             isLoadingFromBackend: false,
             backendSchemaError: null,
           })
         } catch (error) {
-          set({ 
+          set({
             backendSchemaError: error instanceof Error ? error.message : 'Failed to load schema',
             isLoadingFromBackend: false,
           })
         }
       },
-      
+
       // Merge backend schema with existing local customizations
       mergeBackendSchema: (backendSchema) => {
         const existing = get().schema
-        
+
         if (!existing) {
           // No existing schema, just load fresh
           get().loadFromBackend(backendSchema)
           return
         }
-        
+
         try {
           const backendEntityTypes = backendSchema.entityTypes.map(convertBackendEntityType)
           const backendRelTypes = backendSchema.relationshipTypes.map(convertBackendRelationshipType)
-          
+
           // Merge entity types: backend wins for base definition, local wins for visual overrides
           const existingEntityMap = new Map(existing.entityTypes.map(e => [e.id, e]))
           const mergedEntityTypes: EntityTypeSchema[] = []
-          
+
           for (const backendEntity of backendEntityTypes) {
             const localEntity = existingEntityMap.get(backendEntity.id)
             if (localEntity) {
@@ -251,16 +302,16 @@ export const useSchemaStore = create<SchemaState>()(
               mergedEntityTypes.push(backendEntity)
             }
           }
-          
+
           // Keep local-only entity types (user-created)
           for (const localEntity of existingEntityMap.values()) {
             mergedEntityTypes.push(localEntity)
           }
-          
+
           // Merge relationship types similarly
           const existingRelMap = new Map(existing.relationshipTypes.map(r => [r.id, r]))
           const mergedRelTypes: RelationshipTypeSchema[] = []
-          
+
           for (const backendRel of backendRelTypes) {
             const localRel = existingRelMap.get(backendRel.id)
             if (localRel) {
@@ -277,12 +328,12 @@ export const useSchemaStore = create<SchemaState>()(
               mergedRelTypes.push(backendRel)
             }
           }
-          
+
           // Keep local-only relationship types
           for (const localRel of existingRelMap.values()) {
             mergedRelTypes.push(localRel)
           }
-          
+
           // Update views to include new entity/relationship types
           const updatedViews = existing.views.map(view => ({
             ...view,
@@ -297,7 +348,7 @@ export const useSchemaStore = create<SchemaState>()(
               rootEntityTypes: backendSchema.rootEntityTypes,
             },
           }))
-          
+
           set({
             schema: {
               ...existing,
@@ -310,15 +361,15 @@ export const useSchemaStore = create<SchemaState>()(
             backendSchemaError: null,
           })
         } catch (error) {
-          set({ 
+          set({
             backendSchemaError: error instanceof Error ? error.message : 'Failed to merge schema',
             isLoadingFromBackend: false,
           })
         }
       },
-      
+
       setActiveView: (viewId) => set({ activeViewId: viewId }),
-      
+
       // Entity Types
       addEntityType: (entityType) => set((state) => {
         if (!state.schema) return state;
@@ -329,7 +380,7 @@ export const useSchemaStore = create<SchemaState>()(
           },
         };
       }),
-      
+
       updateEntityType: (id, updates) => set((state) => {
         if (!state.schema) return state;
         return {
@@ -341,7 +392,7 @@ export const useSchemaStore = create<SchemaState>()(
           },
         };
       }),
-      
+
       removeEntityType: (id) => set((state) => {
         if (!state.schema) return state;
         return {
@@ -351,11 +402,11 @@ export const useSchemaStore = create<SchemaState>()(
           },
         };
       }),
-      
+
       getEntityType: (id) => {
         return get().schema?.entityTypes.find((et) => et.id === id);
       },
-      
+
       // Relationship Types
       addRelationshipType: (relType) => set((state) => {
         if (!state.schema) return state;
@@ -366,7 +417,7 @@ export const useSchemaStore = create<SchemaState>()(
           },
         };
       }),
-      
+
       updateRelationshipType: (id, updates) => set((state) => {
         if (!state.schema) return state;
         return {
@@ -378,7 +429,7 @@ export const useSchemaStore = create<SchemaState>()(
           },
         };
       }),
-      
+
       removeRelationshipType: (id) => set((state) => {
         if (!state.schema) return state;
         return {
@@ -388,18 +439,22 @@ export const useSchemaStore = create<SchemaState>()(
           },
         };
       }),
-      
+
       // Views
       addView: (view) => set((state) => {
         if (!state.schema) return state;
+        // Tag with current scope key (so it only appears for this workspace+datasource)
+        const scopedView: ViewConfiguration = state.activeScopeKey
+          ? { ...view, scopeKey: view.scopeKey ?? state.activeScopeKey }
+          : view
         return {
           schema: {
             ...state.schema,
-            views: [...state.schema.views, view],
+            views: [...state.schema.views, scopedView],
           },
         };
       }),
-      
+
       updateView: (id, updates) => set((state) => {
         if (!state.schema) return state;
         return {
@@ -411,7 +466,7 @@ export const useSchemaStore = create<SchemaState>()(
           },
         };
       }),
-      
+
       addOrUpdateView: (view) => set((state) => {
         if (!state.schema) return state;
         const existingIndex = state.schema.views.findIndex((v) => v.id === view.id);
@@ -432,7 +487,7 @@ export const useSchemaStore = create<SchemaState>()(
           },
         };
       }),
-      
+
       removeView: (id) => set((state) => {
         if (!state.schema) return state;
         return {
@@ -440,19 +495,19 @@ export const useSchemaStore = create<SchemaState>()(
             ...state.schema,
             views: state.schema.views.filter((v) => v.id !== id),
           },
-          activeViewId: state.activeViewId === id 
-            ? state.schema.defaultViewId 
+          activeViewId: state.activeViewId === id
+            ? state.schema.defaultViewId
             : state.activeViewId,
         };
       }),
-      
+
       duplicateView: (id) => {
         const state = get();
         if (!state.schema) return '';
-        
+
         const original = state.schema.views.find((v) => v.id === id);
         if (!original) return '';
-        
+
         const newId = generateId('view');
         const now = new Date().toISOString();
         const duplicate: ViewConfiguration = {
@@ -463,45 +518,45 @@ export const useSchemaStore = create<SchemaState>()(
           createdAt: now,
           updatedAt: now,
         };
-        
+
         set((state) => ({
           schema: state.schema ? {
             ...state.schema,
             views: [...state.schema.views, duplicate],
           } : null,
         }));
-        
+
         return newId;
       },
-      
+
       getActiveView: () => {
         const { schema, activeViewId } = get();
         if (!schema || !activeViewId) return undefined;
         return schema.views.find((v) => v.id === activeViewId);
       },
-      
+
       // Helpers
       getVisibleEntityTypes: () => {
         const { schema, activeViewId } = get();
         if (!schema || !activeViewId) return [];
-        
+
         const view = schema.views.find((v) => v.id === activeViewId);
         if (!view) return schema.entityTypes;
-        
+
         return schema.entityTypes.filter((et) =>
           view.content.visibleEntityTypes.includes(et.id)
         );
       },
-      
+
       getEntityVisual: (typeId) => {
         const state = get();
         const entityType = state.getEntityType(typeId);
         if (!entityType) return undefined;
-        
+
         const view = state.getActiveView();
         const override = view?.entityOverrides[typeId];
-        
-        return override 
+
+        return override
           ? { ...entityType.visual, ...override }
           : entityType.visual;
       },
@@ -511,6 +566,7 @@ export const useSchemaStore = create<SchemaState>()(
       partialize: (state) => ({
         schema: state.schema,
         activeViewId: state.activeViewId,
+        activeScopeKey: state.activeScopeKey,
       }),
     }
   )

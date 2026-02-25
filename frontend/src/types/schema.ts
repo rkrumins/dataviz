@@ -151,6 +151,13 @@ export interface ViewConfiguration {
   description?: string;
   icon?: string;
 
+  /**
+   * Scope key for per-datasource isolation.
+   * Format: "${workspaceId}/${dataSourceId}"
+   * If undefined/null, the view is global and visible across all scopes (legacy behaviour).
+   */
+  scopeKey?: string | null;
+
   // What to show
   content: ViewContentConfig;
 

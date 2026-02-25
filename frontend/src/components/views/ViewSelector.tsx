@@ -21,12 +21,13 @@ interface ViewSelectorProps {
 
 export function ViewSelector({ onCreateView, onEditView }: ViewSelectorProps) {
   const [isExpanded, setIsExpanded] = useState(false)
-  const schema = useSchemaStore((s) => s.schema)
+  const visibleViews = useSchemaStore((s) => s.visibleViews)
   const activeViewId = useSchemaStore((s) => s.activeViewId)
   const setActiveView = useSchemaStore((s) => s.setActiveView)
 
-  const views = schema?.views ?? []
+  const views = visibleViews()
   const activeView = views.find((v) => v.id === activeViewId)
+    ?? views[0]  // Fall back to first visible view if active view is out-of-scope
 
   return (
     <div className="relative">
@@ -194,11 +195,11 @@ function ViewItem({ view, isActive, onClick, onEdit }: ViewItemProps) {
  * Compact View Selector for constrained spaces
  */
 export function ViewSelectorCompact() {
-  const schema = useSchemaStore((s) => s.schema)
+  const visibleViews = useSchemaStore((s) => s.visibleViews)
   const activeViewId = useSchemaStore((s) => s.activeViewId)
   const setActiveView = useSchemaStore((s) => s.setActiveView)
 
-  const views = schema?.views ?? []
+  const views = visibleViews()
 
   return (
     <div className="flex items-center gap-1 p-1 rounded-lg bg-black/5 dark:bg-white/5">

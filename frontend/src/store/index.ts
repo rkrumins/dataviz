@@ -11,3 +11,8 @@ export type { LineageNode, LineageEdge } from './canvas'
 export { useViewsStore } from './views'
 export type { SavedView } from './views'
 
+export { useConnectionsStore } from './connections'
+export type { } from './connections'
+
+export { useWorkspacesStore } from './workspaces'
+

@@ -49,8 +49,8 @@ export function EntityDrawer({
   const mode = usePersonaStore((s) => s.mode)
 
   // Only show if exactly one node is selected
-  const selectedNode = selectedNodeIds.length === 1 
-    ? nodes.find(n => n.id === selectedNodeIds[0]) 
+  const selectedNode = selectedNodeIds.length === 1
+    ? nodes.find(n => n.id === selectedNodeIds[0])
     : null
 
   const isOpen = !!selectedNode
@@ -134,7 +134,7 @@ export function EntityDrawer({
   const handleSave = useCallback(() => {
     if (!selectedNode) return
     if (jsonError) return
-    
+
     updateNode(selectedNode.id, formData)
     setHasChanges(false)
     setShowSaved(true)
@@ -204,9 +204,9 @@ export function EntityDrawer({
         )}
       >
         {/* Header */}
-        <div 
+        <div
           className="flex-shrink-0 p-5 border-b border-glass-border/50"
-          style={{ 
+          style={{
             background: `linear-gradient(135deg, ${colors.accent}10 0%, transparent 60%)`
           }}
         >
@@ -223,7 +223,7 @@ export function EntityDrawer({
                 <span className={cn(
                   "text-xs font-medium",
                   formData.confidence >= 0.8 ? "text-green-500" :
-                  formData.confidence >= 0.5 ? "text-amber-500" : "text-red-500"
+                    formData.confidence >= 0.5 ? "text-amber-500" : "text-red-500"
                 )}>
                   {Math.round(formData.confidence * 100)}%
                 </span>
@@ -257,7 +257,7 @@ export function EntityDrawer({
                 <span className="text-xs font-medium text-blue-600 dark:text-blue-400">Root Cause</span>
                 <span className="text-[10px] text-blue-500/60">Trace Upstream</span>
               </motion.button>
-              
+
               <motion.button
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
@@ -270,7 +270,7 @@ export function EntityDrawer({
                 <span className="text-xs font-medium text-green-600 dark:text-green-400">Impact</span>
                 <span className="text-[10px] text-green-500/60">Trace Downstream</span>
               </motion.button>
-              
+
               <motion.button
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
@@ -411,7 +411,7 @@ export function EntityDrawer({
                 <span>Last synced 5 min ago</span>
               </div>
               {externalUrl && (
-                <button 
+                <button
                   onClick={() => window.open(externalUrl, '_blank')}
                   className="text-accent-lineage hover:underline flex items-center gap-1"
                 >
@@ -586,10 +586,10 @@ function ViewModeContent({
           <div className="space-y-1">
             {additionalFields.slice(0, 10).map(key => {
               const value = formData[key]
-              const displayValue = typeof value === 'object' 
-                ? JSON.stringify(value) 
+              const displayValue = typeof value === 'object'
+                ? JSON.stringify(value)
                 : String(value ?? '—')
-              
+
               return (
                 <div key={key} className="flex items-start justify-between gap-4 py-2">
                   <span className="text-sm text-ink-muted capitalize min-w-[100px]">
@@ -832,8 +832,8 @@ function JsonModeContent({ rawJson, jsonError, onChange }: JsonModeContentProps)
         </label>
         <span className={cn(
           "text-xs px-2 py-1 rounded-lg",
-          jsonError 
-            ? "bg-red-500/10 text-red-500" 
+          jsonError
+            ? "bg-red-500/10 text-red-500"
             : "bg-green-500/10 text-green-500"
         )}>
           {jsonError ? '⚠️ Invalid' : '✓ Valid'}
@@ -844,8 +844,8 @@ function JsonModeContent({ rawJson, jsonError, onChange }: JsonModeContentProps)
         onChange={(e) => onChange(e.target.value)}
         className={cn(
           "w-full h-[500px] px-4 py-3 rounded-xl bg-black/10 dark:bg-white/5 border transition-all outline-none text-xs font-mono resize-none custom-scrollbar",
-          jsonError 
-            ? "border-red-500/30 focus:border-red-500/50" 
+          jsonError
+            ? "border-red-500/30 focus:border-red-500/50"
             : "border-white/10 focus:border-accent-lineage/50"
         )}
         spellCheck={false}

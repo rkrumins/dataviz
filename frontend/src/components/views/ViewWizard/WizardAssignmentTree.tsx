@@ -38,6 +38,7 @@ import {
 } from '@/store/referenceModelStore'
 import type { ViewLayerConfig, AssignmentConflict } from '@/types/schema'
 import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
+import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
 
 import { useEntityLoader } from '@/hooks/useEntityLoader'
 
@@ -64,6 +65,8 @@ export interface EntityTreeNode {
 interface WizardAssignmentTreeProps {
     /** Layers to assign to */
     layers: ViewLayerConfig[]
+    /** Active drop target from the Layer Studio (shows strip indicator) */
+    activeTarget?: ActiveTarget | null
     /** Edge types that define containment hierarchy */
     containmentEdgeTypes?: string[]
     /** Callback when assignment changes */

@@ -3,7 +3,9 @@ import { TopBar } from './TopBar'
 import { SidebarNav } from './SidebarNav'
 import { CommandPalette } from './CommandPalette'
 import { CanvasRouter } from '@/components/canvas/CanvasRouter'
+import { Dashboard } from '@/components/dashboard/Dashboard'
 import { ViewWizard } from '@/components/views/ViewWizard'
+import { useNavigationStore } from '@/store/navigation'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
 import { cn } from '@/lib/utils'
@@ -25,6 +27,7 @@ export function useViewEditorModal() {
 }
 
 export function AppShell() {
+  const { activeTab } = useNavigationStore()
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [viewEditorOpen, setViewEditorOpen] = useState(false)
   const [editingViewId, setEditingViewId] = useState<string | undefined>()
@@ -64,10 +67,14 @@ export function AppShell() {
               sidebarCollapsed ? "ml-16" : "ml-64"
             )}
           >
-            <CanvasRouter />
+            <div className={cn("absolute inset-0 transition-opacity duration-300", activeTab === 'dashboard' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none')}>
+              <Dashboard />
+            </div>
 
-            {/* Loading Overlay */}
-            <LoadingOverlay />
+            <div className={cn("absolute inset-0 transition-opacity duration-300", activeTab === 'explore' || activeTab === 'lenses' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none')}>
+              <CanvasRouter />
+              <LoadingOverlay />
+            </div>
           </main>
 
           {/* Entity drawer is now integrated into each canvas component */}

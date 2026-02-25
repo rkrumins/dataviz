@@ -20,32 +20,118 @@ import type {
     CreateNodeResult,
 } from './GraphDataProvider'
 
-// Base API URL - typically configured via environment variables
 const API_BASE = '/api/v1'
+
+export interface RemoteGraphProviderOptions {
+    /** Workspace ID. When set, routes through /v1/{ws_id}/graph/... */
+    workspaceId?: string
+    /** Data source ID. When set, appended as ?dataSourceId= to workspace-scoped routes. */
+    dataSourceId?: string
+    /** @deprecated Legacy connection ID. Use workspaceId instead. */
+    connectionId?: string
+}
 
 export class RemoteGraphProvider implements GraphDataProvider {
     readonly name = 'RemoteGraphProvider'
+
+    private readonly workspaceId?: string
+    private readonly dataSourceId?: string
+    private readonly connectionId?: string
+
+    /** In-flight request deduplication: identical concurrent requests share one Promise */
+    private _inflight = new Map<string, Promise<unknown>>()
+
+    /** Short-lived response cache for GET requests (prevents rapid re-fetches during re-renders) */
+    private _responseCache = new Map<string, { data: unknown; ts: number }>()
+    private static RESPONSE_CACHE_TTL = 2000 // 2 seconds
+
+    constructor(options?: RemoteGraphProviderOptions) {
+        this.workspaceId = options?.workspaceId
+        this.dataSourceId = options?.dataSourceId
+        this.connectionId = options?.connectionId
+    }
+
+    // ==========================================
+    // URL builder — workspace path or legacy query param
+    // ==========================================
+
+    private buildUrl(path: string, extraParams?: Record<string, string>): string {
+        // Workspace-scoped: /api/v1/{ws_id}/graph/...
+        const base = this.workspaceId
+            ? `/api/v1/${this.workspaceId}/graph`
+            : API_BASE
+
+        const url = new URL(`${base}${path}`, window.location.origin)
+
+        // Data source targeting within a workspace
+        if (this.workspaceId && this.dataSourceId) {
+            url.searchParams.set('dataSourceId', this.dataSourceId)
+        }
+
+        // Legacy fallback: append connectionId as query param
+        if (!this.workspaceId && this.connectionId) {
+            url.searchParams.set('connectionId', this.connectionId)
+        }
+
+        if (extraParams) {
+            Object.entries(extraParams).forEach(([k, v]) => url.searchParams.set(k, v))
+        }
+        return url.pathname + url.search
+    }
 
     // ==========================================
     // Internal Fetch Helper
     // ==========================================
 
-    private async fetch<T>(endpoint: string, options?: RequestInit): Promise<T> {
-        const url = `${API_BASE}${endpoint}`
-        const response = await fetch(url, {
-            ...options,
-            headers: {
-                'Content-Type': 'application/json',
-                ...options?.headers,
-            },
-        })
+    private async fetch<T>(path: string, options?: RequestInit & { extraParams?: Record<string, string> }): Promise<T> {
+        const { extraParams, ...fetchOptions } = options ?? {}
+        const method = (fetchOptions.method ?? 'GET').toUpperCase()
+        const url = this.buildUrl(path, extraParams)
+        const cacheKey = `${method}:${url}:${fetchOptions.body ?? ''}`
 
-        if (!response.ok) {
-            const errorText = await response.text()
-            throw new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
+        // Check short-lived response cache for GET requests
+        if (method === 'GET') {
+            const cached = this._responseCache.get(cacheKey)
+            if (cached && Date.now() - cached.ts < RemoteGraphProvider.RESPONSE_CACHE_TTL) {
+                return cached.data as T
+            }
         }
 
-        return response.json()
+        // Deduplicate identical in-flight requests
+        const existing = this._inflight.get(cacheKey)
+        if (existing) return existing as Promise<T>
+
+        const promise = this._doFetch<T>(url, fetchOptions, method, cacheKey)
+        this._inflight.set(cacheKey, promise)
+        return promise
+    }
+
+    private async _doFetch<T>(url: string, fetchOptions: RequestInit, method: string, cacheKey: string): Promise<T> {
+        try {
+            const response = await fetch(url, {
+                ...fetchOptions,
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...fetchOptions?.headers,
+                },
+            })
+
+            if (!response.ok) {
+                const errorText = await response.text()
+                throw new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
+            }
+
+            const data = await response.json() as T
+
+            // Cache GET responses briefly to handle rapid re-renders
+            if (method === 'GET') {
+                this._responseCache.set(cacheKey, { data, ts: Date.now() })
+            }
+
+            return data
+        } finally {
+            this._inflight.delete(cacheKey)
+        }
     }
 
     // ==========================================

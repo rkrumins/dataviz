@@ -119,11 +119,15 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
     const { clearAssignments, setLayers } = useReferenceModelStore()
+    const visibleViews = useSchemaStore(s => s.visibleViews)
 
     // Current step
     const [currentStep, setCurrentStep] = useState<WizardStep>('basics')
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [previousSteps, setPreviousSteps] = useState<WizardStep[]>([])
+
+    // Track the draft context model ID created by autosave so we PATCH on subsequent saves
+    const [linkedContextModelId, setLinkedContextModelId] = useState<string | null>(null)
 
     // Form data
     const [formData, setFormData] = useState<WizardFormData>(() => getInitialFormData(schema))
@@ -131,7 +135,7 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
     // Load existing view for edit mode
     useEffect(() => {
         if (mode === 'edit' && viewId && schema) {
-            const existingView = schema.views.find(v => v.id === viewId)
+            const existingView = visibleViews().find(v => v.id === viewId)
             if (existingView) {
                 setFormData({
                     name: existingView.name,
@@ -313,7 +317,10 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                 animate={{ scale: 1, opacity: 1, y: 0 }}
                 exit={{ scale: 0.95, opacity: 0, y: 20 }}
                 transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-                className="relative w-full max-w-4xl max-h-[90vh] bg-white dark:bg-slate-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col"
+                className={cn(
+                    'relative w-full max-h-[90vh] bg-white dark:bg-slate-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col',
+                    currentStep === 'assignment' ? 'max-w-[1180px]' : 'max-w-4xl'
+                )}
             >
                 {/* Header */}
                 <div className="flex items-center justify-between px-8 py-5 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900">
@@ -412,6 +419,8 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                                 <AssignmentStep
                                     formData={formData}
                                     updateFormData={updateFormData}
+                                    linkedContextModelId={linkedContextModelId}
+                                    onDraftSaved={setLinkedContextModelId}
                                 />
                             )}
                             {currentStep === 'entities' && (

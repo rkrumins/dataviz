@@ -1,12 +1,16 @@
 /**
- * ReferenceModelCanvas - Hierarchy-style Reference Model with User-Defined Layers
- * 
+ * ContextViewCanvas - Enterprise-grade Context View with User-Defined Layers
+ *
  * Displays entities in a horizontal left-to-right flow with:
  * - User-defined layer columns (Source → Staging → Refinery → Report)
  * - Collapsible containers within each layer
  * - Entities flow from left (sources) to right (consumers)
  * - Configurable layer definitions via schema
  * - Lineage flow overlay support
+ * - Backend-persisted blueprints (Save / Load / Quick Start Templates)
+ *
+ * Single authoritative canvas — ContextViewCanvas.tsx deleted as dead code.
+ * Store: referenceModelStore.ts (autoDirty + backend sync, no localStorage).
  */
 
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
@@ -16,6 +20,7 @@ import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
+import { useWorkspacesStore } from '@/store/workspaces'
 import {
   type GraphNode,
   resolveLayerAssignment,
@@ -33,6 +38,7 @@ import { TraceToolbar } from './TraceToolbar'
 import { useUnifiedTrace, useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
+import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
 // UX-first interaction components
 import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
@@ -114,17 +120,17 @@ interface HierarchyNode {
   logicalConfig?: LogicalNodeConfig
 }
 
-interface ReferenceModelCanvasProps {
+interface ContextViewCanvasProps {
   className?: string
   layers?: ViewLayerConfig[]
   showLineageFlow?: boolean
 }
 
-export function ReferenceModelCanvas({
+export function ContextViewCanvas({
   className,
   layers = defaultReferenceModelLayers,
   showLineageFlow: initialShowLineageFlow = true
-}: ReferenceModelCanvasProps) {
+}: ContextViewCanvasProps) {
   const nodes = useCanvasStore((s) => s.nodes)
   const edges = useCanvasStore((s) => s.edges)
   const addNodes = useCanvasStore((s) => s.addNodes)
@@ -258,6 +264,14 @@ export function ReferenceModelCanvas({
   const assignmentStatus = useReferenceModelStore(s => s.assignmentStatus)
   const setLayers = useReferenceModelStore(s => s.setLayers)
   const storeLayers = useReferenceModelStore(s => s.layers)
+  const syncStatus = useReferenceModelStore(s => s.syncStatus)
+  const activeContextModelName = useReferenceModelStore(s => s.activeContextModelName)
+  const saveToBackend = useReferenceModelStore(s => s.saveToBackend)
+  const loadFromBackend = useReferenceModelStore(s => s.loadFromBackend)
+  const loadTemplate = useReferenceModelStore(s => s.loadTemplate)
+  const listAvailable = useReferenceModelStore(s => s.listAvailable)
+  const listTemplates = useReferenceModelStore(s => s.listTemplates)
+  const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
 
   // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
@@ -282,29 +296,21 @@ export function ReferenceModelCanvas({
   }, [activeView?.id, activeView?.layout?.referenceLayout?.layers, setLayers, storeLayers])
 
   // Step 2: Load assignments from backend when layers are synced and nodes are available
+  // Uses a ref to track what we've computed for, preventing cascading re-fetches.
+  const assignmentComputedRef = useRef<string | null>(null)
   useEffect(() => {
-    // Only compute if:
-    // 1. We have nodes
-    // 2. We have a provider
-    // 3. Layers are synced from view (store has layers)
-    // 4. Status is idle (not already computing)
-    // 5. We don't already have assignments OR layers have changed
-    if (nodes.length > 0 && provider && storeLayers.length > 0) {
-      if (assignmentStatus === 'idle') {
-        // Check if we need to recompute (no assignments or layers changed)
-        const hasAssignments = effectiveAssignments.size > 0
-        const shouldCompute = !hasAssignments ||
-          // Recompute if layers changed (entityAssignments might have changed)
-          storeLayers.some(layer =>
-            layer.entityAssignments && layer.entityAssignments.length > 0
-          )
+    if (nodes.length === 0 || !provider || storeLayers.length === 0) return
+    if (assignmentStatus !== 'idle') return
 
-        if (shouldCompute) {
-          computeAssignments(provider)
-        }
-      }
-    }
-  }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers.length, effectiveAssignments.size])
+    // Build a fingerprint of layers that affect assignment computation
+    const layerFingerprint = storeLayers.map(l => l.id).join(',')
+
+    // Only compute once per unique layer configuration
+    if (assignmentComputedRef.current === layerFingerprint) return
+    assignmentComputedRef.current = layerFingerprint
+
+    computeAssignments(provider)
+  }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers])
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
@@ -317,6 +323,73 @@ export function ReferenceModelCanvas({
 
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
+
+  // Load Blueprint dropdown state
+  const [showLoadDropdown, setShowLoadDropdown] = useState(false)
+  const [savedModels, setSavedModels] = useState<Array<{ id: string; name: string }>>([])
+  const [isLoadingModels, setIsLoadingModels] = useState(false)
+  const [loadingModelId, setLoadingModelId] = useState<string | null>(null)
+
+  // Quick Start Templates dropdown state
+  const [showTemplatesDropdown, setShowTemplatesDropdown] = useState(false)
+  const [templates, setTemplates] = useState<Array<{ id: string; name: string; category?: string }>>([])
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState(false)
+  const [loadingTemplateId, setLoadingTemplateId] = useState<string | null>(null)
+
+  // Fetch saved models when Load dropdown opens
+  const handleOpenLoadDropdown = useCallback(async () => {
+    if (!activeWorkspaceId) return
+    setShowLoadDropdown(v => !v)
+    setShowTemplatesDropdown(false)
+    if (!showLoadDropdown && savedModels.length === 0) {
+      setIsLoadingModels(true)
+      try {
+        const models = await listAvailable(activeWorkspaceId)
+        setSavedModels(models.map(m => ({ id: m.id, name: m.name })))
+      } catch { /* silent */ } finally {
+        setIsLoadingModels(false)
+      }
+    }
+  }, [activeWorkspaceId, showLoadDropdown, savedModels.length, listAvailable])
+
+  // Load a saved blueprint
+  const handleLoadModel = useCallback(async (id: string) => {
+    if (!activeWorkspaceId) return
+    setLoadingModelId(id)
+    try {
+      await loadFromBackend(activeWorkspaceId, id)
+      setShowLoadDropdown(false)
+    } catch { /* silent */ } finally {
+      setLoadingModelId(null)
+    }
+  }, [activeWorkspaceId, loadFromBackend])
+
+  // Fetch templates when Templates dropdown opens
+  const handleOpenTemplatesDropdown = useCallback(async () => {
+    setShowTemplatesDropdown(v => !v)
+    setShowLoadDropdown(false)
+    if (!showTemplatesDropdown && templates.length === 0) {
+      setIsLoadingTemplates(true)
+      try {
+        const tmpl = await listTemplates()
+        setTemplates(tmpl.map(m => ({ id: m.id, name: m.name, category: m.category ?? undefined })))
+      } catch { /* silent */ } finally {
+        setIsLoadingTemplates(false)
+      }
+    }
+  }, [showTemplatesDropdown, templates.length, listTemplates])
+
+  // Instantiate a Quick Start Template
+  const handleLoadTemplate = useCallback(async (templateId: string, templateName: string) => {
+    if (!activeWorkspaceId) return
+    setLoadingTemplateId(templateId)
+    try {
+      await loadTemplate(activeWorkspaceId, templateId, `${templateName} (copy)`)
+      setShowTemplatesDropdown(false)
+    } catch { /* silent */ } finally {
+      setLoadingTemplateId(null)
+    }
+  }, [activeWorkspaceId, loadTemplate])
 
 
   // Edit Mode State (unified with LineageCanvas)
@@ -371,6 +444,17 @@ export function ReferenceModelCanvas({
       ontologyMetadata
     )
   }, [edges, relationshipTypes, containmentEdgeTypes, ontologyMetadata, edgeFilters])
+
+  // Schema-driven edge color resolver — used by LineageFlowOverlay
+  // Resolves edge type → color from backend schema, falling back to defaults
+  const resolveEdgeColor = useCallback((edgeType: string) => {
+    return getEdgeTypeDefinition(
+      edgeType,
+      relationshipTypes,
+      containmentEdgeTypes,
+      ontologyMetadata ? { edgeTypeMetadata: ontologyMetadata.edgeTypeMetadata } : undefined
+    ).color
+  }, [relationshipTypes, containmentEdgeTypes, ontologyMetadata])
 
   // Trace Calculation for Double Click
   // We import computeTrace dynamically or assume it's available via utility
@@ -430,6 +514,14 @@ export function ReferenceModelCanvas({
     [activeLayers]
   )
 
+  // Stable fingerprint: only changes when the actual node/edge set changes,
+  // not on every array reference swap (which happens on addNodes even with 0 new items)
+  const nodeEdgeFingerprint = useMemo(() => {
+    const firstNodeId = nodes.length > 0 ? nodes[0].id : ''
+    const lastNodeId = nodes.length > 0 ? nodes[nodes.length - 1].id : ''
+    return `${nodes.length}:${edges.length}:${firstNodeId}:${lastNodeId}`
+  }, [nodes, edges])
+
   // Build generic hierarchy tree from nodes and containment edges
   // We keep this to visualize structure, but layer assignment is calculated independently
   const { nodeMap, childMap, parentMap } = useMemo(() => {
@@ -450,7 +542,8 @@ export function ReferenceModelCanvas({
     })
 
     return { nodeMap: nMap, childMap: cMap, parentMap: pMap }
-  }, [nodes, edges, containmentEdgeTypes])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeEdgeFingerprint, containmentEdgeTypes])
 
   // Helper: Calculate currently visible top-level nodes (containers)
   const getVisibleContainerUrns = useCallback(() => {
@@ -464,48 +557,49 @@ export function ReferenceModelCanvas({
       .filter(Boolean)
   }, [nodes, parentMap, expandedNodes])
 
-  // Track previous visible nodes for delta updates
-  const prevVisibleUrnsRef = useRef<Set<string>>(new Set())
+  // Track previous aggregation target fingerprint to avoid redundant fetches
+  const prevAggregationKeyRef = useRef<string>('')
 
-  // Optimized Effect: Fetch aggregated edges only for NEWLY visible nodes
-  // Optimized Effect: Fetch aggregated edges only for visible nodes with Debounce
+  // Stable node URN-to-ID map (updated via ref to avoid effect dependency on nodes)
+  const nodesRef = useRef(nodes)
+  nodesRef.current = nodes
+
+  // Optimized Effect: Fetch aggregated edges only when the visible set actually changes
+  // Uses expandedNodes (user-driven) as the primary trigger, not nodes array reference.
+  // A 500ms debounce coalesces rapid expand/collapse actions.
   useEffect(() => {
     if (!showLineageFlow || nodes.length === 0) return
 
     const fetchDebounced = setTimeout(() => {
       const currentVisibleList = getVisibleContainerUrns()
-      const prevVisibleSet = prevVisibleUrnsRef.current || new Set()
 
-      // Limit to avoid massive queries, though backend is optimized now
       if (currentVisibleList.length > 500) return
 
-      // UX Improvement: Filter out expanded nodes from aggregation
-      // If a node is expanded, we want to show edges for its *children*, not the parent itself.
-      // So we exclude expanded nodes from the "aggregation input".
-      const urnToIdMap = new Map(nodes.map(n => [(n.data?.urn as string) || n.id, n.id]))
-
+      // Exclude expanded nodes from aggregation targets.
+      // When a node is expanded, its children are already in the visible list and will
+      // represent it. Including BOTH parent and children causes the Cypher CONTAINS*0..5
+      // traversal to find the same TRANSFORMS edges at multiple hierarchy levels,
+      // producing duplicate/inflated aggregated edge counts.
+      // (Earlier this caused missing lineage because orphan nodes like Snowflake weren't
+      // loaded — that's now fixed by the initial graph load fetching orphan nodes.)
+      const urnToIdMap = new Map(nodesRef.current.map(n => [(n.data?.urn as string) || n.id, n.id]))
       const aggregationTargets = currentVisibleList.filter(urn => {
         const nodeId = urnToIdMap.get(urn)
-        // If node is expanded, exclude it so we see its children's edges instead
         return nodeId && !expandedNodes.has(nodeId)
       })
 
-      // Calculate Delta or Refresh based on the *filtered* list
-      // actually, we should just fetch for the filtered list.
-      // The "newly visible" check is optimization, but with the filtering logic changing dynamically
-      // (as user expands/collapses), we might just want to refetch for the current set.
-      // Since "expandedNodes" changing will trigger getVisibleContainerUrns -> trigger this effect.
+      // Only fetch if the target set actually changed
+      const aggregationKey = aggregationTargets.sort().join(',')
+      if (aggregationKey === prevAggregationKeyRef.current) return
+      prevAggregationKeyRef.current = aggregationKey
 
-      // We use aggregationTargets for both source and target to find edges WITHIN the visible set (clique)
       if (aggregationTargets.length > 0) {
         fetchAggregated(aggregationTargets, aggregationTargets)
       }
-
-      prevVisibleUrnsRef.current = new Set(currentVisibleList)
-    }, 300) // 300ms debounce
+    }, 500) // 500ms debounce — coalesces rapid expand/collapse
 
     return () => clearTimeout(fetchDebounced)
-  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes, expandedNodes])
+  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes.length, expandedNodes])
 
   // Build layer assignment rules
   const layerRules = useMemo<LayerAssignmentRule[]>(() => {
@@ -706,7 +800,8 @@ export function ReferenceModelCanvas({
     grouped.forEach(list => list.sort((a, b) => a.name.localeCompare(b.name)))
 
     return grouped
-  }, [nodes, edges, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments])
 
   // Flatten logical/physical nodes for search and lookup
   const { displayFlat, displayMap } = useMemo(() => {
@@ -724,6 +819,15 @@ export function ReferenceModelCanvas({
 
     return { displayFlat: flat, displayMap: map }
   }, [nodesByLayer])
+
+  // O(1) URN→ID lookup (replaces O(N) displayFlat.find() per edge)
+  const urnToIdMap = useMemo(() => {
+    const map = new Map<string, string>()
+    displayFlat.forEach(node => {
+      if (node.urn) map.set(node.urn, node.id)
+    })
+    return map
+  }, [displayFlat])
 
   // Search results
   const searchResults = useMemo(() => {
@@ -1040,8 +1144,8 @@ export function ReferenceModelCanvas({
       let tId = displayMap.has(agg.targetUrn) ? agg.targetUrn : ancestorMap.get(agg.targetUrn)
 
       // Fallback for ID vs URN mismatch if map keys differ
-      if (!sId) sId = displayFlat.find(n => n.urn === agg.sourceUrn)?.id
-      if (!tId) tId = displayFlat.find(n => n.urn === agg.targetUrn)?.id
+      if (!sId) sId = urnToIdMap.get(agg.sourceUrn)
+      if (!tId) tId = urnToIdMap.get(agg.targetUrn)
 
       if (sId && tId && sId !== tId) {
         // Create flow edge directly
@@ -1126,7 +1230,39 @@ export function ReferenceModelCanvas({
     })
 
     return projected
-  }, [lineageEdges, edges, aggregatedEdges, nodesByLayer, expandedNodes, displayFlat, displayMap, showLineageFlow, trace.isTracing, traceContextSet])
+  }, [lineageEdges, edges, aggregatedEdges, nodesByLayer, expandedNodes, displayFlat, displayMap, urnToIdMap, showLineageFlow, trace.isTracing, traceContextSet])
+
+  // Click-to-highlight: compute connected nodes/edges for selected node (client-side only, no backend call)
+  const highlightState = useMemo(() => {
+    if (trace.isTracing || !selectedNodeId) {
+      return { nodes: new Set<string>(), edges: new Set<string>() }
+    }
+    const connectedNodes = new Set<string>([selectedNodeId])
+    const connectedEdges = new Set<string>()
+    const selectedUrn = displayMap.get(selectedNodeId)?.urn
+
+    visibleLineageEdges.forEach((edge: any) => {
+      const matches = edge.source === selectedNodeId || edge.target === selectedNodeId ||
+        (selectedUrn && (edge.source === selectedUrn || edge.target === selectedUrn))
+      if (matches) {
+        connectedEdges.add(edge.id)
+        connectedNodes.add(edge.source)
+        connectedNodes.add(edge.target)
+      }
+    })
+    return { nodes: connectedNodes, edges: connectedEdges }
+  }, [selectedNodeId, visibleLineageEdges, trace.isTracing, displayMap])
+
+  const isHighlightActive = highlightState.edges.size > 0
+  const clearSelection = useCanvasStore((s) => s.clearSelection)
+
+  // Background click handler to clear selection/highlight
+  const handleBackgroundClick = useCallback((e: React.MouseEvent) => {
+    // Only clear if clicking directly on the background container, not a child
+    if (e.target === e.currentTarget) {
+      clearSelection()
+    }
+  }, [clearSelection])
 
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-gradient-to-br from-canvas via-canvas to-canvas-elevated/30", className)}>
@@ -1163,10 +1299,10 @@ export function ReferenceModelCanvas({
               <LucideIcons.Network className="w-5 h-5 text-accent-lineage" />
             </div>
             <div>
-              <h2 className="text-base font-display font-semibold text-ink tracking-tight">Reference Model</h2>
+              <h2 className="text-base font-display font-semibold text-ink tracking-tight">Context View</h2>
               <p className="text-[10px] text-ink-muted/60 flex items-center gap-1.5">
                 <LucideIcons.ArrowRight className="w-3 h-3" />
-                Data Flow View
+                Data Flow Blueprint
               </p>
             </div>
           </div>
@@ -1282,6 +1418,223 @@ export function ReferenceModelCanvas({
               <LucideIcons.ChevronsDownUp className="w-4 h-4" />
             </button>
           </div>
+
+          {/* Divider */}
+          <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
+
+          {/* Load Blueprint dropdown */}
+          <div className="relative">
+            <button
+              onClick={handleOpenLoadDropdown}
+              disabled={!activeWorkspaceId}
+              className={cn(
+                "flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all duration-200",
+                showLoadDropdown
+                  ? "bg-purple-500/15 text-purple-400 border border-purple-500/30"
+                  : "bg-white/[0.04] border border-white/[0.08] text-ink-muted hover:bg-white/[0.08] hover:text-ink"
+              )}
+              title={!activeWorkspaceId ? 'No workspace selected' : 'Load a saved blueprint'}
+            >
+              {isLoadingModels ? (
+                <LucideIcons.Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <LucideIcons.FolderOpen className="w-4 h-4" />
+              )}
+              <span>Load</span>
+              <LucideIcons.ChevronDown className={cn("w-3.5 h-3.5 transition-transform", showLoadDropdown && "rotate-180")} />
+            </button>
+
+            <AnimatePresence>
+              {showLoadDropdown && (
+                <motion.div
+                  initial={{ opacity: 0, y: -4, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -4, scale: 0.97 }}
+                  transition={{ duration: 0.15 }}
+                  className="absolute right-0 top-full mt-2 w-64 z-50 rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-white/[0.1] shadow-2xl shadow-black/40 overflow-hidden"
+                >
+                  <div className="px-3 py-2 border-b border-white/[0.06]">
+                    <p className="text-[11px] font-medium text-ink-muted uppercase tracking-wider">Saved Blueprints</p>
+                  </div>
+                  <div className="max-h-52 overflow-y-auto py-1">
+                    {isLoadingModels ? (
+                      <div className="flex items-center justify-center py-6">
+                        <LucideIcons.Loader2 className="w-4 h-4 animate-spin text-ink-muted" />
+                      </div>
+                    ) : savedModels.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-6 px-4 text-center">
+                        <LucideIcons.FolderOpen className="w-8 h-8 text-ink-muted/30 mb-2" />
+                        <p className="text-xs text-ink-muted/60">No saved blueprints yet</p>
+                        <p className="text-[10px] text-ink-muted/40 mt-1">Use Save Blueprint to persist your configuration</p>
+                      </div>
+                    ) : (
+                      savedModels.map(model => (
+                        <button
+                          key={model.id}
+                          onClick={() => handleLoadModel(model.id)}
+                          disabled={loadingModelId === model.id}
+                          className={cn(
+                            "w-full flex items-center gap-3 px-3 py-2 text-left text-sm transition-colors",
+                            activeContextModelName === model.name
+                              ? "bg-purple-500/10 text-purple-400"
+                              : "text-ink hover:bg-white/[0.05] hover:text-ink"
+                          )}
+                        >
+                          {loadingModelId === model.id ? (
+                            <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
+                          ) : activeContextModelName === model.name ? (
+                            <LucideIcons.CheckCircle className="w-3.5 h-3.5 flex-shrink-0 text-purple-400" />
+                          ) : (
+                            <LucideIcons.FileCode2 className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted" />
+                          )}
+                          <span className="truncate">{model.name}</span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                  <div className="border-t border-white/[0.06] px-3 py-2">
+                    <button
+                      onClick={() => {
+                        setSavedModels([])
+                        if (activeWorkspaceId) {
+                          setIsLoadingModels(true)
+                          listAvailable(activeWorkspaceId).then(m => {
+                            setSavedModels(m.map(x => ({ id: x.id, name: x.name })))
+                          }).finally(() => setIsLoadingModels(false))
+                        }
+                      }}
+                      className="w-full flex items-center justify-center gap-1.5 py-1 text-[11px] text-ink-muted/60 hover:text-ink-muted transition-colors"
+                    >
+                      <LucideIcons.RefreshCw className="w-3 h-3" />
+                      Refresh
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Quick Start Templates dropdown */}
+          <div className="relative">
+            <button
+              onClick={handleOpenTemplatesDropdown}
+              className={cn(
+                "flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all duration-200",
+                showTemplatesDropdown
+                  ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                  : "bg-white/[0.04] border border-white/[0.08] text-ink-muted hover:bg-white/[0.08] hover:text-ink"
+              )}
+              title="Apply a Quick Start Template"
+            >
+              {isLoadingTemplates ? (
+                <LucideIcons.Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <LucideIcons.Wand2 className="w-4 h-4" />
+              )}
+              <span>Templates</span>
+              <LucideIcons.ChevronDown className={cn("w-3.5 h-3.5 transition-transform", showTemplatesDropdown && "rotate-180")} />
+            </button>
+
+            <AnimatePresence>
+              {showTemplatesDropdown && (
+                <motion.div
+                  initial={{ opacity: 0, y: -4, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -4, scale: 0.97 }}
+                  transition={{ duration: 0.15 }}
+                  className="absolute right-0 top-full mt-2 w-72 z-50 rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-white/[0.1] shadow-2xl shadow-black/40 overflow-hidden"
+                >
+                  <div className="px-3 py-2 border-b border-white/[0.06]">
+                    <p className="text-[11px] font-medium text-ink-muted uppercase tracking-wider">Quick Start Templates</p>
+                    <p className="text-[10px] text-ink-muted/50 mt-0.5">Replaces current layers — save first if needed</p>
+                  </div>
+                  <div className="max-h-72 overflow-y-auto py-1">
+                    {isLoadingTemplates ? (
+                      <div className="flex items-center justify-center py-6">
+                        <LucideIcons.Loader2 className="w-4 h-4 animate-spin text-ink-muted" />
+                      </div>
+                    ) : templates.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-6 px-4 text-center">
+                        <LucideIcons.Wand2 className="w-8 h-8 text-ink-muted/30 mb-2" />
+                        <p className="text-xs text-ink-muted/60">No templates available</p>
+                        <p className="text-[10px] text-ink-muted/40 mt-1">Ask your admin to seed Quick Start Templates</p>
+                      </div>
+                    ) : (
+                      templates.map(tmpl => (
+                        <button
+                          key={tmpl.id}
+                          onClick={() => handleLoadTemplate(tmpl.id, tmpl.name)}
+                          disabled={loadingTemplateId === tmpl.id || !activeWorkspaceId}
+                          className="w-full flex items-start gap-3 px-3 py-2.5 text-left text-sm text-ink hover:bg-white/[0.05] transition-colors"
+                        >
+                          {loadingTemplateId === tmpl.id ? (
+                            <LucideIcons.Loader2 className="w-4 h-4 animate-spin flex-shrink-0 mt-0.5 text-amber-400" />
+                          ) : (
+                            <LucideIcons.LayoutTemplate className="w-4 h-4 flex-shrink-0 mt-0.5 text-amber-400" />
+                          )}
+                          <div className="min-w-0">
+                            <p className="font-medium truncate">{tmpl.name}</p>
+                            {tmpl.category && (
+                              <p className="text-[10px] text-ink-muted/60 mt-0.5 capitalize">{tmpl.category.replace(/-/g, ' ')}</p>
+                            )}
+                          </div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Divider */}
+          <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
+
+          {/* Save Blueprint */}
+          <div className="flex items-center gap-2">
+            {activeContextModelName && (
+              <span className="text-xs text-ink-muted truncate max-w-[120px]" title={activeContextModelName}>
+                {activeContextModelName}
+              </span>
+            )}
+            <button
+              onClick={() => activeWorkspaceId && saveToBackend(activeWorkspaceId)}
+              disabled={(syncStatus !== 'dirty' && syncStatus !== 'error') || !activeWorkspaceId}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
+                syncStatus === 'dirty'
+                  ? "bg-gradient-to-r from-blue-500/20 to-cyan-500/10 text-blue-400 border border-blue-500/30 hover:from-blue-500/30 hover:to-cyan-500/20 hover:shadow-lg hover:shadow-blue-500/20 hover:scale-[1.02] active:scale-[0.98]"
+                  : syncStatus === 'error'
+                    ? "bg-gradient-to-r from-red-500/20 to-red-500/10 text-red-400 border border-red-500/30"
+                    : "bg-white/[0.03] border border-white/[0.06] text-ink-muted/50 cursor-not-allowed"
+              )}
+              title={
+                !activeWorkspaceId ? 'No workspace selected'
+                  : syncStatus === 'dirty' ? 'Save changes to backend'
+                    : syncStatus === 'error' ? 'Save failed — click to retry'
+                      : 'All changes saved'
+              }
+            >
+              {syncStatus === 'saving' ? (
+                <LucideIcons.Loader2 className="w-4 h-4 animate-spin" />
+              ) : syncStatus === 'error' ? (
+                <LucideIcons.AlertCircle className="w-4 h-4" />
+              ) : syncStatus === 'synced' ? (
+                <LucideIcons.CheckCircle className="w-4 h-4" />
+              ) : (
+                <LucideIcons.Save className="w-4 h-4" />
+              )}
+              <span>
+                {syncStatus === 'saving' ? 'Saving...'
+                  : syncStatus === 'error' ? 'Retry Save'
+                    : syncStatus === 'synced' ? 'Saved'
+                      : 'Save Blueprint'}
+              </span>
+              {syncStatus === 'dirty' && (
+                <div className="w-2 h-2 rounded-full bg-blue-400 shadow-lg shadow-blue-400/50" />
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Search Results - Modern pill results */}
@@ -1394,7 +1747,7 @@ export function ReferenceModelCanvas({
         </div>
 
         {/* Layer Columns */}
-        <div className="flex-1 overflow-auto relative scroll-smooth">
+        <div className="flex-1 overflow-auto relative scroll-smooth" onClick={handleBackgroundClick}>
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them (z-index managed in component to 0, cols should be higher) */}
           {(showLineageFlow || trace.isTracing) && (
             <LineageFlowOverlay
@@ -1407,6 +1760,9 @@ export function ReferenceModelCanvas({
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={trace.isTracing}
               traceResult={trace.result}
+              highlightedEdges={highlightState.edges}
+              isHighlightActive={isHighlightActive}
+              resolveEdgeColor={resolveEdgeColor}
             />
           )}
 
@@ -1433,6 +1789,8 @@ export function ReferenceModelCanvas({
                 traceFocusId={trace.focusId}
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
+                highlightedNodes={highlightState.nodes}
+                isHighlightActive={isHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
               />
             ))}
@@ -1531,12 +1889,14 @@ interface LayerColumnProps {
   traceFocusId: string | null
   traceNodes: Set<string>
   traceContextSet: Set<string>
+  highlightedNodes?: Set<string>
+  isHighlightActive?: boolean
   onAnimationComplete?: () => void
   onFocusNode?: (nodeId: string | null) => void
   focusedNodeId?: string | null
 }
 
-function LayerColumn({
+const LayerColumn = React.memo(function LayerColumn({
   layer,
   nodes,
   schema,
@@ -1552,6 +1912,8 @@ function LayerColumn({
   traceFocusId,
   traceNodes,
   traceContextSet,
+  highlightedNodes,
+  isHighlightActive = false,
   onAnimationComplete,
   onFocusNode,
   focusedNodeId
@@ -1865,6 +2227,8 @@ function LayerColumn({
                   isTraceActive={traceFocusId !== null}
                   isHighlighted={traceContextSet.has(node.id)}
                   isFocusNode={traceFocusId === node.id}
+                  isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
+                  isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
                   onSelect={onSelect}
                   onToggle={onToggle}
                   onContextMenu={onContextMenu}
@@ -1883,7 +2247,7 @@ function LayerColumn({
       )}
     </motion.div>
   )
-}
+})
 
 // ============================================
 // FLAT TREE ITEM - Individual row with tree lines
@@ -1902,6 +2266,8 @@ interface FlatTreeItemProps {
   isTraceActive: boolean
   isHighlighted: boolean
   isFocusNode: boolean
+  isClickHighlighted?: boolean
+  isDimmedByHighlight?: boolean
   onSelect: (id: string) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
@@ -1911,7 +2277,7 @@ interface FlatTreeItemProps {
   animationDelay?: number
 }
 
-function FlatTreeItem({
+const FlatTreeItem = React.memo(function FlatTreeItem({
   node,
   depth,
   isLast,
@@ -1924,6 +2290,8 @@ function FlatTreeItem({
   isTraceActive,
   isHighlighted,
   isFocusNode,
+  isClickHighlighted = false,
+  isDimmedByHighlight = false,
   onSelect,
   onToggle,
   onContextMenu,
@@ -1951,8 +2319,8 @@ function FlatTreeItem({
   const iconSize = isRoot ? 'w-5 h-5' : 'w-4 h-4'
   const iconContainerSize = isRoot ? 'w-9 h-9' : 'w-7 h-7'
 
-  // Calculate dimming
-  const isDimmed = isTraceActive && !isHighlighted
+  // Calculate dimming — trace takes priority over click-highlight
+  const isDimmed = (isTraceActive && !isHighlighted) || isDimmedByHighlight
 
   // Tree line indent - reduced to save horizontal space
   const indentWidth = depth * 16
@@ -1991,8 +2359,10 @@ function FlatTreeItem({
         isFocusNode && "ring-2 ring-accent-lineage/60 ring-offset-1 ring-offset-canvas shadow-lg shadow-accent-lineage/20",
         // Highlighted in trace
         isHighlighted && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
-        // Dimmed when not in trace path
-        isDimmed && "opacity-30 blur-[0.3px]"
+        // Click-highlight: subtle glow on connected nodes
+        isClickHighlighted && !isSelected && "ring-1 ring-blue-400/40 bg-gradient-to-r from-blue-500/10 to-transparent",
+        // Dimmed when not in trace path or not connected to highlighted node
+        isDimmed && "opacity-40"
       )}
       style={{
         paddingLeft: 12 + indentWidth,
@@ -2180,7 +2550,7 @@ function FlatTreeItem({
       />
     </motion.div>
   )
-}
+})
 
 // LayerNodeCard replaced with FlatTreeItem above for better UX
 
@@ -2198,6 +2568,9 @@ function LineageFlowOverlay({
   triggerRedrawRef,
   isTracing = false,
   traceResult = null,
+  highlightedEdges,
+  isHighlightActive = false,
+  resolveEdgeColor,
 }: {
   nodes: any[],
   edges: any[],
@@ -2208,6 +2581,9 @@ function LineageFlowOverlay({
   triggerRedrawRef?: React.MutableRefObject<(() => void) | null>
   isTracing?: boolean,
   traceResult?: any | null,
+  highlightedEdges?: Set<string>,
+  isHighlightActive?: boolean,
+  resolveEdgeColor?: (edgeType: string) => string,
 }) {
   const [paths, setPaths] = useState<React.ReactNode[]>([])
   const containerRef = useRef<HTMLDivElement>(null)
@@ -2262,6 +2638,14 @@ function LineageFlowOverlay({
       if (sourceEl && targetEl) {
         const sRect = sourceEl.getBoundingClientRect()
         const tRect = targetEl.getBoundingClientRect()
+
+        // Viewport culling: skip edges where BOTH endpoints are far outside visible area
+        const viewportMargin = 200
+        const viewportTop = -viewportMargin
+        const viewportBottom = window.innerHeight + viewportMargin
+        const bothAbove = sRect.bottom < viewportTop && tRect.bottom < viewportTop
+        const bothBelow = sRect.top > viewportBottom && tRect.top > viewportBottom
+        if (bothAbove || bothBelow) return
 
         // Relative coordinates
         // Offset sx/tx slightly from the card boundary to make arrowheads/terminals visible
@@ -2324,14 +2708,25 @@ function LineageFlowOverlay({
           d = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
         }
 
-        // Color: In trace mode, color by direction (upstream/downstream)
-        // In normal mode, color by edge type
-        let color = '#3b82f6' // default blue
-        const traceOpacity = isTracing ? 'opacity-80' : 'opacity-40'
-        const traceStroke = isTracing ? 2.5 : 1.5
+        // Color priority: trace > highlight > normal
+        // Edge type color resolved from backend schema via resolveEdgeColor prop
+        const typeColor = resolveEdgeColor
+          ? resolveEdgeColor(edge.originalType || '')
+          : '#3b82f6'
+
+        let color = typeColor
+        let edgeOpacity = 0.4
+        let strokeWidth = 1.5
+        let showAnimatedFlow = true
+
+        // Determine if this edge is highlighted (click-to-highlight)
+        const isEdgeHighlighted = isHighlightActive && highlightedEdges?.has(edge.id)
+        const isEdgeDimmed = isHighlightActive && !isEdgeHighlighted
 
         if (isTracing && traceResult) {
-          // Directional coloring for trace mode
+          // TRACE MODE: highest priority — color by direction (upstream/downstream)
+          edgeOpacity = 0.8
+          strokeWidth = 2.5
           const srcInUpstream = traceResult.upstreamNodes?.has(edge.source)
           const tgtInUpstream = traceResult.upstreamNodes?.has(edge.target)
           const srcInDownstream = traceResult.downstreamNodes?.has(edge.source)
@@ -2345,11 +2740,15 @@ function LineageFlowOverlay({
             color = '#a78bfa' // purple for focus-adjacent
           }
         } else {
-          // Normal mode: color by edge type
-          color = edge.originalType === 'AGGREGATED' ? '#8b5cf6' : // Purple for aggregated
-            edge.originalType === 'TRANSFORMS' ? '#3b82f6' :
-              edge.originalType === 'CONSUMES' ? '#22c55e' :
-                edge.originalType === 'PRODUCES' ? '#f59e0b' : '#3b82f6'
+          // Normal/highlight mode: use schema-resolved type color
+          if (isEdgeHighlighted) {
+            edgeOpacity = 0.9
+            strokeWidth = 2.5
+          } else if (isEdgeDimmed) {
+            edgeOpacity = 0.1
+            strokeWidth = 1
+            showAnimatedFlow = false
+          }
         }
 
         newPaths.push(
@@ -2371,32 +2770,32 @@ function LineageFlowOverlay({
               d={d}
               fill="none"
               stroke="currentColor"
-              strokeWidth={traceStroke}
+              strokeWidth={strokeWidth}
               markerEnd="url(#arrowhead)"
-              className={cn(
-                `transition-all duration-300 ${traceOpacity} group-hover:opacity-100`,
-              )}
-              style={{ strokeWidth: traceStroke }}
+              className="transition-all duration-300 group-hover:opacity-100"
+              style={{ strokeWidth, opacity: edgeOpacity }}
             />
 
-            {/* Animated Flow Layer (particles) */}
-            <path
-              d={d}
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeDasharray="4 8" // Shorter dash, more frequent
-              strokeLinecap="round"
-              className="animate-flow"
-              style={{
-                opacity: 0.8, // Slightly brighter
-                animationDuration: '1.5s', // Constant smooth speed
-                filter: 'url(#glow)'
-              }}
-            />
+            {/* Animated Flow Layer (particles) — only for highlighted/active edges */}
+            {showAnimatedFlow && (
+              <path
+                d={d}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeDasharray="4 8"
+                strokeLinecap="round"
+                className="animate-flow"
+                style={{
+                  opacity: 0.8,
+                  animationDuration: '1.5s',
+                  filter: 'url(#glow)'
+                }}
+              />
+            )}
 
             {/* Terminals */}
-            <circle cx={sx} cy={sy} r="2.5" fill="currentColor" className="opacity-40 group-hover:opacity-80" />
+            <circle cx={sx} cy={sy} r="2.5" fill="currentColor" style={{ opacity: edgeOpacity }} className="group-hover:opacity-80" />
 
             <title>{edge.source} → {edge.target} ({edge.originalType})</title>
           </g>
@@ -2404,7 +2803,7 @@ function LineageFlowOverlay({
       }
     })
     setPaths(newPaths)
-  }, [edges, selectEdge, isEdgePanelOpen, toggleEdgePanel])
+  }, [edges, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor])
 
   // Store updateFlow in ref for ResizeObserver access and expose to parent
   useEffect(() => {
@@ -2502,5 +2901,6 @@ function LineageFlowOverlay({
   )
 }
 
-export default ReferenceModelCanvas
-
+// Backward-compat named export for existing imports (CanvasRouter etc.)
+export { ContextViewCanvas as ReferenceModelCanvas }
+export default ContextViewCanvas

@@ -1,14 +1,16 @@
 /**
- * AssignmentStep - Tree-based entity assignment for ViewWizard
- * 
- * Features:
- * - Hierarchical entity browser with virtualization
- * - Drag-and-drop to layer cards
- * - Bulk selection and assignment
- * - Configurable containment edge types
+ * AssignmentStep - Hosts the Layer Studio for reference layout views,
+ * or falls back to the original tree + LayerManager for other layouts.
+ *
+ * The Layer Studio provides:
+ * - Three-panel WYSIWYG: Layer Hierarchy | Entity Browser | Live Preview
+ * - Logical node (group) CRUD with undo/redo
+ * - Autosave to backend (debounced 800ms)
+ * - Auto-organize suggestions
  */
 
 import { useMemo, useCallback, useEffect } from 'react'
+import { LayerStudio } from '../../LayerStudio'
 import { WizardAssignmentTree } from '../WizardAssignmentTree'
 import { LayerManager } from '../../LayerManager'
 import { useSchemaStore } from '@/store/schema'
@@ -19,9 +21,11 @@ import type { WizardFormData } from '../ViewWizard'
 interface AssignmentStepProps {
     formData: WizardFormData
     updateFormData: (updates: Partial<WizardFormData>) => void
+    linkedContextModelId?: string | null
+    onDraftSaved?: (modelId: string) => void
 }
 
-export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps) {
+export function AssignmentStep({ formData, updateFormData, linkedContextModelId, onDraftSaved }: AssignmentStepProps) {
     const schema = useSchemaStore(s => s.schema)
     const setLayers = useReferenceModelStore(s => s.setLayers)
     const bulkAssignEntitiesToLayer = useReferenceModelStore(s => s.bulkAssignEntitiesToLayer)
@@ -33,11 +37,27 @@ export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps
         }
     }, [formData.layers, setLayers])
 
-    // Get containment edge types from scope configuration or schema with fallback
+    const isReferenceLayout = formData.layoutType === 'reference'
+
+    // ── Reference layout → full Layer Studio ──────────────────────────────────
+    if (isReferenceLayout) {
+        return (
+            <div className="h-[680px] flex flex-col">
+                <LayerStudio
+                    formData={formData}
+                    updateFormData={updateFormData}
+                    linkedContextModelId={linkedContextModelId}
+                    onDraftSaved={onDraftSaved}
+                />
+            </div>
+        )
+    }
+
+    // ── Fallback: original two-panel for non-reference layouts ─────────────────
+    // eslint-disable-next-line react-hooks/rules-of-hooks
     const containmentEdgeTypes = useMemo(() => {
         const configured = formData.scopeEdges?.edgeTypes
         if (configured && configured.length > 0) return configured
-
         return schema?.containmentEdgeTypes || [
             'contains', 'CONTAINS',
             'has_schema', 'HAS_SCHEMA',
@@ -46,17 +66,13 @@ export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps
         ]
     }, [formData.scopeEdges?.edgeTypes, schema?.containmentEdgeTypes])
 
-    // Handle assignment changes from tree
+    // eslint-disable-next-line react-hooks/rules-of-hooks
     const handleAssignmentChange = useCallback((entityId: string, layerId: string | null) => {
         if (!formData.layers) return
-
         const updatedLayers = formData.layers.map(layer => {
-            // Remove entity from all layers first
             const filteredAssignments = (layer.entityAssignments || [])
                 .filter(a => a.entityId !== entityId)
-
             if (layer.id === layerId) {
-                // Add to target layer
                 const newAssignment: EntityAssignmentConfig = {
                     entityId,
                     layerId: layer.id,
@@ -65,63 +81,38 @@ export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps
                     assignedBy: 'user',
                     assignedAt: new Date().toISOString()
                 }
-                return {
-                    ...layer,
-                    entityAssignments: [...filteredAssignments, newAssignment]
-                }
+                return { ...layer, entityAssignments: [...filteredAssignments, newAssignment] }
             }
-
-            return {
-                ...layer,
-                entityAssignments: filteredAssignments
-            }
+            return { ...layer, entityAssignments: filteredAssignments }
         })
-
         updateFormData({ layers: updatedLayers })
     }, [formData.layers, updateFormData])
 
-    // Handle bulk assignment from tree or drops
+    // eslint-disable-next-line react-hooks/rules-of-hooks
     const handleBulkAssignment = useCallback((layerId: string, entityIds: string[]) => {
         if (!formData.layers) return
-
-        // 1. Update store for conflict detection and graph compute
         bulkAssignEntitiesToLayer(entityIds, layerId, { inheritsChildren: true })
-
-        // 2. Update local wizard state immediately
         const updatedLayers = formData.layers.map(layer => {
-            // Remove entity from all layers first
             const filteredAssignments = (layer.entityAssignments || [])
                 .filter(a => !entityIds.includes(a.entityId))
-
             if (layer.id === layerId) {
-                // Add all successful to target layer
                 const newConfigs: EntityAssignmentConfig[] = entityIds.map(id => ({
                     entityId: id,
                     layerId: layer.id,
                     inheritsChildren: true,
                     priority: 1000,
-                    assignedBy: 'user',
+                    assignedBy: 'user' as const,
                     assignedAt: new Date().toISOString()
                 }))
-
-                return {
-                    ...layer,
-                    entityAssignments: [...filteredAssignments, ...newConfigs]
-                }
+                return { ...layer, entityAssignments: [...filteredAssignments, ...newConfigs] }
             }
-
-            return {
-                ...layer,
-                entityAssignments: filteredAssignments
-            }
+            return { ...layer, entityAssignments: filteredAssignments }
         })
-
         updateFormData({ layers: updatedLayers })
     }, [formData.layers, bulkAssignEntitiesToLayer, updateFormData])
 
     return (
         <div className="flex h-[650px] gap-6">
-            {/* Left Panel: Entity Tree Browser */}
             <div className="w-2/5 min-w-[380px] flex flex-col">
                 <WizardAssignmentTree
                     layers={formData.layers || []}
@@ -131,16 +122,10 @@ export function AssignmentStep({ formData, updateFormData }: AssignmentStepProps
                     className="h-full"
                 />
             </div>
-
-            {/* Right Panel: Layer Drop Targets */}
             <div className="flex-1 flex flex-col min-h-0">
                 <div className="mb-3">
-                    <h3 className="text-lg font-semibold text-slate-800 dark:text-white">
-                        Layer Targets
-                    </h3>
-                    <p className="text-sm text-slate-500">
-                        Drop entities here or use the dropdown in the tree
-                    </p>
+                    <h3 className="text-lg font-semibold text-slate-800 dark:text-white">Layer Targets</h3>
+                    <p className="text-sm text-slate-500">Drop entities here or use the dropdown in the tree</p>
                 </div>
                 <div className="flex-1 overflow-y-auto pr-2">
                     <LayerManager

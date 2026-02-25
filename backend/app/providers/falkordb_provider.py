@@ -256,21 +256,16 @@ class FalkorDBProvider(GraphDataProvider):
         params["skip"] = offset
         params["limit"] = limit
         
-        # Determine containment relationships to count children
-        containment = list(self._get_containment_edge_types())
-        containment_rel_types = "|".join([_sanitize_label(t) for t in containment]) if containment else "CONTAINS"
-        
-        # Dynamic Child Count Calculation
-        # OPTIONAL MATCH (n)-[:CONTAINS]->(c) RETURN n, count(c)
-        # We need to inject this into the return statement or use a subquery approach if supported
-        # FalkorDB 2.x supports subqueries or we can just do OPTIONAL MATCH in the main query
-        
-        # Modified Query Construction
-        # Original: MATCH (n) ... RETURN n
-        # New: MATCH (n) ... OPTIONAL MATCH (n)-[:...]->(child) RETURN n, count(child)
-        
-        clauses.append(f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)")
-        clauses.append("RETURN n, count(child) as childCount SKIP $skip LIMIT $limit")
+        # Child count: only compute when needed (skip for bulk lineage fetches)
+        include_child_count = query.include_child_count
+
+        if include_child_count:
+            containment = list(self._get_containment_edge_types())
+            containment_rel_types = "|".join([_sanitize_label(t) for t in containment]) if containment else "CONTAINS"
+            clauses.append(f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)")
+            clauses.append("RETURN n, count(child) as childCount SKIP $skip LIMIT $limit")
+        else:
+            clauses.append("RETURN n SKIP $skip LIMIT $limit")
 
         cypher = " ".join(clauses)
 
@@ -278,14 +273,16 @@ class FalkorDBProvider(GraphDataProvider):
             result = await self._graph.ro_query(cypher, params=params)
         except Exception as e:
             logger.warning(f"get_nodes query failed: {e}")
-            # Fallback to simpler query without count if complex one fails
-            # But we really need the count for UI to work...
             return []
 
         nodes = []
         for row in (result.result_set or []):
-            n = self._extract_node_from_result(row[0])
-            child_count = row[1]
+            if include_child_count:
+                n = self._extract_node_from_result(row[0])
+                child_count = row[1]
+            else:
+                n = self._extract_node_from_result(row)
+                child_count = None
             if n:
                 if query.property_filters and not self._match_property_filters(n, query.property_filters):
                     continue
@@ -293,13 +290,13 @@ class FalkorDBProvider(GraphDataProvider):
                     continue
                 if query.name_filter and not self._match_text_filter(n.display_name, query.name_filter):
                     continue
-                
-                # Apply dynamic child count
+
+                # Apply dynamic child count when available
                 if child_count is not None:
                     n.child_count = int(child_count)
                     if n.properties:
                         n.properties['childCount'] = int(child_count)
-                        
+
                 nodes.append(n)
                 if len(nodes) >= limit:
                     break
@@ -473,41 +470,59 @@ class FalkorDBProvider(GraphDataProvider):
         depth: int,
         descendant_types: Optional[List[EntityType]] = None,
     ) -> Set[str]:
-        """BFS traversal for lineage (excluding containment edges)."""
-        containment = self._get_containment_edge_types()
-        allowed_types = None
+        """
+        Single-query lineage traversal using variable-length Cypher paths.
+        Replaces the previous BFS which made N+1 queries per hop.
+        """
+        await self._ensure_connected()
+        containment = list(self._get_containment_edge_types())
+        params: Dict[str, Any] = {
+            "startUrn": start_urn,
+            "depth": depth,
+            "containmentTypes": containment,
+        }
+
+        # Variable-length path: traverse edges that are NOT containment types
+        if direction == "upstream":
+            # Follow edges backwards (target → source)
+            cypher = (
+                "MATCH (start) WHERE start.urn = $startUrn "
+                "MATCH path = (neighbor)-[*1..]->(start) "
+                "WHERE length(path) <= $depth "
+                "AND ALL(r IN relationships(path) WHERE NOT type(r) IN $containmentTypes) "
+                "RETURN DISTINCT neighbor.urn AS urn"
+            )
+        else:
+            # Follow edges forwards (source → target)
+            cypher = (
+                "MATCH (start) WHERE start.urn = $startUrn "
+                "MATCH path = (start)-[*1..]->(neighbor) "
+                "WHERE length(path) <= $depth "
+                "AND ALL(r IN relationships(path) WHERE NOT type(r) IN $containmentTypes) "
+                "RETURN DISTINCT neighbor.urn AS urn"
+            )
+
+        result = await self._graph.ro_query(cypher, params=params)
+        result_urns: Set[str] = set()
+
         if descendant_types:
             allowed_types = {t.value if hasattr(t, "value") else str(t) for t in descendant_types}
+        else:
+            allowed_types = None
 
-        visited = set()
-        queue = deque([(start_urn, 0)])
-        result_urns = set()
+        for row in (result.result_set or []):
+            urn = row[0]
+            if urn and urn != start_urn:
+                result_urns.add(urn)
 
-        while queue:
-            current_urn, d = queue.popleft()
-            if d >= depth:
-                continue
-            visited.add(current_urn)
-
-            if direction == "upstream":
-                edges = await self.get_edges(EdgeQuery(target_urns=[current_urn]))
-            else:
-                edges = await self.get_edges(EdgeQuery(source_urns=[current_urn]))
-
-            for e in edges:
-                et = e.edge_type.value if hasattr(e.edge_type, "value") else str(e.edge_type)
-                if et.upper() in containment:
-                    continue
-                neighbor = e.source_urn if direction == "upstream" else e.target_urn
-                if allowed_types:
-                    n = await self.get_node(neighbor)
-                    if n:
-                        nt = n.entity_type.value if hasattr(n.entity_type, "value") else str(n.entity_type)
-                        if nt not in allowed_types:
-                            continue
-                if neighbor not in visited:
-                    result_urns.add(neighbor)
-                    queue.append((neighbor, d + 1))
+        # Filter by entity type if needed (uses bulk fetch instead of per-node queries)
+        if allowed_types and result_urns:
+            nodes = await self.get_nodes(NodeQuery(urns=list(result_urns), limit=len(result_urns), include_child_count=False))
+            result_urns = set()
+            for n in nodes:
+                nt = n.entity_type.value if hasattr(n.entity_type, "value") else str(n.entity_type)
+                if nt in allowed_types:
+                    result_urns.add(n.urn)
 
         return result_urns
 
@@ -520,13 +535,9 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> LineageResult:
         upstream_urns = await self._traverse_lineage(urn, "upstream", depth, descendant_types)
         all_urns = upstream_urns | {urn}
-        nodes = []
-        for u in all_urns:
-            n = await self.get_node(u)
-            if n:
-                nodes.append(n)
+        nodes = await self.get_nodes(NodeQuery(urns=list(all_urns), limit=len(all_urns), include_child_count=False))
         node_ids = {n.urn for n in nodes}
-        edges = await self.get_edges(EdgeQuery(limit=100000))
+        edges = await self.get_edges(EdgeQuery(any_urns=list(all_urns), limit=len(all_urns) * 10))
         edges = [e for e in edges if e.source_urn in node_ids and e.target_urn in node_ids]
         return LineageResult(
             nodes=nodes,
@@ -546,13 +557,9 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> LineageResult:
         downstream_urns = await self._traverse_lineage(urn, "downstream", depth, descendant_types)
         all_urns = downstream_urns | {urn}
-        nodes = []
-        for u in all_urns:
-            n = await self.get_node(u)
-            if n:
-                nodes.append(n)
+        nodes = await self.get_nodes(NodeQuery(urns=list(all_urns), limit=len(all_urns), include_child_count=False))
         node_ids = {n.urn for n in nodes}
-        edges = await self.get_edges(EdgeQuery(limit=100000))
+        edges = await self.get_edges(EdgeQuery(any_urns=list(all_urns), limit=len(all_urns) * 10))
         edges = [e for e in edges if e.source_urn in node_ids and e.target_urn in node_ids]
         return LineageResult(
             nodes=nodes,
@@ -574,13 +581,9 @@ class FalkorDBProvider(GraphDataProvider):
         up = await self._traverse_lineage(urn, "upstream", upstream_depth, descendant_types)
         down = await self._traverse_lineage(urn, "downstream", downstream_depth, descendant_types)
         all_urns = up | down | {urn}
-        nodes = []
-        for u in all_urns:
-            n = await self.get_node(u)
-            if n:
-                nodes.append(n)
+        nodes = await self.get_nodes(NodeQuery(urns=list(all_urns), limit=len(all_urns), include_child_count=False))
         node_ids = {n.urn for n in nodes}
-        edges = await self.get_edges(EdgeQuery(limit=100000))
+        edges = await self.get_edges(EdgeQuery(any_urns=list(all_urns), limit=len(all_urns) * 10))
         edges = [e for e in edges if e.source_urn in node_ids and e.target_urn in node_ids]
         return LineageResult(
             nodes=nodes,
@@ -1360,3 +1363,29 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception as e:
             logger.error(f"create_node failed: {e}")
             return False
+
+    # ------------------------------------------------------------------ #
+    # ProviderRegistry lifecycle helpers                                   #
+    # ------------------------------------------------------------------ #
+
+    async def list_graphs(self) -> list:
+        """Return all graph keys on this FalkorDB instance via GRAPH.LIST."""
+        await self._ensure_connected()
+        try:
+            result = await self._db.execute_command("GRAPH.LIST")
+            return list(result) if result else []
+        except Exception as exc:
+            logger.warning("GRAPH.LIST failed: %s", exc)
+            return []
+
+    async def close(self) -> None:
+        """Release the Redis connection pool held by this provider."""
+        try:
+            if self._pool is not None:
+                await self._pool.aclose()
+        except Exception as exc:
+            logger.warning("Error closing FalkorDB pool: %s", exc)
+        finally:
+            self._graph = None
+            self._pool = None
+            self._db = None

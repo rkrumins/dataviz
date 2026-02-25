@@ -1,67 +1,132 @@
 /**
  * GraphProviderContext - React context for graph data provider
- * 
- * Allows injection of different graph data providers (Mock, FalkorDB, DataHub)
- * at the application root level.
+ *
+ * Workspace-aware: when an activeWorkspaceId is set in the workspaces store,
+ * a new RemoteGraphProvider is created with that workspaceId so all API calls
+ * are routed through /v1/{ws_id}/graph/.
+ *
+ * Falls back to connection-aware mode during migration, and to the primary
+ * connection when neither workspace nor connection is configured.
  */
 
-import { createContext, useContext, useState, useEffect, type ReactNode } from 'react'
+import { createContext, useContext, useState, useEffect, useRef, type ReactNode } from 'react'
 import type { GraphDataProvider, GraphProviderContextValue } from './GraphDataProvider'
 import { getMockProvider } from './MockProvider'
+import { RemoteGraphProvider } from './RemoteGraphProvider'
+import { useWorkspacesStore } from '@/store/workspaces'
+import { useConnectionsStore } from '@/store/connections'
 
 // ============================================
-// Context
+// Extended context value
 // ============================================
 
-const GraphProviderContext = createContext<GraphProviderContextValue | null>(null)
+export interface GraphProviderContextValueExtended extends GraphProviderContextValue {
+    workspaceId: string | null
+    setWorkspaceId: (id: string | null) => void
+    dataSourceId: string | null
+    setDataSourceId: (id: string | null) => void
+    /** @deprecated Use workspaceId — kept for backward compat */
+    connectionId: string | null
+    /** @deprecated Use setWorkspaceId — kept for backward compat */
+    setConnectionId: (id: string | null) => void
+}
+
+const GraphProviderContext = createContext<GraphProviderContextValueExtended | null>(null)
 
 // ============================================
 // Provider Component
 // ============================================
 
 interface GraphProviderProps {
-    /** Optional custom provider (defaults to MockProvider) */
-    provider?: GraphDataProvider
     children: ReactNode
 }
 
-export function GraphProvider({ provider, children }: GraphProviderProps) {
+export function GraphProvider({ children }: GraphProviderProps) {
+    // Workspace-centric (primary)
+    const activeWorkspaceId = useWorkspacesStore((s) => s.activeWorkspaceId)
+    const activeDataSourceId = useWorkspacesStore((s) => s.activeDataSourceId)
+    const loadWorkspaces = useWorkspacesStore((s) => s.loadWorkspaces)
+    const setActiveWorkspace = useWorkspacesStore((s) => s.setActiveWorkspace)
+    const setActiveDataSource = useWorkspacesStore((s) => s.setActiveDataSource)
+
+    // Connection-based (legacy fallback)
+    const activeConnectionId = useConnectionsStore((s) => s.activeConnectionId)
+    const loadConnections = useConnectionsStore((s) => s.loadConnections)
+    const setActiveConnection = useConnectionsStore((s) => s.setActiveConnection)
+
     const [isLoading, setIsLoading] = useState(true)
     const [error, setError] = useState<Error | null>(null)
     const [currentProvider, setCurrentProvider] = useState<GraphDataProvider | null>(null)
 
+    // Track previous IDs so we only rebuild the provider when it changes
+    const prevWorkspaceId = useRef<string | null | undefined>(undefined)
+    const prevDataSourceId = useRef<string | null | undefined>(undefined)
+    const prevConnectionId = useRef<string | null | undefined>(undefined)
+
+    // Load both workspace and connection lists on mount
     useEffect(() => {
+        loadWorkspaces()
+        loadConnections()
+    }, [loadWorkspaces, loadConnections])
+
+    // Rebuild provider when workspace, data source, or connection changes
+    useEffect(() => {
+        if (
+            prevWorkspaceId.current === activeWorkspaceId &&
+            prevDataSourceId.current === activeDataSourceId &&
+            prevConnectionId.current === activeConnectionId
+        ) return
+        prevWorkspaceId.current = activeWorkspaceId
+        prevDataSourceId.current = activeDataSourceId
+        prevConnectionId.current = activeConnectionId
+
         const initProvider = async () => {
             try {
                 setIsLoading(true)
                 setError(null)
 
-                // Use provided provider or default to MockProvider
-                const p = provider ?? getMockProvider()
+                let p: RemoteGraphProvider
+                if (activeWorkspaceId) {
+                    // Workspace-scoped: /v1/{ws_id}/graph/... with optional dataSourceId
+                    p = new RemoteGraphProvider({
+                        workspaceId: activeWorkspaceId,
+                        dataSourceId: activeDataSourceId ?? undefined,
+                    })
+                } else if (activeConnectionId) {
+                    // Legacy connection-scoped: ?connectionId=xxx
+                    p = new RemoteGraphProvider({ connectionId: activeConnectionId })
+                } else {
+                    // No workspace or connection → server uses primary/default
+                    p = new RemoteGraphProvider()
+                }
 
-                // Verify provider is working by fetching stats
                 await p.getStats()
-
                 setCurrentProvider(p)
             } catch (err) {
                 setError(err instanceof Error ? err : new Error('Failed to initialize provider'))
+                setCurrentProvider(getMockProvider())
             } finally {
                 setIsLoading(false)
             }
         }
 
         initProvider()
-    }, [provider])
+    }, [activeWorkspaceId, activeDataSourceId, activeConnectionId])
 
-    // Show nothing while loading
     if (!currentProvider && isLoading) {
         return null
     }
 
-    const value: GraphProviderContextValue = {
+    const value: GraphProviderContextValueExtended = {
         provider: currentProvider ?? getMockProvider(),
         isLoading,
         error,
+        workspaceId: activeWorkspaceId,
+        setWorkspaceId: setActiveWorkspace,
+        dataSourceId: activeDataSourceId,
+        setDataSourceId: setActiveDataSource,
+        connectionId: activeConnectionId,
+        setConnectionId: setActiveConnection,
     }
 
     return (
@@ -82,7 +147,6 @@ export function useGraphProvider(): GraphDataProvider {
     const context = useContext(GraphProviderContext)
 
     if (!context) {
-        // If not wrapped in provider, return mock provider
         console.warn('useGraphProvider: No GraphProvider found, using MockProvider')
         return getMockProvider()
     }
@@ -91,9 +155,9 @@ export function useGraphProvider(): GraphDataProvider {
 }
 
 /**
- * Access the full provider context including loading/error state
+ * Access the full provider context including loading/error state and workspaceId
  */
-export function useGraphProviderContext(): GraphProviderContextValue {
+export function useGraphProviderContext(): GraphProviderContextValueExtended {
     const context = useContext(GraphProviderContext)
 
     if (!context) {
@@ -101,6 +165,12 @@ export function useGraphProviderContext(): GraphProviderContextValue {
             provider: getMockProvider(),
             isLoading: false,
             error: null,
+            workspaceId: null,
+            setWorkspaceId: () => {},
+            dataSourceId: null,
+            setDataSourceId: () => {},
+            connectionId: null,
+            setConnectionId: () => {},
         }
     }
 

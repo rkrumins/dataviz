@@ -10,7 +10,7 @@
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import type { OntologyMetadata, EdgeTypeMetadata } from '@/providers/GraphDataProvider'
 
 /** Edge classification categories derived from ontology */
@@ -35,44 +35,48 @@ interface UseOntologyMetadataResult {
     refresh: () => Promise<void>
 }
 
-// Global cache to share metadata across components
-let cachedMetadata: OntologyMetadata | null = null
-let cachePromise: Promise<OntologyMetadata> | null = null
+// Per-context caches — keyed by workspaceId or connectionId (or '__primary__' when null)
+const metadataCache = new Map<string, OntologyMetadata>()
+const fetchPromises = new Map<string, Promise<OntologyMetadata>>()
 
-// Export cached metadata for external access (for App.tsx)
-export function getCachedOntologyMetadata(): OntologyMetadata | null {
-    return cachedMetadata
+function cacheKey(workspaceId: string | null, connectionId: string | null): string {
+    return workspaceId ?? connectionId ?? '__primary__'
+}
+
+// Export cached metadata for external access (e.g. App.tsx)
+export function getCachedOntologyMetadata(workspaceId?: string | null, connectionId?: string | null): OntologyMetadata | null {
+    return metadataCache.get(cacheKey(workspaceId ?? null, connectionId ?? null)) ?? null
 }
 
 /**
- * Hook to access ontology metadata
- * Fetches from backend on first use and caches the result.
+ * Hook to access ontology metadata.
+ * Fetches from the backend on first use per workspace/connection and caches.
  * All edge classification is ontology-driven — no hardcoded type checks.
  */
 export function useOntologyMetadata(): UseOntologyMetadataResult {
-    const { provider } = useGraphProvider()
-    const [metadata, setMetadata] = useState<OntologyMetadata | null>(cachedMetadata)
-    const [isLoading, setIsLoading] = useState(!cachedMetadata)
+    const { provider, workspaceId, connectionId } = useGraphProviderContext()
+    const key = cacheKey(workspaceId, connectionId)
+
+    const [metadata, setMetadata] = useState<OntologyMetadata | null>(metadataCache.get(key) ?? null)
+    const [isLoading, setIsLoading] = useState(!metadataCache.has(key))
     const [error, setError] = useState<Error | null>(null)
 
     const fetchMetadata = useCallback(async () => {
-        if (cachePromise) {
-            // If already fetching, wait for existing promise
+        const existing = fetchPromises.get(key)
+        if (existing) {
             try {
-                const result = await cachePromise
+                const result = await existing
                 setMetadata(result)
                 setIsLoading(false)
-                return
             } catch (err) {
                 setError(err as Error)
                 setIsLoading(false)
-                return
             }
+            return
         }
 
-        if (cachedMetadata) {
-            // Use cached data
-            setMetadata(cachedMetadata)
+        if (metadataCache.has(key)) {
+            setMetadata(metadataCache.get(key)!)
             setIsLoading(false)
             return
         }
@@ -80,46 +84,48 @@ export function useOntologyMetadata(): UseOntologyMetadataResult {
         setIsLoading(true)
         setError(null)
 
+        const promise = provider.getOntologyMetadata()
+        fetchPromises.set(key, promise)
+
         try {
-            cachePromise = provider.getOntologyMetadata()
-            const result = await cachePromise
-            cachedMetadata = result
+            const result = await promise
+            metadataCache.set(key, result)
             setMetadata(result)
             setIsLoading(false)
-            cachePromise = null
-            console.log('[OntologyService] Loaded ontology metadata:', {
+            fetchPromises.delete(key)
+            console.log('[OntologyService] Loaded ontology metadata for', key, {
                 containmentTypes: result.containmentEdgeTypes,
                 lineageTypes: result.lineageEdgeTypes,
                 edgeTypeCount: Object.keys(result.edgeTypeMetadata).length,
-                entityTypeCount: Object.keys(result.entityTypeHierarchy).length
             })
         } catch (err) {
             console.error('[OntologyService] Failed to load ontology metadata:', err)
             setError(err as Error)
             setIsLoading(false)
-            cachePromise = null
-            // Set default fallback metadata — only used when backend is unreachable
+            fetchPromises.delete(key)
+            // Fallback metadata — only used when backend is unreachable
             const fallbackMetadata: OntologyMetadata = {
                 containmentEdgeTypes: ['CONTAINS', 'BELONGS_TO', 'PRODUCES'],
                 lineageEdgeTypes: ['TRANSFORMS', 'CONSUMES', 'RELATED_TO'],
                 edgeTypeMetadata: {},
                 entityTypeHierarchy: {},
-                rootEntityTypes: []
+                rootEntityTypes: [],
             }
-            cachedMetadata = fallbackMetadata
+            metadataCache.set(key, fallbackMetadata)
             setMetadata(fallbackMetadata)
         }
-    }, [provider])
+    }, [provider, key])
 
+    // Re-fetch when connectionId changes
     useEffect(() => {
         fetchMetadata()
     }, [fetchMetadata])
 
     const refresh = useCallback(async () => {
-        cachedMetadata = null
-        cachePromise = null
+        metadataCache.delete(key)
+        fetchPromises.delete(key)
         await fetchMetadata()
-    }, [fetchMetadata])
+    }, [key, fetchMetadata])
 
     // Memoize containmentEdgeTypes to prevent array recreation on every render
     const containmentEdgeTypesKey = metadata?.containmentEdgeTypes?.join(',') || ''

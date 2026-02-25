@@ -7,17 +7,26 @@ import {
   ChevronLeft,
   ChevronRight,
   Plus,
-  Palette
+  Palette,
+  Database,
+  ChevronsUpDown,
+  Check
 } from 'lucide-react'
+import { useState } from 'react'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import { useNavigationStore, type NavigationTab } from '@/store/navigation'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { ViewSelector } from '@/components/views/ViewSelector'
 import { useViewEditorModal } from './AppShell'
+import { WorkspacePanel } from '@/components/workspaces/WorkspacePanel'
+import { useWorkspaces } from '@/hooks/useWorkspaces'
+import { useConnections } from '@/hooks/useConnections'
 import { cn } from '@/lib/utils'
 
 interface NavItem {
-  id: string
+  id: NavigationTab
   label: string
   icon: React.ComponentType<{ className?: string }>
   badge?: number
@@ -30,14 +39,182 @@ const mainNavItems: NavItem[] = [
   { id: 'schema', label: 'Schema Editor', icon: Palette },
 ]
 
+function EnvironmentSwitcher({
+  onManageWorkspaces,
+  onManageConnections,
+  collapsed
+}: {
+  onManageWorkspaces: () => void,
+  onManageConnections: () => void,
+  collapsed: boolean
+}) {
+  const {
+    workspaces,
+    activeWorkspace,
+    activeWorkspaceId,
+    setActiveWorkspace,
+    activeDataSourceId,
+    setActiveDataSource
+  } = useWorkspaces()
+
+  const {
+    connections,
+    activeConnectionId,
+    setActiveConnection
+  } = useConnections()
+
+  const activeConnection = connections.find(c => c.id === activeConnectionId)
+  const activeDs = activeWorkspace?.dataSources?.find(d => d.id === activeDataSourceId)
+
+  let displayName = "Select Environment"
+  let displaySub = "No selection"
+  let Icon = Database
+
+  if (activeWorkspace) {
+    displayName = activeWorkspace.name
+    displaySub = activeDs ? (activeDs.label || activeDs.graphName || 'Workspace') : 'Workspace'
+    Icon = Database
+  } else if (activeConnection) {
+    displayName = activeConnection.name
+    displaySub = 'Legacy Connection'
+    Icon = Network
+  }
+
+  if (collapsed) {
+    return (
+      <div className="p-3 flex justify-center border-b border-glass-border">
+        <button
+          onClick={onManageWorkspaces}
+          className="w-10 h-10 rounded-xl bg-accent-business/10 flex items-center justify-center text-accent-business border border-accent-business/20 cursor-pointer hover:bg-accent-business/20 transition-colors"
+          title={displayName}
+        >
+          <Icon className="w-5 h-5" />
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="px-3 pt-3 pb-2 border-b border-glass-border mb-2">
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger asChild>
+          <button className={cn(
+            "w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left",
+            "bg-gradient-to-br from-black/5 to-black/10 dark:from-white/5 dark:to-white/10",
+            "border border-glass-border shadow-[0_2px_8px_-2px_rgba(0,0,0,0.1)] hover:shadow-[0_4px_12px_-2px_rgba(0,0,0,0.15)]",
+            "transition-all duration-200 group outline-none focus:ring-2 focus:ring-accent-business/50"
+          )}>
+            <div className="flex items-center gap-3 overflow-hidden">
+              <div className="w-8 h-8 rounded-lg bg-accent-business/20 flex items-center justify-center text-accent-business border border-accent-business/30 shrink-0 shadow-inner">
+                <Icon className="w-4 h-4" />
+              </div>
+              <div className="flex flex-col min-w-0">
+                <span className="text-sm font-semibold text-ink truncate leading-tight">{displayName}</span>
+                <span className="text-[10px] text-ink-muted truncate mt-0.5">{displaySub}</span>
+              </div>
+            </div>
+            <ChevronsUpDown className="w-4 h-4 text-ink-muted group-hover:text-ink transition-colors shrink-0" />
+          </button>
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content
+            className="w-64 bg-canvas-elevated border border-glass-border rounded-xl shadow-xl p-2 z-50 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2 ml-3"
+            align="start"
+            sideOffset={8}
+          >
+            {/* Workspaces Group */}
+            <div className="px-3 py-1.5 mb-1 flex items-center justify-between">
+              <span className="text-[10px] font-bold text-ink-muted uppercase tracking-wider">Workspaces</span>
+              <button onClick={onManageWorkspaces} className="p-1 rounded hover:bg-black/5 dark:hover:bg-white/5" title="Manage Workspaces">
+                <Plus className="w-3 h-3 text-ink-muted" />
+              </button>
+            </div>
+            {workspaces.map(ws => (
+              <div key={ws.id} className="flex flex-col mb-1">
+                <DropdownMenu.Item
+                  onSelect={() => setActiveWorkspace(ws.id)}
+                  className="flex items-center justify-between px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-business/10 focus:text-accent-business transition-colors"
+                >
+                  <div className="flex items-center gap-2 truncate">
+                    <Database className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate font-medium">{ws.name}</span>
+                  </div>
+                  {ws.id === activeWorkspaceId && <Check className="w-4 h-4 text-emerald-500 shrink-0" />}
+                </DropdownMenu.Item>
+
+                {/* Data sources sub-options */}
+                {(ws.id === activeWorkspaceId && ws.dataSources && ws.dataSources.length > 1) && (
+                  <div className="mt-1 ml-6 flex flex-col gap-0.5 border-l-2 border-glass-border pl-2">
+                    {ws.dataSources.map(ds => (
+                      <div
+                        key={ds.id}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActiveDataSource(ds.id);
+                        }}
+                        className={cn("flex items-center justify-between text-xs px-2 py-1.5 rounded cursor-pointer transition-colors",
+                          ds.id === activeDataSourceId ? "text-accent-business bg-accent-business/5 font-medium" : "text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5")}
+                      >
+                        <span className="truncate flex-1 pr-2">{ds.label || ds.graphName || ds.providerId}</span>
+                        {ds.id === activeDataSourceId && <Check className="w-3 h-3 text-accent-business shrink-0" />}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+            {workspaces.length === 0 && (
+              <div onClick={onManageWorkspaces} className="px-3 py-2 text-xs text-ink-muted italic border border-dashed border-glass-border rounded-lg text-center cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink transition-colors mb-1">
+                Create Workspace...
+              </div>
+            )}
+
+            <DropdownMenu.Separator className="h-px bg-glass-border my-2 mx-1" />
+
+            {/* Legacy Connections Group */}
+            <div className="px-3 py-1.5 mb-1 flex items-center justify-between">
+              <span className="text-[10px] font-bold text-ink-muted uppercase tracking-wider">Legacy Connections</span>
+              <button onClick={onManageConnections} className="p-1 rounded hover:bg-black/5 dark:hover:bg-white/5" title="Manage Connections">
+                <Plus className="w-3 h-3 text-ink-muted" />
+              </button>
+            </div>
+            {connections.map(conn => (
+              <DropdownMenu.Item
+                key={conn.id}
+                onSelect={() => setActiveConnection(conn.id)}
+                className="flex items-center justify-between px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-business/10 focus:text-accent-business transition-colors mb-1"
+              >
+                <div className="flex items-center gap-2 truncate">
+                  <Network className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">{conn.name}</span>
+                </div>
+                {conn.id === activeConnectionId && <Check className="w-4 h-4 text-emerald-500 shrink-0" />}
+              </DropdownMenu.Item>
+            ))}
+            {connections.length === 0 && (
+              <div onClick={onManageConnections} className="px-3 py-2 text-xs text-ink-muted italic border border-dashed border-glass-border rounded-lg text-center cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink transition-colors">
+                Add Legacy Connection...
+              </div>
+            )}
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
+    </div>
+  )
+}
+
 export function SidebarNav() {
+  const { activeTab, setActiveTab } = useNavigationStore()
   const { sidebarCollapsed, toggleSidebar } = usePreferencesStore()
   const activeLensId = useCanvasStore((s) => s.activeLensId)
-  const schema = useSchemaStore((s) => s.schema)
+  const visibleViews = useSchemaStore((s) => s.visibleViews)
   const { openViewEditor } = useViewEditorModal()
 
-  // Get views from schema
-  const savedViews = schema?.views ?? []
+  const [showWorkspacePanel, setShowWorkspacePanel] = useState(false)
+  const [showConnectionPanel, setShowConnectionPanel] = useState(false)
+
+  // Get views scoped to the active workspace+datasource (global/legacy views always included)
+  const savedViews = visibleViews()
   const pinnedViews = savedViews.filter((v) => v.isDefault)
 
   // Entity types from schema for quick access
@@ -63,19 +240,27 @@ export function SidebarNav() {
       )}
     >
       {/* Main Navigation */}
-      <nav className="flex-1 p-3 space-y-1 overflow-y-auto custom-scrollbar">
-        {mainNavItems.map((item) => (
-          <NavButton
-            key={item.id}
-            item={item}
-            collapsed={sidebarCollapsed}
-            active={item.id === 'explore'}
-          />
-        ))}
+      <nav className="flex-1 flex flex-col overflow-y-auto custom-scrollbar pb-3">
+        <EnvironmentSwitcher
+          collapsed={sidebarCollapsed}
+          onManageWorkspaces={() => setShowWorkspacePanel(true)}
+          onManageConnections={() => setShowConnectionPanel(true)}
+        />
+        <div className="px-3 space-y-1">
+          {mainNavItems.map((item) => (
+            <NavButton
+              key={item.id}
+              item={item}
+              collapsed={sidebarCollapsed}
+              active={activeTab === item.id}
+              onClick={() => setActiveTab(item.id)}
+            />
+          ))}
+        </div>
 
         {/* View Selector */}
         {!sidebarCollapsed && (
-          <div className="pt-4">
+          <div className="pt-2">
             <SectionHeader title="Active View" />
             <ViewSelector
               onCreateView={handleCreateView}
@@ -159,6 +344,23 @@ export function SidebarNav() {
         )}
       </button>
 
+      {/* Workspace Panel Modal */}
+      {showWorkspacePanel && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 animate-in fade-in duration-200">
+          <div className="bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl h-[90vh] max-w-5xl w-full mx-4 animate-in zoom-in-95 duration-200 overflow-hidden">
+            <WorkspacePanel onClose={() => setShowWorkspacePanel(false)} />
+          </div>
+        </div>
+      )}
+
+      {/* Connections Panel Modal */}
+      {showConnectionPanel && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 animate-in fade-in duration-200">
+          <div className="bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl h-[90vh] max-w-5xl w-full mx-4 animate-in zoom-in-95 duration-200 overflow-hidden">
+            <WorkspacePanel initialTab="connections" onClose={() => setShowConnectionPanel(false)} />
+          </div>
+        </div>
+      )}
     </aside>
   )
 }
@@ -167,13 +369,15 @@ interface NavButtonProps {
   item: NavItem
   collapsed: boolean
   active?: boolean
+  onClick?: () => void
 }
 
-function NavButton({ item, collapsed, active }: NavButtonProps) {
+function NavButton({ item, collapsed, active, onClick }: NavButtonProps) {
   const Icon = item.icon
 
   return (
     <button
+      onClick={onClick}
       className={cn(
         "w-full flex items-center gap-3 px-3 py-2.5 rounded-lg",
         "transition-all duration-150",
