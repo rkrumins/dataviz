@@ -262,8 +262,9 @@ class FalkorDBProvider(GraphDataProvider):
         if include_child_count:
             containment = list(self._get_containment_edge_types())
             containment_rel_types = "|".join([_sanitize_label(t) for t in containment]) if containment else "CONTAINS"
+            clauses.append("WITH n SKIP $skip LIMIT $limit")
             clauses.append(f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)")
-            clauses.append("RETURN n, count(child) as childCount SKIP $skip LIMIT $limit")
+            clauses.append("RETURN n, count(child) as childCount")
         else:
             clauses.append("RETURN n SKIP $skip LIMIT $limit")
 
@@ -421,16 +422,18 @@ class FalkorDBProvider(GraphDataProvider):
             cypher = (
                 f"MATCH (p)-[r:{rel}]->(c) "
                 f"WHERE p.urn = $parent "
+                f"WITH c SKIP $skip LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
-                f"RETURN c, count(gc) as childCount SKIP $skip LIMIT $lim"
+                f"RETURN c, count(gc) as childCount"
             )
             params: Dict[str, Any] = {"parent": parent_urn, "skip": offset, "lim": limit, "relTypes": rel_list}
         else:
             cypher = (
                 f"MATCH (p)-[r]->(c) "
                 f"WHERE p.urn = $parent AND type(r) IN $relTypes "
+                f"WITH c SKIP $skip LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
-                f"RETURN c, count(gc) as childCount SKIP $skip LIMIT $lim"
+                f"RETURN c, count(gc) as childCount"
             )
             params = {"parent": parent_urn, "relTypes": rel_list, "skip": offset, "lim": limit}
 

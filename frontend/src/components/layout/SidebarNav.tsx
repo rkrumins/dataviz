@@ -10,7 +10,8 @@ import {
   Palette,
   Database,
   ChevronsUpDown,
-  Check
+  Check,
+  Star
 } from 'lucide-react'
 import { useState } from 'react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
@@ -230,6 +231,21 @@ export function SidebarNav() {
     openViewEditor(viewId)
   }
 
+  // Handle open view
+  const setActiveView = useSchemaStore((s) => s.setActiveView)
+  const updateView = useSchemaStore((s) => s.updateView)
+  const activeViewId = useSchemaStore((s) => s.activeViewId)
+
+  const handleOpenView = (viewId: string) => {
+    setActiveView(viewId)
+    setActiveTab('explore')
+  }
+
+  const handleTogglePin = (e: React.MouseEvent, viewId: string, currentIsDefault?: boolean) => {
+    e.stopPropagation()
+    updateView(viewId, { isDefault: !currentIsDefault })
+  }
+
   return (
     <aside
       className={cn(
@@ -287,13 +303,26 @@ export function SidebarNav() {
             ) : (
               <div className="space-y-1">
                 {pinnedViews.map((view) => (
-                  <ViewButton key={view.id} view={view} isPinned />
+                  <ViewButton
+                    key={view.id}
+                    view={view}
+                    isPinned
+                    isActive={view.id === activeViewId}
+                    onClick={() => handleOpenView(view.id)}
+                    onTogglePin={(e) => handleTogglePin(e, view.id, true)}
+                  />
                 ))}
                 {savedViews
                   .filter((v) => !v.isDefault)
                   .slice(0, 5)
                   .map((view) => (
-                    <ViewButton key={view.id} view={view} />
+                    <ViewButton
+                      key={view.id}
+                      view={view}
+                      isActive={view.id === activeViewId}
+                      onClick={() => handleOpenView(view.id)}
+                      onTogglePin={(e) => handleTogglePin(e, view.id, false)}
+                    />
                   ))}
               </div>
             )}
@@ -427,22 +456,39 @@ function SectionHeader({ title, onAdd }: SectionHeaderProps) {
 interface ViewButtonProps {
   view: { id: string; name: string }
   isPinned?: boolean
+  isActive?: boolean
+  onClick?: () => void
+  onTogglePin?: (e: React.MouseEvent) => void
 }
 
-function ViewButton({ view, isPinned }: ViewButtonProps) {
+function ViewButton({ view, isPinned, isActive, onClick, onTogglePin }: ViewButtonProps) {
   return (
     <button
+      onClick={onClick}
       className={cn(
-        "w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left",
-        "text-sm text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink",
-        "transition-all duration-150"
+        "w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-left group",
+        "text-sm transition-all duration-150",
+        isActive
+          ? "bg-accent-lineage/10 text-accent-lineage font-medium"
+          : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
       )}
     >
-      <Bookmark className={cn(
-        "w-4 h-4 flex-shrink-0",
-        isPinned && "text-accent-lineage fill-accent-lineage"
-      )} />
-      <span className="truncate flex-1">{view.name}</span>
+      <div className="flex items-center gap-2 truncate flex-1">
+        <Bookmark className={cn(
+          "w-4 h-4 flex-shrink-0 transition-colors",
+          isPinned ? "text-accent-lineage fill-accent-lineage" : ""
+        )} />
+        <span className="truncate">{view.name}</span>
+      </div>
+      <div
+        onClick={onTogglePin}
+        className={cn(
+          "p-1 rounded-md transition-all cursor-pointer",
+          isPinned ? "opacity-100" : "opacity-0 group-hover:opacity-100 hover:bg-black/10 dark:hover:bg-white/10"
+        )}
+      >
+        <Star className={cn("w-3.5 h-3.5", isPinned ? "text-amber-500 fill-amber-500" : "text-ink-muted")} />
+      </div>
     </button>
   )
 }

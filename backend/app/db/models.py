@@ -356,6 +356,8 @@ class WorkspaceDataSourceORM(Base):
     workspace = relationship("WorkspaceORM", back_populates="data_sources")
     provider = relationship("ProviderORM", back_populates="data_sources")
     blueprint = relationship("OntologyBlueprintORM", back_populates="data_sources")
+    stats = relationship("DataSourceStatsORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
+    polling_config = relationship("DataSourcePollingConfigORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint("workspace_id", "provider_id", "graph_name", name="uq_ds_ws_prov_graph"),
@@ -404,3 +406,57 @@ class ContextModelORM(Base):
         Index("idx_cm_workspace", "workspace_id"),
         Index("idx_cm_template", "is_template"),
     )
+
+
+# ------------------------------------------------------------------ #
+# data_source_stats (Graph Statistics Cache)                           #
+# ------------------------------------------------------------------ #
+
+class DataSourceStatsORM(Base):
+    __tablename__ = "data_source_stats"
+
+    data_source_id = Column(
+        Text,
+        ForeignKey("workspace_data_sources.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    node_count = Column(Integer, nullable=False, default=0)
+    edge_count = Column(Integer, nullable=False, default=0)
+    entity_type_counts = Column(Text, nullable=False, default="{}")  # JSON
+    edge_type_counts = Column(Text, nullable=False, default="{}")    # JSON
+    schema_stats = Column(Text, nullable=False, default="{}")        # JSON
+    ontology_metadata = Column(Text, nullable=False, default="{}")   # JSON
+    graph_schema = Column(Text, nullable=False, default="{}")        # JSON
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    # Relationships
+    data_source = relationship("WorkspaceDataSourceORM", back_populates="stats")
+
+    def __repr__(self) -> str:
+        return f"<DataSourceStats ds_id={self.data_source_id!r}>"
+
+
+# ------------------------------------------------------------------ #
+# data_source_polling_configs (Microservice orchestration)             #
+# ------------------------------------------------------------------ #
+
+class DataSourcePollingConfigORM(Base):
+    __tablename__ = "data_source_polling_configs"
+
+    data_source_id = Column(
+        Text,
+        ForeignKey("workspace_data_sources.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    is_enabled = Column(Boolean, nullable=False, default=True)
+    interval_seconds = Column(Integer, nullable=False, default=300)
+    last_polled_at = Column(Text, nullable=True)                     # ISO string
+    last_status = Column(Text, nullable=False, default="pending")    # pending | success | error 
+    last_error = Column(Text, nullable=True)
+
+    # Relationships
+    data_source = relationship("WorkspaceDataSourceORM", back_populates="polling_config")
+
+    def __repr__(self) -> str:
+        return f"<DataSourcePollingConfig ds_id={self.data_source_id!r} enabled={self.is_enabled}>"
+
