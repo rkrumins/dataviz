@@ -196,7 +196,7 @@ class ContextEngine:
         db_meta = json.loads(db_config.edge_type_metadata or "{}")
         db_hierarchy = json.loads(db_config.entity_type_hierarchy or "{}")
         db_root = json.loads(db_config.root_entity_types or "[]")
-        mode = getattr(db_config, "override_mode", "merge")
+        mode = db_config.override_mode or "merge"
 
         if mode == "replace":
             return OntologyMetadata(
