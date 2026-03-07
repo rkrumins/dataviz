@@ -828,10 +828,10 @@ class FalkorDBProvider(GraphDataProvider):
         containment_edges: Optional[List[str]] = None,
     ) -> AggregatedEdgeResult:
         """Bounded live traversal fallback when no AGGREGATED edges exist."""
-        gran_str = granularity.value if hasattr(granularity, "value") else str(granularity).lower()
-        gran_level = self._GRANULARITY_DEPTH.get(gran_str, 4)
-        max_depth = min(gran_level, 5)
-        depth_range = f"*0..{max_depth}" if max_depth > 0 else "*0"
+        if not lineage_edges:
+            return AggregatedEdgeResult(aggregatedEdges=[], totalSourceEdges=0)
+            
+        depth_range = "*0..5"
 
         # Use ontology-driven containment types, not hardcoded CONTAINS
         c_types = containment_edges or list(self._get_containment_edge_types())
