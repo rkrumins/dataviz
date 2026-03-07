@@ -621,7 +621,6 @@ class FalkorDBProvider(GraphDataProvider):
             f"MATCH (s_anc)-[:{containment_cypher}*0..5]->(s_leaf) "
             f"MATCH (t_anc)-[:{containment_cypher}*0..5]->(t_leaf) "
             "WHERE s_anc.urn <> t_anc.urn "
-            "AND labels(s_anc) = labels(t_anc) "
             "MERGE (s_anc)-[r:AGGREGATED]->(t_anc) "
             "ON CREATE SET r.weight = 1, r.sourceEdgeTypes = [$edgeType], r.latestUpdate = timestamp() "
             "ON MATCH SET r.weight = r.weight + 1, "
@@ -652,16 +651,13 @@ class FalkorDBProvider(GraphDataProvider):
         Batch materialization: scans all lineage edges and creates/updates
         AGGREGATED relationships in bulk.
 
-        Unlike the per-edge materialize_lineage_for_edge(), this method
-        processes edges in server-side batches using SKIP/LIMIT and runs
-        the full ancestor-pair MERGE in a single Cypher per batch.
-
-        Returns stats: {processed, aggregated_created, errors}.
+        Optimized version: uses WITH/DISTINCT to aggregate ancestor pairs
+        before MERGE, avoiding Cartesian product blow-ups and memory fragmentation.
         """
         await self._ensure_connected()
 
         containment = containment_edge_types or list(self._get_containment_edge_types())
-        containment_cypher = "|".join(containment)
+        containment_cypher = "|".join([_sanitize_label(t) for t in containment])
 
         # Build exclusion list: containment types + AGGREGATED itself
         exclude_types = list(containment) + ["AGGREGATED"]
@@ -683,22 +679,28 @@ class FalkorDBProvider(GraphDataProvider):
 
         processed = 0
         errors = 0
+        created_count = 0
 
         while processed < total:
-            # For each batch: find lineage edges, then for each edge's source/target
-            # walk up containment and MERGE AGGREGATED edges at each matching level.
+            # OPTIMIZED BATCH QUERY:
+            # 1. Match a batch of lineage edges.
+            # 2. Find all ancestors for source and target within 5 hops.
+            # 3. Aggregate unique ancestor pairs (s_anc, t_anc) first.
+            # 4. MERGE only the unique pairs to minimize locking and memory.
             batch_cypher = (
                 f"MATCH (s)-[r]->(t) {type_filter} "
                 f"WITH s, t, type(r) AS edgeType SKIP $skip LIMIT $limit "
                 f"MATCH (s_anc)-[:{containment_cypher}*0..5]->(s) "
                 f"MATCH (t_anc)-[:{containment_cypher}*0..5]->(t) "
-                f"WHERE s_anc.urn <> t_anc.urn AND labels(s_anc) = labels(t_anc) "
+                f"WHERE s_anc.urn <> t_anc.urn "
+                f"WITH s_anc, t_anc, collect(distinct edgeType) AS types, count(*) AS weight_inc "
                 f"MERGE (s_anc)-[agg:AGGREGATED]->(t_anc) "
-                f"ON CREATE SET agg.weight = 1, agg.sourceEdgeTypes = [edgeType], "
+                f"ON CREATE SET agg.weight = weight_inc, agg.sourceEdgeTypes = types, "
                 f"agg.latestUpdate = timestamp() "
-                f"ON MATCH SET agg.weight = agg.weight + 1, "
-                f"agg.sourceEdgeTypes = CASE WHEN NOT edgeType IN agg.sourceEdgeTypes "
-                f"THEN agg.sourceEdgeTypes + edgeType ELSE agg.sourceEdgeTypes END, "
+                f"ON MATCH SET agg.weight = agg.weight + weight_inc, "
+                f"agg.sourceEdgeTypes = CASE "
+                f"  WHEN ALL(t IN types WHERE t IN agg.sourceEdgeTypes) THEN agg.sourceEdgeTypes "
+                f"  ELSE [t IN (agg.sourceEdgeTypes + types) WHERE true] END, "
                 f"agg.latestUpdate = timestamp() "
                 f"RETURN count(agg)"
             )
@@ -706,7 +708,9 @@ class FalkorDBProvider(GraphDataProvider):
             batch_params = {**type_params, "skip": processed, "limit": batch_size}
 
             try:
-                await self._graph.query(batch_cypher, params=batch_params)
+                res = await self._graph.query(batch_cypher, params=batch_params)
+                if res.result_set:
+                    created_count += res.result_set[0][0]
             except Exception as e:
                 logger.error(f"Batch materialization error at offset {processed}: {e}")
                 errors += 1
@@ -714,7 +718,7 @@ class FalkorDBProvider(GraphDataProvider):
             processed += batch_size
             logger.info(f"Batch materialization: {min(processed, total)}/{total} edges processed")
 
-        stats = {"processed": total, "errors": errors}
+        stats = {"processed": total, "aggregated_edges_affected": created_count, "errors": errors}
         logger.info(f"Batch materialization complete: {stats}")
         return stats
 
@@ -745,21 +749,28 @@ class FalkorDBProvider(GraphDataProvider):
            backfilled), use a bounded live traversal with granularity-aware
            containment depth so the endpoint still returns data.
 
-        Results capped at 500 aggregated edges.
         """
         await self._ensure_connected()
 
+        print("source_urns", source_urns)
+        print("target_urns", target_urns)
+        print("granularity", granularity)
+        print("containment_edges", containment_edges)
+        print("lineage_edges", lineage_edges)
+
+        aggregated_edge = "AGGREGATED"
+    
         # ------------------------------------------------------------------
         # 1. PRIMARY: Read from materialized AGGREGATED edges
         # ------------------------------------------------------------------
         if target_urns:
             cypher_mat = (
-                "MATCH (s)-[r:AGGREGATED]->(t) "
+                f"MATCH (s)-[r:{aggregated_edge}]->(t) "
                 "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
                 "AND s.urn <> t.urn "
                 "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                 "r.weight AS weight, r.sourceEdgeTypes AS types "
-                "ORDER BY r.weight DESC LIMIT 500"
+                "ORDER BY r.weight DESC"
             )
             params_mat: Dict[str, Any] = {
                 "sourceUrns": source_urns,
@@ -768,23 +779,25 @@ class FalkorDBProvider(GraphDataProvider):
         else:
             # Cross-level / asymmetric: all AGGREGATED edges from sources
             cypher_mat = (
-                "MATCH (s)-[r:AGGREGATED]->(t) "
+                f"MATCH (s)-[r:{aggregated_edge}]->(t) "
                 "WHERE s.urn IN $sourceUrns "
                 "AND s.urn <> t.urn "
                 "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                 "r.weight AS weight, r.sourceEdgeTypes AS types "
-                "ORDER BY r.weight DESC LIMIT 500"
+                "ORDER BY r.weight DESC"
             )
             params_mat = {"sourceUrns": source_urns}
 
         try:
             result = await self._graph.ro_query(cypher_mat, params=params_mat)
+            print("result", result)
             rows = result.result_set or []
         except Exception as e:
-            logger.warning(f"AGGREGATED edge read failed, will try live fallback: {e}")
+            logger.warning(f"Aggregate edge named {aggregated_edge} read failed, will try live fallback: {e}")
             rows = []
 
         if rows:
+            print("rows", rows)
             return self._rows_to_aggregated_result(rows)
 
         # ------------------------------------------------------------------
@@ -1263,7 +1276,7 @@ class FalkorDBProvider(GraphDataProvider):
         hierarchy_cypher = (
             "MATCH (p)-[r]->(c) "
             "WHERE type(r) IN $containment "
-            "RETURN labels(p)[0], labels(c)[0], type(r)"
+            "RETURN DISTINCT labels(p)[0], labels(c)[0], type(r)"
         )
         hierarchy_res = await self._graph.ro_query(
             hierarchy_cypher, 
