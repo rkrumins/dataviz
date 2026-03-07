@@ -85,35 +85,56 @@ class FalkorDBProvider(GraphDataProvider):
         port: int = 6379,
         graph_name: str = "nexus_lineage",
         seed_file: Optional[str] = None,
+        projection_mode: str = "in_source",
     ):
         self._host = host
         self._port = port
         self._graph_name = graph_name
         self._seed_file = seed_file
+        self._projection_mode = projection_mode  # "in_source" or "dedicated"
         self._graph = None
+        self._proj_graph = None  # Dedicated projection graph (when mode = "dedicated")
         self._pool = None
         self._db = None
+
+    @property
+    def _proj(self):
+        """Transparent access to the projection graph.
+
+        When projection_mode is "in_source", AGGREGATED edges live in the
+        same graph as source data. When "dedicated", they go to a separate
+        graph key (e.g. nexus_lineage_proj) on the same Redis instance.
+        """
+        if self._projection_mode == "dedicated" and self._proj_graph is not None:
+            return self._proj_graph
+        return self._graph
 
     async def _ensure_connected(self):
         """Lazy connection to FalkorDB."""
         if self._graph is not None:
             return
         try:
-            from redis.asyncio import BlockingConnectionPool
+            from redis.asyncio import BlockingConnectionPool, Redis
             from falkordb.asyncio import FalkorDB
 
             self._pool = BlockingConnectionPool(
                 host=self._host,
                 port=self._port,
                 max_connections=16,
-                timeout=None,
+                timeout=30,
                 decode_responses=True,
             )
+            self._redis = Redis(connection_pool=self._pool)
             self._db = FalkorDB(connection_pool=self._pool)
             self._graph = self._db.select_graph(self._graph_name)
 
+            # Set up projection graph if using dedicated mode
+            if self._projection_mode == "dedicated":
+                self._proj_graph = self._db.select_graph(f"{self._graph_name}_proj")
+
             # Ensure indices exist
             await self.ensure_indices()
+            await self.ensure_projections()
 
             # Optional lazy seed
             if self._seed_file:
@@ -179,8 +200,7 @@ class FalkorDBProvider(GraphDataProvider):
         config = os.getenv("CONTAINMENT_EDGE_TYPES", "").strip()
         if config:
             return {t.strip().upper() for t in config.split(",") if t.strip()}
-        # Include PRODUCES by default as requested
-        return {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value, EdgeType.PRODUCES.value}
+        return {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value}
 
     def _extract_node_from_result(self, row) -> Optional[GraphNode]:
         """Extract GraphNode from a FalkorDB result row (Node or dict of properties)."""
@@ -598,44 +618,287 @@ class FalkorDBProvider(GraphDataProvider):
         )
 
 
+    # ------------------------------------------------------------------ #
+    # Projection / Materialization Lifecycle Hooks                         #
+    # ------------------------------------------------------------------ #
+
+    async def ensure_projections(self) -> None:
+        """Create indices on the projection target for fast AGGREGATED reads."""
+        proj = self._proj
+        try:
+            await proj.query("CREATE INDEX FOR (n:_Projection) ON (n.urn)")
+        except Exception:
+            pass  # Index may already exist
+
+    async def _get_ancestor_chain(self, urn: str) -> List[str]:
+        """Get pre-computed ancestor chain from Redis Hash, or compute + cache it.
+
+        Returns list of URNs from immediate parent to root (ordered).
+        Uses Redis Hash `{graph_name}:ancestors` for O(1) lookup.
+        """
+        cache_key = f"{self._graph_name}:ancestors"
+        try:
+            raw = await self._redis.execute_command("HGET", cache_key, urn)
+            if raw:
+                return json.loads(raw)
+        except Exception:
+            pass
+
+        # Cache miss — compute from graph and store
+        ancestors = await self._compute_ancestor_chain(urn)
+        try:
+            await self._redis.execute_command(
+                "HSET", cache_key, urn, json.dumps(ancestors)
+            )
+        except Exception as e:
+            logger.debug(f"Failed to cache ancestor chain for {urn}: {e}")
+        return ancestors
+
+    async def _compute_ancestor_chain(self, urn: str) -> List[str]:
+        """Walk containment edges upward to build the ancestor chain for a node."""
+        containment = list(self._get_containment_edge_types())
+        chain: List[str] = []
+        current = urn
+        seen: Set[str] = {urn}
+
+        for _ in range(10):  # Max 10 containment levels
+            result = await self._graph.ro_query(
+                "MATCH (p)-[r]->(c) WHERE c.urn = $urn AND type(r) IN $ctypes RETURN p.urn",
+                params={"urn": current, "ctypes": containment},
+            )
+            if not result.result_set or not result.result_set[0][0]:
+                break
+            parent_urn = result.result_set[0][0]
+            if parent_urn in seen:
+                break
+            seen.add(parent_urn)
+            chain.append(parent_urn)
+            current = parent_urn
+
+        return chain
+
+    async def _compute_and_store_ancestors_bulk(
+        self,
+        urns: List[str],
+    ) -> Dict[str, List[str]]:
+        """Compute and cache ancestor chains for multiple URNs at once.
+
+        Uses Redis pipeline for batch HSET — zero extra round-trips.
+        """
+        cache_key = f"{self._graph_name}:ancestors"
+        result: Dict[str, List[str]] = {}
+
+        # First, try to fetch all from cache in one pipeline
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for u in urns:
+                pipe.execute_command("HGET", cache_key, u)
+            cached = await pipe.execute()
+
+            missing_urns = []
+            for i, u in enumerate(urns):
+                if cached[i]:
+                    result[u] = json.loads(cached[i])
+                else:
+                    missing_urns.append(u)
+        except Exception:
+            missing_urns = list(urns)
+
+        # Compute missing chains
+        if missing_urns:
+            store_pipe = self._redis.pipeline(transaction=False)
+            for u in missing_urns:
+                chain = await self._compute_ancestor_chain(u)
+                result[u] = chain
+                store_pipe.execute_command("HSET", cache_key, u, json.dumps(chain))
+            try:
+                await store_pipe.execute()
+            except Exception as e:
+                logger.debug(f"Failed to batch-store ancestor chains: {e}")
+
+        return result
+
+    async def on_lineage_edge_written(
+        self,
+        source_urn: str,
+        target_urn: str,
+        edge_id: str,
+        edge_type: str,
+    ) -> None:
+        """Materialize AGGREGATED edges when a lineage edge is written.
+
+        Uses pre-computed ancestor chains instead of Cypher variable-length
+        paths, eliminating the Cartesian product explosion.
+
+        Idempotency: Uses Redis Sets to track which leaf edges contribute
+        to each AGGREGATED pair. SADD is naturally idempotent — calling
+        this twice for the same edge won't double the weight.
+        """
+        await self._ensure_connected()
+
+        # Get ancestor chains for both endpoints (O(1) from Redis cache)
+        s_ancestors = await self._get_ancestor_chain(source_urn)
+        t_ancestors = await self._get_ancestor_chain(target_urn)
+
+        # Include the nodes themselves (depth 0)
+        s_chain = [source_urn] + s_ancestors
+        t_chain = [target_urn] + t_ancestors
+
+        proj = self._proj
+        members_key_prefix = f"{self._graph_name}:agg_members"
+
+        for s_urn in s_chain:
+            for t_urn in t_chain:
+                if s_urn == t_urn:
+                    continue
+
+                # Track membership idempotently via Redis Set
+                member_key = f"{members_key_prefix}:{s_urn}:{t_urn}"
+                try:
+                    added = await self._redis.execute_command("SADD", member_key, edge_id)
+                except Exception:
+                    added = 1  # Assume new if Redis command fails
+
+                if added == 0:
+                    # Edge already tracked for this pair — skip
+                    continue
+
+                # Get current cardinality for accurate weight
+                try:
+                    weight = await self._redis.execute_command("SCARD", member_key)
+                except Exception:
+                    weight = 1
+
+                # MERGE the AGGREGATED edge with accurate weight
+                try:
+                    await proj.query(
+                        "MERGE (s {urn: $sUrn}) "
+                        "MERGE (t {urn: $tUrn}) "
+                        "MERGE (s)-[r:AGGREGATED]->(t) "
+                        "SET r.weight = $weight, "
+                        "r.sourceEdgeTypes = CASE "
+                        "  WHEN r.sourceEdgeTypes IS NULL THEN [$edgeType] "
+                        "  WHEN NOT $edgeType IN r.sourceEdgeTypes "
+                        "    THEN r.sourceEdgeTypes + $edgeType "
+                        "  ELSE r.sourceEdgeTypes END, "
+                        "r.latestUpdate = timestamp()",
+                        params={
+                            "sUrn": s_urn,
+                            "tUrn": t_urn,
+                            "weight": weight,
+                            "edgeType": edge_type,
+                        },
+                    )
+                except Exception as e:
+                    logger.error(f"AGGREGATED MERGE failed ({s_urn}->{t_urn}): {e}")
+
+    async def on_lineage_edge_deleted(
+        self,
+        source_urn: str,
+        target_urn: str,
+        edge_id: str,
+    ) -> None:
+        """Decrement AGGREGATED edge weights when a lineage edge is removed.
+
+        Removes the edge_id from each ancestor-pair's Redis Set.
+        If the set becomes empty, deletes the AGGREGATED relationship.
+        """
+        await self._ensure_connected()
+
+        s_ancestors = await self._get_ancestor_chain(source_urn)
+        t_ancestors = await self._get_ancestor_chain(target_urn)
+
+        s_chain = [source_urn] + s_ancestors
+        t_chain = [target_urn] + t_ancestors
+
+        proj = self._proj
+        members_key_prefix = f"{self._graph_name}:agg_members"
+
+        for s_urn in s_chain:
+            for t_urn in t_chain:
+                if s_urn == t_urn:
+                    continue
+
+                member_key = f"{members_key_prefix}:{s_urn}:{t_urn}"
+                try:
+                    await self._redis.execute_command("SREM", member_key, edge_id)
+                    remaining = await self._redis.execute_command("SCARD", member_key)
+                except Exception:
+                    remaining = None
+
+                if remaining == 0:
+                    # No leaf edges left — delete the AGGREGATED relationship
+                    try:
+                        await proj.query(
+                            "MATCH (s {urn: $sUrn})-[r:AGGREGATED]->(t {urn: $tUrn}) "
+                            "DELETE r",
+                            params={"sUrn": s_urn, "tUrn": t_urn},
+                        )
+                        # Clean up empty Redis key
+                        await self._redis.execute_command("DEL", member_key)
+                    except Exception as e:
+                        logger.error(f"AGGREGATED DELETE failed ({s_urn}->{t_urn}): {e}")
+                elif remaining is not None:
+                    # Update weight to reflect new count
+                    try:
+                        await proj.query(
+                            "MATCH (s {urn: $sUrn})-[r:AGGREGATED]->(t {urn: $tUrn}) "
+                            "SET r.weight = $weight, r.latestUpdate = timestamp()",
+                            params={"sUrn": s_urn, "tUrn": t_urn, "weight": remaining},
+                        )
+                    except Exception as e:
+                        logger.error(f"AGGREGATED weight update failed ({s_urn}->{t_urn}): {e}")
+
+    async def on_containment_changed(self, urn: str) -> None:
+        """Invalidate ancestor cache for a node and its descendants, then rebuild.
+
+        When a node's parent changes, its entire subtree's ancestor chains
+        are invalidated and lazily recomputed on next access.
+        """
+        await self._ensure_connected()
+        cache_key = f"{self._graph_name}:ancestors"
+
+        # Invalidate this node's cached chain
+        try:
+            await self._pool.execute_command("HDEL", cache_key, urn)
+        except Exception:
+            pass
+
+        # Invalidate descendants (BFS through containment)
+        containment = list(self._get_containment_edge_types())
+        queue = deque([urn])
+        visited: Set[str] = {urn}
+
+        while queue:
+            current = queue.popleft()
+            result = await self._graph.ro_query(
+                "MATCH (p)-[r]->(c) WHERE p.urn = $urn AND type(r) IN $ctypes RETURN c.urn",
+                params={"urn": current, "ctypes": containment},
+            )
+            child_urns = [row[0] for row in (result.result_set or []) if row[0] and row[0] not in visited]
+            if child_urns:
+                try:
+                    pipe = self._redis.pipeline(transaction=False)
+                    for cu in child_urns:
+                        pipe.execute_command("HDEL", cache_key, cu)
+                        visited.add(cu)
+                        queue.append(cu)
+                    await pipe.execute()
+                except Exception:
+                    pass
+
+        logger.info(f"Invalidated ancestor cache for {len(visited)} nodes under {urn}")
+
     async def materialize_lineage_for_edge(
         self,
         source_urn: str,
         target_urn: str,
-        lineage_edge_type: str
+        lineage_edge_type: str,
     ) -> bool:
-        """
-        Write-path aggregation for a single lineage edge.
-
-        When a granular edge (source)->(target) is created, we roll up
-        to all matching structural ancestors at equivalent hierarchy levels
-        and MERGE an [:AGGREGATED] relationship with weight tracking.
-        """
-        await self._ensure_connected()
-
-        containment_cypher = "|".join(self._get_containment_edge_types())
-
-        cypher = (
-            "MATCH (s_leaf {urn: $sourceUrn}) "
-            "MATCH (t_leaf {urn: $targetUrn}) "
-            f"MATCH (s_anc)-[:{containment_cypher}*0..5]->(s_leaf) "
-            f"MATCH (t_anc)-[:{containment_cypher}*0..5]->(t_leaf) "
-            "WHERE s_anc.urn <> t_anc.urn "
-            "MERGE (s_anc)-[r:AGGREGATED]->(t_anc) "
-            "ON CREATE SET r.weight = 1, r.sourceEdgeTypes = [$edgeType], r.latestUpdate = timestamp() "
-            "ON MATCH SET r.weight = r.weight + 1, "
-            "r.sourceEdgeTypes = CASE WHEN NOT $edgeType IN r.sourceEdgeTypes "
-            "THEN r.sourceEdgeTypes + $edgeType ELSE r.sourceEdgeTypes END, "
-            "r.latestUpdate = timestamp() "
-            "RETURN count(r)"
-        )
-
+        """Legacy wrapper — delegates to on_lineage_edge_written."""
         try:
-            await self._graph.query(cypher, params={
-                "sourceUrn": source_urn,
-                "targetUrn": target_urn,
-                "edgeType": lineage_edge_type,
-            })
+            edge_id = f"{source_urn}|{lineage_edge_type}|{target_urn}"
+            await self.on_lineage_edge_written(source_urn, target_urn, edge_id, lineage_edge_type)
             return True
         except Exception as e:
             logger.error(f"Failed to materialize lineage: {e}")
@@ -647,22 +910,16 @@ class FalkorDBProvider(GraphDataProvider):
         containment_edge_types: Optional[List[str]] = None,
         lineage_edge_types: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """
-        Batch materialization: scans all lineage edges and creates/updates
-        AGGREGATED relationships in bulk.
+        """Batch materialization using ancestor-chain approach.
 
-        Optimized version: uses WITH/DISTINCT to aggregate ancestor pairs
-        before MERGE, avoiding Cartesian product blow-ups and memory fragmentation.
+        Instead of Cypher variable-length paths with Cartesian products,
+        this uses pre-computed ancestor chains stored in Redis Hashes.
         """
         await self._ensure_connected()
 
         containment = containment_edge_types or list(self._get_containment_edge_types())
-        containment_cypher = "|".join([_sanitize_label(t) for t in containment])
-
-        # Build exclusion list: containment types + AGGREGATED itself
         exclude_types = list(containment) + ["AGGREGATED"]
 
-        # Build edge type filter for Cypher WHERE clause
         if lineage_edge_types:
             type_filter = "WHERE type(r) IN $lineageEdges"
             type_params: Dict[str, Any] = {"lineageEdges": lineage_edge_types}
@@ -682,38 +939,43 @@ class FalkorDBProvider(GraphDataProvider):
         created_count = 0
 
         while processed < total:
-            # OPTIMIZED BATCH QUERY:
-            # 1. Match a batch of lineage edges.
-            # 2. Find all ancestors for source and target within 5 hops.
-            # 3. Aggregate unique ancestor pairs (s_anc, t_anc) first.
-            # 4. MERGE only the unique pairs to minimize locking and memory.
+            # Fetch a batch of lineage edges
             batch_cypher = (
                 f"MATCH (s)-[r]->(t) {type_filter} "
-                f"WITH s, t, type(r) AS edgeType SKIP $skip LIMIT $limit "
-                f"MATCH (s_anc)-[:{containment_cypher}*0..5]->(s) "
-                f"MATCH (t_anc)-[:{containment_cypher}*0..5]->(t) "
-                f"WHERE s_anc.urn <> t_anc.urn "
-                f"WITH s_anc, t_anc, collect(distinct edgeType) AS types, count(*) AS weight_inc "
-                f"MERGE (s_anc)-[agg:AGGREGATED]->(t_anc) "
-                f"ON CREATE SET agg.weight = weight_inc, agg.sourceEdgeTypes = types, "
-                f"agg.latestUpdate = timestamp() "
-                f"ON MATCH SET agg.weight = agg.weight + weight_inc, "
-                f"agg.sourceEdgeTypes = CASE "
-                f"  WHEN ALL(t IN types WHERE t IN agg.sourceEdgeTypes) THEN agg.sourceEdgeTypes "
-                f"  ELSE [t IN (agg.sourceEdgeTypes + types) WHERE true] END, "
-                f"agg.latestUpdate = timestamp() "
-                f"RETURN count(agg)"
+                f"RETURN s.urn, t.urn, type(r), r.id SKIP $skip LIMIT $limit"
             )
-
             batch_params = {**type_params, "skip": processed, "limit": batch_size}
 
             try:
-                res = await self._graph.query(batch_cypher, params=batch_params)
-                if res.result_set:
-                    created_count += res.result_set[0][0]
+                res = await self._graph.ro_query(batch_cypher, params=batch_params)
+                rows = res.result_set or []
             except Exception as e:
-                logger.error(f"Batch materialization error at offset {processed}: {e}")
+                logger.error(f"Batch fetch error at offset {processed}: {e}")
                 errors += 1
+                processed += batch_size
+                continue
+
+            if not rows:
+                break
+
+            # Pre-compute ancestor chains for all URNs in this batch
+            all_urns = set()
+            for row in rows:
+                all_urns.add(row[0])
+                all_urns.add(row[1])
+            await self._compute_and_store_ancestors_bulk(list(all_urns))
+
+            # Now materialize each edge using cached ancestor chains
+            for row in rows:
+                s_urn, t_urn, edge_type, edge_id = row[0], row[1], row[2], row[3]
+                if not edge_id:
+                    edge_id = f"{s_urn}|{edge_type}|{t_urn}"
+                try:
+                    await self.on_lineage_edge_written(s_urn, t_urn, edge_id, edge_type)
+                    created_count += 1
+                except Exception as e:
+                    logger.error(f"Materialization error for {s_urn}->{t_urn}: {e}")
+                    errors += 1
 
             processed += batch_size
             logger.info(f"Batch materialization: {min(processed, total)}/{total} edges processed")
@@ -735,78 +997,48 @@ class FalkorDBProvider(GraphDataProvider):
         containment_edges: List[str],
         lineage_edges: List[str],
     ) -> AggregatedEdgeResult:
-        """
-        Read pre-materialized AGGREGATED edges from the graph.
+        """Read pre-materialized AGGREGATED edges from the projection graph.
 
-        Strategy:
-        1. PRIMARY — Read [:AGGREGATED] relationships created by
-           materialize_lineage_for_edge() or the backfill script.
-           These carry weight + sourceEdgeTypes and connect ancestor pairs
-           at equivalent hierarchy levels.  This is an O(|sourceUrns|)
-           index lookup — sub-millisecond at any scale.
-
-        2. FALLBACK — If no materialized edges found (graph not yet
-           backfilled), use a bounded live traversal with granularity-aware
-           containment depth so the endpoint still returns data.
-
+        Pure index lookup — O(|sourceUrns|), sub-millisecond at any scale.
+        No live fallback: if materialization hasn't run, returns empty result
+        so the caller knows to trigger a backfill.
         """
         await self._ensure_connected()
 
-        print("source_urns", source_urns)
-        print("target_urns", target_urns)
-        print("granularity", granularity)
-        print("containment_edges", containment_edges)
-        print("lineage_edges", lineage_edges)
+        proj = self._proj
 
-        aggregated_edge = "AGGREGATED"
-    
-        # ------------------------------------------------------------------
-        # 1. PRIMARY: Read from materialized AGGREGATED edges
-        # ------------------------------------------------------------------
         if target_urns:
-            cypher_mat = (
-                f"MATCH (s)-[r:{aggregated_edge}]->(t) "
+            cypher = (
+                "MATCH (s)-[r:AGGREGATED]->(t) "
                 "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
                 "AND s.urn <> t.urn "
                 "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                 "r.weight AS weight, r.sourceEdgeTypes AS types "
                 "ORDER BY r.weight DESC"
             )
-            params_mat: Dict[str, Any] = {
+            params: Dict[str, Any] = {
                 "sourceUrns": source_urns,
                 "targetUrns": target_urns,
             }
         else:
-            # Cross-level / asymmetric: all AGGREGATED edges from sources
-            cypher_mat = (
-                f"MATCH (s)-[r:{aggregated_edge}]->(t) "
+            cypher = (
+                "MATCH (s)-[r:AGGREGATED]->(t) "
                 "WHERE s.urn IN $sourceUrns "
                 "AND s.urn <> t.urn "
                 "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                 "r.weight AS weight, r.sourceEdgeTypes AS types "
                 "ORDER BY r.weight DESC"
             )
-            params_mat = {"sourceUrns": source_urns}
+            params = {"sourceUrns": source_urns}
 
         try:
-            result = await self._graph.ro_query(cypher_mat, params=params_mat)
-            print("result", result)
+            result = await proj.ro_query(cypher, params=params)
             rows = result.result_set or []
         except Exception as e:
-            logger.warning(f"Aggregate edge named {aggregated_edge} read failed, will try live fallback: {e}")
+            logger.warning(f"AGGREGATED edge read failed: {e}")
             rows = []
 
-        if rows:
-            print("rows", rows)
-            return self._rows_to_aggregated_result(rows)
-
-        # ------------------------------------------------------------------
-        # 2. FALLBACK: Live traversal (granularity-aware depth)
-        # ------------------------------------------------------------------
-        logger.info("No materialized AGGREGATED edges found — using live traversal fallback")
-        return await self._live_aggregate_fallback(
-            source_urns, target_urns, granularity, lineage_edges, containment_edges
-        )
+        return self._rows_to_aggregated_result(rows)
 
     # ------------------------------------------------------------------
     # Helpers for get_aggregated_edges_between
@@ -1514,6 +1746,8 @@ class FalkorDBProvider(GraphDataProvider):
     async def close(self) -> None:
         """Release the Redis connection pool held by this provider."""
         try:
+            if hasattr(self, "_redis") and self._redis is not None:
+                await self._redis.aclose()
             if self._pool is not None:
                 await self._pool.aclose()
         except Exception as exc:
@@ -1521,4 +1755,5 @@ class FalkorDBProvider(GraphDataProvider):
         finally:
             self._graph = None
             self._pool = None
+            self._redis = None
             self._db = None
