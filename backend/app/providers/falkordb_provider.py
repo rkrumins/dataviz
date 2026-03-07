@@ -605,70 +605,123 @@ class FalkorDBProvider(GraphDataProvider):
         lineage_edge_type: str
     ) -> bool:
         """
-        Write Path Aggregation:
-        When a granular edge (source)->(target) is created, we "rollup" this connection
-        to all matching structural ancestors.
-        
-        Logic:
-        1. Find all ancestors of Source (s_anc).
-        2. Find all ancestors of Target (t_anc).
-        3. Match ancestors that are at the SAME LEVEL (e.g. Table-Table, Domain-Domain).
-           (We infer level equivalence by EntityType or Label).
-        4. MERGE (s_anc)-[:AGGREGATED]->(t_anc).
-        5. Increment weight.
-        
-        Optimization:
-        We perform this in a SINGLE Cypher query for atomicity and speed.
+        Write-path aggregation for a single lineage edge.
+
+        When a granular edge (source)->(target) is created, we roll up
+        to all matching structural ancestors at equivalent hierarchy levels
+        and MERGE an [:AGGREGATED] relationship with weight tracking.
         """
         await self._ensure_connected()
-        
-        containment = list(self._get_containment_edge_types())
-        # Format for Cypher: :TYPE1|TYPE2|...
-        containment_cypher = "|".join(containment)
-        
-        # Cypher Logic:
-        # 1. Match source leaf and its ancestors 
-        # 2. Match target leaf and its ancestors
-        # 3. Filter for pairs where labels(s_anc) == labels(t_anc) (Horizontal Aggregation)
-        #    OR specific EntityType matching if labels are messy.
-        #    Simpler: We just blindly agg between all ancestors and let the "Same Level" check happen via logic or just agg everything? 
-        #    User requirement: "Match Equivalent Tiers".
-        #    We can check "WHERE s_anc.entityType = t_anc.entityType".
-        # 4. EXCLUDE self-loops (s_anc <> t_anc).
-        
+
+        containment_cypher = "|".join(self._get_containment_edge_types())
+
         cypher = (
             "MATCH (s_leaf {urn: $sourceUrn}) "
             "MATCH (t_leaf {urn: $targetUrn}) "
-            # Find ancestors (0..5 hops up). 0 means the node itself (if it's a Table matching a Table).
             f"MATCH (s_anc)-[:{containment_cypher}*0..5]->(s_leaf) "
             f"MATCH (t_anc)-[:{containment_cypher}*0..5]->(t_leaf) "
-            # Filter: structural entities (containers/roots) + Match Levels
-            "WHERE s_anc.urn <> t_anc.urn "  # No self-loops (internal lineage)
-            # Ensure we are linking equivalent types (Table to Table, DB to DB)
-            # Use labels comparison as entityType property might be missing
-            "AND labels(s_anc) = labels(t_anc) " 
-            # Create/Merge the Aggregated Edge
-            "MERGE (s_anc)-[r:AGGREGATED {targetUrn: t_anc.urn}]->(t_anc) "
+            "WHERE s_anc.urn <> t_anc.urn "
+            "AND labels(s_anc) = labels(t_anc) "
+            "MERGE (s_anc)-[r:AGGREGATED]->(t_anc) "
             "ON CREATE SET r.weight = 1, r.sourceEdgeTypes = [$edgeType], r.latestUpdate = timestamp() "
             "ON MATCH SET r.weight = r.weight + 1, "
-            # Append edgeType if not present? (Set logic simulation)
-            "r.sourceEdgeTypes = CASE WHEN NOT $edgeType IN r.sourceEdgeTypes THEN r.sourceEdgeTypes + $edgeType ELSE r.sourceEdgeTypes END, "
+            "r.sourceEdgeTypes = CASE WHEN NOT $edgeType IN r.sourceEdgeTypes "
+            "THEN r.sourceEdgeTypes + $edgeType ELSE r.sourceEdgeTypes END, "
             "r.latestUpdate = timestamp() "
             "RETURN count(r)"
         )
-        
-        params = {
-            "sourceUrn": source_urn,
-            "targetUrn": target_urn,
-            "edgeType": lineage_edge_type
-        }
-        
+
         try:
-            await self._graph.query(cypher, params=params)
+            await self._graph.query(cypher, params={
+                "sourceUrn": source_urn,
+                "targetUrn": target_urn,
+                "edgeType": lineage_edge_type,
+            })
             return True
         except Exception as e:
             logger.error(f"Failed to materialize lineage: {e}")
             return False
+
+    async def materialize_aggregated_edges_batch(
+        self,
+        batch_size: int = 1000,
+        containment_edge_types: Optional[List[str]] = None,
+        lineage_edge_types: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Batch materialization: scans all lineage edges and creates/updates
+        AGGREGATED relationships in bulk.
+
+        Unlike the per-edge materialize_lineage_for_edge(), this method
+        processes edges in server-side batches using SKIP/LIMIT and runs
+        the full ancestor-pair MERGE in a single Cypher per batch.
+
+        Returns stats: {processed, aggregated_created, errors}.
+        """
+        await self._ensure_connected()
+
+        containment = containment_edge_types or list(self._get_containment_edge_types())
+        containment_cypher = "|".join(containment)
+
+        # Build exclusion list: containment types + AGGREGATED itself
+        exclude_types = list(containment) + ["AGGREGATED"]
+
+        # Build edge type filter for Cypher WHERE clause
+        if lineage_edge_types:
+            type_filter = "WHERE type(r) IN $lineageEdges"
+            type_params: Dict[str, Any] = {"lineageEdges": lineage_edge_types}
+        else:
+            type_filter = "WHERE NOT type(r) IN $excludeTypes"
+            type_params = {"excludeTypes": exclude_types}
+
+        # Count total lineage edges
+        count_cypher = f"MATCH ()-[r]->() {type_filter} RETURN count(r)"
+        count_res = await self._graph.ro_query(count_cypher, params=type_params)
+        total = count_res.result_set[0][0] if count_res.result_set else 0
+
+        logger.info(f"Batch materialization: {total} lineage edges to process")
+
+        processed = 0
+        errors = 0
+
+        while processed < total:
+            # For each batch: find lineage edges, then for each edge's source/target
+            # walk up containment and MERGE AGGREGATED edges at each matching level.
+            batch_cypher = (
+                f"MATCH (s)-[r]->(t) {type_filter} "
+                f"WITH s, t, type(r) AS edgeType SKIP $skip LIMIT $limit "
+                f"MATCH (s_anc)-[:{containment_cypher}*0..5]->(s) "
+                f"MATCH (t_anc)-[:{containment_cypher}*0..5]->(t) "
+                f"WHERE s_anc.urn <> t_anc.urn AND labels(s_anc) = labels(t_anc) "
+                f"MERGE (s_anc)-[agg:AGGREGATED]->(t_anc) "
+                f"ON CREATE SET agg.weight = 1, agg.sourceEdgeTypes = [edgeType], "
+                f"agg.latestUpdate = timestamp() "
+                f"ON MATCH SET agg.weight = agg.weight + 1, "
+                f"agg.sourceEdgeTypes = CASE WHEN NOT edgeType IN agg.sourceEdgeTypes "
+                f"THEN agg.sourceEdgeTypes + edgeType ELSE agg.sourceEdgeTypes END, "
+                f"agg.latestUpdate = timestamp() "
+                f"RETURN count(agg)"
+            )
+
+            batch_params = {**type_params, "skip": processed, "limit": batch_size}
+
+            try:
+                await self._graph.query(batch_cypher, params=batch_params)
+            except Exception as e:
+                logger.error(f"Batch materialization error at offset {processed}: {e}")
+                errors += 1
+
+            processed += batch_size
+            logger.info(f"Batch materialization: {min(processed, total)}/{total} edges processed")
+
+        stats = {"processed": total, "errors": errors}
+        logger.info(f"Batch materialization complete: {stats}")
+        return stats
+
+    # Granularity-level mapping for containment depth calculation
+    _GRANULARITY_DEPTH = {
+        "column": 0, "table": 1, "schema": 2, "system": 3, "domain": 4,
+    }
 
     async def get_aggregated_edges_between(
         self,
@@ -679,81 +732,149 @@ class FalkorDBProvider(GraphDataProvider):
         lineage_edges: List[str],
     ) -> AggregatedEdgeResult:
         """
-        Optimized On-The-Fly Aggregation:
-        Instead of reading from 'AGGREGATED' edges (which might be missing or stale),
-        we compute the rollup dynamically by traversing the containment hierarchy.
-        
-        This handles the "Mega-Payload Wall" by letting the database do the heavy lifting.
+        Read pre-materialized AGGREGATED edges from the graph.
+
+        Strategy:
+        1. PRIMARY — Read [:AGGREGATED] relationships created by
+           materialize_lineage_for_edge() or the backfill script.
+           These carry weight + sourceEdgeTypes and connect ancestor pairs
+           at equivalent hierarchy levels.  This is an O(|sourceUrns|)
+           index lookup — sub-millisecond at any scale.
+
+        2. FALLBACK — If no materialized edges found (graph not yet
+           backfilled), use a bounded live traversal with granularity-aware
+           containment depth so the endpoint still returns data.
+
+        Results capped at 500 aggregated edges.
         """
         await self._ensure_connected()
 
-        # Sanitize edge types for inclusion in Cypher string if needed, 
-        # but here we pass them as parameters which is safer.
-        
-        # Cypher Strategy:
-        # 1. Start from $sourceUrns.
-        # 2. Traverse DOWN containment to all descendant leaves.
-        # 3. Traverse ACROSS lineage edges to target leaves.
-        # 4. Traverse UP containment to find ancestors that match $targetUrns.
-        
-        # Note: We use *0..5 for containment traversal to handle multi-level hierarchies 
-        # (Platform -> DB -> Table -> Column).
-        
-        # Advanced Cypher Strategy:
-        # We need to leverage indices, but we don't know the labels of all URNs.
-        # We use a trick: MATCH (n) WHERE n.urn IN $sourceUrns is usually okay,
-        # but in FalkorDB, label-specific indices are much stronger.
-        
-        # We'll use a slightly safer but still generic MATCH, 
-        # but ensure the WHERE clause is efficient.
-        
-        cypher = (
-            "MATCH (s_parent) "
-            "WHERE s_parent.urn IN $sourceUrns "
-            "MATCH (s_parent)-[:CONTAINS*0..5]->(leaf_s) "
-            "MATCH (leaf_s)-[r]->(leaf_t) "
-            "WHERE type(r) IN $lineageEdges "
-            "MATCH (t_parent)-[:CONTAINS*0..5]->(leaf_t) "
-            "WHERE t_parent.urn IN $targetUrns "
-            "AND s_parent.urn <> t_parent.urn "
-            "RETURN s_parent.urn, t_parent.urn, count(r), collect(DISTINCT type(r))"
-        )
-        
-        params = {
-            "sourceUrns": source_urns,
-            "targetUrns": target_urns if target_urns else [],
-            "lineageEdges": lineage_edges
-        }
+        # ------------------------------------------------------------------
+        # 1. PRIMARY: Read from materialized AGGREGATED edges
+        # ------------------------------------------------------------------
+        if target_urns:
+            cypher_mat = (
+                "MATCH (s)-[r:AGGREGATED]->(t) "
+                "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
+                "AND s.urn <> t.urn "
+                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                "r.weight AS weight, r.sourceEdgeTypes AS types "
+                "ORDER BY r.weight DESC LIMIT 500"
+            )
+            params_mat: Dict[str, Any] = {
+                "sourceUrns": source_urns,
+                "targetUrns": target_urns,
+            }
+        else:
+            # Cross-level / asymmetric: all AGGREGATED edges from sources
+            cypher_mat = (
+                "MATCH (s)-[r:AGGREGATED]->(t) "
+                "WHERE s.urn IN $sourceUrns "
+                "AND s.urn <> t.urn "
+                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                "r.weight AS weight, r.sourceEdgeTypes AS types "
+                "ORDER BY r.weight DESC LIMIT 500"
+            )
+            params_mat = {"sourceUrns": source_urns}
 
         try:
-            result = await self._graph.ro_query(cypher, params=params)
+            result = await self._graph.ro_query(cypher_mat, params=params_mat)
+            rows = result.result_set or []
         except Exception as e:
-            logger.error(f"On-the-fly aggregation failed: {e}")
-            # Fallback to minimal result or empty
-            return AggregatedEdgeResult(aggregatedEdges=[], totalSourceEdges=0)
-        
+            logger.warning(f"AGGREGATED edge read failed, will try live fallback: {e}")
+            rows = []
+
+        if rows:
+            return self._rows_to_aggregated_result(rows)
+
+        # ------------------------------------------------------------------
+        # 2. FALLBACK: Live traversal (granularity-aware depth)
+        # ------------------------------------------------------------------
+        logger.info("No materialized AGGREGATED edges found — using live traversal fallback")
+        return await self._live_aggregate_fallback(
+            source_urns, target_urns, granularity, lineage_edges, containment_edges
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers for get_aggregated_edges_between
+    # ------------------------------------------------------------------
+
+    def _rows_to_aggregated_result(self, rows: list) -> AggregatedEdgeResult:
+        """Convert raw Cypher result rows into AggregatedEdgeResult."""
         aggregated = []
         total_edges = 0
-        
-        for row in (result.result_set or []):
+        for row in rows:
             s_urn, t_urn, weight, types = row[0], row[1], row[2], row[3]
-            
-            agg_entry = AggregatedEdgeInfo(
+            w = int(weight) if weight else 1
+            edge_types = types if isinstance(types, list) else [str(types)] if types else []
+            aggregated.append(AggregatedEdgeInfo(
                 id=f"agg-{s_urn}-{t_urn}",
                 sourceUrn=s_urn,
                 targetUrn=t_urn,
-                edgeCount=int(weight),
-                edgeTypes=types if isinstance(types, list) else [str(types)],
-                confidence=1.0, 
-                sourceEdgeIds=[] # We don't fetch IDs for performance on large payloads
+                edgeCount=w,
+                edgeTypes=edge_types,
+                confidence=1.0,
+                sourceEdgeIds=[],
+            ))
+            total_edges += w
+        return AggregatedEdgeResult(aggregatedEdges=aggregated, totalSourceEdges=total_edges)
+
+    async def _live_aggregate_fallback(
+        self,
+        source_urns: List[str],
+        target_urns: Optional[List[str]],
+        granularity: Any,
+        lineage_edges: List[str],
+        containment_edges: Optional[List[str]] = None,
+    ) -> AggregatedEdgeResult:
+        """Bounded live traversal fallback when no AGGREGATED edges exist."""
+        gran_str = granularity.value if hasattr(granularity, "value") else str(granularity).lower()
+        gran_level = self._GRANULARITY_DEPTH.get(gran_str, 4)
+        max_depth = min(gran_level, 5)
+        depth_range = f"*0..{max_depth}" if max_depth > 0 else "*0"
+
+        # Use ontology-driven containment types, not hardcoded CONTAINS
+        c_types = containment_edges or list(self._get_containment_edge_types())
+        containment_cypher = "|".join(c_types)
+
+        if target_urns:
+            cypher = (
+                f"MATCH (s_parent) WHERE s_parent.urn IN $sourceUrns "
+                f"MATCH (s_parent)-[:{containment_cypher}{depth_range}]->(leaf_s) "
+                f"MATCH (leaf_s)-[r]->(leaf_t) WHERE type(r) IN $lineageEdges "
+                f"MATCH (t_parent)-[:{containment_cypher}{depth_range}]->(leaf_t) "
+                f"WHERE t_parent.urn IN $targetUrns AND s_parent.urn <> t_parent.urn "
+                f"RETURN s_parent.urn AS sUrn, t_parent.urn AS tUrn, "
+                f"count(r) AS weight, collect(DISTINCT type(r)) AS types "
+                f"ORDER BY weight DESC LIMIT 500"
             )
-            aggregated.append(agg_entry)
-            total_edges += int(weight)
-            
-        return AggregatedEdgeResult(
-            aggregatedEdges=aggregated,
-            totalSourceEdges=total_edges
-        )
+            params: Dict[str, Any] = {
+                "sourceUrns": source_urns,
+                "targetUrns": target_urns,
+                "lineageEdges": lineage_edges,
+            }
+        else:
+            cypher = (
+                f"MATCH (s_parent) WHERE s_parent.urn IN $sourceUrns "
+                f"MATCH (s_parent)-[:{containment_cypher}{depth_range}]->(leaf_s) "
+                f"MATCH (leaf_s)-[r]->(leaf_t) WHERE type(r) IN $lineageEdges "
+                f"MATCH (t_parent)-[:{containment_cypher}{depth_range}]->(leaf_t) "
+                f"WHERE s_parent.urn <> t_parent.urn "
+                f"RETURN s_parent.urn AS sUrn, t_parent.urn AS tUrn, "
+                f"count(r) AS weight, collect(DISTINCT type(r)) AS types "
+                f"ORDER BY weight DESC LIMIT 500"
+            )
+            params = {
+                "sourceUrns": source_urns,
+                "lineageEdges": lineage_edges,
+            }
+
+        try:
+            result = await self._graph.ro_query(cypher, params=params)
+            return self._rows_to_aggregated_result(result.result_set or [])
+        except Exception as e:
+            logger.error(f"Live aggregation fallback failed: {e}")
+            return AggregatedEdgeResult(aggregatedEdges=[], totalSourceEdges=0)
 
     async def get_trace_lineage(
         self,
@@ -814,81 +935,76 @@ class FalkorDBProvider(GraphDataProvider):
         if not start_urns:
              return LineageResult(nodes=[], edges=[], upstreamUrns=set(), downstreamUrns=set(), totalCount=0, hasMore=False)
 
-        # We can do BFS from the set of start_urns
-        # Note: We treat start_urns as depth 0
-        
-        search_queue = deque([(u, 0) for u in start_urns])
+        # Batched BFS: 1 Cypher query per depth level instead of 1 per node.
+        # Each iteration processes the entire frontier at once.
         visited_lineage = set(start_urns)
-        
-        # Populate initial nodes
-        # Optimization: Fetch them in bulk later, or fetch as we go? 
-        # FalkorDB is fast, fetching as we go or bulk at end. 
-        # Let's match nodes during traversal.
-        
-        while search_queue:
-            curr_urn, curr_depth = search_queue.popleft()
-            
-            if curr_depth >= depth:
-                continue
-                
-            # Construct query based on direction
-            # For "both", we can just do (a)-[r]-(b) but we need to know direction for result classification
-            
-            queries = []
+        current_frontier = list(start_urns)
+
+        for current_depth in range(depth):
+            if not current_frontier:
+                break
+
+            next_frontier_upstream: List[str] = []
+            next_frontier_downstream: List[str] = []
+
+            # Build direction-specific batch queries
+            dir_queries = []
             if direction in ["upstream", "both"]:
-                queries.append(("upstream", f"MATCH (curr)-[r]->(next) WHERE next.urn = $urn AND type(r) IN $lineage RETURN curr, r, next")) # Incoming to current
+                # Find all nodes that flow INTO the current frontier
+                cypher_up = (
+                    "MATCH (src)-[r]->(tgt) "
+                    "WHERE tgt.urn IN $frontier AND type(r) IN $lineage "
+                    "RETURN src, r, tgt"
+                )
+                dir_queries.append(("upstream", cypher_up))
             if direction in ["downstream", "both"]:
-                queries.append(("downstream", f"MATCH (curr)-[r]->(next) WHERE curr.urn = $urn AND type(r) IN $lineage RETURN curr, r, next")) # Outgoing from current
-                
-            for dir_label, cypher_q in queries:
-                res = await self._graph.ro_query(cypher_q, params={"urn": curr_urn, "lineage": safe_lineage})
-                
+                # Find all nodes that flow OUT of the current frontier
+                cypher_down = (
+                    "MATCH (src)-[r]->(tgt) "
+                    "WHERE src.urn IN $frontier AND type(r) IN $lineage "
+                    "RETURN src, r, tgt"
+                )
+                dir_queries.append(("downstream", cypher_down))
+
+            for dir_label, cypher_q in dir_queries:
+                res = await self._graph.ro_query(
+                    cypher_q,
+                    params={"frontier": current_frontier, "lineage": safe_lineage}
+                )
+
                 for row in (res.result_set or []):
-                    # Extract node/edge
-                    # upstream: next.urn=$urn, so curr is the dependency (upstream node)
-                    # downstream: curr.urn=$urn, so next is the dependent (downstream node)
-                    
-                    # Row: [StartNode, Edge, EndNode]
-                    # But wait, my query variable names might be confusing.
-                    # Let's map standard Cypher return: SOURCE, EDGE, TARGET
-                    
                     src_node_obj = self._extract_node_from_result(row[0])
                     edge_obj_raw = row[1]
                     tgt_node_obj = self._extract_node_from_result(row[2])
-                    
+
                     if not src_node_obj or not tgt_node_obj:
                         continue
-                        
-                    # Build edge object
-                    # edge_obj_raw is the relation object or properties dict
-                    # FalkorDB python client returns Relation object or similar
-                    # We need to parse it. 
-                    # row[1] is relation.
-                    
+
                     r_type = getattr(edge_obj_raw, "relation", None) or getattr(edge_obj_raw, "type", None) or "RELATED_TO"
                     r_props = getattr(edge_obj_raw, "properties", {})
-                    
+
                     edge = _edge_from_row(src_node_obj.urn, tgt_node_obj.urn, r_type, r_props)
-                    
+
                     if edge.id not in collected_edges:
                         collected_edges[edge.id] = edge
-                        
-                        # Determine neighbor
+                        collected_nodes[src_node_obj.urn] = src_node_obj
+                        collected_nodes[tgt_node_obj.urn] = tgt_node_obj
+
                         if dir_label == "upstream":
                             neighbor = src_node_obj
                             if neighbor.urn not in visited_lineage:
                                 visited_lineage.add(neighbor.urn)
                                 upstream_urns.add(neighbor.urn)
-                                search_queue.append((neighbor.urn, curr_depth + 1))
+                                next_frontier_upstream.append(neighbor.urn)
                         else:
                             neighbor = tgt_node_obj
                             if neighbor.urn not in visited_lineage:
                                 visited_lineage.add(neighbor.urn)
                                 downstream_urns.add(neighbor.urn)
-                                search_queue.append((neighbor.urn, curr_depth + 1))
-                                
-                        collected_nodes[src_node_obj.urn] = src_node_obj
-                        collected_nodes[tgt_node_obj.urn] = tgt_node_obj
+                                next_frontier_downstream.append(neighbor.urn)
+
+            # Merge frontiers for next depth level
+            current_frontier = next_frontier_upstream + next_frontier_downstream
 
         # 3. Structural Context (Traverse UP)
         # For all collected nodes, find their parents/containers
@@ -925,40 +1041,41 @@ class FalkorDBProvider(GraphDataProvider):
              # Let's do a single pass for immediate parents, then loop?
              # Actually, simpler: Just fetch all ancestors for these nodes.
              
-             # Let's do a generic ancestor fetch
+             # Batched ancestor fetch — climb containment levels
              current_level_urns = all_lineage_urns
-             for _ in range(3): # limit hierarchy depth to 3 levels up from lineage
+             seen_parents: Set[str] = set(collected_nodes.keys())
+             for _ in range(5):  # up to 5 containment levels
                  if not current_level_urns:
                      break
-                 
+
                  res_struct = await self._graph.ro_query(
                      cypher_structure,
                      params={"urns": current_level_urns, "containment": safe_containment}
                  )
-                 
+
                  next_level_urns = []
-                 found_any = False
-                 
+
                  for row in (res_struct.result_set or []):
                      parent = self._extract_node_from_result(row[0])
                      r_raw = row[1]
                      child = self._extract_node_from_result(row[2])
-                     
+
                      if parent and child:
-                         collected_nodes[parent.urn] = parent
-                         collected_nodes[child.urn] = child # Ensure child is there
-                         
+                         collected_nodes[child.urn] = child
+
                          r_type = getattr(r_raw, "relation", None) or getattr(r_raw, "type", None) or "CONTAINS"
                          r_props = getattr(r_raw, "properties", {})
-                         
+
                          edge = _edge_from_row(parent.urn, child.urn, r_type, r_props)
                          collected_edges[edge.id] = edge
-                         
-                         if parent.urn not in collected_nodes: # New node found
+
+                         # Only add parent to next level if we haven't seen it before
+                         if parent.urn not in seen_parents:
+                             seen_parents.add(parent.urn)
+                             collected_nodes[parent.urn] = parent
                              next_level_urns.append(parent.urn)
-                         found_any = True
-                 
-                 if not found_any:
+
+                 if not next_level_urns:
                      break
                  current_level_urns = next_level_urns
 

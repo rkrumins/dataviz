@@ -416,6 +416,34 @@ async def get_aggregated_edges(
     return await engine.get_aggregated_edges(request)
 
 
+@router.post("/edges/aggregated/materialize")
+async def materialize_aggregated_edges(
+    engine: ContextEngine = Depends(get_context_engine),
+    batch_size: int = Body(1000, embed=True),
+):
+    """
+    Trigger batch materialization of AGGREGATED edges.
+    Scans all lineage edges and creates/updates [:AGGREGATED] relationships
+    between ancestor pairs at equivalent hierarchy levels.
+
+    This should be run after data ingestion or as a periodic maintenance task.
+    """
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+    if not isinstance(engine.provider, FalkorDBProvider):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Materialization only supported for FalkorDB provider"}
+        )
+
+    ontology = await engine.get_ontology_metadata()
+    stats = await engine.provider.materialize_aggregated_edges_batch(
+        batch_size=batch_size,
+        containment_edge_types=list(ontology.containment_edge_types),
+        lineage_edge_types=list(ontology.lineage_edge_types),
+    )
+    return JSONResponse(content=stats)
+
+
 @router.post("/nodes/create", response_model=CreateNodeResult, response_model_by_alias=True)
 async def create_node(
     request: CreateNodeRequest = Body(...),
