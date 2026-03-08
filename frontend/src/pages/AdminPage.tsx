@@ -5,16 +5,26 @@
  *   • Workspaces — CRUD + data source management
  *   • Insights — cross-workspace analytics
  */
+import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
-    Server, Database, BarChart3, ChevronRight, Shield,
+    Server, Database, BarChart3, Shield, Layers, ChevronDown
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-const adminSections = [
-    { path: 'providers', label: 'Providers', icon: Server, description: 'Database connections & health' },
-    { path: 'workspaces', label: 'Workspaces', icon: Database, description: 'Environments & data sources' },
-    { path: 'insights', label: 'Insights', icon: BarChart3, description: 'Graph statistics & analytics' },
+// In a larger app, we'd have multiple groups here. For now, it's just "Data Sources".
+const adminGroups = [
+    {
+        id: 'data-sources',
+        label: 'Data Sources',
+        icon: Layers,
+        path: 'data-sources',
+        items: [
+            { path: 'data-sources/workspaces', label: 'Workspaces', icon: Database, description: 'Environments & data sources' },
+            { path: 'data-sources/providers', label: 'Providers', icon: Server, description: 'Database connections & health' },
+            { path: 'data-sources/insights', label: 'Insights', icon: BarChart3, description: 'Graph statistics & analytics' },
+        ]
+    }
 ]
 
 export function AdminPage() {
@@ -22,7 +32,7 @@ export function AdminPage() {
     const isRoot = location.pathname === '/admin' || location.pathname === '/admin/'
 
     if (isRoot) {
-        return <Navigate to="/admin/workspaces" replace />
+        return <Navigate to="/admin/data-sources" replace />
     }
 
     return (
@@ -43,32 +53,81 @@ export function AdminPage() {
                 </div>
 
                 {/* Navigation */}
-                <nav className="flex-1 px-3 space-y-1">
-                    {adminSections.map((section) => {
-                        const Icon = section.icon
+                <nav className="flex-1 px-3 space-y-4 pt-2">
+                    {adminGroups.map((group) => {
+                        const GroupIcon = group.icon
+                        // Check if any child is active to keep the group open and highlighted
+                        const isGroupActive = group.items.some(item => location.pathname.includes(`/admin/${item.path}`))
+
+                        // Default to open if active, otherwise open
+                        const [isOpen, setIsOpen] = useState(true)
+
                         return (
-                            <NavLink
-                                key={section.path}
-                                to={`/admin/${section.path}`}
-                                className={({ isActive }) => cn(
-                                    "w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left group transition-all duration-200",
-                                    isActive
-                                        ? "bg-gradient-to-r from-indigo-500/10 to-violet-500/10 text-indigo-600 dark:text-indigo-400 shadow-sm border border-indigo-500/20"
-                                        : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink border border-transparent"
-                                )}
-                            >
+                            <div key={group.id} className="space-y-1">
+                                {/* Group Header Wrapper */}
+                                <div className="flex items-center w-full px-2 py-1.5 rounded-lg group/header hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+                                    <NavLink
+                                        to={`/admin/${group.path}`}
+                                        className={({ isActive }) => cn(
+                                            "flex-1 flex items-center gap-2 outline-none rounded-md focus-visible:ring-2 focus-visible:ring-indigo-500/50 p-1",
+                                            isActive || isGroupActive ? "text-indigo-500" : "text-ink-muted hover:text-ink-secondary"
+                                        )}
+                                    >
+                                        <GroupIcon className="w-4 h-4 transition-colors" />
+                                        <span className="text-xs font-bold uppercase tracking-wider">
+                                            {group.label}
+                                        </span>
+                                    </NavLink>
+                                    <button
+                                        onClick={(e) => {
+                                            e.preventDefault()
+                                            setIsOpen(!isOpen)
+                                        }}
+                                        className="p-1.5 rounded-md text-ink-muted hover:text-ink-secondary hover:bg-black/10 dark:hover:bg-white/10 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                                        aria-label="Toggle section"
+                                    >
+                                        <ChevronDown className={cn(
+                                            "w-3.5 h-3.5 transition-transform duration-200",
+                                            isOpen ? "" : "-rotate-90"
+                                        )} />
+                                    </button>
+                                </div>
+
+                                {/* Group Items */}
                                 <div className={cn(
-                                    "w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors",
-                                    "group-[.active]:bg-indigo-500/20 bg-black/5 dark:bg-white/5"
+                                    "grid transition-all duration-200 ease-in-out",
+                                    isOpen ? "grid-rows-[1fr] opacity-100 mt-1" : "grid-rows-[0fr] opacity-0 mt-0"
                                 )}>
-                                    <Icon className="w-4 h-4" />
+                                    <div className="overflow-hidden space-y-1">
+                                        {group.items.map((item) => {
+                                            const ItemIcon = item.icon
+                                            return (
+                                                <NavLink
+                                                    key={item.path}
+                                                    to={`/admin/${item.path}`}
+                                                    className={({ isActive }) => cn(
+                                                        "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left group transition-all duration-200 relative",
+                                                        isActive
+                                                            ? "bg-gradient-to-r from-indigo-500/10 to-violet-500/10 text-indigo-600 dark:text-indigo-400 shadow-sm border border-indigo-500/20"
+                                                            : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink border border-transparent"
+                                                    )}
+                                                >
+                                                    <div className={cn(
+                                                        "w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition-colors",
+                                                        "group-[.active]:bg-indigo-500/20 bg-black/5 dark:bg-white/5"
+                                                    )}>
+                                                        <ItemIcon className="w-3.5 h-3.5" />
+                                                    </div>
+                                                    <div className="flex flex-col min-w-0 flex-1">
+                                                        <span className="text-sm font-semibold truncate leading-tight">{item.label}</span>
+                                                        <span className="text-[10px] text-ink-muted truncate mt-0.5">{item.description}</span>
+                                                    </div>
+                                                </NavLink>
+                                            )
+                                        })}
+                                    </div>
                                 </div>
-                                <div className="flex flex-col min-w-0 flex-1">
-                                    <span className="text-sm font-semibold truncate">{section.label}</span>
-                                    <span className="text-[10px] text-ink-muted truncate">{section.description}</span>
-                                </div>
-                                <ChevronRight className="w-4 h-4 text-ink-muted opacity-0 group-hover:opacity-100 transition-opacity" />
-                            </NavLink>
+                            </div>
                         )
                     })}
                 </nav>

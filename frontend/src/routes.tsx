@@ -11,6 +11,7 @@ import { AdminProviders } from '@/components/admin/AdminProviders'
 import { AdminWorkspaces } from '@/components/admin/AdminWorkspaces'
 import { AdminWorkspaceDetail } from '@/components/admin/AdminWorkspaceDetail'
 import { AdminInsights } from '@/components/admin/AdminInsights'
+import { AdminDataSourcesOverview } from '@/components/admin/AdminDataSourcesOverview'
 
 export const router = createBrowserRouter([
   {
@@ -28,11 +29,12 @@ export const router = createBrowserRouter([
         path: 'admin',
         element: <AdminPage />,
         children: [
-          { index: true, element: <Navigate to="workspaces" replace /> },
-          { path: 'providers', element: <AdminProviders /> },
-          { path: 'workspaces', element: <AdminWorkspaces /> },
-          { path: 'workspaces/:wsId', element: <AdminWorkspaceDetail /> },
-          { path: 'insights', element: <AdminInsights /> },
+          { index: true, element: <Navigate to="data-sources" replace /> },
+          { path: 'data-sources', element: <AdminDataSourcesOverview /> },
+          { path: 'data-sources/providers', element: <AdminProviders /> },
+          { path: 'data-sources/workspaces', element: <AdminWorkspaces /> },
+          { path: 'data-sources/workspaces/:wsId', element: <AdminWorkspaceDetail /> },
+          { path: 'data-sources/insights', element: <AdminInsights /> },
         ],
       },
       { path: '*', element: <NotFoundPage /> },
