@@ -1,7 +1,7 @@
 /**
  * Deep-link page: /views/:viewId
- * Loads a specific view by ID, sets the correct workspace context,
- * applies view config, and renders the canvas.
+ * Loads a specific view by ID from the API first, then falls back
+ * to the local schema store for views not yet persisted to the backend.
  */
 import { useEffect, useState, useRef } from 'react'
 import { useParams } from 'react-router-dom'
@@ -14,21 +14,24 @@ import { viewsApi, type ViewApiResponse } from '@/services/viewsApiService'
 export function ViewPage() {
   const { viewId } = useParams<{ viewId: string }>()
   const [view, setView] = useState<ViewApiResponse | null>(null)
+  const [localView, setLocalView] = useState<boolean>(false)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const appliedRef = useRef<string | null>(null)
 
   const { activeWorkspaceId, setActiveWorkspace } = useWorkspacesStore()
-  const { setActiveView } = useSchemaStore()
+  const { setActiveView, schema } = useSchemaStore()
   const { setViewport } = useCanvasStore()
 
-  // Fetch view data
+  // Fetch view data — try API first, fall back to schema store
   useEffect(() => {
     if (!viewId) return
 
     const fetchView = async () => {
       setLoading(true)
       setError(null)
+      setLocalView(false)
+
       try {
         const data = await viewsApi.get(viewId)
         setView(data)
@@ -37,9 +40,35 @@ export function ViewPage() {
         if (data.workspaceId && data.workspaceId !== activeWorkspaceId) {
           setActiveWorkspace(data.workspaceId)
         }
-      } catch (err) {
-        console.error('[ViewPage] Failed to load view:', err)
-        setError(err instanceof Error ? err.message : 'View not found')
+      } catch {
+        // API failed — fall back to local schema store
+        const schemaView = schema?.views.find(v => v.id === viewId)
+        if (schemaView) {
+          // Found in local store — activate it directly
+          setActiveView(viewId)
+          setLocalView(true)
+          setView({
+            id: schemaView.id,
+            name: schemaView.name,
+            description: schemaView.description,
+            viewType: schemaView.layout?.type ?? 'graph',
+            config: {
+              content: schemaView.content,
+              layout: schemaView.layout,
+              filters: schemaView.filters,
+              entityOverrides: schemaView.entityOverrides,
+              icon: schemaView.icon,
+            },
+            visibility: schemaView.isPublic ? 'enterprise' : 'private',
+            isPinned: false,
+            favouriteCount: 0,
+            isFavourited: false,
+            createdAt: schemaView.createdAt ?? new Date().toISOString(),
+            updatedAt: schemaView.updatedAt ?? new Date().toISOString(),
+          })
+        } else {
+          setError('View not found')
+        }
       } finally {
         setLoading(false)
       }
@@ -62,10 +91,12 @@ export function ViewPage() {
         setViewport(config.viewport)
       }
 
-      // Set as the active view in schema store
-      setActiveView(view.id)
+      // Set as the active view in schema store (unless already set for local view)
+      if (!localView) {
+        setActiveView(view.id)
+      }
     }
-  }, [view, setActiveView, setViewport])
+  }, [view, localView, setActiveView, setViewport])
 
   if (loading) {
     return (

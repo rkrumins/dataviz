@@ -7,47 +7,16 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
     ChevronLeft, Plus, Database, Edit2,
     Loader2, Settings, X, AlertTriangle, Save,
-    Tag,
+    Tag, Trash2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { workspaceService, type WorkspaceResponse, type DataSourceResponse } from '@/services/workspaceService'
-import { providerService, type ProviderResponse } from '@/services/providerService'
+import { ShieldAlert } from 'lucide-react'
+import { workspaceService, type WorkspaceResponse, type DataSourceResponse, type WorkspaceDataSourceImpactResponse } from '@/services/workspaceService'
+import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import { useSchemaStore } from '@/store/schema'
 import { DataSourceCard } from './DataSourceCard'
 import { AdminWizard, type WizardStep } from './AdminWizard'
-
-// ─────────────────────────────────────────────────────────────────────
-// Styled Confirm Dialog
-// ─────────────────────────────────────────────────────────────────────
-
-function ConfirmDialog({ open, title, message, danger, confirmLabel, onConfirm, onCancel }: {
-    open: boolean; title: string; message: string; danger?: boolean
-    confirmLabel?: string; onConfirm: () => void; onCancel: () => void
-}) {
-    if (!open) return null
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-            <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onCancel} />
-            <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
-                <div className="flex items-center gap-3 mb-4">
-                    <div className={cn("w-10 h-10 rounded-xl flex items-center justify-center", danger ? "bg-red-500/10" : "bg-amber-500/10")}>
-                        <AlertTriangle className={cn("w-5 h-5", danger ? "text-red-500" : "text-amber-500")} />
-                    </div>
-                    <h3 className="text-lg font-bold text-ink">{title}</h3>
-                </div>
-                <p className="text-sm text-ink-secondary mb-6">{message}</p>
-                <div className="flex justify-end gap-3">
-                    <button onClick={onCancel} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors">Cancel</button>
-                    <button onClick={onConfirm} className={cn(
-                        "px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors",
-                        danger ? "bg-red-500 hover:bg-red-600" : "bg-amber-500 hover:bg-amber-600"
-                    )}>{confirmLabel || 'Confirm'}</button>
-                </div>
-            </div>
-        </div>
-    )
-}
 
 // ─────────────────────────────────────────────────────────────────────
 // Edit Data Source Modal
@@ -72,12 +41,8 @@ function EditDsModal({ ds, onSave, onClose }: {
                             className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-ink-muted mb-1">Provider</label>
-                        <p className="text-sm text-ink">{ds.providerId}</p>
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-ink-muted mb-1">Graph</label>
-                        <p className="text-sm font-mono text-ink">{ds.graphName || '—'}</p>
+                        <label className="block text-sm font-medium text-ink-muted mb-1">Catalog Item</label>
+                        <p className="text-sm font-mono text-ink">{ds.catalogItemId}</p>
                     </div>
                 </div>
                 <div className="flex justify-end gap-3">
@@ -101,9 +66,7 @@ export function AdminWorkspaceDetail() {
     const allViews = useSchemaStore(s => s.schema?.views || [])
 
     const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null)
-    const [providers, setProviders] = useState<ProviderResponse[]>([])
-    const [providerNames, setProviderNames] = useState<Record<string, string>>({})
-    const [graphOptions, setGraphOptions] = useState<Record<string, string[]>>({})
+    const [catalogItems, setCatalogItems] = useState<CatalogItemResponse[]>([])
     const [dsStatsMap, setDsStatsMap] = useState<Record<string, DataSourceStats>>({})
     const [isLoading, setIsLoading] = useState(true)
 
@@ -114,13 +77,14 @@ export function AdminWorkspaceDetail() {
 
     // Add DS wizard
     const [showAddDs, setShowAddDs] = useState(false)
-    const [addDsProvider, setAddDsProvider] = useState('')
-    const [addDsGraph, setAddDsGraph] = useState('')
+    const [addDsCatalogId, setAddDsCatalogId] = useState('')
     const [addDsLabel, setAddDsLabel] = useState('')
     const [addDsSubmitting, setAddDsSubmitting] = useState(false)
 
     // Delete confirm
     const [deleteTarget, setDeleteTarget] = useState<{ id: string; label: string } | null>(null)
+    const [deleteImpact, setDeleteImpact] = useState<WorkspaceDataSourceImpactResponse | null>(null)
+    const [loadingImpact, setLoadingImpact] = useState(false)
 
     // Edit DS modal
     const [editingDs, setEditingDs] = useState<DataSourceResponse | null>(null)
@@ -130,18 +94,14 @@ export function AdminWorkspaceDetail() {
         if (!wsId) return
         setIsLoading(true)
         try {
-            const [ws, provList] = await Promise.all([
+            const [ws, calatogList] = await Promise.all([
                 workspaceService.get(wsId),
-                providerService.list(),
+                catalogService.list()
             ])
             setWorkspace(ws)
-            setProviders(provList)
+            setCatalogItems(calatogList)
             setEditName(ws.name)
             setEditDesc(ws.description || '')
-
-            const names: Record<string, string> = {}
-            provList.forEach(p => { names[p.id] = p.name })
-            setProviderNames(names)
 
             const stats: Record<string, DataSourceStats> = {}
             for (const ds of ws.dataSources || []) {
@@ -167,14 +127,13 @@ export function AdminWorkspaceDetail() {
 
     useEffect(() => { loadWorkspace() }, [loadWorkspace])
 
-    // Fetch graphs when provider selected in add wizard
-    useEffect(() => {
-        if (!addDsProvider) return
-        if (graphOptions[addDsProvider]) return
-        providerService.listGraphs(addDsProvider).then(r => {
-            setGraphOptions(prev => ({ ...prev, [addDsProvider]: r.graphs }))
-        }).catch(() => { })
-    }, [addDsProvider]) // eslint-disable-line
+    // Filter allowed catalog items for this workspace
+    const allowedCatalogItems = useMemo(() => {
+        if (!wsId || !catalogItems) return []
+        return catalogItems.filter(item =>
+            item.permittedWorkspaces.includes('*') || item.permittedWorkspaces.includes(wsId)
+        )
+    }, [wsId, catalogItems])
 
     // ── Scoped views per data source ────────────────────────
     const viewsByDs = useMemo(() => {
@@ -201,10 +160,25 @@ export function AdminWorkspaceDetail() {
         loadWorkspace()
     }
 
+    const handleDeleteDsClick = async (dsId: string, label: string) => {
+        if (!wsId) return
+        setDeleteTarget({ id: dsId, label })
+        setLoadingImpact(true)
+        try {
+            const impact = await workspaceService.getDataSourceImpact(wsId, dsId)
+            setDeleteImpact(impact)
+        } catch (err) {
+            console.error(err)
+        } finally {
+            setLoadingImpact(false)
+        }
+    }
+
     const handleDeleteDs = async () => {
         if (!wsId || !deleteTarget) return
         await workspaceService.removeDataSource(wsId, deleteTarget.id)
         setDeleteTarget(null)
+        setDeleteImpact(null)
         loadWorkspace()
     }
 
@@ -226,15 +200,14 @@ export function AdminWorkspaceDetail() {
         loadWorkspace()
     }
 
-    const resetAddDs = () => { setAddDsProvider(''); setAddDsGraph(''); setAddDsLabel('') }
+    const resetAddDs = () => { setAddDsCatalogId(''); setAddDsLabel('') }
 
     const handleAddDsComplete = async () => {
         if (!wsId) return
         setAddDsSubmitting(true)
         try {
             await workspaceService.addDataSource(wsId, {
-                providerId: addDsProvider,
-                graphName: addDsGraph,
+                catalogItemId: addDsCatalogId,
                 label: addDsLabel || undefined,
             })
             setShowAddDs(false)
@@ -248,30 +221,25 @@ export function AdminWorkspaceDetail() {
     const addDsSteps: WizardStep[] = [
         {
             id: 'source',
-            title: 'Select Source',
+            title: 'Select Data Product',
             icon: Database,
-            validate: () => (addDsProvider && addDsGraph) ? true : 'Select a provider and graph.',
+            validate: () => addDsCatalogId ? true : 'Please select a catalog item.',
             content: (
                 <div className="space-y-4">
                     <div>
-                        <label className="block text-sm font-medium text-ink mb-1.5">Provider *</label>
-                        <select value={addDsProvider} onChange={e => { setAddDsProvider(e.target.value); setAddDsGraph('') }}
+                        <label className="block text-sm font-medium text-ink mb-1.5">Enterprise Catalog Item *</label>
+                        <select value={addDsCatalogId} onChange={e => setAddDsCatalogId(e.target.value)}
                             className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50">
-                            <option value="">Select a provider...</option>
-                            {providers.map(p => <option key={p.id} value={p.id}>{p.name} ({p.providerType})</option>)}
+                            <option value="">Select a data product...</option>
+                            {allowedCatalogItems.map(c => <option key={c.id} value={c.id}>{c.name} ({c.sourceIdentifier})</option>)}
                         </select>
+                        {allowedCatalogItems.length === 0 && (
+                            <p className="text-xs text-amber-500 mt-2">No catalog items are permitted for this workspace. Contact your administrator.</p>
+                        )}
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-ink mb-1.5">Graph *</label>
-                        <select value={addDsGraph} onChange={e => setAddDsGraph(e.target.value)} disabled={!addDsProvider}
-                            className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 disabled:opacity-50">
-                            <option value="">Select a graph...</option>
-                            {(graphOptions[addDsProvider] || []).map(g => <option key={g} value={g}>{g}</option>)}
-                        </select>
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-ink mb-1.5">Label</label>
-                        <input value={addDsLabel} onChange={e => setAddDsLabel(e.target.value)} placeholder="Optional display label"
+                        <label className="block text-sm font-medium text-ink mb-1.5">Connection Label</label>
+                        <input value={addDsLabel} onChange={e => setAddDsLabel(e.target.value)} placeholder="Optional display label in this workspace"
                             className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
                     </div>
                 </div>
@@ -286,8 +254,7 @@ export function AdminWorkspaceDetail() {
                 <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-5">
                     <h4 className="text-sm font-bold text-ink mb-3">Data Source Summary</h4>
                     <dl className="grid grid-cols-2 gap-3 text-sm">
-                        <div><dt className="text-ink-muted">Provider</dt><dd className="text-ink mt-0.5">{providers.find(p => p.id === addDsProvider)?.name || '—'}</dd></div>
-                        <div><dt className="text-ink-muted">Graph</dt><dd className="font-mono text-ink mt-0.5">{addDsGraph || '—'}</dd></div>
+                        <div><dt className="text-ink-muted">Catalog Item</dt><dd className="text-ink mt-0.5">{catalogItems.find(c => c.id === addDsCatalogId)?.name || '—'}</dd></div>
                         <div><dt className="text-ink-muted">Label</dt><dd className="text-ink mt-0.5">{addDsLabel || '—'}</dd></div>
                         <div><dt className="text-ink-muted">Workspace</dt><dd className="text-ink mt-0.5">{workspace?.name || '—'}</dd></div>
                     </dl>
@@ -305,7 +272,7 @@ export function AdminWorkspaceDetail() {
         return (
             <div className="flex flex-col items-center justify-center h-full">
                 <p className="text-ink-muted">Workspace not found.</p>
-                <button onClick={() => navigate('/admin/workspaces')} className="mt-4 text-indigo-500 hover:underline text-sm">← Back to Workspaces</button>
+                <button onClick={() => navigate('/admin/registry?tab=workspaces')} className="mt-4 text-indigo-500 hover:underline text-sm">← Back to Workspaces</button>
             </div>
         )
     }
@@ -313,7 +280,7 @@ export function AdminWorkspaceDetail() {
     return (
         <div className="p-8 max-w-5xl mx-auto">
             {/* Back */}
-            <button onClick={() => navigate('/admin/workspaces')} className="flex items-center gap-1.5 text-sm text-ink-muted hover:text-ink transition-colors mb-6">
+            <button onClick={() => navigate('/admin/registry?tab=workspaces')} className="flex items-center gap-1.5 text-sm text-ink-muted hover:text-ink transition-colors mb-6">
                 <ChevronLeft className="w-4 h-4" /> Back to Workspaces
             </button>
 
@@ -385,14 +352,15 @@ export function AdminWorkspaceDetail() {
                             key={ds.id}
                             ds={ds}
                             stats={dsStatsMap[ds.id]}
-                            providerName={providerNames[ds.providerId]}
+                            providerName={catalogItems.find(c => c.id === ds.catalogItemId)?.name || ds.catalogItemId}
                             isActive={ds.isPrimary}
                             views={viewsByDs[ds.id] || []}
                             onSetPrimary={() => handleSetPrimary(ds.id)}
                             onProjectionModeChange={mode => handleProjectionMode(ds.id, mode)}
                             onDedicatedGraphNameChange={name => handleDedicatedGraphName(ds.id, name)}
                             onEdit={() => setEditingDs(ds)}
-                            onDelete={workspace.dataSources.length > 1 ? () => setDeleteTarget({ id: ds.id, label: ds.label || ds.graphName || 'Unnamed' }) : undefined}
+                            onDelete={workspace.dataSources.length > 1 ? () => handleDeleteDsClick(ds.id, ds.label || ds.catalogItemId) : undefined}
+                            onExplore={() => navigate(`/schema?workspaceId=${workspace.id}&dataSourceId=${ds.id}`)}
                         />
                     ))}
                 </div>
@@ -409,15 +377,50 @@ export function AdminWorkspaceDetail() {
                 completionLabel="Add Source"
             />
 
-            <ConfirmDialog
-                open={!!deleteTarget}
-                title="Remove Data Source"
-                message={`Are you sure you want to remove "${deleteTarget?.label}" from this workspace? This action cannot be undone.`}
-                danger
-                confirmLabel="Remove"
-                onConfirm={handleDeleteDs}
-                onCancel={() => setDeleteTarget(null)}
-            />
+            {deleteTarget && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center">
+                    <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => !loadingImpact && setDeleteTarget(null)} />
+                    <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
+                        <div className="flex items-center gap-3 mb-4">
+                            <div className="w-10 h-10 rounded-xl bg-red-500/10 flex items-center justify-center">
+                                <Trash2 className="w-5 h-5 text-red-500" />
+                            </div>
+                            <h3 className="text-lg font-bold text-ink">Remove Data Source</h3>
+                        </div>
+                        <p className="text-sm text-ink-secondary mb-4">
+                            Are you sure you want to decouple <strong>{deleteTarget.label}</strong> from this domain?
+                        </p>
+
+                        {loadingImpact ? (
+                            <div className="flex justify-center py-6"><Loader2 className="w-6 h-6 animate-spin text-ink-muted" /></div>
+                        ) : deleteImpact && deleteImpact.views.length > 0 ? (
+                            <div className="mb-6 p-4 rounded-xl border border-red-500/20 bg-red-500/5 text-sm">
+                                <h4 className="font-bold text-red-500 mb-2 flex items-center gap-2"><ShieldAlert className="w-4 h-4" /> Blast Radius Warning</h4>
+                                <p className="text-red-400 mb-3 text-xs leading-relaxed">
+                                    Removing this data source will instantly break the following semantic views in this workspace:
+                                </p>
+                                <div className="space-y-2 text-xs text-red-500 font-medium max-h-48 overflow-y-auto mt-2 p-2 bg-red-500/10 rounded-lg">
+                                    <p className="font-bold underline mb-1">{deleteImpact.views.length} Semantic Views:</p>
+                                    <ul className="list-disc pl-4 space-y-0.5">
+                                        {deleteImpact.views.map(v => <li key={v.id}>{v.name}</li>)}
+                                    </ul>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="mb-6 p-3 rounded-lg bg-emerald-500/10 text-emerald-500 text-sm font-medium flex items-center gap-2">
+                                <ShieldAlert className="w-4 h-4" /> Safe to decouple. No views explicitly depend on this data source.
+                            </div>
+                        )}
+
+                        <div className="flex justify-end gap-3">
+                            <button onClick={() => { setDeleteTarget(null); setDeleteImpact(null); }} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50 transition-colors">Cancel</button>
+                            <button onClick={handleDeleteDs} disabled={loadingImpact} className="px-4 py-2 rounded-xl text-sm font-semibold bg-red-500 text-white hover:bg-red-600 disabled:opacity-50 transition-colors flex items-center gap-2">
+                                {loadingImpact ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />} Confirm Removal
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {editingDs && (
                 <EditDsModal

@@ -7,11 +7,9 @@ import { WorkspaceView } from '@/pages/WorkspaceView'
 import { WorkspaceViewsManager } from '@/pages/WorkspaceViewsManager'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 import { AdminPage } from '@/pages/AdminPage'
-import { AdminProviders } from '@/components/admin/AdminProviders'
-import { AdminWorkspaces } from '@/components/admin/AdminWorkspaces'
+import { AdminOverview } from '@/components/admin/AdminOverview'
+import { AdminRegistry } from '@/components/admin/AdminRegistry'
 import { AdminWorkspaceDetail } from '@/components/admin/AdminWorkspaceDetail'
-import { AdminInsights } from '@/components/admin/AdminInsights'
-import { AdminDataSourcesOverview } from '@/components/admin/AdminDataSourcesOverview'
 
 export const router = createBrowserRouter([
   {
@@ -29,16 +27,13 @@ export const router = createBrowserRouter([
         path: 'admin',
         element: <AdminPage />,
         children: [
-          { index: true, element: <Navigate to="data-sources" replace /> },
-          { path: 'data-sources', element: <AdminDataSourcesOverview /> },
-          { path: 'data-sources/providers', element: <AdminProviders /> },
-          { path: 'data-sources/workspaces', element: <AdminWorkspaces /> },
-          { path: 'data-sources/workspaces/:wsId', element: <AdminWorkspaceDetail /> },
-          { path: 'data-sources/insights', element: <AdminInsights /> },
+          { index: true, element: <Navigate to="overview" replace /> },
+          { path: 'overview', element: <AdminOverview /> },
+          { path: 'registry', element: <AdminRegistry /> },
+          { path: 'registry/workspaces/:wsId', element: <AdminWorkspaceDetail /> },
         ],
       },
       { path: '*', element: <NotFoundPage /> },
     ],
   },
 ])
-

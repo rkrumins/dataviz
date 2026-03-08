@@ -271,6 +271,7 @@ class ProviderORM(Base):
     credentials = Column(Text, nullable=True)         # Fernet-encrypted JSON blob
     tls_enabled = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
+    permitted_workspaces = Column(Text, nullable=False, default='["*"]')  # JSON list; "*" = all
     extra_config = Column(Text, nullable=True)        # JSON blob
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
@@ -278,6 +279,10 @@ class ProviderORM(Base):
     # Relationships
     data_sources = relationship(
         "WorkspaceDataSourceORM", back_populates="provider",
+        cascade="all, delete-orphan",
+    )
+    catalog_items = relationship(
+        "CatalogItemORM", back_populates="provider",
         cascade="all, delete-orphan",
     )
 
@@ -378,6 +383,11 @@ class WorkspaceDataSourceORM(Base):
         nullable=False,
     )
     graph_name = Column(Text, nullable=True)
+    catalog_item_id = Column(
+        Text,
+        ForeignKey("catalog_items.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     blueprint_id = Column(
         Text,
         ForeignKey("ontology_blueprints.id", ondelete="SET NULL"),
@@ -388,12 +398,14 @@ class WorkspaceDataSourceORM(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     projection_mode = Column(Text, nullable=True)  # None = inherit from provider, "in_source" | "dedicated"
     dedicated_graph_name = Column(Text, nullable=True)  # graph name when projection_mode == "dedicated"
+    access_level = Column(Text, nullable=True, default="read")  # read | write | admin
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     # Relationships
     workspace = relationship("WorkspaceORM", back_populates="data_sources")
     provider = relationship("ProviderORM", back_populates="data_sources")
+    catalog_item = relationship("CatalogItemORM")
     blueprint = relationship("OntologyBlueprintORM", back_populates="data_sources")
     stats = relationship("DataSourceStatsORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
     polling_config = relationship("DataSourcePollingConfigORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
@@ -402,6 +414,7 @@ class WorkspaceDataSourceORM(Base):
         UniqueConstraint("workspace_id", "provider_id", "graph_name", name="uq_ds_ws_prov_graph"),
         Index("idx_ds_workspace", "workspace_id"),
         Index("idx_ds_provider", "provider_id"),
+        Index("idx_ds_catalog_item", "catalog_item_id"),
     )
 
 
@@ -427,6 +440,7 @@ class ContextModelORM(Base):
     )
     is_template = Column(Boolean, nullable=False, default=False)
     category = Column(Text, nullable=True)                           # e.g. "data-engineering"
+    view_type = Column(Text, nullable=True, default="canvas")        # canvas | reference_model | scope
     layers_config = Column(Text, nullable=False, default="[]")       # JSON: ViewLayerConfig[]
     scope_filter = Column(Text, nullable=True)                       # JSON: ScopeFilterConfig
     instance_assignments = Column(Text, nullable=False, default="{}") # JSON: entityId→assignment
@@ -498,4 +512,42 @@ class DataSourcePollingConfigORM(Base):
 
     def __repr__(self) -> str:
         return f"<DataSourcePollingConfig ds_id={self.data_source_id!r} enabled={self.is_enabled}>"
+
+
+# ------------------------------------------------------------------ #
+# catalog_items  (enterprise data asset catalog)                       #
+# ------------------------------------------------------------------ #
+
+class CatalogItemORM(Base):
+    """
+    Maps a named physical asset (e.g. a graph within a FalkorDB provider)
+    to a managed, permission-controlled catalog entry.
+    Workspaces consume catalog items instead of talking directly to providers.
+    """
+    __tablename__ = "catalog_items"
+
+    id = Column(Text, primary_key=True, default=lambda: f"cat_{uuid.uuid4().hex[:12]}")
+    provider_id = Column(
+        Text,
+        ForeignKey("providers.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_identifier = Column(Text, nullable=True)  # e.g. the graph name on the provider
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    permitted_workspaces = Column(Text, nullable=False, default='["*"]')  # JSON list; "*" = all
+    status = Column(Text, nullable=False, default="active")  # active | archived | deprecated
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    # Relationships
+    provider = relationship("ProviderORM", back_populates="catalog_items")
+
+    __table_args__ = (
+        Index("idx_catalog_provider", "provider_id"),
+        Index("idx_catalog_status", "status"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<CatalogItem id={self.id!r} name={self.name!r} provider={self.provider_id!r}>"
 

@@ -11,17 +11,16 @@ const ADMIN_API = '/api/v1/admin/workspaces'
 // ============================================================
 
 export interface DataSourceCreateRequest {
-    providerId: string
-    graphName: string
+    catalogItemId: string
     blueprintId?: string
     label?: string
 }
 
 export interface DataSourceUpdateRequest {
-    providerId?: string
-    graphName?: string
+    catalogItemId?: string
     blueprintId?: string
     label?: string
+    accessLevel?: string
     isActive?: boolean
     projectionMode?: string | null  // null | "in_source" | "dedicated"
     dedicatedGraphName?: string | null  // graph name when mode is "dedicated"
@@ -30,10 +29,10 @@ export interface DataSourceUpdateRequest {
 export interface DataSourceResponse {
     id: string
     workspaceId: string
-    providerId: string
-    graphName?: string
+    catalogItemId: string
     blueprintId?: string
     label?: string
+    accessLevel: string
     isPrimary: boolean
     isActive: boolean
     projectionMode?: string | null  // null = inherit from provider
@@ -70,6 +69,10 @@ export interface WorkspaceResponse {
     /** Convenience: from primary data source (backward compat) */
     providerId?: string
     graphName?: string
+}
+
+export interface WorkspaceDataSourceImpactResponse {
+    views: { id: string; name: string; type: string }[]
 }
 
 // ============================================================
@@ -160,11 +163,14 @@ export const workspaceService = {
         })
     },
 
-    setProjectionMode(wsId: string, dsId: string, mode: string): Promise<DataSourceResponse> {
-        return request<DataSourceResponse>(`${ADMIN_API}/${wsId}/data-sources/${dsId}/projection-mode`, {
+    setProjectionMode(workspaceId: string, dataSourceId: string, mode: string | null): Promise<DataSourceResponse> {
+        return request<DataSourceResponse>(`${ADMIN_API}/${workspaceId}/data-sources/${dataSourceId}/projection-mode`, {
             method: 'PATCH',
-            body: JSON.stringify({ mode }),
+            body: JSON.stringify({ mode: mode === null ? "" : mode }) // Backend treats "" as null override
         })
     },
-}
 
+    getDataSourceImpact(workspaceId: string, dataSourceId: string): Promise<WorkspaceDataSourceImpactResponse> {
+        return request<WorkspaceDataSourceImpactResponse>(`${ADMIN_API}/${workspaceId}/data-sources/${dataSourceId}/impact`)
+    },
+}

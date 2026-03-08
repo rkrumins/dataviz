@@ -88,7 +88,7 @@ function EnvironmentSwitcher({
     ? workspaces.map(ws => {
       const matchWs = ws.name.toLowerCase().includes(search.toLowerCase())
       const matchDs = ws.dataSources?.filter(ds =>
-        (ds.label || ds.graphName || ds.providerId).toLowerCase().includes(search.toLowerCase())
+        (ds.label || ds.catalogItemId).toLowerCase().includes(search.toLowerCase())
       )
       if (matchWs) return ws
       if (matchDs && matchDs.length > 0) return { ...ws, dataSources: matchDs }
@@ -139,7 +139,7 @@ function EnvironmentSwitcher({
               </span>
               <span className="text-xs text-ink-secondary truncate flex items-center gap-1.5 mt-0.5">
                 {activeDs && <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />}
-                {activeDs ? (activeDs.label || activeDs.graphName || 'Default Source') : 'No source selected'}
+                {activeDs ? (activeDs.label || 'Default Source') : 'No source selected'}
               </span>
             </div>
             <ChevronsUpDown className="w-4 h-4 text-ink-muted opacity-50 group-hover:opacity-100 transition-opacity shrink-0" />
@@ -202,7 +202,7 @@ function EnvironmentSwitcher({
                           >
                             <div className="flex items-center gap-2 min-w-0">
                               <Database className={cn("w-3.5 h-3.5 shrink-0", isSelected ? "text-indigo-500" : "text-ink-muted group-hover:text-ink")} />
-                              <span className="text-sm font-medium truncate">{ds.label || ds.graphName || ds.providerId}</span>
+                              <span className="text-sm font-medium truncate">{ds.label || 'Data Source'}</span>
                             </div>
                             {isSelected && <Check className="w-4 h-4 text-indigo-500 shrink-0 ml-2" />}
                           </button>

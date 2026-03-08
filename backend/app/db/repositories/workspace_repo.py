@@ -30,12 +30,14 @@ def _ds_to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
     return DataSourceResponse(
         id=row.id,
         workspaceId=row.workspace_id,
-        providerId=row.provider_id,
-        graphName=row.graph_name,
+        catalogItemId=row.catalog_item_id,
         blueprintId=row.blueprint_id,
         label=row.label,
         isPrimary=bool(row.is_primary),
         isActive=bool(row.is_active),
+        projectionMode=row.projection_mode,
+        dedicatedGraphName=row.dedicated_graph_name,
+        accessLevel=row.access_level,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
@@ -126,8 +128,7 @@ async def create_workspace(
     for i, ds_req in enumerate(req.data_sources):
         ds = WorkspaceDataSourceORM(
             workspace_id=ws.id,
-            provider_id=ds_req.provider_id,
-            graph_name=ds_req.graph_name,
+            catalog_item_id=ds_req.catalog_item_id,
             blueprint_id=ds_req.blueprint_id,
             label=ds_req.label,
             is_primary=(i == 0),  # first data source is primary by default

@@ -261,6 +261,7 @@ class ProviderResponse(BaseModel):
     tls_enabled: bool = Field(alias="tlsEnabled")
     is_active: bool = Field(alias="isActive")
     extra_config: Optional[Dict[str, Any]] = Field(None, alias="extraConfig")
+    permitted_workspaces: List[str] = Field(default_factory=lambda: ["*"], alias="permittedWorkspaces")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
     # credentials are NEVER returned
@@ -322,10 +323,12 @@ class BlueprintResponse(BaseModel):
 # ============================================
 
 class DataSourceCreateRequest(BaseModel):
-    provider_id: str = Field(alias="providerId")
-    graph_name: str = Field(alias="graphName")
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    catalog_item_id: Optional[str] = Field(None, alias="catalogItemId")
+    graph_name: Optional[str] = Field(None, alias="graphName")
     blueprint_id: Optional[str] = Field(None, alias="blueprintId")
     label: Optional[str] = None
+    access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
 
     class Config:
         populate_by_name = True
@@ -347,14 +350,16 @@ class DataSourceUpdateRequest(BaseModel):
 class DataSourceResponse(BaseModel):
     id: str
     workspace_id: str = Field(alias="workspaceId")
-    provider_id: str = Field(alias="providerId")
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    catalog_item_id: Optional[str] = Field(None, alias="catalogItemId")
     graph_name: Optional[str] = Field(None, alias="graphName")
     blueprint_id: Optional[str] = Field(None, alias="blueprintId")
     label: Optional[str] = None
     is_primary: bool = Field(alias="isPrimary")
     is_active: bool = Field(alias="isActive")
-    projection_mode: Optional[str] = Field(None, alias="projectionMode")  # None = inherit from provider
+    projection_mode: Optional[str] = Field(None, alias="projectionMode")
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")
+    access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -477,6 +482,80 @@ class ContextModelResponse(BaseModel):
 class InstantiateTemplateRequest(BaseModel):
     template_id: str = Field(alias="templateId")
     name: str
+
+    class Config:
+        populate_by_name = True
+
+
+# ─── Impact / Blast-radius models ─────────────────────────────────────────────
+
+class ImpactedEntity(BaseModel):
+    """A single entity (workspace, view, catalog item) affected by a deletion."""
+    id: str
+    name: str
+    type: str  # e.g. "workspace", "view", "catalog_item"
+
+
+class ProviderImpactResponse(BaseModel):
+    """Blast-radius report when deleting a Provider."""
+    catalogItems: List[ImpactedEntity] = []
+    workspaces: List[ImpactedEntity] = []
+    views: List[ImpactedEntity] = []
+
+
+class WorkspaceDataSourceImpactResponse(BaseModel):
+    """Blast-radius report when removing a Data Source from a Workspace."""
+    views: List[ImpactedEntity] = []
+
+
+# ─── Physical asset stats ──────────────────────────────────────────────────────
+
+class PhysicalGraphStatsResponse(BaseModel):
+    """Raw node/edge counts and type breakdowns for a physical graph/database."""
+    nodeCount: int = 0
+    edgeCount: int = 0
+    entityTypeCounts: Dict[str, int] = {}
+    edgeTypeCounts: Dict[str, int] = {}
+
+
+class AssetListResponse(BaseModel):
+    """List of raw asset identifiers (graph names, database names, topics…) on a provider."""
+    assets: List[str] = []
+
+
+# ─── Enterprise Catalog models ─────────────────────────────────────────────────
+
+class CatalogItemCreateRequest(BaseModel):
+    provider_id: str = Field(alias="providerId")
+    source_identifier: Optional[str] = Field(None, alias="sourceIdentifier")
+    name: str
+    description: Optional[str] = None
+    permitted_workspaces: List[str] = Field(default_factory=lambda: ["*"], alias="permittedWorkspaces")
+
+    class Config:
+        populate_by_name = True
+
+
+class CatalogItemUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    permitted_workspaces: Optional[List[str]] = Field(None, alias="permittedWorkspaces")
+
+    class Config:
+        populate_by_name = True
+
+
+class CatalogItemResponse(BaseModel):
+    id: str
+    provider_id: str = Field(alias="providerId")
+    source_identifier: Optional[str] = Field(None, alias="sourceIdentifier")
+    name: str
+    description: Optional[str] = None
+    permitted_workspaces: List[str] = Field(default_factory=lambda: ["*"], alias="permittedWorkspaces")
+    status: str = "active"
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
 
     class Config:
         populate_by_name = True

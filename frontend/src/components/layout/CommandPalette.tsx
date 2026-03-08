@@ -1,21 +1,25 @@
 import { useEffect, useState, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Command } from 'cmdk'
-import { 
-  Search, 
-  Network, 
-  Layers, 
-  Bookmark, 
-  Settings, 
-  Moon, 
+import {
+  Search,
+  Network,
+  Layers,
+  Bookmark,
+  Settings,
+  Moon,
   Sun,
   ArrowUpRight,
   ArrowDownLeft,
   GitBranch,
-  Zap
+  Zap,
+  Eye,
+  LayoutDashboard
 } from 'lucide-react'
 import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
 import { useViewsStore } from '@/store/views'
+import { useSchemaStore } from '@/store/schema'
 import { cn } from '@/lib/utils'
 
 interface CommandPaletteProps {
@@ -25,10 +29,12 @@ interface CommandPaletteProps {
 
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const [search, setSearch] = useState('')
+  const navigate = useNavigate()
   const { toggleMode, mode } = usePersonaStore()
   const { setTheme, theme, toggleSidebar } = usePreferencesStore()
   const views = useViewsStore((s) => s.views)
   const recentViewIds = useViewsStore((s) => s.recentViewIds)
+  const schemaViews = useSchemaStore((s) => s.schema?.views ?? [])
   
   // Compute recent views client-side
   const recentViews = recentViewIds
@@ -53,6 +59,17 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   }, [open, onOpenChange])
 
   const handleSelect = useCallback((action: string) => {
+    if (action.startsWith('navigate:')) {
+      navigate(action.replace('navigate:', ''))
+      onOpenChange(false)
+      return
+    }
+    if (action.startsWith('go-to-view:')) {
+      const viewId = action.replace('go-to-view:', '')
+      navigate(`/views/${viewId}`)
+      onOpenChange(false)
+      return
+    }
     switch (action) {
       case 'toggle-persona':
         toggleMode()
@@ -71,7 +88,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         break
     }
     onOpenChange(false)
-  }, [toggleMode, setTheme, toggleSidebar, onOpenChange])
+  }, [toggleMode, setTheme, toggleSidebar, onOpenChange, navigate])
 
   if (!open) return null
 
@@ -163,6 +180,37 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               />
             </Command.Group>
 
+            {/* Navigation */}
+            <Command.Group heading="Navigation">
+              <CommandItem
+                icon={LayoutDashboard}
+                label="Go to Dashboard"
+                description="Open the dashboard"
+                onSelect={() => handleSelect('navigate:/dashboard')}
+              />
+              <CommandItem
+                icon={Eye}
+                label="Browse Views"
+                description="Discover and explore all views"
+                onSelect={() => handleSelect('navigate:/views')}
+              />
+            </Command.Group>
+
+            {/* Go to View */}
+            {schemaViews.length > 0 && (
+              <Command.Group heading="Go to View">
+                {schemaViews.slice(0, 10).map((view) => (
+                  <CommandItem
+                    key={view.id}
+                    icon={Eye}
+                    label={view.name}
+                    description={view.description ?? `${view.layout?.type ?? 'graph'} view`}
+                    onSelect={() => handleSelect(`go-to-view:${view.id}`)}
+                  />
+                ))}
+              </Command.Group>
+            )}
+
             {/* Recent Views */}
             {recentViews.length > 0 && (
               <Command.Group heading="Recent Views">
@@ -172,7 +220,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                     icon={Bookmark}
                     label={view.name}
                     description={view.lensId}
-                    onSelect={() => handleSelect(`load-view:${view.id}`)}
+                    onSelect={() => handleSelect(`go-to-view:${view.id}`)}
                   />
                 ))}
               </Command.Group>

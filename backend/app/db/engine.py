@@ -135,6 +135,10 @@ async def init_db() -> None:
         migrations = [
             "ALTER TABLE workspace_data_sources ADD COLUMN projection_mode TEXT",
             "ALTER TABLE workspace_data_sources ADD COLUMN dedicated_graph_name TEXT",
+            "ALTER TABLE workspace_data_sources ADD COLUMN catalog_item_id TEXT",
+            "ALTER TABLE workspace_data_sources ADD COLUMN access_level TEXT DEFAULT 'read'",
+            "ALTER TABLE context_models ADD COLUMN view_type TEXT DEFAULT 'canvas'",
+            "ALTER TABLE providers ADD COLUMN permitted_workspaces TEXT DEFAULT '[\"*\"]'",
         ]
         for stmt in migrations:
             try:

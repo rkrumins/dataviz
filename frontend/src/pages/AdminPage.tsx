@@ -8,21 +8,20 @@
 import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
-    Server, Database, BarChart3, Shield, Layers, ChevronDown
+    Server, Database, BarChart3, Shield, Layers, ChevronDown, Globe
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-// In a larger app, we'd have multiple groups here. For now, it's just "Data Sources".
+// The unified UI removes fragmented Data Source menus in favor of a clean, 2-page split
 const adminGroups = [
     {
-        id: 'data-sources',
-        label: 'Data Sources',
-        icon: Layers,
-        path: 'data-sources',
+        id: 'system',
+        label: 'System',
+        icon: Shield,
+        path: '',
         items: [
-            { path: 'data-sources/workspaces', label: 'Workspaces', icon: Database, description: 'Environments & data sources' },
-            { path: 'data-sources/providers', label: 'Providers', icon: Server, description: 'Database connections & health' },
-            { path: 'data-sources/insights', label: 'Insights', icon: BarChart3, description: 'Graph statistics & analytics' },
+            { path: 'overview', label: 'Global Overview', icon: BarChart3, description: 'System health & scale' },
+            { path: 'registry', label: 'Unified Registry', icon: Database, description: 'Connections & Workspaces' },
         ]
     }
 ]
@@ -32,7 +31,7 @@ export function AdminPage() {
     const isRoot = location.pathname === '/admin' || location.pathname === '/admin/'
 
     if (isRoot) {
-        return <Navigate to="/admin/data-sources" replace />
+        return <Navigate to="/admin/overview" replace />
     }
 
     return (

@@ -39,6 +39,7 @@ interface DataSourceCardProps {
     onEdit?: () => void
     onDelete?: () => void
     onSelect?: () => void
+    onExplore?: () => void
 }
 
 type DetailTab = 'insights' | 'aggregation' | 'views'
@@ -122,6 +123,7 @@ export function DataSourceCard({
     onEdit,
     onDelete,
     onSelect,
+    onExplore,
 }: DataSourceCardProps) {
     const navigate = useNavigate()
     const [expanded, setExpanded] = useState(false)
@@ -134,7 +136,7 @@ export function DataSourceCard({
     const handleDedicatedModeSelect = () => {
         onProjectionModeChange?.('dedicated')
         if (!localDedicatedName) {
-            const suggestion = `${ds.graphName || 'graph'}_aggregated`
+            const suggestion = `${ds.label || ds.catalogItemId}_aggregated`
             setLocalDedicatedName(suggestion)
             onDedicatedGraphNameChange?.(suggestion)
         }
@@ -165,9 +167,9 @@ export function DataSourceCard({
                             <Database className="w-4 h-4" />
                         </div>
                         <div className="min-w-0">
-                            <h4 className="text-sm font-bold text-ink truncate">{ds.label || ds.graphName || 'Unnamed'}</h4>
-                            <p className="text-[11px] text-ink-muted truncate">
-                                {providerName || ds.providerId} {ds.graphName && `· ${ds.graphName}`}
+                            <h4 className="text-sm font-bold text-ink truncate">{ds.label || providerName || 'Unnamed'}</h4>
+                            <p className="text-[11px] text-ink-muted truncate border border-glass-border px-1.5 py-0.5 rounded max-w-max bg-black/5 dark:bg-white/5 mt-0.5">
+                                {ds.catalogItemId}
                             </p>
                         </div>
                     </div>
@@ -365,7 +367,7 @@ export function DataSourceCard({
                                                 type="text"
                                                 value={localDedicatedName}
                                                 onChange={e => handleDedicatedNameChange(e.target.value)}
-                                                placeholder={`e.g. ${ds.graphName || 'graph'}_aggregated`}
+                                                placeholder={`e.g. ${ds.label || ds.catalogItemId}_aggregated`}
                                                 onClick={e => e.stopPropagation()}
                                                 className="w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/50"
                                             />
@@ -387,6 +389,15 @@ export function DataSourceCard({
                     {/* ─── Views Tab ────────────────────────────────── */}
                     {activeTab === 'views' && (
                         <div className="px-4 pb-4">
+                            <div className="flex items-center justify-between mb-3">
+                                <h6 className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Associated Views</h6>
+                                {onExplore && (
+                                    <button onClick={onExplore} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-indigo-500 text-white text-[11px] font-semibold hover:bg-indigo-600 transition-colors shadow-sm">
+                                        <ArrowRightLeft className="w-3 h-3" /> Explore & Create View
+                                    </button>
+                                )}
+                            </div>
+
                             {views.length > 0 ? (
                                 <div className="space-y-2">
                                     {views.map(view => (
@@ -417,10 +428,12 @@ export function DataSourceCard({
                                     ))}
                                 </div>
                             ) : (
-                                <div className="py-6 text-center text-xs text-ink-muted">
-                                    <Eye className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                                    No views associated with this data source
-                                    <p className="mt-1 text-[10px]">Views scoped to this workspace + data source will appear here</p>
+                                <div className="py-8 text-center bg-black/[0.02] dark:bg-white/[0.02] rounded-xl border border-glass-border border-dashed">
+                                    <Eye className="w-8 h-8 mx-auto mb-3 opacity-30 text-indigo-500" />
+                                    <div className="text-sm font-semibold text-ink mb-1">No views yet</div>
+                                    <div className="text-xs text-ink-muted max-w-[250px] mx-auto">
+                                        Views scoped to this workspace and data source will appear here.
+                                    </div>
                                 </div>
                             )}
                         </div>

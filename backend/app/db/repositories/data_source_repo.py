@@ -8,6 +8,7 @@ from typing import List, Optional
 
 from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ..models import WorkspaceDataSourceORM
 from backend.common.models.management import (
@@ -27,14 +28,14 @@ def _to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
     return DataSourceResponse(
         id=row.id,
         workspaceId=row.workspace_id,
-        providerId=row.provider_id,
-        graphName=row.graph_name,
+        catalogItemId=row.catalog_item_id,
         blueprintId=row.blueprint_id,
         label=row.label,
         isPrimary=bool(row.is_primary),
         isActive=bool(row.is_active),
         projectionMode=row.projection_mode,
         dedicatedGraphName=row.dedicated_graph_name,
+        accessLevel=row.access_level,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
@@ -72,6 +73,7 @@ async def get_data_source_orm(
     """Return the raw ORM row (used by ProviderRegistry)."""
     result = await session.execute(
         select(WorkspaceDataSourceORM)
+        .options(selectinload(WorkspaceDataSourceORM.catalog_item))
         .where(WorkspaceDataSourceORM.id == ds_id)
     )
     return result.scalar_one_or_none()
@@ -82,7 +84,9 @@ async def get_primary_data_source(
 ) -> Optional[WorkspaceDataSourceORM]:
     """Return the primary data source for a workspace."""
     result = await session.execute(
-        select(WorkspaceDataSourceORM).where(
+        select(WorkspaceDataSourceORM)
+        .options(selectinload(WorkspaceDataSourceORM.catalog_item))
+        .where(
             WorkspaceDataSourceORM.workspace_id == workspace_id,
             WorkspaceDataSourceORM.is_primary == True,  # noqa: E712
             WorkspaceDataSourceORM.is_active == True,
@@ -93,7 +97,9 @@ async def get_primary_data_source(
         return row
     # Fallback: first active data source
     result = await session.execute(
-        select(WorkspaceDataSourceORM).where(
+        select(WorkspaceDataSourceORM)
+        .options(selectinload(WorkspaceDataSourceORM.catalog_item))
+        .where(
             WorkspaceDataSourceORM.workspace_id == workspace_id,
             WorkspaceDataSourceORM.is_active == True,  # noqa: E712
         ).order_by(WorkspaceDataSourceORM.created_at)
@@ -110,8 +116,7 @@ async def create_data_source(
 ) -> DataSourceResponse:
     row = WorkspaceDataSourceORM(
         workspace_id=workspace_id,
-        provider_id=req.provider_id,
-        graph_name=req.graph_name,
+        catalog_item_id=req.catalog_item_id,
         blueprint_id=req.blueprint_id,
         label=req.label,
         is_primary=make_primary,
@@ -131,10 +136,8 @@ async def update_data_source(
     if not row:
         return None
 
-    if req.provider_id is not None:
-        row.provider_id = req.provider_id
-    if req.graph_name is not None:
-        row.graph_name = req.graph_name
+    if req.catalog_item_id is not None:
+        row.catalog_item_id = req.catalog_item_id
     if req.blueprint_id is not None:
         row.blueprint_id = req.blueprint_id
     if req.label is not None:
@@ -146,6 +149,8 @@ async def update_data_source(
         row.projection_mode = req.projection_mode if req.projection_mode else None
     if req.dedicated_graph_name is not None:
         row.dedicated_graph_name = req.dedicated_graph_name if req.dedicated_graph_name else None
+    if getattr(req, "access_level", None) is not None:
+        row.access_level = req.access_level
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
@@ -173,6 +178,21 @@ async def count_data_sources(
         )
     )
     return result.scalar() or 0
+
+async def get_data_source_impact(session: AsyncSession, ds_id: str):
+    """Return the set of context models (views) that would be broken by deleting this data source."""
+    from ..models import ContextModelORM
+    from backend.common.models.management import WorkspaceDataSourceImpactResponse, ImpactedEntity
+    
+    view_result = await session.execute(
+        select(ContextModelORM.id, ContextModelORM.name)
+        .where(ContextModelORM.data_source_id == ds_id)
+    )
+    views = [{"id": r[0], "name": r[1], "type": "view"} for r in view_result.all()]
+    return WorkspaceDataSourceImpactResponse(
+        views=[ImpactedEntity(**v) for v in views]
+    )
+
 
 
 async def set_primary(
