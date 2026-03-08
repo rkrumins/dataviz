@@ -94,7 +94,7 @@ export function useEntityLoader(): UseEntityLoaderResult {
         }).length
 
         // If we have nearly all children (allow small drift), don't refetch
-        if (currentChildrenCount >= childCount) return
+        if (currentChildrenCount >= childCount && childCount > 0) return
 
         // 2. Fetch
         setLoadingNodes(prev => new Set(prev).add(parentId))
@@ -105,9 +105,11 @@ export function useEntityLoader(): UseEntityLoaderResult {
             // This is safer than relying on hardcoded defaults
             const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
 
+            // Smart Pagination Request: Load up to 20 per request, offsetting by already loaded
             const children = await provider.getChildren(urn, {
                 edgeTypes: fetchTypes,
-                limit: 100 // Reasonable batch size
+                limit: 20,
+                offset: currentChildrenCount
             })
 
             if (children.length > 0) {

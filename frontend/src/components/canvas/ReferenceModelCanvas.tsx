@@ -492,6 +492,12 @@ export function ContextViewCanvas({
   // Ref to trigger edge redraw from child components
   const triggerEdgeRedrawRef = useRef<(() => void) | null>(null)
 
+  const handleLayerScroll = useCallback(() => {
+    if (triggerEdgeRedrawRef.current) {
+      triggerEdgeRedrawRef.current()
+    }
+  }, [])
+
   // Callback for animation completion to trigger edge redraw
   const handleAnimationComplete = useCallback(() => {
     // Small delay to ensure DOM is fully updated after animation
@@ -1204,28 +1210,53 @@ export function ContextViewCanvas({
         }
       })
 
-    // Finalize Groups
+    // Finalize Groups (Semantic Edge Bundling & Ghost Edges)
     edgeGroups.forEach((groupEdges, key) => {
-      const distinctTypes = new Map<string, any>()
+      const distinctTypes = new Set<string>()
+      let isGhost = false
+      let isAggregated = false
+      let totalConfidence = 0
+      let maxConfidence = 0
+
+      const sourceId = groupEdges[0].source
+      const targetId = groupEdges[0].target
+
+      // We consider it a "Ghost" edge only if the projected container is collapsed OR has unloaded paginated items.
+      // For now, let's keep all aggregated/bundled edges fully vibrant and just use dash styling
+      // to imply that they are abstracted (source !== originalSource).
+      if (groupEdges.some((e: any) => e.target !== e.originalTargetId || e.source !== e.originalSourceId)) {
+        isGhost = true
+      }
+
       groupEdges.forEach(e => {
-        const typeKey = e.originalType
-        if (!distinctTypes.has(typeKey) || e.data.isAggregated) {
-          // If aggregated, it takes precedence or we keep it. 
-          // Logic: keep one per type
-          distinctTypes.set(typeKey, e)
+        if (e.data?.isAggregated) isAggregated = true
+        if (e.data?.edgeTypes) {
+          e.data.edgeTypes.forEach((et: string) => distinctTypes.add(et))
+        } else if (e.originalType) {
+          distinctTypes.add(e.originalType)
         }
+
+        const conf = e.data?.confidence ?? 1
+        totalConfidence += conf
+        maxConfidence = Math.max(maxConfidence, conf)
       })
 
-      const distinctEdges = Array.from(distinctTypes.values())
-      const total = distinctEdges.length
+      const edgeCount = groupEdges.length
+      const avgConfidence = edgeCount > 0 ? totalConfidence / edgeCount : 1
+      const typesArray = Array.from(distinctTypes)
 
-      distinctEdges.forEach((edge, index) => {
-        projected.push({
-          ...edge,
-          id: `proj-${key}-${edge.originalType}`,
-          groupIndex: index,
-          groupTotal: total
-        })
+      projected.push({
+        id: `bundle-${key}`,
+        source: sourceId,
+        target: targetId,
+        isBundled: edgeCount > 1,
+        isGhost,
+        edgeCount,
+        types: typesArray,
+        confidence: maxConfidence,
+        // Let the renderer know if it should use aggregated styles
+        isAggregated,
+        data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount }
       })
     })
 
@@ -1792,6 +1823,8 @@ export function ContextViewCanvas({
                 highlightedNodes={highlightState.nodes}
                 isHighlightActive={isHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
+                onLoadMore={loadChildren}
+                onScroll={handleLayerScroll}
               />
             ))}
           </div>
@@ -1871,6 +1904,8 @@ interface FlatTreeNode {
   depth: number
   isLast: boolean
   parentIsLast: boolean[]  // Track which parents are "last" for proper tree lines
+  isLoadMore?: boolean
+  loadMoreCount?: number
 }
 
 interface LayerColumnProps {
@@ -1894,6 +1929,8 @@ interface LayerColumnProps {
   onAnimationComplete?: () => void
   onFocusNode?: (nodeId: string | null) => void
   focusedNodeId?: string | null
+  onLoadMore?: (parentId: string) => void
+  onScroll?: () => void
 }
 
 const LayerColumn = React.memo(function LayerColumn({
@@ -1916,7 +1953,9 @@ const LayerColumn = React.memo(function LayerColumn({
   isHighlightActive = false,
   onAnimationComplete,
   onFocusNode,
-  focusedNodeId
+  focusedNodeId,
+  onLoadMore,
+  onScroll
 }: LayerColumnProps) {
   // Local focus state for drilling into subtrees
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
@@ -1946,14 +1985,28 @@ const LayerColumn = React.memo(function LayerColumn({
 
       // Only traverse children if expanded
       if (expandedNodes.has(node.id) && node.children.length > 0) {
+        const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || node.children.length
+        const hasMore = node.children.length < childCount
+
         node.children.forEach((child, idx) => {
           traverse(
             child,
             depth + 1,
-            idx === node.children.length - 1,
+            idx === node.children.length - 1 && !hasMore,
             [...parentIsLast, isLast]
           )
         })
+
+        if (hasMore) {
+          result.push({
+            node,
+            depth: depth + 1,
+            isLast: true,
+            parentIsLast: [...parentIsLast, isLast],
+            isLoadMore: true,
+            loadMoreCount: childCount - node.children.length
+          })
+        }
       }
     }
 
@@ -2146,7 +2199,7 @@ const LayerColumn = React.memo(function LayerColumn({
           <AnimatePresence>
             {breadcrumb.length > 0 && (
               <motion.div
-                initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                initial={{ opacity: 0, height: 0, marginTop: 8 }}
                 animate={{ opacity: 1, height: 'auto', marginTop: 8 }}
                 exit={{ opacity: 0, height: 0, marginTop: 0 }}
                 className="flex items-center gap-1 overflow-x-auto no-scrollbar"
@@ -2187,6 +2240,7 @@ const LayerColumn = React.memo(function LayerColumn({
       {!isCollapsed && (
         <div
           ref={scrollContainerRef}
+          onScroll={onScroll}
           className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar relative"
         >
           {/* Subtle top fade for scroll indication */}
@@ -2212,32 +2266,49 @@ const LayerColumn = React.memo(function LayerColumn({
             </motion.div>
           ) : (
             <div className="py-2 px-1">
-              {flatTree.map(({ node, depth, isLast, parentIsLast }, index) => (
-                <FlatTreeItem
-                  key={node.id}
-                  node={node}
-                  depth={depth}
-                  isLast={isLast}
-                  parentIsLast={parentIsLast}
-                  layer={layer}
-                  schema={schema}
-                  isSelected={selectedNodeId === node.id}
-                  isExpanded={expandedNodes.has(node.id)}
-                  isSearchResult={searchResults.includes(node.id)}
-                  isTraceActive={traceFocusId !== null}
-                  isHighlighted={traceContextSet.has(node.id)}
-                  isFocusNode={traceFocusId === node.id}
-                  isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
-                  isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
-                  onSelect={onSelect}
-                  onToggle={onToggle}
-                  onContextMenu={onContextMenu}
-                  onDoubleClick={onDoubleClick}
-                  onAddChild={onAddChild}
-                  onFocus={handleFocus}
-                  animationDelay={index * 0.02}
-                />
-              ))}
+              {flatTree.map((item, index) => {
+                if (item.isLoadMore) {
+                  return (
+                    <LoadMoreItem
+                      key={`load-more-${item.node.id}`}
+                      parentId={item.node.id}
+                      depth={item.depth}
+                      parentIsLast={item.parentIsLast}
+                      count={item.loadMoreCount!}
+                      onLoadMore={() => onLoadMore && onLoadMore(item.node.id)}
+                      layer={layer}
+                    />
+                  )
+                }
+
+                const { node, depth, isLast, parentIsLast } = item
+                return (
+                  <FlatTreeItem
+                    key={node.id}
+                    node={node}
+                    depth={depth}
+                    isLast={isLast}
+                    parentIsLast={parentIsLast}
+                    layer={layer}
+                    schema={schema}
+                    isSelected={selectedNodeId === node.id}
+                    isExpanded={expandedNodes.has(node.id)}
+                    isSearchResult={searchResults.includes(node.id)}
+                    isTraceActive={traceFocusId !== null}
+                    isHighlighted={traceContextSet.has(node.id)}
+                    isFocusNode={traceFocusId === node.id}
+                    isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
+                    isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
+                    onSelect={onSelect}
+                    onToggle={onToggle}
+                    onContextMenu={onContextMenu}
+                    onDoubleClick={onDoubleClick}
+                    onAddChild={onAddChild}
+                    onFocus={handleFocus}
+                    animationDelay={index * 0.02}
+                  />
+                )
+              })}
             </div>
           )}
 
@@ -2552,11 +2623,133 @@ const FlatTreeItem = React.memo(function FlatTreeItem({
   )
 })
 
-// LayerNodeCard replaced with FlatTreeItem above for better UX
+// ----------------------------------------------------
+// LOAD MORE ITEM (Pagination within Flat Tree)
+// ----------------------------------------------------
+
+function LoadMoreItem({
+  parentId,
+  depth,
+  parentIsLast,
+  count,
+  onLoadMore,
+  layer
+}: {
+  parentId: string
+  depth: number
+  parentIsLast: boolean[]
+  count: number
+  onLoadMore: () => void
+  layer: ViewLayerConfig
+}) {
+  const [isHovered, setIsHovered] = useState(false)
+  const indentWidth = depth * 16
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0 }}
+      className="flex items-center gap-2 mx-1 rounded-xl cursor-pointer transition-all duration-200 group/item relative min-h-[36px] py-1.5"
+      style={{ paddingLeft: 12 + indentWidth }}
+    >
+      <div className="flex items-center absolute left-3 pointer-events-none" style={{ width: indentWidth }}>
+        {parentIsLast.map((pIsLast, idx) => (
+          <div key={idx} className="w-5 h-full flex justify-center">
+            {!pIsLast && (
+              <div className="w-px h-full bg-gradient-to-b from-white/[0.08] via-white/[0.12] to-white/[0.08]" />
+            )}
+          </div>
+        ))}
+        {depth > 0 && (
+          <div className="w-5 h-full relative">
+            <div className="absolute left-1/2 -translate-x-1/2 w-px top-0 h-1/2" style={{ background: 'linear-gradient(to bottom, transparent, rgba(255,255,255,0.12), transparent)' }} />
+            <div className="absolute left-1/2 top-1/2 -translate-y-1/2 flex items-center">
+              <div className="w-3 h-px bg-gradient-to-r from-white/[0.12] to-white/[0.06]" />
+            </div>
+          </div>
+        )}
+      </div>
+
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          onLoadMore()
+        }}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
+        className={cn(
+          "flex flex-1 items-center justify-center gap-2 py-1.5 rounded-lg border text-[11px] font-medium transition-all duration-200",
+          "bg-white/[0.03] border-white/[0.08] hover:bg-white/[0.06] hover:border-white/[0.15] text-ink-muted hover:text-ink/90 active:scale-[0.98]"
+        )}
+      >
+        <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white/[0.05]">
+          <LucideIcons.Plus className={cn("w-3.5 h-3.5 transition-transform", isHovered ? "scale-125 text-blue-400" : "text-ink-muted/70")} />
+        </span>
+        <span className="tracking-wide">Load {Math.min(20, count)} more nodes ({count} remaining)</span>
+      </button>
+    </motion.div>
+  )
+}
 
 // ----------------------------------------------------
 // SVG Overlay Component
 // ----------------------------------------------------
+
+// Global visibility tracker for extreme performance on 10k+ nodes
+const globalVisibleNodes = new Set<string>()
+let globalNodeObserver: IntersectionObserver | null = null
+
+function getSharedNodeObserver(triggerRedraw: () => void) {
+  if (typeof window === 'undefined') return null
+  if (!globalNodeObserver) {
+    globalNodeObserver = new IntersectionObserver((entries) => {
+      let changed = false
+      entries.forEach(entry => {
+        const id = entry.target.id
+        if (!id) return
+        if (entry.isIntersecting) {
+          if (!globalVisibleNodes.has(id)) {
+            globalVisibleNodes.add(id)
+            changed = true
+          }
+        } else {
+          if (globalVisibleNodes.has(id)) {
+            globalVisibleNodes.delete(id)
+            changed = true
+          }
+        }
+      })
+      if (changed) {
+        // Schedule redraw if visibility changes
+        triggerRedraw()
+      }
+    }, {
+      root: null, // observe relative to viewport
+      rootMargin: '100px', // start rendering slightly before it enters screen
+      threshold: 0
+    })
+  }
+  return globalNodeObserver
+}
+
+type ComputedEdge = {
+  id: string
+  source: string
+  target: string
+  minY: number
+  maxY: number
+  pathD: string
+  color: string
+  dynamicStrokeWidth: number
+  edgeOpacity: number
+  isGhost: boolean
+  isBundled: boolean
+  edgeCount: number
+  sx: number
+  sy: number
+  tx: number
+  ty: number
+}
 
 function LineageFlowOverlay({
   nodes,
@@ -2585,10 +2778,16 @@ function LineageFlowOverlay({
   isHighlightActive?: boolean,
   resolveEdgeColor?: (edgeType: string) => string,
 }) {
-  const [paths, setPaths] = useState<React.ReactNode[]>([])
+  // Store computed abstract edges instead of direct React nodes for virtualization
+  const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
+
+  // Viewport tracking for virtualization
+  const [viewport, setViewport] = useState({ scrollTop: 0, clientHeight: typeof window !== 'undefined' ? window.innerHeight : 1000 })
   const containerRef = useRef<HTMLDivElement>(null)
+  const scrollParentRef = useRef<HTMLElement | null>(null)
   const updateFlowRef = useRef<(() => void) | null>(null)
   const rafIdRef = useRef<number | null>(null)
+  const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null)
 
   // Serialize expandedNodes Set to array for proper React dependency tracking
   const expandedNodesArray = useMemo(() => {
@@ -2613,23 +2812,48 @@ function LineageFlowOverlay({
     if (!containerRef.current) return
 
     const containerRect = containerRef.current.getBoundingClientRect()
-    const newPaths: React.ReactNode[] = []
+    // Find scroll parent once
+    if (!scrollParentRef.current) {
+      scrollParentRef.current = containerRef.current.closest('.overflow-y-auto') as HTMLElement
+      if (scrollParentRef.current) {
+        setViewport({
+          scrollTop: scrollParentRef.current.scrollTop,
+          clientHeight: scrollParentRef.current.clientHeight
+        })
+      } else {
+        setViewport({
+          scrollTop: 0,
+          clientHeight: containerRect.height || window.innerHeight
+        })
+      }
+    }
+
+    const newComputedEdges: ComputedEdge[] = []
 
     // Batch DOM reads by collecting all elements first
     const elementCache = new Map<string, HTMLElement>()
 
-    edges.forEach(edge => {
+    // ONLY compute paths for edges where BOTH nodes are strictly visible on screen!
+    // This fully prevents the tornado of 10,000 edges pointing to clipped items, unlocking ultra fast 60fps scrolling.
+    const activeEdges = edges.filter(edge => {
+      const sourceId = `layer-node-${edge.source}`
+      const targetId = `layer-node-${edge.target}`
+
+      return globalVisibleNodes.has(sourceId) && globalVisibleNodes.has(targetId)
+    })
+
+    activeEdges.forEach(edge => {
       const sourceId = `layer-node-${edge.source}`
       const targetId = `layer-node-${edge.target}`
 
       // Cache element lookups
-      let sourceEl = elementCache.get(sourceId)
+      let sourceEl: HTMLElement | null = elementCache.get(sourceId) || null
       if (!sourceEl) {
         sourceEl = document.getElementById(sourceId)
         if (sourceEl) elementCache.set(sourceId, sourceEl)
       }
 
-      let targetEl = elementCache.get(targetId)
+      let targetEl: HTMLElement | null = elementCache.get(targetId) || null
       if (!targetEl) {
         targetEl = document.getElementById(targetId)
         if (targetEl) elementCache.set(targetId, targetEl)
@@ -2638,14 +2862,6 @@ function LineageFlowOverlay({
       if (sourceEl && targetEl) {
         const sRect = sourceEl.getBoundingClientRect()
         const tRect = targetEl.getBoundingClientRect()
-
-        // Viewport culling: skip edges where BOTH endpoints are far outside visible area
-        const viewportMargin = 200
-        const viewportTop = -viewportMargin
-        const viewportBottom = window.innerHeight + viewportMargin
-        const bothAbove = sRect.bottom < viewportTop && tRect.bottom < viewportTop
-        const bothBelow = sRect.top > viewportBottom && tRect.top > viewportBottom
-        if (bothAbove || bothBelow) return
 
         // Relative coordinates
         // Offset sx/tx slightly from the card boundary to make arrowheads/terminals visible
@@ -2656,20 +2872,21 @@ function LineageFlowOverlay({
         let tx = tRect.left - containerRect.left - 4
         const ty = tRect.top + tRect.height / 2 - containerRect.top
 
+        // We no longer cull here based on window.innerHeight, because the container itself scrolls.
+        // Instead, we calculate local bounding Y coordinates and cull in the render loop (Virtualization).
+        // `sy` and `ty` are relative to the top of the canvas container.
+        const minY = Math.min(sy, ty)
+        const maxY = Math.max(sy, ty)
+
         // Smart Routing Logic
-        let d = ''
+        let pathD = ''
         const isSameColumn = Math.abs(sRect.left - tRect.left) < 50
         const isSelf = edge.source === edge.target
 
         // Multi-edge offsetting
         // If there are multiple edges (groupTotal > 1), we offset the control points vertically
         // or curve magnitude to separate them.
-        const total = edge.groupTotal || 1
         const index = edge.groupIndex || 0
-
-        // Vertical separation at the midpoint
-        const verticalSpread = 30
-        const vOffset = (index - (total - 1) / 2) * verticalSpread
 
         if (isSameColumn && !isSelf) {
           // "Bracket" routing: Right -> Right (Cleaner layout)
@@ -2684,7 +2901,7 @@ function LineageFlowOverlay({
           const cp1y = sy
           const cp2y = ty
 
-          d = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
+          pathD = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
         } else {
           // Standard Left-to-Right S-Curve (Sigmoid)
           // This creates a beautiful, simple flow without "ballooning"
@@ -2705,105 +2922,90 @@ function LineageFlowOverlay({
           const cp1y = sy
           const cp2y = ty
 
-          d = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
+          pathD = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
         }
 
-        // Color priority: trace > highlight > normal
-        // Edge type color resolved from backend schema via resolveEdgeColor prop
+        // Theme color priority
+        const primaryType = edge.types && edge.types.length > 0 ? edge.types[0] : (edge.originalType || '')
         const typeColor = resolveEdgeColor
-          ? resolveEdgeColor(edge.originalType || '')
+          ? resolveEdgeColor(primaryType)
           : '#3b82f6'
 
         let color = typeColor
-        let edgeOpacity = 0.4
-        let strokeWidth = 1.5
-        let showAnimatedFlow = true
+        // Base opacity varies by confidence (if available) - increased base for vibrancy
+        let edgeOpacity = 0.5 + (edge.confidence || 0.4) * 0.5
+
+        // Base stroke width depends on bundling!
+        let baseStrokeWidth = 1.5
+        if (edge.isBundled) {
+          // Logarithmic scaling for bundle volume 
+          baseStrokeWidth = Math.min(2 + Math.log2(edge.edgeCount) * 1.5, 10)
+        } else if (edge.isAggregated) {
+          baseStrokeWidth = 2.5
+        }
+
+        let dynamicStrokeWidth = baseStrokeWidth
 
         // Determine if this edge is highlighted (click-to-highlight)
         const isEdgeHighlighted = isHighlightActive && highlightedEdges?.has(edge.id)
-        const isEdgeDimmed = isHighlightActive && !isEdgeHighlighted
+        const isEdgeDimmed = isHighlightActive && !highlightedEdges?.has(edge.id)
 
         if (isTracing && traceResult) {
-          // TRACE MODE: highest priority — color by direction (upstream/downstream)
-          edgeOpacity = 0.8
-          strokeWidth = 2.5
+          // TRACE MODE
+          edgeOpacity = edge.isGhost ? 0.4 : 0.8
+          dynamicStrokeWidth = baseStrokeWidth + 1
           const srcInUpstream = traceResult.upstreamNodes?.has(edge.source)
           const tgtInUpstream = traceResult.upstreamNodes?.has(edge.target)
           const srcInDownstream = traceResult.downstreamNodes?.has(edge.source)
           const tgtInDownstream = traceResult.downstreamNodes?.has(edge.target)
 
           if (srcInUpstream || tgtInUpstream) {
-            color = '#06b6d4' // cyan for upstream
+            color = '#06b6d4' // cyan
           } else if (srcInDownstream || tgtInDownstream) {
-            color = '#f59e0b' // amber for downstream
-          } else {
-            color = '#a78bfa' // purple for focus-adjacent
+            color = '#f59e0b' // amber
+          } else if (!edge.isGhost) {
+            color = '#a78bfa' // purple
+          }
+
+          if (!srcInUpstream && !tgtInUpstream && !srcInDownstream && !tgtInDownstream) {
+            edgeOpacity = edge.isGhost ? 0.05 : 0.1
+            dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
           }
         } else {
-          // Normal/highlight mode: use schema-resolved type color
+          // Normal/highlight mode
           if (isEdgeHighlighted) {
             edgeOpacity = 0.9
-            strokeWidth = 2.5
+            dynamicStrokeWidth = baseStrokeWidth + 1
           } else if (isEdgeDimmed) {
-            edgeOpacity = 0.1
-            strokeWidth = 1
-            showAnimatedFlow = false
+            edgeOpacity = edge.isGhost ? 0.05 : 0.1
+            dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
           }
         }
 
-        newPaths.push(
-          <g
-            key={edge.id}
-            className="pointer-events-auto cursor-pointer group"
-            onClick={(e) => {
-              e.stopPropagation()
-              selectEdge(edge.id)
-              if (!isEdgePanelOpen) toggleEdgePanel()
-            }}
-            style={{ color }}
-          >
-            {/* Invisible thicker path for easier hover */}
-            <path d={d} fill="none" stroke="transparent" strokeWidth="15" />
+        // Ghost styling for abstracted/bundled edges
+        if (edge.isGhost) {
+          edgeOpacity = Math.min(0.7, edgeOpacity)
+        }
 
-            {/* Main Path */}
-            <path
-              d={d}
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={strokeWidth}
-              markerEnd="url(#arrowhead)"
-              className="transition-all duration-300 group-hover:opacity-100"
-              style={{ strokeWidth, opacity: edgeOpacity }}
-            />
-
-            {/* Animated Flow Layer (particles) — only for highlighted/active edges */}
-            {showAnimatedFlow && (
-              <path
-                d={d}
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeDasharray="4 8"
-                strokeLinecap="round"
-                className="animate-flow"
-                style={{
-                  opacity: 0.8,
-                  animationDuration: '1.5s',
-                  filter: 'url(#glow)'
-                }}
-              />
-            )}
-
-            {/* Terminals */}
-            <circle cx={sx} cy={sy} r="2.5" fill="currentColor" style={{ opacity: edgeOpacity }} className="group-hover:opacity-80" />
-
-            <title>{edge.source} → {edge.target} ({edge.originalType})</title>
-          </g>
-        )
+        newComputedEdges.push({
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          minY,
+          maxY,
+          pathD,
+          color,
+          dynamicStrokeWidth,
+          edgeOpacity,
+          isGhost: edge.isGhost || false,
+          isBundled: edge.isBundled || false,
+          edgeCount: edge.edgeCount || 0,
+          sx, sy, tx, ty
+        })
       }
     })
-    setPaths(newPaths)
-  }, [edges, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor])
+    setComputedEdges(newComputedEdges)
+  }, [edges, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId])
 
   // Store updateFlow in ref for ResizeObserver access and expose to parent
   useEffect(() => {
@@ -2822,22 +3024,58 @@ function LineageFlowOverlay({
       scheduleUpdate()
     })
 
+    const visibilityObserver = getSharedNodeObserver(scheduleUpdate)
+
     // Observe all visible node elements
     nodes.forEach(node => {
       const el = document.getElementById(`layer-node-${node.id}`)
       if (el) {
         observer.observe(el)
+        if (visibilityObserver) visibilityObserver.observe(el)
       }
     })
 
     return () => {
       observer.disconnect()
+      if (visibilityObserver) visibilityObserver.disconnect()
+      globalVisibleNodes.clear()
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current)
         rafIdRef.current = null
       }
     }
   }, [nodes, expandedNodesArray, scheduleUpdate])
+
+  // Attach scroll listener to the parent container for Viewport Edge Virtualization
+  useEffect(() => {
+    if (!containerRef.current) return
+    const scrollParent = containerRef.current.closest('.overflow-y-auto') as HTMLElement
+    if (!scrollParent) return
+
+    let rafId: number | null = null
+    const handleScroll = () => {
+      if (rafId !== null) return // debounce
+      rafId = requestAnimationFrame(() => {
+        setViewport({
+          scrollTop: scrollParent.scrollTop,
+          clientHeight: scrollParent.clientHeight
+        })
+        rafId = null
+      })
+    }
+
+    // Capture initial
+    handleScroll()
+
+    scrollParent.addEventListener('scroll', handleScroll, { passive: true })
+    window.addEventListener('resize', handleScroll, { passive: true })
+
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId)
+      scrollParent.removeEventListener('scroll', handleScroll)
+      window.removeEventListener('resize', handleScroll)
+    }
+  }, [])
 
   // Listeners for window resize and scroll
   useEffect(() => {
@@ -2867,16 +3105,33 @@ function LineageFlowOverlay({
     }
   }, [updateFlow, scheduleUpdate, expandedNodesArray])
 
+  // VERY FAST Virtualization Filter: Only render edges that intersect the scroll viewport
+  const VIEWPORT_MARGIN = 400 // Load edges slightly before they enter screen
+  const visibleEdges = computedEdges.filter(edge => {
+    // If edge bottom is above viewport OR edge top is below viewport -> Cull
+    if (edge.maxY < viewport.scrollTop - VIEWPORT_MARGIN) return false
+    if (edge.minY > viewport.scrollTop + viewport.clientHeight + VIEWPORT_MARGIN) return false
+    return true
+  })
+
   return (
     <div ref={containerRef} className="absolute inset-0 pointer-events-none z-20">
-      <style>{`
-          @keyframes dashDraw {
-            from { stroke-dashoffset: 1000; }
-            to { stroke-dashoffset: 0; }
-          }
-        `}</style>
       <svg className="w-full h-full overflow-visible">
         <defs>
+          <style>
+            {`
+              @keyframes dashFlow {
+                from { stroke-dashoffset: 400; }
+                to { stroke-dashoffset: 0; }
+              }
+              .flow-particles {
+                animation: dashFlow 20s linear infinite;
+              }
+              .flow-particles-ghost {
+                animation: dashFlow 40s linear infinite; /* flows slower for ghosts */
+              }
+            `}
+          </style>
           {/* arrowhead marker */}
           <marker
             id="arrowhead"
@@ -2895,7 +3150,113 @@ function LineageFlowOverlay({
             <feComposite in="SourceGraphic" in2="blur" operator="over" />
           </filter>
         </defs>
-        {paths}
+        {visibleEdges.map(edge => {
+          const isHovered = hoveredEdgeId === edge.id
+          const isSourceHovered = hoveredEdgeId === edge.source
+          const isTargetHovered = hoveredEdgeId === edge.target
+          const isHighlighted = isHovered || isSourceHovered || isTargetHovered
+          const { pathD, color, dynamicStrokeWidth, edgeOpacity, isGhost, isBundled, sx, sy, tx, ty } = edge
+
+          return (
+            <g key={edge.id} className="transition-opacity duration-300">
+              {/* INVISIBLE WIDE HIT AREA FOR HOVER */}
+              <path
+                d={pathD}
+                fill="none"
+                stroke="transparent"
+                strokeWidth={20}
+                className="pointer-events-auto cursor-pointer"
+                onMouseEnter={() => setHoveredEdgeId(edge.id)}
+                onMouseLeave={() => setHoveredEdgeId(null)}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  selectEdge(edge.id)
+                  if (!isEdgePanelOpen) toggleEdgePanel()
+                }}
+              />
+
+              {/* BASE GLOW / DROP SHADOW - Thick and highly transparent */}
+              <path
+                d={pathD}
+                style={{
+                  stroke: color,
+                  strokeWidth: dynamicStrokeWidth + (isHighlighted ? 4 : 2),
+                  fill: 'none',
+                  strokeOpacity: isHighlighted ? edgeOpacity * 0.4 : edgeOpacity * 0.15,
+                  strokeLinecap: 'round',
+                  transition: 'all 0.3s ease',
+                }}
+                className="pointer-events-none"
+              />
+
+              {/* CORE LINE - Solid but slightly translucent */}
+              <path
+                d={pathD}
+                style={{
+                  stroke: color,
+                  strokeWidth: dynamicStrokeWidth,
+                  fill: 'none',
+                  strokeOpacity: isHighlighted ? Math.max(0.6, edgeOpacity * 1.5) : edgeOpacity,
+                  strokeDasharray: isGhost ? '6 6' : 'none',
+                  strokeLinecap: 'round',
+                  transition: 'all 0.3s ease',
+                }}
+                className="pointer-events-none"
+              />
+
+              {/* ANIMATED PARTICLES / FLOW overlay */}
+              {!isGhost && (
+                <path
+                  d={pathD}
+                  style={{
+                    stroke: color, // Use the vivid path color instead of white
+                    strokeWidth: Math.max(1, dynamicStrokeWidth * 0.5),
+                    fill: 'none',
+                    strokeOpacity: isHighlighted ? 1 : 0.8,
+                    strokeLinecap: 'round',
+                    // CSS dasharray: small dash, huge gap -> acts like moving dots!
+                    strokeDasharray: '4 16',
+                    // Add a drop shadow strictly to the particles for a neon pop
+                    filter: `drop-shadow(0 0 3px ${color})`
+                  }}
+                  className="pointer-events-none flow-particles"
+                />
+              )}
+              {isGhost && (
+                <path
+                  d={pathD}
+                  style={{
+                    stroke: color,
+                    strokeWidth: Math.max(1, dynamicStrokeWidth * 0.4),
+                    fill: 'none',
+                    strokeOpacity: isHighlighted ? 0.8 : 0.4,
+                    strokeLinecap: 'round',
+                    // Slow dash moving
+                    strokeDasharray: '6 12',
+                  }}
+                  className="pointer-events-none flow-particles-ghost"
+                />
+              )}
+
+              {/* Bundle Badge Label rendered on the path */}
+              {isBundled && !isGhost && (
+                <g transform={`translate(${(sx + tx) / 2}, ${(sy + ty) / 2})`}>
+                  <rect x="-10" y="-8" width="20" height="16" rx="4" fill="currentColor" opacity="0.15" className="group-hover:opacity-30" />
+                  <text x="0" y="3" fill="currentColor" fontSize="10px" fontWeight="bold" textAnchor="middle" opacity="0.9">
+                    {edge.edgeCount}
+                  </text>
+                </g>
+              )}
+
+              {/* Terminals (Hide for ghosts to signify missing end) */}
+              {!isGhost && (
+                <circle cx={sx} cy={sy} r="2.5" fill="currentColor" style={{ opacity: edgeOpacity }} className="group-hover:opacity-80" />
+              )}
+
+              <title>{edge.source} → {edge.target} {isBundled ? `(${edge.edgeCount} bundled logs)` : ''}</title>
+            </g>
+          )
+        })}
       </svg>
     </div>
   )
