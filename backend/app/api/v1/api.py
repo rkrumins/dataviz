@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from .endpoints import (
-    graph, assignments, connections, ontology, views,
+    graph, assignments, connections, ontology, views, views_v2,
     providers, blueprints, workspaces, assets, context_models,
 )
 
@@ -19,6 +19,11 @@ api_router.include_router(
 api_router.include_router(
     context_models.template_router, prefix="/admin/context-model-templates",
     tags=["admin:context-model-templates"],
+)
+
+# ── Top-level views (first-class, cross-workspace) ─────────────────
+api_router.include_router(
+    views_v2.router, prefix="/views", tags=["views"],
 )
 
 # ── Workspace-scoped data routers ───────────────────────────────────
@@ -40,30 +45,30 @@ api_router.include_router(
     context_models.router, prefix="/{ws_id}/context-models", tags=["context-models"],
 )
 
-# ── Legacy routers (backward compat, kept during migration) ─────────
-# Core graph data endpoints (accept optional ?connectionId=)
-api_router.include_router(graph.router, tags=["graph"])
+# # ── Legacy routers (backward compat, kept during migration) ─────────
+# # Core graph data endpoints (accept optional ?connectionId=)
+# api_router.include_router(graph.router, tags=["graph"])
 
-# Assignment compute (stateless per-request)
-api_router.include_router(
-    assignments.router, prefix="/assignments", tags=["assignments"],
-)
+# # Assignment compute (stateless per-request)
+# api_router.include_router(
+#     assignments.router, prefix="/assignments", tags=["assignments"],
+# )
 
-# Connection management (legacy)
-api_router.include_router(
-    connections.router, prefix="/connections", tags=["connections"],
-)
+# # Connection management (legacy)
+# api_router.include_router(
+#     connections.router, prefix="/connections", tags=["connections"],
+# )
 
-# Per-connection ontology overrides (legacy)
-api_router.include_router(
-    ontology.router,
-    prefix="/connections/{connection_id}/ontology",
-    tags=["ontology"],
-)
+# # Per-connection ontology overrides (legacy)
+# api_router.include_router(
+#     ontology.router,
+#     prefix="/connections/{connection_id}/ontology",
+#     tags=["ontology"],
+# )
 
-# Per-connection saved views and rule sets (legacy)
-api_router.include_router(
-    views.router,
-    prefix="/connections/{connection_id}",
-    tags=["views"],
-)
+# # Per-connection saved views and rule sets (legacy)
+# api_router.include_router(
+#     views.router,
+#     prefix="/connections/{connection_id}",
+#     tags=["views"],
+# )

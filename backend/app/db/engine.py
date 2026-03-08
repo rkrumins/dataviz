@@ -127,6 +127,25 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         from . import models  # noqa: F401 — registers ORM models with Base
         await conn.run_sync(Base.metadata.create_all)
+
+    # ── Inline schema migrations ──────────────────────────────────────
+    # SQLAlchemy create_all only creates NEW tables, not new columns on
+    # existing tables.  We run safe ALTER TABLE statements here.
+    async with engine.begin() as conn:
+        migrations = [
+            "ALTER TABLE workspace_data_sources ADD COLUMN projection_mode TEXT",
+            "ALTER TABLE workspace_data_sources ADD COLUMN dedicated_graph_name TEXT",
+        ]
+        for stmt in migrations:
+            try:
+                await conn.execute(
+                    __import__("sqlalchemy").text(stmt)
+                )
+                logger.info("Migration applied: %s", stmt)
+            except Exception:
+                # Column already exists — safe to ignore
+                pass
+
     logger.info("Management DB initialised at %s", DATABASE_URL)
 
 

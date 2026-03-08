@@ -167,6 +167,11 @@ class SavedViewCreateRequest(BaseModel):
     view_type: ViewType = Field(ViewType.CANVAS, alias="viewType")
     config: Dict[str, Any] = Field(default_factory=dict)
     scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    data_source_id: Optional[str] = Field(None, alias="dataSourceId")
+    visibility: str = "private"
+    tags: Optional[List[str]] = None
+    is_pinned: bool = Field(False, alias="isPinned")
 
     class Config:
         populate_by_name = True
@@ -174,12 +179,21 @@ class SavedViewCreateRequest(BaseModel):
 
 class SavedViewResponse(BaseModel):
     id: str
-    connection_id: str = Field(alias="connectionId")
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    workspace_name: Optional[str] = Field(None, alias="workspaceName")
+    data_source_id: Optional[str] = Field(None, alias="dataSourceId")
+    connection_id: Optional[str] = Field(None, alias="connectionId")
     name: str
     description: Optional[str] = None
     view_type: ViewType = Field(alias="viewType")
     config: Dict[str, Any]
     scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
+    visibility: str = "private"
+    created_by: Optional[str] = Field(None, alias="createdBy")
+    tags: Optional[List[str]] = None
+    is_pinned: bool = Field(False, alias="isPinned")
+    favourite_count: int = Field(0, alias="favouriteCount")
+    is_favourited: bool = Field(False, alias="isFavourited")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -323,6 +337,8 @@ class DataSourceUpdateRequest(BaseModel):
     blueprint_id: Optional[str] = Field(None, alias="blueprintId")
     label: Optional[str] = None
     is_active: Optional[bool] = Field(None, alias="isActive")
+    projection_mode: Optional[str] = Field(None, alias="projectionMode")  # None | "in_source" | "dedicated"
+    dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")  # graph name when dedicated
 
     class Config:
         populate_by_name = True
@@ -337,6 +353,8 @@ class DataSourceResponse(BaseModel):
     label: Optional[str] = None
     is_primary: bool = Field(alias="isPrimary")
     is_active: bool = Field(alias="isActive")
+    projection_mode: Optional[str] = Field(None, alias="projectionMode")  # None = inherit from provider
+    dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 

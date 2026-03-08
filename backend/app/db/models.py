@@ -177,6 +177,10 @@ class SavedViewORM(Base):
     view_type = Column(Text, nullable=False, default="canvas")  # canvas | reference_model | scope
     config = Column(Text, nullable=False, default="{}")         # JSON
     scope_filter = Column(Text, nullable=True)                  # JSON
+    visibility = Column(Text, nullable=False, default="private")  # private | workspace | enterprise
+    created_by = Column(Text, nullable=True)                    # user identifier (RBAC-ready)
+    tags = Column(Text, nullable=True)                          # JSON array of strings
+    is_pinned = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -185,15 +189,48 @@ class SavedViewORM(Base):
         "WorkspaceORM", back_populates="saved_views",
         foreign_keys=[workspace_id],
     )
+    favourites = relationship(
+        "ViewFavouriteORM", back_populates="view",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         Index("idx_views_connection", "connection_id"),
         Index("idx_views_workspace", "workspace_id"),
         Index("idx_views_data_source", "data_source_id"),
+        Index("idx_views_visibility", "visibility"),
     )
 
     def __repr__(self) -> str:
         return f"<SavedView id={self.id!r} name={self.name!r} type={self.view_type!r}>"
+
+
+# ------------------------------------------------------------------ #
+# view_favourites                                                      #
+# ------------------------------------------------------------------ #
+
+class ViewFavouriteORM(Base):
+    __tablename__ = "view_favourites"
+
+    id = Column(Text, primary_key=True, default=lambda: f"fav_{uuid.uuid4().hex[:12]}")
+    view_id = Column(
+        Text,
+        ForeignKey("saved_views.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(Text, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    view = relationship("SavedViewORM", back_populates="favourites")
+
+    __table_args__ = (
+        UniqueConstraint("view_id", "user_id", name="uq_view_user_favourite"),
+        Index("idx_favourites_user", "user_id"),
+        Index("idx_favourites_view", "view_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewFavourite view={self.view_id!r} user={self.user_id!r}>"
 
 
 # ------------------------------------------------------------------ #
@@ -349,6 +386,8 @@ class WorkspaceDataSourceORM(Base):
     label = Column(Text, nullable=True)
     is_primary = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
+    projection_mode = Column(Text, nullable=True)  # None = inherit from provider, "in_source" | "dedicated"
+    dedicated_graph_name = Column(Text, nullable=True)  # graph name when projection_mode == "dedicated"
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 

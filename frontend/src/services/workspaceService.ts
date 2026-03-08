@@ -23,6 +23,8 @@ export interface DataSourceUpdateRequest {
     blueprintId?: string
     label?: string
     isActive?: boolean
+    projectionMode?: string | null  // null | "in_source" | "dedicated"
+    dedicatedGraphName?: string | null  // graph name when mode is "dedicated"
 }
 
 export interface DataSourceResponse {
@@ -34,6 +36,8 @@ export interface DataSourceResponse {
     label?: string
     isPrimary: boolean
     isActive: boolean
+    projectionMode?: string | null  // null = inherit from provider
+    dedicatedGraphName?: string | null  // graph name when dedicated
     createdAt: string
     updatedAt: string
 }
@@ -155,4 +159,12 @@ export const workspaceService = {
             method: 'POST',
         })
     },
+
+    setProjectionMode(wsId: string, dsId: string, mode: string): Promise<DataSourceResponse> {
+        return request<DataSourceResponse>(`${ADMIN_API}/${wsId}/data-sources/${dsId}/projection-mode`, {
+            method: 'PATCH',
+            body: JSON.stringify({ mode }),
+        })
+    },
 }
+

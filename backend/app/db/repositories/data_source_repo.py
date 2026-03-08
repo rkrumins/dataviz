@@ -33,6 +33,8 @@ def _to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         label=row.label,
         isPrimary=bool(row.is_primary),
         isActive=bool(row.is_active),
+        projectionMode=row.projection_mode,
+        dedicatedGraphName=row.dedicated_graph_name,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
@@ -139,6 +141,11 @@ async def update_data_source(
         row.label = req.label
     if req.is_active is not None:
         row.is_active = req.is_active
+    if req.projection_mode is not None:
+        # Allow clearing with empty string → None
+        row.projection_mode = req.projection_mode if req.projection_mode else None
+    if req.dedicated_graph_name is not None:
+        row.dedicated_graph_name = req.dedicated_graph_name if req.dedicated_graph_name else None
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()

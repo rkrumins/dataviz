@@ -100,8 +100,6 @@ async def get_default_workspace(
             WorkspaceORM.is_default == True,  # noqa: E712
             WorkspaceORM.is_active == True,
         )
-        .order_by(WorkspaceORM.updated_at.desc())
-        .limit(1)
     )
     return result.scalar_one_or_none()
 

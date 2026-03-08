@@ -21,6 +21,12 @@ export interface SavedView {
   createdAt: string
   updatedAt: string
   isPinned: boolean
+  visibility?: 'private' | 'workspace' | 'enterprise'
+  tags?: string[]
+  favouriteCount?: number
+  isFavourited?: boolean
+  workspaceId?: string
+  workspaceName?: string
 }
 
 interface ViewsState {
@@ -141,7 +147,7 @@ export const useViewsStore = create<ViewsState>()(
       syncToBackend: async (contextId) => {
         const views = get().views
         const API = contextId.startsWith('ws_')
-          ? `/api/v1/v1/${contextId}/assets/views`
+          ? `/api/v1/${contextId}/assets/views`
           : `/api/v1/connections/${contextId}/views`
         for (const view of views) {
           try {
@@ -172,7 +178,7 @@ export const useViewsStore = create<ViewsState>()(
       loadFromBackend: async (contextId) => {
         try {
           const API = contextId.startsWith('ws_')
-            ? `/api/v1/v1/${contextId}/assets/views`
+            ? `/api/v1/${contextId}/assets/views`
             : `/api/v1/connections/${contextId}/views`
           const res = await fetch(API)
           if (!res.ok) return
@@ -222,7 +228,7 @@ export const useViewsStore = create<ViewsState>()(
       deleteFromBackend: async (id, contextId) => {
         try {
           const API = contextId.startsWith('ws_')
-            ? `/api/v1/v1/${contextId}/assets/views/${id}`
+            ? `/api/v1/${contextId}/assets/views/${id}`
             : `/api/v1/connections/${contextId}/views/${id}`
           await fetch(API, {
             method: 'DELETE',

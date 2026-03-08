@@ -202,3 +202,30 @@ async def set_primary_data_source(
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
     ds = await data_source_repo.get_data_source(session, ds_id)
     return ds
+
+
+@router.patch("/{workspace_id}/data-sources/{ds_id}/projection-mode", response_model=DataSourceResponse)
+async def set_projection_mode(
+    workspace_id: str = Path(...),
+    ds_id: str = Path(...),
+    mode: str = Body(..., embed=True),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Set the aggregation edge projection mode for a data source.
+
+    mode values:
+    - "in_source"  — store AGGREGATED edges in the same graph as source data
+    - "dedicated"  — store in a separate projection graph
+    - ""           — clear override, inherit from provider default
+    """
+    if mode and mode not in ("in_source", "dedicated"):
+        raise HTTPException(status_code=422, detail=f"Invalid projection mode: '{mode}'. Must be 'in_source', 'dedicated', or empty.")
+    ds = await data_source_repo.get_data_source_orm(session, ds_id)
+    if not ds or ds.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+    ds.projection_mode = mode if mode else None
+    from datetime import datetime, timezone
+    ds.updated_at = datetime.now(timezone.utc).isoformat()
+    await session.flush()
+    await provider_registry.evict_data_source(ds.provider_id, ds.graph_name or "")
+    return await data_source_repo.get_data_source(session, ds_id)
