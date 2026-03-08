@@ -492,6 +492,7 @@ class FalkorDBProvider(GraphDataProvider):
         parent_urn: str,
         entity_types: Optional[List[EntityType]] = None,
         edge_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
         offset: int = 0,
         limit: int = 100,
     ) -> List[GraphNode]:
@@ -499,25 +500,30 @@ class FalkorDBProvider(GraphDataProvider):
         target_edge_types = set(edge_types) if edge_types else {EdgeType.CONTAINS.value}
         rel_list = list(target_edge_types)
 
+        search_where = ""
+        params: Dict[str, Any] = {"parent": parent_urn, "skip": offset, "lim": limit, "relTypes": rel_list}
+
+        if search_query:
+            search_where = "AND (toLower(c.displayName) CONTAINS toLower($searchQuery) OR toLower(c.urn) CONTAINS toLower($searchQuery)) "
+            params["searchQuery"] = search_query
+
         if len(rel_list) == 1:
             rel = _sanitize_label(rel_list[0])
             cypher = (
                 f"MATCH (p)-[r:{rel}]->(c) "
-                f"WHERE p.urn = $parent "
+                f"WHERE p.urn = $parent {search_where}"
                 f"WITH c SKIP $skip LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
                 f"RETURN c, count(gc) as childCount"
             )
-            params: Dict[str, Any] = {"parent": parent_urn, "skip": offset, "lim": limit, "relTypes": rel_list}
         else:
             cypher = (
                 f"MATCH (p)-[r]->(c) "
-                f"WHERE p.urn = $parent AND type(r) IN $relTypes "
+                f"WHERE p.urn = $parent AND type(r) IN $relTypes {search_where}"
                 f"WITH c SKIP $skip LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
                 f"RETURN c, count(gc) as childCount"
             )
-            params = {"parent": parent_urn, "relTypes": rel_list, "skip": offset, "lim": limit}
 
         result = await self._graph.ro_query(cypher, params=params)
         nodes = []

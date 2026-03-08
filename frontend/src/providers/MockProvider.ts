@@ -308,6 +308,7 @@ export class MockProvider implements GraphDataProvider {
         options?: {
             entityTypes?: EntityType[]
             edgeTypes?: string[]
+            searchQuery?: string
             offset?: number
             limit?: number
         }
@@ -315,6 +316,7 @@ export class MockProvider implements GraphDataProvider {
         const edgeTypes = options?.edgeTypes ?? ['CONTAINS'] // Default to CONTAINS
         const offset = options?.offset ?? 0
         const limit = options?.limit ?? 100
+        const searchQuery = options?.searchQuery?.trim().toLowerCase()
 
         // Find all edges from this parent that match the containment types
         const edges = this.downstreamMap.get(parentUrn) ?? []
@@ -328,6 +330,14 @@ export class MockProvider implements GraphDataProvider {
         // Filter by entity type
         if (options?.entityTypes?.length) {
             children = children.filter((n) => options.entityTypes!.includes(n.entityType))
+        }
+
+        // Filter by search query
+        if (searchQuery) {
+            children = children.filter((n) =>
+                n.displayName?.toLowerCase().includes(searchQuery) ||
+                n.urn?.toLowerCase().includes(searchQuery)
+            )
         }
 
         // Sort alphabetically by default

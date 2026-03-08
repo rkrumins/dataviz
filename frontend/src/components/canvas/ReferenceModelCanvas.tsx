@@ -937,7 +937,7 @@ export function ContextViewCanvas({
   }, [])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren } = useEntityLoader()
+  const { loadChildren, searchChildren, isLoading: isLoadingChildren } = useEntityLoader()
 
   const toggleNode = useCallback(async (nodeId: string) => {
     // Check if we need to fetch children
@@ -1824,6 +1824,8 @@ export function ContextViewCanvas({
                 isHighlightActive={isHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
                 onLoadMore={loadChildren}
+                onSearchChildren={searchChildren}
+                isLoadingChildren={isLoadingChildren}
                 onScroll={handleLayerScroll}
               />
             ))}
@@ -1906,6 +1908,7 @@ interface FlatTreeNode {
   parentIsLast: boolean[]  // Track which parents are "last" for proper tree lines
   isLoadMore?: boolean
   loadMoreCount?: number
+  isSearchBox?: boolean
 }
 
 interface LayerColumnProps {
@@ -1927,9 +1930,9 @@ interface LayerColumnProps {
   highlightedNodes?: Set<string>
   isHighlightActive?: boolean
   onAnimationComplete?: () => void
-  onFocusNode?: (nodeId: string | null) => void
-  focusedNodeId?: string | null
   onLoadMore?: (parentId: string) => void
+  onSearchChildren?: (parentId: string, query: string) => void
+  isLoadingChildren?: boolean
   onScroll?: () => void
 }
 
@@ -1951,16 +1954,16 @@ const LayerColumn = React.memo(function LayerColumn({
   traceContextSet,
   highlightedNodes,
   isHighlightActive = false,
-  onAnimationComplete,
-  onFocusNode,
-  focusedNodeId,
   onLoadMore,
+  onSearchChildren,
+  isLoadingChildren,
   onScroll
 }: LayerColumnProps) {
   // Local focus state for drilling into subtrees
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
   const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
   const [isCollapsed, setIsCollapsed] = useState(false)
+  const [childSearchQueries, setChildSearchQueries] = useState<Record<string, string>>({})
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   // Build flat tree from hierarchy (visible items only)
@@ -1984,15 +1987,35 @@ const LayerColumn = React.memo(function LayerColumn({
       result.push({ node, depth, isLast, parentIsLast: [...parentIsLast] })
 
       // Only traverse children if expanded
-      if (expandedNodes.has(node.id) && node.children.length > 0) {
+      if (expandedNodes.has(node.id) && (node.children.length > 0 || (node.data.childCount as number || 0) > 0)) {
         const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || node.children.length
-        const hasMore = node.children.length < childCount
 
-        node.children.forEach((child, idx) => {
+        // Push the inline search box item
+        result.push({
+          node,
+          depth: depth + 1,
+          isLast: node.children.length === 0,
+          parentIsLast: [...parentIsLast, isLast],
+          isSearchBox: true
+        })
+
+        // Filter children if there's an active query for this node
+        let displayChildren = node.children
+        const activeQuery = childSearchQueries[node.id]?.trim().toLowerCase()
+        if (activeQuery) {
+          displayChildren = displayChildren.filter(c =>
+            c.name.toLowerCase().includes(activeQuery) ||
+            c.id.toLowerCase().includes(activeQuery)
+          )
+        }
+
+        const hasMore = node.children.length < childCount && !activeQuery // Disable load more if actively searching
+
+        displayChildren.forEach((child, idx) => {
           traverse(
             child,
             depth + 1,
-            idx === node.children.length - 1 && !hasMore,
+            idx === displayChildren.length - 1 && !hasMore,
             [...parentIsLast, isLast]
           )
         })
@@ -2267,6 +2290,30 @@ const LayerColumn = React.memo(function LayerColumn({
           ) : (
             <div className="py-2 px-1">
               {flatTree.map((item, index) => {
+                if (item.isSearchBox) {
+                  return (
+                    <SearchBoxItem
+                      key={`search-${item.node.id}`}
+                      parentId={item.node.id}
+                      depth={item.depth}
+                      parentIsLast={item.parentIsLast}
+                      value={childSearchQueries[item.node.id] || ''}
+                      onChange={(val) => {
+                        setChildSearchQueries(prev => ({ ...prev, [item.node.id]: val }))
+                        if (val.trim()) {
+                          // Allow 300ms debounce visually by immediately showing it's ready, actual fetch is done, but UI will reflect
+                          onSearchChildren && onSearchChildren(item.node.id, val)
+                        } else {
+                          // If search is cleared, refetch the original children
+                          onLoadMore && onLoadMore(item.node.id)
+                        }
+                      }}
+                      isLoading={isLoadingChildren}
+                      layer={layer}
+                    />
+                  )
+                }
+
                 if (item.isLoadMore) {
                   return (
                     <LoadMoreItem
@@ -2687,6 +2734,151 @@ function LoadMoreItem({
         </span>
         <span className="tracking-wide">Load {Math.min(20, count)} more nodes ({count} remaining)</span>
       </button>
+    </motion.div>
+  )
+}
+
+// ----------------------------------------------------
+// SEARCH BOX ITEM (Inline search for children)
+// ----------------------------------------------------
+
+function SearchBoxItem({
+  parentId,
+  depth,
+  parentIsLast,
+  value,
+  onChange,
+  isLoading,
+  layer
+}: {
+  parentId: string
+  depth: number
+  parentIsLast: boolean[]
+  value: string
+  onChange: (val: string) => void
+  isLoading?: boolean
+  layer: ViewLayerConfig
+}) {
+  const [isFocused, setIsFocused] = useState(false)
+  const indentWidth = depth * 16
+
+  // Using a local state for input to not jump cursors
+  const [localValue, setLocalValue] = useState(value)
+
+  useEffect(() => {
+    setLocalValue(value)
+  }, [value])
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0 }}
+      className="flex items-center gap-2 mx-1 rounded-xl transition-all duration-200 group/item relative min-h-[36px] py-1.5"
+      style={{ paddingLeft: 12 + indentWidth }}
+    >
+      <div className="flex items-center absolute left-3 pointer-events-none" style={{ width: indentWidth }}>
+        {parentIsLast.map((pIsLast, idx) => (
+          <div key={idx} className="w-5 h-full flex justify-center">
+            {!pIsLast && (
+              <div className="w-px h-full bg-gradient-to-b from-white/[0.08] via-white/[0.12] to-white/[0.08]" />
+            )}
+          </div>
+        ))}
+        {depth > 0 && (
+          <div className="w-5 h-full relative">
+            <div className="absolute left-1/2 -translate-x-1/2 w-px top-0 h-full" style={{ background: 'linear-gradient(to bottom, transparent, rgba(255,255,255,0.12), transparent)' }} />
+            <div className="absolute left-1/2 top-1/2 -translate-y-1/2 flex items-center">
+              <div className="w-3 h-px bg-gradient-to-r from-white/[0.12] to-white/[0.06]" />
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div
+        className={cn(
+          "flex flex-1 items-center gap-2.5 px-3 py-2 mx-1 rounded-xl border text-xs font-medium transition-all duration-300 shadow-sm relative group/searchbox overflow-hidden",
+          isFocused
+            ? "bg-canvas-elevated/90 backdrop-blur-xl border-transparent shadow-xl translate-y-[0px]"
+            : "bg-white/[0.02] border-white/[0.06] hover:bg-white/[0.04] hover:border-white/[0.12] hover:shadow-md"
+        )}
+        style={isFocused ? {
+          boxShadow: `0 8px 24px -4px ${layer.color}25, inset 0 0 0 1.5px ${layer.color}50`
+        } : {}}
+      >
+        {/* Subtle focus glow background */}
+        <div
+          className={cn(
+            "absolute inset-0 transition-opacity duration-500 pointer-events-none",
+            isFocused ? "opacity-100" : "opacity-0"
+          )}
+          style={{ background: `radial-gradient(ellipse at center, ${layer.color}15 0%, transparent 70%)` }}
+        />
+
+        <LucideIcons.Search
+          className={cn("w-4 h-4 transition-all duration-300 relative z-10", isFocused ? "scale-110" : "text-ink-muted/50")}
+          style={isFocused ? { color: layer.color } : {}}
+        />
+
+        <input
+          type="text"
+          value={localValue}
+          onChange={(e) => {
+            setLocalValue(e.target.value)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              onChange(localValue)
+            }
+          }}
+          onBlur={() => {
+            setIsFocused(false)
+            if (localValue !== value) onChange(localValue)
+          }}
+          onFocus={() => setIsFocused(true)}
+          placeholder={`Search ${parentId ? 'node' : 'children'}...`}
+          className="flex-1 bg-transparent border-none outline-none text-ink placeholder-ink-muted/40 relative z-10 transition-all duration-300 min-w-0"
+        />
+
+        <div className="flex items-center gap-1.5 relative z-10 flex-shrink-0">
+          {isLoading ? (
+            <div className="flex items-center justify-center w-5 h-5 rounded-md bg-white/[0.05]">
+              <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: layer.color }} />
+            </div>
+          ) : (
+            <AnimatePresence>
+              {isFocused && !localValue && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  className="px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider uppercase text-ink-muted/50 bg-white/[0.05] border border-white/[0.05]"
+                >
+                  Enter
+                </motion.div>
+              )}
+            </AnimatePresence>
+          )}
+
+          <AnimatePresence>
+            {localValue && !isLoading && (
+              <motion.button
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setLocalValue('')
+                  onChange('')
+                }}
+                className="flex items-center justify-center w-5 h-5 rounded-md hover:bg-white/[0.1] text-ink-muted/60 hover:text-ink transition-colors bg-white/[0.03]"
+              >
+                <LucideIcons.X className="w-3 h-3" />
+              </motion.button>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
     </motion.div>
   )
 }

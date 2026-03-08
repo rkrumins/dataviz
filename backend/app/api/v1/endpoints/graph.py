@@ -117,12 +117,13 @@ async def get_node_parent(
 async def get_node_children(
     urn: str,
     edge_types: Optional[List[str]] = Query(None, alias="edgeTypes"),
+    search_query: Optional[str] = Query(None, alias="searchQuery"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Lazy load children nodes."""
-    return await engine.get_children(urn, edge_types=edge_types, limit=limit, offset=offset)
+    return await engine.get_children(urn, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset)
 
 
 @router.post("/search", response_model=List[GraphNode], response_model_by_alias=True)

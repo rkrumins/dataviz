@@ -58,6 +58,7 @@ class GraphDataProvider(ABC):
         parent_urn: str,
         entity_types: Optional[List[EntityType]] = None,
         edge_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
         offset: int = 0,
         limit: int = 100,
     ) -> List[GraphNode]:

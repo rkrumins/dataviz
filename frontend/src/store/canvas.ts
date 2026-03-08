@@ -91,6 +91,8 @@ interface CanvasState {
   updateNode: (id: string, data: Partial<LineageNode['data']>) => void
   removeNode: (id: string) => void
   removeEdge: (id: string) => void
+  removeNodes: (ids: string[]) => void
+  removeEdges: (ids: string[]) => void
 }
 
 import { persist, createJSONStorage } from 'zustand/middleware'
@@ -209,11 +211,35 @@ export const useCanvasStore = create<CanvasState>()(
           _edgeIndex: nextEdgeIndex,
         }
       }),
+      removeNodes: (ids) => set((state) => {
+        if (ids.length === 0) return state
+        const idSet = new Set(ids)
+        const nextNodeIndex = new Set(state._nodeIndex)
+        ids.forEach(id => nextNodeIndex.delete(id))
+        const remainingEdges = state.edges.filter((e) => !idSet.has(e.source) && !idSet.has(e.target))
+        const nextEdgeIndex = new Set(remainingEdges.map((e) => e.id))
+        return {
+          nodes: state.nodes.filter((n) => !idSet.has(n.id)),
+          edges: remainingEdges,
+          _nodeIndex: nextNodeIndex,
+          _edgeIndex: nextEdgeIndex,
+        }
+      }),
       removeEdge: (id) => set((state) => {
         const nextEdgeIndex = new Set(state._edgeIndex)
         nextEdgeIndex.delete(id)
         return {
           edges: state.edges.filter((e) => e.id !== id),
+          _edgeIndex: nextEdgeIndex,
+        }
+      }),
+      removeEdges: (ids) => set((state) => {
+        if (ids.length === 0) return state
+        const idSet = new Set(ids)
+        const nextEdgeIndex = new Set(state._edgeIndex)
+        ids.forEach(id => nextEdgeIndex.delete(id))
+        return {
+          edges: state.edges.filter((e) => !idSet.has(e.id)),
           _edgeIndex: nextEdgeIndex,
         }
       }),

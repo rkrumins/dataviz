@@ -185,6 +185,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         options?: {
             entityTypes?: EntityType[]
             edgeTypes?: string[]
+            searchQuery?: string
             offset?: number
             limit?: number
         }
@@ -192,6 +193,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         const params = new URLSearchParams()
         if (options?.offset) params.append('offset', String(options.offset))
         if (options?.limit) params.append('limit', String(options.limit))
+        if (options?.searchQuery) params.append('searchQuery', options.searchQuery)
 
         if (options?.edgeTypes?.length) {
             options.edgeTypes.forEach(t => params.append('edgeTypes', t))
