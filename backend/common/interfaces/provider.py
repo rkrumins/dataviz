@@ -58,6 +58,7 @@ class GraphDataProvider(ABC):
         parent_urn: str,
         entity_types: Optional[List[EntityType]] = None,
         edge_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
         offset: int = 0,
         limit: int = 100,
     ) -> List[GraphNode]:
@@ -187,6 +188,38 @@ class GraphDataProvider(ABC):
     # Optional Extension Methods
     # (concrete implementations are optional — default no-ops)
     # ==========================================
+
+    # ==========================================
+    # Projection / Materialization Lifecycle Hooks
+    # (no-ops by default — providers override as needed)
+    # ==========================================
+
+    async def ensure_projections(self) -> None:
+        """Set up projection infrastructure (indices, projection graphs, etc.)."""
+        pass
+
+    async def on_lineage_edge_written(
+        self,
+        source_urn: str,
+        target_urn: str,
+        edge_id: str,
+        edge_type: str,
+    ) -> None:
+        """Called after a lineage edge is created/updated. Materializes AGGREGATED edges."""
+        pass
+
+    async def on_lineage_edge_deleted(
+        self,
+        source_urn: str,
+        target_urn: str,
+        edge_id: str,
+    ) -> None:
+        """Called after a lineage edge is removed. Decrements AGGREGATED edge weights."""
+        pass
+
+    async def on_containment_changed(self, urn: str) -> None:
+        """Called when a node's containment (parent) changes. Rebuilds ancestor chains."""
+        pass
 
     async def list_graphs(self) -> List[str]:
         """

@@ -95,10 +95,13 @@ async def get_default_workspace(
 ) -> Optional[WorkspaceORM]:
     """Return the default workspace (is_default=True, is_active=True)."""
     result = await session.execute(
-        _ws_query().where(
+        _ws_query()
+        .where(
             WorkspaceORM.is_default == True,  # noqa: E712
             WorkspaceORM.is_active == True,
         )
+        .order_by(WorkspaceORM.updated_at.desc())
+        .limit(1)
     )
     return result.scalar_one_or_none()
 

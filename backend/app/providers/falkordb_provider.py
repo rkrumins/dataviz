@@ -6,7 +6,7 @@ Implements GraphDataProvider interface using FalkorDB async client and Cypher qu
 import json
 import logging
 import os
-from collections import deque
+from collections import defaultdict, deque
 from typing import List, Optional, Dict, Any, Set
 
 from ..models.graph import (
@@ -85,35 +85,67 @@ class FalkorDBProvider(GraphDataProvider):
         port: int = 6379,
         graph_name: str = "nexus_lineage",
         seed_file: Optional[str] = None,
+        projection_mode: str = "in_source",
     ):
         self._host = host
         self._port = port
         self._graph_name = graph_name
         self._seed_file = seed_file
+        self._projection_mode = projection_mode  # "in_source" or "dedicated"
         self._graph = None
-        self._pool = None
+        self._proj_graph = None  # Dedicated projection graph (when mode = "dedicated")
+        self._pool = None       # Graph query pool (used by FalkorDB)
+        self._redis_pool = None  # Separate pool for Redis data-structure ops (caching, SADD, etc.)
         self._db = None
+
+    @property
+    def _proj(self):
+        """Transparent access to the projection graph.
+
+        When projection_mode is "in_source", AGGREGATED edges live in the
+        same graph as source data. When "dedicated", they go to a separate
+        graph key (e.g. nexus_lineage_proj) on the same Redis instance.
+        """
+        if self._projection_mode == "dedicated" and self._proj_graph is not None:
+            return self._proj_graph
+        return self._graph
 
     async def _ensure_connected(self):
         """Lazy connection to FalkorDB."""
         if self._graph is not None:
             return
         try:
-            from redis.asyncio import BlockingConnectionPool
+            from redis.asyncio import BlockingConnectionPool, Redis
             from falkordb.asyncio import FalkorDB
 
+            # Pool for graph (Cypher) queries — used by FalkorDB client
             self._pool = BlockingConnectionPool(
                 host=self._host,
                 port=self._port,
-                max_connections=16,
-                timeout=None,
+                max_connections=12,
+                timeout=30,
                 decode_responses=True,
             )
+            # Separate pool for Redis data-structure ops (caching, SADD, HSET, etc.)
+            # Prevents cache/materialization ops from starving graph query connections
+            self._redis_pool = BlockingConnectionPool(
+                host=self._host,
+                port=self._port,
+                max_connections=8,
+                timeout=10,
+                decode_responses=True,
+            )
+            self._redis = Redis(connection_pool=self._redis_pool)
             self._db = FalkorDB(connection_pool=self._pool)
             self._graph = self._db.select_graph(self._graph_name)
 
+            # Set up projection graph if using dedicated mode
+            if self._projection_mode == "dedicated":
+                self._proj_graph = self._db.select_graph(f"{self._graph_name}_proj")
+
             # Ensure indices exist
             await self.ensure_indices()
+            await self.ensure_projections()
 
             # Optional lazy seed
             if self._seed_file:
@@ -176,11 +208,13 @@ class FalkorDBProvider(GraphDataProvider):
         return "FalkorDBProvider"
 
     def _get_containment_edge_types(self) -> Set[str]:
-        config = os.getenv("CONTAINMENT_EDGE_TYPES", "").strip()
-        if config:
-            return {t.strip().upper() for t in config.split(",") if t.strip()}
-        # Include PRODUCES by default as requested
-        return {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value, EdgeType.PRODUCES.value}
+        if not hasattr(self, "_containment_cache"):
+            config = os.getenv("CONTAINMENT_EDGE_TYPES", "").strip()
+            if config:
+                self._containment_cache = {t.strip().upper() for t in config.split(",") if t.strip()}
+            else:
+                self._containment_cache = {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value}
+        return self._containment_cache
 
     def _extract_node_from_result(self, row) -> Optional[GraphNode]:
         """Extract GraphNode from a FalkorDB result row (Node or dict of properties)."""
@@ -196,48 +230,93 @@ class FalkorDBProvider(GraphDataProvider):
             return _node_from_props(cell)
         return None
 
-    def _extract_props_from_node(self, row) -> Optional[Dict]:
-        """Extract properties dict from a FalkorDB node result."""
-        if not row:
+    # ---- URN → label cache (Redis Hash) ----
+
+    def _urn_label_key(self) -> str:
+        return f"{self._graph_name}:urn_labels"
+
+    async def _cache_urn_label(self, urn: str, label: str) -> None:
+        """Store a single urn→label mapping."""
+        try:
+            await self._redis.hset(self._urn_label_key(), urn, label)
+        except Exception:
+            pass  # best-effort
+
+    async def _cache_urn_labels_bulk(self, mapping: Dict[str, str]) -> None:
+        """Bulk-store urn→label mappings via pipeline."""
+        if not mapping:
+            return
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            key = self._urn_label_key()
+            for urn, label in mapping.items():
+                pipe.hset(key, urn, label)
+            await pipe.execute()
+        except Exception:
+            pass  # best-effort
+
+    async def _get_cached_label(self, urn: str) -> Optional[str]:
+        """Look up the label for a URN from Redis cache."""
+        try:
+            return await self._redis.hget(self._urn_label_key(), urn)
+        except Exception:
             return None
-        cell = row[0] if isinstance(row, (list, tuple)) else row
-        if hasattr(cell, "properties"):
-            return cell.properties
-        if isinstance(cell, dict):
-            return cell
-        return None
 
     async def get_node(self, urn: str) -> Optional[GraphNode]:
         await self._ensure_connected()
+
+        # Try label-aware lookup first (index-assisted, 10-50x faster)
+        label = await self._get_cached_label(urn)
+        if label:
+            result = await self._graph.ro_query(
+                f"MATCH (n:{_sanitize_label(label)} {{urn: $urn}}) RETURN n",
+                params={"urn": urn},
+            )
+            if result.result_set and len(result.result_set) > 0:
+                return self._extract_node_from_result(result.result_set[0])
+
+        # Fallback: label-less scan (still works, just slower)
         result = await self._graph.ro_query(
             "MATCH (n) WHERE n.urn = $urn RETURN n",
             params={"urn": urn},
         )
         if result.result_set and len(result.result_set) > 0:
-            return self._extract_node_from_result(result.result_set[0])
+            node = self._extract_node_from_result(result.result_set[0])
+            # Backfill the cache for next time
+            if node:
+                lbl = node.entity_type.value if hasattr(node.entity_type, "value") else str(node.entity_type)
+                await self._cache_urn_label(urn, lbl)
+            return node
         return None
 
     async def get_nodes(self, query: NodeQuery) -> List[GraphNode]:
         await self._ensure_connected()
 
-        clauses = ["MATCH (n)"]
         params: Dict[str, Any] = {}
         conditions = []
 
+        # When a single entity type is provided, use label-specific MATCH for index hit
+        if query.entity_types and len(query.entity_types) == 1:
+            label = _sanitize_label(
+                query.entity_types[0].value if hasattr(query.entity_types[0], "value")
+                else str(query.entity_types[0])
+            )
+            clauses = [f"MATCH (n:{label})"]
+        elif query.entity_types:
+            clauses = ["MATCH (n)"]
+            types = [t.value if hasattr(t, "value") else str(t) for t in query.entity_types]
+            params["entityTypes"] = types
+            conditions.append("labels(n)[0] IN $entityTypes")
+        else:
+            clauses = ["MATCH (n)"]
+
         if query.urns:
-            # FalkorDB IN with list - use UNWIND or multiple OR
             if len(query.urns) == 1:
                 conditions.append("n.urn = $urn0")
                 params["urn0"] = query.urns[0]
             else:
-                urns_param = "urnList"
-                params[urns_param] = query.urns
-                conditions.append(f"n.urn IN ${urns_param}")
-
-        if query.entity_types:
-            types = [t.value if hasattr(t, "value") else str(t) for t in query.entity_types]
-            params["entityTypes"] = types
-            conditions.append(f"labels(n)[0] IN $entityTypes")
+                params["urnList"] = query.urns
+                conditions.append("n.urn IN $urnList")
 
         if query.tags:
             # Tags stored as JSON array string - match quoted tag in JSON
@@ -262,8 +341,9 @@ class FalkorDBProvider(GraphDataProvider):
         if include_child_count:
             containment = list(self._get_containment_edge_types())
             containment_rel_types = "|".join([_sanitize_label(t) for t in containment]) if containment else "CONTAINS"
+            clauses.append("WITH n SKIP $skip LIMIT $limit")
             clauses.append(f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)")
-            clauses.append("RETURN n, count(child) as childCount SKIP $skip LIMIT $limit")
+            clauses.append("RETURN n, count(child) as childCount")
         else:
             clauses.append("RETURN n SKIP $skip LIMIT $limit")
 
@@ -370,26 +450,29 @@ class FalkorDBProvider(GraphDataProvider):
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
         await self._ensure_connected()
 
-        # FalkorDB variable relationship types: use MATCH (a)-[r]->(b) and filter by type(r)
-        cypher = "MATCH (a)-[r]->(b) WHERE a.urn IS NOT NULL AND b.urn IS NOT NULL"
+        cypher = "MATCH (a)-[r]->(b)"
         params: Dict[str, Any] = {}
+        conditions: List[str] = []
 
         if query.source_urns:
             params["sourceUrns"] = query.source_urns
-            cypher += " AND a.urn IN $sourceUrns"
+            conditions.append("a.urn IN $sourceUrns")
         if query.target_urns:
             params["targetUrns"] = query.target_urns
-            cypher += " AND b.urn IN $targetUrns"
+            conditions.append("b.urn IN $targetUrns")
         if query.any_urns:
             params["anyUrns"] = query.any_urns
-            cypher += " AND (a.urn IN $anyUrns OR b.urn IN $anyUrns)"
+            conditions.append("(a.urn IN $anyUrns OR b.urn IN $anyUrns)")
         if query.edge_types:
             types = [t.value if hasattr(t, "value") else str(t) for t in query.edge_types]
             params["edgeTypes"] = types
-            cypher += " AND type(r) IN $edgeTypes"
+            conditions.append("type(r) IN $edgeTypes")
         if query.min_confidence is not None:
             params["minConf"] = query.min_confidence
-            cypher += " AND r.confidence >= $minConf"
+            conditions.append("r.confidence >= $minConf")
+
+        if conditions:
+            cypher += " WHERE " + " AND ".join(conditions)
 
         offset = query.offset or 0
         limit = query.limit or 100
@@ -409,6 +492,7 @@ class FalkorDBProvider(GraphDataProvider):
         parent_urn: str,
         entity_types: Optional[List[EntityType]] = None,
         edge_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
         offset: int = 0,
         limit: int = 100,
     ) -> List[GraphNode]:
@@ -416,23 +500,30 @@ class FalkorDBProvider(GraphDataProvider):
         target_edge_types = set(edge_types) if edge_types else {EdgeType.CONTAINS.value}
         rel_list = list(target_edge_types)
 
+        search_where = ""
+        params: Dict[str, Any] = {"parent": parent_urn, "skip": offset, "lim": limit, "relTypes": rel_list}
+
+        if search_query:
+            search_where = "AND (toLower(c.displayName) CONTAINS toLower($searchQuery) OR toLower(c.urn) CONTAINS toLower($searchQuery)) "
+            params["searchQuery"] = search_query
+
         if len(rel_list) == 1:
             rel = _sanitize_label(rel_list[0])
             cypher = (
                 f"MATCH (p)-[r:{rel}]->(c) "
-                f"WHERE p.urn = $parent "
+                f"WHERE p.urn = $parent {search_where}"
+                f"WITH c SKIP $skip LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
-                f"RETURN c, count(gc) as childCount SKIP $skip LIMIT $lim"
+                f"RETURN c, count(gc) as childCount"
             )
-            params: Dict[str, Any] = {"parent": parent_urn, "skip": offset, "lim": limit, "relTypes": rel_list}
         else:
             cypher = (
                 f"MATCH (p)-[r]->(c) "
-                f"WHERE p.urn = $parent AND type(r) IN $relTypes "
+                f"WHERE p.urn = $parent AND type(r) IN $relTypes {search_where}"
+                f"WITH c SKIP $skip LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
-                f"RETURN c, count(gc) as childCount SKIP $skip LIMIT $lim"
+                f"RETURN c, count(gc) as childCount"
             )
-            params = {"parent": parent_urn, "relTypes": rel_list, "skip": offset, "lim": limit}
 
         result = await self._graph.ro_query(cypher, params=params)
         nodes = []
@@ -470,61 +561,50 @@ class FalkorDBProvider(GraphDataProvider):
         depth: int,
         descendant_types: Optional[List[EntityType]] = None,
     ) -> Set[str]:
-        """
-        Single-query lineage traversal using variable-length Cypher paths.
-        Replaces the previous BFS which made N+1 queries per hop.
+        """Single-query lineage traversal using bounded variable-length Cypher paths.
+
+        Uses *1..{depth} (literal bound) instead of unbounded *1.. so the
+        query planner can prune early. Entity-type filtering is pushed into
+        Cypher via labels(neighbor)[0] rather than fetching all nodes to
+        filter in Python.
         """
         await self._ensure_connected()
         containment = list(self._get_containment_edge_types())
+        safe_depth = max(1, min(int(depth), 20))  # Clamp to sane range
         params: Dict[str, Any] = {
             "startUrn": start_urn,
-            "depth": depth,
             "containmentTypes": containment,
         }
 
-        # Variable-length path: traverse edges that are NOT containment types
+        # Entity-type filter pushed into Cypher
+        type_clause = ""
+        if descendant_types:
+            allowed = [t.value if hasattr(t, "value") else str(t) for t in descendant_types]
+            params["allowedTypes"] = allowed
+            type_clause = "AND labels(neighbor)[0] IN $allowedTypes "
+
         if direction == "upstream":
-            # Follow edges backwards (target → source)
             cypher = (
-                "MATCH (start) WHERE start.urn = $startUrn "
-                "MATCH path = (neighbor)-[*1..]->(start) "
-                "WHERE length(path) <= $depth "
-                "AND ALL(r IN relationships(path) WHERE NOT type(r) IN $containmentTypes) "
-                "RETURN DISTINCT neighbor.urn AS urn"
+                f"MATCH (start) WHERE start.urn = $startUrn "
+                f"MATCH path = (neighbor)-[*1..{safe_depth}]->(start) "
+                f"WHERE ALL(r IN relationships(path) WHERE NOT type(r) IN $containmentTypes) "
+                f"{type_clause}"
+                f"RETURN DISTINCT neighbor.urn AS urn"
             )
         else:
-            # Follow edges forwards (source → target)
             cypher = (
-                "MATCH (start) WHERE start.urn = $startUrn "
-                "MATCH path = (start)-[*1..]->(neighbor) "
-                "WHERE length(path) <= $depth "
-                "AND ALL(r IN relationships(path) WHERE NOT type(r) IN $containmentTypes) "
-                "RETURN DISTINCT neighbor.urn AS urn"
+                f"MATCH (start) WHERE start.urn = $startUrn "
+                f"MATCH path = (start)-[*1..{safe_depth}]->(neighbor) "
+                f"WHERE ALL(r IN relationships(path) WHERE NOT type(r) IN $containmentTypes) "
+                f"{type_clause}"
+                f"RETURN DISTINCT neighbor.urn AS urn"
             )
 
         result = await self._graph.ro_query(cypher, params=params)
-        result_urns: Set[str] = set()
-
-        if descendant_types:
-            allowed_types = {t.value if hasattr(t, "value") else str(t) for t in descendant_types}
-        else:
-            allowed_types = None
-
-        for row in (result.result_set or []):
-            urn = row[0]
-            if urn and urn != start_urn:
-                result_urns.add(urn)
-
-        # Filter by entity type if needed (uses bulk fetch instead of per-node queries)
-        if allowed_types and result_urns:
-            nodes = await self.get_nodes(NodeQuery(urns=list(result_urns), limit=len(result_urns), include_child_count=False))
-            result_urns = set()
-            for n in nodes:
-                nt = n.entity_type.value if hasattr(n.entity_type, "value") else str(n.entity_type)
-                if nt in allowed_types:
-                    result_urns.add(n.urn)
-
-        return result_urns
+        return {
+            row[0] for row in (result.result_set or [])
+            if row[0] and row[0] != start_urn
+        }
 
     async def get_upstream(
         self,
@@ -595,77 +675,404 @@ class FalkorDBProvider(GraphDataProvider):
         )
 
 
+    # ------------------------------------------------------------------ #
+    # Projection / Materialization Lifecycle Hooks                         #
+    # ------------------------------------------------------------------ #
+
+    async def ensure_projections(self) -> None:
+        """Create indices on the projection target for fast AGGREGATED reads."""
+        proj = self._proj
+        try:
+            await proj.query("CREATE INDEX FOR (n:_Projection) ON (n.urn)")
+        except Exception:
+            pass  # Index may already exist
+
+    async def _get_ancestor_chain(self, urn: str) -> List[str]:
+        """Get pre-computed ancestor chain from Redis Hash, or compute + cache it.
+
+        Returns list of URNs from immediate parent to root (ordered).
+        Uses Redis Hash `{graph_name}:ancestors` for O(1) lookup.
+        """
+        cache_key = f"{self._graph_name}:ancestors"
+        try:
+            raw = await self._redis.execute_command("HGET", cache_key, urn)
+            if raw:
+                return json.loads(raw)
+        except Exception:
+            pass
+
+        # Cache miss — compute from graph and store
+        ancestors = await self._compute_ancestor_chain(urn)
+        try:
+            await self._redis.execute_command(
+                "HSET", cache_key, urn, json.dumps(ancestors)
+            )
+        except Exception as e:
+            logger.debug(f"Failed to cache ancestor chain for {urn}: {e}")
+        return ancestors
+
+    async def _compute_ancestor_chain(self, urn: str) -> List[str]:
+        """Single Cypher query to walk containment edges upward (1 query instead of N)."""
+        containment = list(self._get_containment_edge_types())
+        containment_cypher = "|".join(_sanitize_label(t) for t in containment)
+
+        # Variable-length path: returns ordered list of ancestor URNs
+        # nodes(path) gives [child, parent, grandparent, ...] — skip index 0 (self)
+        result = await self._graph.ro_query(
+            f"MATCH path = (child)<-[:{containment_cypher}*1..10]-(ancestor) "
+            f"WHERE child.urn = $urn "
+            f"WITH path ORDER BY length(path) DESC LIMIT 1 "
+            f"RETURN [n IN nodes(path)[1..] | n.urn] AS chain",
+            params={"urn": urn},
+        )
+        if result.result_set and result.result_set[0][0]:
+            return result.result_set[0][0]
+        return []
+
+    async def _compute_and_store_ancestors_bulk(
+        self,
+        urns: List[str],
+    ) -> Dict[str, List[str]]:
+        """Compute and cache ancestor chains for multiple URNs at once.
+
+        Uses Redis pipeline for batch HSET — zero extra round-trips.
+        """
+        cache_key = f"{self._graph_name}:ancestors"
+        result: Dict[str, List[str]] = {}
+
+        # First, try to fetch all from cache in one pipeline
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for u in urns:
+                pipe.execute_command("HGET", cache_key, u)
+            cached = await pipe.execute()
+
+            missing_urns = []
+            for i, u in enumerate(urns):
+                if cached[i]:
+                    result[u] = json.loads(cached[i])
+                else:
+                    missing_urns.append(u)
+        except Exception:
+            missing_urns = list(urns)
+
+        # Compute missing chains
+        if missing_urns:
+            store_pipe = self._redis.pipeline(transaction=False)
+            for u in missing_urns:
+                chain = await self._compute_ancestor_chain(u)
+                result[u] = chain
+                store_pipe.execute_command("HSET", cache_key, u, json.dumps(chain))
+            try:
+                await store_pipe.execute()
+            except Exception as e:
+                logger.debug(f"Failed to batch-store ancestor chains: {e}")
+
+        return result
+
+    async def on_lineage_edge_written(
+        self,
+        source_urn: str,
+        target_urn: str,
+        edge_id: str,
+        edge_type: str,
+    ) -> None:
+        """Materialize AGGREGATED edges when a lineage edge is written.
+
+        Uses pre-computed ancestor chains instead of Cypher variable-length
+        paths, eliminating the Cartesian product explosion.
+
+        Idempotency: Uses Redis Sets to track which leaf edges contribute
+        to each AGGREGATED pair. SADD is naturally idempotent.
+
+        Batching: Collects all new pairs, then issues a single UNWIND+MERGE
+        instead of one Cypher call per ancestor pair.
+        """
+        await self._ensure_connected()
+
+        s_ancestors = await self._get_ancestor_chain(source_urn)
+        t_ancestors = await self._get_ancestor_chain(target_urn)
+
+        s_chain = [source_urn] + s_ancestors
+        t_chain = [target_urn] + t_ancestors
+
+        members_key_prefix = f"{self._graph_name}:agg_members"
+
+        # Phase 1: Redis SADD pipeline to check idempotency for all pairs at once
+        pairs_to_check = []
+        for s_urn in s_chain:
+            for t_urn in t_chain:
+                if s_urn != t_urn:
+                    pairs_to_check.append((s_urn, t_urn))
+
+        if not pairs_to_check:
+            return
+
+        # Pipeline: SADD for all pairs
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for s_urn, t_urn in pairs_to_check:
+                member_key = f"{members_key_prefix}:{s_urn}:{t_urn}"
+                pipe.execute_command("SADD", member_key, edge_id)
+            sadd_results = await pipe.execute()
+        except Exception:
+            sadd_results = [1] * len(pairs_to_check)
+
+        # Phase 2: SCARD pipeline for pairs that were newly added
+        new_pairs = [(pairs_to_check[i], sadd_results[i]) for i in range(len(pairs_to_check)) if sadd_results[i] != 0]
+        if not new_pairs:
+            return
+
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for (s_urn, t_urn), _ in new_pairs:
+                member_key = f"{members_key_prefix}:{s_urn}:{t_urn}"
+                pipe.execute_command("SCARD", member_key)
+            scard_results = await pipe.execute()
+        except Exception:
+            scard_results = [1] * len(new_pairs)
+
+        # Phase 3: Single UNWIND+MERGE for all new pairs
+        merge_batch = []
+        for i, ((s_urn, t_urn), _) in enumerate(new_pairs):
+            weight = scard_results[i] if scard_results[i] else 1
+            merge_batch.append({"s": s_urn, "t": t_urn, "w": int(weight)})
+
+        proj = self._proj
+        try:
+            await proj.query(
+                "UNWIND $batch AS item "
+                "MERGE (s {urn: item.s}) "
+                "MERGE (t {urn: item.t}) "
+                "MERGE (s)-[r:AGGREGATED]->(t) "
+                "SET r.weight = item.w, "
+                "r.sourceEdgeTypes = CASE "
+                "  WHEN r.sourceEdgeTypes IS NULL THEN [$edgeType] "
+                "  WHEN NOT $edgeType IN r.sourceEdgeTypes "
+                "    THEN r.sourceEdgeTypes + $edgeType "
+                "  ELSE r.sourceEdgeTypes END, "
+                "r.latestUpdate = timestamp()",
+                params={"batch": merge_batch, "edgeType": edge_type},
+            )
+        except Exception as e:
+            logger.error(f"Batched AGGREGATED MERGE failed: {e}")
+
+    async def on_lineage_edge_deleted(
+        self,
+        source_urn: str,
+        target_urn: str,
+        edge_id: str,
+    ) -> None:
+        """Decrement AGGREGATED edge weights when a lineage edge is removed.
+
+        Batched: single SREM pipeline → single SCARD pipeline →
+        one UNWIND+SET for weight updates + one UNWIND+DELETE for empty pairs.
+        """
+        await self._ensure_connected()
+
+        s_ancestors = await self._get_ancestor_chain(source_urn)
+        t_ancestors = await self._get_ancestor_chain(target_urn)
+
+        s_chain = [source_urn] + s_ancestors
+        t_chain = [target_urn] + t_ancestors
+
+        members_key_prefix = f"{self._graph_name}:agg_members"
+        pairs = [(s, t) for s in s_chain for t in t_chain if s != t]
+        if not pairs:
+            return
+
+        # Phase 1: Pipeline SREM for all pairs
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for s_urn, t_urn in pairs:
+                pipe.srem(f"{members_key_prefix}:{s_urn}:{t_urn}", edge_id)
+            await pipe.execute()
+        except Exception:
+            pass
+
+        # Phase 2: Pipeline SCARD to get remaining counts
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for s_urn, t_urn in pairs:
+                pipe.scard(f"{members_key_prefix}:{s_urn}:{t_urn}")
+            counts = await pipe.execute()
+        except Exception:
+            return  # Can't determine counts — bail
+
+        # Phase 3: Separate into delete (count=0) vs update (count>0)
+        delete_batch = []
+        update_batch = []
+        cleanup_keys = []
+        for i, (s_urn, t_urn) in enumerate(pairs):
+            remaining = counts[i] if i < len(counts) else None
+            if remaining == 0:
+                delete_batch.append({"s": s_urn, "t": t_urn})
+                cleanup_keys.append(f"{members_key_prefix}:{s_urn}:{t_urn}")
+            elif remaining is not None:
+                update_batch.append({"s": s_urn, "t": t_urn, "w": int(remaining)})
+
+        proj = self._proj
+        if delete_batch:
+            try:
+                await proj.query(
+                    "UNWIND $batch AS item "
+                    "MATCH (s {urn: item.s})-[r:AGGREGATED]->(t {urn: item.t}) "
+                    "DELETE r",
+                    params={"batch": delete_batch},
+                )
+                # Clean up empty Redis keys
+                pipe = self._redis.pipeline(transaction=False)
+                for key in cleanup_keys:
+                    pipe.delete(key)
+                await pipe.execute()
+            except Exception as e:
+                logger.error(f"Batched AGGREGATED DELETE failed: {e}")
+
+        if update_batch:
+            try:
+                await proj.query(
+                    "UNWIND $batch AS item "
+                    "MATCH (s {urn: item.s})-[r:AGGREGATED]->(t {urn: item.t}) "
+                    "SET r.weight = item.w, r.latestUpdate = timestamp()",
+                    params={"batch": update_batch},
+                )
+            except Exception as e:
+                logger.error(f"Batched AGGREGATED weight update failed: {e}")
+
+    async def on_containment_changed(self, urn: str) -> None:
+        """Invalidate ancestor cache for a node and its descendants, then rebuild.
+
+        When a node's parent changes, its entire subtree's ancestor chains
+        are invalidated and lazily recomputed on next access.
+        """
+        await self._ensure_connected()
+        cache_key = f"{self._graph_name}:ancestors"
+
+        # Invalidate this node's cached chain
+        try:
+            await self._redis.hdel(cache_key, urn)
+        except Exception:
+            pass
+
+        # Invalidate descendants (BFS through containment)
+        containment = list(self._get_containment_edge_types())
+        queue = deque([urn])
+        visited: Set[str] = {urn}
+
+        while queue:
+            current = queue.popleft()
+            result = await self._graph.ro_query(
+                "MATCH (p)-[r]->(c) WHERE p.urn = $urn AND type(r) IN $ctypes RETURN c.urn",
+                params={"urn": current, "ctypes": containment},
+            )
+            child_urns = [row[0] for row in (result.result_set or []) if row[0] and row[0] not in visited]
+            if child_urns:
+                try:
+                    pipe = self._redis.pipeline(transaction=False)
+                    for cu in child_urns:
+                        pipe.execute_command("HDEL", cache_key, cu)
+                        visited.add(cu)
+                        queue.append(cu)
+                    await pipe.execute()
+                except Exception:
+                    pass
+
+        logger.info(f"Invalidated ancestor cache for {len(visited)} nodes under {urn}")
+
     async def materialize_lineage_for_edge(
         self,
         source_urn: str,
         target_urn: str,
-        lineage_edge_type: str
+        lineage_edge_type: str,
     ) -> bool:
-        """
-        Write Path Aggregation:
-        When a granular edge (source)->(target) is created, we "rollup" this connection
-        to all matching structural ancestors.
-        
-        Logic:
-        1. Find all ancestors of Source (s_anc).
-        2. Find all ancestors of Target (t_anc).
-        3. Match ancestors that are at the SAME LEVEL (e.g. Table-Table, Domain-Domain).
-           (We infer level equivalence by EntityType or Label).
-        4. MERGE (s_anc)-[:AGGREGATED]->(t_anc).
-        5. Increment weight.
-        
-        Optimization:
-        We perform this in a SINGLE Cypher query for atomicity and speed.
-        """
-        await self._ensure_connected()
-        
-        containment = list(self._get_containment_edge_types())
-        # Format for Cypher: :TYPE1|TYPE2|...
-        containment_cypher = "|".join(containment)
-        
-        # Cypher Logic:
-        # 1. Match source leaf and its ancestors 
-        # 2. Match target leaf and its ancestors
-        # 3. Filter for pairs where labels(s_anc) == labels(t_anc) (Horizontal Aggregation)
-        #    OR specific EntityType matching if labels are messy.
-        #    Simpler: We just blindly agg between all ancestors and let the "Same Level" check happen via logic or just agg everything? 
-        #    User requirement: "Match Equivalent Tiers".
-        #    We can check "WHERE s_anc.entityType = t_anc.entityType".
-        # 4. EXCLUDE self-loops (s_anc <> t_anc).
-        
-        cypher = (
-            "MATCH (s_leaf {urn: $sourceUrn}) "
-            "MATCH (t_leaf {urn: $targetUrn}) "
-            # Find ancestors (0..5 hops up). 0 means the node itself (if it's a Table matching a Table).
-            f"MATCH (s_anc)-[:{containment_cypher}*0..5]->(s_leaf) "
-            f"MATCH (t_anc)-[:{containment_cypher}*0..5]->(t_leaf) "
-            # Filter: structural entities (containers/roots) + Match Levels
-            "WHERE s_anc.urn <> t_anc.urn "  # No self-loops (internal lineage)
-            # Ensure we are linking equivalent types (Table to Table, DB to DB)
-            # Use labels comparison as entityType property might be missing
-            "AND labels(s_anc) = labels(t_anc) " 
-            # Create/Merge the Aggregated Edge
-            "MERGE (s_anc)-[r:AGGREGATED {targetUrn: t_anc.urn}]->(t_anc) "
-            "ON CREATE SET r.weight = 1, r.sourceEdgeTypes = [$edgeType], r.latestUpdate = timestamp() "
-            "ON MATCH SET r.weight = r.weight + 1, "
-            # Append edgeType if not present? (Set logic simulation)
-            "r.sourceEdgeTypes = CASE WHEN NOT $edgeType IN r.sourceEdgeTypes THEN r.sourceEdgeTypes + $edgeType ELSE r.sourceEdgeTypes END, "
-            "r.latestUpdate = timestamp() "
-            "RETURN count(r)"
-        )
-        
-        params = {
-            "sourceUrn": source_urn,
-            "targetUrn": target_urn,
-            "edgeType": lineage_edge_type
-        }
-        
+        """Legacy wrapper — delegates to on_lineage_edge_written."""
         try:
-            await self._graph.query(cypher, params=params)
+            edge_id = f"{source_urn}|{lineage_edge_type}|{target_urn}"
+            await self.on_lineage_edge_written(source_urn, target_urn, edge_id, lineage_edge_type)
             return True
         except Exception as e:
             logger.error(f"Failed to materialize lineage: {e}")
             return False
+
+    async def materialize_aggregated_edges_batch(
+        self,
+        batch_size: int = 1000,
+        containment_edge_types: Optional[List[str]] = None,
+        lineage_edge_types: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Batch materialization using ancestor-chain approach.
+
+        Instead of Cypher variable-length paths with Cartesian products,
+        this uses pre-computed ancestor chains stored in Redis Hashes.
+        """
+        await self._ensure_connected()
+
+        containment = containment_edge_types or list(self._get_containment_edge_types())
+        exclude_types = list(containment) + ["AGGREGATED"]
+
+        if lineage_edge_types:
+            type_filter = "WHERE type(r) IN $lineageEdges"
+            type_params: Dict[str, Any] = {"lineageEdges": lineage_edge_types}
+        else:
+            type_filter = "WHERE NOT type(r) IN $excludeTypes"
+            type_params = {"excludeTypes": exclude_types}
+
+        # Count total lineage edges
+        count_cypher = f"MATCH ()-[r]->() {type_filter} RETURN count(r)"
+        count_res = await self._graph.ro_query(count_cypher, params=type_params)
+        total = count_res.result_set[0][0] if count_res.result_set else 0
+
+        logger.info(f"Batch materialization: {total} lineage edges to process")
+
+        processed = 0
+        errors = 0
+        created_count = 0
+
+        while processed < total:
+            # Fetch a batch of lineage edges
+            batch_cypher = (
+                f"MATCH (s)-[r]->(t) {type_filter} "
+                f"RETURN s.urn, t.urn, type(r), r.id SKIP $skip LIMIT $limit"
+            )
+            batch_params = {**type_params, "skip": processed, "limit": batch_size}
+
+            try:
+                res = await self._graph.ro_query(batch_cypher, params=batch_params)
+                rows = res.result_set or []
+            except Exception as e:
+                logger.error(f"Batch fetch error at offset {processed}: {e}")
+                errors += 1
+                processed += batch_size
+                continue
+
+            if not rows:
+                break
+
+            # Pre-compute ancestor chains for all URNs in this batch
+            all_urns = set()
+            for row in rows:
+                all_urns.add(row[0])
+                all_urns.add(row[1])
+            await self._compute_and_store_ancestors_bulk(list(all_urns))
+
+            # Now materialize each edge using cached ancestor chains
+            for row in rows:
+                s_urn, t_urn, edge_type, edge_id = row[0], row[1], row[2], row[3]
+                if not edge_id:
+                    edge_id = f"{s_urn}|{edge_type}|{t_urn}"
+                try:
+                    await self.on_lineage_edge_written(s_urn, t_urn, edge_id, edge_type)
+                    created_count += 1
+                except Exception as e:
+                    logger.error(f"Materialization error for {s_urn}->{t_urn}: {e}")
+                    errors += 1
+
+            processed += batch_size
+            logger.info(f"Batch materialization: {min(processed, total)}/{total} edges processed")
+
+        stats = {"processed": total, "aggregated_edges_affected": created_count, "errors": errors}
+        logger.info(f"Batch materialization complete: {stats}")
+        return stats
 
     async def get_aggregated_edges_between(
         self,
@@ -675,82 +1082,72 @@ class FalkorDBProvider(GraphDataProvider):
         containment_edges: List[str],
         lineage_edges: List[str],
     ) -> AggregatedEdgeResult:
-        """
-        Optimized On-The-Fly Aggregation:
-        Instead of reading from 'AGGREGATED' edges (which might be missing or stale),
-        we compute the rollup dynamically by traversing the containment hierarchy.
-        
-        This handles the "Mega-Payload Wall" by letting the database do the heavy lifting.
+        """Read pre-materialized AGGREGATED edges from the projection graph.
+
+        Pure index lookup — O(|sourceUrns|), sub-millisecond at any scale.
+        No live fallback: if materialization hasn't run, returns empty result
+        so the caller knows to trigger a backfill.
         """
         await self._ensure_connected()
 
-        # Sanitize edge types for inclusion in Cypher string if needed, 
-        # but here we pass them as parameters which is safer.
-        
-        # Cypher Strategy:
-        # 1. Start from $sourceUrns.
-        # 2. Traverse DOWN containment to all descendant leaves.
-        # 3. Traverse ACROSS lineage edges to target leaves.
-        # 4. Traverse UP containment to find ancestors that match $targetUrns.
-        
-        # Note: We use *0..5 for containment traversal to handle multi-level hierarchies 
-        # (Platform -> DB -> Table -> Column).
-        
-        # Advanced Cypher Strategy:
-        # We need to leverage indices, but we don't know the labels of all URNs.
-        # We use a trick: MATCH (n) WHERE n.urn IN $sourceUrns is usually okay,
-        # but in FalkorDB, label-specific indices are much stronger.
-        
-        # We'll use a slightly safer but still generic MATCH, 
-        # but ensure the WHERE clause is efficient.
-        
-        cypher = (
-            "MATCH (s_parent) "
-            "WHERE s_parent.urn IN $sourceUrns "
-            "MATCH (s_parent)-[:CONTAINS*0..5]->(leaf_s) "
-            "MATCH (leaf_s)-[r]->(leaf_t) "
-            "WHERE type(r) IN $lineageEdges "
-            "MATCH (t_parent)-[:CONTAINS*0..5]->(leaf_t) "
-            "WHERE t_parent.urn IN $targetUrns "
-            "AND s_parent.urn <> t_parent.urn "
-            "RETURN s_parent.urn, t_parent.urn, count(r), collect(DISTINCT type(r))"
-        )
-        
-        params = {
-            "sourceUrns": source_urns,
-            "targetUrns": target_urns if target_urns else [],
-            "lineageEdges": lineage_edges
-        }
+        proj = self._proj
+
+        if target_urns:
+            cypher = (
+                "MATCH (s)-[r:AGGREGATED]->(t) "
+                "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
+                "AND s.urn <> t.urn "
+                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                "r.weight AS weight, r.sourceEdgeTypes AS types "
+                "ORDER BY r.weight DESC"
+            )
+            params: Dict[str, Any] = {
+                "sourceUrns": source_urns,
+                "targetUrns": target_urns,
+            }
+        else:
+            cypher = (
+                "MATCH (s)-[r:AGGREGATED]->(t) "
+                "WHERE s.urn IN $sourceUrns "
+                "AND s.urn <> t.urn "
+                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                "r.weight AS weight, r.sourceEdgeTypes AS types "
+                "ORDER BY r.weight DESC"
+            )
+            params = {"sourceUrns": source_urns}
 
         try:
-            result = await self._graph.ro_query(cypher, params=params)
+            result = await proj.ro_query(cypher, params=params)
+            rows = result.result_set or []
         except Exception as e:
-            logger.error(f"On-the-fly aggregation failed: {e}")
-            # Fallback to minimal result or empty
-            return AggregatedEdgeResult(aggregatedEdges=[], totalSourceEdges=0)
-        
+            logger.warning(f"AGGREGATED edge read failed: {e}")
+            rows = []
+
+        return self._rows_to_aggregated_result(rows)
+
+    # ------------------------------------------------------------------
+    # Helpers for get_aggregated_edges_between
+    # ------------------------------------------------------------------
+
+    def _rows_to_aggregated_result(self, rows: list) -> AggregatedEdgeResult:
+        """Convert raw Cypher result rows into AggregatedEdgeResult."""
         aggregated = []
         total_edges = 0
-        
-        for row in (result.result_set or []):
+        for row in rows:
             s_urn, t_urn, weight, types = row[0], row[1], row[2], row[3]
-            
-            agg_entry = AggregatedEdgeInfo(
+            w = int(weight) if weight else 1
+            edge_types = types if isinstance(types, list) else [str(types)] if types else []
+            aggregated.append(AggregatedEdgeInfo(
                 id=f"agg-{s_urn}-{t_urn}",
                 sourceUrn=s_urn,
                 targetUrn=t_urn,
-                edgeCount=int(weight),
-                edgeTypes=types if isinstance(types, list) else [str(types)],
-                confidence=1.0, 
-                sourceEdgeIds=[] # We don't fetch IDs for performance on large payloads
-            )
-            aggregated.append(agg_entry)
-            total_edges += int(weight)
-            
-        return AggregatedEdgeResult(
-            aggregatedEdges=aggregated,
-            totalSourceEdges=total_edges
-        )
+                edgeCount=w,
+                edgeTypes=edge_types,
+                confidence=1.0,
+                sourceEdgeIds=[],
+            ))
+            total_edges += w
+        return AggregatedEdgeResult(aggregatedEdges=aggregated, totalSourceEdges=total_edges)
 
     async def get_trace_lineage(
         self,
@@ -811,81 +1208,76 @@ class FalkorDBProvider(GraphDataProvider):
         if not start_urns:
              return LineageResult(nodes=[], edges=[], upstreamUrns=set(), downstreamUrns=set(), totalCount=0, hasMore=False)
 
-        # We can do BFS from the set of start_urns
-        # Note: We treat start_urns as depth 0
-        
-        search_queue = deque([(u, 0) for u in start_urns])
+        # Batched BFS: 1 Cypher query per depth level instead of 1 per node.
+        # Each iteration processes the entire frontier at once.
         visited_lineage = set(start_urns)
-        
-        # Populate initial nodes
-        # Optimization: Fetch them in bulk later, or fetch as we go? 
-        # FalkorDB is fast, fetching as we go or bulk at end. 
-        # Let's match nodes during traversal.
-        
-        while search_queue:
-            curr_urn, curr_depth = search_queue.popleft()
-            
-            if curr_depth >= depth:
-                continue
-                
-            # Construct query based on direction
-            # For "both", we can just do (a)-[r]-(b) but we need to know direction for result classification
-            
-            queries = []
+        current_frontier = list(start_urns)
+
+        for current_depth in range(depth):
+            if not current_frontier:
+                break
+
+            next_frontier_upstream: List[str] = []
+            next_frontier_downstream: List[str] = []
+
+            # Build direction-specific batch queries
+            dir_queries = []
             if direction in ["upstream", "both"]:
-                queries.append(("upstream", f"MATCH (curr)-[r]->(next) WHERE next.urn = $urn AND type(r) IN $lineage RETURN curr, r, next")) # Incoming to current
+                # Find all nodes that flow INTO the current frontier
+                cypher_up = (
+                    "MATCH (src)-[r]->(tgt) "
+                    "WHERE tgt.urn IN $frontier AND type(r) IN $lineage "
+                    "RETURN src, r, tgt"
+                )
+                dir_queries.append(("upstream", cypher_up))
             if direction in ["downstream", "both"]:
-                queries.append(("downstream", f"MATCH (curr)-[r]->(next) WHERE curr.urn = $urn AND type(r) IN $lineage RETURN curr, r, next")) # Outgoing from current
-                
-            for dir_label, cypher_q in queries:
-                res = await self._graph.ro_query(cypher_q, params={"urn": curr_urn, "lineage": safe_lineage})
-                
+                # Find all nodes that flow OUT of the current frontier
+                cypher_down = (
+                    "MATCH (src)-[r]->(tgt) "
+                    "WHERE src.urn IN $frontier AND type(r) IN $lineage "
+                    "RETURN src, r, tgt"
+                )
+                dir_queries.append(("downstream", cypher_down))
+
+            for dir_label, cypher_q in dir_queries:
+                res = await self._graph.ro_query(
+                    cypher_q,
+                    params={"frontier": current_frontier, "lineage": safe_lineage}
+                )
+
                 for row in (res.result_set or []):
-                    # Extract node/edge
-                    # upstream: next.urn=$urn, so curr is the dependency (upstream node)
-                    # downstream: curr.urn=$urn, so next is the dependent (downstream node)
-                    
-                    # Row: [StartNode, Edge, EndNode]
-                    # But wait, my query variable names might be confusing.
-                    # Let's map standard Cypher return: SOURCE, EDGE, TARGET
-                    
                     src_node_obj = self._extract_node_from_result(row[0])
                     edge_obj_raw = row[1]
                     tgt_node_obj = self._extract_node_from_result(row[2])
-                    
+
                     if not src_node_obj or not tgt_node_obj:
                         continue
-                        
-                    # Build edge object
-                    # edge_obj_raw is the relation object or properties dict
-                    # FalkorDB python client returns Relation object or similar
-                    # We need to parse it. 
-                    # row[1] is relation.
-                    
+
                     r_type = getattr(edge_obj_raw, "relation", None) or getattr(edge_obj_raw, "type", None) or "RELATED_TO"
                     r_props = getattr(edge_obj_raw, "properties", {})
-                    
+
                     edge = _edge_from_row(src_node_obj.urn, tgt_node_obj.urn, r_type, r_props)
-                    
+
                     if edge.id not in collected_edges:
                         collected_edges[edge.id] = edge
-                        
-                        # Determine neighbor
+                        collected_nodes[src_node_obj.urn] = src_node_obj
+                        collected_nodes[tgt_node_obj.urn] = tgt_node_obj
+
                         if dir_label == "upstream":
                             neighbor = src_node_obj
                             if neighbor.urn not in visited_lineage:
                                 visited_lineage.add(neighbor.urn)
                                 upstream_urns.add(neighbor.urn)
-                                search_queue.append((neighbor.urn, curr_depth + 1))
+                                next_frontier_upstream.append(neighbor.urn)
                         else:
                             neighbor = tgt_node_obj
                             if neighbor.urn not in visited_lineage:
                                 visited_lineage.add(neighbor.urn)
                                 downstream_urns.add(neighbor.urn)
-                                search_queue.append((neighbor.urn, curr_depth + 1))
-                                
-                        collected_nodes[src_node_obj.urn] = src_node_obj
-                        collected_nodes[tgt_node_obj.urn] = tgt_node_obj
+                                next_frontier_downstream.append(neighbor.urn)
+
+            # Merge frontiers for next depth level
+            current_frontier = next_frontier_upstream + next_frontier_downstream
 
         # 3. Structural Context (Traverse UP)
         # For all collected nodes, find their parents/containers
@@ -922,40 +1314,41 @@ class FalkorDBProvider(GraphDataProvider):
              # Let's do a single pass for immediate parents, then loop?
              # Actually, simpler: Just fetch all ancestors for these nodes.
              
-             # Let's do a generic ancestor fetch
+             # Batched ancestor fetch — climb containment levels
              current_level_urns = all_lineage_urns
-             for _ in range(3): # limit hierarchy depth to 3 levels up from lineage
+             seen_parents: Set[str] = set(collected_nodes.keys())
+             for _ in range(5):  # up to 5 containment levels
                  if not current_level_urns:
                      break
-                 
+
                  res_struct = await self._graph.ro_query(
                      cypher_structure,
                      params={"urns": current_level_urns, "containment": safe_containment}
                  )
-                 
+
                  next_level_urns = []
-                 found_any = False
-                 
+
                  for row in (res_struct.result_set or []):
                      parent = self._extract_node_from_result(row[0])
                      r_raw = row[1]
                      child = self._extract_node_from_result(row[2])
-                     
+
                      if parent and child:
-                         collected_nodes[parent.urn] = parent
-                         collected_nodes[child.urn] = child # Ensure child is there
-                         
+                         collected_nodes[child.urn] = child
+
                          r_type = getattr(r_raw, "relation", None) or getattr(r_raw, "type", None) or "CONTAINS"
                          r_props = getattr(r_raw, "properties", {})
-                         
+
                          edge = _edge_from_row(parent.urn, child.urn, r_type, r_props)
                          collected_edges[edge.id] = edge
-                         
-                         if parent.urn not in collected_nodes: # New node found
+
+                         # Only add parent to next level if we haven't seen it before
+                         if parent.urn not in seen_parents:
+                             seen_parents.add(parent.urn)
+                             collected_nodes[parent.urn] = parent
                              next_level_urns.append(parent.urn)
-                         found_any = True
-                 
-                 if not found_any:
+
+                 if not next_level_urns:
                      break
                  current_level_urns = next_level_urns
 
@@ -976,7 +1369,16 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def get_stats(self) -> Dict[str, Any]:
         await self._ensure_connected()
-        
+
+        # Check Redis cache (60s TTL)
+        cache_key = f"{self._graph_name}:stats_cache"
+        try:
+            cached = await self._redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
         # Optimize: Combine node counting with type aggregation
         type_res = await self._graph.ro_query(
             "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c"
@@ -1001,41 +1403,39 @@ class FalkorDBProvider(GraphDataProvider):
             edge_type_counts[t] = cnt
             edge_count += cnt
 
-        return {
+        result = {
             "nodeCount": node_count,
             "edgeCount": edge_count,
             "entityTypeCounts": entity_type_counts,
             "edgeTypeCounts": edge_type_counts,
         }
 
+        try:
+            await self._redis.setex(cache_key, 60, json.dumps(result))
+        except Exception:
+            pass
+
+        return result
+
     async def get_schema_stats(self) -> GraphSchemaStats:
         await self._ensure_connected()
         
-        # Optimize: Get totals from breakdown instead of separate scans
+        # Single query: counts + samples per label using collect() with slicing
         type_res = await self._graph.ro_query(
-            "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c"
+            "MATCH (n) "
+            "WITH labels(n)[0] AS lbl, n.displayName AS name "
+            "WITH lbl, count(*) AS c, collect(name)[0..3] AS samples "
+            "RETURN lbl, c, samples"
         )
-        
+
         entity_stats = []
         total_nodes = 0
-        
+
         for row in (type_res.result_set or []):
             lbl = row[0] or "unknown"
             cnt = row[1]
+            samples = [s for s in (row[2] or []) if s]
             total_nodes += cnt
-            
-            # Optimization: Fetch samples in a separate lightweight query 
-            # instead of aggregation over all nodes in the heavy query
-            try:
-                # Sanitize label for query injection
-                safe_lbl = _sanitize_label(lbl)
-                sample_res = await self._graph.ro_query(
-                    f"MATCH (n:{safe_lbl}) RETURN n.displayName LIMIT 3"
-                )
-                samples = [r[0] for r in (sample_res.result_set or []) if r[0]]
-            except Exception:
-                samples = []
-                
             entity_stats.append(EntityTypeSummary(id=lbl, name=lbl, count=cnt, sampleNames=samples))
 
         edge_type_res = await self._graph.ro_query(
@@ -1085,9 +1485,18 @@ class FalkorDBProvider(GraphDataProvider):
         """
         Build ontology metadata including containment and lineage roles.
         Optimized to use Cypher aggregations instead of full scans.
+        Cached in Redis with 60s TTL — ontology rarely changes.
         """
         await self._ensure_connected()
-        
+
+        cache_key = f"{self._graph_name}:ontology_cache"
+        try:
+            cached = await self._redis.get(cache_key)
+            if cached:
+                return OntologyMetadata(**json.loads(cached))
+        except Exception:
+            pass
+
         containment = list(self._get_containment_edge_types())
         containment_upper = {t.upper() for t in containment}
         
@@ -1143,7 +1552,7 @@ class FalkorDBProvider(GraphDataProvider):
         hierarchy_cypher = (
             "MATCH (p)-[r]->(c) "
             "WHERE type(r) IN $containment "
-            "RETURN labels(p)[0], labels(c)[0], type(r)"
+            "RETURN DISTINCT labels(p)[0], labels(c)[0], type(r)"
         )
         hierarchy_res = await self._graph.ro_query(
             hierarchy_cypher, 
@@ -1180,13 +1589,20 @@ class FalkorDBProvider(GraphDataProvider):
 
         root_entity_types = list(found_parent_types - found_child_types)
 
-        return OntologyMetadata(
+        result = OntologyMetadata(
             containmentEdgeTypes=containment,
             lineageEdgeTypes=lineage_types,
             edgeTypeMetadata=edge_type_metadata,
             entityTypeHierarchy=entity_type_hierarchy,
             rootEntityTypes=root_entity_types,
         )
+
+        try:
+            await self._redis.setex(cache_key, 60, result.model_dump_json())
+        except Exception:
+            pass
+
+        return result
 
     async def get_distinct_values(self, property_name: str) -> List[Any]:
         await self._ensure_connected()
@@ -1215,15 +1631,16 @@ class FalkorDBProvider(GraphDataProvider):
             return []
 
     async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
-        ancestors = []
-        current = urn
-        while len(ancestors) < limit + offset:
-            parent = await self.get_parent(current)
-            if not parent:
-                break
-            ancestors.append(parent)
-            current = parent.urn
-        return ancestors[offset : offset + limit]
+        """Get ancestors using pre-computed Redis chain (2 calls: 1 Redis + 1 Cypher)."""
+        await self._ensure_connected()
+        chain = await self._get_ancestor_chain(urn)
+        chain = chain[offset : offset + limit]
+        if not chain:
+            return []
+        nodes = await self.get_nodes(NodeQuery(urns=chain, limit=len(chain), include_child_count=False))
+        # Preserve containment order (parent → grandparent → ...)
+        urn_to_node = {n.urn: n for n in nodes}
+        return [urn_to_node[u] for u in chain if u in urn_to_node]
 
     async def get_descendants(
         self,
@@ -1233,18 +1650,34 @@ class FalkorDBProvider(GraphDataProvider):
         limit: int = 100,
         offset: int = 0,
     ) -> List[GraphNode]:
-        descendants = []
-        queue = deque([(urn, 0)])
-        while queue and len(descendants) < limit + offset + 100:
-            cur, d = queue.popleft()
-            if d >= depth:
-                continue
-            children = await self.get_children(cur, entity_types=entity_types, limit=500)
-            for c in children:
-                if not entity_types or c.entity_type in entity_types:
-                    descendants.append(c)
-                queue.append((c.urn, d + 1))
-        return descendants[offset : offset + limit]
+        """Single Cypher query to fetch descendants instead of per-node BFS."""
+        await self._ensure_connected()
+        containment = list(self._get_containment_edge_types())
+        containment_cypher = "|".join([_sanitize_label(t) for t in containment])
+
+        conditions = ["root.urn = $urn"]
+        params: Dict[str, Any] = {"urn": urn, "skip": offset, "lim": limit}
+
+        if entity_types:
+            types = [t.value if hasattr(t, "value") else str(t) for t in entity_types]
+            params["entityTypes"] = types
+            conditions.append("labels(desc)[0] IN $entityTypes")
+
+        where = " AND ".join(conditions)
+        cypher = (
+            f"MATCH (root)-[:{containment_cypher}*1..{depth}]->(desc) "
+            f"WHERE {where} "
+            f"RETURN DISTINCT desc "
+            f"SKIP $skip LIMIT $lim"
+        )
+
+        result = await self._graph.ro_query(cypher, params=params)
+        nodes = []
+        for row in (result.result_set or []):
+            n = self._extract_node_from_result(row)
+            if n:
+                nodes.append(n)
+        return nodes
 
     async def get_nodes_by_tag(self, tag: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         await self._ensure_connected()
@@ -1269,58 +1702,85 @@ class FalkorDBProvider(GraphDataProvider):
         return [self._extract_node_from_result(row) for row in (result.result_set or []) if self._extract_node_from_result(row)]
 
     async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:
-        await self._ensure_connected()
-        batch_size = 200
-        for i in range(0, len(nodes), batch_size):
-            batch = nodes[i : i + batch_size]
-            for node in batch:
-                try:
-                    label = _sanitize_label(node.entity_type.value if hasattr(node.entity_type, "value") else str(node.entity_type))
-                    params = {
-                        "urn": node.urn,
-                        "displayName": node.display_name or "",
-                        "qualifiedName": node.qualified_name or "",
-                        "description": node.description or "",
-                        "properties": json.dumps(node.properties),
-                        "tags": json.dumps(node.tags or []),
-                        "layerAssignment": node.layer_assignment or "",
-                        "childCount": node.child_count or 0,
-                        "sourceSystem": node.source_system or "",
-                        "lastSyncedAt": node.last_synced_at or "",
-                    }
-                    await self._graph.query(
-                        f"""
-                        MERGE (n:{label} {{urn: $urn}})
-                        SET n.displayName = $displayName, n.qualifiedName = $qualifiedName, n.description = $description,
-                            n.properties = $properties, n.tags = $tags, n.layerAssignment = $layerAssignment,
-                            n.childCount = $childCount, n.sourceSystem = $sourceSystem, n.lastSyncedAt = $lastSyncedAt
-                        """,
-                        params=params,
-                    )
-                except Exception as e:
-                    logger.warning(f"Node merge failed for {node.urn}: {e}")
+        """Batch-save nodes and edges using UNWIND for bulk writes.
 
-        for i in range(0, len(edges), batch_size):
-            batch = edges[i : i + batch_size]
-            for edge in batch:
+        Groups nodes by label (entity type) so each UNWIND+MERGE targets
+        a single label — enabling index-assisted lookups. Turns N individual
+        queries into ceil(N/batch_size) queries per label.
+        """
+        await self._ensure_connected()
+        batch_size = 500
+
+        # Group nodes by label for label-specific MERGE
+        nodes_by_label: Dict[str, list] = defaultdict(list)
+        for node in nodes:
+            label = _sanitize_label(node.entity_type.value if hasattr(node.entity_type, "value") else str(node.entity_type))
+            nodes_by_label[label].append({
+                "urn": node.urn,
+                "displayName": node.display_name or "",
+                "qualifiedName": node.qualified_name or "",
+                "description": node.description or "",
+                "properties": json.dumps(node.properties),
+                "tags": json.dumps(node.tags or []),
+                "layerAssignment": node.layer_assignment or "",
+                "childCount": node.child_count or 0,
+                "sourceSystem": node.source_system or "",
+                "lastSyncedAt": node.last_synced_at or "",
+            })
+
+        # Bulk-cache urn→label mappings
+        label_mapping = {}
+        for label, items in nodes_by_label.items():
+            for item in items:
+                label_mapping[item["urn"]] = label
+            for i in range(0, len(items), batch_size):
+                batch = items[i : i + batch_size]
                 try:
-                    rel_type = _sanitize_label(edge.edge_type.value if hasattr(edge.edge_type, "value") else str(edge.edge_type))
                     await self._graph.query(
-                        f"""
-                        MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}})
-                        MERGE (a)-[r:{rel_type}]->(b)
-                        SET r.id = $eid, r.confidence = $conf, r.properties = $props
-                        """,
-                        params={
-                            "src": edge.source_urn,
-                            "tgt": edge.target_urn,
-                            "eid": edge.id,
-                            "conf": edge.confidence,
-                            "props": json.dumps(edge.properties),
-                        },
+                        f"UNWIND $batch AS item "
+                        f"MERGE (n:{label} {{urn: item.urn}}) "
+                        f"SET n.displayName = item.displayName, "
+                        f"n.qualifiedName = item.qualifiedName, "
+                        f"n.description = item.description, "
+                        f"n.properties = item.properties, "
+                        f"n.tags = item.tags, "
+                        f"n.layerAssignment = item.layerAssignment, "
+                        f"n.childCount = item.childCount, "
+                        f"n.sourceSystem = item.sourceSystem, "
+                        f"n.lastSyncedAt = item.lastSyncedAt",
+                        params={"batch": batch},
                     )
                 except Exception as e:
-                    logger.warning(f"Edge merge failed for {edge.id}: {e}")
+                    logger.warning(f"Batch node merge failed for label {label}: {e}")
+        await self._cache_urn_labels_bulk(label_mapping)
+
+        # Group edges by relationship type for type-specific MERGE
+        edges_by_type: Dict[str, list] = defaultdict(list)
+        for edge in edges:
+            rel_type = _sanitize_label(edge.edge_type.value if hasattr(edge.edge_type, "value") else str(edge.edge_type))
+            edges_by_type[rel_type].append({
+                "src": edge.source_urn,
+                "tgt": edge.target_urn,
+                "eid": edge.id,
+                "conf": edge.confidence,
+                "props": json.dumps(edge.properties),
+            })
+
+        for rel_type, items in edges_by_type.items():
+            for i in range(0, len(items), batch_size):
+                batch = items[i : i + batch_size]
+                try:
+                    await self._graph.query(
+                        f"UNWIND $batch AS item "
+                        f"MATCH (a {{urn: item.src}}) "
+                        f"MATCH (b {{urn: item.tgt}}) "
+                        f"MERGE (a)-[r:{rel_type}]->(b) "
+                        f"SET r.id = item.eid, r.confidence = item.conf, "
+                        f"r.properties = item.props",
+                        params={"batch": batch},
+                    )
+                except Exception as e:
+                    logger.warning(f"Batch edge merge failed for type {rel_type}: {e}")
 
         return True
 
@@ -1344,6 +1804,7 @@ class FalkorDBProvider(GraphDataProvider):
                 f"MERGE (n:{label} {{urn: $urn}}) SET n += $p",
                 params={"urn": node.urn, "p": params},
             )
+            await self._cache_urn_label(node.urn, label)
             if containment_edge:
                 rel_type = _sanitize_label(containment_edge.edge_type.value if hasattr(containment_edge.edge_type, "value") else str(containment_edge.edge_type))
                 await self._graph.query(
@@ -1379,13 +1840,20 @@ class FalkorDBProvider(GraphDataProvider):
             return []
 
     async def close(self) -> None:
-        """Release the Redis connection pool held by this provider."""
+        """Release both connection pools held by this provider."""
         try:
+            if hasattr(self, "_redis") and self._redis is not None:
+                await self._redis.aclose()
+            if self._redis_pool is not None:
+                await self._redis_pool.aclose()
             if self._pool is not None:
                 await self._pool.aclose()
         except Exception as exc:
-            logger.warning("Error closing FalkorDB pool: %s", exc)
+            logger.warning("Error closing FalkorDB pools: %s", exc)
         finally:
             self._graph = None
+            self._proj_graph = None
             self._pool = None
+            self._redis_pool = None
+            self._redis = None
             self._db = None

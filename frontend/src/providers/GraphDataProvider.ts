@@ -499,6 +499,7 @@ export interface GraphDataProvider {
         options?: {
             entityTypes?: EntityType[]
             edgeTypes?: string[] // Custom edge types for containment
+            searchQuery?: string
             offset?: number
             limit?: number
         }

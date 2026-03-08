@@ -181,6 +181,9 @@ interface ReferenceModelState {
     /** Clear all manual assignments and conflicts */
     clearAssignments: () => void
 
+    /** Remove elements from the store completely (used for searching/refreshing) */
+    removeElements: (nodeIds: string[], edgeIds: string[]) => void
+
     // ===== Backend Sync Actions =====
     /** Save current state to backend (Save Blueprint button) */
     saveToBackend: (wsId: string) => Promise<void>
@@ -307,7 +310,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                 const layers = [...state.layers, newLayer]
                 const layerSequence = [...state.layerSequence, id]
 
-                set({ layers, layerSequence})
+                set({ layers, layerSequence })
 
                 // Notify subscribers
                 state._subscribers.forEach(cb => cb({
@@ -336,7 +339,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
 
                 const layerSequence = state.layerSequence.filter(lid => lid !== id)
 
-                set({ layers, layerSequence})
+                set({ layers, layerSequence })
 
                 // Notify subscribers
                 state._subscribers.forEach(cb => cb({
@@ -353,7 +356,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     l.id === id ? { ...l, ...updates } : l
                 )
 
-                set({ layers})
+                set({ layers })
 
                 // Notify subscribers
                 state._subscribers.forEach(cb => cb({
@@ -377,7 +380,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                         sequence: idx
                     }))
 
-                set({ layers, layerSequence: newSequence})
+                set({ layers, layerSequence: newSequence })
 
                 // Notify subscribers
                 state._subscribers.forEach(cb => cb({
@@ -654,6 +657,33 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     effectiveAssignments: newEffective,
 
                 })
+            },
+
+            removeElements: (nodeIds, edgeIds) => {
+                const state = get()
+
+                // Remove logic for nodes
+                if (nodeIds.length > 0) {
+                    // We remove instance assignments explicitly
+                    const newAssignments = new Map(state.instanceAssignments)
+                    nodeIds.forEach(id => newAssignments.delete(id))
+
+                    // Also effective assignments
+                    const newEffective = new Map(state.effectiveAssignments)
+                    nodeIds.forEach(id => newEffective.delete(id))
+
+                    // Actually purging from layer entityAssignments is optional here,
+                    // but usually you want them fully forgotten.
+                    set({
+                        instanceAssignments: newAssignments,
+                        effectiveAssignments: newEffective
+                    })
+                }
+
+                // Actually dropping the logic from store nodes/edges requires hooking 
+                // into how your 'nodes' and 'edges' are stored. 
+                // Since this store manages 'assignments' rather than raw canvas nodes,
+                // the canvas node/edge removal needs to happen wherever `addNodes` and `addEdges` lives.
             },
 
             checkAssignmentConflict: (entityId, layerId) => {

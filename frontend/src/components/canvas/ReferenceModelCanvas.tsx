@@ -492,6 +492,12 @@ export function ContextViewCanvas({
   // Ref to trigger edge redraw from child components
   const triggerEdgeRedrawRef = useRef<(() => void) | null>(null)
 
+  const handleLayerScroll = useCallback(() => {
+    if (triggerEdgeRedrawRef.current) {
+      triggerEdgeRedrawRef.current()
+    }
+  }, [])
+
   // Callback for animation completion to trigger edge redraw
   const handleAnimationComplete = useCallback(() => {
     // Small delay to ensure DOM is fully updated after animation
@@ -931,7 +937,7 @@ export function ContextViewCanvas({
   }, [])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren } = useEntityLoader()
+  const { loadChildren, searchChildren, isLoading: isLoadingChildren } = useEntityLoader()
 
   const toggleNode = useCallback(async (nodeId: string) => {
     // Check if we need to fetch children
@@ -1204,28 +1210,53 @@ export function ContextViewCanvas({
         }
       })
 
-    // Finalize Groups
+    // Finalize Groups (Semantic Edge Bundling & Ghost Edges)
     edgeGroups.forEach((groupEdges, key) => {
-      const distinctTypes = new Map<string, any>()
+      const distinctTypes = new Set<string>()
+      let isGhost = false
+      let isAggregated = false
+      let totalConfidence = 0
+      let maxConfidence = 0
+
+      const sourceId = groupEdges[0].source
+      const targetId = groupEdges[0].target
+
+      // We consider it a "Ghost" edge only if the projected container is collapsed OR has unloaded paginated items.
+      // For now, let's keep all aggregated/bundled edges fully vibrant and just use dash styling
+      // to imply that they are abstracted (source !== originalSource).
+      if (groupEdges.some((e: any) => e.target !== e.originalTargetId || e.source !== e.originalSourceId)) {
+        isGhost = true
+      }
+
       groupEdges.forEach(e => {
-        const typeKey = e.originalType
-        if (!distinctTypes.has(typeKey) || e.data.isAggregated) {
-          // If aggregated, it takes precedence or we keep it. 
-          // Logic: keep one per type
-          distinctTypes.set(typeKey, e)
+        if (e.data?.isAggregated) isAggregated = true
+        if (e.data?.edgeTypes) {
+          e.data.edgeTypes.forEach((et: string) => distinctTypes.add(et))
+        } else if (e.originalType) {
+          distinctTypes.add(e.originalType)
         }
+
+        const conf = e.data?.confidence ?? 1
+        totalConfidence += conf
+        maxConfidence = Math.max(maxConfidence, conf)
       })
 
-      const distinctEdges = Array.from(distinctTypes.values())
-      const total = distinctEdges.length
+      const edgeCount = groupEdges.length
+      const avgConfidence = edgeCount > 0 ? totalConfidence / edgeCount : 1
+      const typesArray = Array.from(distinctTypes)
 
-      distinctEdges.forEach((edge, index) => {
-        projected.push({
-          ...edge,
-          id: `proj-${key}-${edge.originalType}`,
-          groupIndex: index,
-          groupTotal: total
-        })
+      projected.push({
+        id: `bundle-${key}`,
+        source: sourceId,
+        target: targetId,
+        isBundled: edgeCount > 1,
+        isGhost,
+        edgeCount,
+        types: typesArray,
+        confidence: maxConfidence,
+        // Let the renderer know if it should use aggregated styles
+        isAggregated,
+        data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount }
       })
     })
 
@@ -1792,6 +1823,10 @@ export function ContextViewCanvas({
                 highlightedNodes={highlightState.nodes}
                 isHighlightActive={isHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
+                onLoadMore={loadChildren}
+                onSearchChildren={searchChildren}
+                isLoadingChildren={isLoadingChildren}
+                onScroll={handleLayerScroll}
               />
             ))}
           </div>
@@ -1871,6 +1906,9 @@ interface FlatTreeNode {
   depth: number
   isLast: boolean
   parentIsLast: boolean[]  // Track which parents are "last" for proper tree lines
+  isLoadMore?: boolean
+  loadMoreCount?: number
+  isSearchBox?: boolean
 }
 
 interface LayerColumnProps {
@@ -1892,8 +1930,10 @@ interface LayerColumnProps {
   highlightedNodes?: Set<string>
   isHighlightActive?: boolean
   onAnimationComplete?: () => void
-  onFocusNode?: (nodeId: string | null) => void
-  focusedNodeId?: string | null
+  onLoadMore?: (parentId: string) => void
+  onSearchChildren?: (parentId: string, query: string) => void
+  isLoadingChildren?: boolean
+  onScroll?: () => void
 }
 
 const LayerColumn = React.memo(function LayerColumn({
@@ -1914,15 +1954,40 @@ const LayerColumn = React.memo(function LayerColumn({
   traceContextSet,
   highlightedNodes,
   isHighlightActive = false,
-  onAnimationComplete,
-  onFocusNode,
-  focusedNodeId
+  onLoadMore,
+  onSearchChildren,
+  isLoadingChildren,
+  onScroll
 }: LayerColumnProps) {
-  // Local focus state for drilling into subtrees
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
   const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
   const [isCollapsed, setIsCollapsed] = useState(false)
+  const [childSearchQueries, setChildSearchQueries] = useState<Record<string, string>>({})
+  const [activeSearchNodes, setActiveSearchNodes] = useState<Set<string>>(new Set())
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  const toggleSearchNode = useCallback((nodeId: string) => {
+    setActiveSearchNodes(prev => {
+      const next = new Set(prev)
+      if (next.has(nodeId)) {
+        next.delete(nodeId)
+        // Also optionally clear the search query if closed
+        setChildSearchQueries(q => {
+          const newQ = { ...q }
+          delete newQ[nodeId]
+          return newQ
+        })
+      } else {
+        next.add(nodeId)
+      }
+      return next
+    })
+
+    // Auto-expand the node so the user immediately sees the search box drop down
+    if (!activeSearchNodes.has(nodeId) && !expandedNodes.has(nodeId)) {
+      onToggle(nodeId)
+    }
+  }, [activeSearchNodes, expandedNodes, onToggle])
 
   // Build flat tree from hierarchy (visible items only)
   const flatTree = useMemo(() => {
@@ -1945,15 +2010,45 @@ const LayerColumn = React.memo(function LayerColumn({
       result.push({ node, depth, isLast, parentIsLast: [...parentIsLast] })
 
       // Only traverse children if expanded
-      if (expandedNodes.has(node.id) && node.children.length > 0) {
-        node.children.forEach((child, idx) => {
+      if (expandedNodes.has(node.id) && (node.children.length > 0 || (node.data.childCount as number || 0) > 0)) {
+        const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || node.children.length
+
+        // Push the inline search box item ONLY if active
+        if (activeSearchNodes.has(node.id)) {
+          result.push({
+            node,
+            depth: depth + 1,
+            isLast: node.children.length === 0,
+            parentIsLast: [...parentIsLast, isLast],
+            isSearchBox: true
+          })
+        }
+
+        // Render all existing children dynamically since the server-side search directly controls the contents of `node.children`
+        let displayChildren = node.children
+        const activeQuery = childSearchQueries[node.id]?.trim().toLowerCase()
+
+        const hasMore = node.children.length < childCount && !activeQuery // Disable load more if actively searching
+
+        displayChildren.forEach((child, idx) => {
           traverse(
             child,
             depth + 1,
-            idx === node.children.length - 1,
+            idx === displayChildren.length - 1 && !hasMore,
             [...parentIsLast, isLast]
           )
         })
+
+        if (hasMore) {
+          result.push({
+            node,
+            depth: depth + 1,
+            isLast: true,
+            parentIsLast: [...parentIsLast, isLast],
+            isLoadMore: true,
+            loadMoreCount: childCount - node.children.length
+          })
+        }
       }
     }
 
@@ -1962,7 +2057,7 @@ const LayerColumn = React.memo(function LayerColumn({
     })
 
     return result
-  }, [nodes, expandedNodes, localFocusId])
+  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, childSearchQueries])
 
   // Count total including nested
   const totalCount = useMemo(() => {
@@ -2146,7 +2241,7 @@ const LayerColumn = React.memo(function LayerColumn({
           <AnimatePresence>
             {breadcrumb.length > 0 && (
               <motion.div
-                initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                initial={{ opacity: 0, height: 0, marginTop: 8 }}
                 animate={{ opacity: 1, height: 'auto', marginTop: 8 }}
                 exit={{ opacity: 0, height: 0, marginTop: 0 }}
                 className="flex items-center gap-1 overflow-x-auto no-scrollbar"
@@ -2187,6 +2282,7 @@ const LayerColumn = React.memo(function LayerColumn({
       {!isCollapsed && (
         <div
           ref={scrollContainerRef}
+          onScroll={onScroll}
           className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar relative"
         >
           {/* Subtle top fade for scroll indication */}
@@ -2212,32 +2308,75 @@ const LayerColumn = React.memo(function LayerColumn({
             </motion.div>
           ) : (
             <div className="py-2 px-1">
-              {flatTree.map(({ node, depth, isLast, parentIsLast }, index) => (
-                <FlatTreeItem
-                  key={node.id}
-                  node={node}
-                  depth={depth}
-                  isLast={isLast}
-                  parentIsLast={parentIsLast}
-                  layer={layer}
-                  schema={schema}
-                  isSelected={selectedNodeId === node.id}
-                  isExpanded={expandedNodes.has(node.id)}
-                  isSearchResult={searchResults.includes(node.id)}
-                  isTraceActive={traceFocusId !== null}
-                  isHighlighted={traceContextSet.has(node.id)}
-                  isFocusNode={traceFocusId === node.id}
-                  isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
-                  isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
-                  onSelect={onSelect}
-                  onToggle={onToggle}
-                  onContextMenu={onContextMenu}
-                  onDoubleClick={onDoubleClick}
-                  onAddChild={onAddChild}
-                  onFocus={handleFocus}
-                  animationDelay={index * 0.02}
-                />
-              ))}
+              {flatTree.map((item, index) => {
+                if (item.isSearchBox) {
+                  return (
+                    <SearchBoxItem
+                      key={`search-${item.node.id}`}
+                      parentId={item.node.id}
+                      depth={item.depth}
+                      parentIsLast={item.parentIsLast}
+                      value={childSearchQueries[item.node.id] || ''}
+                      onChange={(val) => {
+                        setChildSearchQueries(prev => ({ ...prev, [item.node.id]: val }))
+                        if (val.trim()) {
+                          // Allow 300ms debounce visually by immediately showing it's ready, actual fetch is done, but UI will reflect
+                          onSearchChildren && onSearchChildren(item.node.id, val)
+                        } else {
+                          // If search is cleared, refetch the original children
+                          onLoadMore && onLoadMore(item.node.id)
+                        }
+                      }}
+                      isLoading={isLoadingChildren}
+                      layer={layer}
+                    />
+                  )
+                }
+
+                if (item.isLoadMore) {
+                  return (
+                    <LoadMoreItem
+                      key={`load-more-${item.node.id}`}
+                      parentId={item.node.id}
+                      depth={item.depth}
+                      parentIsLast={item.parentIsLast}
+                      count={item.loadMoreCount!}
+                      onLoadMore={() => onLoadMore && onLoadMore(item.node.id)}
+                      layer={layer}
+                    />
+                  )
+                }
+
+                const { node, depth, isLast, parentIsLast } = item
+                return (
+                  <FlatTreeItem
+                    key={node.id}
+                    node={node}
+                    depth={depth}
+                    isLast={isLast}
+                    parentIsLast={parentIsLast}
+                    layer={layer}
+                    schema={schema}
+                    isSelected={selectedNodeId === node.id}
+                    isExpanded={expandedNodes.has(node.id)}
+                    isSearchResult={searchResults.includes(node.id)}
+                    isTraceActive={traceFocusId !== null}
+                    isHighlighted={traceContextSet.has(node.id)}
+                    isFocusNode={traceFocusId === node.id}
+                    isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
+                    isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
+                    onSelect={onSelect}
+                    onToggle={onToggle}
+                    onContextMenu={onContextMenu}
+                    onDoubleClick={onDoubleClick}
+                    onAddChild={onAddChild}
+                    onFocus={handleFocus}
+                    onToggleSearch={toggleSearchNode}
+                    isSearchVisible={activeSearchNodes.has(node.id)}
+                    animationDelay={index * 0.02}
+                  />
+                )
+              })}
             </div>
           )}
 
@@ -2274,6 +2413,8 @@ interface FlatTreeItemProps {
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
   onAddChild?: (parentId: string) => void
   onFocus: (node: HierarchyNode) => void
+  onToggleSearch?: (id: string) => void
+  isSearchVisible?: boolean
   animationDelay?: number
 }
 
@@ -2298,6 +2439,8 @@ const FlatTreeItem = React.memo(function FlatTreeItem({
   onDoubleClick,
   onAddChild,
   onFocus,
+  onToggleSearch,
+  isSearchVisible = false,
   animationDelay = 0
 }: FlatTreeItemProps) {
   const itemRef = useRef<HTMLDivElement>(null)
@@ -2522,6 +2665,25 @@ const FlatTreeItem = React.memo(function FlatTreeItem({
           </button>
         )}
 
+        {/* Search children button */}
+        {hasChildren && onToggleSearch && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleSearch(node.id)
+            }}
+            className={cn(
+              "p-1.5 rounded-lg transition-all duration-200 hover:scale-110 active:scale-95",
+              isSearchVisible
+                ? "bg-amber-500/20 text-amber-400"
+                : "bg-white/[0.06] hover:bg-white/[0.12] text-ink-muted/80 hover:text-ink-muted"
+            )}
+            title="Search children"
+          >
+            <LucideIcons.Search className="w-3 h-3" />
+          </button>
+        )}
+
         {/* Add child button */}
         {entityType?.hierarchy?.canContain && entityType.hierarchy.canContain.length > 0 && onAddChild && (
           <button
@@ -2552,11 +2714,289 @@ const FlatTreeItem = React.memo(function FlatTreeItem({
   )
 })
 
-// LayerNodeCard replaced with FlatTreeItem above for better UX
+// ----------------------------------------------------
+// LOAD MORE ITEM (Pagination within Flat Tree)
+// ----------------------------------------------------
+
+function LoadMoreItem({
+  parentId,
+  depth,
+  parentIsLast,
+  count,
+  onLoadMore,
+  layer
+}: {
+  parentId: string
+  depth: number
+  parentIsLast: boolean[]
+  count: number
+  onLoadMore: () => void
+  layer: ViewLayerConfig
+}) {
+  const [isHovered, setIsHovered] = useState(false)
+  const indentWidth = depth * 16
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0 }}
+      className="flex items-center gap-2 mx-1 rounded-xl cursor-pointer transition-all duration-200 group/item relative min-h-[36px] py-1.5"
+      style={{ paddingLeft: 12 + indentWidth }}
+    >
+      <div className="flex items-center absolute left-3 pointer-events-none" style={{ width: indentWidth }}>
+        {parentIsLast.map((pIsLast, idx) => (
+          <div key={idx} className="w-5 h-full flex justify-center">
+            {!pIsLast && (
+              <div className="w-px h-full bg-gradient-to-b from-white/[0.08] via-white/[0.12] to-white/[0.08]" />
+            )}
+          </div>
+        ))}
+        {depth > 0 && (
+          <div className="w-5 h-full relative">
+            <div className="absolute left-1/2 -translate-x-1/2 w-px top-0 h-1/2" style={{ background: 'linear-gradient(to bottom, transparent, rgba(255,255,255,0.12), transparent)' }} />
+            <div className="absolute left-1/2 top-1/2 -translate-y-1/2 flex items-center">
+              <div className="w-3 h-px bg-gradient-to-r from-white/[0.12] to-white/[0.06]" />
+            </div>
+          </div>
+        )}
+      </div>
+
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          onLoadMore()
+        }}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
+        className={cn(
+          "flex flex-1 items-center justify-center gap-2 py-1.5 rounded-lg border text-[11px] font-medium transition-all duration-200",
+          "bg-white/[0.03] border-white/[0.08] hover:bg-white/[0.06] hover:border-white/[0.15] text-ink-muted hover:text-ink/90 active:scale-[0.98]"
+        )}
+      >
+        <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white/[0.05]">
+          <LucideIcons.Plus className={cn("w-3.5 h-3.5 transition-transform", isHovered ? "scale-125 text-blue-400" : "text-ink-muted/70")} />
+        </span>
+        <span className="tracking-wide">Load {Math.min(20, count)} more nodes ({count} remaining)</span>
+      </button>
+    </motion.div>
+  )
+}
+
+// ----------------------------------------------------
+// SEARCH BOX ITEM (Inline search for children)
+// ----------------------------------------------------
+
+function SearchBoxItem({
+  parentId,
+  depth,
+  parentIsLast,
+  value,
+  onChange,
+  isLoading,
+  layer
+}: {
+  parentId: string
+  depth: number
+  parentIsLast: boolean[]
+  value: string
+  onChange: (val: string) => void
+  isLoading?: boolean
+  layer: ViewLayerConfig
+}) {
+  const [isFocused, setIsFocused] = useState(false)
+  const indentWidth = depth * 16
+
+  // Using a local state for input to not jump cursors
+  const [localValue, setLocalValue] = useState(value)
+
+  useEffect(() => {
+    setLocalValue(value)
+  }, [value])
+
+  // Debounce effect: trigger search automatically 400ms after user stops typing
+  useEffect(() => {
+    if (localValue === value) return
+
+    const handler = setTimeout(() => {
+      onChange(localValue)
+    }, 400)
+
+    return () => clearTimeout(handler)
+  }, [localValue, value, onChange])
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0 }}
+      className="flex items-center gap-2 mx-1 rounded-xl transition-all duration-200 group/item relative min-h-[36px] py-1.5"
+      style={{ paddingLeft: 12 + indentWidth }}
+    >
+      <div className="flex items-center absolute left-3 pointer-events-none" style={{ width: indentWidth }}>
+        {parentIsLast.map((pIsLast, idx) => (
+          <div key={idx} className="w-5 h-full flex justify-center">
+            {!pIsLast && (
+              <div className="w-px h-full bg-gradient-to-b from-white/[0.08] via-white/[0.12] to-white/[0.08]" />
+            )}
+          </div>
+        ))}
+        {depth > 0 && (
+          <div className="w-5 h-full relative">
+            <div className="absolute left-1/2 -translate-x-1/2 w-px top-0 h-full" style={{ background: 'linear-gradient(to bottom, transparent, rgba(255,255,255,0.12), transparent)' }} />
+            <div className="absolute left-1/2 top-1/2 -translate-y-1/2 flex items-center">
+              <div className="w-3 h-px bg-gradient-to-r from-white/[0.12] to-white/[0.06]" />
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div
+        className={cn(
+          "flex flex-1 items-center gap-2.5 px-3 py-2 mx-1 rounded-xl border text-xs font-medium transition-all duration-300 shadow-sm relative group/searchbox overflow-hidden",
+          isFocused
+            ? "bg-canvas-elevated/90 backdrop-blur-xl border-transparent shadow-xl translate-y-[0px]"
+            : "bg-white/[0.02] border-white/[0.06] hover:bg-white/[0.04] hover:border-white/[0.12] hover:shadow-md"
+        )}
+        style={isFocused ? {
+          boxShadow: `0 8px 24px -4px ${layer.color}25, inset 0 0 0 1.5px ${layer.color}50`
+        } : {}}
+      >
+        {/* Subtle focus glow background */}
+        <div
+          className={cn(
+            "absolute inset-0 transition-opacity duration-500 pointer-events-none",
+            isFocused ? "opacity-100" : "opacity-0"
+          )}
+          style={{ background: `radial-gradient(ellipse at center, ${layer.color}15 0%, transparent 70%)` }}
+        />
+
+        <LucideIcons.Search
+          className={cn("w-4 h-4 transition-all duration-300 relative z-10", isFocused ? "scale-110" : "text-ink-muted/50")}
+          style={isFocused ? { color: layer.color } : {}}
+        />
+
+        <input
+          type="text"
+          value={localValue}
+          onChange={(e) => {
+            setLocalValue(e.target.value)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              onChange(localValue)
+            }
+          }}
+          onBlur={() => {
+            setIsFocused(false)
+            if (localValue !== value) onChange(localValue)
+          }}
+          onFocus={() => setIsFocused(true)}
+          placeholder={`Search ${parentId ? 'node' : 'children'}...`}
+          className="flex-1 bg-transparent border-none outline-none text-ink placeholder-ink-muted/40 relative z-10 transition-all duration-300 min-w-0"
+        />
+
+        <div className="flex items-center gap-1.5 relative z-10 flex-shrink-0">
+          {isLoading ? (
+            <div className="flex items-center justify-center w-5 h-5 rounded-md bg-white/[0.05]">
+              <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: layer.color }} />
+            </div>
+          ) : (
+            <AnimatePresence>
+              {isFocused && !localValue && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  className="px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider uppercase text-ink-muted/50 bg-white/[0.05] border border-white/[0.05]"
+                >
+                  Enter
+                </motion.div>
+              )}
+            </AnimatePresence>
+          )}
+
+          <AnimatePresence>
+            {localValue && !isLoading && (
+              <motion.button
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setLocalValue('')
+                  onChange('')
+                }}
+                className="flex items-center justify-center w-5 h-5 rounded-md hover:bg-white/[0.1] text-ink-muted/60 hover:text-ink transition-colors bg-white/[0.03]"
+              >
+                <LucideIcons.X className="w-3 h-3" />
+              </motion.button>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+    </motion.div>
+  )
+}
 
 // ----------------------------------------------------
 // SVG Overlay Component
 // ----------------------------------------------------
+
+// Global visibility tracker for extreme performance on 10k+ nodes
+const globalVisibleNodes = new Set<string>()
+let globalNodeObserver: IntersectionObserver | null = null
+
+function getSharedNodeObserver(triggerRedraw: () => void) {
+  if (typeof window === 'undefined') return null
+  if (!globalNodeObserver) {
+    globalNodeObserver = new IntersectionObserver((entries) => {
+      let changed = false
+      entries.forEach(entry => {
+        const id = entry.target.id
+        if (!id) return
+        if (entry.isIntersecting) {
+          if (!globalVisibleNodes.has(id)) {
+            globalVisibleNodes.add(id)
+            changed = true
+          }
+        } else {
+          if (globalVisibleNodes.has(id)) {
+            globalVisibleNodes.delete(id)
+            changed = true
+          }
+        }
+      })
+      if (changed) {
+        // Schedule redraw if visibility changes
+        triggerRedraw()
+      }
+    }, {
+      root: null, // observe relative to viewport
+      rootMargin: '100px', // start rendering slightly before it enters screen
+      threshold: 0
+    })
+  }
+  return globalNodeObserver
+}
+
+type ComputedEdge = {
+  id: string
+  source: string
+  target: string
+  minY: number
+  maxY: number
+  pathD: string
+  color: string
+  dynamicStrokeWidth: number
+  edgeOpacity: number
+  isGhost: boolean
+  isBundled: boolean
+  edgeCount: number
+  sx: number
+  sy: number
+  tx: number
+  ty: number
+}
 
 function LineageFlowOverlay({
   nodes,
@@ -2585,10 +3025,16 @@ function LineageFlowOverlay({
   isHighlightActive?: boolean,
   resolveEdgeColor?: (edgeType: string) => string,
 }) {
-  const [paths, setPaths] = useState<React.ReactNode[]>([])
+  // Store computed abstract edges instead of direct React nodes for virtualization
+  const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
+
+  // Viewport tracking for virtualization
+  const [viewport, setViewport] = useState({ scrollTop: 0, clientHeight: typeof window !== 'undefined' ? window.innerHeight : 1000 })
   const containerRef = useRef<HTMLDivElement>(null)
+  const scrollParentRef = useRef<HTMLElement | null>(null)
   const updateFlowRef = useRef<(() => void) | null>(null)
   const rafIdRef = useRef<number | null>(null)
+  const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null)
 
   // Serialize expandedNodes Set to array for proper React dependency tracking
   const expandedNodesArray = useMemo(() => {
@@ -2613,23 +3059,48 @@ function LineageFlowOverlay({
     if (!containerRef.current) return
 
     const containerRect = containerRef.current.getBoundingClientRect()
-    const newPaths: React.ReactNode[] = []
+    // Find scroll parent once
+    if (!scrollParentRef.current) {
+      scrollParentRef.current = containerRef.current.closest('.overflow-y-auto') as HTMLElement
+      if (scrollParentRef.current) {
+        setViewport({
+          scrollTop: scrollParentRef.current.scrollTop,
+          clientHeight: scrollParentRef.current.clientHeight
+        })
+      } else {
+        setViewport({
+          scrollTop: 0,
+          clientHeight: containerRect.height || window.innerHeight
+        })
+      }
+    }
+
+    const newComputedEdges: ComputedEdge[] = []
 
     // Batch DOM reads by collecting all elements first
     const elementCache = new Map<string, HTMLElement>()
 
-    edges.forEach(edge => {
+    // ONLY compute paths for edges where BOTH nodes are strictly visible on screen!
+    // This fully prevents the tornado of 10,000 edges pointing to clipped items, unlocking ultra fast 60fps scrolling.
+    const activeEdges = edges.filter(edge => {
+      const sourceId = `layer-node-${edge.source}`
+      const targetId = `layer-node-${edge.target}`
+
+      return globalVisibleNodes.has(sourceId) && globalVisibleNodes.has(targetId)
+    })
+
+    activeEdges.forEach(edge => {
       const sourceId = `layer-node-${edge.source}`
       const targetId = `layer-node-${edge.target}`
 
       // Cache element lookups
-      let sourceEl = elementCache.get(sourceId)
+      let sourceEl: HTMLElement | null = elementCache.get(sourceId) || null
       if (!sourceEl) {
         sourceEl = document.getElementById(sourceId)
         if (sourceEl) elementCache.set(sourceId, sourceEl)
       }
 
-      let targetEl = elementCache.get(targetId)
+      let targetEl: HTMLElement | null = elementCache.get(targetId) || null
       if (!targetEl) {
         targetEl = document.getElementById(targetId)
         if (targetEl) elementCache.set(targetId, targetEl)
@@ -2638,14 +3109,6 @@ function LineageFlowOverlay({
       if (sourceEl && targetEl) {
         const sRect = sourceEl.getBoundingClientRect()
         const tRect = targetEl.getBoundingClientRect()
-
-        // Viewport culling: skip edges where BOTH endpoints are far outside visible area
-        const viewportMargin = 200
-        const viewportTop = -viewportMargin
-        const viewportBottom = window.innerHeight + viewportMargin
-        const bothAbove = sRect.bottom < viewportTop && tRect.bottom < viewportTop
-        const bothBelow = sRect.top > viewportBottom && tRect.top > viewportBottom
-        if (bothAbove || bothBelow) return
 
         // Relative coordinates
         // Offset sx/tx slightly from the card boundary to make arrowheads/terminals visible
@@ -2656,20 +3119,21 @@ function LineageFlowOverlay({
         let tx = tRect.left - containerRect.left - 4
         const ty = tRect.top + tRect.height / 2 - containerRect.top
 
+        // We no longer cull here based on window.innerHeight, because the container itself scrolls.
+        // Instead, we calculate local bounding Y coordinates and cull in the render loop (Virtualization).
+        // `sy` and `ty` are relative to the top of the canvas container.
+        const minY = Math.min(sy, ty)
+        const maxY = Math.max(sy, ty)
+
         // Smart Routing Logic
-        let d = ''
+        let pathD = ''
         const isSameColumn = Math.abs(sRect.left - tRect.left) < 50
         const isSelf = edge.source === edge.target
 
         // Multi-edge offsetting
         // If there are multiple edges (groupTotal > 1), we offset the control points vertically
         // or curve magnitude to separate them.
-        const total = edge.groupTotal || 1
         const index = edge.groupIndex || 0
-
-        // Vertical separation at the midpoint
-        const verticalSpread = 30
-        const vOffset = (index - (total - 1) / 2) * verticalSpread
 
         if (isSameColumn && !isSelf) {
           // "Bracket" routing: Right -> Right (Cleaner layout)
@@ -2684,7 +3148,7 @@ function LineageFlowOverlay({
           const cp1y = sy
           const cp2y = ty
 
-          d = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
+          pathD = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
         } else {
           // Standard Left-to-Right S-Curve (Sigmoid)
           // This creates a beautiful, simple flow without "ballooning"
@@ -2705,105 +3169,90 @@ function LineageFlowOverlay({
           const cp1y = sy
           const cp2y = ty
 
-          d = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
+          pathD = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
         }
 
-        // Color priority: trace > highlight > normal
-        // Edge type color resolved from backend schema via resolveEdgeColor prop
+        // Theme color priority
+        const primaryType = edge.types && edge.types.length > 0 ? edge.types[0] : (edge.originalType || '')
         const typeColor = resolveEdgeColor
-          ? resolveEdgeColor(edge.originalType || '')
+          ? resolveEdgeColor(primaryType)
           : '#3b82f6'
 
         let color = typeColor
-        let edgeOpacity = 0.4
-        let strokeWidth = 1.5
-        let showAnimatedFlow = true
+        // Base opacity varies by confidence (if available) - increased base for vibrancy
+        let edgeOpacity = 0.5 + (edge.confidence || 0.4) * 0.5
+
+        // Base stroke width depends on bundling!
+        let baseStrokeWidth = 1.5
+        if (edge.isBundled) {
+          // Logarithmic scaling for bundle volume 
+          baseStrokeWidth = Math.min(2 + Math.log2(edge.edgeCount) * 1.5, 10)
+        } else if (edge.isAggregated) {
+          baseStrokeWidth = 2.5
+        }
+
+        let dynamicStrokeWidth = baseStrokeWidth
 
         // Determine if this edge is highlighted (click-to-highlight)
         const isEdgeHighlighted = isHighlightActive && highlightedEdges?.has(edge.id)
-        const isEdgeDimmed = isHighlightActive && !isEdgeHighlighted
+        const isEdgeDimmed = isHighlightActive && !highlightedEdges?.has(edge.id)
 
         if (isTracing && traceResult) {
-          // TRACE MODE: highest priority — color by direction (upstream/downstream)
-          edgeOpacity = 0.8
-          strokeWidth = 2.5
+          // TRACE MODE
+          edgeOpacity = edge.isGhost ? 0.4 : 0.8
+          dynamicStrokeWidth = baseStrokeWidth + 1
           const srcInUpstream = traceResult.upstreamNodes?.has(edge.source)
           const tgtInUpstream = traceResult.upstreamNodes?.has(edge.target)
           const srcInDownstream = traceResult.downstreamNodes?.has(edge.source)
           const tgtInDownstream = traceResult.downstreamNodes?.has(edge.target)
 
           if (srcInUpstream || tgtInUpstream) {
-            color = '#06b6d4' // cyan for upstream
+            color = '#06b6d4' // cyan
           } else if (srcInDownstream || tgtInDownstream) {
-            color = '#f59e0b' // amber for downstream
-          } else {
-            color = '#a78bfa' // purple for focus-adjacent
+            color = '#f59e0b' // amber
+          } else if (!edge.isGhost) {
+            color = '#a78bfa' // purple
+          }
+
+          if (!srcInUpstream && !tgtInUpstream && !srcInDownstream && !tgtInDownstream) {
+            edgeOpacity = edge.isGhost ? 0.05 : 0.1
+            dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
           }
         } else {
-          // Normal/highlight mode: use schema-resolved type color
+          // Normal/highlight mode
           if (isEdgeHighlighted) {
             edgeOpacity = 0.9
-            strokeWidth = 2.5
+            dynamicStrokeWidth = baseStrokeWidth + 1
           } else if (isEdgeDimmed) {
-            edgeOpacity = 0.1
-            strokeWidth = 1
-            showAnimatedFlow = false
+            edgeOpacity = edge.isGhost ? 0.05 : 0.1
+            dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
           }
         }
 
-        newPaths.push(
-          <g
-            key={edge.id}
-            className="pointer-events-auto cursor-pointer group"
-            onClick={(e) => {
-              e.stopPropagation()
-              selectEdge(edge.id)
-              if (!isEdgePanelOpen) toggleEdgePanel()
-            }}
-            style={{ color }}
-          >
-            {/* Invisible thicker path for easier hover */}
-            <path d={d} fill="none" stroke="transparent" strokeWidth="15" />
+        // Ghost styling for abstracted/bundled edges
+        if (edge.isGhost) {
+          edgeOpacity = Math.min(0.7, edgeOpacity)
+        }
 
-            {/* Main Path */}
-            <path
-              d={d}
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={strokeWidth}
-              markerEnd="url(#arrowhead)"
-              className="transition-all duration-300 group-hover:opacity-100"
-              style={{ strokeWidth, opacity: edgeOpacity }}
-            />
-
-            {/* Animated Flow Layer (particles) — only for highlighted/active edges */}
-            {showAnimatedFlow && (
-              <path
-                d={d}
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeDasharray="4 8"
-                strokeLinecap="round"
-                className="animate-flow"
-                style={{
-                  opacity: 0.8,
-                  animationDuration: '1.5s',
-                  filter: 'url(#glow)'
-                }}
-              />
-            )}
-
-            {/* Terminals */}
-            <circle cx={sx} cy={sy} r="2.5" fill="currentColor" style={{ opacity: edgeOpacity }} className="group-hover:opacity-80" />
-
-            <title>{edge.source} → {edge.target} ({edge.originalType})</title>
-          </g>
-        )
+        newComputedEdges.push({
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          minY,
+          maxY,
+          pathD,
+          color,
+          dynamicStrokeWidth,
+          edgeOpacity,
+          isGhost: edge.isGhost || false,
+          isBundled: edge.isBundled || false,
+          edgeCount: edge.edgeCount || 0,
+          sx, sy, tx, ty
+        })
       }
     })
-    setPaths(newPaths)
-  }, [edges, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor])
+    setComputedEdges(newComputedEdges)
+  }, [edges, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId])
 
   // Store updateFlow in ref for ResizeObserver access and expose to parent
   useEffect(() => {
@@ -2822,22 +3271,58 @@ function LineageFlowOverlay({
       scheduleUpdate()
     })
 
+    const visibilityObserver = getSharedNodeObserver(scheduleUpdate)
+
     // Observe all visible node elements
     nodes.forEach(node => {
       const el = document.getElementById(`layer-node-${node.id}`)
       if (el) {
         observer.observe(el)
+        if (visibilityObserver) visibilityObserver.observe(el)
       }
     })
 
     return () => {
       observer.disconnect()
+      if (visibilityObserver) visibilityObserver.disconnect()
+      globalVisibleNodes.clear()
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current)
         rafIdRef.current = null
       }
     }
   }, [nodes, expandedNodesArray, scheduleUpdate])
+
+  // Attach scroll listener to the parent container for Viewport Edge Virtualization
+  useEffect(() => {
+    if (!containerRef.current) return
+    const scrollParent = containerRef.current.closest('.overflow-y-auto') as HTMLElement
+    if (!scrollParent) return
+
+    let rafId: number | null = null
+    const handleScroll = () => {
+      if (rafId !== null) return // debounce
+      rafId = requestAnimationFrame(() => {
+        setViewport({
+          scrollTop: scrollParent.scrollTop,
+          clientHeight: scrollParent.clientHeight
+        })
+        rafId = null
+      })
+    }
+
+    // Capture initial
+    handleScroll()
+
+    scrollParent.addEventListener('scroll', handleScroll, { passive: true })
+    window.addEventListener('resize', handleScroll, { passive: true })
+
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId)
+      scrollParent.removeEventListener('scroll', handleScroll)
+      window.removeEventListener('resize', handleScroll)
+    }
+  }, [])
 
   // Listeners for window resize and scroll
   useEffect(() => {
@@ -2867,16 +3352,33 @@ function LineageFlowOverlay({
     }
   }, [updateFlow, scheduleUpdate, expandedNodesArray])
 
+  // VERY FAST Virtualization Filter: Only render edges that intersect the scroll viewport
+  const VIEWPORT_MARGIN = 400 // Load edges slightly before they enter screen
+  const visibleEdges = computedEdges.filter(edge => {
+    // If edge bottom is above viewport OR edge top is below viewport -> Cull
+    if (edge.maxY < viewport.scrollTop - VIEWPORT_MARGIN) return false
+    if (edge.minY > viewport.scrollTop + viewport.clientHeight + VIEWPORT_MARGIN) return false
+    return true
+  })
+
   return (
     <div ref={containerRef} className="absolute inset-0 pointer-events-none z-20">
-      <style>{`
-          @keyframes dashDraw {
-            from { stroke-dashoffset: 1000; }
-            to { stroke-dashoffset: 0; }
-          }
-        `}</style>
       <svg className="w-full h-full overflow-visible">
         <defs>
+          <style>
+            {`
+              @keyframes dashFlow {
+                from { stroke-dashoffset: 400; }
+                to { stroke-dashoffset: 0; }
+              }
+              .flow-particles {
+                animation: dashFlow 20s linear infinite;
+              }
+              .flow-particles-ghost {
+                animation: dashFlow 40s linear infinite; /* flows slower for ghosts */
+              }
+            `}
+          </style>
           {/* arrowhead marker */}
           <marker
             id="arrowhead"
@@ -2895,7 +3397,113 @@ function LineageFlowOverlay({
             <feComposite in="SourceGraphic" in2="blur" operator="over" />
           </filter>
         </defs>
-        {paths}
+        {visibleEdges.map(edge => {
+          const isHovered = hoveredEdgeId === edge.id
+          const isSourceHovered = hoveredEdgeId === edge.source
+          const isTargetHovered = hoveredEdgeId === edge.target
+          const isHighlighted = isHovered || isSourceHovered || isTargetHovered
+          const { pathD, color, dynamicStrokeWidth, edgeOpacity, isGhost, isBundled, sx, sy, tx, ty } = edge
+
+          return (
+            <g key={edge.id} className="transition-opacity duration-300">
+              {/* INVISIBLE WIDE HIT AREA FOR HOVER */}
+              <path
+                d={pathD}
+                fill="none"
+                stroke="transparent"
+                strokeWidth={20}
+                className="pointer-events-auto cursor-pointer"
+                onMouseEnter={() => setHoveredEdgeId(edge.id)}
+                onMouseLeave={() => setHoveredEdgeId(null)}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  selectEdge(edge.id)
+                  if (!isEdgePanelOpen) toggleEdgePanel()
+                }}
+              />
+
+              {/* BASE GLOW / DROP SHADOW - Thick and highly transparent */}
+              <path
+                d={pathD}
+                style={{
+                  stroke: color,
+                  strokeWidth: dynamicStrokeWidth + (isHighlighted ? 4 : 2),
+                  fill: 'none',
+                  strokeOpacity: isHighlighted ? edgeOpacity * 0.4 : edgeOpacity * 0.15,
+                  strokeLinecap: 'round',
+                  transition: 'all 0.3s ease',
+                }}
+                className="pointer-events-none"
+              />
+
+              {/* CORE LINE - Solid but slightly translucent */}
+              <path
+                d={pathD}
+                style={{
+                  stroke: color,
+                  strokeWidth: dynamicStrokeWidth,
+                  fill: 'none',
+                  strokeOpacity: isHighlighted ? Math.max(0.6, edgeOpacity * 1.5) : edgeOpacity,
+                  strokeDasharray: isGhost ? '6 6' : 'none',
+                  strokeLinecap: 'round',
+                  transition: 'all 0.3s ease',
+                }}
+                className="pointer-events-none"
+              />
+
+              {/* ANIMATED PARTICLES / FLOW overlay */}
+              {!isGhost && (
+                <path
+                  d={pathD}
+                  style={{
+                    stroke: color, // Use the vivid path color instead of white
+                    strokeWidth: Math.max(1, dynamicStrokeWidth * 0.5),
+                    fill: 'none',
+                    strokeOpacity: isHighlighted ? 1 : 0.8,
+                    strokeLinecap: 'round',
+                    // CSS dasharray: small dash, huge gap -> acts like moving dots!
+                    strokeDasharray: '4 16',
+                    // Add a drop shadow strictly to the particles for a neon pop
+                    filter: `drop-shadow(0 0 3px ${color})`
+                  }}
+                  className="pointer-events-none flow-particles"
+                />
+              )}
+              {isGhost && (
+                <path
+                  d={pathD}
+                  style={{
+                    stroke: color,
+                    strokeWidth: Math.max(1, dynamicStrokeWidth * 0.4),
+                    fill: 'none',
+                    strokeOpacity: isHighlighted ? 0.8 : 0.4,
+                    strokeLinecap: 'round',
+                    // Slow dash moving
+                    strokeDasharray: '6 12',
+                  }}
+                  className="pointer-events-none flow-particles-ghost"
+                />
+              )}
+
+              {/* Bundle Badge Label rendered on the path */}
+              {isBundled && !isGhost && (
+                <g transform={`translate(${(sx + tx) / 2}, ${(sy + ty) / 2})`}>
+                  <rect x="-10" y="-8" width="20" height="16" rx="4" fill="currentColor" opacity="0.15" className="group-hover:opacity-30" />
+                  <text x="0" y="3" fill="currentColor" fontSize="10px" fontWeight="bold" textAnchor="middle" opacity="0.9">
+                    {edge.edgeCount}
+                  </text>
+                </g>
+              )}
+
+              {/* Terminals (Hide for ghosts to signify missing end) */}
+              {!isGhost && (
+                <circle cx={sx} cy={sy} r="2.5" fill="currentColor" style={{ opacity: edgeOpacity }} className="group-hover:opacity-80" />
+              )}
+
+              <title>{edge.source} → {edge.target} {isBundled ? `(${edge.edgeCount} bundled logs)` : ''}</title>
+            </g>
+          )
+        })}
       </svg>
     </div>
   )

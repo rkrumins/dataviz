@@ -5,6 +5,7 @@ import { useOntologyMetadata } from '@/services/ontologyService'
 
 interface UseEntityLoaderResult {
     loadChildren: (parentId: string) => Promise<void>
+    searchChildren: (parentId: string, query: string) => Promise<void>
     isLoading: boolean
     loadingNodes: Set<string>
 }
@@ -14,7 +15,7 @@ interface UseEntityLoaderResult {
  * Checks if children are already loaded in the canvas store before fetching
  */
 export function useEntityLoader(): UseEntityLoaderResult {
-    const { nodes, edges, addNodes, addEdges } = useCanvasStore()
+    const { nodes, edges, addNodes, addEdges, removeNodes, removeEdges } = useCanvasStore()
     const provider = useGraphProvider()
     const { containmentEdgeTypes } = useOntologyMetadata()
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
@@ -94,7 +95,7 @@ export function useEntityLoader(): UseEntityLoaderResult {
         }).length
 
         // If we have nearly all children (allow small drift), don't refetch
-        if (currentChildrenCount >= childCount) return
+        if (currentChildrenCount >= childCount && childCount > 0) return
 
         // 2. Fetch
         setLoadingNodes(prev => new Set(prev).add(parentId))
@@ -105,19 +106,25 @@ export function useEntityLoader(): UseEntityLoaderResult {
             // This is safer than relying on hardcoded defaults
             const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
 
+            // Smart Pagination Request: Load up to 20 per request, offsetting by already loaded
             const children = await provider.getChildren(urn, {
                 edgeTypes: fetchTypes,
-                limit: 100 // Reasonable batch size
+                limit: 20,
+                offset: currentChildrenCount
             })
 
             if (children.length > 0) {
+                const freshNodes = useCanvasStore.getState().nodes
+                const freshEdges = useCanvasStore.getState().edges
+                const currentExistingNodeIds = new Set(freshNodes.map(n => n.id))
+
                 const nodesToAdd: LineageNode[] = []
                 const edgesToAdd: LineageEdge[] = []
                 const newIds = new Set<string>()
 
                 children.forEach(child => {
                     // Check duplicates against store AND current batch
-                    if (!existingNodeIds.has(child.urn) && !newIds.has(child.urn)) {
+                    if (!currentExistingNodeIds.has(child.urn) && !newIds.has(child.urn)) {
                         nodesToAdd.push({
                             id: child.urn,
                             type: 'generic',
@@ -139,7 +146,7 @@ export function useEntityLoader(): UseEntityLoaderResult {
 
                     // Always ensure edge exists
                     const edgeId = `contains-${urn}-${child.urn}`
-                    const edgeExists = edges.some(e => e.id === edgeId) || edgesToAdd.some(e => e.id === edgeId)
+                    const edgeExists = freshEdges.some(e => e.id === edgeId) || edgesToAdd.some(e => e.id === edgeId)
 
                     if (!edgeExists) {
                         // Use ontology-defined containment type if available, else CONTAINS
@@ -174,8 +181,109 @@ export function useEntityLoader(): UseEntityLoaderResult {
         }
     }, [nodes, edges, provider, containmentEdgeTypes, addNodes, addEdges, loadingNodes])
 
+    const searchChildren = useCallback(async (parentId: string, query: string) => {
+        if (!query.trim()) return
+
+        setLoadingNodes(prev => new Set(prev).add(parentId))
+        try {
+            const parentNode = nodes.find(n => n.id === parentId)
+            const urn = parentNode ? (parentNode.data.urn as string || parentId) : parentId
+
+            const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
+
+            // Server-side search
+            const children = await provider.getChildren(urn, {
+                edgeTypes: fetchTypes,
+                searchQuery: query,
+                limit: 50
+            })
+
+            // Always get the freshest state right before mutating
+            const freshNodes = useCanvasStore.getState().nodes
+            const freshEdges = useCanvasStore.getState().edges
+
+            if (children.length >= 0) {
+                // First, clean up the exact current children of this node to replace them with search results
+                const existingEdgesToRemove = freshEdges.filter(e => e.source === parentId)
+                const targetNodeIdsToRemove = new Set(existingEdgesToRemove.map(e => e.target))
+
+                // Keep nodes that might be connected to other parents
+                const otherEdges = freshEdges.filter(e => e.source !== parentId)
+                const safeNodesToKeep = new Set(otherEdges.map(e => e.target))
+                const nodeIdsToRemove = Array.from(targetNodeIdsToRemove).filter(id => !safeNodesToKeep.has(id))
+                const edgeIdsToRemove = existingEdgesToRemove.map(e => e.id)
+
+                // Purge them from the canvas view immediately
+                if (nodeIdsToRemove.length > 0) removeNodes(nodeIdsToRemove)
+                if (edgeIdsToRemove.length > 0) removeEdges(edgeIdsToRemove)
+
+                if (children.length > 0) {
+                    const nodesToAdd: LineageNode[] = []
+                    const edgesToAdd: LineageEdge[] = []
+
+                    // Re-calculate existing state post-removal
+                    const remainingNodeIds = new Set(freshNodes.map(n => n.id))
+                    nodeIdsToRemove.forEach(id => remainingNodeIds.delete(id))
+
+                    const remainingEdges = freshEdges.filter(e => !edgeIdsToRemove.includes(e.id))
+                    const newIds = new Set<string>()
+
+                    children.forEach(child => {
+                        if (!remainingNodeIds.has(child.urn) && !newIds.has(child.urn)) {
+                            nodesToAdd.push({
+                                id: child.urn,
+                                type: 'generic',
+                                position: { x: 0, y: 0 },
+                                data: {
+                                    ...child,
+                                    label: child.displayName,
+                                    type: child.entityType === 'schemaField' ? 'column' : child.entityType,
+                                    urn: child.urn,
+                                    childCount: child.childCount,
+                                    metadata: child.properties,
+                                    classifications: child.tags,
+                                    businessLabel: child.properties?.businessLabel,
+                                }
+                            } as any)
+                            newIds.add(child.urn)
+                        }
+
+                        const edgeId = `contains-${urn}-${child.urn}`
+                        const edgeExists = remainingEdges.some(e => e.id === edgeId) || edgesToAdd.some(e => e.id === edgeId)
+
+                        if (!edgeExists) {
+                            const relationType = containmentEdgeTypes.length > 0 ? containmentEdgeTypes[0] : 'CONTAINS'
+                            edgesToAdd.push({
+                                id: edgeId,
+                                source: parentId,
+                                target: child.urn,
+                                type: 'lineage',
+                                data: {
+                                    edgeType: relationType,
+                                    relationship: relationType.toLowerCase()
+                                }
+                            })
+                        }
+                    })
+
+                    if (nodesToAdd.length > 0) addNodes(nodesToAdd)
+                    if (edgesToAdd.length > 0) addEdges(edgesToAdd)
+                }
+            }
+        } catch (err) {
+            console.error(`[EntityLoader] Failed to search children for ${parentId}`, err)
+        } finally {
+            setLoadingNodes(prev => {
+                const next = new Set(prev)
+                next.delete(parentId)
+                return next
+            })
+        }
+    }, [nodes, edges, provider, containmentEdgeTypes, addNodes, addEdges])
+
     return {
         loadChildren,
+        searchChildren,
         isLoading: loadingNodes.size > 0,
         loadingNodes
     }

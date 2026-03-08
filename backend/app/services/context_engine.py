@@ -240,8 +240,8 @@ class ContextEngine:
     async def get_schema_stats(self) -> GraphSchemaStats:
         return await self.provider.get_schema_stats()
     
-    async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, limit: int = 100) -> List[GraphNode]:
-        return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, limit=limit)
+    async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, search_query: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+        return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset)
 
     async def get_edges(self, query: EdgeQuery = None) -> List[GraphEdge]:
         if query is None: query = EdgeQuery()

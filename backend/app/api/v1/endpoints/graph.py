@@ -117,12 +117,13 @@ async def get_node_parent(
 async def get_node_children(
     urn: str,
     edge_types: Optional[List[str]] = Query(None, alias="edgeTypes"),
+    search_query: Optional[str] = Query(None, alias="searchQuery"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Lazy load children nodes."""
-    return await engine.get_children(urn, edge_types=edge_types, limit=limit)
+    return await engine.get_children(urn, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset)
 
 
 @router.post("/search", response_model=List[GraphNode], response_model_by_alias=True)
@@ -169,8 +170,29 @@ async def get_neighborhood_map(
 
 @router.get("/stats")
 async def get_graph_stats(
+    dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    from backend.app.db.repositories.stats_repo import get_data_source_stats
+    import json
+    
+    # Try fetching from cache first
+    ds_id = dataSourceId or engine._data_source_id
+    if ds_id:
+        stats_cache = await get_data_source_stats(session, ds_id)
+        if stats_cache:
+            try:
+                return {
+                    "nodeCount": stats_cache.node_count,
+                    "edgeCount": stats_cache.edge_count,
+                    "entityTypeCounts": json.loads(stats_cache.entity_type_counts),
+                    "edgeTypeCounts": json.loads(stats_cache.edge_type_counts)
+                }
+            except Exception:
+                pass # Fallback to runtime if JSON fails
+    
+    # Fallback to runtime
     return await engine.get_stats()
 
 
@@ -299,17 +321,49 @@ async def save_graph(
 
 @router.get("/introspection", response_model=GraphSchemaStats, response_model_by_alias=True)
 async def get_graph_introspection(
+    dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Get detailed schema statistics for the graph."""
+    from backend.app.db.repositories.stats_repo import get_data_source_stats
+    import json
+    
+    ds_id = dataSourceId or engine._data_source_id
+    if ds_id:
+        stats_cache = await get_data_source_stats(session, ds_id)
+        if stats_cache and stats_cache.schema_stats and stats_cache.schema_stats != "{}":
+            try:
+                return GraphSchemaStats.model_validate(json.loads(stats_cache.schema_stats))
+            except Exception:
+                pass
+                
     return await engine.get_schema_stats()
 
 
 @router.get("/metadata/ontology")
 async def get_ontology_metadata(
+    dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Get ontology metadata including containment edge types and entity hierarchies."""
+    from backend.app.db.repositories.stats_repo import get_data_source_stats
+    import json
+    
+    ds_id = dataSourceId or engine._data_source_id
+    if ds_id:
+        stats_cache = await get_data_source_stats(session, ds_id)
+        if stats_cache and stats_cache.ontology_metadata and stats_cache.ontology_metadata != "{}":
+            try:
+                # Assuming the string is already a valid JSON structure from the Pydantic dump
+                return JSONResponse(
+                    content=json.loads(stats_cache.ontology_metadata),
+                    headers={"Cache-Control": "private, max-age=300"},
+                )
+            except Exception:
+                pass
+
     result = await engine.get_ontology_metadata()
     return JSONResponse(
         content=result.model_dump(by_alias=True),
@@ -319,13 +373,30 @@ async def get_ontology_metadata(
 
 @router.get("/metadata/schema")
 async def get_graph_schema(
+    dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """
     Get complete graph schema including entity types, relationship types,
     visual configurations, and hierarchy rules.
     This enables frontend to dynamically load schema from backend.
     """
+    from backend.app.db.repositories.stats_repo import get_data_source_stats
+    import json
+    
+    ds_id = dataSourceId or engine._data_source_id
+    if ds_id:
+        stats_cache = await get_data_source_stats(session, ds_id)
+        if stats_cache and stats_cache.graph_schema and stats_cache.graph_schema != "{}":
+            try:
+                return JSONResponse(
+                    content=json.loads(stats_cache.graph_schema),
+                    headers={"Cache-Control": "private, max-age=300"},
+                )
+            except Exception:
+                pass
+
     result = await engine.get_graph_schema()
     return JSONResponse(
         content=result.model_dump(by_alias=True),
@@ -344,6 +415,34 @@ async def get_aggregated_edges(
     at a higher granularity level (e.g., between datasets instead of columns).
     """
     return await engine.get_aggregated_edges(request)
+
+
+@router.post("/edges/aggregated/materialize")
+async def materialize_aggregated_edges(
+    engine: ContextEngine = Depends(get_context_engine),
+    batch_size: int = Body(1000, embed=True),
+):
+    """
+    Trigger batch materialization of AGGREGATED edges.
+    Scans all lineage edges and creates/updates [:AGGREGATED] relationships
+    between ancestor pairs at equivalent hierarchy levels.
+
+    This should be run after data ingestion or as a periodic maintenance task.
+    """
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+    if not isinstance(engine.provider, FalkorDBProvider):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Materialization only supported for FalkorDB provider"}
+        )
+
+    ontology = await engine.get_ontology_metadata()
+    stats = await engine.provider.materialize_aggregated_edges_batch(
+        batch_size=batch_size,
+        containment_edge_types=list(ontology.containment_edge_types),
+        lineage_edge_types=list(ontology.lineage_edge_types),
+    )
+    return JSONResponse(content=stats)
 
 
 @router.post("/nodes/create", response_model=CreateNodeResult, response_model_by_alias=True)
