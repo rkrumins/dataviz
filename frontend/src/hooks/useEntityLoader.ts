@@ -114,13 +114,17 @@ export function useEntityLoader(): UseEntityLoaderResult {
             })
 
             if (children.length > 0) {
+                const freshNodes = useCanvasStore.getState().nodes
+                const freshEdges = useCanvasStore.getState().edges
+                const currentExistingNodeIds = new Set(freshNodes.map(n => n.id))
+
                 const nodesToAdd: LineageNode[] = []
                 const edgesToAdd: LineageEdge[] = []
                 const newIds = new Set<string>()
 
                 children.forEach(child => {
                     // Check duplicates against store AND current batch
-                    if (!existingNodeIds.has(child.urn) && !newIds.has(child.urn)) {
+                    if (!currentExistingNodeIds.has(child.urn) && !newIds.has(child.urn)) {
                         nodesToAdd.push({
                             id: child.urn,
                             type: 'generic',
@@ -142,7 +146,7 @@ export function useEntityLoader(): UseEntityLoaderResult {
 
                     // Always ensure edge exists
                     const edgeId = `contains-${urn}-${child.urn}`
-                    const edgeExists = edges.some(e => e.id === edgeId) || edgesToAdd.some(e => e.id === edgeId)
+                    const edgeExists = freshEdges.some(e => e.id === edgeId) || edgesToAdd.some(e => e.id === edgeId)
 
                     if (!edgeExists) {
                         // Use ontology-defined containment type if available, else CONTAINS
@@ -194,13 +198,17 @@ export function useEntityLoader(): UseEntityLoaderResult {
                 limit: 50
             })
 
+            // Always get the freshest state right before mutating
+            const freshNodes = useCanvasStore.getState().nodes
+            const freshEdges = useCanvasStore.getState().edges
+
             if (children.length >= 0) {
                 // First, clean up the exact current children of this node to replace them with search results
-                const existingEdgesToRemove = edges.filter(e => e.source === parentId)
+                const existingEdgesToRemove = freshEdges.filter(e => e.source === parentId)
                 const targetNodeIdsToRemove = new Set(existingEdgesToRemove.map(e => e.target))
 
                 // Keep nodes that might be connected to other parents
-                const otherEdges = edges.filter(e => e.source !== parentId)
+                const otherEdges = freshEdges.filter(e => e.source !== parentId)
                 const safeNodesToKeep = new Set(otherEdges.map(e => e.target))
                 const nodeIdsToRemove = Array.from(targetNodeIdsToRemove).filter(id => !safeNodesToKeep.has(id))
                 const edgeIdsToRemove = existingEdgesToRemove.map(e => e.id)
@@ -214,10 +222,10 @@ export function useEntityLoader(): UseEntityLoaderResult {
                     const edgesToAdd: LineageEdge[] = []
 
                     // Re-calculate existing state post-removal
-                    const remainingNodeIds = new Set(nodes.map(n => n.id))
+                    const remainingNodeIds = new Set(freshNodes.map(n => n.id))
                     nodeIdsToRemove.forEach(id => remainingNodeIds.delete(id))
 
-                    const remainingEdges = edges.filter(e => !edgeIdsToRemove.includes(e.id))
+                    const remainingEdges = freshEdges.filter(e => !edgeIdsToRemove.includes(e.id))
                     const newIds = new Set<string>()
 
                     children.forEach(child => {

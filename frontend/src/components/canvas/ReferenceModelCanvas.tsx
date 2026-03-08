@@ -1959,12 +1959,35 @@ const LayerColumn = React.memo(function LayerColumn({
   isLoadingChildren,
   onScroll
 }: LayerColumnProps) {
-  // Local focus state for drilling into subtrees
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
   const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [childSearchQueries, setChildSearchQueries] = useState<Record<string, string>>({})
+  const [activeSearchNodes, setActiveSearchNodes] = useState<Set<string>>(new Set())
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  const toggleSearchNode = useCallback((nodeId: string) => {
+    setActiveSearchNodes(prev => {
+      const next = new Set(prev)
+      if (next.has(nodeId)) {
+        next.delete(nodeId)
+        // Also optionally clear the search query if closed
+        setChildSearchQueries(q => {
+          const newQ = { ...q }
+          delete newQ[nodeId]
+          return newQ
+        })
+      } else {
+        next.add(nodeId)
+      }
+      return next
+    })
+
+    // Auto-expand the node so the user immediately sees the search box drop down
+    if (!activeSearchNodes.has(nodeId) && !expandedNodes.has(nodeId)) {
+      onToggle(nodeId)
+    }
+  }, [activeSearchNodes, expandedNodes, onToggle])
 
   // Build flat tree from hierarchy (visible items only)
   const flatTree = useMemo(() => {
@@ -1990,24 +2013,20 @@ const LayerColumn = React.memo(function LayerColumn({
       if (expandedNodes.has(node.id) && (node.children.length > 0 || (node.data.childCount as number || 0) > 0)) {
         const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || node.children.length
 
-        // Push the inline search box item
-        result.push({
-          node,
-          depth: depth + 1,
-          isLast: node.children.length === 0,
-          parentIsLast: [...parentIsLast, isLast],
-          isSearchBox: true
-        })
+        // Push the inline search box item ONLY if active
+        if (activeSearchNodes.has(node.id)) {
+          result.push({
+            node,
+            depth: depth + 1,
+            isLast: node.children.length === 0,
+            parentIsLast: [...parentIsLast, isLast],
+            isSearchBox: true
+          })
+        }
 
-        // Filter children if there's an active query for this node
+        // Render all existing children dynamically since the server-side search directly controls the contents of `node.children`
         let displayChildren = node.children
         const activeQuery = childSearchQueries[node.id]?.trim().toLowerCase()
-        if (activeQuery) {
-          displayChildren = displayChildren.filter(c =>
-            c.name.toLowerCase().includes(activeQuery) ||
-            c.id.toLowerCase().includes(activeQuery)
-          )
-        }
 
         const hasMore = node.children.length < childCount && !activeQuery // Disable load more if actively searching
 
@@ -2038,7 +2057,7 @@ const LayerColumn = React.memo(function LayerColumn({
     })
 
     return result
-  }, [nodes, expandedNodes, localFocusId])
+  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, childSearchQueries])
 
   // Count total including nested
   const totalCount = useMemo(() => {
@@ -2352,6 +2371,8 @@ const LayerColumn = React.memo(function LayerColumn({
                     onDoubleClick={onDoubleClick}
                     onAddChild={onAddChild}
                     onFocus={handleFocus}
+                    onToggleSearch={toggleSearchNode}
+                    isSearchVisible={activeSearchNodes.has(node.id)}
                     animationDelay={index * 0.02}
                   />
                 )
@@ -2392,6 +2413,8 @@ interface FlatTreeItemProps {
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
   onAddChild?: (parentId: string) => void
   onFocus: (node: HierarchyNode) => void
+  onToggleSearch?: (id: string) => void
+  isSearchVisible?: boolean
   animationDelay?: number
 }
 
@@ -2416,6 +2439,8 @@ const FlatTreeItem = React.memo(function FlatTreeItem({
   onDoubleClick,
   onAddChild,
   onFocus,
+  onToggleSearch,
+  isSearchVisible = false,
   animationDelay = 0
 }: FlatTreeItemProps) {
   const itemRef = useRef<HTMLDivElement>(null)
@@ -2640,6 +2665,25 @@ const FlatTreeItem = React.memo(function FlatTreeItem({
           </button>
         )}
 
+        {/* Search children button */}
+        {hasChildren && onToggleSearch && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleSearch(node.id)
+            }}
+            className={cn(
+              "p-1.5 rounded-lg transition-all duration-200 hover:scale-110 active:scale-95",
+              isSearchVisible
+                ? "bg-amber-500/20 text-amber-400"
+                : "bg-white/[0.06] hover:bg-white/[0.12] text-ink-muted/80 hover:text-ink-muted"
+            )}
+            title="Search children"
+          >
+            <LucideIcons.Search className="w-3 h-3" />
+          </button>
+        )}
+
         {/* Add child button */}
         {entityType?.hierarchy?.canContain && entityType.hierarchy.canContain.length > 0 && onAddChild && (
           <button
@@ -2768,6 +2812,17 @@ function SearchBoxItem({
   useEffect(() => {
     setLocalValue(value)
   }, [value])
+
+  // Debounce effect: trigger search automatically 400ms after user stops typing
+  useEffect(() => {
+    if (localValue === value) return
+
+    const handler = setTimeout(() => {
+      onChange(localValue)
+    }, 400)
+
+    return () => clearTimeout(handler)
+  }, [localValue, value, onChange])
 
   return (
     <motion.div
