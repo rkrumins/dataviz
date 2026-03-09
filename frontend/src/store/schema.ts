@@ -188,45 +188,12 @@ export const useSchemaStore = create<SchemaState>()(
         )
       },
 
-      // Load backend schema and create new workspace schema from it
+      // Load backend schema (ontology only — entity types + relationship types).
+      // Views are loaded separately from the Context Model API.
       loadFromBackend: (backendSchema) => {
         try {
           const entityTypes = backendSchema.entityTypes.map(convertBackendEntityType)
           const relationshipTypes = backendSchema.relationshipTypes.map(convertBackendRelationshipType)
-
-          // Create default view
-          const defaultViewId = generateId('view')
-          const now = new Date().toISOString()
-
-          const defaultView: ViewConfiguration = {
-            id: defaultViewId,
-            name: 'Default View',
-            description: 'Auto-generated default view from backend schema',
-            icon: 'Layout',
-            content: {
-              visibleEntityTypes: entityTypes.map(e => e.id),
-              visibleRelationshipTypes: relationshipTypes.map(r => r.id),
-              defaultDepth: 3,
-              maxDepth: 10,
-              rootEntityTypes: backendSchema.rootEntityTypes,
-            },
-            layout: {
-              type: 'reference',
-              lod: { enabled: true, levels: [] },
-            },
-            filters: {
-              entityTypeFilters: [],
-              fieldFilters: [],
-              searchableFields: ['name', 'description'],
-              quickFilters: [],
-            },
-            entityOverrides: {},
-            isDefault: true,
-            isPublic: true,
-            createdBy: 'system',
-            createdAt: now,
-            updatedAt: now,
-          }
 
           const workspaceSchema: WorkspaceSchema = {
             id: generateId('workspace'),
@@ -234,8 +201,8 @@ export const useSchemaStore = create<SchemaState>()(
             version: backendSchema.version,
             entityTypes,
             relationshipTypes,
-            views: [defaultView],
-            defaultViewId,
+            views: [],  // Views come from the Context Model API
+            defaultViewId: '',
             globalVisuals: {
               theme: 'dark',
               accentColor: '#6366f1',
@@ -249,7 +216,7 @@ export const useSchemaStore = create<SchemaState>()(
 
           set({
             schema: workspaceSchema,
-            activeViewId: defaultViewId,
+            activeViewId: null,
             isLoadingFromBackend: false,
             backendSchemaError: null,
           })
@@ -334,27 +301,12 @@ export const useSchemaStore = create<SchemaState>()(
             mergedRelTypes.push(localRel)
           }
 
-          // Update views to include new entity/relationship types
-          const updatedViews = existing.views.map(view => ({
-            ...view,
-            content: {
-              ...view.content,
-              visibleEntityTypes: [
-                ...new Set([...view.content.visibleEntityTypes, ...backendEntityTypes.map(e => e.id)])
-              ],
-              visibleRelationshipTypes: [
-                ...new Set([...view.content.visibleRelationshipTypes, ...backendRelTypes.map(r => r.id)])
-              ],
-              rootEntityTypes: backendSchema.rootEntityTypes,
-            },
-          }))
-
+          // Views are managed exclusively via the Context Model API — don't touch them here
           set({
             schema: {
               ...existing,
               entityTypes: mergedEntityTypes,
               relationshipTypes: mergedRelTypes,
-              views: updatedViews,
               containmentEdgeTypes: backendSchema.containmentEdgeTypes,
             },
             isLoadingFromBackend: false,

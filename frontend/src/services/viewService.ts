@@ -1,13 +1,13 @@
 /**
- * View Service - API-first CRUD operations for view configurations
+ * View Service — thin wrapper over contextModelService.
  *
- * All persistence goes through the /api/v1/views REST endpoints.
- * The local schema store is updated as a cache after each operation.
+ * Delegates all persistence to the Context Model API (the single source of truth).
+ * Updates the local schema store as a cache after each operation.
  */
 
 import type { ViewConfiguration, ViewLayerConfig, FieldFilter } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
-import { viewsApi, type ViewApiResponse } from './viewsApiService'
+import * as cms from './contextModelService'
 
 // ============================================
 // Types
@@ -22,7 +22,6 @@ export interface CreateViewRequest {
     visibleEntityTypes?: string[]
     visibleRelationshipTypes?: string[]
     fieldFilters?: FieldFilter[]
-    // New fields for first-class views
     workspaceId: string
     dataSourceId?: string
     visibility?: 'private' | 'workspace' | 'enterprise'
@@ -55,9 +54,9 @@ export interface ViewServiceResult<T> {
 // ============================================
 
 /**
- * Build the API config payload from the local request format.
+ * Build the view config blob from the local request format.
  */
-function buildConfig(request: CreateViewRequest | UpdateViewRequest): Record<string, unknown> {
+function buildViewConfig(request: CreateViewRequest | UpdateViewRequest): Record<string, unknown> {
     return {
         icon: request.icon ?? 'Layout',
         content: {
@@ -90,62 +89,29 @@ function buildConfig(request: CreateViewRequest | UpdateViewRequest): Record<str
     }
 }
 
-/**
- * Convert an API response into the local ViewConfiguration shape
- * so the schema store stays consistent.
- */
-function apiResponseToViewConfig(res: ViewApiResponse): ViewConfiguration {
-    const config = (res.config ?? {}) as Record<string, any>
-    return {
-        id: res.id,
-        name: res.name,
-        description: res.description,
-        icon: config.icon ?? 'Layout',
-        content: config.content ?? {
-            visibleEntityTypes: [],
-            visibleRelationshipTypes: [],
-            defaultDepth: 5,
-            maxDepth: 10,
-            rootEntityTypes: ['domain'],
-        },
-        layout: config.layout ?? { type: 'graph', lod: { enabled: false, levels: [] } },
-        filters: config.filters ?? {
-            entityTypeFilters: [],
-            fieldFilters: [],
-            searchableFields: [],
-            quickFilters: [],
-        },
-        entityOverrides: config.entityOverrides ?? {},
-        isDefault: false,
-        isPublic: (res.visibility ?? 'private') !== 'private',
-        createdBy: res.createdBy ?? 'user',
-        createdAt: res.createdAt,
-        updatedAt: res.updatedAt,
-    }
-}
-
 // ============================================
 // View Service Implementation
 // ============================================
 
 class ViewServiceImpl {
     /**
-     * Create a new view via API, then sync to local store.
+     * Create a new view via the Context Model API, then sync to local store.
      */
     async createView(request: CreateViewRequest): Promise<ViewServiceResult<ViewConfiguration>> {
         try {
-            const apiResponse = await viewsApi.create({
+            const result = await cms.createView({
                 name: request.name,
                 description: request.description,
-                viewType: request.layoutType === 'reference' ? 'CANVAS' : 'CANVAS',
-                config: buildConfig(request),
-                workspaceId: request.workspaceId,
-                dataSourceId: request.dataSourceId,
+                layersConfig: request.layers ?? [],
+                instanceAssignments: {},
+                viewType: request.layoutType,
+                config: buildViewConfig(request),
                 visibility: request.visibility ?? 'private',
                 tags: request.tags,
+                workspaceId: request.workspaceId,
             })
 
-            const viewConfig = apiResponseToViewConfig(apiResponse)
+            const viewConfig = cms.contextModelToViewConfig(result)
             useSchemaStore.getState().addView(viewConfig)
 
             return { success: true, data: viewConfig }
@@ -155,38 +121,20 @@ class ViewServiceImpl {
     }
 
     /**
-     * Update an existing view via API, then sync to local store.
+     * Update an existing view, then sync to local store.
      */
     async updateView(id: string, request: UpdateViewRequest): Promise<ViewServiceResult<ViewConfiguration>> {
         try {
-            // Fetch the current view from API to merge with updates
-            const current = await viewsApi.get(id)
-            const currentConfig = (current.config ?? {}) as Record<string, any>
-
-            const mergedConfig = request.layoutType || request.visibleEntityTypes || request.layers || request.fieldFilters
-                ? buildConfig({
-                    ...request,
-                    layoutType: request.layoutType ?? currentConfig.layout?.type ?? 'graph',
-                    visibleEntityTypes: request.visibleEntityTypes ?? currentConfig.content?.visibleEntityTypes ?? [],
-                    visibleRelationshipTypes: request.visibleRelationshipTypes ?? currentConfig.content?.visibleRelationshipTypes ?? [],
-                    layers: request.layers ?? currentConfig.layout?.referenceLayout?.layers ?? [],
-                    fieldFilters: request.fieldFilters ?? currentConfig.filters?.fieldFilters ?? [],
-                    icon: request.icon ?? currentConfig.icon ?? 'Layout',
-                })
-                : current.config
-
-            const apiResponse = await viewsApi.update(id, {
-                name: request.name ?? current.name,
-                description: request.description ?? current.description,
-                viewType: current.viewType,
-                config: mergedConfig as Record<string, unknown>,
-                workspaceId: request.workspaceId ?? current.workspaceId ?? '',
-                dataSourceId: request.dataSourceId ?? current.dataSourceId,
-                visibility: request.visibility ?? current.visibility as 'private' | 'workspace' | 'enterprise',
-                tags: request.tags ?? current.tags,
+            const result = await cms.updateView(id, {
+                name: request.name,
+                ...(request.layoutType && { viewType: request.layoutType }),
+                ...(request.layers && { layersConfig: request.layers }),
+                config: buildViewConfig(request),
+                visibility: request.visibility,
+                tags: request.tags,
             })
 
-            const viewConfig = apiResponseToViewConfig(apiResponse)
+            const viewConfig = cms.contextModelToViewConfig(result)
             useSchemaStore.getState().addOrUpdateView(viewConfig)
 
             return { success: true, data: viewConfig }
@@ -196,11 +144,11 @@ class ViewServiceImpl {
     }
 
     /**
-     * Delete a view via API, then remove from local store.
+     * Delete a view, then remove from local store.
      */
     async deleteView(id: string): Promise<ViewServiceResult<void>> {
         try {
-            await viewsApi.delete(id)
+            await cms.deleteView(id)
             useSchemaStore.getState().removeView(id)
             return { success: true }
         } catch (error) {
@@ -209,20 +157,12 @@ class ViewServiceImpl {
     }
 
     /**
-     * Get a single view by ID — try local store first, fall back to API.
+     * Get a single view by ID from the API.
      */
     async getView(id: string): Promise<ViewServiceResult<ViewConfiguration>> {
         try {
-            // Check local store first
-            const schema = useSchemaStore.getState().schema
-            const localView = schema?.views.find(v => v.id === id)
-            if (localView) {
-                return { success: true, data: localView }
-            }
-
-            // Fall back to API
-            const apiResponse = await viewsApi.get(id)
-            const viewConfig = apiResponseToViewConfig(apiResponse)
+            const result = await cms.getView(id)
+            const viewConfig = cms.contextModelToViewConfig(result)
             return { success: true, data: viewConfig }
         } catch (error) {
             return { success: false, error: (error as Error).message }
@@ -230,28 +170,28 @@ class ViewServiceImpl {
     }
 
     /**
-     * List all views from local store.
+     * List all views from the API.
      */
-    async listViews(): Promise<ViewServiceResult<ViewConfiguration[]>> {
+    async listViews(params?: cms.ViewListParams): Promise<ViewServiceResult<ViewConfiguration[]>> {
         try {
-            const schema = useSchemaStore.getState().schema
-            return { success: true, data: schema?.views ?? [] }
+            const results = await cms.listViews(params)
+            return { success: true, data: results.map(cms.contextModelToViewConfig) }
         } catch (error) {
             return { success: false, error: (error as Error).message }
         }
     }
 
     /**
-     * Duplicate a view via API.
+     * Duplicate a view.
      */
     async duplicateView(id: string, workspaceId: string): Promise<ViewServiceResult<ViewConfiguration>> {
         try {
-            const result = await this.getView(id)
-            if (!result.success || !result.data) {
+            const getResult = await this.getView(id)
+            if (!getResult.success || !getResult.data) {
                 return { success: false, error: 'View not found' }
             }
 
-            const sourceView = result.data
+            const sourceView = getResult.data
             return this.createView({
                 name: `${sourceView.name} (Copy)`,
                 description: sourceView.description,

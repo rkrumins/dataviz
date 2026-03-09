@@ -18,7 +18,6 @@ import {
 } from 'lucide-react'
 import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
-import { useViewsStore } from '@/store/views'
 import { useSchemaStore } from '@/store/schema'
 import { cn } from '@/lib/utils'
 
@@ -32,15 +31,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate()
   const { toggleMode, mode } = usePersonaStore()
   const { setTheme, theme, toggleSidebar } = usePreferencesStore()
-  const views = useViewsStore((s) => s.views)
-  const recentViewIds = useViewsStore((s) => s.recentViewIds)
   const schemaViews = useSchemaStore((s) => s.schema?.views ?? [])
-  
-  // Compute recent views client-side
-  const recentViews = recentViewIds
-    .slice(0, 5)
-    .map((id) => views.find((v) => v.id === id))
-    .filter((v): v is typeof views[0] => v !== undefined)
 
   // Keyboard shortcut to open
   useEffect(() => {
@@ -205,21 +196,6 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                     icon={Eye}
                     label={view.name}
                     description={view.description ?? `${view.layout?.type ?? 'graph'} view`}
-                    onSelect={() => handleSelect(`go-to-view:${view.id}`)}
-                  />
-                ))}
-              </Command.Group>
-            )}
-
-            {/* Recent Views */}
-            {recentViews.length > 0 && (
-              <Command.Group heading="Recent Views">
-                {recentViews.map((view) => (
-                  <CommandItem
-                    key={view.id}
-                    icon={Bookmark}
-                    label={view.name}
-                    description={view.lensId}
                     onSelect={() => handleSelect(`go-to-view:${view.id}`)}
                   />
                 ))}

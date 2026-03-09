@@ -3,19 +3,21 @@
  * CRUD interface for managing views owned by a workspace.
  */
 import { useEffect, useState, useCallback } from 'react'
-import { useParams, Link, useNavigate } from 'react-router-dom'
-import { Plus, Trash2, Eye, Globe, Lock, Users, Heart, Pencil, MoreHorizontal } from 'lucide-react'
-import { viewsApi, type ViewApiResponse } from '@/services/viewsApiService'
+import { useParams, Link } from 'react-router-dom'
+import { Plus, Trash2, Eye, Globe, Lock, Users, Heart, Pencil } from 'lucide-react'
+import {
+  listViews, deleteView, updateViewVisibility,
+  type ContextModel,
+} from '@/services/contextModelService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
 
 export function WorkspaceViewsManager() {
   const { workspaceId } = useParams<{ workspaceId: string }>()
-  const navigate = useNavigate()
   const { activeWorkspaceId, setActiveWorkspace, workspaces } = useWorkspacesStore()
   const { openViewEditor } = useViewEditorModal()
 
-  const [views, setViews] = useState<ViewApiResponse[]>([])
+  const [views, setViews] = useState<ContextModel[]>([])
   const [loading, setLoading] = useState(true)
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
 
@@ -32,7 +34,7 @@ export function WorkspaceViewsManager() {
     if (!workspaceId) return
     setLoading(true)
     try {
-      const data = await viewsApi.list({ workspaceId })
+      const data = await listViews({ workspaceId })
       setViews(data)
     } catch (err) {
       console.error('[WorkspaceViewsManager] Failed to load views:', err)
@@ -45,7 +47,7 @@ export function WorkspaceViewsManager() {
 
   const handleDelete = async (viewId: string) => {
     try {
-      await viewsApi.delete(viewId)
+      await deleteView(viewId)
       setDeleteConfirm(null)
       fetchViews()
     } catch (err) {
@@ -55,7 +57,7 @@ export function WorkspaceViewsManager() {
 
   const handleVisibilityChange = async (viewId: string, visibility: 'private' | 'workspace' | 'enterprise') => {
     try {
-      await viewsApi.updateVisibility(viewId, visibility)
+      await updateViewVisibility(viewId, visibility)
       fetchViews()
     } catch (err) {
       console.error('Failed to update visibility:', err)

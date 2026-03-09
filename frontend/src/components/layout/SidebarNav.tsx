@@ -280,7 +280,7 @@ export function SidebarNav() {
       case 'explore': navigate(activeWorkspaceId ? `/workspaces/${activeWorkspaceId}` : '/dashboard'); break
       case 'lenses': navigate(activeWorkspaceId ? `/workspaces/${activeWorkspaceId}` : '/dashboard'); break
       case 'schema': navigate('/schema'); break
-      case 'admin': navigate('/admin/data-sources'); break
+      case 'admin': navigate('/admin/overview'); break
     }
   }
 
@@ -302,8 +302,8 @@ export function SidebarNav() {
       <nav className="flex-1 flex flex-col overflow-y-auto custom-scrollbar pb-3">
         <EnvironmentSwitcher
           collapsed={sidebarCollapsed}
-          onManageWorkspaces={() => navigate('/admin/data-sources')}
-          onManageConnections={() => navigate('/admin/data-sources/providers')}
+          onManageWorkspaces={() => navigate('/admin/registry?tab=workspaces')}
+          onManageConnections={() => navigate('/admin/registry?tab=connections')}
         />
         <div className="px-3 space-y-1">
           {mainNavItems.map((item) => (

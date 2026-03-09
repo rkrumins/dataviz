@@ -5,11 +5,14 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { Search, Heart, Eye, Globe, Lock, Users, Star, LayoutGrid, TrendingUp } from 'lucide-react'
-import { viewsApi, type ViewApiResponse } from '@/services/viewsApiService'
+import {
+  listViews, listPopularViews, favouriteView, unfavouriteView,
+  type ContextModel,
+} from '@/services/contextModelService'
 
 export function ViewsGallery() {
-  const [views, setViews] = useState<ViewApiResponse[]>([])
-  const [popularViews, setPopularViews] = useState<ViewApiResponse[]>([])
+  const [views, setViews] = useState<ContextModel[]>([])
+  const [popularViews, setPopularViews] = useState<ContextModel[]>([])
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [activeFilter, setActiveFilter] = useState<string | null>(null)
@@ -18,11 +21,11 @@ export function ViewsGallery() {
     setLoading(true)
     try {
       const [allViews, popular] = await Promise.all([
-        viewsApi.list({
+        listViews({
           search: search || undefined,
           visibility: activeFilter || undefined,
         }),
-        viewsApi.listPopular(10),
+        listPopularViews(10),
       ])
       setViews(allViews)
       setPopularViews(popular)
@@ -40,11 +43,10 @@ export function ViewsGallery() {
   const toggleFavourite = async (viewId: string, isFavourited: boolean) => {
     try {
       if (isFavourited) {
-        await viewsApi.unfavourite(viewId)
+        await unfavouriteView(viewId)
       } else {
-        await viewsApi.favourite(viewId)
+        await favouriteView(viewId)
       }
-      // Refresh
       fetchViews()
     } catch (err) {
       console.error('Failed to toggle favourite:', err)
@@ -158,7 +160,7 @@ export function ViewsGallery() {
 }
 
 function ViewCard({ view, onToggleFavourite }: {
-  view: ViewApiResponse
+  view: ContextModel
   onToggleFavourite: () => void
 }) {
   const visibilityIcon = {

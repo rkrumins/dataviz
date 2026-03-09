@@ -22,6 +22,8 @@ import { useSchemaStore } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { defaultWorkspaceSchema } from '@/lib/default-schema'
 import { useOntologyMetadata, getCachedOntologyMetadata } from '@/services/ontologyService'
+import { listContextModels, contextModelToViewConfig } from '@/services/contextModelService'
+import { useWorkspacesStore } from '@/store/workspaces'
 import { useRouteSync } from '@/hooks/useRouteSync'
 import { cn } from '@/lib/utils'
 
@@ -103,6 +105,25 @@ export function AppLayout() {
     }
     loadBackendSchema()
   }, [isAuthenticated, hasLoadedBackendSchema, isLoadingBackendSchema, provider, schema, mergeBackendSchema, loadFromBackend, loadSchema])
+
+  // Load views from the Context Model API into the schema store cache
+  const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
+  useEffect(() => {
+    if (!isAuthenticated || !hasLoadedBackendSchema || !activeWorkspaceId) return
+
+    const loadViews = async () => {
+      try {
+        const models = await listContextModels(activeWorkspaceId)
+        const { addOrUpdateView } = useSchemaStore.getState()
+        for (const cm of models) {
+          addOrUpdateView(contextModelToViewConfig(cm))
+        }
+      } catch (err) {
+        console.error('[AppLayout] Failed to load views from API:', err)
+      }
+    }
+    loadViews()
+  }, [isAuthenticated, hasLoadedBackendSchema, activeWorkspaceId])
 
   // Initialize graph data
   useEffect(() => {

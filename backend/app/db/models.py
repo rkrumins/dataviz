@@ -57,10 +57,6 @@ class GraphConnectionORM(Base):
         "AssignmentRuleSetORM", back_populates="connection",
         cascade="all, delete-orphan",
     )
-    saved_views = relationship(
-        "SavedViewORM", back_populates="connection",
-        cascade="all, delete-orphan",
-    )
 
     __table_args__ = (
         # Only one row may have is_primary=True (partial unique index).
@@ -150,62 +146,6 @@ class AssignmentRuleSetORM(Base):
 
 
 # ------------------------------------------------------------------ #
-# saved_views                                                           #
-# ------------------------------------------------------------------ #
-
-class SavedViewORM(Base):
-    __tablename__ = "saved_views"
-
-    id = Column(Text, primary_key=True, default=lambda: f"view_{uuid.uuid4().hex[:12]}")
-    connection_id = Column(
-        Text,
-        ForeignKey("graph_connections.id", ondelete="CASCADE"),
-        nullable=True,  # nullable during migration
-    )
-    workspace_id = Column(
-        Text,
-        ForeignKey("workspaces.id", ondelete="CASCADE"),
-        nullable=True,  # nullable during migration
-    )
-    data_source_id = Column(
-        Text,
-        ForeignKey("workspace_data_sources.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-    name = Column(Text, nullable=False)
-    description = Column(Text, nullable=True)
-    view_type = Column(Text, nullable=False, default="canvas")  # canvas | reference_model | scope
-    config = Column(Text, nullable=False, default="{}")         # JSON
-    scope_filter = Column(Text, nullable=True)                  # JSON
-    visibility = Column(Text, nullable=False, default="private")  # private | workspace | enterprise
-    created_by = Column(Text, nullable=True)                    # user identifier (RBAC-ready)
-    tags = Column(Text, nullable=True)                          # JSON array of strings
-    is_pinned = Column(Boolean, nullable=False, default=False)
-    created_at = Column(Text, nullable=False, default=_now)
-    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
-
-    connection = relationship("GraphConnectionORM", back_populates="saved_views")
-    workspace = relationship(
-        "WorkspaceORM", back_populates="saved_views",
-        foreign_keys=[workspace_id],
-    )
-    favourites = relationship(
-        "ViewFavouriteORM", back_populates="view",
-        cascade="all, delete-orphan",
-    )
-
-    __table_args__ = (
-        Index("idx_views_connection", "connection_id"),
-        Index("idx_views_workspace", "workspace_id"),
-        Index("idx_views_data_source", "data_source_id"),
-        Index("idx_views_visibility", "visibility"),
-    )
-
-    def __repr__(self) -> str:
-        return f"<SavedView id={self.id!r} name={self.name!r} type={self.view_type!r}>"
-
-
-# ------------------------------------------------------------------ #
 # view_favourites                                                      #
 # ------------------------------------------------------------------ #
 
@@ -215,13 +155,13 @@ class ViewFavouriteORM(Base):
     id = Column(Text, primary_key=True, default=lambda: f"fav_{uuid.uuid4().hex[:12]}")
     view_id = Column(
         Text,
-        ForeignKey("saved_views.id", ondelete="CASCADE"),
+        ForeignKey("context_models.id", ondelete="CASCADE"),
         nullable=False,
     )
     user_id = Column(Text, nullable=False)
     created_at = Column(Text, nullable=False, default=_now)
 
-    view = relationship("SavedViewORM", back_populates="favourites")
+    context_model = relationship("ContextModelORM", back_populates="favourites")
 
     __table_args__ = (
         UniqueConstraint("view_id", "user_id", name="uq_view_user_favourite"),
@@ -347,10 +287,6 @@ class WorkspaceORM(Base):
         "WorkspaceDataSourceORM", back_populates="workspace",
         cascade="all, delete-orphan",
     )
-    saved_views = relationship(
-        "SavedViewORM", back_populates="workspace",
-        foreign_keys="SavedViewORM.workspace_id",
-    )
     assignment_rule_sets = relationship(
         "AssignmentRuleSetORM", back_populates="workspace",
         foreign_keys="AssignmentRuleSetORM.workspace_id",
@@ -440,11 +376,17 @@ class ContextModelORM(Base):
     )
     is_template = Column(Boolean, nullable=False, default=False)
     category = Column(Text, nullable=True)                           # e.g. "data-engineering"
-    view_type = Column(Text, nullable=True, default="canvas")        # canvas | reference_model | scope
+    view_type = Column(Text, nullable=True)                           # graph | hierarchy | reference
     layers_config = Column(Text, nullable=False, default="[]")       # JSON: ViewLayerConfig[]
     scope_filter = Column(Text, nullable=True)                       # JSON: ScopeFilterConfig
     instance_assignments = Column(Text, nullable=False, default="{}") # JSON: entityId→assignment
     scope_edge_config = Column(Text, nullable=True)                  # JSON: ScopeEdgeConfig
+    # View metadata (sharing & discovery)
+    config = Column(Text, nullable=True)                             # JSON: {icon, content, filters, entityOverrides, viewport}
+    visibility = Column(Text, nullable=False, default="private")     # private | workspace | enterprise
+    created_by = Column(Text, nullable=True)                         # user identifier (RBAC-ready)
+    tags = Column(Text, nullable=True)                               # JSON array of strings
+    is_pinned = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
@@ -454,10 +396,15 @@ class ContextModelORM(Base):
         "WorkspaceORM",
         foreign_keys=[workspace_id],
     )
+    favourites = relationship(
+        "ViewFavouriteORM", back_populates="context_model",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         Index("idx_cm_workspace", "workspace_id"),
         Index("idx_cm_template", "is_template"),
+        Index("idx_cm_visibility", "visibility"),
     )
 
 

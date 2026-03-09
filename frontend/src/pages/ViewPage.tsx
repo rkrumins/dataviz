@@ -1,7 +1,13 @@
 /**
- * Deep-link page: /views/:viewId
- * Loads a specific view by ID from the API first, then falls back
- * to the local schema store for views not yet persisted to the backend.
+ * View page: /views/:viewId
+ *
+ * Resolution order:
+ * 1. Schema store (local cache — includes API-loaded views AND the default view)
+ * 2. Context Model API (for deep-links / shared URLs not yet in the store)
+ * 3. 404
+ *
+ * This ensures local-only views (e.g. the auto-generated default) and
+ * API-backed views (cm_ IDs) both work seamlessly.
  */
 import { useEffect, useState, useRef } from 'react'
 import { useParams } from 'react-router-dom'
@@ -9,94 +15,67 @@ import { CanvasRouter } from '@/components/canvas/CanvasRouter'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
-import { viewsApi, type ViewApiResponse } from '@/services/viewsApiService'
+import { getView, contextModelToViewConfig } from '@/services/contextModelService'
+import type { ViewConfiguration } from '@/types/schema'
 
 export function ViewPage() {
   const { viewId } = useParams<{ viewId: string }>()
-  const [view, setView] = useState<ViewApiResponse | null>(null)
-  const [localView, setLocalView] = useState<boolean>(false)
+  const [resolvedView, setResolvedView] = useState<ViewConfiguration | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const appliedRef = useRef<string | null>(null)
 
   const { activeWorkspaceId, setActiveWorkspace } = useWorkspacesStore()
-  const { setActiveView, schema } = useSchemaStore()
+  const { setActiveView } = useSchemaStore()
   const { setViewport } = useCanvasStore()
 
-  // Fetch view data — try API first, fall back to schema store
+  // Resolve the view: schema store first, then API
   useEffect(() => {
     if (!viewId) return
 
-    const fetchView = async () => {
-      setLoading(true)
-      setError(null)
-      setLocalView(false)
+    // Reset state on view change
+    setLoading(true)
+    setError(null)
+    appliedRef.current = null
 
+    // 1. Check schema store (local cache)
+    const localView = useSchemaStore.getState().schema?.views.find(v => v.id === viewId)
+    if (localView) {
+      setResolvedView(localView)
+      setActiveView(viewId)
+      setLoading(false)
+      return
+    }
+
+    // 2. Not in local store — fetch from API (deep-link / shared URL)
+    const fetchFromApi = async () => {
       try {
-        const data = await viewsApi.get(viewId)
-        setView(data)
+        const data = await getView(viewId)
 
-        // Set the correct workspace if different from active
+        // Switch workspace if needed
         if (data.workspaceId && data.workspaceId !== activeWorkspaceId) {
           setActiveWorkspace(data.workspaceId)
         }
-      } catch {
-        // API failed — fall back to local schema store
-        const schemaView = schema?.views.find(v => v.id === viewId)
-        if (schemaView) {
-          // Found in local store — activate it directly
-          setActiveView(viewId)
-          setLocalView(true)
-          setView({
-            id: schemaView.id,
-            name: schemaView.name,
-            description: schemaView.description,
-            viewType: schemaView.layout?.type ?? 'graph',
-            config: {
-              content: schemaView.content,
-              layout: schemaView.layout,
-              filters: schemaView.filters,
-              entityOverrides: schemaView.entityOverrides,
-              icon: schemaView.icon,
-            },
-            visibility: schemaView.isPublic ? 'enterprise' : 'private',
-            isPinned: false,
-            favouriteCount: 0,
-            isFavourited: false,
-            createdAt: schemaView.createdAt ?? new Date().toISOString(),
-            updatedAt: schemaView.updatedAt ?? new Date().toISOString(),
-          })
-        } else {
-          setError('View not found')
+
+        // Convert and add to schema store cache
+        const viewConfig = contextModelToViewConfig(data)
+        useSchemaStore.getState().addOrUpdateView(viewConfig)
+        setActiveView(viewId)
+        setResolvedView(viewConfig)
+
+        // Apply viewport if present
+        if (data.config?.viewport) {
+          setViewport(data.config.viewport)
         }
+      } catch {
+        setError('View not found')
       } finally {
         setLoading(false)
       }
     }
 
-    fetchView()
+    fetchFromApi()
   }, [viewId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Apply view config to canvas once loaded (only once per view)
-  useEffect(() => {
-    if (!view || appliedRef.current === view.id) return
-    appliedRef.current = view.id
-
-    // Apply view config to stores
-    if (view.config) {
-      const config = view.config as Record<string, any>
-
-      // Apply viewport if present
-      if (config.viewport) {
-        setViewport(config.viewport)
-      }
-
-      // Set as the active view in schema store (unless already set for local view)
-      if (!localView) {
-        setActiveView(view.id)
-      }
-    }
-  }, [view, localView, setActiveView, setViewport])
 
   if (loading) {
     return (
@@ -128,22 +107,12 @@ export function ViewPage() {
 
   return (
     <div className="absolute inset-0">
-      {view && (
+      {resolvedView && (
         <div className="absolute top-2 left-2 z-20 glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2">
-          <span className="text-xs font-medium text-ink-primary">{view.name}</span>
-          {view.workspaceName && (
-            <>
-              <span className="text-ink-faint">/</span>
-              <span className="text-xs text-ink-secondary">{view.workspaceName}</span>
-            </>
-          )}
-          {view.visibility !== 'private' && (
-            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-              view.visibility === 'enterprise'
-                ? 'bg-green-500/20 text-green-400'
-                : 'bg-blue-500/20 text-blue-400'
-            }`}>
-              {view.visibility}
+          <span className="text-xs font-medium text-ink-primary">{resolvedView.name}</span>
+          {resolvedView.isPublic && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-500/20 text-green-400">
+              shared
             </span>
           )}
         </div>

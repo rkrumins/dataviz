@@ -6,7 +6,7 @@ import { useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Link2, Check, Lock, Users, Globe } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { viewsApi } from '@/services/viewsApiService'
+import { updateViewVisibility } from '@/services/contextModelService'
 
 interface ShareViewDialogProps {
     viewId: string
@@ -62,7 +62,7 @@ export function ShareViewDialog({
         setVisibility(newVisibility)
         setSaving(true)
         try {
-            await viewsApi.updateVisibility(viewId, newVisibility)
+            await updateViewVisibility(viewId, newVisibility)
             onVisibilityChange?.(newVisibility)
         } catch {
             // Revert on error
