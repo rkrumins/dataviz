@@ -272,6 +272,7 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                     visibleRelationshipTypes: formData.visibleRelationshipTypes,
                     fieldFilters,
                     workspaceId: activeWorkspaceId ?? '',
+                    contextModelId: linkedContextModelId ?? undefined,
                     visibility: formData.visibility,
                     tags: formData.tags.length > 0 ? formData.tags : undefined,
                 })

@@ -7,8 +7,8 @@ import { useParams, Link } from 'react-router-dom'
 import { Plus, Trash2, Eye, Globe, Lock, Users, Heart, Pencil } from 'lucide-react'
 import {
   listViews, deleteView, updateViewVisibility,
-  type ContextModel,
-} from '@/services/contextModelService'
+  type View,
+} from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
 
@@ -17,7 +17,7 @@ export function WorkspaceViewsManager() {
   const { activeWorkspaceId, setActiveWorkspace, workspaces } = useWorkspacesStore()
   const { openViewEditor } = useViewEditorModal()
 
-  const [views, setViews] = useState<ContextModel[]>([])
+  const [views, setViews] = useState<View[]>([])
   const [loading, setLoading] = useState(true)
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
 

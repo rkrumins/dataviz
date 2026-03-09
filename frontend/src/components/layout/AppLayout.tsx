@@ -22,7 +22,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { defaultWorkspaceSchema } from '@/lib/default-schema'
 import { useOntologyMetadata, getCachedOntologyMetadata } from '@/services/ontologyService'
-import { listContextModels, contextModelToViewConfig } from '@/services/contextModelService'
+import { listViews, viewToViewConfig } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useRouteSync } from '@/hooks/useRouteSync'
 import { cn } from '@/lib/utils'
@@ -113,10 +113,10 @@ export function AppLayout() {
 
     const loadViews = async () => {
       try {
-        const models = await listContextModels(activeWorkspaceId)
+        const views = await listViews({ workspaceId: activeWorkspaceId })
         const { addOrUpdateView } = useSchemaStore.getState()
-        for (const cm of models) {
-          addOrUpdateView(contextModelToViewConfig(cm))
+        for (const v of views) {
+          addOrUpdateView(viewToViewConfig(v))
         }
       } catch (err) {
         console.error('[AppLayout] Failed to load views from API:', err)

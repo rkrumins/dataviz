@@ -1,13 +1,13 @@
 /**
- * View Service — thin wrapper over contextModelService.
+ * View Service — thin wrapper over viewApiService.
  *
- * Delegates all persistence to the Context Model API (the single source of truth).
+ * Delegates all persistence to the View API (de-coupled from Context Models).
  * Updates the local schema store as a cache after each operation.
  */
 
 import type { ViewConfiguration, ViewLayerConfig, FieldFilter } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
-import * as cms from './contextModelService'
+import * as viewApi from './viewApiService'
 
 // ============================================
 // Types
@@ -24,6 +24,7 @@ export interface CreateViewRequest {
     fieldFilters?: FieldFilter[]
     workspaceId: string
     dataSourceId?: string
+    contextModelId?: string
     visibility?: 'private' | 'workspace' | 'enterprise'
     tags?: string[]
 }
@@ -37,8 +38,7 @@ export interface UpdateViewRequest {
     visibleEntityTypes?: string[]
     visibleRelationshipTypes?: string[]
     fieldFilters?: FieldFilter[]
-    workspaceId?: string
-    dataSourceId?: string
+    contextModelId?: string
     visibility?: 'private' | 'workspace' | 'enterprise'
     tags?: string[]
 }
@@ -95,23 +95,23 @@ function buildViewConfig(request: CreateViewRequest | UpdateViewRequest): Record
 
 class ViewServiceImpl {
     /**
-     * Create a new view via the Context Model API, then sync to local store.
+     * Create a new view via the View API, then sync to local store.
      */
     async createView(request: CreateViewRequest): Promise<ViewServiceResult<ViewConfiguration>> {
         try {
-            const result = await cms.createView({
+            const result = await viewApi.createView({
                 name: request.name,
                 description: request.description,
-                layersConfig: request.layers ?? [],
-                instanceAssignments: {},
+                contextModelId: request.contextModelId,
+                workspaceId: request.workspaceId,
+                dataSourceId: request.dataSourceId,
                 viewType: request.layoutType,
                 config: buildViewConfig(request),
                 visibility: request.visibility ?? 'private',
                 tags: request.tags,
-                workspaceId: request.workspaceId,
             })
 
-            const viewConfig = cms.contextModelToViewConfig(result)
+            const viewConfig = viewApi.viewToViewConfig(result)
             useSchemaStore.getState().addView(viewConfig)
 
             return { success: true, data: viewConfig }
@@ -125,16 +125,16 @@ class ViewServiceImpl {
      */
     async updateView(id: string, request: UpdateViewRequest): Promise<ViewServiceResult<ViewConfiguration>> {
         try {
-            const result = await cms.updateView(id, {
+            const result = await viewApi.updateView(id, {
                 name: request.name,
+                contextModelId: request.contextModelId,
                 ...(request.layoutType && { viewType: request.layoutType }),
-                ...(request.layers && { layersConfig: request.layers }),
                 config: buildViewConfig(request),
                 visibility: request.visibility,
                 tags: request.tags,
             })
 
-            const viewConfig = cms.contextModelToViewConfig(result)
+            const viewConfig = viewApi.viewToViewConfig(result)
             useSchemaStore.getState().addOrUpdateView(viewConfig)
 
             return { success: true, data: viewConfig }
@@ -148,7 +148,7 @@ class ViewServiceImpl {
      */
     async deleteView(id: string): Promise<ViewServiceResult<void>> {
         try {
-            await cms.deleteView(id)
+            await viewApi.deleteView(id)
             useSchemaStore.getState().removeView(id)
             return { success: true }
         } catch (error) {
@@ -161,8 +161,8 @@ class ViewServiceImpl {
      */
     async getView(id: string): Promise<ViewServiceResult<ViewConfiguration>> {
         try {
-            const result = await cms.getView(id)
-            const viewConfig = cms.contextModelToViewConfig(result)
+            const result = await viewApi.getView(id)
+            const viewConfig = viewApi.viewToViewConfig(result)
             return { success: true, data: viewConfig }
         } catch (error) {
             return { success: false, error: (error as Error).message }
@@ -172,10 +172,10 @@ class ViewServiceImpl {
     /**
      * List all views from the API.
      */
-    async listViews(params?: cms.ViewListParams): Promise<ViewServiceResult<ViewConfiguration[]>> {
+    async listViews(params?: viewApi.ViewListParams): Promise<ViewServiceResult<ViewConfiguration[]>> {
         try {
-            const results = await cms.listViews(params)
-            return { success: true, data: results.map(cms.contextModelToViewConfig) }
+            const results = await viewApi.listViews(params)
+            return { success: true, data: results.map(viewApi.viewToViewConfig) }
         } catch (error) {
             return { success: false, error: (error as Error).message }
         }

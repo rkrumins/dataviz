@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from .endpoints import (
     graph, assignments, providers, blueprints, workspaces,
-    assets, context_models, catalog,
+    assets, context_models, catalog, views,
 )
 
 api_router = APIRouter()
@@ -26,7 +26,7 @@ api_router.include_router(
 
 # ── Top-level views (first-class, cross-workspace) ─────────────────
 api_router.include_router(
-    context_models.view_router, prefix="/views", tags=["views"],
+    views.router, prefix="/views", tags=["views"],
 )
 
 # ── Workspace-scoped data routers ───────────────────────────────────

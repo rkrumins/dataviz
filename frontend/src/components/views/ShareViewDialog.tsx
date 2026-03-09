@@ -6,7 +6,7 @@ import { useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Link2, Check, Lock, Users, Globe } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { updateViewVisibility } from '@/services/contextModelService'
+import { updateViewVisibility } from '@/services/viewApiService'
 
 interface ShareViewDialogProps {
     viewId: string

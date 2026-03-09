@@ -15,7 +15,7 @@ import { CanvasRouter } from '@/components/canvas/CanvasRouter'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
-import { getView, contextModelToViewConfig } from '@/services/contextModelService'
+import { getView, viewToViewConfig } from '@/services/viewApiService'
 import type { ViewConfiguration } from '@/types/schema'
 
 export function ViewPage() {
@@ -58,7 +58,7 @@ export function ViewPage() {
         }
 
         // Convert and add to schema store cache
-        const viewConfig = contextModelToViewConfig(data)
+        const viewConfig = viewToViewConfig(data)
         useSchemaStore.getState().addOrUpdateView(viewConfig)
         setActiveView(viewId)
         setResolvedView(viewConfig)

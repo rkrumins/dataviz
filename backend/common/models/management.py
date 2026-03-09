@@ -392,13 +392,6 @@ class ContextModelCreateRequest(BaseModel):
     scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
     instance_assignments: Dict[str, Any] = Field(default_factory=dict, alias="instanceAssignments")
     scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
-    # View metadata
-    view_type: Optional[str] = Field(None, alias="viewType")
-    config: Optional[Dict[str, Any]] = None
-    visibility: str = "private"
-    tags: Optional[List[str]] = None
-    is_pinned: bool = Field(False, alias="isPinned")
-    workspace_id: Optional[str] = Field(None, alias="workspaceId")
 
     class Config:
         populate_by_name = True
@@ -411,12 +404,6 @@ class ContextModelUpdateRequest(BaseModel):
     scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
     instance_assignments: Optional[Dict[str, Any]] = Field(None, alias="instanceAssignments")
     scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
-    # View metadata
-    view_type: Optional[str] = Field(None, alias="viewType")
-    config: Optional[Dict[str, Any]] = None
-    visibility: Optional[str] = None
-    tags: Optional[List[str]] = None
-    is_pinned: Optional[bool] = Field(None, alias="isPinned")
 
     class Config:
         populate_by_name = True
@@ -435,16 +422,6 @@ class ContextModelResponse(BaseModel):
     instance_assignments: Dict[str, Any] = Field(default_factory=dict, alias="instanceAssignments")
     scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
     is_active: bool = Field(alias="isActive")
-    # View metadata
-    view_type: Optional[str] = Field(None, alias="viewType")
-    config: Optional[Dict[str, Any]] = None
-    visibility: str = "private"
-    created_by: Optional[str] = Field(None, alias="createdBy")
-    tags: Optional[List[str]] = None
-    is_pinned: bool = Field(False, alias="isPinned")
-    favourite_count: int = Field(0, alias="favouriteCount")
-    is_favourited: bool = Field(False, alias="isFavourited")
-    workspace_name: Optional[str] = Field(None, alias="workspaceName")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -455,6 +432,64 @@ class ContextModelResponse(BaseModel):
 class InstantiateTemplateRequest(BaseModel):
     template_id: str = Field(alias="templateId")
     name: str
+
+    class Config:
+        populate_by_name = True
+
+
+# ============================================
+# View Models (visual rendering of context models)
+# ============================================
+
+class ViewCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    context_model_id: Optional[str] = Field(None, alias="contextModelId")
+    workspace_id: str = Field(alias="workspaceId")
+    data_source_id: Optional[str] = Field(None, alias="dataSourceId")
+    view_type: str = Field("graph", alias="viewType")
+    config: Dict[str, Any] = Field(default_factory=dict)
+    visibility: str = "private"
+    tags: Optional[List[str]] = None
+    is_pinned: bool = Field(False, alias="isPinned")
+
+    class Config:
+        populate_by_name = True
+
+
+class ViewUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    context_model_id: Optional[str] = Field(None, alias="contextModelId")
+    view_type: Optional[str] = Field(None, alias="viewType")
+    config: Optional[Dict[str, Any]] = None
+    visibility: Optional[str] = None
+    tags: Optional[List[str]] = None
+    is_pinned: Optional[bool] = Field(None, alias="isPinned")
+
+    class Config:
+        populate_by_name = True
+
+
+class ViewResponse(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    context_model_id: Optional[str] = Field(None, alias="contextModelId")
+    context_model_name: Optional[str] = Field(None, alias="contextModelName")
+    workspace_id: str = Field(alias="workspaceId")
+    workspace_name: Optional[str] = Field(None, alias="workspaceName")
+    data_source_id: Optional[str] = Field(None, alias="dataSourceId")
+    view_type: str = Field(alias="viewType")
+    config: Dict[str, Any] = Field(default_factory=dict)
+    visibility: str = "private"
+    created_by: Optional[str] = Field(None, alias="createdBy")
+    tags: Optional[List[str]] = None
+    is_pinned: bool = Field(False, alias="isPinned")
+    favourite_count: int = Field(0, alias="favouriteCount")
+    is_favourited: bool = Field(False, alias="isFavourited")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
 
     class Config:
         populate_by_name = True

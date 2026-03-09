@@ -5,6 +5,7 @@ import { ViewPage } from '@/pages/ViewPage'
 import { ViewsGallery } from '@/pages/ViewsGallery'
 import { WorkspaceView } from '@/pages/WorkspaceView'
 import { WorkspaceViewsManager } from '@/pages/WorkspaceViewsManager'
+import { ExplorerPage } from '@/pages/ExplorerPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 import { AdminPage } from '@/pages/AdminPage'
 import { AdminOverview } from '@/components/admin/AdminOverview'
@@ -18,6 +19,7 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: 'dashboard', element: <Dashboard /> },
+      { path: 'explorer', element: <ExplorerPage /> },
       { path: 'views', element: <ViewsGallery /> },
       { path: 'views/:viewId', element: <ViewPage /> },
       { path: 'workspaces/:workspaceId', element: <WorkspaceView /> },

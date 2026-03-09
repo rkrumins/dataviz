@@ -277,7 +277,7 @@ export function SidebarNav() {
   const handleNavClick = (tabId: NavigationTab | string) => {
     switch (tabId) {
       case 'dashboard': navigate('/dashboard'); break
-      case 'explore': navigate(activeWorkspaceId ? `/workspaces/${activeWorkspaceId}` : '/dashboard'); break
+      case 'explore': navigate('/explorer'); break
       case 'lenses': navigate(activeWorkspaceId ? `/workspaces/${activeWorkspaceId}` : '/dashboard'); break
       case 'schema': navigate('/schema'); break
       case 'admin': navigate('/admin/overview'); break
