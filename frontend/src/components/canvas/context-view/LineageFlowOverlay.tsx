@@ -402,8 +402,10 @@ export function LineageFlowOverlay({
   })
 
   return (
+    <>
+    {/* ── VISUAL LAYER ─── z-[5]: behind node columns, no pointer events ── */}
     <div ref={containerRef} className="absolute inset-0 pointer-events-none z-[5]">
-      <svg className="w-full h-full overflow-visible">
+      <svg className="w-full h-full overflow-visible pointer-events-none">
         <defs>
           <style>
             {`
@@ -441,27 +443,22 @@ export function LineageFlowOverlay({
           const isHovered = hoveredEdgeId === edge.id
           const isSourceHovered = hoveredEdgeId === edge.source
           const isTargetHovered = hoveredEdgeId === edge.target
-          const isHighlighted = isHovered || isSourceHovered || isTargetHovered
+          // Highlight on hover OR when connected to the selected node
+          const isHighlighted = isHovered || isSourceHovered || isTargetHovered || (isHighlightActive && highlightedEdges?.has(edge.id))
           const { pathD, color, dynamicStrokeWidth, edgeOpacity, isGhost, isBundled, sx, sy, tx, ty } = edge
 
+          // When a node is selected, dim edges not connected to it to ~8%.
+          // Connected edges stay full-strength with a brightness boost.
+          const isConnectedToSelected = isHighlightActive && highlightedEdges?.has(edge.id)
+          const groupOpacity = isHighlightActive
+            ? (isConnectedToSelected ? 1 : 0.08)
+            : 1
+
           return (
-            <g key={edge.id} className="transition-opacity duration-300">
-              {/* INVISIBLE HIT AREA FOR HOVER - narrow enough to not cover nodes */}
-              <path
-                d={pathD}
-                fill="none"
-                stroke="transparent"
-                strokeWidth={10}
-                className="pointer-events-auto cursor-pointer"
-                data-canvas-interactive
-                onMouseEnter={() => setHoveredEdgeId(edge.id)}
-                onMouseLeave={() => setHoveredEdgeId(null)}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  selectEdge(edge.id)
-                  if (!isEdgePanelOpen) toggleEdgePanel()
-                }}
-              />
+            <g
+              key={edge.id}
+              style={{ opacity: groupOpacity, transition: 'opacity 0.25s ease' }}
+            >
 
               {/* BASE GLOW / DROP SHADOW - Thick and highly transparent */}
               <path
@@ -547,5 +544,35 @@ export function LineageFlowOverlay({
         })}
       </svg>
     </div>
+
+    {/* ── HIT LAYER ─── z-20: above columns, transparent, only click/hover paths ── *
+     *  Positioned identically to the visual layer but invisible. Sits above the    *
+     *  z-10 column container so pointer events reach these paths correctly.        */}
+    <div className="absolute inset-0 pointer-events-none z-20">
+      <svg className="w-full h-full overflow-visible pointer-events-none">
+        {visibleEdges.map(edge => {
+          const { pathD } = edge
+          return (
+            <path
+              key={`hit-${edge.id}`}
+              d={pathD}
+              fill="none"
+              stroke="transparent"
+              strokeWidth={14}
+              className="pointer-events-auto cursor-pointer"
+              data-canvas-interactive
+              onMouseEnter={() => setHoveredEdgeId(edge.id)}
+              onMouseLeave={() => setHoveredEdgeId(null)}
+              onClick={(e) => {
+                e.stopPropagation()
+                selectEdge(edge.id)
+                if (!isEdgePanelOpen) toggleEdgePanel()
+              }}
+            />
+          )
+        })}
+      </svg>
+    </div>
+    </>
   )
 }

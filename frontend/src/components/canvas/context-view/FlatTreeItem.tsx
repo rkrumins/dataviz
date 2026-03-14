@@ -105,6 +105,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       data-canvas-interactive
       initial={{ opacity: 0, x: -12, scale: 0.97 }}
       animate={{ opacity: 1, x: 0, scale: 1 }}
+      exit={{ opacity: 0, x: -8, scale: 0.96, transition: { duration: 0.18, ease: [0.4, 0, 1, 1] } }}
       transition={{
         duration: 0.3,
         delay: Math.min(animationDelay, 0.4),

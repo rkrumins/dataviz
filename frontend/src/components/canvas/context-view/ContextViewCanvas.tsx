@@ -14,8 +14,7 @@
  */
 
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import * as LucideIcons from 'lucide-react'
+import { AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
@@ -28,7 +27,7 @@ import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetai
 import { EntityDrawer } from '../../panels/EntityDrawer'
 import { EntityCreationPanel } from '../../panels/EntityCreationPanel'
 import { EdgeLegend } from '../EdgeLegend'
-import { TraceToolbar } from '../TraceToolbar'
+
 import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
@@ -55,6 +54,7 @@ import { useEdgeProjection } from '@/hooks/useEdgeProjection'
 import { useHighlightState } from '@/hooks/useHighlightState'
 import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay } from './LineageFlowOverlay'
+import { ContextViewHeader } from './ContextViewHeader'
 
 // Re-export for backward compatibility
 export { defaultReferenceModelLayers } from './constants'
@@ -256,7 +256,6 @@ export function ContextViewCanvas({
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
-  const searchInputRef = useRef<HTMLInputElement>(null)
 
   // Entity creation state
   const [isCreatingEntity, setIsCreatingEntity] = useState(false)
@@ -266,60 +265,48 @@ export function ContextViewCanvas({
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
 
-  // Load Blueprint dropdown state
-  const [showLoadDropdown, setShowLoadDropdown] = useState(false)
+  // Blueprint / Template data state (open/close is owned by OverflowMenu internally)
   const [savedModels, setSavedModels] = useState<Array<{ id: string; name: string }>>([])
   const [isLoadingModels, setIsLoadingModels] = useState(false)
   const [loadingModelId, setLoadingModelId] = useState<string | null>(null)
-
-  // Quick Start Templates dropdown state
-  const [showTemplatesDropdown, setShowTemplatesDropdown] = useState(false)
   const [templates, setTemplates] = useState<Array<{ id: string; name: string; category?: string }>>([])
   const [isLoadingTemplates, setIsLoadingTemplates] = useState(false)
   const [loadingTemplateId, setLoadingTemplateId] = useState<string | null>(null)
 
-  // Fetch saved models when Load dropdown opens
+  // Lazily fetch saved blueprints on first open (called by OverflowMenu)
   const handleOpenLoadDropdown = useCallback(async () => {
-    if (!activeWorkspaceId) return
-    setShowLoadDropdown(v => !v)
-    setShowTemplatesDropdown(false)
-    if (!showLoadDropdown && savedModels.length === 0) {
-      setIsLoadingModels(true)
-      try {
-        const models = await listAvailable(activeWorkspaceId)
-        setSavedModels(models.map(m => ({ id: m.id, name: m.name })))
-      } catch { /* silent */ } finally {
-        setIsLoadingModels(false)
-      }
+    if (!activeWorkspaceId || savedModels.length > 0 || isLoadingModels) return
+    setIsLoadingModels(true)
+    try {
+      const models = await listAvailable(activeWorkspaceId)
+      setSavedModels(models.map(m => ({ id: m.id, name: m.name })))
+    } catch { /* silent */ } finally {
+      setIsLoadingModels(false)
     }
-  }, [activeWorkspaceId, showLoadDropdown, savedModels.length, listAvailable])
+  }, [activeWorkspaceId, savedModels.length, isLoadingModels, listAvailable])
 
-  // Load a saved blueprint
+  // Load a saved blueprint and clear the model list so next open re-fetches
   const handleLoadModel = useCallback(async (id: string) => {
     if (!activeWorkspaceId) return
     setLoadingModelId(id)
     try {
       await loadFromBackend(activeWorkspaceId, id)
-      setShowLoadDropdown(false)
     } catch { /* silent */ } finally {
       setLoadingModelId(null)
     }
   }, [activeWorkspaceId, loadFromBackend])
 
-  // Fetch templates when Templates dropdown opens
+  // Lazily fetch templates on first open (called by OverflowMenu)
   const handleOpenTemplatesDropdown = useCallback(async () => {
-    setShowTemplatesDropdown(v => !v)
-    setShowLoadDropdown(false)
-    if (!showTemplatesDropdown && templates.length === 0) {
-      setIsLoadingTemplates(true)
-      try {
-        const tmpl = await listTemplates()
-        setTemplates(tmpl.map(m => ({ id: m.id, name: m.name, category: m.category ?? undefined })))
-      } catch { /* silent */ } finally {
-        setIsLoadingTemplates(false)
-      }
+    if (templates.length > 0 || isLoadingTemplates) return
+    setIsLoadingTemplates(true)
+    try {
+      const tmpl = await listTemplates()
+      setTemplates(tmpl.map(m => ({ id: m.id, name: m.name, category: m.category ?? undefined })))
+    } catch { /* silent */ } finally {
+      setIsLoadingTemplates(false)
     }
-  }, [showTemplatesDropdown, templates.length, listTemplates])
+  }, [templates.length, isLoadingTemplates, listTemplates])
 
   // Instantiate a Quick Start Template
   const handleLoadTemplate = useCallback(async (templateId: string, templateName: string) => {
@@ -327,7 +314,6 @@ export function ContextViewCanvas({
     setLoadingTemplateId(templateId)
     try {
       await loadTemplate(activeWorkspaceId, templateId, `${templateName} (copy)`)
-      setShowTemplatesDropdown(false)
     } catch { /* silent */ } finally {
       setLoadingTemplateId(null)
     }
@@ -552,10 +538,9 @@ export function ContextViewCanvas({
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap
   const { nodesByLayer, displayFlat, displayMap, urnToIdMap } = useLayerAssignment({
-    nodes, edges, sortedLayers, nodeEdgeFingerprint,
-    containmentEdgeTypes: new Set(containmentEdgeTypes),
+    nodes, sortedLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
-    nodeMap, childMap, parentMap, expandedNodes,
+    nodeMap, childMap, parentMap,
   })
 
   // Search results
@@ -660,14 +645,16 @@ export function ContextViewCanvas({
   }, [])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, searchChildren, isLoading: isLoadingChildren, loadingNodes } = useEntityLoader()
+  const { loadChildren, searchChildren, isLoading: isLoadingChildren, loadingNodes, failedNodes } = useEntityLoader()
+
+  // Tracks nodes currently being fetched — prevents duplicate fetches on rapid clicks.
+  // A ref (not state) because we need synchronous reads inside the toggle callback.
+  const pendingLoadRef = useRef<Set<string>>(new Set())
 
   const toggleNode = useCallback(async (nodeId: string) => {
-    // Check if we need to fetch children
     const node = displayMap.get(nodeId)
 
     if (node?.isLogical) {
-      // Just toggle logical nodes
       setExpandedNodes((prev) => {
         const next = new Set(prev)
         if (next.has(nodeId)) next.delete(nodeId)
@@ -677,24 +664,26 @@ export function ContextViewCanvas({
       return
     }
 
-    // Toggle expansion state locally first
+    // Determine action from committed state via updater function — avoids stale closure read.
+    let wasExpanded = false
     setExpandedNodes((prev) => {
+      wasExpanded = prev.has(nodeId)
       const next = new Set(prev)
-      if (next.has(nodeId)) {
-        next.delete(nodeId)
-        return next
-      } else {
-        next.add(nodeId)
-        return next
-      }
+      if (wasExpanded) next.delete(nodeId)
+      else next.add(nodeId)
+      return next
     })
 
-    // Lazy load children if expanding
-    if (!expandedNodes.has(nodeId)) {
-      await loadChildren(nodeId)
+    // Trigger fetch only when expanding, and only once per node (guard against rapid clicks).
+    if (!wasExpanded && !pendingLoadRef.current.has(nodeId)) {
+      pendingLoadRef.current.add(nodeId)
+      try {
+        await loadChildren(nodeId)
+      } finally {
+        pendingLoadRef.current.delete(nodeId)
+      }
     }
-
-  }, [displayMap, expandedNodes, loadChildren])
+  }, [displayMap, loadChildren])
 
   // Expand all / collapse all
   const expandAll = useCallback(() => {
@@ -790,421 +779,49 @@ export function ContextViewCanvas({
         )}
       </AnimatePresence>
 
-      {/* Header - Modern glass morphism style */}
-      <div className="flex-shrink-0 bg-gradient-to-r from-canvas-elevated/90 via-canvas-elevated/95 to-canvas-elevated/90 backdrop-blur-xl border-b border-white/[0.06] px-6 py-3 relative">
-        {/* Subtle gradient overlay */}
-        <div className="absolute inset-0 bg-gradient-to-r from-accent-lineage/[0.02] via-transparent to-purple-500/[0.02] pointer-events-none" />
-
-        <div className="flex items-center gap-4 relative">
-          {/* Title with icon */}
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-accent-lineage/20 to-purple-500/20 flex items-center justify-center shadow-lg shadow-accent-lineage/10">
-              <LucideIcons.Network className="w-5 h-5 text-accent-lineage" />
-            </div>
-            <div>
-              <h2 className="text-base font-display font-semibold text-ink tracking-tight">Context View</h2>
-              <p className="text-[10px] text-ink-muted/60 flex items-center gap-1.5">
-                <LucideIcons.ArrowRight className="w-3 h-3" />
-                Data Flow Blueprint
-              </p>
-            </div>
-          </div>
-
-          <div className="flex-1" />
-
-          {/* Search - Modern glass input */}
-          <div className="relative group">
-            <div className="absolute inset-0 bg-gradient-to-r from-accent-lineage/10 to-purple-500/10 rounded-xl opacity-0 group-focus-within:opacity-100 blur-xl transition-opacity" />
-            <div className="relative">
-              <LucideIcons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted/50 group-focus-within:text-accent-lineage transition-colors" />
-              <input
-                ref={searchInputRef}
-                type="text"
-                placeholder="Search entities..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-52 pl-9 pr-8 py-2 rounded-xl bg-white/[0.04] border border-white/[0.08] text-sm text-ink placeholder:text-ink-muted/40 focus:outline-none focus:border-accent-lineage/40 focus:bg-white/[0.06] transition-all"
-              />
-              {searchQuery && (
-                <button
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-lg hover:bg-white/10 text-ink-muted hover:text-ink transition-all"
-                >
-                  <LucideIcons.X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Divider */}
-          <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
-
-          {/* Lineage Flow Toggle - Modern pill button */}
-          <button
-            onClick={() => setShowLineageFlow(!showLineageFlow)}
-            className={cn(
-              "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
-              showLineageFlow
-                ? "bg-gradient-to-r from-accent-lineage/20 to-accent-lineage/10 text-accent-lineage shadow-lg shadow-accent-lineage/20 border border-accent-lineage/30"
-                : "bg-white/[0.04] border border-white/[0.08] text-ink-muted hover:bg-white/[0.08] hover:text-ink"
-            )}
-          >
-            <motion.div
-              animate={{ rotate: showLineageFlow ? 0 : -180 }}
-              transition={{ duration: 0.3 }}
-            >
-              <LucideIcons.GitBranch className="w-4 h-4" />
-            </motion.div>
-            <span>{showLineageFlow ? 'Flow Active' : 'Show Flow'}</span>
-            <div className={cn(
-              "w-2 h-2 rounded-full transition-colors duration-300",
-              showLineageFlow ? "bg-green-400 shadow-lg shadow-green-400/50" : "bg-ink-muted/30"
-            )} />
-          </button>
-
-          {/* Granularity Selector - Modern dropdown */}
-          <AnimatePresence>
-            {showLineageFlow && (
-              <motion.div
-                initial={{ opacity: 0, width: 0 }}
-                animate={{ opacity: 1, width: 'auto' }}
-                exit={{ opacity: 0, width: 0 }}
-                className="overflow-hidden"
-              >
-                <select
-                  value={lineageGranularity}
-                  onChange={(e) => setLineageGranularity(e.target.value as any)}
-                  className="px-3 py-2 rounded-xl text-xs font-medium bg-white/[0.04] border border-white/[0.08] text-ink cursor-pointer hover:bg-white/[0.08] focus:outline-none focus:border-accent-lineage/40 transition-all appearance-none pr-8 bg-no-repeat bg-right"
-                  style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%239ca3af'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E")`, backgroundSize: '16px', backgroundPosition: 'right 8px center' }}
-                >
-                  <option value="column">Column Level</option>
-                  <option value="table">Table Level</option>
-                  <option value="schema">Schema Level</option>
-                  <option value="system">System Level</option>
-                  <option value="domain">Domain Level</option>
-                </select>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* Divider */}
-          <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
-
-          {/* Add Entity Button - Accent gradient */}
-          <button
-            onClick={() => {
-              setIsCreatingEntity(true)
-              setCreationParentId(null)
-              setCreationLayerId(null)
-            }}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-gradient-to-r from-green-500/20 to-emerald-500/10 text-green-400 border border-green-500/30 hover:from-green-500/30 hover:to-emerald-500/20 hover:shadow-lg hover:shadow-green-500/20 transition-all duration-300 hover:scale-[1.02] active:scale-[0.98]"
-          >
-            <LucideIcons.Plus className="w-4 h-4" />
-            <span>Add Entity</span>
-          </button>
-
-          {/* Expand/Collapse - Icon buttons */}
-          <div className="flex items-center gap-1 p-1 rounded-xl bg-white/[0.03] border border-white/[0.06]">
-            <button
-              onClick={expandAll}
-              className="p-1.5 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all"
-              title="Expand All"
-            >
-              <LucideIcons.ChevronsDownUp className="w-4 h-4 rotate-180" />
-            </button>
-            <div className="w-px h-4 bg-white/[0.08]" />
-            <button
-              onClick={collapseAll}
-              className="p-1.5 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all"
-              title="Collapse All"
-            >
-              <LucideIcons.ChevronsDownUp className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Divider */}
-          <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
-
-          {/* Load Blueprint dropdown */}
-          <div className="relative">
-            <button
-              onClick={handleOpenLoadDropdown}
-              disabled={!activeWorkspaceId}
-              className={cn(
-                "flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all duration-200",
-                showLoadDropdown
-                  ? "bg-purple-500/15 text-purple-400 border border-purple-500/30"
-                  : "bg-white/[0.04] border border-white/[0.08] text-ink-muted hover:bg-white/[0.08] hover:text-ink"
-              )}
-              title={!activeWorkspaceId ? 'No workspace selected' : 'Load a saved blueprint'}
-            >
-              {isLoadingModels ? (
-                <LucideIcons.Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <LucideIcons.FolderOpen className="w-4 h-4" />
-              )}
-              <span>Load</span>
-              <LucideIcons.ChevronDown className={cn("w-3.5 h-3.5 transition-transform", showLoadDropdown && "rotate-180")} />
-            </button>
-
-            <AnimatePresence>
-              {showLoadDropdown && (
-                <motion.div
-                  initial={{ opacity: 0, y: -4, scale: 0.97 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: -4, scale: 0.97 }}
-                  transition={{ duration: 0.15 }}
-                  className="absolute right-0 top-full mt-2 w-64 z-50 rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-white/[0.1] shadow-2xl shadow-black/40 overflow-hidden"
-                >
-                  <div className="px-3 py-2 border-b border-white/[0.06]">
-                    <p className="text-[11px] font-medium text-ink-muted uppercase tracking-wider">Saved Blueprints</p>
-                  </div>
-                  <div className="max-h-52 overflow-y-auto py-1">
-                    {isLoadingModels ? (
-                      <div className="flex items-center justify-center py-6">
-                        <LucideIcons.Loader2 className="w-4 h-4 animate-spin text-ink-muted" />
-                      </div>
-                    ) : savedModels.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center py-6 px-4 text-center">
-                        <LucideIcons.FolderOpen className="w-8 h-8 text-ink-muted/30 mb-2" />
-                        <p className="text-xs text-ink-muted/60">No saved blueprints yet</p>
-                        <p className="text-[10px] text-ink-muted/40 mt-1">Use Save Blueprint to persist your configuration</p>
-                      </div>
-                    ) : (
-                      savedModels.map(model => (
-                        <button
-                          key={model.id}
-                          onClick={() => handleLoadModel(model.id)}
-                          disabled={loadingModelId === model.id}
-                          className={cn(
-                            "w-full flex items-center gap-3 px-3 py-2 text-left text-sm transition-colors",
-                            activeContextModelName === model.name
-                              ? "bg-purple-500/10 text-purple-400"
-                              : "text-ink hover:bg-white/[0.05] hover:text-ink"
-                          )}
-                        >
-                          {loadingModelId === model.id ? (
-                            <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
-                          ) : activeContextModelName === model.name ? (
-                            <LucideIcons.CheckCircle className="w-3.5 h-3.5 flex-shrink-0 text-purple-400" />
-                          ) : (
-                            <LucideIcons.FileCode2 className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted" />
-                          )}
-                          <span className="truncate">{model.name}</span>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                  <div className="border-t border-white/[0.06] px-3 py-2">
-                    <button
-                      onClick={() => {
-                        setSavedModels([])
-                        if (activeWorkspaceId) {
-                          setIsLoadingModels(true)
-                          listAvailable(activeWorkspaceId).then(m => {
-                            setSavedModels(m.map(x => ({ id: x.id, name: x.name })))
-                          }).finally(() => setIsLoadingModels(false))
-                        }
-                      }}
-                      className="w-full flex items-center justify-center gap-1.5 py-1 text-[11px] text-ink-muted/60 hover:text-ink-muted transition-colors"
-                    >
-                      <LucideIcons.RefreshCw className="w-3 h-3" />
-                      Refresh
-                    </button>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-
-          {/* Quick Start Templates dropdown */}
-          <div className="relative">
-            <button
-              onClick={handleOpenTemplatesDropdown}
-              className={cn(
-                "flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all duration-200",
-                showTemplatesDropdown
-                  ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
-                  : "bg-white/[0.04] border border-white/[0.08] text-ink-muted hover:bg-white/[0.08] hover:text-ink"
-              )}
-              title="Apply a Quick Start Template"
-            >
-              {isLoadingTemplates ? (
-                <LucideIcons.Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <LucideIcons.Wand2 className="w-4 h-4" />
-              )}
-              <span>Templates</span>
-              <LucideIcons.ChevronDown className={cn("w-3.5 h-3.5 transition-transform", showTemplatesDropdown && "rotate-180")} />
-            </button>
-
-            <AnimatePresence>
-              {showTemplatesDropdown && (
-                <motion.div
-                  initial={{ opacity: 0, y: -4, scale: 0.97 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: -4, scale: 0.97 }}
-                  transition={{ duration: 0.15 }}
-                  className="absolute right-0 top-full mt-2 w-72 z-50 rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-white/[0.1] shadow-2xl shadow-black/40 overflow-hidden"
-                >
-                  <div className="px-3 py-2 border-b border-white/[0.06]">
-                    <p className="text-[11px] font-medium text-ink-muted uppercase tracking-wider">Quick Start Templates</p>
-                    <p className="text-[10px] text-ink-muted/50 mt-0.5">Replaces current layers — save first if needed</p>
-                  </div>
-                  <div className="max-h-72 overflow-y-auto py-1">
-                    {isLoadingTemplates ? (
-                      <div className="flex items-center justify-center py-6">
-                        <LucideIcons.Loader2 className="w-4 h-4 animate-spin text-ink-muted" />
-                      </div>
-                    ) : templates.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center py-6 px-4 text-center">
-                        <LucideIcons.Wand2 className="w-8 h-8 text-ink-muted/30 mb-2" />
-                        <p className="text-xs text-ink-muted/60">No templates available</p>
-                        <p className="text-[10px] text-ink-muted/40 mt-1">Ask your admin to seed Quick Start Templates</p>
-                      </div>
-                    ) : (
-                      templates.map(tmpl => (
-                        <button
-                          key={tmpl.id}
-                          onClick={() => handleLoadTemplate(tmpl.id, tmpl.name)}
-                          disabled={loadingTemplateId === tmpl.id || !activeWorkspaceId}
-                          className="w-full flex items-start gap-3 px-3 py-2.5 text-left text-sm text-ink hover:bg-white/[0.05] transition-colors"
-                        >
-                          {loadingTemplateId === tmpl.id ? (
-                            <LucideIcons.Loader2 className="w-4 h-4 animate-spin flex-shrink-0 mt-0.5 text-amber-400" />
-                          ) : (
-                            <LucideIcons.LayoutTemplate className="w-4 h-4 flex-shrink-0 mt-0.5 text-amber-400" />
-                          )}
-                          <div className="min-w-0">
-                            <p className="font-medium truncate">{tmpl.name}</p>
-                            {tmpl.category && (
-                              <p className="text-[10px] text-ink-muted/60 mt-0.5 capitalize">{tmpl.category.replace(/-/g, ' ')}</p>
-                            )}
-                          </div>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-
-          {/* Divider */}
-          <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
-
-          {/* Save Blueprint */}
-          <div className="flex items-center gap-2">
-            {activeContextModelName && (
-              <span className="text-xs text-ink-muted truncate max-w-[120px]" title={activeContextModelName}>
-                {activeContextModelName}
-              </span>
-            )}
-            <button
-              onClick={() => activeWorkspaceId && saveToBackend(activeWorkspaceId)}
-              disabled={(syncStatus !== 'dirty' && syncStatus !== 'error') || !activeWorkspaceId}
-              className={cn(
-                "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
-                syncStatus === 'dirty'
-                  ? "bg-gradient-to-r from-blue-500/20 to-cyan-500/10 text-blue-400 border border-blue-500/30 hover:from-blue-500/30 hover:to-cyan-500/20 hover:shadow-lg hover:shadow-blue-500/20 hover:scale-[1.02] active:scale-[0.98]"
-                  : syncStatus === 'error'
-                    ? "bg-gradient-to-r from-red-500/20 to-red-500/10 text-red-400 border border-red-500/30"
-                    : "bg-white/[0.03] border border-white/[0.06] text-ink-muted/50 cursor-not-allowed"
-              )}
-              title={
-                !activeWorkspaceId ? 'No workspace selected'
-                  : syncStatus === 'dirty' ? 'Save changes to backend'
-                    : syncStatus === 'error' ? 'Save failed — click to retry'
-                      : 'All changes saved'
-              }
-            >
-              {syncStatus === 'saving' ? (
-                <LucideIcons.Loader2 className="w-4 h-4 animate-spin" />
-              ) : syncStatus === 'error' ? (
-                <LucideIcons.AlertCircle className="w-4 h-4" />
-              ) : syncStatus === 'synced' ? (
-                <LucideIcons.CheckCircle className="w-4 h-4" />
-              ) : (
-                <LucideIcons.Save className="w-4 h-4" />
-              )}
-              <span>
-                {syncStatus === 'saving' ? 'Saving...'
-                  : syncStatus === 'error' ? 'Retry Save'
-                    : syncStatus === 'synced' ? 'Saved'
-                      : 'Save Blueprint'}
-              </span>
-              {syncStatus === 'dirty' && (
-                <div className="w-2 h-2 rounded-full bg-blue-400 shadow-lg shadow-blue-400/50" />
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* Search Results - Modern pill results */}
-        <AnimatePresence>
-          {searchResults.length > 0 && (
-            <motion.div
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: 'auto' }}
-              exit={{ opacity: 0, height: 0 }}
-              className="mt-3 flex items-center gap-2 flex-wrap relative"
-            >
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/20">
-                <LucideIcons.Search className="w-3.5 h-3.5 text-amber-500" />
-                <span className="text-xs font-medium text-amber-500">{searchResults.length} found</span>
-              </div>
-              {searchResults.slice(0, 5).map((node, idx) => (
-                <motion.button
-                  key={node.id}
-                  initial={{ opacity: 0, scale: 0.8 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  transition={{ delay: idx * 0.05 }}
-                  onClick={() => {
-                    selectNode(node.id)
-                    setExpandedNodes((prev) => new Set([...prev, node.id]))
-                  }}
-                  className="px-3 py-1.5 rounded-xl bg-white/[0.04] border border-white/[0.08] text-ink text-xs font-medium hover:bg-accent-lineage/15 hover:border-accent-lineage/30 hover:text-accent-lineage transition-all duration-200 hover:shadow-lg hover:shadow-accent-lineage/10"
-                >
-                  {node.name}
-                </motion.button>
-              ))}
-              {searchResults.length > 5 && (
-                <span className="px-2 py-1 text-xs text-ink-muted/60">+{searchResults.length - 5} more</span>
-              )}
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Trace Toolbar - Using unified TraceToolbar component */}
-        <AnimatePresence>
-          {trace.isTracing && (
-            <TraceToolbar
-              focusNodeName={displayMap.get(trace.focusId || '')?.name || trace.focusId || 'Unknown Node'}
-              upstreamCount={trace.upstreamCount}
-              downstreamCount={trace.downstreamCount}
-              showUpstream={trace.showUpstream}
-              showDownstream={trace.showDownstream}
-              onToggleUpstream={() => trace.setShowUpstream(!trace.showUpstream)}
-              onToggleDownstream={() => trace.setShowDownstream(!trace.showDownstream)}
-              onExitTrace={() => {
-                trace.clearTrace()
-                setExpandedNodes(new Set())
-              }}
-              onRetrace={trace.retrace}
-              onTraceUpstream={() => trace.focusId && trace.traceUpstream(trace.focusId)}
-              onTraceDownstream={() => trace.focusId && trace.traceDownstream(trace.focusId)}
-              onTraceFullLineage={() => trace.focusId && trace.traceFullLineage(trace.focusId)}
-              config={trace.config}
-              onConfigChange={trace.setConfig}
-              traceResult={trace.result}
-              statistics={trace.statistics}
-              isLoading={trace.isLoading}
-              availableLineageEdgeTypes={lineageEdgeTypes}
-              position="floating"
-            />
-          )}
-        </AnimatePresence>
-      </div>
+      <ContextViewHeader
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        searchResults={searchResults}
+        onSearchResultClick={(node) => {
+          selectNode(node.id)
+          setExpandedNodes((prev) => new Set([...prev, node.id]))
+        }}
+        showLineageFlow={showLineageFlow}
+        onToggleLineageFlow={() => setShowLineageFlow(!showLineageFlow)}
+        lineageGranularity={lineageGranularity}
+        onGranularityChange={(g) => setLineageGranularity(g as any)}
+        onExpandAll={expandAll}
+        onCollapseAll={collapseAll}
+        onAddEntity={() => { setIsCreatingEntity(true); setCreationParentId(null); setCreationLayerId(null) }}
+        activeWorkspaceId={activeWorkspaceId}
+        onOpenLoadDropdown={handleOpenLoadDropdown}
+        savedModels={savedModels}
+        isLoadingModels={isLoadingModels}
+        loadingModelId={loadingModelId}
+        activeContextModelName={activeContextModelName}
+        onLoadModel={handleLoadModel}
+        onRefreshModels={() => {
+          setSavedModels([])
+          if (activeWorkspaceId) {
+            setIsLoadingModels(true)
+            listAvailable(activeWorkspaceId)
+              .then(m => setSavedModels(m.map(x => ({ id: x.id, name: x.name }))))
+              .finally(() => setIsLoadingModels(false))
+          }
+        }}
+        onOpenTemplatesDropdown={handleOpenTemplatesDropdown}
+        templates={templates}
+        isLoadingTemplates={isLoadingTemplates}
+        loadingTemplateId={loadingTemplateId}
+        onLoadTemplate={handleLoadTemplate}
+        syncStatus={syncStatus}
+        onSave={() => activeWorkspaceId && saveToBackend(activeWorkspaceId)}
+        trace={trace}
+        focusNodeName={displayMap.get(trace.focusId || '')?.name || trace.focusId || 'Unknown Node'}
+        lineageEdgeTypes={lineageEdgeTypes}
+        onExitTrace={() => { trace.clearTrace(); setExpandedNodes(new Set()) }}
+      />
 
       <div className="flex-1 w-full h-full relative overflow-hidden bg-canvas flex flex-col">
         {/* Edge Panel */}
@@ -1244,9 +861,13 @@ export function ContextViewCanvas({
           />
         </AnimatePresence>
 
-        {/* Edge Legend - positioned above bottom, fixed position */}
-        <div className="absolute bottom-40 right-4 z-30 w-64 pointer-events-auto">
-          <EdgeLegend defaultExpanded={false} />
+        {/* Edge Legend — shifts left when EntityDrawer is open to avoid overlap (3.3)
+             receives only the projected visible edges, not all canvas edges (3.2) */}
+        <div className={cn(
+          "absolute bottom-40 z-30 w-64 pointer-events-auto transition-all duration-300 ease-out",
+          selectedNodeId ? "right-[420px]" : "right-4"
+        )}>
+          <EdgeLegend defaultExpanded={false} visibleEdges={visibleLineageEdges} />
         </div>
 
         {/* Layer Columns */}
@@ -1299,6 +920,7 @@ export function ContextViewCanvas({
                 onSearchChildren={searchChildren}
                 isLoadingChildren={isLoadingChildren}
                 loadingNodes={loadingNodes}
+                failedNodes={failedNodes}
                 onScroll={handleLayerScroll}
               />
             ))}

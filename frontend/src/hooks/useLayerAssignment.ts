@@ -24,16 +24,13 @@ import type { HierarchyNode } from '../components/canvas/context-view/types'
 
 export interface UseLayerAssignmentOptions {
   nodes: any[]
-  edges?: any[]
   sortedLayers: ViewLayerConfig[]
   nodeEdgeFingerprint: string
-  containmentEdgeTypes?: Set<string>
   instanceAssignments: Map<string, { layerId: string }>
   effectiveAssignments: Map<string, { layerId: string }>
   nodeMap: Map<string, any>
   childMap: Map<string, string[]>
   parentMap: Map<string, string>
-  expandedNodes?: Set<string>
 }
 
 export interface UseLayerAssignmentResult {

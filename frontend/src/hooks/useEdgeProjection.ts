@@ -241,7 +241,6 @@ export function useEdgeProjection({
       const distinctTypes = new Set<string>()
       let isGhost = false
       let isAggregated = false
-      let totalConfidence = 0
       let maxConfidence = 0
 
       const sourceId = groupEdges[0].source
@@ -262,9 +261,7 @@ export function useEdgeProjection({
           distinctTypes.add(e.originalType)
         }
 
-        const conf = e.data?.confidence ?? 1
-        totalConfidence += conf
-        maxConfidence = Math.max(maxConfidence, conf)
+        maxConfidence = Math.max(maxConfidence, e.data?.confidence ?? 1)
       })
 
       const edgeCount = groupEdges.length

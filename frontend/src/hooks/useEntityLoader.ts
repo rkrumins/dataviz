@@ -8,6 +8,7 @@ interface UseEntityLoaderResult {
     searchChildren: (parentId: string, query: string) => Promise<void>
     isLoading: boolean
     loadingNodes: Set<string>
+    failedNodes: Set<string>
 }
 
 /**
@@ -19,6 +20,7 @@ export function useEntityLoader(): UseEntityLoaderResult {
     const provider = useGraphProvider()
     const { containmentEdgeTypes } = useOntologyMetadata()
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
+    const [failedNodes, setFailedNodes] = useState<Set<string>>(new Set())
 
     const loadChildren = useCallback(async (parentId: string) => {
         // Handle root loading (empty parentId)
@@ -97,7 +99,8 @@ export function useEntityLoader(): UseEntityLoaderResult {
         // If we have nearly all children (allow small drift), don't refetch
         if (currentChildrenCount >= childCount && childCount > 0) return
 
-        // 2. Fetch
+        // 2. Fetch — clear any prior failure for this node on retry
+        setFailedNodes(prev => { const next = new Set(prev); next.delete(parentId); return next })
         setLoadingNodes(prev => new Set(prev).add(parentId))
         try {
             const urn = (parentNode.data.urn as string) || parentId
@@ -172,6 +175,7 @@ export function useEntityLoader(): UseEntityLoaderResult {
             }
         } catch (err) {
             console.error(`[EntityLoader] Failed to load children for ${parentId}`, err)
+            setFailedNodes(prev => new Set(prev).add(parentId))
         } finally {
             setLoadingNodes(prev => {
                 const next = new Set(prev)
@@ -285,6 +289,7 @@ export function useEntityLoader(): UseEntityLoaderResult {
         loadChildren,
         searchChildren,
         isLoading: loadingNodes.size > 0,
-        loadingNodes
+        loadingNodes,
+        failedNodes,
     }
 }

@@ -28,6 +28,7 @@ export interface FlatTreeNode {
   isSearchBox?: boolean
   isSkeleton?: boolean
   skeletonIndex?: number
+  isFailed?: boolean
 }
 
 export type ComputedEdge = {

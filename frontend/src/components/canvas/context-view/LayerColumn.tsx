@@ -8,7 +8,7 @@
  * - Inline search and load-more support
  */
 
-import React, { useState, useMemo, useCallback, useRef } from 'react'
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -43,6 +43,7 @@ interface LayerColumnProps {
   onSearchChildren?: (parentId: string, query: string) => void
   isLoadingChildren?: boolean
   loadingNodes?: Set<string>
+  failedNodes?: Set<string>
   onScroll?: () => void
 }
 
@@ -69,6 +70,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onSearchChildren,
   isLoadingChildren,
   loadingNodes,
+  failedNodes,
   onScroll
 }: LayerColumnProps) {
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
@@ -137,8 +139,20 @@ export const LayerColumn = React.memo(function LayerColumn({
           })
         }
 
+        // Show error row if the last fetch for this node failed
+        const isNodeFailed = (failedNodes?.has(node.id) ?? false) && !isNodeLoading && node.children.length === 0
+        if (isNodeFailed) {
+          result.push({
+            node,
+            depth: depth + 1,
+            isLast: true,
+            parentIsLast: [...parentIsLast, isLast],
+            isFailed: true,
+          })
+        }
+
         // Show skeleton placeholders while children are being loaded
-        if (isNodeLoading && node.children.length === 0) {
+        else if (isNodeLoading && node.children.length === 0) {
           const skeletonCount = Math.min(childCount || 3, 4)
           for (let i = 0; i < skeletonCount; i++) {
             result.push({
@@ -185,7 +199,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     })
 
     return result
-  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, childSearchQueries, loadingNodes])
+  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, childSearchQueries, loadingNodes, failedNodes])
 
   // Count total including nested
   const totalCount = useMemo(() => {
@@ -438,6 +452,30 @@ export const LayerColumn = React.memo(function LayerColumn({
             <div className="py-2 px-1">
               <AnimatePresence initial={false}>
               {flatTree.map((item, index) => {
+                // Error row — shown when loadChildren failed
+                if (item.isFailed) {
+                  const indentWidth = item.depth * 16
+                  return (
+                    <motion.div
+                      key={`error-${item.node.id}`}
+                      initial={{ opacity: 0, x: -8 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: -8 }}
+                      transition={{ duration: 0.2 }}
+                      className="flex items-center gap-2 mx-1 rounded-xl px-3 py-2 cursor-pointer group/error"
+                      style={{ paddingLeft: 12 + indentWidth }}
+                      onClick={() => onLoadMore && onLoadMore(item.node.id)}
+                    >
+                      <div className="w-6 h-6 flex-shrink-0 flex items-center justify-center">
+                        <LucideIcons.AlertCircle className="w-3.5 h-3.5 text-red-400/70" />
+                      </div>
+                      <span className="text-xs text-red-400/70 group-hover/error:text-red-400 transition-colors">
+                        Failed to load — click to retry
+                      </span>
+                    </motion.div>
+                  )
+                }
+
                 // Skeleton loading placeholder
                 if (item.isSkeleton) {
                   const indentWidth = item.depth * 16
@@ -503,14 +541,15 @@ export const LayerColumn = React.memo(function LayerColumn({
 
                 if (item.isLoadMore) {
                   return (
-                    <LoadMoreItem
+                    <AutoLoadSentinel
                       key={`load-more-${item.node.id}`}
-                      parentId={item.node.id}
+                      nodeId={item.node.id}
                       depth={item.depth}
                       parentIsLast={item.parentIsLast}
-                      count={item.loadMoreCount!}
+                      remainingCount={item.loadMoreCount!}
                       onLoadMore={() => onLoadMore && onLoadMore(item.node.id)}
-                      layer={layer}
+                      isLoading={loadingNodes?.has(item.node.id) ?? false}
+                      layerColor={layer.color ?? '#6b7280'}
                     />
                   )
                 }
@@ -557,3 +596,82 @@ export const LayerColumn = React.memo(function LayerColumn({
     </motion.div>
   )
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AutoLoadSentinel — replaces the click-based LoadMoreItem (Phase 3.4)
+// Invisible div that triggers onLoadMore automatically when scrolled into view.
+// Falls back to a subtle "Load N more" button when the observer isn't firing
+// (e.g., very tall columns where the sentinel is already in view on expand).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function AutoLoadSentinel({
+  nodeId,
+  depth,
+  parentIsLast,
+  remainingCount,
+  onLoadMore,
+  isLoading,
+  layerColor,
+}: {
+  nodeId: string
+  depth: number
+  parentIsLast: boolean[]
+  remainingCount: number
+  onLoadMore: () => void
+  isLoading: boolean
+  layerColor: string
+}) {
+  const sentinelRef = useRef<HTMLDivElement>(null)
+  const firedRef = useRef(false)
+
+  useEffect(() => {
+    const el = sentinelRef.current
+    if (!el) return
+    firedRef.current = false
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && !firedRef.current && !isLoading) {
+          firedRef.current = true
+          onLoadMore()
+        }
+      },
+      { rootMargin: '120px', threshold: 0 }
+    )
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [nodeId, onLoadMore, isLoading])
+
+  const indentWidth = depth * 16
+
+  return (
+    <div
+      ref={sentinelRef}
+      className="flex items-center gap-2 mx-1 px-3 py-2"
+      style={{ paddingLeft: 12 + indentWidth }}
+    >
+      {isLoading ? (
+        // Loading indicator — matches skeleton colour palette
+        <div className="flex items-center gap-2 w-full">
+          <LucideIcons.Loader2
+            className="w-3.5 h-3.5 animate-spin flex-shrink-0"
+            style={{ color: layerColor }}
+          />
+          <div
+            className="h-2 rounded animate-pulse flex-1 max-w-[120px]"
+            style={{ backgroundColor: `${layerColor}18` }}
+          />
+        </div>
+      ) : (
+        // Subtle "load more" pill — visible if user reaches it before observer fires
+        <button
+          onClick={onLoadMore}
+          className="flex items-center gap-1.5 text-[11px] text-ink-muted/50 hover:text-ink-muted transition-colors group"
+        >
+          <LucideIcons.ChevronsDown className="w-3 h-3 group-hover:translate-y-0.5 transition-transform" />
+          {remainingCount} more
+        </button>
+      )}
+    </div>
+  )
+}
