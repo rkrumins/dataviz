@@ -11,10 +11,21 @@
 
 import { createContext, useContext, useState, useEffect, useRef, type ReactNode } from 'react'
 import type { GraphDataProvider, GraphProviderContextValue } from './GraphDataProvider'
-import { getMockProvider } from './MockProvider'
 import { RemoteGraphProvider } from './RemoteGraphProvider'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useConnectionsStore } from '@/store/connections'
+
+// MockProvider (+ its 113 kB demo-data.ts) is loaded lazily so it never
+// appears in the initial bundle. It is only fetched when the backend is
+// unreachable or when a component is rendered outside a GraphProvider.
+let _mockProvider: GraphDataProvider | null = null
+async function ensureMockProvider(): Promise<GraphDataProvider> {
+  if (!_mockProvider) {
+    const { getMockProvider } = await import('./MockProvider')
+    _mockProvider = getMockProvider()
+  }
+  return _mockProvider
+}
 
 // ============================================
 // Extended context value
@@ -104,7 +115,7 @@ export function GraphProvider({ children }: GraphProviderProps) {
                 setCurrentProvider(p)
             } catch (err) {
                 setError(err instanceof Error ? err : new Error('Failed to initialize provider'))
-                setCurrentProvider(getMockProvider())
+                setCurrentProvider(await ensureMockProvider())
             } finally {
                 setIsLoading(false)
             }
@@ -118,7 +129,9 @@ export function GraphProvider({ children }: GraphProviderProps) {
     }
 
     const value: GraphProviderContextValueExtended = {
-        provider: currentProvider ?? getMockProvider(),
+        // _mockProvider is guaranteed non-null here: if currentProvider is null it means
+        // the catch block ran, which always calls ensureMockProvider() before setIsLoading(false).
+        provider: currentProvider ?? (_mockProvider as GraphDataProvider),
         isLoading,
         error,
         workspaceId: activeWorkspaceId,
@@ -147,8 +160,10 @@ export function useGraphProvider(): GraphDataProvider {
     const context = useContext(GraphProviderContext)
 
     if (!context) {
-        console.warn('useGraphProvider: No GraphProvider found, using MockProvider')
-        return getMockProvider()
+        // Trigger background load for next render cycle
+        void ensureMockProvider()
+        if (_mockProvider) return _mockProvider
+        throw new Error('useGraphProvider must be used within a <GraphProvider>')
     }
 
     return context.provider
@@ -161,8 +176,10 @@ export function useGraphProviderContext(): GraphProviderContextValueExtended {
     const context = useContext(GraphProviderContext)
 
     if (!context) {
+        void ensureMockProvider()
+        if (!_mockProvider) throw new Error('useGraphProviderContext must be used within a <GraphProvider>')
         return {
-            provider: getMockProvider(),
+            provider: _mockProvider,
             isLoading: false,
             error: null,
             workspaceId: null,

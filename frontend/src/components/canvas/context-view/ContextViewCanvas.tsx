@@ -389,12 +389,25 @@ export function ContextViewCanvas({
     [activeLayers]
   )
 
-  // Stable fingerprint: only changes when the actual node/edge set changes,
-  // not on every array reference swap (which happens on addNodes even with 0 new items)
+  // Stable fingerprint: only changes when the actual node/edge set changes.
+  // Phase 5.2: samples first, middle, and last IDs — detects insertions anywhere
+  // in the array (not just at the ends) while remaining O(1).
   const nodeEdgeFingerprint = useMemo(() => {
-    const firstNodeId = nodes.length > 0 ? nodes[0].id : ''
-    const lastNodeId = nodes.length > 0 ? nodes[nodes.length - 1].id : ''
-    return `${nodes.length}:${edges.length}:${firstNodeId}:${lastNodeId}`
+    const n = nodes.length
+    const e = edges.length
+    if (n === 0 && e === 0) return 'empty'
+    const nMid = Math.floor(n / 2)
+    const eMid = Math.floor(e / 2)
+    return [
+      n,
+      nodes[0]?.id ?? '',
+      nodes[nMid]?.id ?? '',
+      nodes[n - 1]?.id ?? '',
+      e,
+      edges[0]?.id ?? '',
+      edges[eMid]?.id ?? '',
+      edges[e - 1]?.id ?? '',
+    ].join(':')
   }, [nodes, edges])
 
   // Build generic hierarchy tree from nodes and containment edges

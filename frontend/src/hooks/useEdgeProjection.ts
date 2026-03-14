@@ -4,9 +4,14 @@
  * Encapsulates:
  * - lineageEdges: aggregated + expanded detailed + trace/regular edges
  * - visibleLineageEdges: edge projection/roll-up to visible ancestors
+ *
+ * Phase 5.1: ancestorMap is built incrementally — on expand/collapse only
+ * the changed subtree is patched, avoiding a full O(N) traversal on every
+ * user interaction. Full rebuild only happens when nodesByLayer changes
+ * (layer re-assignment, initial load).
  */
 
-import { useMemo } from 'react'
+import { useMemo, useRef } from 'react'
 import { normalizeEdgeType } from '@/services/ontologyService'
 import type { HierarchyNode } from '../components/canvas/context-view/types'
 
@@ -29,6 +34,85 @@ export interface UseEdgeProjectionOptions {
 }
 
 // ============================================
+// Tree helpers for incremental ancestorMap updates
+// ============================================
+
+function searchSubtree(nodes: HierarchyNode[], id: string): HierarchyNode | undefined {
+  for (const node of nodes) {
+    if (node.id === id) return node
+    const found = searchSubtree(node.children, id)
+    if (found) return found
+  }
+  return undefined
+}
+
+function findNodeById(nodesByLayer: Map<string, HierarchyNode[]>, id: string): HierarchyNode | undefined {
+  for (const roots of nodesByLayer.values()) {
+    const found = searchSubtree(roots, id)
+    if (found) return found
+  }
+  return undefined
+}
+
+/** Map a node and all its descendants to `anchor` in the given map. */
+function collapseSubtreeInMap(node: HierarchyNode, anchor: string, map: Map<string, string>) {
+  if (node.urn) map.set(node.urn, anchor)
+  map.set(node.id, anchor)
+  node.children.forEach(c => collapseSubtreeInMap(c, anchor, map))
+}
+
+/**
+ * When `node` is expanded, each direct child becomes visible and maps to
+ * itself. If a child is already expanded, recurse so its children also
+ * map correctly. If a child is collapsed, all its descendants roll up to it.
+ */
+function expandNodeInMap(node: HierarchyNode, expandedNodes: Set<string>, map: Map<string, string>) {
+  node.children.forEach(child => {
+    if (child.urn) map.set(child.urn, child.id)
+    map.set(child.id, child.id)
+    if (expandedNodes.has(child.id)) {
+      expandNodeInMap(child, expandedNodes, map)
+    } else {
+      // Ensure all of this collapsed child's descendants roll up to it
+      child.children.forEach(gc => collapseSubtreeInMap(gc, child.id, map))
+    }
+  })
+}
+
+/** Full O(N) build. Called on initial load and whenever nodesByLayer changes. */
+function buildFullAncestorMap(
+  nodesByLayer: Map<string, HierarchyNode[]>,
+  expandedNodes: Set<string>,
+  displayFlat: HierarchyNode[],
+): Map<string, string> {
+  const map = new Map<string, string>()
+
+  const processNode = (node: HierarchyNode, currentVisibleAnchor: string) => {
+    if (node.urn) map.set(node.urn, currentVisibleAnchor)
+    map.set(node.id, currentVisibleAnchor)
+
+    let childAnchor = currentVisibleAnchor
+    if (node.id === currentVisibleAnchor) {
+      childAnchor = expandedNodes.has(node.id) ? 'USE_CHILD_ID' : node.id
+    }
+
+    node.children?.forEach(child => {
+      processNode(child, childAnchor === 'USE_CHILD_ID' ? child.id : childAnchor)
+    })
+  }
+
+  nodesByLayer.forEach(roots => roots.forEach(root => processNode(root, root.id)))
+
+  // Safety pass: visible nodes always map to themselves
+  displayFlat.forEach(node => {
+    if (!map.has(node.id)) map.set(node.id, node.id)
+    if (node.urn && !map.has(node.urn)) map.set(node.urn, node.id)
+  })
+
+  return map
+}
+
+// ============================================
 // Hook
 // ============================================
 
@@ -46,11 +130,16 @@ export function useEdgeProjection({
   isContainmentEdge,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[] } {
 
+  // ── Incremental ancestorMap state ──────────────────────────────────────
+  const ancestorMapRef = useRef<Map<string, string>>(new Map())
+  const prevNodesByLayerRef = useRef<Map<string, HierarchyNode[]> | null>(null)
+  const prevExpandedNodesRef = useRef<Set<string>>(new Set())
+
+  // ── lineageEdges ───────────────────────────────────────────────────────
   const lineageEdges = useMemo(() => {
-    // When tracing, always compute edges even if flow toggle is off (Trace overrides)
     if (!showLineageFlow && !isTracing) return []
 
-    // 1. Aggregated Edges (Always show if Flow is ON)
+    // 1. Aggregated Edges
     const aggEdges = Array.from(aggregatedEdges.values())
       .filter(e => e.state === 'collapsed')
       .map(e => ({
@@ -67,11 +156,10 @@ export function useEdgeProjection({
         }
       }))
 
-    // 2. Expanded Detailed Edges (User explicitly expanded an edge)
+    // 2. Expanded Detailed Edges
     const expandedDetailedEdges = Array.from(aggregatedEdges.values())
       .filter(e => e.state === 'expanded')
       .flatMap(e => e.detailedEdges
-        // Filter out containment edges from detailed view to avoid "sneaky" structural edges
         .filter((de: any) => !isContainmentEdge(de.edgeType))
         .map((de: any) => ({
           id: de.id,
@@ -84,159 +172,144 @@ export function useEdgeProjection({
           }
         })))
 
-    // 3. Trace / Regular Edges (ONLY when Tracing is Active)
-    // "Sneaky" edges fix: Don't show raw granular edges in the high-level view
-    // unless we are specifically in a granular trace mode.
+    // 3. Trace / Regular Edges (only when tracing)
     let regularEdges: any[] = []
     if (isTracing) {
-      regularEdges = edges.filter(edge => {
-        return !isContainmentEdge(normalizeEdgeType(edge))
-      })
+      regularEdges = edges.filter(edge => !isContainmentEdge(normalizeEdgeType(edge)))
     }
 
     return [...aggEdges, ...expandedDetailedEdges, ...regularEdges]
   }, [edges, showLineageFlow, isTracing, aggregatedEdges, isContainmentEdge])
 
-  // Lineage Roll-up: Project edges to visible ancestors
+  // ── ancestorMap (Phase 5.1 — incremental) ─────────────────────────────
+  //
+  // Full rebuild: when nodesByLayer reference changes (layer re-assignment,
+  // initial data load). This is infrequent.
+  //
+  // Incremental patch: when only expandedNodes changes (user expands /
+  // collapses a tree node). We diff the previous/current Set and only
+  // traverse the affected subtrees — O(subtree) instead of O(N).
+  const ancestorMap = useMemo(() => {
+    const needsFullRebuild = prevNodesByLayerRef.current !== nodesByLayer
+
+    if (needsFullRebuild) {
+      const map = buildFullAncestorMap(nodesByLayer, expandedNodes, displayFlat)
+      prevNodesByLayerRef.current = nodesByLayer
+      prevExpandedNodesRef.current = expandedNodes
+      ancestorMapRef.current = map
+      return map
+    }
+
+    // Same nodesByLayer — check if expandedNodes changed
+    const prev = prevExpandedNodesRef.current
+    if (prev === expandedNodes) {
+      return ancestorMapRef.current
+    }
+
+    // Diff
+    const expanded: string[] = []
+    const collapsed: string[] = []
+    expandedNodes.forEach(id => { if (!prev.has(id)) expanded.push(id) })
+    prev.forEach(id => { if (!expandedNodes.has(id)) collapsed.push(id) })
+
+    if (expanded.length === 0 && collapsed.length === 0) {
+      prevExpandedNodesRef.current = expandedNodes
+      return ancestorMapRef.current
+    }
+
+    // Shallow copy then patch only changed subtrees
+    const map = new Map(ancestorMapRef.current)
+
+    // Collapses first: all descendants → collapsed node
+    collapsed.forEach(id => {
+      const node = findNodeById(nodesByLayer, id)
+      if (node) {
+        node.children.forEach(child => collapseSubtreeInMap(child, id, map))
+      }
+    })
+
+    // Expansions: children become individually visible
+    expanded.forEach(id => {
+      const node = findNodeById(nodesByLayer, id)
+      if (node) {
+        expandNodeInMap(node, expandedNodes, map)
+      }
+    })
+
+    prevExpandedNodesRef.current = expandedNodes
+    ancestorMapRef.current = map
+    return map
+  }, [nodesByLayer, expandedNodes, displayFlat])
+
+  // ── Edge projection ────────────────────────────────────────────────────
+  //
+  // Now depends on the stable `ancestorMap` instead of rebuilding it here.
+  // This memo only re-runs when edges or the ancestorMap actually change.
   const visibleLineageEdges = useMemo(() => {
     if (!showLineageFlow && !isTracing) return []
 
-    // 1. Build Ancestor Map: Physical URN -> Visible Node ID
-    // ONLY needed for granular edges (Trace) or if we have non-aggregated edges mixed in.
-    const ancestorMap = new Map<string, string>()
-
-    // We only need to build this map if we have Regular (non-aggregated) edges to project
-    // OR if we want to validate aggregated edges against visible nodes (safety)
-
-    // Helper to traverse and map
-    const processNode = (node: HierarchyNode, currentVisibleAnchor: string) => {
-      // Map current node to the anchor
-      if (node.urn) ancestorMap.set(node.urn, currentVisibleAnchor)
-      ancestorMap.set(node.id, currentVisibleAnchor)
-
-      let childAnchor = currentVisibleAnchor
-
-      // If I am the visible node, check if I allow my children to be seen
-      if (node.id === currentVisibleAnchor) {
-        if (expandedNodes.has(node.id)) {
-          childAnchor = 'USE_CHILD_ID' // Special flag
-        } else {
-          childAnchor = node.id
-        }
-      }
-
-      if (node.children) {
-        node.children.forEach(child => {
-          const nextAnchor = childAnchor === 'USE_CHILD_ID' ? child.id : childAnchor
-          processNode(child, nextAnchor)
-        })
-      }
-    }
-
-    // Always build map for consistency and to handle Trace edges
-    nodesByLayer.forEach(roots => roots.forEach(root => {
-      processNode(root, root.id)
-    }))
-
-    // Ensure all visible nodes map to themselves
-    displayFlat.forEach(node => {
-      if (!ancestorMap.has(node.id)) ancestorMap.set(node.id, node.id)
-      if (node.urn && !ancestorMap.has(node.urn)) ancestorMap.set(node.urn, node.id)
-    })
-
-    // 2. Project Edges
-    const projected: any[] = []
     const edgeGroups = new Map<string, any[]>()
 
-    // Helper to add edge to group
     const addEdgeToGroup = (sourceId: string, targetId: string, edge: any, type: string) => {
       const groupKey = `${sourceId}->${targetId}`
       if (!edgeGroups.has(groupKey)) edgeGroups.set(groupKey, [])
-      edgeGroups.get(groupKey)!.push({
-        ...edge,
-        source: sourceId,
-        target: targetId,
-        originalType: type
-      })
+      edgeGroups.get(groupKey)!.push({ ...edge, source: sourceId, target: targetId, originalType: type })
     }
 
-    // Process Edges
-    // A. Aggregated Edges (Optimization: Skip lookup if possible, or fast lookup)
-    const aggEdgesRaw = Array.from(aggregatedEdges.values())
+    // A. Aggregated Edges
+    Array.from(aggregatedEdges.values())
       .filter(e => e.state === 'collapsed')
-
-    aggEdgesRaw.forEach(e => {
-      const agg = e.aggregated
-      // For Aggregated Edges, the backend guarantees they match the requested visible URNs.
-      // However, we verify they map to valid visible nodes to avoid dangling edges.
-      // Usually sourceUrn == visibleNodeId (or URN).
-
-      // Fast check: Is the source/target directly in displayMap (visible)?
-      let sId = displayMap.has(agg.sourceUrn) ? agg.sourceUrn : ancestorMap.get(agg.sourceUrn)
-      let tId = displayMap.has(agg.targetUrn) ? agg.targetUrn : ancestorMap.get(agg.targetUrn)
-
-      // Fallback for ID vs URN mismatch if map keys differ
-      if (!sId) sId = urnToIdMap.get(agg.sourceUrn)
-      if (!tId) tId = urnToIdMap.get(agg.targetUrn)
-
-      if (sId && tId && sId !== tId) {
-        // Create flow edge directly
-        addEdgeToGroup(sId, tId, {
-          id: agg.id,
-          data: {
-            edgeType: 'AGGREGATED',
-            relationship: 'aggregated',
-            isAggregated: true,
-            edgeCount: agg.edgeCount,
-            edgeTypes: agg.edgeTypes,
-            confidence: agg.confidence,
-            sourceEdgeIds: agg.sourceEdgeIds
-          }
-        }, 'AGGREGATED')
-      }
-    })
+      .forEach(e => {
+        const agg = e.aggregated
+        let sId = displayMap.has(agg.sourceUrn) ? agg.sourceUrn : ancestorMap.get(agg.sourceUrn)
+        let tId = displayMap.has(agg.targetUrn) ? agg.targetUrn : ancestorMap.get(agg.targetUrn)
+        if (!sId) sId = urnToIdMap.get(agg.sourceUrn)
+        if (!tId) tId = urnToIdMap.get(agg.targetUrn)
+        if (sId && tId && sId !== tId) {
+          addEdgeToGroup(sId, tId, {
+            id: agg.id,
+            data: {
+              edgeType: 'AGGREGATED',
+              relationship: 'aggregated',
+              isAggregated: true,
+              edgeCount: agg.edgeCount,
+              edgeTypes: agg.edgeTypes,
+              confidence: agg.confidence,
+              sourceEdgeIds: agg.sourceEdgeIds,
+            }
+          }, 'AGGREGATED')
+        }
+      })
 
     // B. Regular / Trace Edges
-    // These require full ancestor projection
-    const regularEdges = edges.filter(edge => !isContainmentEdge(normalizeEdgeType(edge)))
-
-    regularEdges.forEach(edge => {
-      const sId = ancestorMap.get(edge.source) || (displayMap.has(edge.source) ? edge.source : null)
-      const tId = ancestorMap.get(edge.target) || (displayMap.has(edge.target) ? edge.target : null)
-
-      if (sId && tId && sId !== tId) {
-        if (isTracing) {
-          if (!traceContextSet.has(sId) || !traceContextSet.has(tId)) return
+    edges
+      .filter(edge => !isContainmentEdge(normalizeEdgeType(edge)))
+      .forEach(edge => {
+        const sId = ancestorMap.get(edge.source) || (displayMap.has(edge.source) ? edge.source : null)
+        const tId = ancestorMap.get(edge.target) || (displayMap.has(edge.target) ? edge.target : null)
+        if (sId && tId && sId !== tId) {
+          if (isTracing && (!traceContextSet.has(sId) || !traceContextSet.has(tId))) return
+          addEdgeToGroup(sId, tId, { ...edge, data: edge.data || {} }, normalizeEdgeType(edge))
         }
+      })
 
-        addEdgeToGroup(sId, tId, {
-          ...edge,
-          data: edge.data || {}
-        }, normalizeEdgeType(edge))
-      }
-    })
-
-    // C. Expanded Detailed Edges from Aggregation
+    // C. Expanded Detailed Edges
     Array.from(aggregatedEdges.values())
       .filter(e => e.state === 'expanded')
       .flatMap(e => e.detailedEdges)
       .forEach(edge => {
-        // These are real edges, need projection just in case, though they likely connect visible children
         const sId = ancestorMap.get(edge.sourceUrn)
         const tId = ancestorMap.get(edge.targetUrn)
         if (sId && tId && sId !== tId) {
           addEdgeToGroup(sId, tId, {
             id: edge.id,
-            data: {
-              edgeType: edge.edgeType,
-              relationship: edge.edgeType,
-              confidence: edge.confidence
-            }
+            data: { edgeType: edge.edgeType, relationship: edge.edgeType, confidence: edge.confidence }
           }, edge.edgeType)
         }
       })
 
-    // Finalize Groups (Semantic Edge Bundling & Ghost Edges)
+    // Finalize: bundle groups into projected edges
+    const projected: any[] = []
     edgeGroups.forEach((groupEdges, key) => {
       const distinctTypes = new Set<string>()
       let isGhost = false
@@ -246,9 +319,6 @@ export function useEdgeProjection({
       const sourceId = groupEdges[0].source
       const targetId = groupEdges[0].target
 
-      // We consider it a "Ghost" edge only if the projected container is collapsed OR has unloaded paginated items.
-      // For now, let's keep all aggregated/bundled edges fully vibrant and just use dash styling
-      // to imply that they are abstracted (source !== originalSource).
       if (groupEdges.some((e: any) => e.target !== e.originalTargetId || e.source !== e.originalSourceId)) {
         isGhost = true
       }
@@ -260,7 +330,6 @@ export function useEdgeProjection({
         } else if (e.originalType) {
           distinctTypes.add(e.originalType)
         }
-
         maxConfidence = Math.max(maxConfidence, e.data?.confidence ?? 1)
       })
 
@@ -276,14 +345,13 @@ export function useEdgeProjection({
         edgeCount,
         types: typesArray,
         confidence: maxConfidence,
-        // Let the renderer know if it should use aggregated styles
         isAggregated,
         data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount }
       })
     })
 
     return projected
-  }, [lineageEdges, edges, aggregatedEdges, nodesByLayer, expandedNodes, displayFlat, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge])
 
   return { lineageEdges, visibleLineageEdges }
 }

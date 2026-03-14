@@ -8,10 +8,14 @@
  * - 'grid' → GridView (card grid)
  */
 
-import { Suspense, useMemo } from 'react'
+import { Suspense, useMemo, useEffect, useRef } from 'react'
+import { ReactFlowProvider } from '@xyflow/react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2 } from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
+import { useCanvasStore } from '@/store/canvas'
+import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { useOntologyMetadata } from '@/services/ontologyService'
 import { LineageCanvas } from './LineageCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
@@ -25,6 +29,59 @@ interface CanvasRouterProps {
 export function CanvasRouter({ className }: CanvasRouterProps) {
   const activeView = useSchemaStore((s) => s.getActiveView())
   const layoutType = activeView?.layout.type ?? 'graph'
+
+  // Load root nodes the first time this canvas mounts (or when the provider changes).
+  // Only fetches root-level entities — children are loaded lazily via useEntityLoader.
+  // This replaces the old AppLayout fetchInitialGraph which fired on every route.
+  const rawNodes = useCanvasStore((s) => s.nodes)
+  const { setNodes, setEdges } = useCanvasStore()
+  const provider = useGraphProvider()
+  const { metadata: ontologyMetadata, isLoading: isLoadingOntology } = useOntologyMetadata()
+  const initializedForRef = useRef<typeof provider | null>(null)
+
+  useEffect(() => {
+    if (isLoadingOntology) return
+    if (rawNodes.length > 0 && initializedForRef.current === provider) return
+    if (initializedForRef.current === provider) return
+    initializedForRef.current = provider
+
+    const rootTypes: string[] = ontologyMetadata?.rootEntityTypes?.length
+      ? ontologyMetadata.rootEntityTypes
+      : ['domain', 'dataPlatform', 'system']
+
+    const toNodeType = (entityType: string) => {
+      switch (entityType) {
+        case 'schemaField': case 'column': return 'column'
+        case 'dataPlatform': case 'system': return 'system'
+        case 'dataset': case 'table': return 'dataset'
+        case 'container': return 'container'
+        default: return 'domain'
+      }
+    }
+
+    provider.getNodes({ entityTypes: rootTypes as any[], limit: 200 })
+      .then(rootNodes => {
+        if (!rootNodes.length) return
+        setNodes(rootNodes.map(n => ({
+          id: n.urn,
+          type: toNodeType(n.entityType as string),
+          position: { x: Math.random() * 800, y: Math.random() * 600 },
+          data: {
+            label: n.displayName,
+            type: n.entityType as any,
+            urn: n.urn,
+            metadata: n.properties,
+            childCount: n.childCount,
+            classifications: n.tags,
+            businessLabel: (n.properties?.businessLabel as string) ?? undefined,
+            ...n,
+          },
+        })))
+        setEdges([])
+      })
+      .catch(err => console.error('[CanvasRouter] Failed to load initial nodes:', err))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider, ontologyMetadata, isLoadingOntology])
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {
@@ -49,6 +106,7 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
   }, [layoutType])
 
   return (
+    <ReactFlowProvider>
     <div className={cn("relative w-full h-full", className)}>
       {/* View Type Indicator */}
       <AnimatePresence>
@@ -76,6 +134,7 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
         </div>
       )}
     </div>
+    </ReactFlowProvider>
   )
 }
 
