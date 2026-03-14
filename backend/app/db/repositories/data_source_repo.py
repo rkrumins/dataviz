@@ -35,6 +35,8 @@ def _to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         isActive=bool(row.is_active),
         projectionMode=row.projection_mode,
         dedicatedGraphName=row.dedicated_graph_name,
+        providerId=row.provider_id,
+        graphName=row.graph_name,
         accessLevel=row.access_level,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
@@ -114,9 +116,16 @@ async def create_data_source(
     req: DataSourceCreateRequest,
     make_primary: bool = False,
 ) -> DataSourceResponse:
+    from .catalog_repo import get_catalog_item_orm
+    cat = await get_catalog_item_orm(session, req.catalog_item_id)
+    if not cat:
+        raise ValueError(f"Catalog Item '{req.catalog_item_id}' not found")
+
     row = WorkspaceDataSourceORM(
         workspace_id=workspace_id,
         catalog_item_id=req.catalog_item_id,
+        provider_id=cat.provider_id,
+        graph_name=cat.source_identifier,
         blueprint_id=req.blueprint_id,
         label=req.label,
         is_primary=make_primary,

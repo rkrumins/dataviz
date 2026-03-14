@@ -41,8 +41,9 @@ async def create_workspace(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Create a new workspace with one or more data sources."""
+    # Allow empty workspaces for "Skip for Now" onboarding
     if not req.data_sources:
-        raise HTTPException(status_code=422, detail="At least one data source is required")
+        req.data_sources = []
 
     # Validate all referenced catalog items and blueprints exist
     from backend.app.db.repositories import catalog_repo
