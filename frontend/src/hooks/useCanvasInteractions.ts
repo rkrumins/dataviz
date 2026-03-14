@@ -5,7 +5,7 @@
  * into a single cohesive hook for consistent UX across all canvas views.
  */
 
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { ContextMenuTarget } from '@/components/canvas/CanvasContextMenu'
@@ -61,6 +61,10 @@ export interface UseCanvasInteractionsOptions {
     onMoveToLayer?: (nodeId: string, layerId: string) => void
     /** Callback to trace a node */
     onTraceNode?: (nodeId: string) => void
+    /** Callback to close the edge detail panel (ESC cascade). Should return true if it handled the close. */
+    onCloseEdgePanel?: () => boolean
+    /** Callback to close the entity drawer (ESC cascade). Should return true if it handled the close. */
+    onCloseEntityDrawer?: () => boolean
 }
 
 export interface UseCanvasInteractionsResult {
@@ -130,6 +134,8 @@ export function useCanvasInteractions(
         onInlineEditSave,
         onEdgeDeleted,
         onTraceNode,
+        onCloseEdgePanel,
+        onCloseEntityDrawer,
     } = options
     
     const provider = useGraphProvider()
@@ -384,6 +390,10 @@ export function useCanvasInteractions(
                 closeCommandPalette()
             } else if (contextMenu.isOpen) {
                 closeContextMenu()
+            } else if (onCloseEdgePanel?.()) {
+                // Edge panel was open and closed
+            } else if (onCloseEntityDrawer?.()) {
+                // Entity drawer was open and closed
             } else {
                 clearSelection()
             }
@@ -400,11 +410,13 @@ export function useCanvasInteractions(
     }
     
     // Track mouse position for 'N' key create
-    if (typeof window !== 'undefined') {
-        document.addEventListener('mousemove', (e) => {
+    useEffect(() => {
+        const handler = (e: MouseEvent) => {
             lastMousePosition.current = { x: e.clientX, y: e.clientY }
-        }, { passive: true })
-    }
+        }
+        document.addEventListener('mousemove', handler, { passive: true })
+        return () => document.removeEventListener('mousemove', handler)
+    }, [])
     
     return {
         state: {

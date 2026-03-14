@@ -132,7 +132,9 @@ export const useCanvasStore = create<CanvasState>()(
           ? state.selectedNodeIds.includes(id)
             ? state.selectedNodeIds.filter((nid) => nid !== id)
             : [...state.selectedNodeIds, id]
-          : [id],
+          : state.selectedNodeIds.length === 1 && state.selectedNodeIds[0] === id
+            ? [] // Toggle off: clicking the already-selected node deselects it
+            : [id],
         selectedEdgeIds: multi ? state.selectedEdgeIds : [],
       })),
       selectEdge: (id, multi = false) => set((state) => ({

@@ -9,7 +9,7 @@
  * - Responsive and accessible design
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
@@ -64,6 +64,7 @@ export function EntityDrawer({
   const [showSaved, setShowSaved] = useState(false)
   const [isPinned, setIsPinned] = useState(false)
   const [copiedUrn, setCopiedUrn] = useState(false)
+  const drawerRef = useRef<HTMLElement>(null)
 
   // Reset state when selection changes
   useEffect(() => {
@@ -171,6 +172,18 @@ export function EntityDrawer({
     }
   }, [clearSelection, isPinned])
 
+  // Click-outside to close drawer (respects pin state)
+  useEffect(() => {
+    if (!isOpen || isPinned) return
+    const handleMouseDown = (e: MouseEvent) => {
+      if (drawerRef.current && !drawerRef.current.contains(e.target as Node)) {
+        clearSelection()
+      }
+    }
+    document.addEventListener('mousedown', handleMouseDown)
+    return () => document.removeEventListener('mousedown', handleMouseDown)
+  }, [isOpen, isPinned, clearSelection])
+
   // Get external URL
   const externalUrl = useMemo(() => {
     const urn = formData.urn || selectedNode?.id
@@ -192,6 +205,7 @@ export function EntityDrawer({
   return (
     <AnimatePresence>
       <motion.aside
+        ref={drawerRef}
         initial={{ x: '100%', opacity: 0 }}
         animate={{ x: 0, opacity: 1 }}
         exit={{ x: '100%', opacity: 0 }}

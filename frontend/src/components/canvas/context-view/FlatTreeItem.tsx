@@ -1,0 +1,362 @@
+import React, { useState, useEffect, useRef } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import * as LucideIcons from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import type { HierarchyNode } from './types'
+import type { ViewLayerConfig } from '@/types/schema'
+import { useSchemaStore } from '@/store/schema'
+
+interface FlatTreeItemProps {
+  node: HierarchyNode
+  depth: number
+  isLast: boolean
+  parentIsLast: boolean[]
+  layer: ViewLayerConfig
+  schema: ReturnType<typeof useSchemaStore.getState>['schema']
+  isSelected: boolean
+  isExpanded: boolean
+  isLoading?: boolean
+  isSearchResult: boolean
+  isTraceActive: boolean
+  isHighlighted: boolean
+  isFocusNode: boolean
+  isClickHighlighted?: boolean
+  isDimmedByHighlight?: boolean
+  onSelect: (id: string) => void
+  onToggle: (id: string) => void
+  onContextMenu: (e: React.MouseEvent, id: string) => void
+  onDoubleClick: (id: string, event?: React.MouseEvent) => void
+  onAddChild?: (parentId: string) => void
+  onFocus: (node: HierarchyNode) => void
+  onToggleSearch?: (id: string) => void
+  isSearchVisible?: boolean
+  animationDelay?: number
+}
+
+export const FlatTreeItem = React.memo(function FlatTreeItem({
+  node,
+  depth,
+  isLast,
+  parentIsLast,
+  layer,
+  schema,
+  isSelected,
+  isExpanded,
+  isLoading = false,
+  isSearchResult,
+  isTraceActive,
+  isHighlighted,
+  isFocusNode,
+  isClickHighlighted = false,
+  isDimmedByHighlight = false,
+  onSelect,
+  onToggle,
+  onContextMenu,
+  onDoubleClick,
+  onAddChild,
+  onFocus,
+  onToggleSearch,
+  isSearchVisible = false,
+  animationDelay = 0
+}: FlatTreeItemProps) {
+  const itemRef = useRef<HTMLDivElement>(null)
+  const [isHovered, setIsHovered] = useState(false)
+  const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
+  const visual = entityType?.visual
+  const nodeColor = visual?.color ?? layer.color
+
+  const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || 0
+  const hasChildren = node.children.length > 0 || childCount > 0
+  const descendantCount = hasChildren && !isExpanded ? (childCount || node.children.length) : 0
+
+  // IMPROVED SIZING - Keep items readable at ALL depths
+  // Root items are slightly larger, but children remain very readable
+  const isRoot = depth === 0
+  const heightClass = isRoot ? 'min-h-[52px]' : 'min-h-[44px]'
+  const paddingClass = isRoot ? 'py-3' : 'py-2.5'
+  const textClass = isRoot ? 'text-sm' : 'text-[13px]'
+  const iconSize = isRoot ? 'w-5 h-5' : 'w-4 h-4'
+  const iconContainerSize = isRoot ? 'w-9 h-9' : 'w-7 h-7'
+
+  // Calculate dimming — trace takes priority over click-highlight
+  const isDimmed = (isTraceActive && !isHighlighted) || isDimmedByHighlight
+
+  // Tree line indent - reduced to save horizontal space
+  const indentWidth = depth * 16
+
+  // Auto-scroll when this node becomes the focus of a trace
+  useEffect(() => {
+    if (isFocusNode && itemRef.current) {
+      setTimeout(() => {
+        itemRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center',
+          inline: 'nearest'
+        })
+      }, 100)
+    }
+  }, [isFocusNode])
+
+  return (
+    <motion.div
+      ref={itemRef}
+      id={`layer-node-${node.id}`}
+      data-canvas-interactive
+      initial={{ opacity: 0, x: -12, scale: 0.97 }}
+      animate={{ opacity: 1, x: 0, scale: 1 }}
+      transition={{
+        duration: 0.3,
+        delay: Math.min(animationDelay, 0.4),
+        ease: [0.25, 0.46, 0.45, 0.94],
+        scale: { duration: 0.25, delay: Math.min(animationDelay, 0.4) },
+      }}
+      className={cn(
+        "flex items-center gap-2 mx-1 rounded-xl cursor-pointer transition-all duration-200 group/item relative",
+        heightClass,
+        paddingClass,
+        // Base hover state with gradient
+        "hover:bg-gradient-to-r hover:from-white/[0.06] hover:to-transparent",
+        // Selected state with accent glow
+        isSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
+        // Search result highlight
+        isSearchResult && !isSelected && "bg-gradient-to-r from-amber-500/15 to-transparent shadow-[inset_0_0_0_1px_rgba(245,158,11,0.3)]",
+        // Focus node (trace target)
+        isFocusNode && "ring-2 ring-accent-lineage/60 ring-offset-1 ring-offset-canvas shadow-lg shadow-accent-lineage/20",
+        // Highlighted in trace
+        isHighlighted && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
+        // Click-highlight: subtle glow on connected nodes
+        isClickHighlighted && !isSelected && "ring-1 ring-blue-400/40 bg-gradient-to-r from-blue-500/10 to-transparent",
+        // Dimmed when not in trace path or not connected to highlighted node
+        isDimmed && "opacity-40"
+      )}
+      style={{
+        paddingLeft: 12 + indentWidth,
+        // Subtle left border accent for root items
+        ...(depth === 0 && {
+          borderLeft: `3px solid ${nodeColor}40`,
+        })
+      }}
+      onClick={(e) => {
+        e.stopPropagation()
+        onSelect(node.id)
+      }}
+      onDoubleClick={(e) => {
+        e.stopPropagation()
+        onDoubleClick(node.id, e)
+      }}
+      onContextMenu={(e) => onContextMenu(e, node.id)}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+    >
+      {/* Modern Tree Lines with gradient effect */}
+      <div className="flex items-center absolute left-3" style={{ width: indentWidth }}>
+        {parentIsLast.map((pIsLast, idx) => (
+          <div key={idx} className="w-5 h-full flex justify-center">
+            {!pIsLast && (
+              <div className="w-px h-full bg-gradient-to-b from-white/[0.08] via-white/[0.12] to-white/[0.08]" />
+            )}
+          </div>
+        ))}
+        {depth > 0 && (
+          <div className="w-5 h-full relative">
+            {/* Vertical line with gradient */}
+            <div className={cn(
+              "absolute left-1/2 -translate-x-1/2 w-px",
+              isLast ? "top-0 h-1/2" : "top-0 bottom-0"
+            )} style={{ background: 'linear-gradient(to bottom, transparent, rgba(255,255,255,0.12), transparent)' }} />
+            {/* Horizontal connector with dot */}
+            <div className="absolute left-1/2 top-1/2 -translate-y-1/2 flex items-center">
+              <div className="w-3 h-px bg-gradient-to-r from-white/[0.12] to-white/[0.06]" />
+              <div
+                className="w-1.5 h-1.5 rounded-full -ml-0.5"
+                style={{ backgroundColor: `${nodeColor}40` }}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Expand/Collapse Toggle - Modern circular button with loading state */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          onToggle(node.id)
+        }}
+        className={cn(
+          "flex-shrink-0 rounded-lg transition-all duration-200",
+          hasChildren
+            ? "hover:bg-white/[0.1] hover:scale-110 active:scale-95"
+            : "opacity-0 pointer-events-none",
+          isRoot ? "w-7 h-7" : "w-6 h-6"
+        )}
+      >
+        {hasChildren && (
+          <AnimatePresence mode="wait">
+            {isLoading ? (
+              <motion.div
+                key="spinner"
+                initial={{ opacity: 0, scale: 0.5 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.5 }}
+                transition={{ duration: 0.15 }}
+                className="w-full h-full flex items-center justify-center"
+              >
+                <LucideIcons.Loader2
+                  className={cn(
+                    "animate-spin",
+                    isRoot ? "w-4 h-4" : "w-3.5 h-3.5"
+                  )}
+                  style={{ color: nodeColor }}
+                />
+              </motion.div>
+            ) : (
+              <motion.div
+                key="chevron"
+                initial={{ opacity: 0, scale: 0.5 }}
+                animate={{ opacity: 1, scale: 1, rotate: isExpanded ? 90 : 0 }}
+                exit={{ opacity: 0, scale: 0.5 }}
+                transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+                className="w-full h-full flex items-center justify-center"
+              >
+                <LucideIcons.ChevronRight
+                  className={cn(
+                    "transition-colors",
+                    isHovered ? "text-ink" : "text-ink-muted/60",
+                    isRoot ? "w-4 h-4" : "w-4 h-4"
+                  )}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
+        )}
+      </button>
+
+      {/* Entity Icon - Glass morphism container */}
+      <div
+        className={cn(
+          "rounded-xl flex items-center justify-center flex-shrink-0 transition-all duration-200 shadow-sm",
+          iconContainerSize,
+          isSelected && "scale-110 shadow-md",
+          isHovered && "scale-105"
+        )}
+        style={{
+          background: `linear-gradient(135deg, ${nodeColor}25 0%, ${nodeColor}10 100%)`,
+          boxShadow: isSelected ? `0 4px 12px ${nodeColor}30` : `0 2px 4px ${nodeColor}15`
+        }}
+      >
+        <DynamicIcon
+          name={visual?.icon ?? 'Box'}
+          className={cn(iconSize, "transition-transform duration-200")}
+          style={{ color: nodeColor }}
+        />
+      </div>
+
+      {/* Name - IMPROVED: Better visibility with tooltip */}
+      <div className="flex-1 min-w-0 flex flex-col justify-center" title={node.name}>
+        <span className={cn(
+          "font-medium tracking-tight transition-colors duration-200",
+          textClass,
+          isHighlighted ? "text-accent-lineage" : isSelected ? "text-ink" : "text-ink/90",
+          isHovered && !isSelected && "text-ink",
+          // Allow text to wrap to 2 lines for better readability
+          "line-clamp-2"
+        )}>
+          {node.name}
+        </span>
+        {/* Type badge - show for all items to help identify entity types */}
+        <span className={cn(
+          "text-[10px] text-ink-muted/60 truncate mt-0.5 flex items-center gap-1",
+          isRoot && "text-[11px]"
+        )}>
+          <span
+            className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+            style={{ backgroundColor: nodeColor }}
+          />
+          {entityType?.name ?? node.typeId}
+        </span>
+      </div>
+
+      {/* Badges - Descendant count */}
+      <AnimatePresence>
+        {descendantCount > 0 && (
+          <motion.span
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.8 }}
+            className="text-[11px] px-2 py-1 rounded-lg bg-white/[0.06] border border-white/[0.08] text-ink-muted font-semibold tabular-nums flex-shrink-0"
+          >
+            +{descendantCount}
+          </motion.span>
+        )}
+      </AnimatePresence>
+
+      {/* Action buttons - Glass morphism style, appear on hover */}
+      <motion.div
+        initial={false}
+        animate={{ opacity: isHovered ? 1 : 0, x: isHovered ? 0 : 8 }}
+        transition={{ duration: 0.15 }}
+        className="flex items-center gap-1 flex-shrink-0"
+      >
+        {/* Focus/Drill button */}
+        {hasChildren && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onFocus(node)
+            }}
+            className="p-1.5 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 hover:text-blue-300 transition-all duration-200 hover:scale-110 active:scale-95"
+            title="Focus on this subtree"
+          >
+            <LucideIcons.Maximize2 className="w-3 h-3" />
+          </button>
+        )}
+
+        {/* Search children button */}
+        {hasChildren && onToggleSearch && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleSearch(node.id)
+            }}
+            className={cn(
+              "p-1.5 rounded-lg transition-all duration-200 hover:scale-110 active:scale-95",
+              isSearchVisible
+                ? "bg-amber-500/20 text-amber-400"
+                : "bg-white/[0.06] hover:bg-white/[0.12] text-ink-muted/80 hover:text-ink-muted"
+            )}
+            title="Search children"
+          >
+            <LucideIcons.Search className="w-3 h-3" />
+          </button>
+        )}
+
+        {/* Add child button */}
+        {entityType?.hierarchy?.canContain && entityType.hierarchy.canContain.length > 0 && onAddChild && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onAddChild(node.id)
+            }}
+            className="p-1.5 rounded-lg bg-green-500/10 hover:bg-green-500/20 text-green-400 hover:text-green-300 transition-all duration-200 hover:scale-110 active:scale-95"
+            title="Add child entity"
+          >
+            <LucideIcons.Plus className="w-3 h-3" />
+          </button>
+        )}
+      </motion.div>
+
+      {/* Hover indicator line */}
+      <motion.div
+        className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full"
+        style={{ backgroundColor: nodeColor }}
+        initial={false}
+        animate={{
+          height: isSelected ? '70%' : isHovered ? '50%' : '0%',
+          opacity: isSelected ? 1 : isHovered ? 0.6 : 0
+        }}
+        transition={{ duration: 0.2 }}
+      />
+    </motion.div>
+  )
+})

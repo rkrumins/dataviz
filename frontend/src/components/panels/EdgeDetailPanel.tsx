@@ -9,7 +9,7 @@
  * - Node-centric edge exploration
  */
 
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     X,
@@ -109,6 +109,19 @@ export function EdgeDetailPanel({
     const clearSelection = useCanvasStore((s) => s.clearSelection)
     const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
     const { containmentEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
+    const panelRef = useRef<HTMLDivElement>(null)
+
+    // Click-outside to close panel
+    useEffect(() => {
+        if (!isOpen) return
+        const handleMouseDown = (e: MouseEvent) => {
+            if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+                onClose()
+            }
+        }
+        document.addEventListener('mousedown', handleMouseDown)
+        return () => document.removeEventListener('mousedown', handleMouseDown)
+    }, [isOpen, onClose])
 
     // Generate filters dynamically if not provided
     const edgeFilters = useMemo(() => {
@@ -232,6 +245,7 @@ export function EdgeDetailPanel({
 
     return (
         <motion.div
+            ref={panelRef}
             initial={{ x: 300, opacity: 0 }}
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: 300, opacity: 0 }}
