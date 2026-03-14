@@ -23,6 +23,7 @@ interface FlatTreeItemProps {
   isFocusNode: boolean
   isClickHighlighted?: boolean
   isDimmedByHighlight?: boolean
+  isFocused?: boolean
   onSelect: (id: string) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
@@ -50,6 +51,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   isFocusNode,
   isClickHighlighted = false,
   isDimmedByHighlight = false,
+  isFocused = false,
   onSelect,
   onToggle,
   onContextMenu,
@@ -98,6 +100,41 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     }
   }, [isFocusNode])
 
+  // 4.3 Drag-and-drop — only root-level nodes (depth === 0, no parentId) may
+  // be re-assigned between layers. Children live inside their parent's
+  // containment scope; moving a column without its table would break the
+  // ontology. Attach native events via ref (avoids Framer Motion type conflict).
+  const isLayerDraggable = depth === 0 && !node.parentId
+  useEffect(() => {
+    const el = itemRef.current
+    if (!el) return
+
+    if (!isLayerDraggable) {
+      el.removeAttribute('draggable')
+      return
+    }
+
+    el.setAttribute('draggable', 'true')
+
+    const onDragStart = (e: DragEvent) => {
+      if (!e.dataTransfer) return
+      e.dataTransfer.effectAllowed = 'move'
+      e.dataTransfer.setData('text/x-entity-id', node.id)
+      e.dataTransfer.setData('text/x-entity-name', node.name)
+      e.dataTransfer.setDragImage(el, 20, 20)
+    }
+    const onDragEnd = () => {
+      delete document.documentElement.dataset.hoveredNode
+    }
+
+    el.addEventListener('dragstart', onDragStart)
+    el.addEventListener('dragend', onDragEnd)
+    return () => {
+      el.removeEventListener('dragstart', onDragStart)
+      el.removeEventListener('dragend', onDragEnd)
+    }
+  }, [node.id, node.name, isLayerDraggable])
+
   return (
     <motion.div
       ref={itemRef}
@@ -128,6 +165,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         isHighlighted && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
         // Click-highlight: subtle glow on connected nodes
         isClickHighlighted && !isSelected && "ring-1 ring-blue-400/40 bg-gradient-to-r from-blue-500/10 to-transparent",
+        // Keyboard focus ring (4.5)
+        isFocused && !isSelected && "ring-2 ring-accent-lineage/40 bg-gradient-to-r from-accent-lineage/[0.06] to-transparent",
         // Dimmed when not in trace path or not connected to highlighted node
         isDimmed && "opacity-40"
       )}
@@ -147,8 +186,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         onDoubleClick(node.id, e)
       }}
       onContextMenu={(e) => onContextMenu(e, node.id)}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
+      onMouseEnter={() => {
+        setIsHovered(true)
+        document.documentElement.dataset.hoveredNode = node.id
+      }}
+      onMouseLeave={() => {
+        setIsHovered(false)
+        delete document.documentElement.dataset.hoveredNode
+      }}
     >
       {/* Modern Tree Lines with gradient effect */}
       <div className="flex items-center absolute left-3" style={{ width: indentWidth }}>

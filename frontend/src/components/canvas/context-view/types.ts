@@ -48,4 +48,7 @@ export type ComputedEdge = {
   sy: number
   tx: number
   ty: number
+  // For tooltip display
+  types: string[]
+  confidence: number
 }

@@ -287,7 +287,11 @@ export function LineageFlowOverlay({
           isGhost: edge.isGhost || false,
           isBundled: edge.isBundled || false,
           edgeCount: edge.edgeCount || 0,
-          sx, sy, tx, ty
+          sx, sy, tx, ty,
+          types: Array.isArray(edge.types) && edge.types.length > 0
+            ? edge.types
+            : edge.originalType ? [edge.originalType] : [],
+          confidence: edge.confidence || 0,
         })
       }
     })
@@ -392,6 +396,35 @@ export function LineageFlowOverlay({
     }
   }, [updateFlow, scheduleUpdate, expandedNodesArray])
 
+  // ── 4.2 Hover Preview ────────────────────────────────────────────────────────
+  // Pure DOM/CSS — zero React re-renders. Reads document.dataset.hoveredNode set
+  // by FlatTreeItem, then dims/highlights visual edge <g> elements directly.
+  useEffect(() => {
+    let rafId: number
+    let lastNode: string | undefined
+
+    const tick = () => {
+      const hovered = document.documentElement.dataset.hoveredNode
+      if (hovered !== lastNode) {
+        lastNode = hovered
+        const groups = containerRef.current?.querySelectorAll<SVGGElement>('g[data-edge-id]')
+        groups?.forEach(g => {
+          if (!hovered) {
+            g.style.removeProperty('opacity')
+          } else if (g.dataset.edgeSrc === hovered || g.dataset.edgeTgt === hovered) {
+            g.style.opacity = '1'
+          } else {
+            g.style.opacity = '0.06'
+          }
+        })
+      }
+      rafId = requestAnimationFrame(tick)
+    }
+
+    rafId = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(rafId)
+  }, [])
+
   // VERY FAST Virtualization Filter: Only render edges that intersect the scroll viewport
   const VIEWPORT_MARGIN = 400 // Load edges slightly before they enter screen
   const visibleEdges = computedEdges.filter(edge => {
@@ -457,6 +490,9 @@ export function LineageFlowOverlay({
           return (
             <g
               key={edge.id}
+              data-edge-id={edge.id}
+              data-edge-src={edge.source}
+              data-edge-tgt={edge.target}
               style={{ opacity: groupOpacity, transition: 'opacity 0.25s ease' }}
             >
 
@@ -543,6 +579,69 @@ export function LineageFlowOverlay({
           )
         })}
       </svg>
+
+      {/* ── 4.4 Edge Tooltip ───────────────────────────────────────────────────── */}
+      {(() => {
+        if (!hoveredEdgeId) return null
+        const edge = computedEdges.find(e => e.id === hoveredEdgeId)
+        if (!edge) return null
+        const midX = (edge.sx + edge.tx) / 2
+        const midY = (edge.sy + edge.ty) / 2
+        const typeLabel = edge.types.length > 0 ? edge.types.join(' · ') : 'RELATIONSHIP'
+        const confPct = edge.confidence > 0 ? Math.round(edge.confidence * 100) : null
+
+        // Flip tooltip left if too close to right edge
+        const tooltipX = midX + 14
+        const tooltipY = midY - 44
+
+        return (
+          <div
+            className="absolute pointer-events-none"
+            style={{ left: tooltipX, top: tooltipY, zIndex: 100 }}
+          >
+            <div
+              className="rounded-xl border border-white/[0.12] shadow-2xl shadow-black/60 px-3 py-2.5 min-w-[140px] max-w-[220px]"
+              style={{
+                background: 'rgba(15, 17, 23, 0.92)',
+                backdropFilter: 'blur(12px)',
+              }}
+            >
+              {/* type chip */}
+              <div className="flex items-center gap-2 mb-1.5">
+                <div className="w-3 h-0.5 rounded-full flex-shrink-0" style={{ backgroundColor: edge.color }} />
+                <span className="text-[11px] font-semibold tracking-wide" style={{ color: edge.color }}>
+                  {typeLabel}
+                </span>
+              </div>
+
+              {/* bundle count */}
+              {edge.edgeCount > 1 && (
+                <p className="text-[10px] text-white/60 leading-snug">
+                  {edge.edgeCount.toLocaleString()} relationships bundled
+                </p>
+              )}
+
+              {/* confidence */}
+              {confPct !== null && (
+                <div className="flex items-center gap-1.5 mt-1">
+                  <div className="flex-1 h-0.5 rounded-full bg-white/10 overflow-hidden">
+                    <div
+                      className="h-full rounded-full"
+                      style={{ width: `${confPct}%`, backgroundColor: edge.color, opacity: 0.7 }}
+                    />
+                  </div>
+                  <span className="text-[10px] text-white/50 tabular-nums flex-shrink-0">{confPct}%</span>
+                </div>
+              )}
+
+              {/* hint */}
+              <p className="text-[9px] text-white/30 mt-1.5 pt-1.5 border-t border-white/[0.06]">
+                Click to inspect
+              </p>
+            </div>
+          </div>
+        )
+      })()}
     </div>
 
     {/* ── HIT LAYER ─── z-20: above columns, transparent, only click/hover paths ── *

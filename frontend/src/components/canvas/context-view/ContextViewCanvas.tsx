@@ -209,10 +209,7 @@ export function ContextViewCanvas({
   const syncStatus = useReferenceModelStore(s => s.syncStatus)
   const activeContextModelName = useReferenceModelStore(s => s.activeContextModelName)
   const saveToBackend = useReferenceModelStore(s => s.saveToBackend)
-  const loadFromBackend = useReferenceModelStore(s => s.loadFromBackend)
-  const loadTemplate = useReferenceModelStore(s => s.loadTemplate)
-  const listAvailable = useReferenceModelStore(s => s.listAvailable)
-  const listTemplates = useReferenceModelStore(s => s.listTemplates)
+  const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
 
   // Step 1: Sync view layers to store when activeView changes
@@ -264,61 +261,6 @@ export function ContextViewCanvas({
 
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
-
-  // Blueprint / Template data state (open/close is owned by OverflowMenu internally)
-  const [savedModels, setSavedModels] = useState<Array<{ id: string; name: string }>>([])
-  const [isLoadingModels, setIsLoadingModels] = useState(false)
-  const [loadingModelId, setLoadingModelId] = useState<string | null>(null)
-  const [templates, setTemplates] = useState<Array<{ id: string; name: string; category?: string }>>([])
-  const [isLoadingTemplates, setIsLoadingTemplates] = useState(false)
-  const [loadingTemplateId, setLoadingTemplateId] = useState<string | null>(null)
-
-  // Lazily fetch saved blueprints on first open (called by OverflowMenu)
-  const handleOpenLoadDropdown = useCallback(async () => {
-    if (!activeWorkspaceId || savedModels.length > 0 || isLoadingModels) return
-    setIsLoadingModels(true)
-    try {
-      const models = await listAvailable(activeWorkspaceId)
-      setSavedModels(models.map(m => ({ id: m.id, name: m.name })))
-    } catch { /* silent */ } finally {
-      setIsLoadingModels(false)
-    }
-  }, [activeWorkspaceId, savedModels.length, isLoadingModels, listAvailable])
-
-  // Load a saved blueprint and clear the model list so next open re-fetches
-  const handleLoadModel = useCallback(async (id: string) => {
-    if (!activeWorkspaceId) return
-    setLoadingModelId(id)
-    try {
-      await loadFromBackend(activeWorkspaceId, id)
-    } catch { /* silent */ } finally {
-      setLoadingModelId(null)
-    }
-  }, [activeWorkspaceId, loadFromBackend])
-
-  // Lazily fetch templates on first open (called by OverflowMenu)
-  const handleOpenTemplatesDropdown = useCallback(async () => {
-    if (templates.length > 0 || isLoadingTemplates) return
-    setIsLoadingTemplates(true)
-    try {
-      const tmpl = await listTemplates()
-      setTemplates(tmpl.map(m => ({ id: m.id, name: m.name, category: m.category ?? undefined })))
-    } catch { /* silent */ } finally {
-      setIsLoadingTemplates(false)
-    }
-  }, [templates.length, isLoadingTemplates, listTemplates])
-
-  // Instantiate a Quick Start Template
-  const handleLoadTemplate = useCallback(async (templateId: string, templateName: string) => {
-    if (!activeWorkspaceId) return
-    setLoadingTemplateId(templateId)
-    try {
-      await loadTemplate(activeWorkspaceId, templateId, `${templateName} (copy)`)
-    } catch { /* silent */ } finally {
-      setLoadingTemplateId(null)
-    }
-  }, [activeWorkspaceId, loadTemplate])
-
 
   // Edit Mode State (unified with LineageCanvas)
   const [isPaletteOpen, setPaletteOpen] = useState(false)
@@ -795,26 +737,7 @@ export function ContextViewCanvas({
         onCollapseAll={collapseAll}
         onAddEntity={() => { setIsCreatingEntity(true); setCreationParentId(null); setCreationLayerId(null) }}
         activeWorkspaceId={activeWorkspaceId}
-        onOpenLoadDropdown={handleOpenLoadDropdown}
-        savedModels={savedModels}
-        isLoadingModels={isLoadingModels}
-        loadingModelId={loadingModelId}
         activeContextModelName={activeContextModelName}
-        onLoadModel={handleLoadModel}
-        onRefreshModels={() => {
-          setSavedModels([])
-          if (activeWorkspaceId) {
-            setIsLoadingModels(true)
-            listAvailable(activeWorkspaceId)
-              .then(m => setSavedModels(m.map(x => ({ id: x.id, name: x.name }))))
-              .finally(() => setIsLoadingModels(false))
-          }
-        }}
-        onOpenTemplatesDropdown={handleOpenTemplatesDropdown}
-        templates={templates}
-        isLoadingTemplates={isLoadingTemplates}
-        loadingTemplateId={loadingTemplateId}
-        onLoadTemplate={handleLoadTemplate}
         syncStatus={syncStatus}
         onSave={() => activeWorkspaceId && saveToBackend(activeWorkspaceId)}
         trace={trace}
@@ -922,6 +845,7 @@ export function ContextViewCanvas({
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
                 onScroll={handleLayerScroll}
+                onAssignToLayer={(entityId) => assignEntityToLayer(entityId, layer.id)}
               />
             ))}
           </div>

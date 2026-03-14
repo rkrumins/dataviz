@@ -45,6 +45,7 @@ interface LayerColumnProps {
   loadingNodes?: Set<string>
   failedNodes?: Set<string>
   onScroll?: () => void
+  onAssignToLayer?: (entityId: string) => void
 }
 
 export const LayerColumn = React.memo(function LayerColumn({
@@ -71,13 +72,16 @@ export const LayerColumn = React.memo(function LayerColumn({
   isLoadingChildren,
   loadingNodes,
   failedNodes,
-  onScroll
+  onScroll,
+  onAssignToLayer,
 }: LayerColumnProps) {
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
   const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [childSearchQueries, setChildSearchQueries] = useState<Record<string, string>>({})
   const [activeSearchNodes, setActiveSearchNodes] = useState<Set<string>>(new Set())
+  const [isDragOver, setIsDragOver] = useState(false)
+  const [focusIndex, setFocusIndex] = useState(-1)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   const toggleSearchNode = useCallback((nodeId: string) => {
@@ -249,6 +253,67 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
   }, [handleFocus])
 
+  // ── 4.5 Keyboard Navigation ───────────────────────────────────────────────
+  // Only the real FlatTreeItem rows (no skeletons, errors, search boxes, load-more)
+  const navigableItems = useMemo(
+    () => flatTree.filter(item => !item.isSearchBox && !item.isSkeleton && !item.isFailed && !item.isLoadMore),
+    [flatTree]
+  )
+
+  // Reset focus when tree content changes
+  useEffect(() => {
+    setFocusIndex(-1)
+  }, [nodes, localFocusId])
+
+  // Auto-scroll focused row into view.
+  // Use getElementById — querySelector rejects IDs containing ":" (URN format).
+  const focusedNodeId = navigableItems[focusIndex]?.node.id ?? null
+  useEffect(() => {
+    if (!focusedNodeId) return
+    const el = document.getElementById(`layer-node-${focusedNodeId}`)
+    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [focusedNodeId])
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const count = navigableItems.length
+    if (count === 0) return
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault()
+        setFocusIndex(i => Math.min(i + 1, count - 1))
+        break
+      case 'ArrowUp':
+        e.preventDefault()
+        setFocusIndex(i => (i <= 0 ? 0 : i - 1))
+        break
+      case 'ArrowRight': {
+        e.preventDefault()
+        const item = navigableItems[focusIndex]
+        if (item && !expandedNodes.has(item.node.id)) onToggle(item.node.id)
+        break
+      }
+      case 'ArrowLeft': {
+        e.preventDefault()
+        const item = navigableItems[focusIndex]
+        if (item && expandedNodes.has(item.node.id)) onToggle(item.node.id)
+        break
+      }
+      case 'Enter': {
+        const item = navigableItems[focusIndex]
+        if (item) onSelect(item.node.id)
+        break
+      }
+      case 'Home':
+        e.preventDefault()
+        setFocusIndex(0)
+        break
+      case 'End':
+        e.preventDefault()
+        setFocusIndex(count - 1)
+        break
+    }
+  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect])
+
   // Get total items at current level
   const visibleCount = flatTree.length
 
@@ -263,17 +328,49 @@ export const LayerColumn = React.memo(function LayerColumn({
       {/* Subtle column separator line with gradient fade */}
       <div className="absolute right-0 top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-glass-border/50 to-transparent" />
 
-      {/* Layer Header - Glass morphism style */}
+      {/* Layer Header - Glass morphism style + drag target (4.3) */}
       <div
         className={cn(
-          "flex-shrink-0 sticky top-0 z-10 backdrop-blur-xl border-b border-white/[0.08] dark:border-white/[0.05] cursor-pointer",
-          isCollapsed ? "px-2 py-4" : "px-4 py-3"
+          "flex-shrink-0 sticky top-0 z-10 backdrop-blur-xl border-b cursor-pointer transition-all duration-200",
+          isCollapsed ? "px-2 py-4" : "px-4 py-3",
+          isDragOver
+            ? "border-white/30"
+            : "border-white/[0.08] dark:border-white/[0.05]"
         )}
         style={{
           background: `linear-gradient(135deg, ${layer.color}12 0%, ${layer.color}05 100%)`,
+          boxShadow: isDragOver ? `inset 0 0 0 2px ${layer.color}80, 0 0 20px ${layer.color}20` : undefined,
         }}
         onClick={() => isCollapsed && setIsCollapsed(false)}
+        onDragOver={(e) => {
+          e.preventDefault()
+          e.dataTransfer.dropEffect = 'move'
+          setIsDragOver(true)
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDragOver(false)
+        }}
+        onDrop={(e) => {
+          e.preventDefault()
+          setIsDragOver(false)
+          const entityId = e.dataTransfer.getData('text/x-entity-id')
+          if (entityId && onAssignToLayer) onAssignToLayer(entityId)
+        }}
       >
+        {/* Drop hint overlay */}
+        {isDragOver && (
+          <div
+            className="absolute inset-0 flex items-center justify-center rounded-sm pointer-events-none"
+            style={{ backgroundColor: `${layer.color}15` }}
+          >
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/40 border border-white/20 backdrop-blur-sm">
+              <LucideIcons.MoveRight className="w-3.5 h-3.5" style={{ color: layer.color }} />
+              <span className="text-xs font-medium" style={{ color: layer.color }}>
+                Move to {layer.name}
+              </span>
+            </div>
+          </div>
+        )}
         <div className={cn(
           "flex items-center",
           isCollapsed ? "flex-col gap-3" : "gap-3"
@@ -425,7 +522,9 @@ export const LayerColumn = React.memo(function LayerColumn({
         <div
           ref={scrollContainerRef}
           onScroll={onScroll}
-          className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar relative"
+          onKeyDown={handleKeyDown}
+          tabIndex={0}
+          className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar relative outline-none focus-visible:ring-1 focus-visible:ring-accent-lineage/30 focus-visible:ring-inset"
         >
           {/* Subtle top fade for scroll indication */}
           <div className="absolute top-0 left-0 right-0 h-4 bg-gradient-to-b from-canvas/80 to-transparent pointer-events-none z-10" />
@@ -555,6 +654,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                 }
 
                 const { node, depth, isLast, parentIsLast } = item
+                const navIdx = navigableItems.findIndex(ni => ni.node.id === node.id)
                 return (
                   <FlatTreeItem
                     key={node.id}
@@ -573,6 +673,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     isFocusNode={traceFocusId === node.id}
                     isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
                     isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
+                    isFocused={focusIndex >= 0 && navIdx === focusIndex}
                     onSelect={onSelect}
                     onToggle={onToggle}
                     onContextMenu={onContextMenu}
