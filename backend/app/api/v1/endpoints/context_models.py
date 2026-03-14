@@ -9,12 +9,13 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import context_model_repo
+from backend.app.db.repositories import context_model_repo, view_repo
 from backend.common.models.management import (
     ContextModelCreateRequest,
     ContextModelUpdateRequest,
     ContextModelResponse,
     InstantiateTemplateRequest,
+    ViewResponse,
 )
 
 # ------------------------------------------------------------------ #
@@ -164,3 +165,20 @@ async def delete_template(
     deleted = await context_model_repo.delete_context_model(session, template_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Template '{template_id}' not found")
+
+
+# ------------------------------------------------------------------ #
+# Context Model → Views (1:N relationship)                             #
+# ------------------------------------------------------------------ #
+
+@router.get("/{context_model_id}/views", response_model=List[ViewResponse])
+async def list_views_for_context_model(
+    ws_id: str = Path(...),
+    context_model_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """List all views referencing a given context model."""
+    cm = await context_model_repo.get_context_model(session, context_model_id)
+    if not cm:
+        raise HTTPException(status_code=404, detail=f"Context model '{context_model_id}' not found")
+    return await view_repo.list_views_for_context_model(session, context_model_id)

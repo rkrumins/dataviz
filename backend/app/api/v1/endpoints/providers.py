@@ -14,7 +14,9 @@ from backend.common.models.management import (
     ProviderUpdateRequest,
     ProviderResponse,
     ConnectionTestResult,
-    GraphListResponse,
+    AssetListResponse,
+    ProviderImpactResponse,
+    PhysicalGraphStatsResponse,
 )
 
 router = APIRouter()
@@ -80,6 +82,20 @@ async def delete_provider(
     await provider_registry.evict_provider(provider_id)
 
 
+@router.get("/{provider_id}/impact", response_model=ProviderImpactResponse)
+async def get_provider_impact(
+    provider_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Calculate the blast radius of deleting a provider."""
+    # Ensure provider exists first
+    prov_row = await provider_repo.get_provider_orm(session, provider_id)
+    if not prov_row:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    
+    return await provider_repo.get_provider_impact(session, provider_id)
+
+
 @router.post("/{provider_id}/test", response_model=ConnectionTestResult)
 async def test_provider(
     provider_id: str = Path(...),
@@ -106,12 +122,12 @@ async def test_provider(
         return ConnectionTestResult(success=False, error=str(exc))
 
 
-@router.get("/{provider_id}/graphs", response_model=GraphListResponse)
-async def list_graphs(
+@router.get("/{provider_id}/assets", response_model=AssetListResponse)
+async def list_assets(
     provider_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """List available graph keys on this provider (e.g. FalkorDB GRAPH.LIST)."""
+    """List available assets (e.g. graphs, databases, topics) on this provider."""
     prov_row = await provider_repo.get_provider_orm(session, provider_id)
     if not prov_row:
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
@@ -123,6 +139,36 @@ async def list_graphs(
             None, prov_row.tls_enabled, creds,
         )
         graphs = await instance.list_graphs()
-        return GraphListResponse(graphs=graphs, connectionId=provider_id)
+        return AssetListResponse(assets=graphs)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to list graphs: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/{provider_id}/assets/{asset_name}/stats", response_model=PhysicalGraphStatsResponse)
+async def get_asset_stats(
+    provider_id: str = Path(...),
+    asset_name: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Get raw physical metadata (node/edge counts) for a specific asset."""
+    prov_row = await provider_repo.get_provider_orm(session, provider_id)
+    if not prov_row:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+
+    try:
+        creds = await provider_repo.get_credentials(session, provider_id)
+        # Instantiate with asset_name as the target graph/database key
+        instance = provider_registry._create_provider_instance(
+            prov_row.provider_type, prov_row.host, prov_row.port,
+            asset_name, prov_row.tls_enabled, creds,
+        )
+        raw = await instance.get_stats()
+        return PhysicalGraphStatsResponse(
+            nodeCount=raw.get("node_count", raw.get("nodeCount", 0)),
+            edgeCount=raw.get("edge_count", raw.get("edgeCount", 0)),
+            entityTypeCounts=raw.get("entity_type_counts", raw.get("entityTypeCounts", {})),
+            edgeTypeCounts=raw.get("edge_type_counts", raw.get("edgeTypeCounts", {})),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+

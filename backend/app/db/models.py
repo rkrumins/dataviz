@@ -57,10 +57,6 @@ class GraphConnectionORM(Base):
         "AssignmentRuleSetORM", back_populates="connection",
         cascade="all, delete-orphan",
     )
-    saved_views = relationship(
-        "SavedViewORM", back_populates="connection",
-        cascade="all, delete-orphan",
-    )
 
     __table_args__ = (
         # Only one row may have is_primary=True (partial unique index).
@@ -150,50 +146,31 @@ class AssignmentRuleSetORM(Base):
 
 
 # ------------------------------------------------------------------ #
-# saved_views                                                           #
+# view_favourites                                                      #
 # ------------------------------------------------------------------ #
 
-class SavedViewORM(Base):
-    __tablename__ = "saved_views"
+class ViewFavouriteORM(Base):
+    __tablename__ = "view_favourites"
 
-    id = Column(Text, primary_key=True, default=lambda: f"view_{uuid.uuid4().hex[:12]}")
-    connection_id = Column(
+    id = Column(Text, primary_key=True, default=lambda: f"fav_{uuid.uuid4().hex[:12]}")
+    view_id = Column(
         Text,
-        ForeignKey("graph_connections.id", ondelete="CASCADE"),
-        nullable=True,  # nullable during migration
+        ForeignKey("views.id", ondelete="CASCADE"),
+        nullable=False,
     )
-    workspace_id = Column(
-        Text,
-        ForeignKey("workspaces.id", ondelete="CASCADE"),
-        nullable=True,  # nullable during migration
-    )
-    data_source_id = Column(
-        Text,
-        ForeignKey("workspace_data_sources.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-    name = Column(Text, nullable=False)
-    description = Column(Text, nullable=True)
-    view_type = Column(Text, nullable=False, default="canvas")  # canvas | reference_model | scope
-    config = Column(Text, nullable=False, default="{}")         # JSON
-    scope_filter = Column(Text, nullable=True)                  # JSON
+    user_id = Column(Text, nullable=False)
     created_at = Column(Text, nullable=False, default=_now)
-    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
-    connection = relationship("GraphConnectionORM", back_populates="saved_views")
-    workspace = relationship(
-        "WorkspaceORM", back_populates="saved_views",
-        foreign_keys=[workspace_id],
-    )
+    view = relationship("ViewORM", back_populates="favourites")
 
     __table_args__ = (
-        Index("idx_views_connection", "connection_id"),
-        Index("idx_views_workspace", "workspace_id"),
-        Index("idx_views_data_source", "data_source_id"),
+        UniqueConstraint("view_id", "user_id", name="uq_view_user_favourite"),
+        Index("idx_favourites_user", "user_id"),
+        Index("idx_favourites_view", "view_id"),
     )
 
     def __repr__(self) -> str:
-        return f"<SavedView id={self.id!r} name={self.name!r} type={self.view_type!r}>"
+        return f"<ViewFavourite view={self.view_id!r} user={self.user_id!r}>"
 
 
 # ------------------------------------------------------------------ #
@@ -234,6 +211,7 @@ class ProviderORM(Base):
     credentials = Column(Text, nullable=True)         # Fernet-encrypted JSON blob
     tls_enabled = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
+    permitted_workspaces = Column(Text, nullable=False, default='["*"]')  # JSON list; "*" = all
     extra_config = Column(Text, nullable=True)        # JSON blob
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
@@ -241,6 +219,10 @@ class ProviderORM(Base):
     # Relationships
     data_sources = relationship(
         "WorkspaceDataSourceORM", back_populates="provider",
+        cascade="all, delete-orphan",
+    )
+    catalog_items = relationship(
+        "CatalogItemORM", back_populates="provider",
         cascade="all, delete-orphan",
     )
 
@@ -305,10 +287,6 @@ class WorkspaceORM(Base):
         "WorkspaceDataSourceORM", back_populates="workspace",
         cascade="all, delete-orphan",
     )
-    saved_views = relationship(
-        "SavedViewORM", back_populates="workspace",
-        foreign_keys="SavedViewORM.workspace_id",
-    )
     assignment_rule_sets = relationship(
         "AssignmentRuleSetORM", back_populates="workspace",
         foreign_keys="AssignmentRuleSetORM.workspace_id",
@@ -341,6 +319,11 @@ class WorkspaceDataSourceORM(Base):
         nullable=False,
     )
     graph_name = Column(Text, nullable=True)
+    catalog_item_id = Column(
+        Text,
+        ForeignKey("catalog_items.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     blueprint_id = Column(
         Text,
         ForeignKey("ontology_blueprints.id", ondelete="SET NULL"),
@@ -349,12 +332,16 @@ class WorkspaceDataSourceORM(Base):
     label = Column(Text, nullable=True)
     is_primary = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
+    projection_mode = Column(Text, nullable=True)  # None = inherit from provider, "in_source" | "dedicated"
+    dedicated_graph_name = Column(Text, nullable=True)  # graph name when projection_mode == "dedicated"
+    access_level = Column(Text, nullable=True, default="read")  # read | write | admin
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     # Relationships
     workspace = relationship("WorkspaceORM", back_populates="data_sources")
     provider = relationship("ProviderORM", back_populates="data_sources")
+    catalog_item = relationship("CatalogItemORM")
     blueprint = relationship("OntologyBlueprintORM", back_populates="data_sources")
     stats = relationship("DataSourceStatsORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
     polling_config = relationship("DataSourcePollingConfigORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
@@ -363,6 +350,7 @@ class WorkspaceDataSourceORM(Base):
         UniqueConstraint("workspace_id", "provider_id", "graph_name", name="uq_ds_ws_prov_graph"),
         Index("idx_ds_workspace", "workspace_id"),
         Index("idx_ds_provider", "provider_id"),
+        Index("idx_ds_catalog_item", "catalog_item_id"),
     )
 
 
@@ -406,6 +394,56 @@ class ContextModelORM(Base):
         Index("idx_cm_workspace", "workspace_id"),
         Index("idx_cm_template", "is_template"),
     )
+
+
+# ------------------------------------------------------------------ #
+# views (Visual rendering of context models)                           #
+# ------------------------------------------------------------------ #
+
+class ViewORM(Base):
+    __tablename__ = "views"
+
+    id = Column(Text, primary_key=True, default=lambda: f"view_{uuid.uuid4().hex[:12]}")
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    context_model_id = Column(
+        Text,
+        ForeignKey("context_models.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    workspace_id = Column(
+        Text,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    data_source_id = Column(
+        Text,
+        ForeignKey("workspace_data_sources.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    view_type = Column(Text, nullable=False, default="graph")
+    config = Column(Text, nullable=False, default="{}")       # JSON: full ViewConfiguration
+    visibility = Column(Text, nullable=False, default="private")
+    created_by = Column(Text, nullable=True)
+    tags = Column(Text, nullable=True)                        # JSON array
+    is_pinned = Column(Boolean, nullable=False, default=False)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    # Relationships
+    context_model = relationship("ContextModelORM", backref="views")
+    workspace = relationship("WorkspaceORM", foreign_keys=[workspace_id])
+    favourites = relationship("ViewFavouriteORM", back_populates="view", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_view_workspace", "workspace_id"),
+        Index("idx_view_context_model", "context_model_id"),
+        Index("idx_view_visibility", "visibility"),
+        Index("idx_view_data_source", "data_source_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<View id={self.id!r} name={self.name!r} type={self.view_type!r}>"
 
 
 # ------------------------------------------------------------------ #
@@ -459,4 +497,42 @@ class DataSourcePollingConfigORM(Base):
 
     def __repr__(self) -> str:
         return f"<DataSourcePollingConfig ds_id={self.data_source_id!r} enabled={self.is_enabled}>"
+
+
+# ------------------------------------------------------------------ #
+# catalog_items  (enterprise data asset catalog)                       #
+# ------------------------------------------------------------------ #
+
+class CatalogItemORM(Base):
+    """
+    Maps a named physical asset (e.g. a graph within a FalkorDB provider)
+    to a managed, permission-controlled catalog entry.
+    Workspaces consume catalog items instead of talking directly to providers.
+    """
+    __tablename__ = "catalog_items"
+
+    id = Column(Text, primary_key=True, default=lambda: f"cat_{uuid.uuid4().hex[:12]}")
+    provider_id = Column(
+        Text,
+        ForeignKey("providers.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_identifier = Column(Text, nullable=True)  # e.g. the graph name on the provider
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    permitted_workspaces = Column(Text, nullable=False, default='["*"]')  # JSON list; "*" = all
+    status = Column(Text, nullable=False, default="active")  # active | archived | deprecated
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    # Relationships
+    provider = relationship("ProviderORM", back_populates="catalog_items")
+
+    __table_args__ = (
+        Index("idx_catalog_provider", "provider_id"),
+        Index("idx_catalog_status", "status"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<CatalogItem id={self.id!r} name={self.name!r} provider={self.provider_id!r}>"
 

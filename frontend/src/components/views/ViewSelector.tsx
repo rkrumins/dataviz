@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
@@ -21,6 +22,8 @@ interface ViewSelectorProps {
 
 export function ViewSelector({ onCreateView, onEditView }: ViewSelectorProps) {
   const [isExpanded, setIsExpanded] = useState(false)
+  const navigate = useNavigate()
+  const location = useLocation()
   const visibleViews = useSchemaStore((s) => s.visibleViews)
   const activeViewId = useSchemaStore((s) => s.activeViewId)
   const setActiveView = useSchemaStore((s) => s.setActiveView)
@@ -85,6 +88,7 @@ export function ViewSelector({ onCreateView, onEditView }: ViewSelectorProps) {
                   isActive={view.id === activeViewId}
                   onClick={() => {
                     setActiveView(view.id)
+                    navigate(`/views/${view.id}`)
                     setIsExpanded(false)
                   }}
                   onEdit={() => onEditView?.(view.id)}

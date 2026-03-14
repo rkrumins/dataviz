@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useDashboardData } from '@/hooks/useDashboardData'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { useNavigationStore } from '@/store/navigation'
 import {
     DashboardHero,
     InsightCards,
@@ -25,10 +25,10 @@ export function Dashboard() {
         isLoading
     } = useDashboardData()
 
+    const navigate = useNavigate()
     const totalViewsCount = useSchemaStore(s => s.schema?.views.length || 0)
     const setActiveWorkspace = useWorkspacesStore(s => s.setActiveWorkspace)
     const setActiveDataSource = useWorkspacesStore(s => s.setActiveDataSource)
-    const setActiveTab = useNavigationStore(s => s.setActiveTab)
     const setActiveView = useSchemaStore(s => s.setActiveView)
 
     const [searchQuery, setSearchQuery] = useState('')
@@ -68,7 +68,7 @@ export function Dashboard() {
                         onSelect: () => {
                             setActiveWorkspace(ws.id)
                             setActiveDataSource(ds.id)
-                            setActiveTab('explore')
+                            navigate(`/workspaces/${ws.id}`)
                         },
                     })
                 }
@@ -86,7 +86,7 @@ export function Dashboard() {
                     icon: Eye,
                     onSelect: () => {
                         setActiveView(v.id)
-                        setActiveTab('explore')
+                        navigate(`/views/${v.id}`)
                     },
                 })
             }
@@ -112,7 +112,7 @@ export function Dashboard() {
             .sort((a, b) => ORDER.indexOf(a.category) - ORDER.indexOf(b.category))
             .slice(0, 12)
     }, [searchQuery, workspaces, recentViews, templates, blueprints,
-        setActiveWorkspace, setActiveDataSource, setActiveView, setActiveTab])
+        setActiveWorkspace, setActiveDataSource, setActiveView, navigate])
 
     if (isLoading) {
         return (

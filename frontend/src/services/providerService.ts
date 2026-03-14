@@ -18,6 +18,7 @@ export interface ProviderCreateRequest {
         token?: string
     }
     tlsEnabled?: boolean
+    permittedWorkspaces?: string[]
 }
 
 export interface ProviderUpdateRequest {
@@ -31,6 +32,32 @@ export interface ProviderUpdateRequest {
     }
     tlsEnabled?: boolean
     isActive?: boolean
+    permittedWorkspaces?: string[]
+}
+
+export interface ConnectionTestResult {
+    success: boolean
+    latencyMs?: number
+    error?: string
+}
+
+export interface ImpactedEntity {
+    id: string
+    name: string
+    type: string
+}
+
+export interface ProviderImpactResponse {
+    catalogItems: ImpactedEntity[]
+    workspaces: ImpactedEntity[]
+    views: ImpactedEntity[]
+}
+
+export interface PhysicalGraphStatsResponse {
+    nodeCount: number
+    edgeCount: number
+    entityTypeCounts: Record<string, number>
+    edgeTypeCounts: Record<string, number>
 }
 
 export interface ProviderResponse {
@@ -41,6 +68,7 @@ export interface ProviderResponse {
     port?: number
     tlsEnabled: boolean
     isActive: boolean
+    permittedWorkspaces: string[]
     createdAt: string
     updatedAt: string
 }
@@ -85,14 +113,22 @@ export const providerService = {
         return request<void>(`${ADMIN_API}/${id}`, { method: 'DELETE' })
     },
 
-    test(id: string): Promise<{ success: boolean; latencyMs?: number; error?: string }> {
-        return request<{ success: boolean; latencyMs?: number; error?: string }>(
+    test(id: string): Promise<ConnectionTestResult> {
+        return request<ConnectionTestResult>(
             `${ADMIN_API}/${id}/test`,
             { method: 'POST' },
         )
     },
 
-    listGraphs(id: string): Promise<{ graphs: string[] }> {
-        return request<{ graphs: string[] }>(`${ADMIN_API}/${id}/graphs`)
+    getImpact(id: string): Promise<ProviderImpactResponse> {
+        return request<ProviderImpactResponse>(`${ADMIN_API}/${id}/impact`)
+    },
+
+    listAssets(id: string): Promise<{ assets: string[] }> {
+        return request<{ assets: string[] }>(`${ADMIN_API}/${id}/assets`)
+    },
+
+    getAssetStats(providerId: string, assetName: string): Promise<any> {
+        return request<any>(`${ADMIN_API}/${providerId}/assets/${assetName}/stats`)
     },
 }

@@ -1,10 +1,16 @@
 /**
- * Context Model API Service
+ * Context Model API Service — Data governance layer.
  *
- * Handles CRUD operations for context models (backend-persisted layer configurations).
- * Context models define how to organize graph nodes into logical business flows.
+ * Context models define HOW to organize graph data (layers, assignments, scope).
+ * Views (visual rendering) are handled by viewApiService.ts.
+ *
+ * Two API scopes:
+ * - Workspace-scoped: /api/v1/{wsId}/context-models  (blueprint CRUD)
+ * - Admin templates:  /api/v1/admin/context-model-templates
  */
-import type { ViewLayerConfig, ScopeFilterConfig, EntityAssignmentConfig, ScopeEdgeConfig } from '@/types/schema'
+import type {
+    ViewLayerConfig, ScopeFilterConfig, EntityAssignmentConfig, ScopeEdgeConfig,
+} from '@/types/schema'
 
 // ============================================
 // Types
@@ -60,13 +66,12 @@ async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
         const errorText = await response.text()
         throw new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
     }
-    // 204 No Content
     if (response.status === 204) return undefined as T
     return response.json()
 }
 
 // ============================================
-// Workspace-Scoped Operations
+// Workspace-Scoped Operations (Blueprints)
 // ============================================
 
 /** List all context models for a workspace */
@@ -143,7 +148,7 @@ export async function createTemplate(data: ContextModelCreateRequest): Promise<C
 
 /**
  * createOrUpdate — upsert helper.
- * If `existingId` provided → PATCH, otherwise POST.
+ * If `existingId` provided → PUT, otherwise POST.
  * Returns the full ContextModel (including the ID assigned by the backend).
  */
 export async function createOrUpdate(
@@ -172,11 +177,6 @@ export async function createOrUpdate(
  *
  * The returned function also exposes `.flush()` to force an immediate write
  * (call on wizard submit / step change).
- *
- * Usage:
- *   const autosave = makeDraftSave(wsId, 800)
- *   autosave({ name, layersConfig, instanceAssignments }, draftIdRef)
- *   autosave.flush()
  */
 export function makeDraftSave(wsId: string, delayMs = 800) {
     let timer: ReturnType<typeof setTimeout> | null = null
@@ -227,6 +227,5 @@ export function makeDraftSave(wsId: string, delayMs = 800) {
     return schedule
 }
 
-// React import needed for MutableRefObject typing — imported via the consumer. 
-// If tree-shaking strips this, consumers must import React themselves.
+// React import needed for MutableRefObject typing — imported via the consumer.
 import type React from 'react'

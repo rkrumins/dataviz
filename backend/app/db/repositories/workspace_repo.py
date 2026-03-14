@@ -30,12 +30,16 @@ def _ds_to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
     return DataSourceResponse(
         id=row.id,
         workspaceId=row.workspace_id,
-        providerId=row.provider_id,
-        graphName=row.graph_name,
+        catalogItemId=row.catalog_item_id,
         blueprintId=row.blueprint_id,
         label=row.label,
         isPrimary=bool(row.is_primary),
         isActive=bool(row.is_active),
+        projectionMode=row.projection_mode,
+        dedicatedGraphName=row.dedicated_graph_name,
+        providerId=row.provider_id,
+        graphName=row.graph_name,
+        accessLevel=row.access_level,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
@@ -100,8 +104,6 @@ async def get_default_workspace(
             WorkspaceORM.is_default == True,  # noqa: E712
             WorkspaceORM.is_active == True,
         )
-        .order_by(WorkspaceORM.updated_at.desc())
-        .limit(1)
     )
     return result.scalar_one_or_none()
 
@@ -125,11 +127,18 @@ async def create_workspace(
     await session.flush()  # assigns ws.id
 
     # Create data source rows
+    from .catalog_repo import get_catalog_item_orm
     for i, ds_req in enumerate(req.data_sources):
+        # Resolve provider and graph name from catalog item
+        cat = await get_catalog_item_orm(session, ds_req.catalog_item_id)
+        if not cat:
+            raise ValueError(f"Catalog Item '{ds_req.catalog_item_id}' not found")
+
         ds = WorkspaceDataSourceORM(
             workspace_id=ws.id,
-            provider_id=ds_req.provider_id,
-            graph_name=ds_req.graph_name,
+            catalog_item_id=ds_req.catalog_item_id,
+            provider_id=cat.provider_id,
+            graph_name=cat.source_identifier,
             blueprint_id=ds_req.blueprint_id,
             label=ds_req.label,
             is_primary=(i == 0),  # first data source is primary by default

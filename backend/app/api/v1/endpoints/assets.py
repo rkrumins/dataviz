@@ -1,6 +1,9 @@
 """
-Workspace-scoped asset endpoints: saved views and assignment rule-sets.
+Workspace-scoped asset endpoints: assignment rule-sets.
 Mounted at /v1/{ws_id}/assets/
+
+Note: View endpoints have been consolidated into context_models.view_router
+mounted at /api/v1/views.
 """
 from typing import List
 from fastapi import APIRouter, Body, Depends, HTTPException, Path
@@ -11,8 +14,6 @@ from backend.app.db.repositories import workspace_repo, assignment_repo
 from backend.common.models.management import (
     RuleSetCreateRequest,
     RuleSetResponse,
-    SavedViewCreateRequest,
-    SavedViewResponse,
 )
 
 router = APIRouter()
@@ -21,74 +22,6 @@ router = APIRouter()
 async def _require_workspace(session: AsyncSession, ws_id: str) -> None:
     if not await workspace_repo.get_workspace(session, ws_id):
         raise HTTPException(status_code=404, detail=f"Workspace '{ws_id}' not found")
-
-
-# ------------------------------------------------------------------ #
-# Saved Views                                                          #
-# ------------------------------------------------------------------ #
-
-@router.get("/views", response_model=List[SavedViewResponse])
-async def list_views(
-    ws_id: str = Path(...),
-    session: AsyncSession = Depends(get_db_session),
-):
-    """List all saved views for this workspace."""
-    await _require_workspace(session, ws_id)
-    # Use workspace_id for lookup; fall back to connection_id-based for migration
-    return await assignment_repo.list_views_by_workspace(session, ws_id)
-
-
-@router.post("/views", response_model=SavedViewResponse, status_code=201)
-async def create_view(
-    ws_id: str = Path(...),
-    req: SavedViewCreateRequest = Body(...),
-    session: AsyncSession = Depends(get_db_session),
-):
-    """Create a new saved view for this workspace."""
-    await _require_workspace(session, ws_id)
-    return await assignment_repo.create_view_for_workspace(session, ws_id, req)
-
-
-@router.get("/views/{view_id}", response_model=SavedViewResponse)
-async def get_view(
-    ws_id: str = Path(...),
-    view_id: str = Path(...),
-    session: AsyncSession = Depends(get_db_session),
-):
-    """Get a single saved view."""
-    await _require_workspace(session, ws_id)
-    view = await assignment_repo.get_view(session, view_id)
-    if not view:
-        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
-    return view
-
-
-@router.put("/views/{view_id}", response_model=SavedViewResponse)
-async def update_view(
-    ws_id: str = Path(...),
-    view_id: str = Path(...),
-    req: SavedViewCreateRequest = Body(...),
-    session: AsyncSession = Depends(get_db_session),
-):
-    """Replace an existing saved view."""
-    await _require_workspace(session, ws_id)
-    view = await assignment_repo.update_view(session, view_id, req)
-    if not view:
-        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
-    return view
-
-
-@router.delete("/views/{view_id}", status_code=204)
-async def delete_view(
-    ws_id: str = Path(...),
-    view_id: str = Path(...),
-    session: AsyncSession = Depends(get_db_session),
-):
-    """Delete a saved view."""
-    await _require_workspace(session, ws_id)
-    deleted = await assignment_repo.delete_view(session, view_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
 
 
 # ------------------------------------------------------------------ #

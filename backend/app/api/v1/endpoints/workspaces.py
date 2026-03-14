@@ -17,6 +17,7 @@ from backend.common.models.management import (
     DataSourceCreateRequest,
     DataSourceUpdateRequest,
     DataSourceResponse,
+    WorkspaceDataSourceImpactResponse,
 )
 
 router = APIRouter()
@@ -40,13 +41,15 @@ async def create_workspace(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Create a new workspace with one or more data sources."""
+    # Allow empty workspaces for "Skip for Now" onboarding
     if not req.data_sources:
-        raise HTTPException(status_code=422, detail="At least one data source is required")
+        req.data_sources = []
 
-    # Validate all referenced providers and blueprints exist
+    # Validate all referenced catalog items and blueprints exist
+    from backend.app.db.repositories import catalog_repo
     for ds in req.data_sources:
-        if not await provider_repo.get_provider(session, ds.provider_id):
-            raise HTTPException(status_code=404, detail=f"Provider '{ds.provider_id}' not found")
+        if not await catalog_repo.get_catalog_item(session, ds.catalog_item_id):
+            raise HTTPException(status_code=404, detail=f"Catalog Item '{ds.catalog_item_id}' not found")
         if ds.blueprint_id and not await blueprint_repo.get_blueprint(session, ds.blueprint_id):
             raise HTTPException(status_code=404, detail=f"Blueprint '{ds.blueprint_id}' not found")
 
@@ -134,8 +137,9 @@ async def add_data_source(
     ws = await workspace_repo.get_workspace_orm(session, workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
-    if not await provider_repo.get_provider(session, req.provider_id):
-        raise HTTPException(status_code=404, detail=f"Provider '{req.provider_id}' not found")
+    from backend.app.db.repositories import catalog_repo
+    if not await catalog_repo.get_catalog_item(session, req.catalog_item_id):
+        raise HTTPException(status_code=404, detail=f"Catalog Item '{req.catalog_item_id}' not found")
     if req.blueprint_id and not await blueprint_repo.get_blueprint(session, req.blueprint_id):
         raise HTTPException(status_code=404, detail=f"Blueprint '{req.blueprint_id}' not found")
     return await data_source_repo.create_data_source(session, workspace_id, req)
@@ -153,17 +157,16 @@ async def update_data_source(
     if not old_ds or old_ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
 
-    # Validate new provider/blueprint if changing
-    if req.provider_id and not await provider_repo.get_provider(session, req.provider_id):
-        raise HTTPException(status_code=404, detail=f"Provider '{req.provider_id}' not found")
+    # Validate new catalog item/blueprint if changing
+    from backend.app.db.repositories import catalog_repo
+    if req.catalog_item_id and not await catalog_repo.get_catalog_item(session, req.catalog_item_id):
+        raise HTTPException(status_code=404, detail=f"Catalog Item '{req.catalog_item_id}' not found")
     if req.blueprint_id and not await blueprint_repo.get_blueprint(session, req.blueprint_id):
         raise HTTPException(status_code=404, detail=f"Blueprint '{req.blueprint_id}' not found")
 
-    # Evict old cache entry if provider or graph changes
-    if req.provider_id or req.graph_name:
-        await provider_registry.evict_data_source(
-            old_ds.provider_id, old_ds.graph_name or ""
-        )
+    # Evict old cache entry
+    if req.catalog_item_id or req.projection_mode is not None or req.dedicated_graph_name is not None:
+        await provider_registry.evict_workspace(workspace_id, session)
 
     ds = await data_source_repo.update_data_source(session, ds_id, req)
     if not ds:
@@ -186,9 +189,21 @@ async def remove_data_source(
     if count <= 1:
         raise HTTPException(status_code=409, detail="Cannot delete the last data source in a workspace")
 
-    await provider_registry.evict_data_source(ds.provider_id, ds.graph_name or "")
+    await provider_registry.evict_workspace(workspace_id, session)
     await data_source_repo.delete_data_source(session, ds_id)
 
+@router.get("/{workspace_id}/data-sources/{ds_id}/impact", response_model=WorkspaceDataSourceImpactResponse)
+async def get_data_source_impact(
+    workspace_id: str = Path(...),
+    ds_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Return the blast radius of deleting a data source (e.g. affected semantic views)."""
+    ds = await data_source_repo.get_data_source_orm(session, ds_id)
+    if not ds or ds.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+    
+    return await data_source_repo.get_data_source_impact(session, ds_id)
 
 @router.post("/{workspace_id}/data-sources/{ds_id}/set-primary", response_model=DataSourceResponse)
 async def set_primary_data_source(
@@ -202,3 +217,30 @@ async def set_primary_data_source(
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
     ds = await data_source_repo.get_data_source(session, ds_id)
     return ds
+
+
+@router.patch("/{workspace_id}/data-sources/{ds_id}/projection-mode", response_model=DataSourceResponse)
+async def set_projection_mode(
+    workspace_id: str = Path(...),
+    ds_id: str = Path(...),
+    mode: str = Body(..., embed=True),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Set the aggregation edge projection mode for a data source.
+
+    mode values:
+    - "in_source"  — store AGGREGATED edges in the same graph as source data
+    - "dedicated"  — store in a separate projection graph
+    - ""           — clear override, inherit from provider default
+    """
+    if mode and mode not in ("in_source", "dedicated"):
+        raise HTTPException(status_code=422, detail=f"Invalid projection mode: '{mode}'. Must be 'in_source', 'dedicated', or empty.")
+    ds = await data_source_repo.get_data_source_orm(session, ds_id)
+    if not ds or ds.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+    ds.projection_mode = mode if mode else None
+    from datetime import datetime, timezone
+    ds.updated_at = datetime.now(timezone.utc).isoformat()
+    await session.flush()
+    await provider_registry.evict_workspace(workspace_id, session)
+    return await data_source_repo.get_data_source(session, ds_id)

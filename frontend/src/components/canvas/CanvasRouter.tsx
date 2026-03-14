@@ -28,16 +28,13 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {
-    // Also check view ID for specific handling
-    const viewId = activeView?.id ?? ''
-
     // Layered lineage view combines layers with lineage flow
-    if (viewId === 'layered-lineage' || layoutType === 'layered-lineage') {
+    if (layoutType === 'layered-lineage') {
       return LayeredLineageCanvas
     }
 
     // Reference model view gets special horizontal layer layout
-    if (viewId === 'reference-model' || layoutType === 'reference') {
+    if (layoutType === 'reference') {
       return ReferenceModelCanvas
     }
 
@@ -49,7 +46,7 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
       default:
         return LineageCanvas
     }
-  }, [layoutType, activeView?.id])
+  }, [layoutType])
 
   return (
     <div className={cn("relative w-full h-full", className)}>

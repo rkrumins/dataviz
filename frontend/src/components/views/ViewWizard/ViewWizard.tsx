@@ -10,6 +10,7 @@
  */
 
 import React, { useState, useCallback, useMemo, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     X,
@@ -29,8 +30,9 @@ import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
+import { useWorkspacesStore } from '@/store/workspaces'
 import { viewService } from '@/services/viewService'
-import type { ViewConfiguration, ViewLayerConfig, ScopeEdgeConfig } from '@/types/schema'
+import type { ViewConfiguration, ViewLayerConfig, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
 
 // Import step components
 import { BasicsStep } from './steps/BasicsStep'
@@ -63,6 +65,8 @@ export interface WizardFormData {
     name: string
     description: string
     icon: string
+    visibility: 'private' | 'workspace' | 'enterprise'
+    tags: string[]
 
     // Step 2: Layout Type
     layoutType: 'graph' | 'hierarchy' | 'reference'
@@ -116,10 +120,12 @@ const LAYOUT_TYPES = [
 // ============================================
 
 export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWizardProps) {
+    const navigate = useNavigate()
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
     const { clearAssignments, setLayers } = useReferenceModelStore()
     const visibleViews = useSchemaStore(s => s.visibleViews)
+    const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
 
     // Current step
     const [currentStep, setCurrentStep] = useState<WizardStep>('basics')
@@ -141,6 +147,8 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                     name: existingView.name,
                     description: existingView.description ?? '',
                     icon: existingView.icon ?? 'Layout',
+                    visibility: (existingView as any).visibility ?? (existingView.isPublic ? 'enterprise' : 'private'),
+                    tags: (existingView as any).tags ?? [],
                     layoutType: existingView.layout.type as 'graph' | 'hierarchy' | 'reference',
                     layers: existingView.layout.referenceLayout?.layers ?? [],
                     visibleEntityTypes: existingView.content.visibleEntityTypes,
@@ -237,33 +245,46 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
         }
     }, [currentStep, activeSteps])
 
+    // Build field filters from advanced filters
+    const buildFieldFilters = useCallback((filters: ActiveFilter[]): FieldFilter[] => {
+        return filters.map(af => ({
+            field: af.type === 'tag' ? 'tags' : af.type === 'name' ? 'name' : af.type === 'property' ? String(af.value).split('=')[0] : 'property',
+            operator: (af.type === 'name' ? 'contains' : 'equals') as FieldFilter['operator'],
+            value: af.type === 'property' && String(af.value).includes('=') ? String(af.value).split('=')[1] : af.value
+        }))
+    }, [])
+
     // Submit
     const handleSubmit = useCallback(async () => {
         setIsSubmitting(true)
         try {
+            const layersWithScope = formData.layers.map(l => ({ ...l, scopeEdges: formData.scopeEdges }))
+            const fieldFilters = buildFieldFilters(formData.advancedFilters)
+
             if (mode === 'create') {
                 const result = await viewService.createView({
                     name: formData.name,
                     description: formData.description,
                     icon: formData.icon,
                     layoutType: formData.layoutType,
-                    layers: formData.layers.map(l => ({ ...l, scopeEdges: formData.scopeEdges })), // Apply scope to all layers
+                    layers: layersWithScope,
                     visibleEntityTypes: formData.visibleEntityTypes,
                     visibleRelationshipTypes: formData.visibleRelationshipTypes,
-                    fieldFilters: formData.advancedFilters.map(af => ({
-                        field: af.type === 'tag' ? 'tags' : af.type === 'name' ? 'name' : af.type === 'property' ? String(af.value).split('=')[0] : 'property',
-                        operator: af.type === 'name' ? 'contains' : 'equals',
-                        value: af.type === 'property' && String(af.value).includes('=') ? String(af.value).split('=')[1] : af.value
-                    }))
+                    fieldFilters,
+                    workspaceId: activeWorkspaceId ?? '',
+                    contextModelId: linkedContextModelId ?? undefined,
+                    visibility: formData.visibility,
+                    tags: formData.tags.length > 0 ? formData.tags : undefined,
                 })
                 if (result.success && result.data) {
-                    // Sync layers to referenceModelStore after saving
                     const savedLayers = result.data.layout?.referenceLayout?.layers
                     if (savedLayers && savedLayers.length > 0) {
                         setLayers(savedLayers)
                     }
                     onComplete?.(result.data)
                     onClose()
+                    // Navigate to the newly created view
+                    navigate(`/views/${result.data.id}`)
                 }
             } else if (viewId) {
                 const result = await viewService.updateView(viewId, {
@@ -271,17 +292,14 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                     description: formData.description,
                     icon: formData.icon,
                     layoutType: formData.layoutType,
-                    layers: formData.layers.map(l => ({ ...l, scopeEdges: formData.scopeEdges })), // Apply scope to all layers
+                    layers: layersWithScope,
                     visibleEntityTypes: formData.visibleEntityTypes,
                     visibleRelationshipTypes: formData.visibleRelationshipTypes,
-                    fieldFilters: formData.advancedFilters.map(af => ({
-                        field: af.type === 'tag' ? 'tags' : af.type === 'name' ? 'name' : af.type === 'property' ? String(af.value).split('=')[0] : 'property',
-                        operator: af.type === 'name' ? 'contains' : 'equals',
-                        value: af.type === 'property' && String(af.value).includes('=') ? String(af.value).split('=')[1] : af.value
-                    }))
+                    fieldFilters,
+                    visibility: formData.visibility,
+                    tags: formData.tags.length > 0 ? formData.tags : undefined,
                 })
                 if (result.success && result.data) {
-                    // Sync layers to referenceModelStore after saving
                     const savedLayers = result.data.layout?.referenceLayout?.layers
                     if (savedLayers && savedLayers.length > 0) {
                         setLayers(savedLayers)
@@ -293,7 +311,7 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
         } finally {
             setIsSubmitting(false)
         }
-    }, [mode, viewId, formData, onComplete, onClose])
+    }, [mode, viewId, formData, activeWorkspaceId, onComplete, onClose, navigate, setLayers, buildFieldFilters])
 
     // Update form data
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {
@@ -516,6 +534,8 @@ function getInitialFormData(schema: ReturnType<typeof useSchemaStore.getState>['
         name: '',
         description: '',
         icon: 'Layout',
+        visibility: 'private',
+        tags: [],
         layoutType: 'reference',
         layers: [],
         visibleEntityTypes: schema?.entityTypes.map(e => e.id) ?? [],

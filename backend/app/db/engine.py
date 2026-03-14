@@ -127,6 +127,34 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         from . import models  # noqa: F401 — registers ORM models with Base
         await conn.run_sync(Base.metadata.create_all)
+
+    # ── Inline schema migrations ──────────────────────────────────────
+    # SQLAlchemy create_all only creates NEW tables, not new columns on
+    # existing tables.  We run safe ALTER TABLE statements here.
+    async with engine.begin() as conn:
+        migrations = [
+            "ALTER TABLE workspace_data_sources ADD COLUMN projection_mode TEXT",
+            "ALTER TABLE workspace_data_sources ADD COLUMN dedicated_graph_name TEXT",
+            "ALTER TABLE workspace_data_sources ADD COLUMN catalog_item_id TEXT",
+            "ALTER TABLE workspace_data_sources ADD COLUMN access_level TEXT DEFAULT 'read'",
+            "ALTER TABLE context_models ADD COLUMN view_type TEXT",
+            "ALTER TABLE context_models ADD COLUMN config TEXT",
+            "ALTER TABLE context_models ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
+            "ALTER TABLE context_models ADD COLUMN created_by TEXT",
+            "ALTER TABLE context_models ADD COLUMN tags TEXT",
+            "ALTER TABLE context_models ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE providers ADD COLUMN permitted_workspaces TEXT DEFAULT '[\"*\"]'",
+        ]
+        for stmt in migrations:
+            try:
+                await conn.execute(
+                    __import__("sqlalchemy").text(stmt)
+                )
+                logger.info("Migration applied: %s", stmt)
+            except Exception:
+                # Column already exists — safe to ignore
+                pass
+
     logger.info("Management DB initialised at %s", DATABASE_URL)
 
 

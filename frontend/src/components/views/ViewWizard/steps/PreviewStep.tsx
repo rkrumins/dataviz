@@ -15,9 +15,14 @@ import {
     Box,
     GitBranch,
     Check,
-    Sparkles
+    Sparkles,
+    Lock,
+    Users,
+    Globe,
+    Tag
 } from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
+import { useWorkspacesStore } from '@/store/workspaces'
 import type { WizardFormData } from '../ViewWizard'
 
 // ============================================
@@ -32,8 +37,15 @@ interface PreviewStepProps {
 // Component
 // ============================================
 
+const VISIBILITY_META = {
+    private: { label: 'Private', icon: Lock, color: 'slate' },
+    workspace: { label: 'Workspace', icon: Users, color: 'blue' },
+    enterprise: { label: 'Enterprise', icon: Globe, color: 'green' },
+} as const
+
 export function PreviewStep({ formData }: PreviewStepProps) {
     const schema = useSchemaStore(s => s.schema)
+    const activeWorkspace = useWorkspacesStore(s => s.getActiveWorkspace())
 
     // Get entity type info
     const selectedEntityTypes = formData.visibleEntityTypes
@@ -196,6 +208,41 @@ export function PreviewStep({ formData }: PreviewStepProps) {
                                     +{selectedEdgeTypes.length - 6} more
                                 </span>
                             )}
+                        </div>
+                    </div>
+                    {/* Sharing & Metadata */}
+                    <div className="p-5">
+                        <div className="flex items-center gap-3 mb-4">
+                            <div className="w-10 h-10 rounded-lg bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-600 dark:text-indigo-400">
+                                {(() => {
+                                    const V = VISIBILITY_META[formData.visibility]
+                                    return <V.icon className="w-5 h-5" />
+                                })()}
+                            </div>
+                            <div className="flex-1">
+                                <p className="text-sm font-medium text-slate-500 uppercase tracking-wide">Sharing</p>
+                                <p className="font-semibold text-slate-800 dark:text-slate-200">
+                                    {VISIBILITY_META[formData.visibility].label}
+                                </p>
+                            </div>
+                            <Check className="w-5 h-5 text-green-500" />
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                            {activeWorkspace && (
+                                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-full text-sm">
+                                    <Box className="w-3 h-3 text-slate-400" />
+                                    {activeWorkspace.name}
+                                </span>
+                            )}
+                            {formData.tags.map(tag => (
+                                <span
+                                    key={tag}
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-full text-sm"
+                                >
+                                    <Tag className="w-3 h-3 text-slate-400" />
+                                    {tag}
+                                </span>
+                            ))}
                         </div>
                     </div>
                 </div>

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import {
   LayoutDashboard,
   Network,
@@ -8,22 +9,22 @@ import {
   ChevronRight,
   Plus,
   Palette,
-  Database,
   ChevronsUpDown,
   Check,
-  Star
+  Star,
+  Settings,
+  Database,
+  Search,
 } from 'lucide-react'
-import { useState } from 'react'
-import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import * as Popover from '@radix-ui/react-popover'
+import { useNavigate } from 'react-router-dom'
 import { useNavigationStore, type NavigationTab } from '@/store/navigation'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { ViewSelector } from '@/components/views/ViewSelector'
-import { useViewEditorModal } from './AppShell'
-import { WorkspacePanel } from '@/components/workspaces/WorkspacePanel'
+import { useViewEditorModal } from './AppLayout'
 import { useWorkspaces } from '@/hooks/useWorkspaces'
-import { useConnections } from '@/hooks/useConnections'
 import { cn } from '@/lib/utils'
 
 interface NavItem {
@@ -38,11 +39,28 @@ const mainNavItems: NavItem[] = [
   { id: 'explore', label: 'Explore', icon: Network },
   { id: 'lenses', label: 'Context Lenses', icon: Layers },
   { id: 'schema', label: 'Schema Editor', icon: Palette },
+  { id: 'admin' as any, label: 'Administration', icon: Settings },
 ]
+
+// ─────────────────────────────────────────────────────────────────────
+// Workspace Avatar Colors
+// ─────────────────────────────────────────────────────────────────────
+const WS_COLORS = [
+  'from-indigo-500 to-violet-500',
+  'from-emerald-500 to-teal-500',
+  'from-amber-500 to-orange-500',
+  'from-rose-500 to-pink-500',
+  'from-cyan-500 to-blue-500',
+  'from-fuchsia-500 to-purple-500',
+]
+function wsColor(index: number) { return WS_COLORS[index % WS_COLORS.length] }
+
+// ─────────────────────────────────────────────────────────────────────
+// Environment Switcher — Premium Workspace Toggle
+// ─────────────────────────────────────────────────────────────────────
 
 function EnvironmentSwitcher({
   onManageWorkspaces,
-  onManageConnections,
   collapsed
 }: {
   onManageWorkspaces: () => void,
@@ -58,38 +76,47 @@ function EnvironmentSwitcher({
     setActiveDataSource
   } = useWorkspaces()
 
-  const {
-    connections,
-    activeConnectionId,
-    setActiveConnection
-  } = useConnections()
+  const [isOpen, setIsOpen] = useState(false)
+  const [search, setSearch] = useState('')
 
-  const activeConnection = connections.find(c => c.id === activeConnectionId)
   const activeDs = activeWorkspace?.dataSources?.find(d => d.id === activeDataSourceId)
+  const activeIdx = workspaces.findIndex(ws => ws.id === activeWorkspaceId)
 
-  let displayName = "Select Environment"
-  let displaySub = "No selection"
-  let Icon = Database
+  // Filter logic: if search matches workspace name, include all its DS.
+  // Otherwise, only include DS whose name/label matches the search.
+  const filteredWorkspaces = search
+    ? workspaces.map(ws => {
+      const matchWs = ws.name.toLowerCase().includes(search.toLowerCase())
+      const matchDs = ws.dataSources?.filter(ds =>
+        (ds.label || ds.catalogItemId).toLowerCase().includes(search.toLowerCase())
+      )
+      if (matchWs) return ws
+      if (matchDs && matchDs.length > 0) return { ...ws, dataSources: matchDs }
+      return null
+    }).filter(Boolean) as typeof workspaces
+    : workspaces
 
-  if (activeWorkspace) {
-    displayName = activeWorkspace.name
-    displaySub = activeDs ? (activeDs.label || activeDs.graphName || 'Workspace') : 'Workspace'
-    Icon = Database
-  } else if (activeConnection) {
-    displayName = activeConnection.name
-    displaySub = 'Legacy Connection'
-    Icon = Network
+  const handleSelect = (wsId: string, dsId: string) => {
+    setActiveWorkspace(wsId)
+    setActiveDataSource(dsId)
+    setIsOpen(false)
+    setSearch('')
   }
 
   if (collapsed) {
     return (
       <div className="p-3 flex justify-center border-b border-glass-border">
         <button
-          onClick={onManageWorkspaces}
-          className="w-10 h-10 rounded-xl bg-accent-business/10 flex items-center justify-center text-accent-business border border-accent-business/20 cursor-pointer hover:bg-accent-business/20 transition-colors"
-          title={displayName}
+          onClick={() => setIsOpen(!isOpen)}
+          className={cn(
+            "w-10 h-10 rounded-xl flex items-center justify-center text-sm font-bold text-white border cursor-pointer transition-all",
+            activeWorkspace
+              ? `bg-gradient-to-br ${wsColor(activeIdx)} border-white/20 shadow-lg`
+              : "bg-black/10 dark:bg-white/10 border-glass-border text-ink-muted"
+          )}
+          title={activeWorkspace?.name || 'Select workspace'}
         >
-          <Icon className="w-5 h-5" />
+          {activeWorkspace ? activeWorkspace.name.charAt(0).toUpperCase() : '?'}
         </button>
       </div>
     )
@@ -97,148 +124,164 @@ function EnvironmentSwitcher({
 
   return (
     <div className="px-3 pt-3 pb-2 border-b border-glass-border mb-2">
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
-          <button className={cn(
-            "w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left",
-            "bg-gradient-to-br from-black/5 to-black/10 dark:from-white/5 dark:to-white/10",
-            "border border-glass-border shadow-[0_2px_8px_-2px_rgba(0,0,0,0.1)] hover:shadow-[0_4px_12px_-2px_rgba(0,0,0,0.15)]",
-            "transition-all duration-200 group outline-none focus:ring-2 focus:ring-accent-business/50"
-          )}>
-            <div className="flex items-center gap-3 overflow-hidden">
-              <div className="w-8 h-8 rounded-lg bg-accent-business/20 flex items-center justify-center text-accent-business border border-accent-business/30 shrink-0 shadow-inner">
-                <Icon className="w-4 h-4" />
-              </div>
-              <div className="flex flex-col min-w-0">
-                <span className="text-sm font-semibold text-ink truncate leading-tight">{displayName}</span>
-                <span className="text-[10px] text-ink-muted truncate mt-0.5">{displaySub}</span>
-              </div>
+      <Popover.Root open={isOpen} onOpenChange={setIsOpen}>
+        <Popover.Trigger asChild>
+          <button className="group w-full flex items-center gap-3 p-2.5 rounded-xl bg-canvas hover:bg-canvas-elevated border border-transparent hover:border-glass-border transition-all text-left outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50">
+            <div className={cn(
+              "w-9 h-9 rounded-lg shadow-inner flex items-center justify-center text-white shrink-0 text-xs font-bold",
+              activeWorkspace ? `bg-gradient-to-br ${wsColor(activeIdx)}` : "bg-black/10 dark:bg-white/10 text-ink-muted"
+            )}>
+              {activeWorkspace ? activeWorkspace.name.charAt(0).toUpperCase() : '?'}
             </div>
-            <ChevronsUpDown className="w-4 h-4 text-ink-muted group-hover:text-ink transition-colors shrink-0" />
+            <div className="flex flex-col min-w-0 flex-1">
+              <span className="text-sm font-bold text-ink truncate leading-tight">
+                {activeWorkspace?.name || 'Select Workspace'}
+              </span>
+              <span className="text-xs text-ink-secondary truncate flex items-center gap-1.5 mt-0.5">
+                {activeDs && <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />}
+                {activeDs ? (activeDs.label || 'Default Source') : 'No source selected'}
+              </span>
+            </div>
+            <ChevronsUpDown className="w-4 h-4 text-ink-muted opacity-50 group-hover:opacity-100 transition-opacity shrink-0" />
           </button>
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content
-            className="w-64 bg-canvas-elevated border border-glass-border rounded-xl shadow-xl p-2 z-50 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2 ml-3"
+        </Popover.Trigger>
+
+        <Popover.Portal>
+          <Popover.Content
+            side="bottom"
             align="start"
-            sideOffset={8}
+            className="w-72 bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl p-0 overflow-hidden z-50 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2 ml-3"
+            sideOffset={4}
           >
-            {/* Workspaces Group */}
-            <div className="px-3 py-1.5 mb-1 flex items-center justify-between">
-              <span className="text-[10px] font-bold text-ink-muted uppercase tracking-wider">Workspaces</span>
-              <button onClick={onManageWorkspaces} className="p-1 rounded hover:bg-black/5 dark:hover:bg-white/5" title="Manage Workspaces">
-                <Plus className="w-3 h-3 text-ink-muted" />
-              </button>
+            {/* ── Search Header ── */}
+            <div className="p-2 border-b border-glass-border bg-black/5 dark:bg-white/5">
+              <div className="relative flex items-center">
+                <Search className="absolute left-2.5 w-3.5 h-3.5 text-ink-muted" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Search environments..."
+                  autoFocus
+                  className="w-full bg-transparent pl-8 pr-3 py-1.5 text-sm text-ink focus:outline-none placeholder:text-ink-muted"
+                />
+              </div>
             </div>
-            {workspaces.map(ws => (
-              <div key={ws.id} className="flex flex-col mb-1">
-                <DropdownMenu.Item
-                  onSelect={() => setActiveWorkspace(ws.id)}
-                  className="flex items-center justify-between px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-business/10 focus:text-accent-business transition-colors"
-                >
-                  <div className="flex items-center gap-2 truncate">
-                    <Database className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate font-medium">{ws.name}</span>
-                  </div>
-                  {ws.id === activeWorkspaceId && <Check className="w-4 h-4 text-emerald-500 shrink-0" />}
-                </DropdownMenu.Item>
 
-                {/* Data sources sub-options */}
-                {(ws.id === activeWorkspaceId && ws.dataSources && ws.dataSources.length > 1) && (
-                  <div className="mt-1 ml-6 flex flex-col gap-0.5 border-l-2 border-glass-border pl-2">
-                    {ws.dataSources.map(ds => (
-                      <div
-                        key={ds.id}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setActiveDataSource(ds.id);
-                        }}
-                        className={cn("flex items-center justify-between text-xs px-2 py-1.5 rounded cursor-pointer transition-colors",
-                          ds.id === activeDataSourceId ? "text-accent-business bg-accent-business/5 font-medium" : "text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5")}
-                      >
-                        <span className="truncate flex-1 pr-2">{ds.label || ds.graphName || ds.providerId}</span>
-                        {ds.id === activeDataSourceId && <Check className="w-3 h-3 text-accent-business shrink-0" />}
+            {/* ── Scrollable List ── */}
+            <div className="max-h-[50vh] overflow-y-auto custom-scrollbar p-2 space-y-3">
+              {filteredWorkspaces.map((ws, i) => {
+                const isWsActive = ws.id === activeWorkspaceId
+                return (
+                  <div key={ws.id}>
+                    {/* Workspace Label */}
+                    <div className="px-2 pb-1.5 flex items-center gap-2">
+                      <div className={cn(
+                        "w-5 h-5 rounded overflow-hidden flex items-center justify-center text-[10px] font-bold text-white shrink-0",
+                        `bg-gradient-to-br ${wsColor(i)}`
+                      )}>
+                        {ws.name.charAt(0).toUpperCase()}
                       </div>
-                    ))}
+                      <span className="text-xs font-bold text-ink tracking-wide truncate">{ws.name}</span>
+                    </div>
+
+                    {/* Data Sources */}
+                    <div className="flex flex-col gap-0.5 ml-2 border-l-2 border-glass-border pl-1.5">
+                      {ws.dataSources && ws.dataSources.map(ds => {
+                        const isSelected = isWsActive && ds.id === activeDataSourceId
+                        return (
+                          <button
+                            key={ds.id}
+                            onClick={() => handleSelect(ws.id, ds.id)}
+                            className={cn(
+                              "flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer outline-none transition-colors text-left group",
+                              isSelected
+                                ? "bg-indigo-500/10 text-indigo-500"
+                                : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                            )}
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <Database className={cn("w-3.5 h-3.5 shrink-0", isSelected ? "text-indigo-500" : "text-ink-muted group-hover:text-ink")} />
+                              <span className="text-sm font-medium truncate">{ds.label || 'Data Source'}</span>
+                            </div>
+                            {isSelected && <Check className="w-4 h-4 text-indigo-500 shrink-0 ml-2" />}
+                          </button>
+                        )
+                      })}
+                      {(!ws.dataSources || ws.dataSources.length === 0) && (
+                        <button
+                          onClick={() => { onManageWorkspaces(); setIsOpen(false) }}
+                          className="px-3 py-2 text-xs text-ink-muted italic border border-dashed border-glass-border rounded-lg text-left hover:bg-black/5 dark:hover:bg-white/5 transition-colors focus-visible:outline-none"
+                        >
+                          No sources configured. Click to manage.
+                        </button>
+                      )}
+                    </div>
                   </div>
-                )}
-              </div>
-            ))}
-            {workspaces.length === 0 && (
-              <div onClick={onManageWorkspaces} className="px-3 py-2 text-xs text-ink-muted italic border border-dashed border-glass-border rounded-lg text-center cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink transition-colors mb-1">
-                Create Workspace...
-              </div>
-            )}
+                )
+              })}
+              {filteredWorkspaces.length === 0 && (
+                <div className="px-3 py-4 text-center text-xs text-ink-muted">
+                  {search ? 'No environments match your search' : 'No workspaces available'}
+                </div>
+              )}
+            </div>
 
-            <DropdownMenu.Separator className="h-px bg-glass-border my-2 mx-1" />
-
-            {/* Legacy Connections Group */}
-            <div className="px-3 py-1.5 mb-1 flex items-center justify-between">
-              <span className="text-[10px] font-bold text-ink-muted uppercase tracking-wider">Legacy Connections</span>
-              <button onClick={onManageConnections} className="p-1 rounded hover:bg-black/5 dark:hover:bg-white/5" title="Manage Connections">
-                <Plus className="w-3 h-3 text-ink-muted" />
+            {/* ── Footer ── */}
+            <div className="p-2 border-t border-glass-border bg-black/5 dark:bg-white/5">
+              <button
+                onClick={() => { onManageWorkspaces(); setIsOpen(false) }}
+                className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+              >
+                <span className="flex items-center gap-1.5"><Settings className="w-3.5 h-3.5" /> Manage Environments</span>
+                <span className="font-mono px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 text-[9px]">⌘K</span>
               </button>
             </div>
-            {connections.map(conn => (
-              <DropdownMenu.Item
-                key={conn.id}
-                onSelect={() => setActiveConnection(conn.id)}
-                className="flex items-center justify-between px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-business/10 focus:text-accent-business transition-colors mb-1"
-              >
-                <div className="flex items-center gap-2 truncate">
-                  <Network className="w-3.5 h-3.5 shrink-0" />
-                  <span className="truncate">{conn.name}</span>
-                </div>
-                {conn.id === activeConnectionId && <Check className="w-4 h-4 text-emerald-500 shrink-0" />}
-              </DropdownMenu.Item>
-            ))}
-            {connections.length === 0 && (
-              <div onClick={onManageConnections} className="px-3 py-2 text-xs text-ink-muted italic border border-dashed border-glass-border rounded-lg text-center cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink transition-colors">
-                Add Legacy Connection...
-              </div>
-            )}
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
+          </Popover.Content>
+        </Popover.Portal>
+      </Popover.Root>
     </div>
   )
 }
 
 export function SidebarNav() {
-  const { activeTab, setActiveTab } = useNavigationStore()
+  const navigate = useNavigate()
+  const { activeTab } = useNavigationStore()
   const { sidebarCollapsed, toggleSidebar } = usePreferencesStore()
   const activeLensId = useCanvasStore((s) => s.activeLensId)
   const visibleViews = useSchemaStore((s) => s.visibleViews)
   const { openViewEditor } = useViewEditorModal()
-
-  const [showWorkspacePanel, setShowWorkspacePanel] = useState(false)
-  const [showConnectionPanel, setShowConnectionPanel] = useState(false)
+  const { activeWorkspaceId } = useWorkspaces()
 
   // Get views scoped to the active workspace+datasource (global/legacy views always included)
   const savedViews = visibleViews()
   const pinnedViews = savedViews.filter((v) => v.isDefault)
 
-  // Entity types from schema for quick access
-  // const entityTypes = schema?.entityTypes.slice(0, 5) ?? []
-
-  // Handle view creation
   const handleCreateView = () => {
     openViewEditor()
   }
 
-  // Handle view edit
   const handleEditView = (viewId: string) => {
     openViewEditor(viewId)
   }
 
-  // Handle open view
   const setActiveView = useSchemaStore((s) => s.setActiveView)
   const updateView = useSchemaStore((s) => s.updateView)
   const activeViewId = useSchemaStore((s) => s.activeViewId)
 
   const handleOpenView = (viewId: string) => {
     setActiveView(viewId)
-    setActiveTab('explore')
+    navigate(`/views/${viewId}`)
+  }
+
+  const handleNavClick = (tabId: NavigationTab | string) => {
+    switch (tabId) {
+      case 'dashboard': navigate('/dashboard'); break
+      case 'explore': navigate('/explorer'); break
+      case 'lenses': navigate(activeWorkspaceId ? `/workspaces/${activeWorkspaceId}` : '/dashboard'); break
+      case 'schema': navigate('/schema'); break
+      case 'admin': navigate('/admin/overview'); break
+    }
   }
 
   const handleTogglePin = (e: React.MouseEvent, viewId: string, currentIsDefault?: boolean) => {
@@ -259,8 +302,8 @@ export function SidebarNav() {
       <nav className="flex-1 flex flex-col overflow-y-auto custom-scrollbar pb-3">
         <EnvironmentSwitcher
           collapsed={sidebarCollapsed}
-          onManageWorkspaces={() => setShowWorkspacePanel(true)}
-          onManageConnections={() => setShowConnectionPanel(true)}
+          onManageWorkspaces={() => navigate('/admin/registry?tab=workspaces')}
+          onManageConnections={() => navigate('/admin/registry?tab=connections')}
         />
         <div className="px-3 space-y-1">
           {mainNavItems.map((item) => (
@@ -269,7 +312,7 @@ export function SidebarNav() {
               item={item}
               collapsed={sidebarCollapsed}
               active={activeTab === item.id}
-              onClick={() => setActiveTab(item.id)}
+              onClick={() => handleNavClick(item.id)}
             />
           ))}
         </div>
@@ -373,23 +416,7 @@ export function SidebarNav() {
         )}
       </button>
 
-      {/* Workspace Panel Modal */}
-      {showWorkspacePanel && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 animate-in fade-in duration-200">
-          <div className="bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl h-[90vh] max-w-5xl w-full mx-4 animate-in zoom-in-95 duration-200 overflow-hidden">
-            <WorkspacePanel onClose={() => setShowWorkspacePanel(false)} />
-          </div>
-        </div>
-      )}
-
-      {/* Connections Panel Modal */}
-      {showConnectionPanel && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 animate-in fade-in duration-200">
-          <div className="bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl h-[90vh] max-w-5xl w-full mx-4 animate-in zoom-in-95 duration-200 overflow-hidden">
-            <WorkspacePanel initialTab="connections" onClose={() => setShowConnectionPanel(false)} />
-          </div>
-        </div>
-      )}
+      {/* Workspace Panel Modal — removed, management is now at /admin */}
     </aside>
   )
 }
