@@ -20,25 +20,39 @@ export enum GranularityLevel {
   Domain = 4,
 }
 
-// Map entity types to their granularity
+/**
+ * Default granularity map — used as fallback when no ontology schema is loaded.
+ * In production, granularity is derived from the ontology's entity hierarchy
+ * (EntityTypeSchema.hierarchy.level). This map only covers well-known system types.
+ *
+ * @deprecated Prefer passing schemaGranularity via ViewProjectionConfig when available.
+ */
 export const ENTITY_GRANULARITY: Record<string, GranularityLevel> = {
   'column': GranularityLevel.Column,
+  'schemaField': GranularityLevel.Column,
   'dataset': GranularityLevel.Table,
   'asset': GranularityLevel.Table,
   'table': GranularityLevel.Table,
+  'pipeline': GranularityLevel.Table,
+  'dashboard': GranularityLevel.Table,
   'container': GranularityLevel.Schema,
   'schema': GranularityLevel.Schema,
   'system': GranularityLevel.System,
   'app': GranularityLevel.System,
   'dataPlatform': GranularityLevel.System,
   'domain': GranularityLevel.Domain,
-  'pipeline': GranularityLevel.Table,
-  'dashboard': GranularityLevel.Table,
 }
 
-// Map entity types to their parent type
+/**
+ * Default parent type map — used as fallback when no ontology schema is loaded.
+ * In production, parent relationships are derived from the ontology's
+ * EntityTypeSchema.hierarchy.canBeContainedBy field.
+ *
+ * @deprecated Prefer reading parent relationships from the schema store.
+ */
 export const ENTITY_PARENT_TYPE: Record<string, string> = {
   'column': 'dataset',
+  'schemaField': 'dataset',
   'dataset': 'schema',
   'asset': 'app',
   'table': 'schema',

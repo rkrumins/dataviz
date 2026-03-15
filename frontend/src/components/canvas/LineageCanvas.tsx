@@ -19,9 +19,6 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { GitBranch, ArrowRight, ArrowDown, Loader2 } from 'lucide-react'
 
 // Legacy nodes for backward compatibility
-import { DomainNode } from './nodes/DomainNode'
-import { AppNode } from './nodes/AppNode'
-import { AssetNode } from './nodes/AssetNode'
 import { GhostNode } from './nodes/GhostNode'
 // New generic node for schema-driven rendering
 import { GenericNode } from './nodes/GenericNode'
@@ -58,22 +55,22 @@ import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
 
-// Register custom node types - includes both legacy and generic
+// All node types use GenericNode — schema-driven rendering via ontology definitions.
+// GhostNode is kept for collapsed/offscreen placeholder nodes.
 const nodeTypes = {
-  // Legacy nodes for demo data compatibility
-  domain: DomainNode,
-  app: AppNode,
-  asset: AssetNode,
   ghost: GhostNode,
-  // Generic node for schema-driven entities
+  // GenericNode handles all entity types dynamically
   generic: GenericNode,
-  // Schema types mapped to generic node
+  domain: GenericNode,
+  app: GenericNode,
+  asset: GenericNode,
   system: GenericNode,
   dataset: GenericNode,
   pipeline: GenericNode,
   dashboard: GenericNode,
   column: GenericNode,
   schemaField: GenericNode,
+  container: GenericNode,
 }
 
 // Register custom edge types

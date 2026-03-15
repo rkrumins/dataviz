@@ -49,10 +49,6 @@ class GraphConnectionORM(Base):
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     # Relationships
-    ontology_config = relationship(
-        "OntologyConfigORM", back_populates="connection",
-        uselist=False, cascade="all, delete-orphan",
-    )
     assignment_rule_sets = relationship(
         "AssignmentRuleSetORM", back_populates="connection",
         cascade="all, delete-orphan",
@@ -68,35 +64,6 @@ class GraphConnectionORM(Base):
 
     def __repr__(self) -> str:
         return f"<GraphConnection id={self.id!r} name={self.name!r} type={self.provider_type!r}>"
-
-
-# ------------------------------------------------------------------ #
-# ontology_configs                                                      #
-# ------------------------------------------------------------------ #
-
-class OntologyConfigORM(Base):
-    __tablename__ = "ontology_configs"
-
-    id = Column(Text, primary_key=True, default=lambda: f"ont_{uuid.uuid4().hex[:12]}")
-    connection_id = Column(
-        Text,
-        ForeignKey("graph_connections.id", ondelete="CASCADE"),
-        nullable=False,
-        unique=True,
-    )
-    containment_edge_types = Column(Text, nullable=False, default="[]")   # JSON
-    lineage_edge_types = Column(Text, nullable=False, default="[]")       # JSON
-    edge_type_metadata = Column(Text, nullable=False, default="{}")       # JSON
-    entity_type_hierarchy = Column(Text, nullable=False, default="{}")    # JSON
-    root_entity_types = Column(Text, nullable=False, default="[]")        # JSON
-    override_mode = Column(Text, nullable=False, default="merge")         # merge | replace
-    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
-    updated_by = Column(Text, nullable=True)
-
-    connection = relationship("GraphConnectionORM", back_populates="ontology_config")
-
-    def __repr__(self) -> str:
-        return f"<OntologyConfig conn={self.connection_id!r} mode={self.override_mode!r}>"
 
 
 # ------------------------------------------------------------------ #
@@ -235,36 +202,43 @@ class ProviderORM(Base):
 
 
 # ------------------------------------------------------------------ #
-# ontology_blueprints  (standalone, versioned, reusable)               #
+# ontologies  (standalone, versioned, reusable semantic definitions)   #
 # ------------------------------------------------------------------ #
 
-class OntologyBlueprintORM(Base):
-    __tablename__ = "ontology_blueprints"
+class OntologyORM(Base):
+    __tablename__ = "ontologies"
 
     id = Column(Text, primary_key=True, default=lambda: f"bp_{uuid.uuid4().hex[:12]}")
     name = Column(Text, nullable=False)
     version = Column(Integer, nullable=False, default=1)
+    # Legacy flat edge type lists (kept for backward compat; derived from definitions when present)
     containment_edge_types = Column(Text, nullable=False, default="[]")   # JSON
     lineage_edge_types = Column(Text, nullable=False, default="[]")       # JSON
     edge_type_metadata = Column(Text, nullable=False, default="{}")       # JSON
     entity_type_hierarchy = Column(Text, nullable=False, default="{}")    # JSON
     root_entity_types = Column(Text, nullable=False, default="[]")        # JSON
-    visual_overrides = Column(Text, nullable=False, default="{}")         # JSON
+    # Rich definition columns (Phase 1+): nested dicts keyed by type ID
+    entity_type_definitions = Column(Text, nullable=False, default="{}")  # JSON Dict[str, EntityTypeDefEntry]
+    relationship_type_definitions = Column(Text, nullable=False, default="{}")  # JSON Dict[str, RelTypeDefEntry]
+    # Ontology metadata
     is_published = Column(Boolean, nullable=False, default=False)
+    is_system = Column(Boolean, nullable=False, default=False)
+    scope = Column(Text, nullable=False, default="universal")             # universal | workspace
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     # Relationships
     data_sources = relationship(
-        "WorkspaceDataSourceORM", back_populates="blueprint",
+        "WorkspaceDataSourceORM", back_populates="ontology",
     )
 
     __table_args__ = (
-        Index("idx_blueprints_name_version", "name", "version"),
+        Index("idx_ontologies_name_version", "name", "version"),
+        Index("idx_ontologies_is_system", "is_system"),
     )
 
     def __repr__(self) -> str:
-        return f"<OntologyBlueprint id={self.id!r} name={self.name!r} v{self.version}>"
+        return f"<Ontology id={self.id!r} name={self.name!r} v{self.version}>"
 
 
 # ------------------------------------------------------------------ #
@@ -324,9 +298,9 @@ class WorkspaceDataSourceORM(Base):
         ForeignKey("catalog_items.id", ondelete="SET NULL"),
         nullable=True,
     )
-    blueprint_id = Column(
+    ontology_id = Column(
         Text,
-        ForeignKey("ontology_blueprints.id", ondelete="SET NULL"),
+        ForeignKey("ontologies.id", ondelete="SET NULL"),
         nullable=True,
     )
     label = Column(Text, nullable=True)
@@ -342,7 +316,7 @@ class WorkspaceDataSourceORM(Base):
     workspace = relationship("WorkspaceORM", back_populates="data_sources")
     provider = relationship("ProviderORM", back_populates="data_sources")
     catalog_item = relationship("CatalogItemORM")
-    blueprint = relationship("OntologyBlueprintORM", back_populates="data_sources")
+    ontology = relationship("OntologyORM", back_populates="data_sources")
     stats = relationship("DataSourceStatsORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
     polling_config = relationship("DataSourcePollingConfigORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
 

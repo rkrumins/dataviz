@@ -133,7 +133,7 @@ export interface RelationshipVisualConfig {
   strokeStyle: 'solid' | 'dashed' | 'dotted';
   animated: boolean;
   animationSpeed: 'slow' | 'normal' | 'fast';
-  arrowType: 'arrow' | 'diamond' | 'circle' | 'none';
+  arrowType: 'arrow' | 'arrowclosed' | 'diamond' | 'circle' | 'none';
   curveType: 'bezier' | 'step' | 'straight' | 'smoothstep';
 }
 

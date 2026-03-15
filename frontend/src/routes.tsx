@@ -15,6 +15,7 @@ const AdminPage = lazy(() => import('@/pages/AdminPage').then(m => ({ default: m
 const AdminOverview = lazy(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
 const AdminRegistry = lazy(() => import('@/components/admin/AdminRegistry').then(m => ({ default: m.AdminRegistry })))
 const AdminWorkspaceDetail = lazy(() => import('@/components/admin/AdminWorkspaceDetail').then(m => ({ default: m.AdminWorkspaceDetail })))
+const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 
 // Thin suspense wrapper used for each lazy route — shows a centred spinner.
 function PageLoader() {
@@ -41,7 +42,7 @@ export const router = createBrowserRouter([
       { path: 'views/:viewId', element: <Lazy><ViewPage /></Lazy> },
       { path: 'workspaces/:workspaceId', element: <Lazy><WorkspaceView /></Lazy> },
       { path: 'workspaces/:workspaceId/views', element: <Lazy><WorkspaceViewsManager /></Lazy> },
-      { path: 'schema', element: <Lazy><Dashboard /></Lazy> },
+      { path: 'schema', element: <Lazy><OntologySchemaPage /></Lazy> },
       {
         path: 'admin',
         element: <Lazy><AdminPage /></Lazy>,

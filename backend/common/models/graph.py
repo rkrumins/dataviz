@@ -57,7 +57,7 @@ class FilterOperator(str, Enum):
 
 class GraphNode(BaseModel):
     urn: str
-    entity_type: EntityType = Field(alias="entityType")
+    entity_type: str = Field(alias="entityType")  # open string; use EntityType enum for well-known values
     display_name: str = Field(alias="displayName")
     qualified_name: Optional[str] = Field(None, alias="qualifiedName")
     description: Optional[str] = None
@@ -75,7 +75,7 @@ class GraphEdge(BaseModel):
     id: str
     source_urn: str = Field(alias="sourceUrn")
     target_urn: str = Field(alias="targetUrn")
-    edge_type: EdgeType = Field(alias="edgeType")
+    edge_type: str = Field(alias="edgeType")  # open string; use EdgeType enum for well-known values
     confidence: Optional[float] = None
     properties: Dict[str, Any] = Field(default_factory=dict)
 
@@ -102,7 +102,7 @@ class TextFilter(BaseModel):
 
 class NodeQuery(BaseModel):
     urns: Optional[List[str]] = None
-    entity_types: Optional[List[EntityType]] = Field(None, alias="entityTypes")
+    entity_types: Optional[List[str]] = Field(None, alias="entityTypes")  # open strings
     tags: Optional[List[str]] = None
     layer_id: Optional[str] = Field(None, alias="layerId")
     search_query: Optional[str] = Field(None, alias="searchQuery")
@@ -120,30 +120,10 @@ class EdgeQuery(BaseModel):
     source_urns: Optional[List[str]] = Field(None, alias="sourceUrns")
     target_urns: Optional[List[str]] = Field(None, alias="targetUrns")
     any_urns: Optional[List[str]] = Field(None, alias="anyUrns")
-    edge_types: Optional[List[EdgeType]] = Field(None, alias="edgeTypes")
+    edge_types: Optional[List[str]] = Field(None, alias="edgeTypes")  # open strings
     min_confidence: Optional[float] = Field(None, alias="minConfidence")
     offset: Optional[int] = 0
     limit: Optional[int] = 100
-
-    @validator('edge_types', pre=True)
-    def validate_edge_types(cls, v):
-        if v is None:
-            return None
-        if not isinstance(v, list):
-            return v
-        result = []
-        for et in v:
-            if isinstance(et, str):
-                try:
-                    result.append(EdgeType(et.upper()))
-                except ValueError:
-                    for edge_type in EdgeType:
-                        if edge_type.value.upper() == et.upper():
-                            result.append(edge_type)
-                            break
-            elif isinstance(et, EdgeType):
-                result.append(et)
-        return result if result else None
 
     class Config:
         populate_by_name = True
@@ -341,8 +321,8 @@ class GraphSchema(BaseModel):
 class AggregatedEdgeRequest(BaseModel):
     source_urns: List[str] = Field(alias="sourceUrns")
     target_urns: Optional[List[str]] = Field(None, alias="targetUrns")
-    granularity: Granularity = Granularity.TABLE
-    include_edge_types: Optional[List[EdgeType]] = Field(None, alias="includeEdgeTypes")
+    granularity: str = Granularity.TABLE  # open string; use Granularity enum for well-known values
+    include_edge_types: Optional[List[str]] = Field(None, alias="includeEdgeTypes")  # open strings
     lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
     containment_edge_types: Optional[List[str]] = Field(None, alias="containmentEdgeTypes")
 
@@ -373,7 +353,7 @@ class AggregatedEdgeResult(BaseModel):
 # ============================================
 
 class CreateNodeRequest(BaseModel):
-    entity_type: EntityType = Field(alias="entityType")
+    entity_type: str = Field(alias="entityType")  # open string
     display_name: str = Field(alias="displayName")
     parent_urn: Optional[str] = Field(None, alias="parentUrn")
     properties: Dict[str, Any] = Field(default_factory=dict)

@@ -144,6 +144,16 @@ async def init_db() -> None:
             "ALTER TABLE context_models ADD COLUMN tags TEXT",
             "ALTER TABLE context_models ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE providers ADD COLUMN permitted_workspaces TEXT DEFAULT '[\"*\"]'",
+            # Phase 0a: Rename ontology_blueprints -> ontologies
+            "ALTER TABLE ontology_blueprints RENAME TO ontologies",
+            # Phase 0a: Rename blueprint_id -> ontology_id in workspace_data_sources
+            "ALTER TABLE workspace_data_sources ADD COLUMN ontology_id TEXT REFERENCES ontologies(id) ON DELETE SET NULL",
+            "UPDATE workspace_data_sources SET ontology_id = blueprint_id WHERE blueprint_id IS NOT NULL",
+            # Phase 1: Add new definition columns to ontologies
+            "ALTER TABLE ontologies ADD COLUMN entity_type_definitions TEXT DEFAULT '{}'",
+            "ALTER TABLE ontologies ADD COLUMN relationship_type_definitions TEXT DEFAULT '{}'",
+            "ALTER TABLE ontologies ADD COLUMN is_system INTEGER DEFAULT 0",
+            "ALTER TABLE ontologies ADD COLUMN scope TEXT DEFAULT 'universal'",
         ]
         for stmt in migrations:
             try:

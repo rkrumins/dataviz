@@ -302,10 +302,10 @@ class ProviderRegistry:
         Create Provider + Blueprint + Workspace from an existing legacy connection.
         Returns the new workspace ID.
         """
-        from ..db.repositories import provider_repo, blueprint_repo, workspace_repo
+        from ..db.repositories import provider_repo, ontology_definition_repo, workspace_repo
         from backend.common.models.management import (
             ProviderCreateRequest,
-            BlueprintCreateRequest,
+            OntologyCreateRequest,
             WorkspaceCreateRequest,
             ProviderType,
         )
@@ -327,20 +327,20 @@ class ProviderRegistry:
             tlsEnabled=bool(connection_orm.tls_enabled),
         ))
 
-        # Create Blueprint from ontology config (if exists)
-        bp_req = BlueprintCreateRequest(name=f"{connection_orm.name} blueprint")
+        # Create Ontology from legacy ontology config (if exists)
+        ont_req = OntologyCreateRequest(name=f"{connection_orm.name} ontology")
         if connection_orm.ontology_config:
             import json as _json
             ont = connection_orm.ontology_config
-            bp_req = BlueprintCreateRequest(
-                name=f"{connection_orm.name} blueprint",
+            ont_req = OntologyCreateRequest(
+                name=f"{connection_orm.name} ontology",
                 containmentEdgeTypes=_json.loads(ont.containment_edge_types or "[]"),
                 lineageEdgeTypes=_json.loads(ont.lineage_edge_types or "[]"),
                 edgeTypeMetadata=_json.loads(ont.edge_type_metadata or "{}"),
                 entityTypeHierarchy=_json.loads(ont.entity_type_hierarchy or "{}"),
                 rootEntityTypes=_json.loads(ont.root_entity_types or "[]"),
             )
-        bp = await blueprint_repo.create_blueprint(session, bp_req)
+        ontology = await ontology_definition_repo.create_ontology(session, ont_req)
 
         # Create Workspace with data source
         from backend.common.models.management import DataSourceCreateRequest
@@ -349,13 +349,13 @@ class ProviderRegistry:
             dataSources=[DataSourceCreateRequest(
                 providerId=prov.id,
                 graphName=connection_orm.graph_name or "nexus_lineage",
-                blueprintId=bp.id,
+                ontologyId=ontology.id,
             )],
         ), make_default=True)
 
         logger.info(
-            "Migrated connection %s → provider=%s blueprint=%s workspace=%s",
-            connection_orm.id, prov.id, bp.id, ws.id,
+            "Migrated connection %s → provider=%s ontology=%s workspace=%s",
+            connection_orm.id, prov.id, ontology.id, ws.id,
         )
         return ws.id
 
@@ -369,12 +369,11 @@ class ProviderRegistry:
         Called once on first startup when both tables are empty.
         Returns the new workspace ID.
         """
-        from ..db.repositories import provider_repo, blueprint_repo, workspace_repo
+        from ..db.repositories import provider_repo, ontology_definition_repo, workspace_repo
         from ..db.repositories.connection_repo import create_connection
-        from ..db.repositories.ontology_repo import bootstrap_ontology_from_env
         from backend.common.models.management import (
             ProviderCreateRequest,
-            BlueprintCreateRequest,
+            OntologyCreateRequest,
             WorkspaceCreateRequest,
             ConnectionCreateRequest,
             ProviderType,
@@ -402,12 +401,12 @@ class ProviderRegistry:
             tlsEnabled=False,
         ))
 
-        # 2. Create Blueprint from env
+        # 2. Create Ontology from env (containment edge types from env var)
         containment_types_raw = os.getenv("CONTAINMENT_EDGE_TYPES", "")
         containment_types = [t.strip() for t in containment_types_raw.split(",") if t.strip()]
 
-        bp = await blueprint_repo.create_blueprint(session, BlueprintCreateRequest(
-            name="Default Blueprint (bootstrapped)",
+        ontology = await ontology_definition_repo.create_ontology(session, OntologyCreateRequest(
+            name="Default Ontology (bootstrapped)",
             containmentEdgeTypes=containment_types,
         ))
 
@@ -418,7 +417,7 @@ class ProviderRegistry:
             dataSources=[DataSourceCreateRequest(
                 providerId=prov.id,
                 graphName=graph_name,
-                blueprintId=bp.id,
+                ontologyId=ontology.id,
             )],
         ), make_default=True)
 
@@ -433,13 +432,9 @@ class ProviderRegistry:
             tls_enabled=False,
         ), make_primary=True)
 
-        # 5. Bootstrap ontology for legacy connection
-        if containment_types:
-            await bootstrap_ontology_from_env(session, legacy_conn.id, containment_types)
-
         logger.info(
-            "Bootstrapped from env: provider=%s blueprint=%s workspace=%s legacy_conn=%s",
-            prov.id, bp.id, ws.id, legacy_conn.id,
+            "Bootstrapped from env: provider=%s ontology=%s workspace=%s legacy_conn=%s",
+            prov.id, ontology.id, ws.id, legacy_conn.id,
         )
 
         self._default_ws_id = ws.id

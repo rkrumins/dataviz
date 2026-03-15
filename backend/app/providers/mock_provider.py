@@ -264,13 +264,7 @@ class MockGraphProvider(GraphDataProvider):
                  if edge.source_urn not in query.any_urns and edge.target_urn not in query.any_urns:
                      continue
             if query.edge_types:
-                # Handle both EdgeType enum and string comparisons
-                edge_type_value = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
-                query_types = [
-                    t.value if hasattr(t, 'value') else str(t) 
-                    for t in query.edge_types
-                ]
-                if edge_type_value not in query_types:
+                if str(edge.edge_type) not in [str(t) for t in query.edge_types]:
                     continue
             
             result.append(edge)
@@ -298,16 +292,9 @@ class MockGraphProvider(GraphDataProvider):
         for edge in edges:
             # check edge type string vs enum or string
             # Ensure we handle both string and enum comparison safely
-            etype = edge.edge_type.value if hasattr(edge.edge_type, 'value') else edge.edge_type
+            etype = str(edge.edge_type)
             
-            # Simple check: if edge types were passed, does this match?
-            # We treat everything as string for comparison to be safe
-            is_match = False
-            for t in target_edge_types:
-                t_val = t.value if hasattr(t, 'value') else t
-                if t_val == etype:
-                    is_match = True
-                    break
+            is_match = etype in [str(t) for t in target_edge_types]
             
             if not is_match:
                 continue
@@ -380,8 +367,7 @@ class MockGraphProvider(GraphDataProvider):
                 
             for edge in edges:
                 # Skip containment edges for lineage — driven by ontology config
-                edge_type_val = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
-                if edge_type_val.upper() in containment_types:
+                if str(edge.edge_type).upper() in containment_types:
                     continue
                     
                 neighbor = edge.source_urn if direction == 'upstream' else edge.target_urn
@@ -390,8 +376,7 @@ class MockGraphProvider(GraphDataProvider):
                 if allowed_types_set:
                     neighbor_node = self._nodes.get(neighbor)
                     if neighbor_node:
-                         ntype = neighbor_node.entity_type.value if hasattr(neighbor_node.entity_type, 'value') else str(neighbor_node.entity_type)
-                         if ntype not in allowed_types_set:
+                         if str(neighbor_node.entity_type) not in allowed_types_set:
                              continue
                 
                 if neighbor not in visited:
@@ -526,7 +511,7 @@ class MockGraphProvider(GraphDataProvider):
         
         # Basic O(N^2) check on edges - ok for small mock data
         for edge in self._edges.values():
-             et = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
+             et = str(edge.edge_type)
              if et in containment_edges: continue
              if lineage_edges and et not in lineage_edges: continue
              
@@ -682,7 +667,7 @@ class MockGraphProvider(GraphDataProvider):
         type_counts = {}
         samples = {} # type -> list of names
         for node in self._nodes.values():
-            t = node.entity_type.value if hasattr(node.entity_type, 'value') else node.entity_type
+            t = str(node.entity_type)
             type_counts[t] = type_counts.get(t, 0) + 1
             if t not in samples: samples[t] = []
             if len(samples[t]) < 3: samples[t].append(node.display_name)
@@ -696,7 +681,7 @@ class MockGraphProvider(GraphDataProvider):
         # Edge Type Stats
         edge_counts = {}
         for edge in self._edges.values():
-            t = edge.edge_type.value if hasattr(edge.edge_type, 'value') else edge.edge_type
+            t = str(edge.edge_type)
             edge_counts[t] = edge_counts.get(t, 0) + 1
             
         edge_stats = [
@@ -710,8 +695,7 @@ class MockGraphProvider(GraphDataProvider):
             for tag in node.tags:
                 tag_counts[tag] = tag_counts.get(tag, 0) + 1
                 if tag not in tag_types: tag_types[tag] = set()
-                t = node.entity_type.value if hasattr(node.entity_type, 'value') else node.entity_type
-                tag_types[tag].add(t)
+                tag_types[tag].add(str(node.entity_type))
                 
         tag_stats = [
             TagSummary(tag=t, count=c, entityTypes=list(tag_types[t])) 
@@ -750,7 +734,7 @@ class MockGraphProvider(GraphDataProvider):
             containment_upper = {t.upper() for t in containment_types}
             lineage_types = []
             for edge in self._edges.values():
-                et = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
+                et = str(edge.edge_type)
                 if et.upper() not in containment_upper and et.upper() not in metadata_types and et.upper() != EdgeType.AGGREGATED.value:
                     if et not in lineage_types:
                         lineage_types.append(et)
@@ -766,7 +750,7 @@ class MockGraphProvider(GraphDataProvider):
         edge_type_target_types: Dict[str, Set[str]] = {}
         
         for edge in self._edges.values():
-            edge_type = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
+            edge_type = str(edge.edge_type)
             edge_type_counts[edge_type] = edge_type_counts.get(edge_type, 0) + 1
             
             # Get source and target entity types
@@ -774,13 +758,13 @@ class MockGraphProvider(GraphDataProvider):
             target_node = self._nodes.get(edge.target_urn)
             
             if source_node:
-                source_type = source_node.entity_type.value if hasattr(source_node.entity_type, 'value') else str(source_node.entity_type)
+                source_type = str(source_node.entity_type)
                 if edge_type not in edge_type_source_types:
                     edge_type_source_types[edge_type] = set()
                 edge_type_source_types[edge_type].add(source_type)
             
             if target_node:
-                target_type = target_node.entity_type.value if hasattr(target_node.entity_type, 'value') else str(target_node.entity_type)
+                target_type = str(target_node.entity_type)
                 if edge_type not in edge_type_target_types:
                     edge_type_target_types[edge_type] = set()
                 edge_type_target_types[edge_type].add(target_type)
@@ -828,7 +812,7 @@ class MockGraphProvider(GraphDataProvider):
         
         # Analyze containment edges to determine what can contain what
         for edge in self._edges.values():
-            edge_type = edge.edge_type.value if hasattr(edge.edge_type, 'value') else str(edge.edge_type)
+            edge_type = str(edge.edge_type)
             
             if edge_type.upper() not in containment_upper:
                 continue
@@ -839,8 +823,8 @@ class MockGraphProvider(GraphDataProvider):
             if not source_node or not target_node:
                 continue
             
-            source_type = source_node.entity_type.value if hasattr(source_node.entity_type, 'value') else str(source_node.entity_type)
-            target_type = target_node.entity_type.value if hasattr(target_node.entity_type, 'value') else str(target_node.entity_type)
+            source_type = str(source_node.entity_type)
+            target_type = str(target_node.entity_type)
             
             # Determine parent and child by checking edge direction from metadata
             edge_meta = edge_type_metadata.get(edge_type)

@@ -31,7 +31,7 @@ def _ds_to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         id=row.id,
         workspaceId=row.workspace_id,
         catalogItemId=row.catalog_item_id,
-        blueprintId=row.blueprint_id,
+        ontologyId=row.ontology_id,
         label=row.label,
         isPrimary=bool(row.is_primary),
         isActive=bool(row.is_active),
@@ -139,7 +139,7 @@ async def create_workspace(
             catalog_item_id=ds_req.catalog_item_id,
             provider_id=cat.provider_id,
             graph_name=cat.source_identifier,
-            blueprint_id=ds_req.blueprint_id,
+            ontology_id=ds_req.ontology_id,
             label=ds_req.label,
             is_primary=(i == 0),  # first data source is primary by default
             is_active=True,

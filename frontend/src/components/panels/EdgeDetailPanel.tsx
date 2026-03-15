@@ -45,6 +45,7 @@ import {
 import { useSchemaStore } from '@/store/schema'
 import { useOntologyMetadata } from '@/services/ontologyService'
 import { getAllEdgeTypeDefinitions, normalizeEdgeType } from '@/utils/edgeTypeUtils'
+import { useEdgeVisual } from '@/hooks/useEntityVisual'
 import { cn } from '@/lib/utils'
 
 // ============================================
@@ -671,34 +672,11 @@ function EdgeCard({
     const confidence = edge.data?.confidence
     const label = edge.data?.label
 
-    const getEdgeColor = (type: string) => {
-        const colors: Record<string, string> = {
-            transforms: '#f59e0b',
-            produces: '#22c55e',
-            consumes: '#3b82f6',
-            contains: '#8b5cf6',
-            lineage: '#06b6d4',
-        }
-        return colors[type] || '#6b7280'
-    }
-
-    const getEdgeIcon = (type: string) => {
-        switch (type) {
-            case 'transforms':
-                return Workflow
-            case 'produces':
-                return Package
-            case 'consumes':
-                return Database
-            case 'contains':
-                return Table2
-            default:
-                return GitBranch
-        }
-    }
-
-    const EdgeIcon = getEdgeIcon(edgeType)
-    const color = getEdgeColor(edgeType)
+    // Resolve color from schema via hook (falls back to #6366f1 for unknown types)
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const edgeVisual = useEdgeVisual(edgeType)
+    const color = edgeVisual.strokeColor
+    const EdgeIcon = GitBranch  // Generic fallback; icon resolution TBD in Phase 4d
 
     return (
         <motion.div

@@ -3,7 +3,7 @@ import logging
 import time
 from typing import List, Dict, Any, Set, Optional, Tuple, TYPE_CHECKING
 from ..models.graph import (
-    GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
+    GraphNode, GraphEdge, LineageResult, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
     CreateNodeRequest, CreateNodeResult
@@ -15,6 +15,7 @@ from ..providers.mock_provider import MockGraphProvider
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+    from ..ontology.protocols import OntologyServiceProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +33,15 @@ def _create_provider() -> GraphDataProvider:
         )
     return MockGraphProvider()
 
-# Granularity mapping (mirrors frontend ENTITY_GRANULARITY)
-ENTITY_GRANULARITY = {
+
+# Granularity canonical name -> Granularity enum (kept for aggregation logic).
+# These are derived from entity def 'granularity' field; this mapping translates
+# the string value stored in ontology defs to the Granularity enum.
+_GRAN_STR_TO_ENUM: Dict[str, Granularity] = {
     'column': Granularity.COLUMN,
-    'schemaField': Granularity.COLUMN,
-    'dataset': Granularity.TABLE,
-    'asset': Granularity.TABLE,
     'table': Granularity.TABLE,
     'schema': Granularity.SCHEMA,
-    'container': Granularity.SCHEMA, # Loose mapping
     'system': Granularity.SYSTEM,
-    'dataPlatform': Granularity.SYSTEM,
-    'app': Granularity.SYSTEM,
     'domain': Granularity.DOMAIN,
 }
 
@@ -58,14 +56,22 @@ GRANULARITY_LEVELS = {
 class ContextEngine:
     _ONTOLOGY_CACHE_TTL = 300  # 5 minutes
 
-    def __init__(self, provider: GraphDataProvider = None):
+    def __init__(
+        self,
+        provider: GraphDataProvider = None,
+        ontology_service: Optional["OntologyServiceProtocol"] = None,
+    ):
         self.provider = provider or MockGraphProvider()
+        self._ontology_service = ontology_service  # injected; None = legacy path
         self._connection_id: Optional[str] = None
         self._workspace_id: Optional[str] = None
         self._data_source_id: Optional[str] = None
         self._db_session: Optional["AsyncSession"] = None
         self._ontology_cache: Optional[OntologyMetadata] = None
         self._ontology_cache_ts: float = 0.0
+        # Cache for resolved rich definitions (keyed by workspace+ds)
+        self._resolved_ontology_cache: Optional[Any] = None
+        self._resolved_ontology_cache_ts: float = 0.0
 
     # ------------------------------------------------------------------ #
     # Workspace-aware factory (new)                                        #
@@ -83,10 +89,15 @@ class ContextEngine:
         Create a ContextEngine scoped to a workspace data source.
         If data_source_id is given, uses that specific source; otherwise the primary.
         """
+        from ..ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+        from ..ontology.service import LocalOntologyService
+
         provider = await registry.get_provider_for_workspace(
             workspace_id, session, data_source_id
         )
-        engine = cls(provider=provider)
+        repo = SQLAlchemyOntologyRepository(session)
+        ontology_service = LocalOntologyService(repo)
+        engine = cls(provider=provider, ontology_service=ontology_service)
         engine._workspace_id = workspace_id
         engine._data_source_id = data_source_id
         engine._db_session = session
@@ -114,7 +125,7 @@ class ContextEngine:
         return engine
 
     # ------------------------------------------------------------------ #
-    # Enhanced ontology with blueprint/DB override merging                  #
+    # Ontology resolution with DB override merging                          #
     # ------------------------------------------------------------------ #
 
     async def get_ontology_metadata(self) -> OntologyMetadata:
@@ -123,7 +134,7 @@ class ContextEngine:
         Results are cached with a TTL to avoid repeated DB/graph queries.
 
         Priority order:
-        1. Workspace path: load blueprint → merge with introspection
+        1. Workspace path: load assigned ontology → merge with introspection
         2. Connection path (legacy): load ontology_config → merge with introspection
         3. Singleton path: introspection only
         """
@@ -139,94 +150,40 @@ class ContextEngine:
     def invalidate_ontology_cache(self) -> None:
         """Clear cached ontology so the next call re-fetches from source."""
         self._ontology_cache = None
+        self._resolved_ontology_cache = None
 
     async def _fetch_ontology_metadata(self) -> OntologyMetadata:
-        """Internal: fetch and merge ontology metadata (uncached)."""
+        """
+        Internal: fetch and merge ontology metadata (uncached).
+
+        Uses the OntologyService for workspace-scoped engines with the three-layer merge:
+        system_default <- assigned <- introspection.
+        Falls back to introspection-only for unregistered engines.
+        """
         introspected = await self.provider.get_ontology_metadata()
 
-        if self._workspace_id and self._db_session:
+        if self._ontology_service and self._workspace_id:
             try:
-                return await self._load_blueprint_ontology(introspected)
+                resolved = await self._ontology_service.resolve(
+                    workspace_id=self._workspace_id,
+                    data_source_id=self._data_source_id,
+                    introspected=introspected,
+                )
+                # Cache the rich resolved ontology for get_graph_schema()
+                self._resolved_ontology_cache = resolved
+                self._resolved_ontology_cache_ts = time.monotonic()
+                # Convert ResolvedOntology back to OntologyMetadata (flat format for legacy callers)
+                return OntologyMetadata(
+                    containmentEdgeTypes=resolved.containment_edge_types,
+                    lineageEdgeTypes=resolved.lineage_edge_types,
+                    edgeTypeMetadata=resolved.edge_type_metadata,
+                    entityTypeHierarchy=resolved.entity_type_hierarchy,
+                    rootEntityTypes=resolved.root_entity_types,
+                )
             except Exception as exc:
-                logger.warning("Failed to load blueprint ontology: %s", exc)
-                return introspected
-
-        if self._connection_id and self._db_session:
-            try:
-                from ..db.repositories.ontology_repo import get_ontology_config
-                db_config = await get_ontology_config(self._db_session, self._connection_id)
-                if db_config:
-                    return self._merge_ontology(introspected, db_config)
-            except Exception as exc:
-                logger.warning("Failed to load DB ontology override: %s", exc)
+                logger.warning("OntologyService.resolve() failed, falling back to introspection: %s", exc)
 
         return introspected
-
-    async def _load_blueprint_ontology(self, introspected: OntologyMetadata) -> OntologyMetadata:
-        """Load blueprint from the resolved data source and merge with introspected metadata."""
-        from ..db.repositories import data_source_repo
-        from ..db.repositories.blueprint_repo import get_blueprint_orm
-
-        # Resolve the data source to find its blueprint
-        if self._data_source_id:
-            ds = await data_source_repo.get_data_source_orm(self._db_session, self._data_source_id)
-        else:
-            ds = await data_source_repo.get_primary_data_source(self._db_session, self._workspace_id)
-
-        if not ds or not ds.blueprint_id:
-            return introspected
-
-        bp = await get_blueprint_orm(self._db_session, ds.blueprint_id)
-        if not bp:
-            return introspected
-
-        # Use blueprint as override source (same merge logic as ontology_config)
-        return self._merge_ontology(introspected, bp)
-
-    def _merge_ontology(self, base: OntologyMetadata, db_config: Any) -> OntologyMetadata:
-        """
-        Merge DB ontology config with introspected metadata.
-        override_mode='merge'   → union edge type lists; DB metadata wins on conflicts.
-        override_mode='replace' → DB config replaces introspection entirely.
-        """
-        import json
-
-        db_containment = json.loads(db_config.containment_edge_types or "[]")
-        db_lineage = json.loads(db_config.lineage_edge_types or "[]")
-        db_meta = json.loads(db_config.edge_type_metadata or "{}")
-        db_hierarchy = json.loads(db_config.entity_type_hierarchy or "{}")
-        db_root = json.loads(db_config.root_entity_types or "[]")
-        mode = db_config.override_mode or "merge"
-
-        if mode == "replace":
-            return OntologyMetadata(
-                containmentEdgeTypes=db_containment or base.containment_edge_types,
-                lineageEdgeTypes=db_lineage or base.lineage_edge_types,
-                edgeTypeMetadata=db_meta or {e: v.model_dump(by_alias=True) for e, v in base.edge_type_metadata.items()},
-                entityTypeHierarchy=db_hierarchy or {e: v.model_dump(by_alias=True) for e, v in base.entity_type_hierarchy.items()},
-                rootEntityTypes=db_root or base.root_entity_types,
-            )
-
-        # merge mode: union lists, DB additions win on metadata conflicts
-        merged_containment = list(
-            dict.fromkeys(base.containment_edge_types + [t for t in db_containment if t not in base.containment_edge_types])
-        )
-        merged_lineage = list(
-            dict.fromkeys(base.lineage_edge_types + [t for t in db_lineage if t not in base.lineage_edge_types])
-        )
-        merged_meta = {e: v.model_dump(by_alias=True) for e, v in base.edge_type_metadata.items()}
-        merged_meta.update(db_meta)
-        merged_hierarchy = {e: v.model_dump(by_alias=True) for e, v in base.entity_type_hierarchy.items()}
-        merged_hierarchy.update(db_hierarchy)
-        merged_root = list(dict.fromkeys(base.root_entity_types + [t for t in db_root if t not in base.root_entity_types]))
-
-        return OntologyMetadata(
-            containmentEdgeTypes=merged_containment,
-            lineageEdgeTypes=merged_lineage,
-            edgeTypeMetadata=merged_meta,
-            entityTypeHierarchy=merged_hierarchy,
-            rootEntityTypes=merged_root,
-        )
 
     async def get_node(self, urn: str) -> Optional[GraphNode]:
         return await self.provider.get_node(urn)
@@ -409,7 +366,29 @@ class ContextEngine:
     @staticmethod
     def _normalize_edge_type(edge_type) -> str:
         """Normalize edge type to uppercase string for comparison."""
-        return (edge_type.value if hasattr(edge_type, 'value') else str(edge_type)).upper()
+        return str(edge_type).upper()
+
+    def _entity_granularity(self, entity_type: str) -> Granularity:
+        """
+        Map an entity type string to a Granularity enum value.
+        Uses the resolved ontology's entity definition 'granularity' field when available;
+        falls back to the canonical string-to-enum mapping for well-known types.
+        """
+        if self._resolved_ontology_cache:
+            ent_def = self._resolved_ontology_cache.entity_type_definitions.get(entity_type)
+            if ent_def:
+                gran_str = ent_def.granularity
+                return _GRAN_STR_TO_ENUM.get(gran_str, Granularity.COLUMN)
+
+        # Built-in fallback for well-known types (same as the old ENTITY_GRANULARITY dict)
+        _FALLBACK: Dict[str, Granularity] = {
+            'column': Granularity.COLUMN, 'schemaField': Granularity.COLUMN,
+            'dataset': Granularity.TABLE, 'asset': Granularity.TABLE, 'table': Granularity.TABLE,
+            'schema': Granularity.SCHEMA, 'container': Granularity.SCHEMA,
+            'system': Granularity.SYSTEM, 'dataPlatform': Granularity.SYSTEM, 'app': Granularity.SYSTEM,
+            'domain': Granularity.DOMAIN,
+        }
+        return _FALLBACK.get(entity_type, Granularity.COLUMN)
 
     async def _apply_inherited_lineage(
         self, 
@@ -502,10 +481,9 @@ class ContextEngine:
         visible_node_ids = set()
         
         for node in nodes:
-            # Map entity type to granularity
-            # Handle Enum or String
-            entity_key = node.entity_type.value if hasattr(node.entity_type, 'value') else str(node.entity_type)
-            node_gran = ENTITY_GRANULARITY.get(entity_key, Granularity.COLUMN)
+            # Map entity type to granularity using resolved ontology if available, else fallback
+            entity_key = str(node.entity_type)
+            node_gran = self._entity_granularity(entity_key)
             node_level = GRANULARITY_LEVELS.get(node_gran, 0)
             
             if node_level >= target_level:
@@ -533,7 +511,7 @@ class ContextEngine:
                         id=agg_id,
                         sourceUrn=agg["sourceUrn"],
                         targetUrn=agg["targetUrn"],
-                        edgeType=EdgeType.AGGREGATED,
+                        edgeType="AGGREGATED",
                         confidence=agg["confidence"],
                         properties={
                             "isAggregated": True,
@@ -621,8 +599,8 @@ class ContextEngine:
             node = node_map.get(current_urn)
             # Use node.entity_type if available, else infer from URN (for ancestors not in our set)
             if node:
-                entity_key = getattr(node.entity_type, "value", str(node.entity_type))
-                node_gran = ENTITY_GRANULARITY.get(entity_key, Granularity.COLUMN)
+                entity_key = str(node.entity_type)
+                node_gran = self._entity_granularity(entity_key)
             else:
                 node_gran = self._infer_granularity_from_urn(current_urn)
             node_level = GRANULARITY_LEVELS.get(node_gran, 0)
@@ -688,7 +666,7 @@ class ContextEngine:
         self, 
         urn: str, 
         depth: int = 5, 
-        entity_types: Optional[List[EntityType]] = None,
+        entity_types: Optional[List[str]] = None,
         limit: int = 100, 
         offset: int = 0
     ) -> List[GraphNode]:
@@ -702,139 +680,215 @@ class ContextEngine:
 
     async def get_graph_schema(self) -> GraphSchema:
         """
-        Build a complete graph schema from introspection data and ontology metadata.
-        This enables frontend to load schema dynamically from the backend.
+        Build a complete graph schema from resolved ontology definitions and introspection stats.
+        Uses the rich entity/relationship definitions from the OntologyService when available;
+        falls back to generating definitions from introspection stats + minimal defaults.
         """
-        # Get introspection stats and ontology (merged with DB overrides)
         stats = await self.provider.get_schema_stats()
+        # Calling get_ontology_metadata() will also populate _resolved_ontology_cache
         ontology = await self.get_ontology_metadata()
-        
-        # Build entity type definitions from introspection
+
+        resolved = self._resolved_ontology_cache
         entity_types: List[EntityTypeDefinition] = []
-        
-        # Default visual configurations by entity type
-        ENTITY_VISUALS = {
-            'domain': {'icon': 'FolderTree', 'color': '#8b5cf6', 'shape': 'rounded', 'size': 'lg'},
-            'system': {'icon': 'Database', 'color': '#06b6d4', 'shape': 'rounded', 'size': 'md'},
-            'dataPlatform': {'icon': 'Server', 'color': '#06b6d4', 'shape': 'rounded', 'size': 'md'},
-            'container': {'icon': 'Box', 'color': '#10b981', 'shape': 'rounded', 'size': 'md'},
-            'schema': {'icon': 'Layers', 'color': '#10b981', 'shape': 'rounded', 'size': 'md'},
-            'dataset': {'icon': 'Table2', 'color': '#22c55e', 'shape': 'rectangle', 'size': 'sm'},
-            'schemaField': {'icon': 'Columns3', 'color': '#f59e0b', 'shape': 'rectangle', 'size': 'xs'},
-            'column': {'icon': 'Columns3', 'color': '#f59e0b', 'shape': 'rectangle', 'size': 'xs'},
-            'dataJob': {'icon': 'Workflow', 'color': '#ec4899', 'shape': 'diamond', 'size': 'md'},
-            'dataFlow': {'icon': 'GitBranch', 'color': '#ec4899', 'shape': 'diamond', 'size': 'md'},
-            'pipeline': {'icon': 'Workflow', 'color': '#ec4899', 'shape': 'diamond', 'size': 'md'},
-            'dashboard': {'icon': 'LayoutDashboard', 'color': '#3b82f6', 'shape': 'rounded', 'size': 'md'},
-            'chart': {'icon': 'BarChart3', 'color': '#3b82f6', 'shape': 'rounded', 'size': 'sm'},
-            'report': {'icon': 'FileText', 'color': '#22c55e', 'shape': 'rounded', 'size': 'md'},
-            'glossaryTerm': {'icon': 'BookOpen', 'color': '#a855f7', 'shape': 'rounded', 'size': 'sm'},
-            'tag': {'icon': 'Tag', 'color': '#64748b', 'shape': 'rounded', 'size': 'xs'},
-            'app': {'icon': 'AppWindow', 'color': '#06b6d4', 'shape': 'rounded', 'size': 'md'},
-        }
-        
-        # Hierarchy levels
-        ENTITY_LEVELS = {
-            'domain': 0, 'system': 1, 'dataPlatform': 1, 'app': 1,
-            'container': 2, 'schema': 2, 'dataFlow': 2, 'pipeline': 2,
-            'dataset': 3, 'dashboard': 3, 'dataJob': 3, 'report': 3,
-            'schemaField': 4, 'column': 4, 'chart': 4,
-            'glossaryTerm': 5, 'tag': 5
-        }
-        
+        relationship_types: List[RelationshipTypeDefinition] = []
+
+        if resolved and resolved.entity_type_definitions:
+            # Rich path: build from ontology service definitions
+            entity_types = self._build_entity_types_from_resolved(stats, resolved)
+            relationship_types = self._build_rel_types_from_resolved(stats, ontology, resolved)
+        else:
+            # Legacy/fallback path: minimal definitions from stats + defaults
+            from ..ontology.defaults import SYSTEM_ENTITY_TYPES, SYSTEM_RELATIONSHIP_TYPES
+            from ..ontology.resolver import parse_entity_definitions, parse_relationship_definitions
+            sys_ent = parse_entity_definitions(SYSTEM_ENTITY_TYPES)
+            sys_rel = parse_relationship_definitions(SYSTEM_RELATIONSHIP_TYPES)
+            entity_types = self._build_entity_types_from_dicts(stats, ontology, sys_ent)
+            relationship_types = self._build_rel_types_from_dicts(stats, ontology, sys_rel)
+
+        return GraphSchema(
+            version="1.0.0",
+            entityTypes=entity_types,
+            relationshipTypes=relationship_types,
+            rootEntityTypes=ontology.root_entity_types,
+            containmentEdgeTypes=ontology.containment_edge_types,
+        )
+
+    def _build_entity_types_from_resolved(self, stats, resolved) -> List[EntityTypeDefinition]:
+        """Build EntityTypeDefinition list from rich resolved ontology definitions."""
+        from ..ontology.models import EntityTypeDefEntry
+
+        stat_map = {s.id: s for s in stats.entity_type_stats}
+        result: List[EntityTypeDefinition] = []
+
+        # Include all types that appear in either stats or resolved definitions
+        seen_ids = set(stat_map.keys()) | set(resolved.entity_type_definitions.keys())
+
+        for entity_id in seen_ids:
+            ent_def: Optional[EntityTypeDefEntry] = resolved.entity_type_definitions.get(entity_id)
+            stat = stat_map.get(entity_id)
+
+            if ent_def is None:
+                # Synthesise minimal definition for types only in stats
+                from ..ontology.models import EntityTypeDefEntry
+                ent_def = EntityTypeDefEntry(name=entity_id.title(), plural_name=entity_id.title() + "s")
+
+            icon = (stat.icon if stat else None) or ent_def.visual.icon
+            color = (stat.color if stat else None) or ent_def.visual.color
+
+            result.append(EntityTypeDefinition(
+                id=entity_id,
+                name=ent_def.name or entity_id.title(),
+                pluralName=ent_def.plural_name or (ent_def.name + "s"),
+                description=ent_def.description or f"Entity type: {entity_id}",
+                visual=EntityVisualSchema(
+                    icon=icon,
+                    color=color,
+                    shape=ent_def.visual.shape,
+                    size=ent_def.visual.size,
+                    borderStyle=ent_def.visual.border_style,
+                    showInMinimap=ent_def.visual.show_in_minimap,
+                ),
+                fields=[
+                    FieldSchema(
+                        id=f.id, name=f.name, type=f.type,
+                        required=f.required,
+                        showInNode=f.show_in_node, showInPanel=f.show_in_panel,
+                        showInTooltip=f.show_in_tooltip, displayOrder=f.display_order,
+                    )
+                    for f in ent_def.fields
+                ] or [
+                    FieldSchema(id='name', name='Name', type='string', required=True,
+                                showInNode=True, showInPanel=True, showInTooltip=True, displayOrder=1),
+                ],
+                hierarchy=EntityHierarchySchema(
+                    level=ent_def.hierarchy.level,
+                    canContain=ent_def.hierarchy.can_contain,
+                    canBeContainedBy=ent_def.hierarchy.can_be_contained_by,
+                    defaultExpanded=ent_def.hierarchy.default_expanded,
+                ),
+                behavior=EntityBehaviorSchema(
+                    selectable=ent_def.behavior.selectable,
+                    draggable=ent_def.behavior.draggable,
+                    expandable=ent_def.behavior.expandable,
+                    traceable=ent_def.behavior.traceable,
+                    clickAction=ent_def.behavior.click_action,
+                    doubleClickAction=ent_def.behavior.double_click_action,
+                ),
+            ))
+
+        return result
+
+    def _build_rel_types_from_resolved(self, stats, ontology, resolved) -> List[RelationshipTypeDefinition]:
+        """Build RelationshipTypeDefinition list from rich resolved ontology definitions."""
+        from ..ontology.models import RelationshipTypeDefEntry
+
+        stat_map = {s.id: s for s in stats.edge_type_stats}
+        containment_upper = {t.upper() for t in ontology.containment_edge_types}
+        result: List[RelationshipTypeDefinition] = []
+        seen_ids = set(stat_map.keys()) | set(resolved.relationship_type_definitions.keys())
+
+        for rel_id in seen_ids:
+            rel_def: Optional[RelationshipTypeDefEntry] = resolved.relationship_type_definitions.get(rel_id)
+            stat = stat_map.get(rel_id)
+            is_containment = rel_id.upper() in containment_upper
+
+            if rel_def is None:
+                rel_def = RelationshipTypeDefEntry(name=rel_id.title())
+                rel_def.is_containment = is_containment
+
+            result.append(RelationshipTypeDefinition(
+                id=rel_id.lower(),
+                name=rel_def.name or rel_id.title(),
+                description=rel_def.description or f"Relationship type: {rel_id}",
+                sourceTypes=(stat.source_types if stat else None) or rel_def.source_types,
+                targetTypes=(stat.target_types if stat else None) or rel_def.target_types,
+                visual=RelationshipVisualSchema(
+                    strokeColor=rel_def.visual.stroke_color,
+                    strokeWidth=rel_def.visual.stroke_width,
+                    strokeStyle=rel_def.visual.stroke_style,
+                    animated=rel_def.visual.animated,
+                    animationSpeed=rel_def.visual.animation_speed,
+                    arrowType=rel_def.visual.arrow_type,
+                    curveType=rel_def.visual.curve_type,
+                ),
+                bidirectional=rel_def.bidirectional,
+                showLabel=rel_def.show_label,
+                isContainment=rel_def.is_containment,
+            ))
+
+        return result
+
+    def _build_entity_types_from_dicts(self, stats, ontology, sys_ent) -> List[EntityTypeDefinition]:
+        """Fallback: build entity types from defaults dict when no OntologyService is wired."""
+        result: List[EntityTypeDefinition] = []
         for stat in stats.entity_type_stats:
             entity_id = stat.id
-            visuals = ENTITY_VISUALS.get(entity_id, {'icon': 'Box', 'color': '#6366f1', 'shape': 'rounded', 'size': 'md'})
-            
-            # Get hierarchy info from ontology
+            ent_def = sys_ent.get(entity_id)
+            icon = (stat.icon if stat.icon else None) or (ent_def.visual.icon if ent_def else "Box")
+            color = (stat.color if stat.color else None) or (ent_def.visual.color if ent_def else "#6366f1")
             hierarchy_info = ontology.entity_type_hierarchy.get(entity_id, {})
-            can_contain = hierarchy_info.get('canContain', []) if isinstance(hierarchy_info, dict) else (hierarchy_info.can_contain if hasattr(hierarchy_info, 'can_contain') else [])
-            can_be_contained = hierarchy_info.get('canBeContainedBy', []) if isinstance(hierarchy_info, dict) else (hierarchy_info.can_be_contained_by if hasattr(hierarchy_info, 'can_be_contained_by') else [])
-            
-            entity_def = EntityTypeDefinition(
+            can_contain = hierarchy_info.get('canContain', []) if isinstance(hierarchy_info, dict) else []
+            can_be_contained = hierarchy_info.get('canBeContainedBy', []) if isinstance(hierarchy_info, dict) else []
+            level = ent_def.hierarchy.level if ent_def else 3
+
+            result.append(EntityTypeDefinition(
                 id=entity_id,
                 name=stat.name,
                 pluralName=f"{stat.name}s",
                 description=f"Entity type: {stat.name}",
                 visual=EntityVisualSchema(
-                    icon=stat.icon or visuals.get('icon', 'Box'),
-                    color=stat.color or visuals.get('color', '#6366f1'),
-                    shape=visuals.get('shape', 'rounded'),
-                    size=visuals.get('size', 'md'),
-                    borderStyle='solid',
-                    showInMinimap=ENTITY_LEVELS.get(entity_id, 3) <= 3
+                    icon=icon,
+                    color=color,
+                    shape=ent_def.visual.shape if ent_def else "rounded",
+                    size=ent_def.visual.size if ent_def else "md",
+                    borderStyle="solid",
+                    showInMinimap=level <= 3,
                 ),
                 fields=[
-                    FieldSchema(id='name', name='Name', type='string', required=True, showInNode=True, showInPanel=True, showInTooltip=True, displayOrder=1),
-                    FieldSchema(id='description', name='Description', type='markdown', required=False, showInNode=False, showInPanel=True, showInTooltip=False, displayOrder=2),
-                    FieldSchema(id='urn', name='URN', type='urn', required=False, showInNode=False, showInPanel=True, showInTooltip=False, displayOrder=10),
+                    FieldSchema(id='name', name='Name', type='string', required=True,
+                                showInNode=True, showInPanel=True, showInTooltip=True, displayOrder=1),
                 ],
                 hierarchy=EntityHierarchySchema(
-                    level=ENTITY_LEVELS.get(entity_id, 3),
-                    canContain=can_contain,
-                    canBeContainedBy=can_be_contained,
-                    defaultExpanded=ENTITY_LEVELS.get(entity_id, 3) <= 1
+                    level=level, canContain=can_contain,
+                    canBeContainedBy=can_be_contained, defaultExpanded=level <= 1,
                 ),
                 behavior=EntityBehaviorSchema(
-                    selectable=True,
-                    draggable=ENTITY_LEVELS.get(entity_id, 3) <= 3,
-                    expandable=len(can_contain) > 0,
-                    traceable=True,
+                    selectable=True, draggable=level <= 3,
+                    expandable=len(can_contain) > 0, traceable=True,
                     clickAction='select',
-                    doubleClickAction='expand' if len(can_contain) > 0 else 'panel'
-                )
-            )
-            entity_types.append(entity_def)
-        
-        # Build relationship type definitions from edge stats
-        relationship_types: List[RelationshipTypeDefinition] = []
-        
-        EDGE_VISUALS = {
-            'PRODUCES': {'strokeColor': '#6366f1', 'animated': True},
-            'CONSUMES': {'strokeColor': '#10b981', 'animated': True},
-            'TRANSFORMS': {'strokeColor': '#f59e0b', 'animated': True, 'strokeStyle': 'dashed'},
-            'CONTAINS': {'strokeColor': '#94a3b8', 'animated': False, 'strokeStyle': 'dotted', 'arrowType': 'none'},
-            'BELONGS_TO': {'strokeColor': '#94a3b8', 'animated': False, 'strokeStyle': 'dotted', 'arrowType': 'none'},
-            'TAGGED_WITH': {'strokeColor': '#a855f7', 'animated': False},
-            'RELATED_TO': {'strokeColor': '#64748b', 'animated': False},
-            'AGGREGATED': {'strokeColor': '#f59e0b', 'animated': True, 'strokeWidth': 3},
-        }
-        
+                    doubleClickAction='expand' if can_contain else 'panel',
+                ),
+            ))
+        return result
+
+    def _build_rel_types_from_dicts(self, stats, ontology, sys_rel) -> List[RelationshipTypeDefinition]:
+        """Fallback: build relationship types from defaults dict when no OntologyService is wired."""
+        result: List[RelationshipTypeDefinition] = []
+        containment_upper = {t.upper() for t in ontology.containment_edge_types}
         for stat in stats.edge_type_stats:
             edge_id = stat.id
-            visuals = EDGE_VISUALS.get(edge_id.upper(), {'strokeColor': '#6366f1', 'animated': True})
-            
-            # Check if this is a containment edge
-            is_containment = edge_id.upper() in [t.upper() for t in ontology.containment_edge_types]
-            
-            rel_def = RelationshipTypeDefinition(
+            rel_def = sys_rel.get(edge_id.upper()) or sys_rel.get(edge_id)
+            is_containment = edge_id.upper() in containment_upper
+            result.append(RelationshipTypeDefinition(
                 id=edge_id.lower(),
                 name=stat.name,
                 description=f"Relationship type: {stat.name}",
                 sourceTypes=stat.source_types,
                 targetTypes=stat.target_types,
                 visual=RelationshipVisualSchema(
-                    strokeColor=visuals.get('strokeColor', '#6366f1'),
-                    strokeWidth=visuals.get('strokeWidth', 2),
-                    strokeStyle=visuals.get('strokeStyle', 'solid'),
-                    animated=visuals.get('animated', True),
-                    animationSpeed='normal',
-                    arrowType=visuals.get('arrowType', 'arrow'),
-                    curveType='bezier'
+                    strokeColor=rel_def.visual.stroke_color if rel_def else "#6366f1",
+                    strokeWidth=rel_def.visual.stroke_width if rel_def else 2,
+                    strokeStyle=rel_def.visual.stroke_style if rel_def else "solid",
+                    animated=rel_def.visual.animated if rel_def else True,
+                    animationSpeed="normal",
+                    arrowType=rel_def.visual.arrow_type if rel_def else "arrow",
+                    curveType="bezier",
                 ),
                 bidirectional=False,
-                showLabel=False,
-                isContainment=is_containment
-            )
-            relationship_types.append(rel_def)
-        
-        return GraphSchema(
-            version="1.0.0",
-            entityTypes=entity_types,
-            relationshipTypes=relationship_types,
-            rootEntityTypes=ontology.root_entity_types,
-            containmentEdgeTypes=ontology.containment_edge_types
-        )
+                showLabel=rel_def.show_label if rel_def else False,
+                isContainment=is_containment,
+            ))
+        return result
 
     async def get_aggregated_edges(self, request: AggregatedEdgeRequest) -> AggregatedEdgeResult:
         """
@@ -878,7 +932,7 @@ class ContextEngine:
         from datetime import datetime
         
         # Generate URN
-        urn = f"urn:nexus:{request.entity_type.value}:{uuid.uuid4().hex[:12]}"
+        urn = f"urn:nexus:{str(request.entity_type)}:{uuid.uuid4().hex[:12]}"
         
         # Validate parent relationship if specified
         containment_edge = None
@@ -897,15 +951,16 @@ class ContextEngine:
                 )
             
             # Validate hierarchy rules
-            parent_hierarchy = ontology.entity_type_hierarchy.get(parent_node.entity_type.value, {})
+            parent_type = str(parent_node.entity_type)
+            parent_hierarchy = ontology.entity_type_hierarchy.get(parent_type, {})
             can_contain = parent_hierarchy.get('canContain', []) if isinstance(parent_hierarchy, dict) else (parent_hierarchy.can_contain if hasattr(parent_hierarchy, 'can_contain') else [])
             
-            if request.entity_type.value not in can_contain and len(can_contain) > 0:
+            if str(request.entity_type) not in can_contain and len(can_contain) > 0:
                 return CreateNodeResult(
                     node=None,
                     containmentEdge=None,
                     success=False,
-                    error=f"Entity type '{request.entity_type.value}' cannot be contained by '{parent_node.entity_type.value}'"
+                    error=f"Entity type '{str(request.entity_type)}' cannot be contained by '{parent_type}'"
                 )
             
             # Create containment edge
@@ -913,7 +968,7 @@ class ContextEngine:
                 id=f"contains-{request.parent_urn}-{urn}",
                 sourceUrn=request.parent_urn,
                 targetUrn=urn,
-                edgeType=EdgeType.CONTAINS,
+                edgeType="CONTAINS",
                 confidence=1.0,
                 properties={}
             )

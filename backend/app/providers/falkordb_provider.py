@@ -33,13 +33,9 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
         return None
     entity_type = entity_type_str or props.get("entityType", "container")
     try:
-        et_enum = EntityType(entity_type) if isinstance(entity_type, str) else entity_type
-    except ValueError:
-        et_enum = EntityType.CONTAINER
-    try:
         return GraphNode(
             urn=props["urn"],
-            entityType=et_enum,
+            entityType=str(entity_type),
             displayName=props.get("displayName", ""),
             qualifiedName=props.get("qualifiedName"),
             description=props.get("description"),
@@ -58,15 +54,11 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
 def _edge_from_row(source_urn: str, target_urn: str, rel_type: str, props: Dict[str, Any]) -> GraphEdge:
     """Build GraphEdge from FalkorDB edge data."""
     edge_id = props.get("id") or f"{source_urn}|{rel_type}|{target_urn}"
-    try:
-        et = EdgeType(rel_type) if isinstance(rel_type, str) else rel_type
-    except ValueError:
-        et = EdgeType.RELATED_TO
     return GraphEdge(
         id=edge_id,
         sourceUrn=source_urn,
         targetUrn=target_urn,
-        edgeType=et,
+        edgeType=str(rel_type),
         confidence=props.get("confidence"),
         properties=json.loads(props["properties"]) if isinstance(props.get("properties"), str) else (props.get("properties") or {}),
     )
@@ -284,8 +276,7 @@ class FalkorDBProvider(GraphDataProvider):
             node = self._extract_node_from_result(result.result_set[0])
             # Backfill the cache for next time
             if node:
-                lbl = node.entity_type.value if hasattr(node.entity_type, "value") else str(node.entity_type)
-                await self._cache_urn_label(urn, lbl)
+                await self._cache_urn_label(urn, str(node.entity_type))
             return node
         return None
 
@@ -297,14 +288,11 @@ class FalkorDBProvider(GraphDataProvider):
 
         # When a single entity type is provided, use label-specific MATCH for index hit
         if query.entity_types and len(query.entity_types) == 1:
-            label = _sanitize_label(
-                query.entity_types[0].value if hasattr(query.entity_types[0], "value")
-                else str(query.entity_types[0])
-            )
+            label = _sanitize_label(str(query.entity_types[0]))
             clauses = [f"MATCH (n:{label})"]
         elif query.entity_types:
             clauses = ["MATCH (n)"]
-            types = [t.value if hasattr(t, "value") else str(t) for t in query.entity_types]
+            types = [str(t) for t in query.entity_types]
             params["entityTypes"] = types
             conditions.append("labels(n)[0] IN $entityTypes")
         else:
@@ -1714,7 +1702,7 @@ class FalkorDBProvider(GraphDataProvider):
         # Group nodes by label for label-specific MERGE
         nodes_by_label: Dict[str, list] = defaultdict(list)
         for node in nodes:
-            label = _sanitize_label(node.entity_type.value if hasattr(node.entity_type, "value") else str(node.entity_type))
+            label = _sanitize_label(str(node.entity_type))
             nodes_by_label[label].append({
                 "urn": node.urn,
                 "displayName": node.display_name or "",
@@ -1757,7 +1745,7 @@ class FalkorDBProvider(GraphDataProvider):
         # Group edges by relationship type for type-specific MERGE
         edges_by_type: Dict[str, list] = defaultdict(list)
         for edge in edges:
-            rel_type = _sanitize_label(edge.edge_type.value if hasattr(edge.edge_type, "value") else str(edge.edge_type))
+            rel_type = _sanitize_label(str(edge.edge_type))
             edges_by_type[rel_type].append({
                 "src": edge.source_urn,
                 "tgt": edge.target_urn,
@@ -1787,7 +1775,7 @@ class FalkorDBProvider(GraphDataProvider):
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         await self._ensure_connected()
         try:
-            label = _sanitize_label(node.entity_type.value if hasattr(node.entity_type, "value") else str(node.entity_type))
+            label = _sanitize_label(str(node.entity_type))
             params = {
                 "urn": node.urn,
                 "displayName": node.display_name or "",
@@ -1806,7 +1794,7 @@ class FalkorDBProvider(GraphDataProvider):
             )
             await self._cache_urn_label(node.urn, label)
             if containment_edge:
-                rel_type = _sanitize_label(containment_edge.edge_type.value if hasattr(containment_edge.edge_type, "value") else str(containment_edge.edge_type))
+                rel_type = _sanitize_label(str(containment_edge.edge_type))
                 await self._graph.query(
                     f"""
                     MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}})

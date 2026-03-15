@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { AppShell } from '@/components/layout/AppShell'
 import { LoginPage } from '@/components/auth/LoginPage'
@@ -7,20 +7,19 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { defaultWorkspaceSchema } from '@/lib/default-schema'
 import { useOntologyMetadata, getCachedOntologyMetadata } from '@/services/ontologyService'
+import { useGraphSchema } from '@/hooks/useGraphSchema'
 
 function App() {
   const { isAuthenticated } = useAuthStore()
   const { theme } = usePreferencesStore()
   const { setNodes, setEdges, setActiveLens } = useCanvasStore()
-  const { loadSchema, schema, mergeBackendSchema, loadFromBackend } = useSchemaStore()
+  const { schema } = useSchemaStore()
   const provider = useGraphProvider()
   const { containmentEdgeTypes, isLoading: isLoadingOntology, metadata: ontologyMetadata } = useOntologyMetadata()
 
-  // Track if we've attempted to load schema from backend
-  const [hasLoadedBackendSchema, setHasLoadedBackendSchema] = useState(false)
-  const [isLoadingBackendSchema, setIsLoadingBackendSchema] = useState(false)
+  // React Query-backed schema loading (replaces manual mergeBackendSchema pattern)
+  const { isLoading: isLoadingBackendSchema } = useGraphSchema()
 
   // Track which provider instance we've loaded graph data for (prevents re-fetch cascades)
   const graphLoadedForProviderRef = useRef<typeof provider | null>(null)
@@ -33,52 +32,7 @@ function App() {
     [containmentEdgeTypes]
   )
 
-  // Load schema from backend on startup
-  useEffect(() => {
-    if (!isAuthenticated || hasLoadedBackendSchema || isLoadingBackendSchema) return
-
-    const loadBackendSchema = async () => {
-      setIsLoadingBackendSchema(true)
-
-      try {
-        console.log('[App] Loading schema from backend...')
-        const backendSchema = await provider.getFullSchema()
-
-        if (backendSchema && backendSchema.entityTypes.length > 0) {
-          console.log('[App] Backend schema loaded:', {
-            entityTypes: backendSchema.entityTypes.length,
-            relationshipTypes: backendSchema.relationshipTypes.length,
-            rootTypes: backendSchema.rootEntityTypes,
-          })
-
-          // Merge backend schema with any existing local customizations
-          if (schema) {
-            mergeBackendSchema(backendSchema)
-            console.log('[App] Merged backend schema with existing schema')
-          } else {
-            loadFromBackend(backendSchema)
-            console.log('[App] Loaded fresh schema from backend')
-          }
-        } else {
-          console.warn('[App] Backend returned empty schema, using defaults')
-          if (!schema) {
-            loadSchema(defaultWorkspaceSchema)
-          }
-        }
-      } catch (err) {
-        console.warn('[App] Failed to load schema from backend, using defaults:', err)
-        // Fall back to default schema
-        if (!schema) {
-          loadSchema(defaultWorkspaceSchema)
-        }
-      } finally {
-        setHasLoadedBackendSchema(true)
-        setIsLoadingBackendSchema(false)
-      }
-    }
-
-    loadBackendSchema()
-  }, [isAuthenticated, hasLoadedBackendSchema, isLoadingBackendSchema, provider, schema, mergeBackendSchema, loadFromBackend, loadSchema])
+  const hasLoadedBackendSchema = !isLoadingBackendSchema
 
   // Initialize graph data on mount (after schema is loaded)
   // Runs ONCE per provider instance — subsequent dep changes (ontology, schema) do NOT re-fetch.

@@ -17,11 +17,10 @@ import { LoginPage } from '@/components/auth/LoginPage'
 import { useAuthStore } from '@/store/auth'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
-import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { defaultWorkspaceSchema } from '@/lib/default-schema'
 import { listViews, viewToViewConfig } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useRouteSync } from '@/hooks/useRouteSync'
+import { useGraphSchema } from '@/hooks/useGraphSchema'
 import { cn } from '@/lib/utils'
 
 // Context for View Editor Modal
@@ -43,11 +42,10 @@ export function useViewEditorModal() {
 export function AppLayout() {
   const { isAuthenticated } = useAuthStore()
   const { theme, sidebarCollapsed } = usePreferencesStore()
-  const { loadSchema, schema, mergeBackendSchema, loadFromBackend } = useSchemaStore()
-  const provider = useGraphProvider()
 
-  const [hasLoadedBackendSchema, setHasLoadedBackendSchema] = useState(false)
-  const [isLoadingBackendSchema, setIsLoadingBackendSchema] = useState(false)
+  // React Query-backed schema loading (replaces manual mergeBackendSchema pattern)
+  const { isLoading: isLoadingBackendSchema } = useGraphSchema()
+  const hasLoadedBackendSchema = !isLoadingBackendSchema
 
   // View editor state
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
@@ -65,33 +63,6 @@ export function AppLayout() {
 
   // Sync React Router location with Zustand navigation store
   useRouteSync()
-
-  // Load schema from backend on startup
-  useEffect(() => {
-    if (!isAuthenticated || hasLoadedBackendSchema || isLoadingBackendSchema) return
-
-    const loadBackendSchema = async () => {
-      setIsLoadingBackendSchema(true)
-      try {
-        const backendSchema = await provider.getFullSchema()
-        if (backendSchema && backendSchema.entityTypes.length > 0) {
-          if (schema) {
-            mergeBackendSchema(backendSchema)
-          } else {
-            loadFromBackend(backendSchema)
-          }
-        } else {
-          if (!schema) loadSchema(defaultWorkspaceSchema)
-        }
-      } catch {
-        if (!schema) loadSchema(defaultWorkspaceSchema)
-      } finally {
-        setHasLoadedBackendSchema(true)
-        setIsLoadingBackendSchema(false)
-      }
-    }
-    loadBackendSchema()
-  }, [isAuthenticated, hasLoadedBackendSchema, isLoadingBackendSchema, provider, schema, mergeBackendSchema, loadFromBackend, loadSchema])
 
   // Load views from the Context Model API into the schema store cache
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)

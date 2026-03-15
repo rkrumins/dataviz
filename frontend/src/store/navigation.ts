@@ -9,5 +9,7 @@ interface NavigationState {
 
 export const useNavigationStore = create<NavigationState>((set) => ({
     activeTab: 'dashboard',
-    setActiveTab: (tab) => set({ activeTab: tab }),
+    setActiveTab: (tab) => set((state) => (
+        state.activeTab === tab ? state : { activeTab: tab }
+    )),
 }))

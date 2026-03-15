@@ -1,7 +1,7 @@
 /**
  * Workspace Service — CRUD for workspaces and their data sources.
  * A workspace is an operational context containing one or more data sources,
- * each binding a Provider + Graph Name + Blueprint.
+ * each binding a Provider + Graph Name + Ontology.
  */
 
 const ADMIN_API = '/api/v1/admin/workspaces'
@@ -12,13 +12,13 @@ const ADMIN_API = '/api/v1/admin/workspaces'
 
 export interface DataSourceCreateRequest {
     catalogItemId: string
-    blueprintId?: string
+    ontologyId?: string
     label?: string
 }
 
 export interface DataSourceUpdateRequest {
     catalogItemId?: string
-    blueprintId?: string
+    ontologyId?: string
     label?: string
     accessLevel?: string
     isActive?: boolean
@@ -30,7 +30,7 @@ export interface DataSourceResponse {
     id: string
     workspaceId: string
     catalogItemId: string
-    blueprintId?: string
+    ontologyId?: string
     label?: string
     accessLevel: string
     isPrimary: boolean

@@ -411,7 +411,7 @@ def node_from_graph_node(graph_node) -> Node:
     """Convert backend GraphNode to GraphQL Node"""
     return Node(
         urn=graph_node.urn,
-        entity_type=graph_node.entity_type.value if hasattr(graph_node.entity_type, 'value') else str(graph_node.entity_type),
+        entity_type=str(graph_node.entity_type),
         display_name=graph_node.display_name,
         qualified_name=graph_node.qualified_name,
         description=graph_node.description,
@@ -429,7 +429,7 @@ def edge_from_graph_edge(graph_edge, is_aggregated: bool = False, source_edge_co
         id=graph_edge.id,
         source_urn=graph_edge.source_urn,
         target_urn=graph_edge.target_urn,
-        edge_type=graph_edge.edge_type.value if hasattr(graph_edge.edge_type, 'value') else str(graph_edge.edge_type),
+        edge_type=str(graph_edge.edge_type),
         confidence=graph_edge.confidence,
         properties=graph_edge.properties or {},
         is_aggregated=is_aggregated,

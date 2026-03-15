@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from .endpoints import (
-    graph, assignments, providers, blueprints, workspaces,
+    graph, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views,
 )
 
@@ -14,7 +14,7 @@ api_router.include_router(
     catalog.router, prefix="/admin/catalog", tags=["admin:catalog"],
 )
 api_router.include_router(
-    blueprints.router, prefix="/admin/blueprints", tags=["admin:blueprints"],
+    ontologies.router, prefix="/admin/ontologies", tags=["admin:ontologies"],
 )
 api_router.include_router(
     workspaces.router, prefix="/admin/workspaces", tags=["admin:workspaces"],

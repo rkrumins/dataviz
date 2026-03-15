@@ -7,12 +7,27 @@ import type {
   ViewConfiguration,
   EntityVisualConfig,
   EntityFieldDefinition,
-  EntityHierarchyConfig,
   EntityBehaviorConfig,
   RelationshipVisualConfig,
 } from '@/types/schema'
 import type { GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition } from '@/providers/GraphDataProvider'
 import { generateId } from '@/lib/utils'
+
+const EMPTY_ENTITY_TYPES: EntityTypeSchema[] = []
+const EMPTY_REL_TYPES: RelationshipTypeSchema[] = []
+const DEFAULT_CONTAINMENT_EDGE_TYPES: string[] = ['CONTAINS', 'BELONGS_TO']
+const DEFAULT_GLOBAL_VISUALS: WorkspaceSchema['globalVisuals'] = {
+  theme: 'dark',
+  accentColor: '#6366f1',
+  fontFamily: 'Inter',
+  borderRadius: 'md',
+  showConfidenceScores: true,
+  animationsEnabled: true,
+}
+
+function jsonEquals(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
 
 interface SchemaState {
   // Current workspace schema
@@ -42,7 +57,6 @@ interface SchemaState {
 
   // Backend schema loading
   loadFromBackend: (backendSchema: GraphSchema) => void;
-  mergeBackendSchema: (backendSchema: GraphSchema) => void;
 
   // Entity Types
   addEntityType: (entityType: EntityTypeSchema) => void;
@@ -144,9 +158,13 @@ export const useSchemaStore = create<SchemaState>()(
       isLoadingFromBackend: false,
       backendSchemaError: null,
 
-      loadSchema: (schema) => set({
-        schema,
-        activeViewId: schema.defaultViewId
+      loadSchema: (schema) => set((state) => {
+        // Preserve the active view when still valid.
+        const hasActive = !!state.activeViewId && schema.views.some(v => v.id === state.activeViewId)
+        return {
+          schema,
+          activeViewId: hasActive ? state.activeViewId : schema.defaultViewId,
+        }
       }),
 
       setActiveScopeKey: (workspaceId, dataSourceId) => {
@@ -155,6 +173,14 @@ export const useSchemaStore = create<SchemaState>()(
           : workspaceId
             ? `${workspaceId}/default`
             : null
+
+        const currentState = get()
+        // Avoid no-op writes that can trigger render loops in strict mode.
+        if (currentState.activeScopeKey === key) {
+          const schema = currentState.schema
+          const hasUnscopedViews = !!schema && schema.views.some(v => !v.scopeKey)
+          if (!hasUnscopedViews) return
+        }
 
         if (key) {
           // Migration: tag any unscoped views with the current scope on first set.
@@ -194,127 +220,57 @@ export const useSchemaStore = create<SchemaState>()(
         try {
           const entityTypes = backendSchema.entityTypes.map(convertBackendEntityType)
           const relationshipTypes = backendSchema.relationshipTypes.map(convertBackendRelationshipType)
+          set((state) => {
+            const prevSchema = state.schema
+            const nextContainment = backendSchema.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES
 
-          const workspaceSchema: WorkspaceSchema = {
-            id: generateId('workspace'),
-            name: 'Dynamic Workspace',
-            version: backendSchema.version,
-            entityTypes,
-            relationshipTypes,
-            views: [],  // Views come from the Context Model API
-            defaultViewId: '',
-            globalVisuals: {
-              theme: 'dark',
-              accentColor: '#6366f1',
-              fontFamily: 'Inter',
-              borderRadius: 'md',
-              showConfidenceScores: true,
-              animationsEnabled: true,
-            },
-            containmentEdgeTypes: backendSchema.containmentEdgeTypes,
-          }
+            // Strategic no-op: do not write store state if ontology schema payload
+            // hasn't actually changed. This prevents render churn and update loops.
+            if (
+              prevSchema &&
+              prevSchema.version === backendSchema.version &&
+              jsonEquals(prevSchema.entityTypes, entityTypes) &&
+              jsonEquals(prevSchema.relationshipTypes, relationshipTypes) &&
+              jsonEquals(prevSchema.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES, nextContainment)
+            ) {
+              if (state.backendSchemaError || state.isLoadingFromBackend) {
+                return {
+                  ...state,
+                  isLoadingFromBackend: false,
+                  backendSchemaError: null,
+                }
+              }
+              return state
+            }
 
-          set({
-            schema: workspaceSchema,
-            activeViewId: null,
-            isLoadingFromBackend: false,
-            backendSchemaError: null,
+            // Preserve view state (loaded from Context Model API) across ontology refreshes.
+            const preservedViews = prevSchema?.views ?? []
+            const defaultViewId = prevSchema?.defaultViewId ?? (preservedViews[0]?.id ?? '')
+            const activeViewStillValid = !!state.activeViewId && preservedViews.some(v => v.id === state.activeViewId)
+
+            const workspaceSchema: WorkspaceSchema = {
+              id: prevSchema?.id ?? generateId('workspace'),
+              name: prevSchema?.name ?? 'Dynamic Workspace',
+              version: backendSchema.version,
+              entityTypes,
+              relationshipTypes,
+              views: preservedViews,
+              defaultViewId,
+              globalVisuals: prevSchema?.globalVisuals ?? DEFAULT_GLOBAL_VISUALS,
+              containmentEdgeTypes: nextContainment,
+            }
+
+            return {
+              ...state,
+              schema: workspaceSchema,
+              activeViewId: activeViewStillValid ? state.activeViewId : (defaultViewId || null),
+              isLoadingFromBackend: false,
+              backendSchemaError: null,
+            }
           })
         } catch (error) {
           set({
             backendSchemaError: error instanceof Error ? error.message : 'Failed to load schema',
-            isLoadingFromBackend: false,
-          })
-        }
-      },
-
-      // Merge backend schema with existing local customizations
-      mergeBackendSchema: (backendSchema) => {
-        const existing = get().schema
-
-        if (!existing) {
-          // No existing schema, just load fresh
-          get().loadFromBackend(backendSchema)
-          return
-        }
-
-        try {
-          const backendEntityTypes = backendSchema.entityTypes.map(convertBackendEntityType)
-          const backendRelTypes = backendSchema.relationshipTypes.map(convertBackendRelationshipType)
-
-          // Merge entity types: backend wins for base definition, local wins for visual overrides
-          const existingEntityMap = new Map(existing.entityTypes.map(e => [e.id, e]))
-          const mergedEntityTypes: EntityTypeSchema[] = []
-
-          for (const backendEntity of backendEntityTypes) {
-            const localEntity = existingEntityMap.get(backendEntity.id)
-            if (localEntity) {
-              // Merge: use backend fields/hierarchy, preserve local visual customizations
-              mergedEntityTypes.push({
-                ...backendEntity,
-                visual: {
-                  ...backendEntity.visual,
-                  // Keep local color if it was customized (different from backend)
-                  color: localEntity.visual.color !== '#6366f1' ? localEntity.visual.color : backendEntity.visual.color,
-                },
-                // Preserve local behavior overrides
-                behavior: {
-                  ...backendEntity.behavior,
-                  ...localEntity.behavior,
-                },
-              })
-              existingEntityMap.delete(backendEntity.id)
-            } else {
-              // New entity from backend
-              mergedEntityTypes.push(backendEntity)
-            }
-          }
-
-          // Keep local-only entity types (user-created)
-          for (const localEntity of existingEntityMap.values()) {
-            mergedEntityTypes.push(localEntity)
-          }
-
-          // Merge relationship types similarly
-          const existingRelMap = new Map(existing.relationshipTypes.map(r => [r.id, r]))
-          const mergedRelTypes: RelationshipTypeSchema[] = []
-
-          for (const backendRel of backendRelTypes) {
-            const localRel = existingRelMap.get(backendRel.id)
-            if (localRel) {
-              // Keep local visual customizations
-              mergedRelTypes.push({
-                ...backendRel,
-                visual: {
-                  ...backendRel.visual,
-                  strokeColor: localRel.visual.strokeColor !== '#6366f1' ? localRel.visual.strokeColor : backendRel.visual.strokeColor,
-                },
-              })
-              existingRelMap.delete(backendRel.id)
-            } else {
-              mergedRelTypes.push(backendRel)
-            }
-          }
-
-          // Keep local-only relationship types
-          for (const localRel of existingRelMap.values()) {
-            mergedRelTypes.push(localRel)
-          }
-
-          // Views are managed exclusively via the Context Model API — don't touch them here
-          set({
-            schema: {
-              ...existing,
-              entityTypes: mergedEntityTypes,
-              relationshipTypes: mergedRelTypes,
-              containmentEdgeTypes: backendSchema.containmentEdgeTypes,
-            },
-            isLoadingFromBackend: false,
-            backendSchemaError: null,
-          })
-        } catch (error) {
-          set({
-            backendSchemaError: error instanceof Error ? error.message : 'Failed to merge schema',
             isLoadingFromBackend: false,
           })
         }
@@ -515,8 +471,10 @@ export const useSchemaStore = create<SchemaState>()(
     }),
     {
       name: 'nexus-schema',
+      // Only persist UI state — schema types come from the backend (React Query cache).
+      // Persisting entity/relationship type definitions caused stale data issues when
+      // the ontology changed server-side; the server is now the single source of truth.
       partialize: (state) => ({
-        schema: state.schema,
         activeViewId: state.activeViewId,
         activeScopeKey: state.activeScopeKey,
       }),
@@ -526,11 +484,11 @@ export const useSchemaStore = create<SchemaState>()(
 
 // Selector hooks
 export const useActiveView = () => useSchemaStore((s) => s.getActiveView());
-export const useEntityTypes = () => useSchemaStore((s) => s.schema?.entityTypes ?? []);
-export const useRelationshipTypes = () => useSchemaStore((s) => s.schema?.relationshipTypes ?? []);
+export const useEntityTypes = () => useSchemaStore((s) => s.schema?.entityTypes ?? EMPTY_ENTITY_TYPES);
+export const useRelationshipTypes = () => useSchemaStore((s) => s.schema?.relationshipTypes ?? EMPTY_REL_TYPES);
 export const useSchemaLoadingState = () => useSchemaStore((s) => ({
   isLoading: s.isLoadingFromBackend,
   error: s.backendSchemaError,
 }));
-export const useContainmentEdgeTypes = () => useSchemaStore((s) => s.schema?.containmentEdgeTypes ?? ['CONTAINS', 'BELONGS_TO']);
+export const useContainmentEdgeTypes = () => useSchemaStore((s) => s.schema?.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES);
 

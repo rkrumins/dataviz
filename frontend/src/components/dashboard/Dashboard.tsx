@@ -21,7 +21,7 @@ export function Dashboard() {
         workspaces,
         recentViews,
         templates,
-        blueprints,
+        ontologies,
         isLoading
     } = useDashboardData()
 
@@ -92,8 +92,8 @@ export function Dashboard() {
             }
         })
 
-            // Templates & blueprints
-            ;[...templates, ...blueprints].forEach(t => {
+            // Templates & ontologies
+            ;[...templates, ...ontologies].forEach(t => {
                 if (t.name.toLowerCase().includes(q)) {
                     results.push({
                         id: `tpl-${t.id}`,
@@ -111,7 +111,7 @@ export function Dashboard() {
         return results
             .sort((a, b) => ORDER.indexOf(a.category) - ORDER.indexOf(b.category))
             .slice(0, 12)
-    }, [searchQuery, workspaces, recentViews, templates, blueprints,
+    }, [searchQuery, workspaces, recentViews, templates, ontologies,
         setActiveWorkspace, setActiveDataSource, setActiveView, navigate])
 
     if (isLoading) {
@@ -189,8 +189,8 @@ export function Dashboard() {
                 >
                     <BlueprintGrid
                         title="Starter Templates"
-                        subtitle="Semantic context model blueprints ready to deploy"
-                        items={[...templates, ...blueprints]}
+                        subtitle="Semantic context model ontologies ready to deploy"
+                        items={[...templates, ...ontologies]}
                         icon={LayoutTemplate}
                     />
                 </motion.div>

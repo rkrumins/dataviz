@@ -29,7 +29,7 @@ def _to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         id=row.id,
         workspaceId=row.workspace_id,
         catalogItemId=row.catalog_item_id,
-        blueprintId=row.blueprint_id,
+        ontologyId=row.ontology_id,
         label=row.label,
         isPrimary=bool(row.is_primary),
         isActive=bool(row.is_active),
@@ -126,7 +126,7 @@ async def create_data_source(
         catalog_item_id=req.catalog_item_id,
         provider_id=cat.provider_id,
         graph_name=cat.source_identifier,
-        blueprint_id=req.blueprint_id,
+        ontology_id=req.ontology_id,
         label=req.label,
         is_primary=make_primary,
         is_active=True,
@@ -147,8 +147,8 @@ async def update_data_source(
 
     if req.catalog_item_id is not None:
         row.catalog_item_id = req.catalog_item_id
-    if req.blueprint_id is not None:
-        row.blueprint_id = req.blueprint_id
+    if req.ontology_id is not None:
+        row.ontology_id = req.ontology_id
     if req.label is not None:
         row.label = req.label
     if req.is_active is not None:

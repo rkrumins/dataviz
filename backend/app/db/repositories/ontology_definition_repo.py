@@ -1,6 +1,6 @@
 """
-Repository for ontology_blueprints table.
-Supports versioning: published blueprints are immutable; updates create new versions.
+Repository for ontologies table.
+Supports versioning: published ontologies are immutable; updates create new versions.
 """
 import json
 import logging
@@ -10,11 +10,11 @@ from typing import List, Optional
 from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import OntologyBlueprintORM
+from ..models import OntologyORM
 from backend.common.models.management import (
-    BlueprintCreateRequest,
-    BlueprintUpdateRequest,
-    BlueprintResponse,
+    OntologyCreateRequest,
+    OntologyUpdateRequest,
+    OntologyDefinitionResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 # ORM → Pydantic conversion                                           #
 # ------------------------------------------------------------------ #
 
-def _to_response(row: OntologyBlueprintORM) -> BlueprintResponse:
-    return BlueprintResponse(
+def _to_response(row: OntologyORM) -> OntologyDefinitionResponse:
+    return OntologyDefinitionResponse(
         id=row.id,
         name=row.name,
         version=row.version,
@@ -34,8 +34,11 @@ def _to_response(row: OntologyBlueprintORM) -> BlueprintResponse:
         edgeTypeMetadata=json.loads(row.edge_type_metadata or "{}"),
         entityTypeHierarchy=json.loads(row.entity_type_hierarchy or "{}"),
         rootEntityTypes=json.loads(row.root_entity_types or "[]"),
-        visualOverrides=json.loads(row.visual_overrides or "{}"),
+        entityTypeDefinitions=json.loads(row.entity_type_definitions or "{}"),
+        relationshipTypeDefinitions=json.loads(row.relationship_type_definitions or "{}"),
         isPublished=bool(row.is_published),
+        isSystem=bool(row.is_system) if row.is_system is not None else False,
+        scope=row.scope or "universal",
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
@@ -45,64 +48,74 @@ def _to_response(row: OntologyBlueprintORM) -> BlueprintResponse:
 # CRUD                                                                 #
 # ------------------------------------------------------------------ #
 
-async def list_blueprints(session: AsyncSession) -> List[BlueprintResponse]:
-    """List all blueprints (all versions)."""
+async def list_ontologies(session: AsyncSession) -> List[OntologyDefinitionResponse]:
+    """List all ontologies (all versions)."""
     result = await session.execute(
-        select(OntologyBlueprintORM).order_by(
-            OntologyBlueprintORM.name,
-            OntologyBlueprintORM.version.desc(),
+        select(OntologyORM).order_by(
+            OntologyORM.name,
+            OntologyORM.version.desc(),
         )
     )
     return [_to_response(r) for r in result.scalars().all()]
 
 
-async def list_latest_blueprints(session: AsyncSession) -> List[BlueprintResponse]:
-    """List only the latest version of each blueprint name."""
-    # Subquery: max version per name
+async def list_latest_ontologies(session: AsyncSession) -> List[OntologyDefinitionResponse]:
+    """List only the latest version of each ontology name."""
     sub = (
         select(
-            OntologyBlueprintORM.name,
-            func.max(OntologyBlueprintORM.version).label("max_ver"),
+            OntologyORM.name,
+            func.max(OntologyORM.version).label("max_ver"),
         )
-        .group_by(OntologyBlueprintORM.name)
+        .group_by(OntologyORM.name)
         .subquery()
     )
     result = await session.execute(
-        select(OntologyBlueprintORM)
+        select(OntologyORM)
         .join(
             sub,
-            (OntologyBlueprintORM.name == sub.c.name)
-            & (OntologyBlueprintORM.version == sub.c.max_ver),
+            (OntologyORM.name == sub.c.name)
+            & (OntologyORM.version == sub.c.max_ver),
         )
-        .order_by(OntologyBlueprintORM.name)
+        .order_by(OntologyORM.name)
     )
     return [_to_response(r) for r in result.scalars().all()]
 
 
-async def get_blueprint(
-    session: AsyncSession, blueprint_id: str
-) -> Optional[BlueprintResponse]:
+async def get_ontology(
+    session: AsyncSession, ontology_id: str
+) -> Optional[OntologyDefinitionResponse]:
     result = await session.execute(
-        select(OntologyBlueprintORM).where(OntologyBlueprintORM.id == blueprint_id)
+        select(OntologyORM).where(OntologyORM.id == ontology_id)
     )
     row = result.scalar_one_or_none()
     return _to_response(row) if row else None
 
 
-async def get_blueprint_orm(
-    session: AsyncSession, blueprint_id: str
-) -> Optional[OntologyBlueprintORM]:
+async def get_ontology_orm(
+    session: AsyncSession, ontology_id: str
+) -> Optional[OntologyORM]:
     result = await session.execute(
-        select(OntologyBlueprintORM).where(OntologyBlueprintORM.id == blueprint_id)
+        select(OntologyORM).where(OntologyORM.id == ontology_id)
     )
     return result.scalar_one_or_none()
 
 
-async def create_blueprint(
+async def get_system_default_ontology(session: AsyncSession) -> Optional[OntologyORM]:
+    """Return the system default ontology ORM (is_system=True), if any."""
+    result = await session.execute(
+        select(OntologyORM)
+        .where(OntologyORM.is_system == True)  # noqa: E712
+        .order_by(OntologyORM.version.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_ontology(
     session: AsyncSession,
-    req: BlueprintCreateRequest,
-) -> BlueprintResponse:
-    row = OntologyBlueprintORM(
+    req: OntologyCreateRequest,
+) -> OntologyDefinitionResponse:
+    row = OntologyORM(
         name=req.name,
         version=1,
         containment_edge_types=json.dumps(req.containment_edge_types),
@@ -110,32 +123,33 @@ async def create_blueprint(
         edge_type_metadata=json.dumps(req.edge_type_metadata),
         entity_type_hierarchy=json.dumps(req.entity_type_hierarchy),
         root_entity_types=json.dumps(req.root_entity_types),
-        visual_overrides=json.dumps(req.visual_overrides),
+        entity_type_definitions=json.dumps(req.entity_type_definitions),
+        relationship_type_definitions=json.dumps(req.relationship_type_definitions),
         is_published=False,
+        is_system=False,
+        scope="universal",
     )
     session.add(row)
     await session.flush()
     return _to_response(row)
 
 
-async def update_blueprint(
+async def update_ontology(
     session: AsyncSession,
-    blueprint_id: str,
-    req: BlueprintUpdateRequest,
-) -> Optional[BlueprintResponse]:
+    ontology_id: str,
+    req: OntologyUpdateRequest,
+) -> Optional[OntologyDefinitionResponse]:
     """
-    Update a blueprint. If published, creates a new version row instead.
-    Returns the updated (or newly created) blueprint.
+    Update an ontology. If published, creates a new version row instead.
+    Returns the updated (or newly created) ontology.
     """
-    row = await get_blueprint_orm(session, blueprint_id)
+    row = await get_ontology_orm(session, ontology_id)
     if not row:
         return None
 
     if row.is_published:
-        # Published → create new version (immutable originals)
         return await _create_new_version(session, row, req)
 
-    # Draft → update in place
     if req.name is not None:
         row.name = req.name
     if req.containment_edge_types is not None:
@@ -148,8 +162,10 @@ async def update_blueprint(
         row.entity_type_hierarchy = json.dumps(req.entity_type_hierarchy)
     if req.root_entity_types is not None:
         row.root_entity_types = json.dumps(req.root_entity_types)
-    if req.visual_overrides is not None:
-        row.visual_overrides = json.dumps(req.visual_overrides)
+    if req.entity_type_definitions is not None:
+        row.entity_type_definitions = json.dumps(req.entity_type_definitions)
+    if req.relationship_type_definitions is not None:
+        row.relationship_type_definitions = json.dumps(req.relationship_type_definitions)
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
@@ -158,19 +174,18 @@ async def update_blueprint(
 
 async def _create_new_version(
     session: AsyncSession,
-    original: OntologyBlueprintORM,
-    req: BlueprintUpdateRequest,
-) -> BlueprintResponse:
-    """Create a new version of a published blueprint with the requested changes."""
-    # Find max version for this blueprint name
+    original: OntologyORM,
+    req: OntologyUpdateRequest,
+) -> OntologyDefinitionResponse:
+    """Create a new version of a published ontology with the requested changes."""
     result = await session.execute(
-        select(func.max(OntologyBlueprintORM.version)).where(
-            OntologyBlueprintORM.name == original.name
+        select(func.max(OntologyORM.version)).where(
+            OntologyORM.name == original.name
         )
     )
     max_version = result.scalar() or 0
 
-    new_row = OntologyBlueprintORM(
+    new_row = OntologyORM(
         name=req.name if req.name is not None else original.name,
         version=max_version + 1,
         containment_edge_types=(
@@ -198,22 +213,29 @@ async def _create_new_version(
             if req.root_entity_types is not None
             else original.root_entity_types
         ),
-        visual_overrides=(
-            json.dumps(req.visual_overrides)
-            if req.visual_overrides is not None
-            else original.visual_overrides
+        entity_type_definitions=(
+            json.dumps(req.entity_type_definitions)
+            if req.entity_type_definitions is not None
+            else original.entity_type_definitions
         ),
-        is_published=False,  # New version starts as draft
+        relationship_type_definitions=(
+            json.dumps(req.relationship_type_definitions)
+            if req.relationship_type_definitions is not None
+            else original.relationship_type_definitions
+        ),
+        is_published=False,
+        is_system=False,
+        scope=original.scope or "universal",
     )
     session.add(new_row)
     await session.flush()
     return _to_response(new_row)
 
 
-async def publish_blueprint(
-    session: AsyncSession, blueprint_id: str
-) -> Optional[BlueprintResponse]:
-    row = await get_blueprint_orm(session, blueprint_id)
+async def publish_ontology(
+    session: AsyncSession, ontology_id: str
+) -> Optional[OntologyDefinitionResponse]:
+    row = await get_ontology_orm(session, ontology_id)
     if not row:
         return None
     row.is_published = True
@@ -222,19 +244,23 @@ async def publish_blueprint(
     return _to_response(row)
 
 
-async def delete_blueprint(
-    session: AsyncSession, blueprint_id: str
+async def delete_ontology(
+    session: AsyncSession, ontology_id: str
 ) -> bool:
     result = await session.execute(
-        delete(OntologyBlueprintORM).where(OntologyBlueprintORM.id == blueprint_id)
+        delete(OntologyORM).where(OntologyORM.id == ontology_id)
     )
     return result.rowcount > 0
 
 
-async def has_workspaces(session: AsyncSession, blueprint_id: str) -> bool:
-    """Check if any workspaces reference this blueprint."""
-    from ..models import WorkspaceORM
+async def has_data_sources(session: AsyncSession, ontology_id: str) -> bool:
+    """Check if any data sources reference this ontology."""
+    from ..models import WorkspaceDataSourceORM
     result = await session.execute(
-        select(WorkspaceORM.id).where(WorkspaceORM.blueprint_id == blueprint_id).limit(1)
+        select(WorkspaceDataSourceORM.id)
+        .where(WorkspaceDataSourceORM.ontology_id == ontology_id)
+        .limit(1)
     )
     return result.scalar_one_or_none() is not None
+
+

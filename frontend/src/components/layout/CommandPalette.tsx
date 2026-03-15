@@ -19,6 +19,7 @@ import {
 import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
+import type { ViewConfiguration } from '@/types/schema'
 import { cn } from '@/lib/utils'
 
 interface CommandPaletteProps {
@@ -26,12 +27,17 @@ interface CommandPaletteProps {
   onOpenChange: (open: boolean) => void
 }
 
+const EMPTY_VIEWS: ViewConfiguration[] = []
+
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const [search, setSearch] = useState('')
   const navigate = useNavigate()
   const { toggleMode, mode } = usePersonaStore()
   const { setTheme, theme, toggleSidebar } = usePreferencesStore()
-  const schemaViews = useSchemaStore((s) => s.schema?.views ?? [])
+  // IMPORTANT: never return a freshly allocated [] from a Zustand selector.
+  // That changes identity on every render and can trigger infinite rerenders
+  // through useSyncExternalStore.
+  const schemaViews = useSchemaStore((s) => s.schema?.views ?? EMPTY_VIEWS)
 
   // Keyboard shortcut to open
   useEffect(() => {
