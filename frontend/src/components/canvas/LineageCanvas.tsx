@@ -40,8 +40,7 @@ import { NodePalette } from './NodePalette'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
-import { useSchemaStore } from '@/store/schema'
-import { useOntologyMetadata } from '@/services/ontologyService'
+import { useSchemaStore, useContainmentEdgeTypes, useLineageEdgeTypes, useRelationshipTypes } from '@/store/schema'
 import { cn } from '@/lib/utils'
 import { useGraphProvider } from '@/providers'
 import * as LucideIcons from 'lucide-react'
@@ -101,8 +100,9 @@ export function LineageCanvas() {
 
   const { showMinimap, showGrid, snapToGrid } = usePreferencesStore()
   const schema = useSchemaStore((s) => s.schema)
-  const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
-  const { containmentEdgeTypes, lineageEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
+  const relationshipTypes = useRelationshipTypes()
+  const containmentEdgeTypes = useContainmentEdgeTypes()
+  const lineageEdgeTypes = useLineageEdgeTypes()
 
   // Edge detail panel
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
@@ -115,9 +115,8 @@ export function LineageCanvas() {
       rawEdges,
       relationshipTypes,
       containmentEdgeTypes,
-      ontologyMetadata
     )
-  }, [rawEdges, relationshipTypes, containmentEdgeTypes, ontologyMetadata, edgeFilters])
+  }, [rawEdges, relationshipTypes, containmentEdgeTypes, edgeFilters])
 
   const provider = useGraphProvider()
 

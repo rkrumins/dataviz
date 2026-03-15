@@ -3,7 +3,6 @@ import {
   LayoutDashboard,
   Network,
   Layers,
-  Bookmark,
   History,
   ChevronLeft,
   ChevronRight,
@@ -11,21 +10,33 @@ import {
   Palette,
   ChevronsUpDown,
   Check,
-  Star,
   Settings,
   Database,
   Search,
+  Bookmark,
+  ExternalLink,
+  GitBranch,
+  AlignLeft,
+  List,
+  LayoutGrid,
+  Clock,
 } from 'lucide-react'
 import * as Popover from '@radix-ui/react-popover'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { useNavigationStore, type NavigationTab } from '@/store/navigation'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
-import { ViewSelector } from '@/components/views/ViewSelector'
+import { useWorkspacesStore } from '@/store/workspaces'
+
 import { useViewEditorModal } from './AppLayout'
 import { useWorkspaces } from '@/hooks/useWorkspaces'
+import { useBookmarkedViews } from '@/hooks/useBookmarkedViews'
+import { useRecentViews } from '@/hooks/useRecentViews'
 import { cn } from '@/lib/utils'
+import type { View } from '@/services/viewApiService'
+import type { RecentViewEntry } from '@/hooks/useRecentViews'
+import * as LucideIcons from 'lucide-react'
 
 interface NavItem {
   id: NavigationTab
@@ -55,6 +66,39 @@ const WS_COLORS = [
 ]
 function wsColor(index: number) { return WS_COLORS[index % WS_COLORS.length] }
 
+// Maps layout type → Lucide icon name for visual scanning
+function layoutTypeIcon(viewType: string): string {
+  const map: Record<string, string> = {
+    graph: 'Network',
+    hierarchy: 'GitBranch',
+    tree: 'GitBranch',
+    reference: 'Layers',
+    'layered-lineage': 'AlignLeft',
+    list: 'List',
+    grid: 'LayoutGrid',
+    timeline: 'Clock',
+  }
+  return map[viewType] ?? 'Layout'
+}
+
+// Dynamic icon from Lucide
+function DynamicIcon({ name, className }: { name: string; className?: string }) {
+  const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string }>>)[name]
+  if (!IconComponent) return <LucideIcons.Layout className={className} />
+  return <IconComponent className={className} />
+}
+
+// Relative time formatter
+function formatRelativeTime(isoString: string): string {
+  const diff = Date.now() - new Date(isoString).getTime()
+  const mins = Math.floor(diff / 60_000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  return `${Math.floor(hrs / 24)}d ago`
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Environment Switcher — Premium Workspace Toggle
 // ─────────────────────────────────────────────────────────────────────
@@ -67,6 +111,7 @@ function EnvironmentSwitcher({
   onManageConnections: () => void,
   collapsed: boolean
 }) {
+  const navigate = useNavigate()
   const {
     workspaces,
     activeWorkspace,
@@ -82,8 +127,6 @@ function EnvironmentSwitcher({
   const activeDs = activeWorkspace?.dataSources?.find(d => d.id === activeDataSourceId)
   const activeIdx = workspaces.findIndex(ws => ws.id === activeWorkspaceId)
 
-  // Filter logic: if search matches workspace name, include all its DS.
-  // Otherwise, only include DS whose name/label matches the search.
   const filteredWorkspaces = search
     ? workspaces.map(ws => {
       const matchWs = ws.name.toLowerCase().includes(search.toLowerCase())
@@ -101,6 +144,8 @@ function EnvironmentSwitcher({
     setActiveDataSource(dsId)
     setIsOpen(false)
     setSearch('')
+    // Navigate to dashboard so we don't stay on a stale view URL from another workspace
+    navigate('/dashboard')
   }
 
   if (collapsed) {
@@ -174,7 +219,6 @@ function EnvironmentSwitcher({
                 const isWsActive = ws.id === activeWorkspaceId
                 return (
                   <div key={ws.id}>
-                    {/* Workspace Label */}
                     <div className="px-2 pb-1.5 flex items-center gap-2">
                       <div className={cn(
                         "w-5 h-5 rounded overflow-hidden flex items-center justify-center text-[10px] font-bold text-white shrink-0",
@@ -185,7 +229,6 @@ function EnvironmentSwitcher({
                       <span className="text-xs font-bold text-ink tracking-wide truncate">{ws.name}</span>
                     </div>
 
-                    {/* Data Sources */}
                     <div className="flex flex-col gap-0.5 ml-2 border-l-2 border-glass-border pl-1.5">
                       {ws.dataSources && ws.dataSources.map(ds => {
                         const isSelected = isWsActive && ds.id === activeDataSourceId
@@ -244,32 +287,242 @@ function EnvironmentSwitcher({
   )
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Workspace Views List — inline list of views for the active workspace
+// ─────────────────────────────────────────────────────────────────────
+interface WorkspaceViewsListProps {
+  activeViewId: string | null
+  bookmarkedIds: Set<string>
+  onOpenView: (viewId: string) => void
+  onCreateView: () => void
+  onEditView: (viewId: string) => void
+  onBookmark: (viewId: string) => void
+}
+
+function WorkspaceViewsList({ activeViewId, bookmarkedIds, onOpenView, onCreateView, onEditView, onBookmark }: WorkspaceViewsListProps) {
+  // Subscribe to activeScopeKey so this list re-renders when workspace changes
+  useSchemaStore((s) => s.activeScopeKey)
+  const visibleViews = useSchemaStore((s) => s.visibleViews)
+  const views = visibleViews()
+
+  if (views.length === 0) {
+    return (
+      <div className="px-3 py-2 mb-1">
+        <p className="text-xs text-ink-muted leading-relaxed">
+          No views in this workspace yet.{' '}
+          <button
+            onClick={onCreateView}
+            className="text-accent-lineage hover:underline"
+          >
+            Create one
+          </button>
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-0.5 mb-1">
+      {views.map(view => {
+        const isActive = view.id === activeViewId
+        const isBookmarked = bookmarkedIds.has(view.id)
+        return (
+          <div
+            key={view.id}
+            role="button"
+            tabIndex={0}
+            onClick={() => onOpenView(view.id)}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenView(view.id) } }}
+            className={cn(
+              "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left group transition-colors duration-150 cursor-pointer",
+              isActive
+                ? "bg-accent-lineage/10 text-accent-lineage"
+                : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
+            )}
+          >
+            <DynamicIcon
+              name={view.icon || layoutTypeIcon(view.layout?.type ?? 'graph')}
+              className={cn("w-4 h-4 shrink-0", isActive ? "text-accent-lineage" : "text-ink-muted")}
+            />
+            <span className="text-sm font-medium truncate flex-1">{view.name}</span>
+            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+              {!isBookmarked && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onBookmark(view.id) }}
+                  className="p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                  title="Bookmark"
+                >
+                  <Bookmark className="w-3 h-3 text-ink-muted" />
+                </button>
+              )}
+              <button
+                onClick={(e) => { e.stopPropagation(); onEditView(view.id) }}
+                className="p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                title="Edit view"
+              >
+                <Settings className="w-3 h-3 text-ink-muted" />
+              </button>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Bookmark Item
+// ─────────────────────────────────────────────────────────────────────
+interface BookmarkItemProps {
+  view: View
+  isActive: boolean
+  isCrossWorkspace: boolean
+  onClick: () => void
+  onRemoveBookmark: () => void
+}
+
+function BookmarkItem({ view, isActive, isCrossWorkspace, onClick, onRemoveBookmark }: BookmarkItemProps) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
+      className={cn(
+        "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left group transition-colors duration-150 cursor-pointer",
+        isActive
+          ? "bg-accent-lineage/10 text-accent-lineage"
+          : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
+      )}
+    >
+      <DynamicIcon
+        name={view.config?.icon || layoutTypeIcon(view.viewType)}
+        className={cn("w-4 h-4 shrink-0", isActive ? "text-accent-lineage" : "text-ink-muted")}
+      />
+      <div className="flex flex-col min-w-0 flex-1">
+        <span className="text-sm font-medium truncate">{view.name}</span>
+        {isCrossWorkspace && view.workspaceName && (
+          <span className="text-[10px] text-ink-muted truncate leading-tight mt-0.5">
+            {view.workspaceName}
+          </span>
+        )}
+      </div>
+      <button
+        onClick={(e) => { e.stopPropagation(); onRemoveBookmark() }}
+        className="opacity-0 group-hover:opacity-100 p-1 rounded transition-all hover:bg-black/10 dark:hover:bg-white/10 shrink-0"
+        title="Remove bookmark"
+      >
+        <Bookmark className={cn(
+          "w-3.5 h-3.5",
+          isActive ? "text-accent-lineage fill-accent-lineage" : "text-ink-muted fill-current"
+        )} />
+      </button>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Bookmarks skeleton / empty state
+// ─────────────────────────────────────────────────────────────────────
+function BookmarksSkeleton() {
+  return (
+    <div className="space-y-1 px-3 py-1">
+      {[1, 2, 3].map(i => (
+        <div
+          key={i}
+          className="h-8 rounded-lg bg-black/5 dark:bg-white/5 animate-pulse"
+          style={{ opacity: 1 - (i - 1) * 0.25 }}
+        />
+      ))}
+    </div>
+  )
+}
+
+function BookmarksEmptyState() {
+  return (
+    <div className="px-3 py-3">
+      <p className="text-xs text-ink-muted leading-relaxed">
+        Bookmark views from the{' '}
+        <Link to="/explorer" className="text-accent-lineage hover:underline">
+          Explorer
+        </Link>
+        {' '}for quick access.
+      </p>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Recent view item
+// ─────────────────────────────────────────────────────────────────────
+interface RecentItemProps {
+  entry: RecentViewEntry
+  isActive: boolean
+  isBookmarked: boolean
+  onClick: () => void
+  onBookmark: () => void
+}
+
+function RecentItem({ entry, isActive, isBookmarked, onClick, onBookmark }: RecentItemProps) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
+      className={cn(
+        "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left group transition-colors duration-150 cursor-pointer",
+        isActive
+          ? "bg-accent-lineage/10 text-accent-lineage"
+          : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
+      )}
+    >
+      <History className="w-4 h-4 shrink-0 text-ink-muted" />
+      <span className="text-sm truncate flex-1">{entry.viewName}</span>
+      <div className="flex items-center gap-1 shrink-0">
+        {!isBookmarked && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onBookmark() }}
+            className="opacity-0 group-hover:opacity-100 p-1 rounded transition-all hover:bg-black/10 dark:hover:bg-white/10"
+            title="Add to bookmarks"
+          >
+            <Bookmark className="w-3 h-3 text-ink-muted" />
+          </button>
+        )}
+        <span className="text-[10px] text-ink-muted opacity-0 group-hover:opacity-100 transition-opacity">
+          {formatRelativeTime(entry.visitedAt)}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Main SidebarNav
+// ─────────────────────────────────────────────────────────────────────
 export function SidebarNav() {
   const navigate = useNavigate()
   const { activeTab } = useNavigationStore()
   const { sidebarCollapsed, toggleSidebar } = usePreferencesStore()
   const activeLensId = useCanvasStore((s) => s.activeLensId)
-  const visibleViews = useSchemaStore((s) => s.visibleViews)
   const { openViewEditor } = useViewEditorModal()
   const { activeWorkspaceId } = useWorkspaces()
 
-  // Get views scoped to the active workspace+datasource (global/legacy views always included)
-  const savedViews = visibleViews()
-  const pinnedViews = savedViews.filter((v) => v.isDefault)
-
-  const handleCreateView = () => {
-    openViewEditor()
-  }
-
-  const handleEditView = (viewId: string) => {
-    openViewEditor(viewId)
-  }
-
-  const setActiveView = useSchemaStore((s) => s.setActiveView)
-  const updateView = useSchemaStore((s) => s.updateView)
   const activeViewId = useSchemaStore((s) => s.activeViewId)
+  const setActiveView = useSchemaStore((s) => s.setActiveView)
 
-  const handleOpenView = (viewId: string) => {
+  const { bookmarks, isLoading: isLoadingBookmarks, toggleBookmark } = useBookmarkedViews()
+  const { recent } = useRecentViews()
+
+  const bookmarkedIds = new Set(bookmarks.map(b => b.id))
+
+  const handleCreateView = () => openViewEditor()
+  const handleEditView = (viewId: string) => openViewEditor(viewId)
+
+  const handleOpenView = (viewId: string, viewWorkspaceId?: string) => {
+    if (viewWorkspaceId && viewWorkspaceId !== activeWorkspaceId) {
+      useWorkspacesStore.getState().setActiveWorkspace(viewWorkspaceId)
+    }
     setActiveView(viewId)
     navigate(`/views/${viewId}`)
   }
@@ -282,11 +535,6 @@ export function SidebarNav() {
       case 'schema': navigate('/schema'); break
       case 'admin': navigate('/admin/overview'); break
     }
-  }
-
-  const handleTogglePin = (e: React.MouseEvent, viewId: string, currentIsDefault?: boolean) => {
-    e.stopPropagation()
-    updateView(viewId, { isDefault: !currentIsDefault })
   }
 
   return (
@@ -305,6 +553,8 @@ export function SidebarNav() {
           onManageWorkspaces={() => navigate('/admin/registry?tab=workspaces')}
           onManageConnections={() => navigate('/admin/registry?tab=connections')}
         />
+
+        {/* Primary nav items */}
         <div className="px-3 space-y-1">
           {mainNavItems.map((item) => (
             <NavButton
@@ -317,70 +567,104 @@ export function SidebarNav() {
           ))}
         </div>
 
-        {/* View Selector */}
+        {/* ── VIEWS section ── */}
         {!sidebarCollapsed && (
-          <div className="pt-2">
-            <SectionHeader title="Active View" />
-            <ViewSelector
+          <div className="pt-4">
+            {/* Section header */}
+            <div className="flex items-center justify-between px-3 py-1 mb-1">
+              <span className="text-xs font-medium text-ink-muted uppercase tracking-wider">Views</span>
+              <button
+                onClick={handleCreateView}
+                className="p-1 rounded hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                title="Create new view"
+              >
+                <Plus className="w-3 h-3 text-ink-muted" />
+              </button>
+            </div>
+
+            {/* ── This workspace ── */}
+            <WorkspaceViewsList
+              activeViewId={activeViewId}
+              bookmarkedIds={bookmarkedIds}
+              onOpenView={handleOpenView}
               onCreateView={handleCreateView}
               onEditView={handleEditView}
+              onBookmark={(viewId) => toggleBookmark(viewId, false)}
             />
-          </div>
-        )}
 
-        {/* Divider */}
-        {!sidebarCollapsed && (
-          <div className="pt-4 pb-2">
-            <div className="h-px bg-glass-border" />
-          </div>
-        )}
+            {/* ── Bookmarks ── */}
+            <div className="mt-3">
+              <div className="flex items-center justify-between px-3 py-1">
+                <span className="text-xs font-medium text-ink-muted uppercase tracking-wider">
+                  Bookmarks{bookmarks.length > 0 ? ` (${bookmarks.length})` : ''}
+                </span>
+                <Link
+                  to="/explorer"
+                  className="flex items-center gap-1 text-[10px] text-ink-muted hover:text-ink-secondary transition-colors"
+                  title="Browse all views in Explorer"
+                >
+                  Explorer <ExternalLink className="w-2.5 h-2.5" />
+                </Link>
+              </div>
 
-        {/* Saved Views Section */}
-        {!sidebarCollapsed && (
-          <div className="pt-2">
-            <SectionHeader title="Saved Views" onAdd={handleCreateView} />
-            {savedViews.length === 0 ? (
-              <p className="text-xs text-ink-muted px-3 py-2">
-                No saved views yet
-              </p>
-            ) : (
-              <div className="space-y-1">
-                {pinnedViews.map((view) => (
-                  <ViewButton
-                    key={view.id}
-                    view={view}
-                    isPinned
-                    isActive={view.id === activeViewId}
-                    onClick={() => handleOpenView(view.id)}
-                    onTogglePin={(e) => handleTogglePin(e, view.id, true)}
-                  />
-                ))}
-                {savedViews
-                  .filter((v) => !v.isDefault)
-                  .slice(0, 5)
-                  .map((view) => (
-                    <ViewButton
+              {isLoadingBookmarks ? (
+                <BookmarksSkeleton />
+              ) : bookmarks.length === 0 ? (
+                <BookmarksEmptyState />
+              ) : (
+                <div className="space-y-0.5">
+                  {bookmarks.map(view => (
+                    <BookmarkItem
                       key={view.id}
                       view={view}
                       isActive={view.id === activeViewId}
-                      onClick={() => handleOpenView(view.id)}
-                      onTogglePin={(e) => handleTogglePin(e, view.id, false)}
+                      isCrossWorkspace={view.workspaceId !== activeWorkspaceId}
+                      onClick={() => handleOpenView(view.id, view.workspaceId)}
+                      onRemoveBookmark={() => toggleBookmark(view.id, true)}
                     />
                   ))}
+                </div>
+              )}
+            </div>
+
+            {/* ── Recent ── */}
+            {recent.length > 0 && (
+              <div className="mt-3">
+                <div className="px-3 py-1">
+                  <span className="text-xs font-medium text-ink-muted uppercase tracking-wider">Recent</span>
+                </div>
+                <div className="space-y-0.5">
+                  {recent.map(entry => (
+                    <RecentItem
+                      key={entry.viewId}
+                      entry={entry}
+                      isActive={entry.viewId === activeViewId}
+                      isBookmarked={bookmarkedIds.has(entry.viewId)}
+                      onClick={() => handleOpenView(entry.viewId, entry.workspaceId)}
+                      onBookmark={() => toggleBookmark(entry.viewId, false)}
+                    />
+                  ))}
+                </div>
               </div>
             )}
           </div>
         )}
 
-        {/* Recent Traces */}
-        {!sidebarCollapsed && (
-          <div className="pt-4">
-            <SectionHeader title="Recent Traces" />
-            <div className="space-y-1">
-              <TraceItem label="Revenue → Sources" time="2m ago" />
-              <TraceItem label="Customer Data Impact" time="1h ago" />
-              <TraceItem label="Pipeline Dependencies" time="3h ago" />
-            </div>
+        {/* Collapsed: bookmark count badge */}
+        {sidebarCollapsed && (
+          <div className="px-3 py-2 flex justify-center mt-2">
+            <button
+              title={bookmarks.length > 0 ? `${bookmarks.length} bookmark${bookmarks.length !== 1 ? 's' : ''}` : 'No bookmarks yet — browse Explorer'}
+              onClick={() => navigate('/explorer')}
+              className="relative w-10 h-10 rounded-lg flex items-center justify-center text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+            >
+              <Bookmark className="w-5 h-5" />
+              {bookmarks.length > 0 && (
+                <span className="absolute top-1 right-1 w-4 h-4 rounded-full bg-accent-lineage text-[9px] text-white flex items-center justify-center font-bold leading-none">
+                  {bookmarks.length > 9 ? '9+' : bookmarks.length}
+                </span>
+              )}
+            </button>
           </div>
         )}
       </nav>
@@ -415,8 +699,6 @@ export function SidebarNav() {
           <ChevronLeft className="w-3 h-3" />
         )}
       </button>
-
-      {/* Workspace Panel Modal — removed, management is now at /admin */}
     </aside>
   )
 }
@@ -457,87 +739,6 @@ function NavButton({ item, collapsed, active, onClick }: NavButtonProps) {
   )
 }
 
-interface SectionHeaderProps {
-  title: string
-  onAdd?: () => void
-}
-
-function SectionHeader({ title, onAdd }: SectionHeaderProps) {
-  return (
-    <div className="flex items-center justify-between px-3 py-1">
-      <span className="text-xs font-medium text-ink-muted uppercase tracking-wider">
-        {title}
-      </span>
-      {onAdd && (
-        <button
-          onClick={onAdd}
-          className="p-1 rounded hover:bg-black/5 dark:hover:bg-white/5"
-        >
-          <Plus className="w-3 h-3 text-ink-muted" />
-        </button>
-      )}
-    </div>
-  )
-}
-
-interface ViewButtonProps {
-  view: { id: string; name: string }
-  isPinned?: boolean
-  isActive?: boolean
-  onClick?: () => void
-  onTogglePin?: (e: React.MouseEvent) => void
-}
-
-function ViewButton({ view, isPinned, isActive, onClick, onTogglePin }: ViewButtonProps) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-left group",
-        "text-sm transition-all duration-150",
-        isActive
-          ? "bg-accent-lineage/10 text-accent-lineage font-medium"
-          : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
-      )}
-    >
-      <div className="flex items-center gap-2 truncate flex-1">
-        <Bookmark className={cn(
-          "w-4 h-4 flex-shrink-0 transition-colors",
-          isPinned ? "text-accent-lineage fill-accent-lineage" : ""
-        )} />
-        <span className="truncate">{view.name}</span>
-      </div>
-      <div
-        onClick={onTogglePin}
-        className={cn(
-          "p-1 rounded-md transition-all cursor-pointer",
-          isPinned ? "opacity-100" : "opacity-0 group-hover:opacity-100 hover:bg-black/10 dark:hover:bg-white/10"
-        )}
-      >
-        <Star className={cn("w-3.5 h-3.5", isPinned ? "text-amber-500 fill-amber-500" : "text-ink-muted")} />
-      </div>
-    </button>
-  )
-}
-
-interface TraceItemProps {
-  label: string
-  time: string
-}
-
-function TraceItem({ label, time }: TraceItemProps) {
-  return (
-    <button
-      className={cn(
-        "w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left",
-        "text-sm text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink",
-        "transition-all duration-150"
-      )}
-    >
-      <History className="w-4 h-4 flex-shrink-0 text-ink-muted" />
-      <span className="truncate flex-1">{label}</span>
-      <span className="text-2xs text-ink-muted">{time}</span>
-    </button>
-  )
-}
-
+// Keep unused icon imports referenced to avoid tree-shaking warnings
+// (GitBranch, AlignLeft, List, LayoutGrid, Clock are used via layoutTypeIcon + DynamicIcon)
+void [GitBranch, AlignLeft, List, LayoutGrid, Clock, History]

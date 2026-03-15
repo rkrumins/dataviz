@@ -16,7 +16,15 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
-import { useSchemaStore } from '@/store/schema'
+import {
+  useSchemaStore,
+  useContainmentEdgeTypes,
+  useLineageEdgeTypes,
+  useIsContainmentEdge,
+  normalizeEdgeType,
+  useEdgeTypeMetadataMap,
+  useRelationshipTypes,
+} from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -30,7 +38,6 @@ import { EdgeLegend } from '../EdgeLegend'
 
 import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
-import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
 import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
 // UX-first interaction components
@@ -81,7 +88,10 @@ export function ContextViewCanvas({
   const activeView = useSchemaStore((s) => s.getActiveView())
   const updateView = useSchemaStore((s) => s.updateView)
   const provider = useGraphProvider()
-  const { containmentEdgeTypes, lineageEdgeTypes, isContainmentEdge } = useOntologyMetadata()
+  const containmentEdgeTypes = useContainmentEdgeTypes()
+  const lineageEdgeTypes = useLineageEdgeTypes()
+  const isContainmentEdge = useIsContainmentEdge()
+  const edgeTypeMetadata = useEdgeTypeMetadataMap()
 
   // URN resolver for trace
   const urnResolver = useCallback((nodeId: string) => {
@@ -265,7 +275,7 @@ export function ContextViewCanvas({
   // Edit Mode State (unified with LineageCanvas)
   const [isPaletteOpen, setPaletteOpen] = useState(false)
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
-  const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
+  const relationshipTypes = useRelationshipTypes()
 
   // Handle save graph
   const handleSave = useCallback(async () => {
@@ -300,7 +310,7 @@ export function ContextViewCanvas({
   // Edge details
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
   const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
-  const { metadata: ontologyMetadata } = useOntologyMetadata()
+  const ontologyMetadata = useMemo(() => ({ edgeTypeMetadata }), [edgeTypeMetadata])
   const selectEdge = useCanvasStore((s) => s.selectEdge)
 
   // Generate dynamic edge filters from actual edges and schema

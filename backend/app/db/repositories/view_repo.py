@@ -229,8 +229,18 @@ async def list_views_filtered(
     limit: int = 50,
     offset: int = 0,
     user_id: Optional[str] = None,
+    favourited_only: bool = False,
 ) -> List[ViewResponse]:
     query = select(ViewORM)
+
+    # When favourited_only is True, inner-join on the favourites table so only
+    # views the requesting user has bookmarked are returned.
+    if favourited_only and user_id:
+        query = query.join(
+            ViewFavouriteORM,
+            (ViewFavouriteORM.view_id == ViewORM.id) &
+            (ViewFavouriteORM.user_id == user_id),
+        )
 
     if workspace_id:
         query = query.where(ViewORM.workspace_id == workspace_id)

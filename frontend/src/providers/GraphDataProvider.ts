@@ -236,6 +236,8 @@ export interface RelationshipTypeDefinition {
     bidirectional: boolean
     showLabel: boolean
     isContainment: boolean
+    isLineage: boolean
+    category: 'structural' | 'flow' | 'metadata' | 'association'
 }
 
 export interface GraphSchema {
@@ -244,6 +246,7 @@ export interface GraphSchema {
     relationshipTypes: RelationshipTypeDefinition[]
     rootEntityTypes: string[]
     containmentEdgeTypes: string[]
+    lineageEdgeTypes: string[]
 }
 
 // ============================================

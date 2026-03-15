@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type {
@@ -10,12 +11,25 @@ import type {
   EntityBehaviorConfig,
   RelationshipVisualConfig,
 } from '@/types/schema'
-import type { GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition } from '@/providers/GraphDataProvider'
+import type {
+  GraphSchema,
+  EntityTypeDefinition,
+  RelationshipTypeDefinition,
+  EdgeTypeMetadata,
+} from '@/providers/GraphDataProvider'
 import { generateId } from '@/lib/utils'
 
 const EMPTY_ENTITY_TYPES: EntityTypeSchema[] = []
 const EMPTY_REL_TYPES: RelationshipTypeSchema[] = []
-const DEFAULT_CONTAINMENT_EDGE_TYPES: string[] = ['CONTAINS', 'BELONGS_TO']
+const EMPTY_STRING_ARRAY: string[] = []
+const EMPTY_ENTITY_HIERARCHY_MAP: Record<string, { canContain: string[]; canBeContainedBy: string[] }> = {}
+const EMPTY_EDGE_TYPE_METADATA_MAP: Record<string, EdgeTypeMetadata> = {}
+// These are intentionally EMPTY — the backend's ontology (or its graph introspection)
+// defines what containment and lineage mean for each specific graph.
+// Components must wait for the schema to load before making hierarchy decisions;
+// they must never hardcode graph-topology assumptions.
+const DEFAULT_CONTAINMENT_EDGE_TYPES: string[] = []
+const DEFAULT_LINEAGE_EDGE_TYPES: string[] = []
 const DEFAULT_GLOBAL_VISUALS: WorkspaceSchema['globalVisuals'] = {
   theme: 'dark',
   accentColor: '#6366f1',
@@ -146,6 +160,9 @@ function convertBackendRelationshipType(backendRel: RelationshipTypeDefinition):
     },
     bidirectional: backendRel.bidirectional,
     showLabel: backendRel.showLabel,
+    isContainment: backendRel.isContainment ?? false,
+    isLineage: backendRel.isLineage ?? false,
+    category: (backendRel.category ?? 'association') as NonNullable<RelationshipTypeSchema['category']>,
   }
 }
 
@@ -209,9 +226,15 @@ export const useSchemaStore = create<SchemaState>()(
       visibleViews: () => {
         const { schema, activeScopeKey } = get()
         if (!schema) return []
-        return schema.views.filter(
-          v => !v.scopeKey || v.scopeKey === activeScopeKey
-        )
+        // Extract just the workspaceId portion for matching workspace-level views
+        const activeWorkspaceId = activeScopeKey?.split('/')[0]
+        return schema.views.filter(v => {
+          if (!v.scopeKey) return true                          // unscoped → global
+          if (v.scopeKey === activeScopeKey) return true        // exact workspace+datasource match
+          // Workspace-level views (no specific datasource) appear for any datasource in the same workspace
+          if (activeWorkspaceId && v.scopeKey === `${activeWorkspaceId}/default`) return true
+          return false
+        })
       },
 
       // Load backend schema (ontology only — entity types + relationship types).
@@ -223,6 +246,7 @@ export const useSchemaStore = create<SchemaState>()(
           set((state) => {
             const prevSchema = state.schema
             const nextContainment = backendSchema.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES
+            const nextLineage = backendSchema.lineageEdgeTypes ?? DEFAULT_LINEAGE_EDGE_TYPES
 
             // Strategic no-op: do not write store state if ontology schema payload
             // hasn't actually changed. This prevents render churn and update loops.
@@ -231,7 +255,8 @@ export const useSchemaStore = create<SchemaState>()(
               prevSchema.version === backendSchema.version &&
               jsonEquals(prevSchema.entityTypes, entityTypes) &&
               jsonEquals(prevSchema.relationshipTypes, relationshipTypes) &&
-              jsonEquals(prevSchema.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES, nextContainment)
+              jsonEquals(prevSchema.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES, nextContainment) &&
+              jsonEquals(prevSchema.lineageEdgeTypes ?? DEFAULT_LINEAGE_EDGE_TYPES, nextLineage)
             ) {
               if (state.backendSchemaError || state.isLoadingFromBackend) {
                 return {
@@ -258,6 +283,8 @@ export const useSchemaStore = create<SchemaState>()(
               defaultViewId,
               globalVisuals: prevSchema?.globalVisuals ?? DEFAULT_GLOBAL_VISUALS,
               containmentEdgeTypes: nextContainment,
+              lineageEdgeTypes: nextLineage,
+              rootEntityTypes: backendSchema.rootEntityTypes ?? [],
             }
 
             return {
@@ -486,9 +513,107 @@ export const useSchemaStore = create<SchemaState>()(
 export const useActiveView = () => useSchemaStore((s) => s.getActiveView());
 export const useEntityTypes = () => useSchemaStore((s) => s.schema?.entityTypes ?? EMPTY_ENTITY_TYPES);
 export const useRelationshipTypes = () => useSchemaStore((s) => s.schema?.relationshipTypes ?? EMPTY_REL_TYPES);
-export const useSchemaLoadingState = () => useSchemaStore((s) => ({
-  isLoading: s.isLoadingFromBackend,
-  error: s.backendSchemaError,
-}));
+export const useSchemaIsLoading = () => useSchemaStore((s) => s.isLoadingFromBackend);
+export const useSchemaError = () => useSchemaStore((s) => s.backendSchemaError);
 export const useContainmentEdgeTypes = () => useSchemaStore((s) => s.schema?.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES);
+export const useLineageEdgeTypes = () => useSchemaStore((s) => s.schema?.lineageEdgeTypes ?? DEFAULT_LINEAGE_EDGE_TYPES);
+export const useRootEntityTypes = () => useSchemaStore((s) => s.schema?.rootEntityTypes ?? EMPTY_STRING_ARRAY);
+export function useEntityTypeHierarchyMap() {
+  const entityTypes = useEntityTypes()
+  return useMemo(() => {
+    if (entityTypes.length === 0) return EMPTY_ENTITY_HIERARCHY_MAP
+    return Object.fromEntries(
+      entityTypes.map((entityType) => [
+        entityType.id,
+        {
+          canContain: entityType.hierarchy?.canContain ?? EMPTY_STRING_ARRAY,
+          canBeContainedBy: entityType.hierarchy?.canBeContainedBy ?? EMPTY_STRING_ARRAY,
+        },
+      ])
+    )
+  }, [entityTypes])
+}
+
+export function useEdgeTypeMetadataMap() {
+  const relTypes = useRelationshipTypes()
+  return useMemo(() => {
+    if (relTypes.length === 0) return EMPTY_EDGE_TYPE_METADATA_MAP
+    return Object.fromEntries(
+      relTypes.map((relType) => [
+        relType.id,
+        {
+          isContainment: relType.isContainment ?? false,
+          isLineage: relType.isLineage ?? false,
+          direction: 'source-to-target',
+          category: relType.category ?? 'association',
+        },
+      ])
+    )
+  }, [relTypes])
+}
+
+// ============================================
+// Edge Classification Helpers (non-hook)
+// These read from the Zustand store snapshot — call inside components or hooks only.
+// ============================================
+
+/** Normalise raw edge type string for case-insensitive comparison */
+export function normalizeEdgeType(edge: { data?: { edgeType?: string; relationship?: string } }): string {
+  return (edge.data?.edgeType || edge.data?.relationship || '').toUpperCase()
+}
+
+/** Pure helper: check edge type against a set of containment types (case-insensitive) */
+export function isContainmentEdgeType(edgeType: string, containmentTypes: string[]): boolean {
+  const normalized = edgeType.toUpperCase()
+  return containmentTypes.some(t => t.toUpperCase() === normalized)
+}
+
+/** Pure helper: check edge type against a set of lineage types (case-insensitive) */
+export function isLineageEdgeType(edgeType: string, lineageTypes: string[]): boolean {
+  const normalized = edgeType.toUpperCase()
+  return lineageTypes.some(t => t.toUpperCase() === normalized)
+}
+
+/** Hook: returns whether an edge type is a containment edge per the loaded ontology */
+export function useIsContainmentEdge() {
+  const types = useContainmentEdgeTypes()
+  return (edgeType: string) => isContainmentEdgeType(edgeType, types)
+}
+
+/** Hook: returns whether an edge type is a lineage edge per the loaded ontology */
+export function useIsLineageEdge() {
+  const types = useLineageEdgeTypes()
+  return (edgeType: string) => isLineageEdgeType(edgeType, types)
+}
+
+/** Hook: returns edge classification category from relationship definitions */
+export function useGetEdgeClassification() {
+  const relTypes = useRelationshipTypes()
+  return (edgeType: string): 'structural' | 'flow' | 'metadata' | 'association' => {
+    const upper = edgeType.toUpperCase()
+    const rel = relTypes.find(r => r.id.toUpperCase() === upper)
+    return (rel?.category as 'structural' | 'flow' | 'metadata' | 'association') ?? 'association'
+  }
+}
+
+/** Hook: returns full relationship definition for an edge type (used for metadata access) */
+export function useGetEdgeTypeDefinition() {
+  const relTypes = useRelationshipTypes()
+  return (edgeType: string) => {
+    const upper = edgeType.toUpperCase()
+    return relTypes.find(r => r.id.toUpperCase() === upper) ?? null
+  }
+}
+
+/**
+ * Hook: returns a GranularityLevel map derived from the loaded ontology's entity
+ * hierarchy levels. The map inverts ontology levels so that a lower level
+ * (root/domain) maps to a higher GranularityLevel enum value.
+ *
+ * Falls back to the hardcoded projection-engine map when no schema is loaded.
+ * Import buildGranularityMap from projection-engine to convert the entity types.
+ */
+export function useSchemaEntityTypes() {
+  return useSchemaStore((s) => s.schema?.entityTypes ?? EMPTY_ENTITY_TYPES)
+}
 

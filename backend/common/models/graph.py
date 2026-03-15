@@ -208,6 +208,7 @@ class EntityTypeHierarchy(BaseModel):
         populate_by_name = True
 
 class OntologyMetadata(BaseModel):
+    """Flat traversal metadata projected from ResolvedOntology for API callers."""
     containment_edge_types: List[str] = Field(alias="containmentEdgeTypes")
     lineage_edge_types: List[str] = Field(default_factory=list, alias="lineageEdgeTypes")
     edge_type_metadata: Dict[str, EdgeTypeMetadata] = Field(alias="edgeTypeMetadata")
@@ -300,16 +301,20 @@ class RelationshipTypeDefinition(BaseModel):
     bidirectional: bool = False
     show_label: bool = Field(default=False, alias="showLabel")
     is_containment: bool = Field(default=False, alias="isContainment")
+    is_lineage: bool = Field(default=False, alias="isLineage")
+    category: str = Field(default="association", alias="category")
 
     class Config:
         populate_by_name = True
 
 class GraphSchema(BaseModel):
+    """Frontend schema-store API contract serialized from resolved ontology."""
     version: str = "1.0.0"
     entity_types: List[EntityTypeDefinition] = Field(alias="entityTypes")
     relationship_types: List[RelationshipTypeDefinition] = Field(alias="relationshipTypes")
     root_entity_types: List[str] = Field(default_factory=list, alias="rootEntityTypes")
     containment_edge_types: List[str] = Field(default_factory=list, alias="containmentEdgeTypes")
+    lineage_edge_types: List[str] = Field(default_factory=list, alias="lineageEdgeTypes")
 
     class Config:
         populate_by_name = True
@@ -367,6 +372,100 @@ class CreateNodeResult(BaseModel):
     containment_edge: Optional[GraphEdge] = Field(None, alias="containmentEdge")
     success: bool = True
     error: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+# ============================================
+# Edge Mutation Models
+# ============================================
+
+class CreateEdgeRequest(BaseModel):
+    """Create a directed edge between two existing nodes."""
+    source_urn: str = Field(alias="sourceUrn")
+    target_urn: str = Field(alias="targetUrn")
+    edge_type: str = Field(alias="edgeType")
+    properties: Dict[str, Any] = Field(default_factory=dict)
+    # Idempotency key — if supplied and a matching edge already exists, return it unchanged.
+    idempotency_key: Optional[str] = Field(None, alias="idempotencyKey")
+
+    class Config:
+        populate_by_name = True
+
+
+class UpdateEdgeRequest(BaseModel):
+    """Update mutable properties of an existing edge. edge_type is immutable."""
+    properties: Dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        populate_by_name = True
+
+
+class EdgeMutationResult(BaseModel):
+    edge: Optional[GraphEdge] = None
+    success: bool = True
+    error: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+
+    class Config:
+        populate_by_name = True
+
+
+# ============================================
+# Batch Command Models
+# ============================================
+
+class BatchCommandOp(str):
+    CREATE_NODE = "create_node"
+    UPDATE_NODE = "update_node"
+    DELETE_NODE = "delete_node"
+    CREATE_EDGE = "create_edge"
+    UPDATE_EDGE = "update_edge"
+    DELETE_EDGE = "delete_edge"
+
+
+class BatchCommand(BaseModel):
+    """A single operation within a batch request."""
+    op: str = Field(..., description="create_node | update_node | delete_node | create_edge | update_edge | delete_edge")
+    ref: Optional[str] = Field(None, description="Client-side reference for correlating responses.")
+    payload: Dict[str, Any] = Field(default_factory=dict, description="Op-specific payload (matches single-op request body).")
+
+    class Config:
+        populate_by_name = True
+
+
+class BatchCommandRequest(BaseModel):
+    """Batch of graph mutation commands executed atomically."""
+    commands: List[BatchCommand]
+    # If True, abort the entire batch on the first failure (default).
+    # If False, continue and collect all results.
+    fail_fast: bool = Field(True, alias="failFast")
+
+    class Config:
+        populate_by_name = True
+
+
+class BatchCommandResult(BaseModel):
+    """Result for a single command within the batch."""
+    ref: Optional[str] = None
+    op: str
+    success: bool
+    error: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+    # For create ops: the created resource
+    created_urn: Optional[str] = Field(None, alias="createdUrn")
+    created_edge_id: Optional[str] = Field(None, alias="createdEdgeId")
+
+    class Config:
+        populate_by_name = True
+
+
+class BatchResponse(BaseModel):
+    results: List[BatchCommandResult]
+    total: int
+    succeeded: int
+    failed: int
 
     class Config:
         populate_by_name = True

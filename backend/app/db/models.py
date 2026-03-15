@@ -224,6 +224,11 @@ class OntologyORM(Base):
     is_published = Column(Boolean, nullable=False, default=False)
     is_system = Column(Boolean, nullable=False, default=False)
     scope = Column(Text, nullable=False, default="universal")             # universal | workspace
+    # Schema evolution policy applied when a newer version of this ontology is published.
+    # reject   — do not allow changes that would break existing data (safest).
+    # deprecate — mark removed types as deprecated; continue to serve them.
+    # migrate  — automatically rename/remap types per a migration manifest.
+    evolution_policy = Column(Text, nullable=False, default="reject")   # reject | deprecate | migrate
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -239,6 +244,50 @@ class OntologyORM(Base):
 
     def __repr__(self) -> str:
         return f"<Ontology id={self.id!r} name={self.name!r} v{self.version}>"
+
+
+# ------------------------------------------------------------------ #
+# ontology_source_mappings — per-source type mapping profiles          #
+# ------------------------------------------------------------------ #
+
+class OntologySourceMappingORM(Base):
+    """
+    Maps external provider type labels to Synodic ontology type IDs.
+
+    When a DataHub asset arrives with type "DATASET" from platform "snowflake",
+    the mapping profile for that data source translates it to the Synodic
+    entity type "dataset" before writing to the graph.
+
+    One row per (data_source_id, external_type) pair.
+    entity_type_mappings and relationship_type_mappings are JSON dicts:
+      { "<external_label>": "<synodic_type_id>", … }
+    """
+    __tablename__ = "ontology_source_mappings"
+
+    id = Column(Text, primary_key=True, default=lambda: f"osm_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(Text, nullable=False, index=True)
+    ontology_id = Column(Text, nullable=True)                        # optional pinned ontology
+    # JSON dict: external entity type label → Synodic entity type id
+    entity_type_mappings = Column(Text, nullable=False, default="{}")
+    # JSON dict: external relationship type label → Synodic relationship type id
+    relationship_type_mappings = Column(Text, nullable=False, default="{}")
+    # EXTENSION POINT: add conditional aliasing/ignore rules when DataHub/OpenMetadata
+    # ingestion needs source-context-aware mappings beyond simple label->type maps.
+    # Snapshot of the last-seen external schema (for drift detection)
+    last_seen_schema_hash = Column(Text, nullable=True)
+    last_seen_at = Column(Text, nullable=True)
+    # Whether the last drift check found unmapped types
+    has_drift = Column(Boolean, nullable=False, default=False)
+    drift_details = Column(Text, nullable=True)                      # JSON list of issues
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        Index("idx_osm_data_source", "data_source_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OntologySourceMapping ds={self.data_source_id!r}>"
 
 
 # ------------------------------------------------------------------ #
@@ -275,7 +324,7 @@ class WorkspaceORM(Base):
 
 
 # ------------------------------------------------------------------ #
-# workspace_data_sources  (binds provider + graph + blueprint)         #
+# workspace_data_sources  (binds provider + graph + assigned ontology)  #
 # ------------------------------------------------------------------ #
 
 class WorkspaceDataSourceORM(Base):
@@ -317,6 +366,9 @@ class WorkspaceDataSourceORM(Base):
     provider = relationship("ProviderORM", back_populates="data_sources")
     catalog_item = relationship("CatalogItemORM")
     ontology = relationship("OntologyORM", back_populates="data_sources")
+    # EXTENSION POINT: add ontology_version_strategy (pinned|floating) and
+    # ontology_enforcement (permissive|strict) when multi-source governance
+    # requires per-data-source resolution policies.
     stats = relationship("DataSourceStatsORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
     polling_config = relationship("DataSourcePollingConfigORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
 
@@ -397,6 +449,8 @@ class ViewORM(Base):
     )
     view_type = Column(Text, nullable=False, default="graph")
     config = Column(Text, nullable=False, default="{}")       # JSON: full ViewConfiguration
+    # EXTENSION POINT: persist referenced_entity_types / referenced_relationship_types
+    # for view-ontology compatibility checks once real breakage workflows appear.
     visibility = Column(Text, nullable=False, default="private")
     created_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                        # JSON array

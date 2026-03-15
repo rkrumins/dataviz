@@ -86,6 +86,8 @@ class RelationshipTypeDefEntry:
     visual: RelationshipVisualData = field(default_factory=RelationshipVisualData)
     source_types: List[str] = field(default_factory=list)
     target_types: List[str] = field(default_factory=list)
+    # EXTENSION POINT: add source_cardinality / target_cardinality when mutation
+    # validation needs explicit cardinality constraints beyond type compatibility.
     bidirectional: bool = False
     show_label: bool = False
     label_field: Optional[str] = None
@@ -103,7 +105,7 @@ class DerivedLists:
 
 @dataclass
 class OntologyData:
-    """Raw data loaded from DB (before resolution/merge)."""
+    """Raw ontology DB record before resolution; not used as runtime truth."""
     id: str
     name: str
     version: int
@@ -121,7 +123,7 @@ class OntologyData:
 
 @dataclass
 class ResolvedOntology:
-    """Fully resolved and merged ontology, ready to serve to clients."""
+    """Fully merged ontology for one data-source context; internal source of truth."""
     # Rich definitions (primary source of truth)
     entity_type_definitions: Dict[str, EntityTypeDefEntry] = field(default_factory=dict)
     relationship_type_definitions: Dict[str, RelationshipTypeDefEntry] = field(default_factory=dict)
@@ -132,7 +134,19 @@ class ResolvedOntology:
     entity_type_hierarchy: Dict[str, Dict] = field(default_factory=dict)
     root_entity_types: List[str] = field(default_factory=list)
     # Provenance: which layer each type came from
-    resolution_sources: Dict[str, str] = field(default_factory=dict)  # type_id -> "blueprint"|"system_default"|"introspection"
+    resolution_sources: Dict[str, str] = field(default_factory=dict)  # type_id -> "assigned"|"system_default"|"introspection"
+
+    def to_flat_metadata(self):
+        """Project the resolved ontology into legacy flat traversal metadata."""
+        from backend.common.models.graph import OntologyMetadata
+
+        return OntologyMetadata(
+            containmentEdgeTypes=self.containment_edge_types,
+            lineageEdgeTypes=self.lineage_edge_types,
+            edgeTypeMetadata=self.edge_type_metadata,
+            entityTypeHierarchy=self.entity_type_hierarchy,
+            rootEntityTypes=self.root_entity_types,
+        )
 
 
 @dataclass

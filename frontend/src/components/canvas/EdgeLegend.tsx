@@ -14,8 +14,7 @@ import { GitBranch, ChevronDown, ChevronUp, Eye, EyeOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
 import { useEdgeFiltersStore } from '@/hooks/useEdgeFilters'
-import { useSchemaStore } from '@/store/schema'
-import { useOntologyMetadata } from '@/services/ontologyService'
+import { useSchemaStore, useContainmentEdgeTypes, useRelationshipTypes } from '@/store/schema'
 import { getAllEdgeTypeDefinitions, normalizeEdgeType } from '@/utils/edgeTypeUtils'
 
 // ─── Data-shape helpers ───────────────────────────────────────────────────────
@@ -52,8 +51,8 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
     const [isExpanded, setIsExpanded] = useState(defaultExpanded)
 
     const storeEdges = useCanvasStore((s) => s.edges)
-    const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
-    const { containmentEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
+    const relationshipTypes = useRelationshipTypes()
+    const containmentEdgeTypes = useContainmentEdgeTypes()
 
     const {
         highlightedEdgeIds,
@@ -74,9 +73,8 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
             storeEdges,
             relationshipTypes,
             containmentEdgeTypes,
-            ontologyMetadata ? { edgeTypeMetadata: ontologyMetadata.edgeTypeMetadata } : undefined
         )
-    }, [storeEdges, relationshipTypes, containmentEdgeTypes, ontologyMetadata])
+    }, [storeEdges, relationshipTypes, containmentEdgeTypes])
 
     // Per-type counts from the *active* edge list.
     // For projected edges each entry may represent multiple underlying edges

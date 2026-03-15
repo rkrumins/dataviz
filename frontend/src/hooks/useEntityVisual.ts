@@ -38,7 +38,6 @@ const EDGE_VISUAL_FALLBACK: RelationshipVisualConfig = {
   arrowType: 'arrow',
   curveType: 'bezier',
 }
-const EMPTY_STRING_ARRAY: string[] = []
 
 // -----------------------------------------------------------------------
 // Hook variants (for React components)
@@ -111,23 +110,3 @@ function getEdgeVisualFromSchema(
   return relType.visual
 }
 
-// -----------------------------------------------------------------------
-// Convenience: check classifications from resolved metadata
-// -----------------------------------------------------------------------
-
-/** Returns true if the edge type is classified as containment in the active schema. */
-export function useIsContainmentEdge(edgeTypeId: string): boolean {
-  const containmentTypes = useSchemaStore((s) => s.schema?.containmentEdgeTypes ?? EMPTY_STRING_ARRAY)
-  return containmentTypes.some((t) => t.toUpperCase() === edgeTypeId.toUpperCase())
-}
-
-/** Returns true if the edge type is classified as lineage in the active schema. */
-export function useIsLineageEdge(edgeTypeId: string): boolean {
-  const schema = useSchemaStore((s) => s.schema)
-  if (!schema) return false
-  const normalized = edgeTypeId.toUpperCase()
-  const relType = schema.relationshipTypes.find(
-    (rt) => rt.id.toUpperCase() === normalized
-  )
-  return (relType as any)?.isLineage ?? true  // default true for unknown types (conservative)
-}

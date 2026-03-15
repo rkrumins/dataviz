@@ -286,15 +286,14 @@ class FalkorDBProvider(GraphDataProvider):
         params: Dict[str, Any] = {}
         conditions = []
 
-        # When a single entity type is provided, use label-specific MATCH for index hit
-        if query.entity_types and len(query.entity_types) == 1:
-            label = _sanitize_label(str(query.entity_types[0]))
-            clauses = [f"MATCH (n:{label})"]
-        elif query.entity_types:
+        # Match by entity type (label). Use case-insensitive matching so ontology types
+        # like "Glossary" match graph labels like "glossary" or "GLOSSARY".
+        if query.entity_types:
             clauses = ["MATCH (n)"]
             types = [str(t) for t in query.entity_types]
-            params["entityTypes"] = types
-            conditions.append("labels(n)[0] IN $entityTypes")
+            types_lower = [t.lower() for t in types]
+            params["entityTypesLower"] = types_lower
+            conditions.append("toLower(labels(n)[0]) IN $entityTypesLower")
         else:
             clauses = ["MATCH (n)"]
 

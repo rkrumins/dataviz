@@ -80,6 +80,11 @@ class SQLAlchemyOntologyRepository:
         )
         if data_source_id:
             q = q.where(WorkspaceDataSourceORM.id == data_source_id)
+        else:
+            q = q.order_by(
+                WorkspaceDataSourceORM.is_primary.desc(),
+                WorkspaceDataSourceORM.created_at.asc(),
+            )
         q = q.limit(1)
         result = await self._session.execute(q)
         row = result.scalar_one_or_none()

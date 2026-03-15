@@ -19,11 +19,6 @@ from .defaults import (
     SYSTEM_ENTITY_TYPES,
     SYSTEM_RELATIONSHIP_TYPES,
 )
-from .events import (
-    OntologyEventBus,
-    OntologyUpdated,
-    event_bus as _default_bus,
-)
 from .models import (
     CoverageReport,
     EntityTypeDefEntry,
@@ -51,16 +46,14 @@ class LocalOntologyService:
     """
     In-process implementation of OntologyServiceProtocol.
 
-    DI contract: caller injects repository and optionally an event bus.
+    DI contract: caller injects repository.
     """
 
     def __init__(
         self,
         repository: OntologyRepositoryProtocol,
-        bus: Optional[OntologyEventBus] = None,
     ) -> None:
         self._repo = repository
-        self._bus = bus or _default_bus
 
     # ------------------------------------------------------------------ #
     # Core: resolve                                                         #
@@ -70,7 +63,8 @@ class LocalOntologyService:
         self,
         workspace_id: Optional[str] = None,
         data_source_id: Optional[str] = None,
-        introspected: Optional[OntologyMetadata] = None,
+        introspected_entity_ids: Optional[List[str]] = None,
+        introspected_rel_ids: Optional[List[str]] = None,
     ) -> ResolvedOntology:
         """
         Three-layer merge:
@@ -86,12 +80,6 @@ class LocalOntologyService:
                 assigned = await self._repo.get_for_data_source(workspace_id, data_source_id)
             except Exception:
                 logger.exception("Failed to load assigned ontology for workspace=%s ds=%s", workspace_id, data_source_id)
-
-        introspected_entity_ids: Optional[List[str]] = None
-        introspected_rel_ids: Optional[List[str]] = None
-        if introspected:
-            introspected_entity_ids = [e.id for e in (introspected.entity_type_definitions or [])]
-            introspected_rel_ids = [r.id for r in (introspected.relationship_type_definitions or [])]
 
         return resolve_ontology(
             system_default=system_default,

@@ -66,6 +66,8 @@ export interface ViewListParams {
     tags?: string[]
     limit?: number
     offset?: number
+    /** Return only views the current user has bookmarked/favourited. */
+    favouritedOnly?: boolean
 }
 
 // ============================================
@@ -100,6 +102,7 @@ export async function listViews(params?: ViewListParams): Promise<View[]> {
     if (params?.tags) params.tags.forEach(t => sp.append('tags', t))
     if (params?.limit) sp.set('limit', String(params.limit))
     if (params?.offset) sp.set('offset', String(params.offset))
+    if (params?.favouritedOnly) sp.set('favouritedOnly', 'true')
     const qs = sp.toString()
     return apiFetch<View[]>(`/api/v1/views/${qs ? `?${qs}` : ''}`)
 }
@@ -166,12 +169,24 @@ export async function unfavouriteView(viewId: string): Promise<void> {
  */
 export function viewToViewConfig(view: View): ViewConfiguration {
     const cfg = view.config ?? {}
+    // Derive scopeKey from the authoritative workspaceId + dataSourceId on the API
+    // response, matching the format used by setActiveScopeKey() in the schema store
+    // (`${wsId}/${dsId}` or `${wsId}/default`). The stored cfg.scopeKey is unreliable
+    // because it was a frontend-only field and is absent on server-created views.
+    const scopeKey = view.workspaceId
+        ? view.dataSourceId
+            ? `${view.workspaceId}/${view.dataSourceId}`
+            : `${view.workspaceId}/default`
+        : cfg.scopeKey ?? null
     return {
         id: view.id,
         name: view.name,
         description: view.description,
         icon: cfg.icon ?? 'Layout',
-        scopeKey: cfg.scopeKey ?? null,
+        scopeKey,
+        workspaceId: view.workspaceId,
+        workspaceName: view.workspaceName,
+        isFavourited: view.isFavourited,
         content: cfg.content ?? {
             visibleEntityTypes: [],
             visibleRelationshipTypes: [],

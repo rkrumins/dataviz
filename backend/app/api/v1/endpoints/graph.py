@@ -1,7 +1,7 @@
 from typing import List, Optional, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.graph import (
@@ -9,6 +9,8 @@ from backend.app.models.graph import (
     NodeQuery, EdgeQuery, GraphSchemaStats,
     AggregatedEdgeRequest, AggregatedEdgeResult,
     CreateNodeRequest, CreateNodeResult,
+    CreateEdgeRequest, UpdateEdgeRequest, EdgeMutationResult,
+    BatchCommandRequest, BatchCommandResult, BatchResponse,
 )
 from backend.app.services.context_engine import context_engine, ContextEngine
 from backend.app.db.engine import get_db_session
@@ -456,3 +458,192 @@ async def create_node(
     based on ontology rules.
     """
     return await engine.create_node(request)
+
+
+# ─── Edge CRUD ────────────────────────────────────────────────────────────────
+
+@router.post("/edges", response_model=EdgeMutationResult, response_model_by_alias=True, status_code=201)
+async def create_edge(
+    request: CreateEdgeRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """
+    Create a directed edge between two existing nodes.
+
+    Validates source/target entity types against the active ontology.
+    If idempotencyKey is supplied and a matching edge already exists it is returned unchanged.
+    """
+    return await engine.create_edge(request)
+
+
+@router.patch("/edges/{edge_id}", response_model=EdgeMutationResult, response_model_by_alias=True)
+async def update_edge(
+    edge_id: str,
+    request: UpdateEdgeRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Update mutable properties of an existing edge. Edge type is immutable."""
+    return await engine.update_edge(edge_id, request)
+
+
+@router.delete("/edges/{edge_id}", status_code=204)
+async def delete_edge(
+    edge_id: str,
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Delete an edge by ID."""
+    success = await engine.delete_edge(edge_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Edge '{edge_id}' not found")
+
+
+# ─── Preflight / guided-create APIs ─────────────────────────────────────────
+
+class AllowedChildOption(BaseModel):
+    entity_type: str = Field(alias="entityType")
+    label: str
+    description: Optional[str] = None
+    allowed: bool
+    reason: Optional[str] = None     # Non-null when allowed=False (explains why)
+
+    class Config:
+        populate_by_name = True
+
+
+class AllowedEdgeOption(BaseModel):
+    edge_type: str = Field(alias="edgeType")
+    label: str
+    description: Optional[str] = None
+    allowed: bool
+    reason: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+@router.post("/commands/batch", response_model=BatchResponse, response_model_by_alias=True)
+async def batch_commands(
+    request: BatchCommandRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """
+    Execute a batch of graph mutation commands.
+
+    Each command is one of:
+      create_node, update_node, delete_node,
+      create_edge, update_edge, delete_edge
+
+    Commands are executed in order. If fail_fast=true (default), execution
+    stops on the first failure and returns partial results. If fail_fast=false,
+    all commands are attempted and results are collected.
+
+    All node/edge mutations are validated against the active ontology before
+    any write is attempted.  Validation failures count as command failures.
+    """
+    from backend.common.models.graph import CreateNodeRequest as _CNR, CreateEdgeRequest as _CER
+    from backend.common.models.graph import UpdateEdgeRequest as _UER
+
+    results: List[BatchCommandResult] = []
+    succeeded = 0
+    failed = 0
+
+    for cmd in request.commands:
+        try:
+            if cmd.op == "create_node":
+                node_req = _CNR(**cmd.payload)
+                res = await engine.create_node(node_req)
+                if res.success:
+                    succeeded += 1
+                    results.append(BatchCommandResult(
+                        ref=cmd.ref, op=cmd.op, success=True,
+                        createdUrn=res.node.urn if res.node else None,
+                    ))
+                else:
+                    failed += 1
+                    results.append(BatchCommandResult(
+                        ref=cmd.ref, op=cmd.op, success=False, error=res.error,
+                    ))
+            elif cmd.op == "create_edge":
+                edge_req = _CER(**cmd.payload)
+                res = await engine.create_edge(edge_req)
+                if res.success:
+                    succeeded += 1
+                    results.append(BatchCommandResult(
+                        ref=cmd.ref, op=cmd.op, success=True,
+                        createdEdgeId=res.edge.id if res.edge else None,
+                    ))
+                else:
+                    failed += 1
+                    results.append(BatchCommandResult(
+                        ref=cmd.ref, op=cmd.op, success=False, error=res.error,
+                        warnings=res.warnings,
+                    ))
+            elif cmd.op == "delete_edge":
+                edge_id = cmd.payload.get("edgeId") or cmd.payload.get("edge_id", "")
+                ok = await engine.delete_edge(edge_id)
+                if ok:
+                    succeeded += 1
+                    results.append(BatchCommandResult(ref=cmd.ref, op=cmd.op, success=True))
+                else:
+                    failed += 1
+                    results.append(BatchCommandResult(
+                        ref=cmd.ref, op=cmd.op, success=False,
+                        error=f"Edge '{edge_id}' not found",
+                    ))
+            else:
+                failed += 1
+                results.append(BatchCommandResult(
+                    ref=cmd.ref, op=cmd.op, success=False,
+                    error=f"Unsupported op: {cmd.op}",
+                ))
+        except Exception as exc:
+            failed += 1
+            results.append(BatchCommandResult(
+                ref=cmd.ref, op=cmd.op, success=False, error=str(exc),
+            ))
+
+        if request.fail_fast and failed > 0:
+            # Fill remaining commands as skipped
+            remaining = request.commands[len(results):]
+            for skipped in remaining:
+                results.append(BatchCommandResult(
+                    ref=skipped.ref, op=skipped.op, success=False,
+                    error="Skipped: batch aborted due to earlier failure (fail_fast=true)",
+                ))
+            break
+
+    return BatchResponse(
+        results=results,
+        total=len(request.commands),
+        succeeded=succeeded,
+        failed=failed,
+    )
+
+
+@router.get("/nodes/{urn}/allowed-children", response_model=List[AllowedChildOption], response_model_by_alias=True)
+async def get_allowed_children(
+    urn: str,
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """
+    Return all entity types from the active ontology with an indication of
+    whether each may be created as a child of this node.
+
+    Used to populate and disable options in the guided create panel.
+    """
+    return await engine.get_allowed_children(urn)
+
+
+@router.get("/nodes/{urn}/allowed-edges", response_model=List[AllowedEdgeOption], response_model_by_alias=True)
+async def get_allowed_edges(
+    urn: str,
+    direction: str = Query("outgoing", description="outgoing | incoming | both"),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """
+    Return all relationship types from the active ontology with an indication of
+    whether each may be created from (or to) this node.
+
+    Used to populate and disable options in the guided edge creator.
+    """
+    return await engine.get_allowed_edges(urn, direction=direction)

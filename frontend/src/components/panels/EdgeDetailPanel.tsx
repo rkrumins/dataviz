@@ -42,8 +42,7 @@ import {
     EDGE_DIRECTION_FILTERS,
     type EdgeDirection,
 } from '@/hooks/useEdgeFilters'
-import { useSchemaStore } from '@/store/schema'
-import { useOntologyMetadata } from '@/services/ontologyService'
+import { useSchemaStore, useContainmentEdgeTypes, useEdgeTypeMetadataMap, useRelationshipTypes } from '@/store/schema'
 import { getAllEdgeTypeDefinitions, normalizeEdgeType } from '@/utils/edgeTypeUtils'
 import { useEdgeVisual } from '@/hooks/useEntityVisual'
 import { cn } from '@/lib/utils'
@@ -108,8 +107,10 @@ export function EdgeDetailPanel({
     const selectedEdgeIds = useCanvasStore((s) => s.selectedEdgeIds)
     const selectEdge = useCanvasStore((s) => s.selectEdge)
     const clearSelection = useCanvasStore((s) => s.clearSelection)
-    const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
-    const { containmentEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
+    const relationshipTypes = useRelationshipTypes()
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+    const edgeTypeMetadata = useEdgeTypeMetadataMap()
+    const ontologyMetadata = useMemo(() => ({ edgeTypeMetadata }), [edgeTypeMetadata])
     const panelRef = useRef<HTMLDivElement>(null)
 
     // Click-outside to close panel

@@ -57,7 +57,8 @@ class OntologyServiceProtocol(Protocol):
         self,
         workspace_id: Optional[str] = None,
         data_source_id: Optional[str] = None,
-        introspected: Optional[OntologyMetadata] = None,
+        introspected_entity_ids: Optional[List[str]] = None,
+        introspected_rel_ids: Optional[List[str]] = None,
     ) -> ResolvedOntology: ...
 
     async def suggest_from_introspection(

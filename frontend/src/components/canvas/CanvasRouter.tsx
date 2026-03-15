@@ -12,10 +12,9 @@ import { Suspense, useMemo, useEffect, useRef } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2 } from 'lucide-react'
-import { useSchemaStore } from '@/store/schema'
+import { useSchemaStore, useRootEntityTypes, useSchemaIsLoading } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { useOntologyMetadata } from '@/services/ontologyService'
 import { LineageCanvas } from './LineageCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
@@ -36,35 +35,23 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
   const rawNodes = useCanvasStore((s) => s.nodes)
   const { setNodes, setEdges } = useCanvasStore()
   const provider = useGraphProvider()
-  const { metadata: ontologyMetadata, isLoading: isLoadingOntology } = useOntologyMetadata()
+  const rootEntityTypes = useRootEntityTypes()
+  const isLoadingOntology = useSchemaIsLoading()
   const initializedForRef = useRef<typeof provider | null>(null)
 
   useEffect(() => {
-    if (isLoadingOntology) return
+    // Wait for the ontology to load so we know the true root entity types.
+    if (isLoadingOntology || rootEntityTypes.length === 0) return
     if (rawNodes.length > 0 && initializedForRef.current === provider) return
     if (initializedForRef.current === provider) return
     initializedForRef.current = provider
 
-    const rootTypes: string[] = ontologyMetadata?.rootEntityTypes?.length
-      ? ontologyMetadata.rootEntityTypes
-      : ['domain', 'dataPlatform', 'system']
-
-    const toNodeType = (entityType: string) => {
-      switch (entityType) {
-        case 'schemaField': case 'column': return 'column'
-        case 'dataPlatform': case 'system': return 'system'
-        case 'dataset': case 'table': return 'dataset'
-        case 'container': return 'container'
-        default: return 'domain'
-      }
-    }
-
-    provider.getNodes({ entityTypes: rootTypes as any[], limit: 200 })
+    provider.getNodes({ entityTypes: rootEntityTypes as any[], limit: 200 })
       .then(rootNodes => {
         if (!rootNodes.length) return
         setNodes(rootNodes.map(n => ({
           id: n.urn,
-          type: toNodeType(n.entityType as string),
+          type: 'generic',
           position: { x: Math.random() * 800, y: Math.random() * 600 },
           data: {
             label: n.displayName,
@@ -81,7 +68,7 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
       })
       .catch(err => console.error('[CanvasRouter] Failed to load initial nodes:', err))
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider, ontologyMetadata, isLoadingOntology])
+  }, [provider, rootEntityTypes, isLoadingOntology])
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {

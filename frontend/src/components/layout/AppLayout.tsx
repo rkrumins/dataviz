@@ -64,14 +64,17 @@ export function AppLayout() {
   // Sync React Router location with Zustand navigation store
   useRouteSync()
 
-  // Load views from the Context Model API into the schema store cache
+  // Load views from the API into the schema store cache.
+  // Fetches ALL accessible views (no workspace filter) so that cross-workspace
+  // links in the sidebar and deep-linked URLs resolve without a page refresh.
+  // Re-runs when activeWorkspaceId changes so newly created views are picked up.
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
   useEffect(() => {
-    if (!isAuthenticated || !hasLoadedBackendSchema || !activeWorkspaceId) return
+    if (!isAuthenticated || !hasLoadedBackendSchema) return
 
     const loadViews = async () => {
       try {
-        const views = await listViews({ workspaceId: activeWorkspaceId })
+        const views = await listViews()
         const { addOrUpdateView } = useSchemaStore.getState()
         for (const v of views) {
           addOrUpdateView(viewToViewConfig(v))

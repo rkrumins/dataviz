@@ -23,7 +23,13 @@ import {
     X,
     Filter,
     Layers,
-    ArrowRight
+    ArrowRight,
+    Server,
+    Columns,
+    LayoutDashboard,
+    BarChart3,
+    GitBranch,
+    Hash,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
@@ -33,7 +39,7 @@ import {
     useInstanceAssignments,
     useAssignmentConflicts
 } from '@/store/referenceModelStore'
-import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
+import { useContainmentEdgeTypes, useEntityTypes, useRootEntityTypes, normalizeEdgeType } from '@/store/schema'
 
 // ============================================
 // Types
@@ -59,29 +65,29 @@ interface EntityAssignmentPanelProps {
     className?: string
 }
 
-type GranularityLevel = 'all' | 'domain' | 'system' | 'schema' | 'table' | 'column'
-
 // ============================================
 // Constants
 // ============================================
 
-const TYPE_ICONS: Record<string, React.ReactNode> = {
+const TYPE_ICON_MAP: Record<string, React.ReactNode> = {
     domain: <Database className="w-4 h-4" />,
+    dataplatform: <Server className="w-4 h-4" />,
     system: <Folder className="w-4 h-4" />,
+    container: <Folder className="w-4 h-4" />,
     schema: <Folder className="w-4 h-4" />,
+    dataset: <Table className="w-4 h-4" />,
     table: <Table className="w-4 h-4" />,
-    column: <Box className="w-4 h-4" />,
-    default: <Box className="w-4 h-4" />
+    schemafield: <Hash className="w-4 h-4" />,
+    column: <Columns className="w-4 h-4" />,
+    dashboard: <LayoutDashboard className="w-4 h-4" />,
+    chart: <BarChart3 className="w-4 h-4" />,
+    _projection: <GitBranch className="w-4 h-4" />,
 }
+const DEFAULT_TYPE_ICON = <Box className="w-4 h-4" />
 
-const GRANULARITY_OPTIONS: { value: GranularityLevel; label: string }[] = [
-    { value: 'all', label: 'All Entities' },
-    { value: 'domain', label: 'Domains' },
-    { value: 'system', label: 'Systems' },
-    { value: 'schema', label: 'Schemas' },
-    { value: 'table', label: 'Tables' },
-    { value: 'column', label: 'Columns' }
-]
+function getTypeIcon(entityType: string): React.ReactNode {
+    return TYPE_ICON_MAP[entityType.toLowerCase()] ?? DEFAULT_TYPE_ICON
+}
 
 // ============================================
 // Sub-components
@@ -115,7 +121,7 @@ function EntityRow({
     onDragEnd
 }: EntityRowProps) {
     const hasChildren = node.childCount > 0 || node.children.length > 0
-    const icon = TYPE_ICONS[node.type] || TYPE_ICONS.default
+    const icon = getTypeIcon(node.type)
     const assignedLayer = layers.find(l => l.id === node.assignedLayerId)
 
     // Highlight search match
@@ -239,7 +245,7 @@ export function EntityAssignmentPanel({
 
     // Local state
     const [searchQuery, setSearchQuery] = useState('')
-    const [granularity, setGranularity] = useState<GranularityLevel>('all')
+    const [granularity, setGranularity] = useState<string>('all')
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
     const [draggingNode, setDraggingNode] = useState<EntityTreeNode | null>(null)
@@ -254,8 +260,33 @@ export function EntityAssignmentPanel({
         [instanceAssignments]
     )
 
-    const { containmentEdgeTypes } = useOntologyMetadata()
-    
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+    const schemaEntityTypes = useEntityTypes()
+    const rootEntityTypes = useRootEntityTypes()
+
+    // Build dynamic granularity options from schema entity types + actual node types
+    const granularityOptions = useMemo(() => {
+        const typeSet = new Set<string>()
+        // Add types from the ontology schema
+        for (const et of schemaEntityTypes) {
+            typeSet.add(et.id)
+        }
+        // Add types actually present in the canvas (covers unregistered/ad-hoc types)
+        for (const n of nodes) {
+            const t = (n.data as { type?: string }).type
+            if (t && t !== 'ghost') typeSet.add(t)
+        }
+        const options: { value: string; label: string }[] = [
+            { value: 'all', label: 'All Entities' },
+        ]
+        // Use ontology display name when available, otherwise title-case the id
+        const nameMap = new Map(schemaEntityTypes.map(et => [et.id, et.name ?? et.id]))
+        for (const t of [...typeSet].sort()) {
+            options.push({ value: t, label: nameMap.get(t) ?? t })
+        }
+        return options
+    }, [schemaEntityTypes, nodes])
+
     const entityTree = useMemo<EntityTreeNode[]>(() => {
         if (!nodes.length) return []
 
@@ -304,15 +335,22 @@ export function EntityAssignmentPanel({
             }
         }
 
-        // Root nodes: those without parents
+        // Root nodes: no parent edge AND type is a known root type.
+        // Restricting to rootEntityTypes prevents orphaned deep nodes
+        // (e.g. schemaFields or datasets without parents loaded yet) from
+        // appearing at the top level of the tree.
+        const rootTypeSet = new Set(rootEntityTypes.map(t => t.toLowerCase()))
+        const isRootType = (nodeType: string) =>
+            rootTypeSet.size === 0 || rootTypeSet.has((nodeType ?? '').toLowerCase())
+
         const roots = nodes
-            .filter(n => !hasParent.has(n.id) && n.data.type !== 'ghost')
+            .filter(n => !hasParent.has(n.id) && n.data.type !== 'ghost' && isRootType(n.data.type as string))
             .map(n => buildNode(n.id, 0))
             .filter((n): n is EntityTreeNode => n !== null)
             .sort((a, b) => a.name.localeCompare(b.name))
 
         return roots
-    }, [nodes, edges, instanceAssignments, assignmentKey, containmentEdgeTypes])
+    }, [nodes, edges, instanceAssignments, assignmentKey, containmentEdgeTypes, rootEntityTypes])
 
     // Filter tree by search and granularity
     const filteredTree = useMemo(() => {
@@ -528,10 +566,10 @@ export function EntityAssignmentPanel({
                     <Filter className="w-4 h-4 text-slate-400" />
                     <select
                         value={granularity}
-                        onChange={e => setGranularity(e.target.value as GranularityLevel)}
+                        onChange={e => setGranularity(e.target.value)}
                         className="flex-1 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5"
                     >
-                        {GRANULARITY_OPTIONS.map(opt => (
+                        {granularityOptions.map(opt => (
                             <option key={opt.value} value={opt.value}>{opt.label}</option>
                         ))}
                     </select>

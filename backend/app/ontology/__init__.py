@@ -6,7 +6,6 @@ Architecture: Hexagonal (Ports & Adapters)
   - service.py: LocalOntologyService (concrete implementation)
   - resolver.py: Pure merge/derive/validate/suggest functions (no I/O)
   - defaults.py: System default entity/relationship definitions
-  - events.py: Domain events and in-process event bus
   - models.py: Domain data classes
   - adapters/sqlalchemy_repo.py: SQLAlchemy repository implementation
 """

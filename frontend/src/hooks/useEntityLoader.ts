@@ -1,10 +1,15 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { useOntologyMetadata } from '@/services/ontologyService'
+import { useContainmentEdgeTypes, useRootEntityTypes, useEntityTypes, useSchemaIsLoading } from '@/store/schema'
+
+interface LoadChildrenOptions {
+    /** When true, load all schema entity types for root (used by Assignment tree) */
+    useAllSchemaTypes?: boolean
+}
 
 interface UseEntityLoaderResult {
-    loadChildren: (parentId: string) => Promise<void>
+    loadChildren: (parentId: string, options?: LoadChildrenOptions) => Promise<void>
     searchChildren: (parentId: string, query: string) => Promise<void>
     isLoading: boolean
     loadingNodes: Set<string>
@@ -18,20 +23,40 @@ interface UseEntityLoaderResult {
 export function useEntityLoader(): UseEntityLoaderResult {
     const { nodes, edges, addNodes, addEdges, removeNodes, removeEdges } = useCanvasStore()
     const provider = useGraphProvider()
-    const { containmentEdgeTypes } = useOntologyMetadata()
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+    const rootEntityTypes = useRootEntityTypes()
+    const schemaEntityTypes = useEntityTypes()
+    const isSchemaLoading = useSchemaIsLoading()
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
     const [failedNodes, setFailedNodes] = useState<Set<string>>(new Set())
+    // Prevent infinite retries when API returns [] for roots — only attempt once per rootEntityTypes config.
+    const rootsAttemptedForRef = useRef<string | null>(null)
 
-    const loadChildren = useCallback(async (parentId: string) => {
+    // Reset when provider changes (e.g. workspace/datasource switch) so we can reload.
+    useEffect(() => {
+        rootsAttemptedForRef.current = null
+    }, [provider])
+
+    const loadChildren = useCallback(async (parentId: string, options?: LoadChildrenOptions) => {
         // Handle root loading (empty parentId)
         if (!parentId) {
             if (loadingNodes.has('ROOT')) return
+            // Wait until the schema has fully loaded.
+            if (isSchemaLoading) return
+            // Decide which entity types to load: all schema types (assignment browser) or roots only (hierarchy).
+            const typesToLoad = options?.useAllSchemaTypes && schemaEntityTypes.length > 0
+                ? schemaEntityTypes.map((et) => et.id)
+                : rootEntityTypes
+            if (typesToLoad.length === 0) return
+            // Avoid infinite loop: when API returns [], nodes stay empty, effect re-runs, we retry forever.
+            const key = `all:${options?.useAllSchemaTypes ?? false}:${typesToLoad.join(',')}`
+            if (rootsAttemptedForRef.current === key) return
+            rootsAttemptedForRef.current = key
             setLoadingNodes(prev => new Set(prev).add('ROOT'))
             try {
-                // Fetch root entities as defined in ontology or provider defaults
                 const roots = await provider.getNodes({
-                    entityTypes: containmentEdgeTypes.length > 0 ? undefined : ['domain', 'system'],
-                    limit: 50
+                    entityTypes: typesToLoad as any[],
+                    limit: 200
                 })
 
                 if (roots.length > 0) {
@@ -50,6 +75,36 @@ export function useEntityLoader(): UseEntityLoaderResult {
                         }
                     } as any))
                     addNodes(nodesToAdd)
+                    // Fetch containment edges for hierarchy when loading all schema types
+                    if (options?.useAllSchemaTypes && containmentEdgeTypes.length > 0) {
+                        const urnSet = new Set([
+                            ...roots.map(r => r.urn),
+                            ...useCanvasStore.getState().nodes.map(n => n.id)
+                        ])
+                        try {
+                            const graphEdges = await provider.getEdges({
+                                sourceUrns: [...urnSet],
+                                edgeTypes: containmentEdgeTypes as any[],
+                                limit: 2000
+                            })
+                            const urnSetFull = new Set(useCanvasStore.getState().nodes.map(n => n.id))
+                            const edgesToAdd: LineageEdge[] = graphEdges
+                                .filter(e => urnSetFull.has(e.targetUrn))
+                                .map(e => ({
+                                    id: e.id,
+                                    source: e.sourceUrn,
+                                    target: e.targetUrn,
+                                    type: 'lineage' as const,
+                                    data: {
+                                        edgeType: e.edgeType || containmentEdgeTypes[0],
+                                        relationship: (e.edgeType || containmentEdgeTypes[0]).toLowerCase()
+                                    }
+                                }))
+                            if (edgesToAdd.length > 0) addEdges(edgesToAdd)
+                        } catch (edgeErr) {
+                            console.warn('[EntityLoader] Failed to load containment edges:', edgeErr)
+                        }
+                    }
                 }
             } catch (err) {
                 console.error('[EntityLoader] Failed to load roots', err)
@@ -88,12 +143,7 @@ export function useEntityLoader(): UseEntityLoaderResult {
             if (!existingNodeIds.has(e.target)) return false // Edge must point to existing node
 
             const type = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
-            // If we have ontology types, use them. Otherwise fallback to broad check.
-            if (containmentEdgeTypes.length > 0) {
-                return containmentEdgeTypes.some(t => t.toUpperCase() === type)
-            }
-            // Fallback for when ontology isn't loaded yet or valid
-            return ['CONTAINS', 'HAS_CHILD', 'HAS_COLUMN', 'HAS_TABLE'].includes(type)
+            return containmentEdgeTypes.some(t => t.toUpperCase() === type)
         }).length
 
         // If we have nearly all children (allow small drift), don't refetch
@@ -152,12 +202,12 @@ export function useEntityLoader(): UseEntityLoaderResult {
                     const edgeExists = freshEdges.some(e => e.id === edgeId) || edgesToAdd.some(e => e.id === edgeId)
 
                     if (!edgeExists) {
-                        // Use ontology-defined containment type if available, else CONTAINS
-                        const relationType = containmentEdgeTypes.length > 0 ? containmentEdgeTypes[0] : 'CONTAINS'
-
+                        // Use the first ontology-defined containment type.
+                        // The ontology (or backend introspection) is always the source of truth.
+                        const relationType = containmentEdgeTypes[0] ?? 'edge'
                         edgesToAdd.push({
                             id: edgeId,
-                            source: parentId, // Use the ID from the store
+                            source: parentId,
                             target: child.urn,
                             type: 'lineage',
                             data: {
@@ -183,7 +233,7 @@ export function useEntityLoader(): UseEntityLoaderResult {
                 return next
             })
         }
-    }, [nodes, edges, provider, containmentEdgeTypes, addNodes, addEdges, loadingNodes])
+    }, [nodes, edges, provider, containmentEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaLoading, addNodes, addEdges, loadingNodes])
 
     const searchChildren = useCallback(async (parentId: string, query: string) => {
         if (!query.trim()) return
@@ -256,7 +306,7 @@ export function useEntityLoader(): UseEntityLoaderResult {
                         const edgeExists = remainingEdges.some(e => e.id === edgeId) || edgesToAdd.some(e => e.id === edgeId)
 
                         if (!edgeExists) {
-                            const relationType = containmentEdgeTypes.length > 0 ? containmentEdgeTypes[0] : 'CONTAINS'
+                            const relationType = containmentEdgeTypes[0] ?? 'edge'
                             edgesToAdd.push({
                                 id: edgeId,
                                 source: parentId,

@@ -20,12 +20,12 @@ import type {
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import {
   GranularityLevel,
-  ENTITY_GRANULARITY,
   buildContainmentMap,
+  buildGranularityMap,
   aggregateLineageEdges,
   computeAllNodeCounts,
 } from '@/lib/projection-engine'
-import { useOntologyMetadata, normalizeEdgeType, isContainmentEdgeType } from '@/services/ontologyService'
+import { useSchemaEntityTypes, useContainmentEdgeTypes, normalizeEdgeType, useIsContainmentEdge } from '@/store/schema'
 
 // ============================================
 // EXPLORATION STORE
@@ -533,7 +533,7 @@ export function projectToGranularity(
   // Filter nodes at or above target granularity
   const filteredNodes = nodes.filter((node) => {
     const nodeType = node.data?.type as string
-    const nodeGranularity = ENTITY_GRANULARITY[nodeType] ?? GranularityLevel.Column
+    const nodeGranularity = granularityMap[nodeType] ?? GranularityLevel.Column
     return nodeGranularity >= targetLevel
   })
 
@@ -750,7 +750,10 @@ import { useEffect } from 'react'
 import { useEntityLoader } from '@/hooks/useEntityLoader'
 
 export function useLineageExploration(): UseLineageExplorationResult {
-  const { containmentEdgeTypes, isContainmentEdge } = useOntologyMetadata()
+  const containmentEdgeTypes = useContainmentEdgeTypes()
+  const isContainmentEdge = useIsContainmentEdge()
+  const schemaEntityTypes = useSchemaEntityTypes()
+  const granularityMap = buildGranularityMap(schemaEntityTypes)
   const provider = useGraphProvider()
   const {
     config,

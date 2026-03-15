@@ -29,6 +29,7 @@ def _to_response(row: OntologyORM) -> OntologyDefinitionResponse:
         id=row.id,
         name=row.name,
         version=row.version,
+        evolutionPolicy=getattr(row, "evolution_policy", "reject") or "reject",
         containmentEdgeTypes=json.loads(row.containment_edge_types or "[]"),
         lineageEdgeTypes=json.loads(row.lineage_edge_types or "[]"),
         edgeTypeMetadata=json.loads(row.edge_type_metadata or "{}"),
@@ -118,6 +119,7 @@ async def create_ontology(
     row = OntologyORM(
         name=req.name,
         version=1,
+        evolution_policy=req.evolution_policy or "reject",
         containment_edge_types=json.dumps(req.containment_edge_types),
         lineage_edge_types=json.dumps(req.lineage_edge_types),
         edge_type_metadata=json.dumps(req.edge_type_metadata),
@@ -166,6 +168,8 @@ async def update_ontology(
         row.entity_type_definitions = json.dumps(req.entity_type_definitions)
     if req.relationship_type_definitions is not None:
         row.relationship_type_definitions = json.dumps(req.relationship_type_definitions)
+    if req.evolution_policy is not None:
+        row.evolution_policy = req.evolution_policy
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
@@ -222,6 +226,11 @@ async def _create_new_version(
             json.dumps(req.relationship_type_definitions)
             if req.relationship_type_definitions is not None
             else original.relationship_type_definitions
+        ),
+        evolution_policy=(
+            req.evolution_policy
+            if req.evolution_policy is not None
+            else getattr(original, "evolution_policy", "reject") or "reject"
         ),
         is_published=False,
         is_system=False,

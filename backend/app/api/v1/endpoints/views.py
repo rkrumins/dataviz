@@ -43,6 +43,7 @@ async def list_views(
     tags: Optional[List[str]] = Query(None),
     limit: int = Query(50, le=200),
     offset: int = Query(0),
+    favourited_only: bool = Query(False, alias="favouritedOnly"),
     session: AsyncSession = Depends(get_db_session),
 ):
     """List accessible views with optional filtering."""
@@ -57,6 +58,7 @@ async def list_views(
         limit=limit,
         offset=offset,
         user_id=_PLACEHOLDER_USER,
+        favourited_only=favourited_only,
     )
 
 

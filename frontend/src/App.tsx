@@ -1,88 +1,74 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { AppShell } from '@/components/layout/AppShell'
 import { LoginPage } from '@/components/auth/LoginPage'
 import { useAuthStore } from '@/store/auth'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
-import { useSchemaStore } from '@/store/schema'
+import {
+  useSchemaStore,
+  useContainmentEdgeTypes,
+  useRootEntityTypes,
+  useEntityTypeHierarchyMap,
+  useSchemaIsLoading,
+} from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { useOntologyMetadata, getCachedOntologyMetadata } from '@/services/ontologyService'
 import { useGraphSchema } from '@/hooks/useGraphSchema'
 
 function App() {
   const { isAuthenticated } = useAuthStore()
   const { theme } = usePreferencesStore()
-  const { setNodes, setEdges, setActiveLens } = useCanvasStore()
+  const { setNodes, setEdges } = useCanvasStore()
   const { schema } = useSchemaStore()
   const provider = useGraphProvider()
-  const { containmentEdgeTypes, isLoading: isLoadingOntology, metadata: ontologyMetadata } = useOntologyMetadata()
+  const containmentEdgeTypes = useContainmentEdgeTypes()
+  const rootEntityTypes = useRootEntityTypes()
+  const entityTypeHierarchy = useEntityTypeHierarchyMap()
+  const isLoadingOntology = useSchemaIsLoading()
 
   // React Query-backed schema loading (replaces manual mergeBackendSchema pattern)
   const { isLoading: isLoadingBackendSchema } = useGraphSchema()
 
-  // Track which provider instance we've loaded graph data for (prevents re-fetch cascades)
-  const graphLoadedForProviderRef = useRef<typeof provider | null>(null)
-
-  // Use defaults if no containment types available - memoize to prevent recreation
-  const effectiveContainmentTypes = useMemo(() =>
-    containmentEdgeTypes.length > 0
-      ? containmentEdgeTypes
-      : ['CONTAINS', 'BELONGS_TO'],
-    [containmentEdgeTypes]
-  )
+  // Track which (provider, entity-type signature) combo we've already loaded for.
+  // Tracking provider alone is not enough: when the workspace changes, the schema
+  // store still holds the OLD workspace's entity types during the render where
+  // hasLoadedBackendSchema first becomes true (loadFromBackend runs in the same
+  // effects batch but its zustand update isn't visible until the next render).
+  // By including the entity-type signature we allow a re-fetch when the correct
+  // types arrive in the following render, without opening an infinite-loop risk.
+  const graphLoadedForRef = useRef<{ provider: typeof provider; typesSig: string } | null>(null)
 
   const hasLoadedBackendSchema = !isLoadingBackendSchema
 
   // Initialize graph data on mount (after schema is loaded)
-  // Runs ONCE per provider instance — subsequent dep changes (ontology, schema) do NOT re-fetch.
+  // Re-runs when provider changes (workspace switch) or when entity types change
+  // (new workspace schema arrived) — guards prevent unnecessary repeated fetches.
   useEffect(() => {
-    // Only initialize if authenticated and schema loading is complete
+    // Wait until the schema has loaded so we have ontology-defined root types,
+    // containment edges, and hierarchy. Never guess with hardcoded type names.
     if (!isAuthenticated) return
-    if (!hasLoadedBackendSchema && !schema) return // Wait for schema
+    if (isLoadingOntology || !hasLoadedBackendSchema) return
+    if (rootEntityTypes.length === 0) return
 
-    // Wait for ontology metadata to finish loading (either success or error)
-    const cachedMeta = getCachedOntologyMetadata()
-    if (isLoadingOntology && !ontologyMetadata && !cachedMeta) {
-      console.log('[App] Waiting for ontology metadata to load...')
-      return
-    }
+    // Skip if we already loaded for this exact provider + entity-type combination
+    const typesSig = rootEntityTypes.join(',')
+    if (graphLoadedForRef.current?.provider === provider &&
+        graphLoadedForRef.current?.typesSig === typesSig) return
+    graphLoadedForRef.current = { provider, typesSig }
 
-    // Only fetch once per provider instance (prevents cascading re-fetches
-    // when ontology, schema, or other deps change after initial load)
-    if (graphLoadedForProviderRef.current === provider) return
-    graphLoadedForProviderRef.current = provider
-
-    // Log what we're using
     if (containmentEdgeTypes.length > 0) {
       console.log('[App] Using containment edge types from backend:', containmentEdgeTypes)
-    } else {
-      console.warn('[App] No containment edge types from backend, using defaults:', effectiveContainmentTypes)
     }
 
-    // If schema still not loaded (edge case), load defaults
-    if (!schema) {
-      loadSchema(defaultWorkspaceSchema)
-    }
-
-    // Initialize backend data — loads the top 2 levels of the hierarchy
-    // so the user immediately sees roots + their direct children.
     const fetchInitialGraph = async () => {
       try {
-        const rootTypes = ontologyMetadata?.rootEntityTypes?.length && ontologyMetadata.rootEntityTypes.length > 0
-          ? ontologyMetadata.rootEntityTypes
-          : ['domain', 'dataPlatform', 'system'] // Safe defaults
+        const rootTypes = rootEntityTypes
 
-        // Also determine child types from ontology hierarchy so we can load
-        // orphaned nodes that exist at the top level without a parent.
+        // Child types from ontology hierarchy
         const childTypes = new Set<string>()
-        if (ontologyMetadata?.entityTypeHierarchy) {
-          for (const rootType of rootTypes) {
-            const hierarchy = ontologyMetadata.entityTypeHierarchy[rootType]
-            if (hierarchy?.canContain) {
-              hierarchy.canContain.forEach((t: string) => childTypes.add(t))
-            }
-          }
+        for (const rootType of rootTypes) {
+          const hierarchy = entityTypeHierarchy[rootType]
+          hierarchy?.canContain?.forEach((t: string) => childTypes.add(t))
         }
 
         console.log('[App] Fetching initial graph for root types:', rootTypes, 'child types:', [...childTypes])
@@ -140,27 +126,11 @@ function App() {
 
         console.log(`[App] Loaded ${uniqueNodes.length} nodes (${rootNodes.length} roots, ${allChildren.length} children, ${orphanNodes.length} orphans), ${uniqueEdges.length} edges`)
 
-        const toNodeType = (entityType: string) => {
-          switch (entityType) {
-            case 'schemaField':
-            case 'column':
-              return 'column'
-            case 'dataPlatform':
-            case 'system':
-              return 'system'
-            case 'dataset':
-            case 'table':
-              return 'dataset'
-            case 'container':
-              return 'container'
-            default:
-              return 'domain'
-          }
-        }
-
+        // Use the entity type id directly as the React Flow node type.
+        // GenericNode handles all types via the ontology schema — no hardcoded mapping.
         setNodes(uniqueNodes.map(n => ({
           id: n.urn,
-          type: toNodeType(n.entityType as string),
+          type: 'generic',
           position: { x: Math.random() * 800, y: Math.random() * 600 },
           data: {
             label: n.displayName,
@@ -190,7 +160,7 @@ function App() {
     }
 
     fetchInitialGraph()
-  }, [isAuthenticated, hasLoadedBackendSchema, isLoadingOntology, ontologyMetadata, provider, effectiveContainmentTypes.join(','), setNodes, setEdges, setActiveLens, loadSchema, schema])
+  }, [isAuthenticated, hasLoadedBackendSchema, isLoadingOntology, rootEntityTypes, entityTypeHierarchy, provider, containmentEdgeTypes, setNodes, setEdges, schema])
 
   // Apply theme class to document
   useEffect(() => {

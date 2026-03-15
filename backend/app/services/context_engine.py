@@ -67,9 +67,7 @@ class ContextEngine:
         self._workspace_id: Optional[str] = None
         self._data_source_id: Optional[str] = None
         self._db_session: Optional["AsyncSession"] = None
-        self._ontology_cache: Optional[OntologyMetadata] = None
-        self._ontology_cache_ts: float = 0.0
-        # Cache for resolved rich definitions (keyed by workspace+ds)
+        # Single ontology cache slot (resolved form, includes flat projection fields).
         self._resolved_ontology_cache: Optional[Any] = None
         self._resolved_ontology_cache_ts: float = 0.0
 
@@ -130,60 +128,63 @@ class ContextEngine:
 
     async def get_ontology_metadata(self) -> OntologyMetadata:
         """
-        Return ontology metadata, merging stored config with graph introspection.
-        Results are cached with a TTL to avoid repeated DB/graph queries.
-
-        Priority order:
-        1. Workspace path: load assigned ontology → merge with introspection
-        2. Connection path (legacy): load ontology_config → merge with introspection
-        3. Singleton path: introspection only
+        Return flat ontology metadata projected from the resolved ontology cache.
         """
-        now = time.monotonic()
-        if self._ontology_cache and (now - self._ontology_cache_ts) < self._ONTOLOGY_CACHE_TTL:
-            return self._ontology_cache
-
-        result = await self._fetch_ontology_metadata()
-        self._ontology_cache = result
-        self._ontology_cache_ts = now
-        return result
+        resolved = await self._resolve_ontology()
+        return resolved.to_flat_metadata()
 
     def invalidate_ontology_cache(self) -> None:
         """Clear cached ontology so the next call re-fetches from source."""
-        self._ontology_cache = None
         self._resolved_ontology_cache = None
+        self._resolved_ontology_cache_ts = 0.0
 
-    async def _fetch_ontology_metadata(self) -> OntologyMetadata:
+    async def _resolve_ontology(self):
         """
-        Internal: fetch and merge ontology metadata (uncached).
+        Single ontology resolution entry point with TTL caching.
+        Returns ResolvedOntology for all callers.
+        """
+        now = time.monotonic()
+        if (
+            self._resolved_ontology_cache is not None
+            and (now - self._resolved_ontology_cache_ts) < self._ONTOLOGY_CACHE_TTL
+        ):
+            return self._resolved_ontology_cache
 
-        Uses the OntologyService for workspace-scoped engines with the three-layer merge:
-        system_default <- assigned <- introspection.
-        Falls back to introspection-only for unregistered engines.
-        """
         introspected = await self.provider.get_ontology_metadata()
+        introspected_entity_ids = list(introspected.entity_type_hierarchy.keys()) if introspected else None
+        introspected_rel_ids = list(introspected.edge_type_metadata.keys()) if introspected else None
 
         if self._ontology_service and self._workspace_id:
             try:
                 resolved = await self._ontology_service.resolve(
                     workspace_id=self._workspace_id,
                     data_source_id=self._data_source_id,
-                    introspected=introspected,
+                    introspected_entity_ids=introspected_entity_ids,
+                    introspected_rel_ids=introspected_rel_ids,
                 )
-                # Cache the rich resolved ontology for get_graph_schema()
                 self._resolved_ontology_cache = resolved
                 self._resolved_ontology_cache_ts = time.monotonic()
-                # Convert ResolvedOntology back to OntologyMetadata (flat format for legacy callers)
-                return OntologyMetadata(
-                    containmentEdgeTypes=resolved.containment_edge_types,
-                    lineageEdgeTypes=resolved.lineage_edge_types,
-                    edgeTypeMetadata=resolved.edge_type_metadata,
-                    entityTypeHierarchy=resolved.entity_type_hierarchy,
-                    rootEntityTypes=resolved.root_entity_types,
-                )
+                return resolved
             except Exception as exc:
                 logger.warning("OntologyService.resolve() failed, falling back to introspection: %s", exc)
 
-        return introspected
+        # Legacy/no-service fallback: still cache as a ResolvedOntology-shaped object.
+        from ..ontology.models import ResolvedOntology
+
+        fallback = ResolvedOntology(
+            containment_edge_types=introspected.containment_edge_types if introspected else [],
+            lineage_edge_types=introspected.lineage_edge_types if introspected else [],
+            edge_type_metadata=introspected.edge_type_metadata if introspected else {},
+            entity_type_hierarchy=introspected.entity_type_hierarchy if introspected else {},
+            root_entity_types=introspected.root_entity_types if introspected else [],
+        )
+        self._resolved_ontology_cache = fallback
+        self._resolved_ontology_cache_ts = time.monotonic()
+        return fallback
+
+    async def _get_resolved_ontology(self):
+        """Return the cached ResolvedOntology, refreshing via _resolve_ontology() if needed."""
+        return await self._resolve_ontology()
 
     async def get_node(self, urn: str) -> Optional[GraphNode]:
         return await self.provider.get_node(urn)
@@ -711,6 +712,7 @@ class ContextEngine:
             relationshipTypes=relationship_types,
             rootEntityTypes=ontology.root_entity_types,
             containmentEdgeTypes=ontology.containment_edge_types,
+            lineageEdgeTypes=ontology.lineage_edge_types,
         )
 
     def _build_entity_types_from_resolved(self, stats, resolved) -> List[EntityTypeDefinition]:
@@ -814,6 +816,8 @@ class ContextEngine:
                 bidirectional=rel_def.bidirectional,
                 showLabel=rel_def.show_label,
                 isContainment=rel_def.is_containment,
+                isLineage=rel_def.is_lineage,
+                category=rel_def.category,
             ))
 
         return result
@@ -827,8 +831,16 @@ class ContextEngine:
             icon = (stat.icon if stat.icon else None) or (ent_def.visual.icon if ent_def else "Box")
             color = (stat.color if stat.color else None) or (ent_def.visual.color if ent_def else "#6366f1")
             hierarchy_info = ontology.entity_type_hierarchy.get(entity_id, {})
-            can_contain = hierarchy_info.get('canContain', []) if isinstance(hierarchy_info, dict) else []
-            can_be_contained = hierarchy_info.get('canBeContainedBy', []) if isinstance(hierarchy_info, dict) else []
+            if isinstance(hierarchy_info, dict):
+                can_contain = hierarchy_info.get('canContain', []) or hierarchy_info.get('can_contain', [])
+                can_be_contained = hierarchy_info.get('canBeContainedBy', []) or hierarchy_info.get('can_be_contained_by', [])
+            else:
+                can_contain = getattr(hierarchy_info, 'can_contain', None) or getattr(hierarchy_info, 'canContain', []) or []
+                can_be_contained = (
+                    getattr(hierarchy_info, 'can_be_contained_by', None)
+                    or getattr(hierarchy_info, 'canBeContainedBy', [])
+                    or []
+                )
             level = ent_def.hierarchy.level if ent_def else 3
 
             result.append(EntityTypeDefinition(
@@ -865,10 +877,12 @@ class ContextEngine:
         """Fallback: build relationship types from defaults dict when no OntologyService is wired."""
         result: List[RelationshipTypeDefinition] = []
         containment_upper = {t.upper() for t in ontology.containment_edge_types}
+        lineage_upper = {t.upper() for t in ontology.lineage_edge_types}
         for stat in stats.edge_type_stats:
             edge_id = stat.id
             rel_def = sys_rel.get(edge_id.upper()) or sys_rel.get(edge_id)
             is_containment = edge_id.upper() in containment_upper
+            is_lineage = edge_id.upper() in lineage_upper
             result.append(RelationshipTypeDefinition(
                 id=edge_id.lower(),
                 name=stat.name,
@@ -887,6 +901,8 @@ class ContextEngine:
                 bidirectional=False,
                 showLabel=rel_def.show_label if rel_def else False,
                 isContainment=is_containment,
+                isLineage=is_lineage,
+                category=rel_def.category if rel_def else ("structural" if is_containment else "flow" if is_lineage else "association"),
             ))
         return result
 
@@ -926,42 +942,52 @@ class ContextEngine:
     async def create_node(self, request: CreateNodeRequest) -> CreateNodeResult:
         """
         Create a new node with optional automatic containment edge.
-        Validates against ontology rules before creation.
+        Validates against the resolved ontology before creation.
         """
-        import uuid
         from datetime import datetime
-        
-        # Generate URN
-        urn = f"urn:nexus:{str(request.entity_type)}:{uuid.uuid4().hex[:12]}"
-        
+        from backend.app.ontology.urn import make_urn
+        from backend.app.ontology.mutation_validator import (
+            MutationOp,
+            validate_node_mutation,
+        )
+
+        # Resolve the ontology once (cached by ContextEngine)
+        resolved = await self._get_resolved_ontology()
+
         # Validate parent relationship if specified
         containment_edge = None
+        parent_entity_type: Optional[str] = None
         if request.parent_urn:
-            # Get ontology to validate hierarchy
-            ontology = await self.provider.get_ontology_metadata()
-            
-            # Get parent node to check its type
             parent_node = await self.provider.get_node(request.parent_urn)
             if not parent_node:
                 return CreateNodeResult(
                     node=None,
                     containmentEdge=None,
                     success=False,
-                    error=f"Parent node not found: {request.parent_urn}"
+                    error=f"Parent node not found: {request.parent_urn}",
                 )
-            
-            # Validate hierarchy rules
-            parent_type = str(parent_node.entity_type)
-            parent_hierarchy = ontology.entity_type_hierarchy.get(parent_type, {})
-            can_contain = parent_hierarchy.get('canContain', []) if isinstance(parent_hierarchy, dict) else (parent_hierarchy.can_contain if hasattr(parent_hierarchy, 'can_contain') else [])
-            
-            if str(request.entity_type) not in can_contain and len(can_contain) > 0:
+            parent_entity_type = str(parent_node.entity_type)
+
+        # Ontology-driven validation
+        if resolved and resolved.entity_type_definitions:
+            result = validate_node_mutation(
+                op=MutationOp.CREATE,
+                entity_type=str(request.entity_type),
+                ontology=resolved,
+                parent_entity_type=parent_entity_type,
+            )
+            if not result.ok:
                 return CreateNodeResult(
                     node=None,
                     containmentEdge=None,
                     success=False,
-                    error=f"Entity type '{str(request.entity_type)}' cannot be contained by '{parent_type}'"
+                    error="; ".join(result.errors),
                 )
+
+        # Generate a canonical Synodic URN
+        urn = make_urn(entity_type=str(request.entity_type), source_system="manual")
+
+        if request.parent_urn and parent_entity_type:
             
             # Create containment edge
             containment_edge = GraphEdge(
@@ -1015,6 +1041,160 @@ class ContextEngine:
             success=True,
             error=None
         )
+
+    # ------------------------------------------------------------------ #
+    # Edge CRUD                                                            #
+    # ------------------------------------------------------------------ #
+
+    async def create_edge(self, request) -> Any:
+        """
+        Create a directed edge with ontology-driven source/target validation.
+        Returns an EdgeMutationResult.
+        """
+        import uuid as _uuid
+        from backend.app.ontology.mutation_validator import MutationOp, validate_edge_mutation
+        from backend.common.models.graph import EdgeMutationResult
+
+        resolved = await self._get_resolved_ontology()
+
+        # Fetch source and target nodes to get their entity types
+        source_node = await self.provider.get_node(request.source_urn)
+        target_node = await self.provider.get_node(request.target_urn)
+
+        if not source_node:
+            return EdgeMutationResult(success=False, error=f"Source node not found: {request.source_urn}")
+        if not target_node:
+            return EdgeMutationResult(success=False, error=f"Target node not found: {request.target_urn}")
+
+        # Validate against ontology
+        if resolved is not None and resolved.relationship_type_definitions:
+            val = validate_edge_mutation(
+                op=MutationOp.CREATE,
+                edge_type=request.edge_type,
+                source_entity_type=str(source_node.entity_type),
+                target_entity_type=str(target_node.entity_type),
+                ontology=resolved,
+            )
+            if not val.ok:
+                return EdgeMutationResult(success=False, error="; ".join(val.errors), warnings=val.warnings)
+
+        edge_id = request.idempotency_key or f"edge-{_uuid.uuid4().hex[:12]}"
+        edge = GraphEdge(
+            id=edge_id,
+            sourceUrn=request.source_urn,
+            targetUrn=request.target_urn,
+            edgeType=request.edge_type,
+            confidence=1.0,
+            properties=request.properties,
+        )
+
+        try:
+            await self.provider.create_edge(edge)
+        except NotImplementedError:
+            logger.warning("Provider does not support edge creation — returning optimistic result")
+        except Exception as exc:
+            return EdgeMutationResult(success=False, error=str(exc))
+
+        return EdgeMutationResult(edge=edge, success=True)
+
+    async def update_edge(self, edge_id: str, request) -> Any:
+        """Update mutable edge properties."""
+        from backend.common.models.graph import EdgeMutationResult
+
+        try:
+            edge = await self.provider.update_edge(edge_id, request.properties)
+            if edge is None:
+                return EdgeMutationResult(success=False, error=f"Edge '{edge_id}' not found")
+            return EdgeMutationResult(edge=edge, success=True)
+        except NotImplementedError:
+            return EdgeMutationResult(success=False, error="Provider does not support edge updates")
+        except Exception as exc:
+            return EdgeMutationResult(success=False, error=str(exc))
+
+    async def delete_edge(self, edge_id: str) -> bool:
+        """Delete an edge by ID. Returns True on success."""
+        try:
+            return await self.provider.delete_edge(edge_id)
+        except NotImplementedError:
+            logger.warning("Provider does not support edge deletion")
+            return False
+
+    # ------------------------------------------------------------------ #
+    # Preflight helpers                                                    #
+    # ------------------------------------------------------------------ #
+
+    async def get_allowed_children(self, parent_urn: str) -> List[Any]:
+        """
+        Return all ontology entity types annotated with allowed=True/False
+        depending on whether this node's entity type can contain them.
+        """
+        from backend.app.api.v1.endpoints.graph import AllowedChildOption
+
+        parent_node = await self.provider.get_node(parent_urn)
+        resolved = await self._get_resolved_ontology()
+
+        if not parent_node or not resolved:
+            return []
+
+        parent_type = str(parent_node.entity_type)
+        parent_def = resolved.entity_type_definitions.get(parent_type) if resolved else None
+        allowed_children: set = set(parent_def.hierarchy.can_contain) if parent_def else set()
+
+        result = []
+        for et_id, et_def in (resolved.entity_type_definitions.items() if resolved else {}.items()):
+            allowed = et_id in allowed_children
+            result.append(AllowedChildOption(
+                entityType=et_id,
+                label=et_def.name,
+                description=et_def.description,
+                allowed=allowed,
+                reason=(
+                    None if allowed
+                    else f"'{parent_type}' cannot contain '{et_id}' per the active ontology"
+                ),
+            ))
+        return sorted(result, key=lambda o: (not o.allowed, o.entity_type))
+
+    async def get_allowed_edges(self, source_urn: str, direction: str = "outgoing") -> List[Any]:
+        """
+        Return all ontology relationship types annotated with allowed=True/False
+        depending on whether this node's entity type can be the source (or target).
+        """
+        from backend.app.api.v1.endpoints.graph import AllowedEdgeOption
+
+        node = await self.provider.get_node(source_urn)
+        resolved = await self._get_resolved_ontology()
+
+        if not node or not resolved:
+            return []
+
+        node_type = str(node.entity_type)
+        result = []
+        for rt_id, rt_def in (resolved.relationship_type_definitions.items() if resolved else {}.items()):
+            src_types = rt_def.source_types or []
+            tgt_types = rt_def.target_types or []
+            if direction in ("outgoing", "both"):
+                allowed = (not src_types) or (node_type in src_types)
+                reason = (
+                    None if allowed
+                    else f"'{node_type}' is not a valid source for '{rt_id}'. "
+                         f"Allowed: {sorted(src_types)}"
+                )
+            else:  # incoming
+                allowed = (not tgt_types) or (node_type in tgt_types)
+                reason = (
+                    None if allowed
+                    else f"'{node_type}' is not a valid target for '{rt_id}'. "
+                         f"Allowed: {sorted(tgt_types)}"
+                )
+            result.append(AllowedEdgeOption(
+                edgeType=rt_id,
+                label=rt_def.name,
+                description=rt_def.description,
+                allowed=allowed,
+                reason=reason,
+            ))
+        return sorted(result, key=lambda o: (not o.allowed, o.edge_type))
 
 # Singleton instance - provider selected via GRAPH_PROVIDER env (mock | falkordb)
 context_engine = ContextEngine(provider=_create_provider())

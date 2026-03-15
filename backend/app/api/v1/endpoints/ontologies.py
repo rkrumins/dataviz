@@ -5,19 +5,12 @@ Published ontologies are immutable; updates create new versions.
 System ontologies (is_system=True) cannot be deleted.
 """
 from typing import List, Optional
-from fastapi import APIRouter, Body, Depends, HTTPException, Path
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import ontology_definition_repo
 from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
-from backend.app.ontology.events import (
-    OntologyCreated,
-    OntologyDeleted,
-    OntologyPublished,
-    OntologyUpdated,
-    event_bus,
-)
 from backend.app.ontology.resolver import (
     parse_entity_definitions,
     parse_relationship_definitions,
@@ -54,11 +47,7 @@ async def create_ontology(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Create a new ontology (starts at version 1, unpublished)."""
-    result = await ontology_definition_repo.create_ontology(session, req)
-    await event_bus.publish(OntologyCreated(
-        ontology_id=result.id, name=result.name, is_system=result.isSystem,
-    ))
-    return result
+    return await ontology_definition_repo.create_ontology(session, req)
 
 
 @router.get("/{ontology_id}", response_model=OntologyDefinitionResponse)
@@ -86,9 +75,6 @@ async def update_ontology(
     ontology = await ontology_definition_repo.update_ontology(session, ontology_id, req)
     if not ontology:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await event_bus.publish(OntologyUpdated(
-        ontology_id=ontology.id, name=ontology.name, version=ontology.version,
-    ))
     return ontology
 
 
@@ -112,21 +98,32 @@ async def delete_ontology(
             detail="Cannot delete ontology: one or more data sources still reference it.",
         )
     await ontology_definition_repo.delete_ontology(session, ontology_id)
-    await event_bus.publish(OntologyDeleted(ontology_id=ontology_id))
 
 
 @router.post("/{ontology_id}/publish", response_model=OntologyDefinitionResponse)
 async def publish_ontology(
     ontology_id: str = Path(...),
+    force: bool = Query(False, description="Bypass evolution_policy check (admin only)."),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Mark an ontology as published (immutable after this)."""
+    """
+    Mark an ontology as published (immutable after this).
+
+    Runs an impact check first. If the evolution_policy is 'reject' and the
+    publish would remove existing types, the request is blocked with HTTP 409.
+    Pass ?force=true to skip this guard (use with caution).
+    """
+    if not force:
+        impact = await get_ontology_impact(ontology_id, session)
+        if not impact["allowed"]:
+            raise HTTPException(
+                status_code=409,
+                detail=impact["reason"],
+            )
+
     ontology = await ontology_definition_repo.publish_ontology(session, ontology_id)
     if not ontology:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await event_bus.publish(OntologyPublished(
-        ontology_id=ontology.id, name=ontology.name, version=ontology.version,
-    ))
     return ontology
 
 
@@ -156,11 +153,7 @@ async def clone_ontology(
         entityTypeDefinitions=json.loads(source.entity_type_definitions or "{}"),
         relationshipTypeDefinitions=json.loads(source.relationship_type_definitions or "{}"),
     )
-    result = await ontology_definition_repo.create_ontology(session, req)
-    await event_bus.publish(OntologyCreated(
-        ontology_id=result.id, name=result.name, is_system=False,
-    ))
-    return result
+    return await ontology_definition_repo.create_ontology(session, req)
 
 
 @router.post("/{ontology_id}/validate", response_model=OntologyValidationResponse)
@@ -220,6 +213,92 @@ async def get_ontology_coverage(
         coveredRelationshipTypes=report.covered_relationship_types,
         uncoveredRelationshipTypes=report.uncovered_relationship_types,
     )
+
+
+@router.get("/{ontology_id}/impact", response_model=dict)
+async def get_ontology_impact(
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Simulate the impact of publishing this ontology version.
+
+    Compares the draft to the previously published version of the same ontology
+    name and returns:
+    - added entity / relationship types
+    - removed entity / relationship types
+    - changed definitions
+    - whether publishing is allowed given the evolution_policy
+    - the reason if it is blocked
+
+    A 200 response does NOT publish — call /{id}/publish to commit.
+    """
+    import json
+
+    draft_row = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
+    if not draft_row:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    if draft_row.is_published:
+        raise HTTPException(status_code=409, detail="Ontology is already published.")
+
+    # Find the latest published version of the same ontology name
+    from sqlalchemy import select
+    from backend.app.db.models import OntologyORM
+    result = await session.execute(
+        select(OntologyORM)
+        .where(OntologyORM.name == draft_row.name)
+        .where(OntologyORM.is_published == True)  # noqa: E712
+        .order_by(OntologyORM.version.desc())
+        .limit(1)
+    )
+    prev_row = result.scalar_one_or_none()
+
+    draft_entities = set(json.loads(draft_row.entity_type_definitions or "{}").keys())
+    draft_rels = set(json.loads(draft_row.relationship_type_definitions or "{}").keys())
+
+    if prev_row is None:
+        # First publish — no breaking changes possible
+        return {
+            "allowed": True,
+            "reason": None,
+            "addedEntityTypes": sorted(draft_entities),
+            "removedEntityTypes": [],
+            "addedRelationshipTypes": sorted(draft_rels),
+            "removedRelationshipTypes": [],
+        }
+
+    prev_entities = set(json.loads(prev_row.entity_type_definitions or "{}").keys())
+    prev_rels = set(json.loads(prev_row.relationship_type_definitions or "{}").keys())
+
+    removed_entities = sorted(prev_entities - draft_entities)
+    removed_rels = sorted(prev_rels - draft_rels)
+    has_breaking = bool(removed_entities or removed_rels)
+
+    policy = getattr(draft_row, "evolution_policy", "reject") or "reject"
+    allowed = True
+    reason = None
+
+    if has_breaking and policy == "reject":
+        allowed = False
+        reason = (
+            f"Evolution policy is 'reject' and publishing would remove "
+            f"{len(removed_entities)} entity type(s) and "
+            f"{len(removed_rels)} relationship type(s). "
+            "Change the evolution_policy to 'deprecate' or 'migrate', "
+            "or restore the removed types."
+        )
+
+    return {
+        "allowed": allowed,
+        "reason": reason,
+        "evolutionPolicy": policy,
+        "addedEntityTypes": sorted(draft_entities - prev_entities),
+        "removedEntityTypes": removed_entities,
+        "addedRelationshipTypes": sorted(draft_rels - prev_rels),
+        "removedRelationshipTypes": removed_rels,
+        # EXTENSION POINT: include per-field TypeDiff and affected data sources/views
+        # when publish-confirmation UX needs richer blast-radius detail.
+    }
 
 
 @router.post("/suggest", response_model=OntologyCreateRequest, status_code=200)

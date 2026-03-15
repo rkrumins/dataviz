@@ -197,6 +197,11 @@ class OntologyCreateRequest(BaseModel):
     name: str
     version: int = 1
     scope: str = "universal"  # "universal" | "workspace"
+    # Schema evolution policy: what happens when this ontology is updated and published.
+    # reject   — block publish if it breaks existing data (default, safest).
+    # deprecate — mark removed/renamed types deprecated; still served.
+    # migrate  — apply a migration manifest to remap types automatically.
+    evolution_policy: str = Field("reject", alias="evolutionPolicy")
     containment_edge_types: List[str] = Field(default_factory=list, alias="containmentEdgeTypes")
     lineage_edge_types: List[str] = Field(default_factory=list, alias="lineageEdgeTypes")
     edge_type_metadata: Dict[str, Any] = Field(default_factory=dict, alias="edgeTypeMetadata")
@@ -211,6 +216,7 @@ class OntologyCreateRequest(BaseModel):
 
 class OntologyUpdateRequest(BaseModel):
     name: Optional[str] = None
+    evolution_policy: Optional[str] = Field(None, alias="evolutionPolicy")
     containment_edge_types: Optional[List[str]] = Field(None, alias="containmentEdgeTypes")
     lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
     edge_type_metadata: Optional[Dict[str, Any]] = Field(None, alias="edgeTypeMetadata")
@@ -227,6 +233,7 @@ class OntologyDefinitionResponse(BaseModel):
     id: str
     name: str
     version: int
+    evolution_policy: str = Field("reject", alias="evolutionPolicy")
     containment_edge_types: List[str] = Field(alias="containmentEdgeTypes")
     lineage_edge_types: List[str] = Field(alias="lineageEdgeTypes")
     edge_type_metadata: Dict[str, Any] = Field(alias="edgeTypeMetadata")
@@ -242,12 +249,6 @@ class OntologyDefinitionResponse(BaseModel):
 
     class Config:
         populate_by_name = True
-
-
-# Backward-compat aliases (used by provider_registry bootstrap; remove in Phase 5)
-BlueprintCreateRequest = OntologyCreateRequest
-BlueprintUpdateRequest = OntologyUpdateRequest
-BlueprintResponse = OntologyDefinitionResponse
 
 
 class OntologyValidationIssue(BaseModel):

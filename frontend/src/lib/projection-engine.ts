@@ -21,13 +21,17 @@ export enum GranularityLevel {
 }
 
 /**
- * Default granularity map — used as fallback when no ontology schema is loaded.
- * In production, granularity is derived from the ontology's entity hierarchy
- * (EntityTypeSchema.hierarchy.level). This map only covers well-known system types.
+ * Internal fallback granularity map — only used when the schema store has not yet
+ * loaded. All production code paths should derive granularity from
+ * EntityTypeSchema.hierarchy.level via useSchemaGranularityMap().
  *
- * @deprecated Prefer passing schemaGranularity via ViewProjectionConfig when available.
+ * Domain is the coarsest (level 0 in ontology → highest GranularityLevel enum value).
+ * Column is the finest (level 4 in ontology → GranularityLevel.Column = 0).
+ * The mapping inverts the ontology level: granularityLevel = MAX_LEVEL - ontologyLevel.
+ *
+ * @internal Do not import this directly — use useSchemaGranularityMap() instead.
  */
-export const ENTITY_GRANULARITY: Record<string, GranularityLevel> = {
+const _FALLBACK_ENTITY_GRANULARITY: Record<string, GranularityLevel> = {
   'column': GranularityLevel.Column,
   'schemaField': GranularityLevel.Column,
   'dataset': GranularityLevel.Table,
@@ -44,11 +48,36 @@ export const ENTITY_GRANULARITY: Record<string, GranularityLevel> = {
 }
 
 /**
- * Default parent type map — used as fallback when no ontology schema is loaded.
- * In production, parent relationships are derived from the ontology's
- * EntityTypeSchema.hierarchy.canBeContainedBy field.
+ * @deprecated Import ENTITY_GRANULARITY only for backward-compat; prefer
+ * useSchemaGranularityMap() to get an ontology-driven map.
+ */
+export const ENTITY_GRANULARITY: Record<string, GranularityLevel> = _FALLBACK_ENTITY_GRANULARITY
+
+/**
+ * Build a granularity map from an array of entity type schemas.
+ * The ontology hierarchy level is inverted so that a lower ontology level
+ * (closer to root/domain) maps to a higher GranularityLevel enum value.
  *
- * @deprecated Prefer reading parent relationships from the schema store.
+ * @param entityTypes - Array of EntityTypeSchema objects from the schema store.
+ * @returns Record mapping entity type id → GranularityLevel
+ */
+export function buildGranularityMap(
+  entityTypes: Array<{ id: string; hierarchy: { level: number } }>,
+): Record<string, GranularityLevel> {
+  if (entityTypes.length === 0) return _FALLBACK_ENTITY_GRANULARITY
+
+  const maxLevel = Math.max(...entityTypes.map((e) => e.hierarchy.level))
+  const result: Record<string, GranularityLevel> = {}
+  for (const e of entityTypes) {
+    // Invert: finest (highest ontology level) → Column (0), coarsest (0) → Domain (4)
+    result[e.id] = (maxLevel - e.hierarchy.level) as GranularityLevel
+  }
+  return result
+}
+
+/**
+ * @deprecated Use buildGranularityMap() + containment from schema instead.
+ * Retained for isolated usages not yet migrated to schema store.
  */
 export const ENTITY_PARENT_TYPE: Record<string, string> = {
   'column': 'dataset',
@@ -205,18 +234,22 @@ export function computeAllNodeCounts(
 }
 
 /**
- * Find ancestor at a specific granularity level
+ * Find ancestor at a specific granularity level.
+ *
+ * @param granularityMap - Schema-derived map (from buildGranularityMap).
+ *   Falls back to the internal hardcoded map when not supplied.
  */
 export function findAncestorAtGranularity(
   nodeId: string,
   targetGranularity: GranularityLevel,
   nodes: Node[],
-  containmentMap: Map<string, string>
+  containmentMap: Map<string, string>,
+  granularityMap: Record<string, GranularityLevel> = _FALLBACK_ENTITY_GRANULARITY,
 ): string | null {
   const nodeMap = new Map(nodes.map(n => [n.id, n]))
 
   let currentId: string | undefined = nodeId
-  let visited = new Set<string>()
+  const visited = new Set<string>()
 
   while (currentId && !visited.has(currentId)) {
     visited.add(currentId)
@@ -224,7 +257,7 @@ export function findAncestorAtGranularity(
     if (!node) return null
 
     const nodeType = node.data?.type as string
-    const nodeGranularity = ENTITY_GRANULARITY[nodeType] ?? GranularityLevel.Column
+    const nodeGranularity = granularityMap[nodeType] ?? GranularityLevel.Column
 
     if (nodeGranularity >= targetGranularity) {
       return currentId

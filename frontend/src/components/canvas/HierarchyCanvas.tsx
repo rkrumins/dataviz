@@ -13,9 +13,8 @@ import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useSchemaStore } from '@/store/schema'
+import { useSchemaStore, useContainmentEdgeTypes, useLineageEdgeTypes, isContainmentEdgeType, useRelationshipTypes } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
-import { useOntologyMetadata, isContainmentEdgeType } from '@/services/ontologyService'
 import { useEntityLoader } from '@/hooks/useEntityLoader'
 
 // UX-first interaction components (unified with LineageCanvas)
@@ -67,9 +66,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const { nodes, edges, selectNode, selectedNodeIds, addNodes, addEdges } = useCanvasStore()
   const selectedNodeId = selectedNodeIds[0] ?? null
   const schema = useSchemaStore((s) => s.schema)
-  const { containmentEdgeTypes, lineageEdgeTypes } = useOntologyMetadata()
+  const containmentEdgeTypes = useContainmentEdgeTypes()
+  const lineageEdgeTypes = useLineageEdgeTypes()
   const { loadChildren, loadingNodes } = useEntityLoader()
-  const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
+  const relationshipTypes = useRelationshipTypes()
   const provider = useGraphProvider()
 
   // Search state

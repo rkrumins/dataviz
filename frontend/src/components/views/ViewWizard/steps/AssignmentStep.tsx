@@ -116,7 +116,6 @@ export function AssignmentStep({ formData, updateFormData, linkedContextModelId,
             <div className="w-2/5 min-w-[380px] flex flex-col">
                 <WizardAssignmentTree
                     layers={formData.layers || []}
-                    containmentEdgeTypes={containmentEdgeTypes}
                     onAssignmentChange={handleAssignmentChange}
                     onBulkAssign={handleBulkAssignment}
                     className="h-full"
