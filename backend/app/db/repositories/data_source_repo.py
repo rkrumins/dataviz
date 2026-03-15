@@ -145,8 +145,6 @@ async def update_data_source(
     if not row:
         return None
 
-    if req.catalog_item_id is not None:
-        row.catalog_item_id = req.catalog_item_id
     if req.ontology_id is not None:
         row.ontology_id = req.ontology_id
     if req.label is not None:

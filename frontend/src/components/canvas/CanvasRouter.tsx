@@ -12,7 +12,7 @@ import { Suspense, useMemo, useEffect, useRef } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2 } from 'lucide-react'
-import { useSchemaStore, useRootEntityTypes, useSchemaIsLoading } from '@/store/schema'
+import { useSchemaStore, useRootEntityTypes, useSchemaIsLoading, useEntityTypes } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { LineageCanvas } from './LineageCanvas'
@@ -20,6 +20,73 @@ import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
 import { LayeredLineageCanvas } from './LayeredLineageCanvas'
 import { cn } from '@/lib/utils'
+import type { GraphNode, EntityTypeDefinition } from '@/providers/GraphDataProvider'
+
+/** Max entities per type per fetch. Keeps initial loads manageable. */
+const PER_TYPE_LIMIT = 200
+
+function toCanvasNode(n: GraphNode, opts?: { randomPosition?: boolean }) {
+  return {
+    id: n.urn,
+    type: 'generic' as const,
+    position: opts?.randomPosition
+      ? { x: Math.random() * 800, y: Math.random() * 600 }
+      : { x: 0, y: 0 },
+    data: {
+      label: n.displayName,
+      type: n.entityType,
+      urn: n.urn,
+      metadata: n.properties,
+      childCount: n.childCount,
+      classifications: n.tags,
+      businessLabel: (n.properties?.businessLabel as string) ?? undefined,
+      ...n,
+    },
+  }
+}
+
+/**
+ * Compute the "view-scoped root types" for a reference/context view.
+ *
+ * A type is a VIEW ROOT if none of its canBeContainedBy parents appear in
+ * the view's visibleEntityTypes set. This correctly handles multiple
+ * independent hierarchies coexisting in one graph:
+ *
+ *   Physical tree:    DataDomain → DataPlatform → System → Table → Column
+ *   Reference tree:   Country → Region → City
+ *   Governance tree:  SharingPolicy
+ *
+ * For visibleEntityTypes = ["DataDomain","DataPlatform","Country","SharingPolicy"]:
+ *   → roots = ["DataDomain", "Country", "SharingPolicy"]   (each tree's entry point)
+ *
+ * For visibleEntityTypes = ["DataPlatform","System","Table"]:
+ *   → roots = ["DataPlatform"]   (DataDomain is not visible, so DataPlatform is the root here)
+ */
+function computeViewScopedRoots(
+  visibleTypes: string[],
+  schemaEntityTypes: EntityTypeDefinition[],
+  globalRoots: string[],
+): string[] {
+  if (visibleTypes.length === 0) return globalRoots
+
+  const visibleSet = new Set(visibleTypes)
+
+  const roots = visibleTypes.filter(typeId => {
+    const et = schemaEntityTypes.find(e => e.id === typeId)
+    // A type with no definition → treat as root (safest assumption)
+    if (!et) return true
+    const parents = et.hierarchy?.canBeContainedBy ?? []
+    // Root in this view = no parent type is in the visible set
+    return parents.every(parentType => !visibleSet.has(parentType))
+  })
+
+  if (roots.length > 0) return roots
+
+  // Last resort: use global ontology roots that overlap with visible types,
+  // or simply the first visible type so the view is never empty.
+  const globalOverlap = globalRoots.filter(r => visibleSet.has(r))
+  return globalOverlap.length > 0 ? globalOverlap : [visibleTypes[0]]
+}
 
 interface CanvasRouterProps {
   className?: string
@@ -29,46 +96,113 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
   const activeView = useSchemaStore((s) => s.getActiveView())
   const layoutType = activeView?.layout.type ?? 'graph'
 
-  // Load root nodes the first time this canvas mounts (or when the provider changes).
-  // Only fetches root-level entities — children are loaded lazily via useEntityLoader.
-  // This replaces the old AppLayout fetchInitialGraph which fired on every route.
-  const rawNodes = useCanvasStore((s) => s.nodes)
-  const { setNodes, setEdges } = useCanvasStore()
+  const { setNodes, addNodes, setEdges, addEdges } = useCanvasStore()
   const provider = useGraphProvider()
   const rootEntityTypes = useRootEntityTypes()
+  const allSchemaEntityTypes = useEntityTypes()
   const isLoadingOntology = useSchemaIsLoading()
-  const initializedForRef = useRef<typeof provider | null>(null)
+
+  // Track (provider, viewId) so reference views reload when the active view changes.
+  const initializedKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
-    // Wait for the ontology to load so we know the true root entity types.
-    if (isLoadingOntology || rootEntityTypes.length === 0) return
-    if (rawNodes.length > 0 && initializedForRef.current === provider) return
-    if (initializedForRef.current === provider) return
-    initializedForRef.current = provider
+    if (isLoadingOntology) return
 
-    provider.getNodes({ entityTypes: rootEntityTypes as any[], limit: 200 })
-      .then(rootNodes => {
+    const isReferenceView = layoutType === 'reference' || layoutType === 'layered-lineage'
+
+    // Reference views key on view ID too — different views show different entity scopes.
+    const initKey = isReferenceView
+      ? `${String(provider)}:${activeView?.id ?? 'none'}`
+      : String(provider)
+
+    if (initializedKeyRef.current === initKey) return
+    initializedKeyRef.current = initKey
+
+    setNodes([])
+    setEdges([])
+
+    if (isReferenceView) {
+      // Reference / Context View loading strategy
+      // ──────────────────────────────────────────
+      // A reference view can span multiple independent hierarchies simultaneously:
+      //   Physical:    DataDomain → DataPlatform → System → Table → Column
+      //   Reference:   Country → Region → City
+      //   Governance:  SharingPolicy
+      //
+      // We load in two passes so the view feels responsive:
+      //
+      //   Pass 1 — View-scoped root types (immediately visible)
+      //     Types whose parent types are NOT in the view's visibleEntityTypes.
+      //     For a "DataDomain + Country" view both are roots; we load both.
+      //     Limit: PER_TYPE_LIMIT entities per root type.
+      //
+      //   Pass 2 — Direct children of those roots (one level deep, background)
+      //     Types in visibleEntityTypes whose parents ARE the root types just loaded.
+      //     Loaded in the background after Pass 1 completes.
+      //     This populates child layers without waiting for user interaction.
+      //     Deeper levels remain on-demand (user expands nodes).
+
+      const viewTypes = activeView?.content?.visibleEntityTypes ?? []
+      const rootTypes = computeViewScopedRoots(viewTypes, allSchemaEntityTypes, rootEntityTypes)
+
+      if (rootTypes.length === 0) return
+
+      // Pass 1: load root entities
+      Promise.all(
+        rootTypes.map(et =>
+          provider.getNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
+            .catch(() => [] as GraphNode[])
+        )
+      ).then(results => {
+        const rootNodes = results.flat()
         if (!rootNodes.length) return
-        setNodes(rootNodes.map(n => ({
-          id: n.urn,
-          type: 'generic',
-          position: { x: Math.random() * 800, y: Math.random() * 600 },
-          data: {
-            label: n.displayName,
-            type: n.entityType as any,
-            urn: n.urn,
-            metadata: n.properties,
-            childCount: n.childCount,
-            classifications: n.tags,
-            businessLabel: (n.properties?.businessLabel as string) ?? undefined,
-            ...n,
-          },
-        })))
+
+        setNodes(rootNodes.map(n => toCanvasNode(n)))
         setEdges([])
-      })
-      .catch(err => console.error('[CanvasRouter] Failed to load initial nodes:', err))
+
+        // Pass 2: load ALL remaining visible entity types (not just direct children).
+        // This ensures deep hierarchies (4+ levels) are fully populated.
+        // Each type bounded by PER_TYPE_LIMIT, so total is manageable.
+        const loadedRootTypes = new Set(rootNodes.map(n => n.entityType))
+
+        const remainingTypes = viewTypes.filter(t => !loadedRootTypes.has(t))
+        const childTypes = remainingTypes
+
+        if (childTypes.length === 0) return
+
+        Promise.all(
+          childTypes.map(et =>
+            provider.getNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
+              .catch(() => [] as GraphNode[])
+          )
+        ).then(childResults => {
+          const childNodes = childResults.flat()
+          if (childNodes.length === 0) return
+          addNodes(childNodes.map(n => toCanvasNode(n)))
+        })
+      }).catch(err => console.error('[CanvasRouter] Failed to load reference view nodes:', err))
+
+    } else {
+      // HierarchyCanvas / LineageCanvas: root entities only.
+      // Children are expanded lazily via useEntityLoader.loadChildren().
+      // If the resolved ontology has no root types yet (graph with no containment edges),
+      // fall back to all schema types so the view is never empty.
+      const typesToLoad = rootEntityTypes.length > 0
+        ? rootEntityTypes
+        : allSchemaEntityTypes.map(et => et.id)
+
+      if (typesToLoad.length === 0) return
+
+      provider.getNodes({ entityTypes: typesToLoad as any[], limit: PER_TYPE_LIMIT })
+        .then(rootNodes => {
+          if (!rootNodes.length) return
+          setNodes(rootNodes.map(n => toCanvasNode(n, { randomPosition: true })))
+          setEdges([])
+        })
+        .catch(err => console.error('[CanvasRouter] Failed to load initial nodes:', err))
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider, rootEntityTypes, isLoadingOntology])
+  }, [provider, layoutType, activeView?.id, rootEntityTypes, allSchemaEntityTypes, isLoadingOntology])
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {

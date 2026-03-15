@@ -24,6 +24,7 @@ import {
   normalizeEdgeType,
   useEdgeTypeMetadataMap,
   useRelationshipTypes,
+  useEntityTypes,
 } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
@@ -207,7 +208,7 @@ export function ContextViewCanvas({
     fetchAggregated,
     granularity: lineageGranularity,
     setGranularity: setLineageGranularity,
-  } = useAggregatedLineage({ granularity: 'table' })
+  } = useAggregatedLineage({ granularity: null })
 
   // Instance-level assignments from store (user drag-and-drop)
   const instanceAssignments = useInstanceAssignments()
@@ -276,6 +277,16 @@ export function ContextViewCanvas({
   const [isPaletteOpen, setPaletteOpen] = useState(false)
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   const relationshipTypes = useRelationshipTypes()
+
+  // Granularity options for the lineage aggregation selector — driven by the
+  // active ontology's entity types, sorted coarsest-first (lowest level first).
+  const schemaEntityTypes = useEntityTypes()
+  const granularityOptions = useMemo(
+    () => schemaEntityTypes
+      .filter(et => et.hierarchy?.level !== undefined)
+      .map(et => ({ id: et.id, name: et.name, level: et.hierarchy.level })),
+    [schemaEntityTypes]
+  )
 
   // Handle save graph
   const handleSave = useCallback(async () => {
@@ -755,7 +766,8 @@ export function ContextViewCanvas({
         showLineageFlow={showLineageFlow}
         onToggleLineageFlow={() => setShowLineageFlow(!showLineageFlow)}
         lineageGranularity={lineageGranularity}
-        onGranularityChange={(g) => setLineageGranularity(g as any)}
+        onGranularityChange={setLineageGranularity}
+        granularityOptions={granularityOptions}
         onExpandAll={expandAll}
         onCollapseAll={collapseAll}
         onAddEntity={() => { setIsCreatingEntity(true); setCreationParentId(null); setCreationLayerId(null) }}

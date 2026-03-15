@@ -398,8 +398,9 @@ export interface RuleCondition {
  * How to project/aggregate the underlying data for this view
  */
 export interface ViewProjectionConfig {
-  // Target granularity level (0=Column, 1=Table, 2=Schema, 3=System, 4=Domain)
-  targetGranularity: number;
+  // Target entity type ID for lineage aggregation (e.g. "dataset", "term").
+  // null = no aggregation (show finest-grained lineage as-is).
+  targetGranularityType: string | null;
 
   // Aggregate child lineage to parent level
   aggregateLineage: boolean;

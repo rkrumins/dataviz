@@ -17,6 +17,7 @@
 
 import { useState, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence, Reorder, useDragControls } from 'framer-motion'
+import * as LucideIcons from 'lucide-react'
 import {
     ChevronRight,
     ChevronDown,
@@ -28,9 +29,6 @@ import {
     FolderOpen,
     Layers,
     FolderPlus,
-    Database,
-    Table,
-    Columns,
     Box,
     Loader2,
     X,
@@ -40,7 +38,7 @@ import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig } from 
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
 import { useCanvasStore } from '@/store/canvas'
 import { useEntityLoader } from '@/hooks/useEntityLoader'
-import { useContainmentEdgeTypes } from '@/store/schema'
+import { useContainmentEdgeTypes, useEntityTypes } from '@/store/schema'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -83,35 +81,6 @@ function parseTransfer(e: React.DragEvent): DropPayload | null {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const TYPE_ICONS: Record<string, React.ReactNode> = {
-    domain: <Database className="w-3 h-3" />,
-    dataplatform: <Folder className="w-3 h-3" />,
-    system: <Folder className="w-3 h-3" />,
-    container: <Folder className="w-3 h-3" />,
-    schema: <Folder className="w-3 h-3" />,
-    table: <Table className="w-3 h-3" />,
-    dataset: <Table className="w-3 h-3" />,
-    schemafield: <Columns className="w-3 h-3" />,
-    column: <Columns className="w-3 h-3" />,
-    dashboard: <Box className="w-3 h-3" />,
-    chart: <Box className="w-3 h-3" />,
-    default: <Box className="w-3 h-3" />
-}
-
-const TYPE_COLORS: Record<string, string> = {
-    domain: '#8b5cf6',    // Purple
-    dataplatform: '#6366f1', // Indigo
-    system: '#3b82f6',    // Blue
-    container: '#0ea5e9', // Sky
-    schema: '#0ea5e9',    // Sky
-    table: '#22c55e',     // Green
-    dataset: '#22c55e',   // Green
-    schemafield: '#64748b', // Slate
-    column: '#64748b',    // Slate
-    dashboard: '#f97316', // Orange
-    chart: '#f59e0b',     // Amber
-    default: '#94a3b8'
-}
 
 // ─── Inline Text Input ────────────────────────────────────────────────────────
 
@@ -197,9 +166,17 @@ function AssignedEntityItem({
         setIsExpanded(v => !v)
     }
 
+    const schemaEntityTypes = useEntityTypes()
     const typeLower = type.toLowerCase()
-    const icon = TYPE_ICONS[typeLower] || TYPE_ICONS.default
-    const color = TYPE_COLORS[typeLower] || TYPE_COLORS.default
+    const visual = useMemo(
+        () => schemaEntityTypes.find(et => et.id.toLowerCase() === typeLower)?.visual,
+        [schemaEntityTypes, typeLower]
+    )
+    const icon = (() => {
+        const Cmp = visual?.icon ? (LucideIcons as Record<string, any>)[visual.icon] : null
+        return Cmp ? <Cmp className="w-3 h-3" /> : <Box className="w-3 h-3" />
+    })()
+    const color = visual?.color ?? '#94a3b8'
 
     return (
         <div>

@@ -13,15 +13,12 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
+import * as LucideIcons from 'lucide-react'
 import {
     Search,
     ChevronRight,
     GripVertical,
-    Database,
-    Folder,
-    Table,
     Box,
-    Columns,
     X,
     AlertTriangle,
     CheckSquare,
@@ -86,35 +83,9 @@ interface FlatNode extends EntityTreeNode {
 // ============================================
 
 
-const TYPE_ICONS: Record<string, React.ReactNode> = {
-    domain: <Database className="w-4 h-4" />,
-    dataplatform: <Folder className="w-4 h-4" />,
-    system: <Folder className="w-4 h-4" />,
-    container: <Folder className="w-4 h-4" />,
-    schema: <Folder className="w-4 h-4" />,
-    table: <Table className="w-4 h-4" />,
-    dataset: <Table className="w-4 h-4" />,
-    schemafield: <Columns className="w-4 h-4" />,
-    column: <Columns className="w-4 h-4" />,
-    dashboard: <Box className="w-4 h-4" />,
-    chart: <Box className="w-4 h-4" />,
-    default: <Box className="w-4 h-4" />
-}
-
-const TYPE_COLORS: Record<string, string> = {
-    domain: '#8b5cf6',    // Purple
-    dataplatform: '#6366f1', // Indigo
-    system: '#3b82f6',    // Blue
-    container: '#0ea5e9', // Sky
-    schema: '#0ea5e9',    // Sky
-    table: '#22c55e',     // Green
-    dataset: '#22c55e',   // Green
-    schemafield: '#64748b', // Slate
-    column: '#64748b',    // Slate
-    dashboard: '#f97316', // Orange
-    chart: '#f59e0b',     // Amber
-    default: '#94a3b8'
-}
+// Visual config lookup built dynamically from ontology entity types.
+// See entityVisualMap in WizardAssignmentTree for the hook-driven map.
+type EntityVisualEntry = { icon?: string; color?: string }
 
 // ============================================
 // Tree Row Component
@@ -124,6 +95,7 @@ interface TreeRowProps {
     node: FlatNode
     layers: ViewLayerConfig[]
     searchQuery: string
+    entityVisualMap: Record<string, EntityVisualEntry>
     onToggle: (id: string) => void
     onSelect: (id: string, multi: boolean) => void
     onAssign: (entityId: string, layerId: string) => void
@@ -136,6 +108,7 @@ function TreeRow({
     node,
     layers,
     searchQuery,
+    entityVisualMap,
     onToggle,
     onSelect,
     onAssign,
@@ -145,8 +118,12 @@ function TreeRow({
 }: TreeRowProps) {
     const hasChildren = node.childCount > 0 || node.children.length > 0
     const typeLower = node.type.toLowerCase()
-    const icon = TYPE_ICONS[typeLower] || TYPE_ICONS.default
-    const typeColor = TYPE_COLORS[typeLower] || TYPE_COLORS.default
+    const visual = entityVisualMap[typeLower]
+    const icon = (() => {
+        const Cmp = visual?.icon ? (LucideIcons as Record<string, any>)[visual.icon] : null
+        return Cmp ? <Cmp className="w-4 h-4" /> : <Box className="w-4 h-4" />
+    })()
+    const typeColor = visual?.color ?? '#94a3b8'
     const assignedLayer = layers.find(l => l.id === node.assignedLayerId)
 
     // Highlight search match
@@ -461,6 +438,12 @@ export function WizardAssignmentTree({
     const schemaEntityTypes = useEntityTypes()
     const entityTypes = useMemo(
         () => schemaEntityTypes.map(et => et.id).sort(),
+        [schemaEntityTypes]
+    )
+
+    // Visual map: entity type id (lowercased) → { icon, color } from ontology
+    const entityVisualMap = useMemo<Record<string, EntityVisualEntry>>(
+        () => Object.fromEntries(schemaEntityTypes.map(et => [et.id.toLowerCase(), et.visual])),
         [schemaEntityTypes]
     )
 
@@ -779,9 +762,13 @@ export function WizardAssignmentTree({
                                     ? 'text-white shadow-md'
                                     : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'
                             )}
-                            style={typeFilter === type ? { backgroundColor: TYPE_COLORS[type.toLowerCase()] || TYPE_COLORS.default } : {}}
+                            style={typeFilter === type ? { backgroundColor: entityVisualMap[type.toLowerCase()]?.color ?? '#94a3b8' } : {}}
                         >
-                            {TYPE_ICONS[type.toLowerCase()] || TYPE_ICONS.default}
+                            {(() => {
+                                const vis = entityVisualMap[type.toLowerCase()]
+                                const Cmp = vis?.icon ? (LucideIcons as Record<string, any>)[vis.icon] : null
+                                return Cmp ? <Cmp className="w-3 h-3" /> : <Box className="w-3 h-3" />
+                            })()}
                             {type}
                         </button>
                     ))}
@@ -892,6 +879,7 @@ export function WizardAssignmentTree({
                                         node={node}
                                         layers={layers}
                                         searchQuery={searchQuery}
+                                        entityVisualMap={entityVisualMap}
                                         onToggle={handleToggle}
                                         onSelect={handleSelect}
                                         onAssign={handleAssign}

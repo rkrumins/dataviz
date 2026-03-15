@@ -13,6 +13,13 @@ import { TraceToolbar } from '../TraceToolbar'
 import type { UseUnifiedTraceResult } from '@/hooks/useUnifiedTrace'
 import type { HierarchyNode } from './types'
 
+/** Minimal entity type shape needed for the granularity selector. */
+export interface GranularityOption {
+  id: string
+  name: string
+  level: number
+}
+
 export interface ContextViewHeaderProps {
   // Search
   searchQuery: string
@@ -23,8 +30,11 @@ export interface ContextViewHeaderProps {
   // Lineage flow
   showLineageFlow: boolean
   onToggleLineageFlow: () => void
-  lineageGranularity: string
-  onGranularityChange: (g: string) => void
+  /** Current granularity: entity type ID, or null for no aggregation. */
+  lineageGranularity: string | null
+  onGranularityChange: (g: string | null) => void
+  /** Entity types from the active ontology, used to populate the granularity picker. */
+  granularityOptions: GranularityOption[]
 
   // Expand/collapse
   onExpandAll: () => void
@@ -55,6 +65,7 @@ export function ContextViewHeader({
   onToggleLineageFlow,
   lineageGranularity,
   onGranularityChange,
+  granularityOptions,
   onExpandAll,
   onCollapseAll,
   onAddEntity,
@@ -147,16 +158,18 @@ export function ContextViewHeader({
               className="overflow-hidden"
             >
               <select
-                value={lineageGranularity}
-                onChange={(e) => onGranularityChange(e.target.value)}
+                value={lineageGranularity ?? ''}
+                onChange={(e) => onGranularityChange(e.target.value || null)}
                 className="px-3 py-2 rounded-xl text-xs font-medium bg-white/[0.04] border border-white/[0.08] text-ink cursor-pointer hover:bg-white/[0.08] focus:outline-none focus:border-accent-lineage/40 transition-all appearance-none pr-8 bg-no-repeat bg-right"
                 style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%239ca3af'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E")`, backgroundSize: '16px', backgroundPosition: 'right 8px center' }}
               >
-                <option value="column">Column Level</option>
-                <option value="table">Table Level</option>
-                <option value="schema">Schema Level</option>
-                <option value="system">System Level</option>
-                <option value="domain">Domain Level</option>
+                <option value="">All levels (no aggregation)</option>
+                {[...granularityOptions]
+                  .sort((a, b) => a.level - b.level)
+                  .map(opt => (
+                    <option key={opt.id} value={opt.id}>{opt.name} level</option>
+                  ))
+                }
               </select>
             </motion.div>
           )}

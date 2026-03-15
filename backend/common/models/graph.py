@@ -33,6 +33,12 @@ class EdgeType(str, Enum):
     AGGREGATED = 'AGGREGATED'
 
 class Granularity(str, Enum):
+    """
+    Deprecated: fixed 5-bucket enum replaced by ontology-native entity type ID strings.
+    Granularity is now expressed as an entity type ID (e.g. "dataset", "term") whose
+    hierarchy.level in the active ontology determines the coarseness of projection.
+    This class is retained only for backward-compat with GraphQL types and legacy callers.
+    """
     COLUMN = 'column'
     TABLE = 'table'
     SCHEMA = 'schema'
@@ -326,7 +332,7 @@ class GraphSchema(BaseModel):
 class AggregatedEdgeRequest(BaseModel):
     source_urns: List[str] = Field(alias="sourceUrns")
     target_urns: Optional[List[str]] = Field(None, alias="targetUrns")
-    granularity: str = Granularity.TABLE  # open string; use Granularity enum for well-known values
+    granularity: Optional[str] = None  # entity type ID from the active ontology, e.g. "dataset", "term"; None = no aggregation
     include_edge_types: Optional[List[str]] = Field(None, alias="includeEdgeTypes")  # open strings
     lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
     containment_edge_types: Optional[List[str]] = Field(None, alias="containmentEdgeTypes")

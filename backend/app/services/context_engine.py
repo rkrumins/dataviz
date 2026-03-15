@@ -3,7 +3,7 @@ import logging
 import time
 from typing import List, Dict, Any, Set, Optional, Tuple, TYPE_CHECKING
 from ..models.graph import (
-    GraphNode, GraphEdge, LineageResult, Granularity, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
+    GraphNode, GraphEdge, LineageResult, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
     CreateNodeRequest, CreateNodeResult
@@ -34,24 +34,9 @@ def _create_provider() -> GraphDataProvider:
     return MockGraphProvider()
 
 
-# Granularity canonical name -> Granularity enum (kept for aggregation logic).
-# These are derived from entity def 'granularity' field; this mapping translates
-# the string value stored in ontology defs to the Granularity enum.
-_GRAN_STR_TO_ENUM: Dict[str, Granularity] = {
-    'column': Granularity.COLUMN,
-    'table': Granularity.TABLE,
-    'schema': Granularity.SCHEMA,
-    'system': Granularity.SYSTEM,
-    'domain': Granularity.DOMAIN,
-}
-
-GRANULARITY_LEVELS = {
-    Granularity.COLUMN: 0,
-    Granularity.TABLE: 1,
-    Granularity.SCHEMA: 2,
-    Granularity.SYSTEM: 3,
-    Granularity.DOMAIN: 4,
-}
+# Granularity is now expressed as an entity type ID string (e.g. "dataset", "term").
+# Coarseness is derived from hierarchy.level in the resolved ontology — level 0 = coarsest.
+# No hardcoded mapping needed.
 
 class ContextEngine:
     _ONTOLOGY_CACHE_TTL = 300  # 5 minutes
@@ -162,6 +147,16 @@ class ContextEngine:
                     introspected_entity_ids=introspected_entity_ids,
                     introspected_rel_ids=introspected_rel_ids,
                 )
+                # Push resolved containment types to the provider so subsequent
+                # queries (childCount, hierarchy) use the correct edge set.
+                if hasattr(self.provider, 'set_containment_edge_types') and resolved.containment_edge_types:
+                    self.provider.set_containment_edge_types(resolved.containment_edge_types)
+                # Ensure indices exist for all ontology-defined entity types.
+                if hasattr(self.provider, 'ensure_indices') and resolved.entity_type_definitions:
+                    try:
+                        await self.provider.ensure_indices(list(resolved.entity_type_definitions.keys()))
+                    except Exception:
+                        pass  # best-effort, don't block resolution
                 self._resolved_ontology_cache = resolved
                 self._resolved_ontology_cache_ts = time.monotonic()
                 return resolved
@@ -237,7 +232,7 @@ class ContextEngine:
         urn: str, 
         upstream_depth: int, 
         downstream_depth: int,
-        granularity: Granularity = Granularity.TABLE,
+        granularity: Optional[str] = None,
         aggregate_edges: bool = True,
         exclude_containment_edges: bool = True,
         include_inherited_lineage: bool = True,
@@ -245,16 +240,19 @@ class ContextEngine:
     ) -> LineageResult:
         """
         Get lineage and optionally aggregate it to a coarser granularity.
-        
+
         All edge classification (containment vs lineage) is derived from
         the ontology metadata — no hardcoded edge type references.
-        
+
         Args:
             urn: Starting entity URN
             upstream_depth: How many hops upstream to traverse
             downstream_depth: How many hops downstream to traverse
-            granularity: Target granularity for projection
-            aggregate_edges: Whether to aggregate edges at granularity level
+            granularity: Entity type ID to project to (e.g. "dataset", "term").
+                        Nodes finer than this type (higher hierarchy.level) are collapsed
+                        upward to their nearest ancestor at this level.
+                        None = no aggregation, return all levels as-is.
+            aggregate_edges: Whether to aggregate lineage edges at the granularity level
             exclude_containment_edges: Filter out containment edges (for pure data lineage)
             include_inherited_lineage: Aggregate lineage from children to parent
             lineage_edge_types: Optional whitelist of lineage edge types to include.
@@ -318,12 +316,12 @@ class ContextEngine:
                 containment_types, active_lineage_types
             )
         
-        if not aggregate_edges and granularity == Granularity.COLUMN:
+        if not aggregate_edges and granularity is None:
             return result
-        
-        # When projecting from column to table (or higher), ensure ancestor nodes are in the set
+
+        # When projecting, ensure ancestor nodes at the target level are in the set
         # so aggregated edges have nodes to connect to
-        if granularity != Granularity.COLUMN:
+        if granularity is not None:
             node_map = {n.urn: n for n in result.nodes}
             ancestor_urns_to_add = set()
             for node in result.nodes:
@@ -369,27 +367,23 @@ class ContextEngine:
         """Normalize edge type to uppercase string for comparison."""
         return str(edge_type).upper()
 
-    def _entity_granularity(self, entity_type: str) -> Granularity:
+    def _entity_level(self, entity_type: str) -> int:
         """
-        Map an entity type string to a Granularity enum value.
-        Uses the resolved ontology's entity definition 'granularity' field when available;
-        falls back to the canonical string-to-enum mapping for well-known types.
+        Return the hierarchy.level of an entity type from the resolved ontology.
+        Level 0 = coarsest (root); higher = finer grained.
+        Returns a very high value for unknown types so they are treated as leaves.
         """
         if self._resolved_ontology_cache:
             ent_def = self._resolved_ontology_cache.entity_type_definitions.get(entity_type)
-            if ent_def:
-                gran_str = ent_def.granularity
-                return _GRAN_STR_TO_ENUM.get(gran_str, Granularity.COLUMN)
+            if ent_def is not None:
+                return ent_def.hierarchy.level
+        return 9999  # unknown type → treat as finest leaf
 
-        # Built-in fallback for well-known types (same as the old ENTITY_GRANULARITY dict)
-        _FALLBACK: Dict[str, Granularity] = {
-            'column': Granularity.COLUMN, 'schemaField': Granularity.COLUMN,
-            'dataset': Granularity.TABLE, 'asset': Granularity.TABLE, 'table': Granularity.TABLE,
-            'schema': Granularity.SCHEMA, 'container': Granularity.SCHEMA,
-            'system': Granularity.SYSTEM, 'dataPlatform': Granularity.SYSTEM, 'app': Granularity.SYSTEM,
-            'domain': Granularity.DOMAIN,
-        }
-        return _FALLBACK.get(entity_type, Granularity.COLUMN)
+    def _target_level(self, target_granularity: Optional[str]) -> int:
+        """Return the hierarchy.level of the target granularity entity type. None → -1 (accept all)."""
+        if target_granularity is None:
+            return -1
+        return self._entity_level(target_granularity)
 
     async def _apply_inherited_lineage(
         self, 
@@ -458,36 +452,35 @@ class ContextEngine:
         )
 
     def _project_graph(
-        self, 
-        result: LineageResult, 
-        target_granularity: Granularity,
+        self,
+        result: LineageResult,
+        target_granularity: Optional[str],
         aggregate_edges: bool,
         containment_map: Optional[Dict[str, str]] = None,
         containment_types: Optional[Set[str]] = None
     ) -> LineageResult:
         nodes = result.nodes
         edges = result.edges
-        
+
         if containment_types is None:
             containment_types = set()
-        
-        # Use provided containment map or build from edges (may be empty if containment were filtered)
+
+        # Use provided containment map or build from edges
         if containment_map is None:
             containment_map = self._build_containment_map(nodes, edges, containment_types)
-        
-        # Filter nodes to target granularity
-        target_level = GRANULARITY_LEVELS.get(target_granularity, 0)
-        
+
+        # target_level: nodes at or coarser (level <=) are visible; finer nodes collapse upward.
+        # Level 0 = coarsest (root). None target = show everything.
+        tlevel = self._target_level(target_granularity)
+
         visible_nodes = []
         visible_node_ids = set()
-        
+
         for node in nodes:
-            # Map entity type to granularity using resolved ontology if available, else fallback
             entity_key = str(node.entity_type)
-            node_gran = self._entity_granularity(entity_key)
-            node_level = GRANULARITY_LEVELS.get(node_gran, 0)
-            
-            if node_level >= target_level:
+            node_level = self._entity_level(entity_key)
+            # Include if at or coarser than target (lower or equal level number)
+            if tlevel < 0 or node_level <= tlevel:
                 visible_nodes.append(node)
                 visible_node_ids.add(node.urn)
                 
@@ -565,52 +558,42 @@ class ContextEngine:
                 containment[edge.target_urn] = edge.source_urn
         return containment
 
-    def _infer_granularity_from_urn(self, urn: str) -> Granularity:
-        """Infer granularity from URN pattern when node is not in our set."""
-        if not urn or ":" not in urn:
-            return Granularity.COLUMN
-        lower = urn.lower()
-        if "schemafield" in lower:
-            return Granularity.COLUMN
-        if "dataset" in lower:
-            return Granularity.TABLE
-        if "container" in lower:
-            return Granularity.SCHEMA
-        if "dataplatform" in lower or "app" in lower:
-            return Granularity.SYSTEM
-        if "domain" in lower:
-            return Granularity.DOMAIN
-        return Granularity.COLUMN
-
     def _find_ancestor_at_granularity(
-        self, 
-        urn: str, 
-        target_granularity: Granularity, 
-        nodes: List[GraphNode], 
+        self,
+        urn: str,
+        target_granularity: Optional[str],
+        nodes: List[GraphNode],
         containment_map: Dict[str, str]
     ) -> Optional[str]:
+        """
+        Walk up the containment chain from `urn` until reaching a node whose
+        hierarchy.level <= the target type's level (i.e. at or coarser than target).
+        Returns the URN of that ancestor, or None if not found.
+        target_granularity=None means no projection — always return the node itself.
+        """
+        if target_granularity is None:
+            return urn
+
         node_map = {n.urn: n for n in nodes}
-        target_level = GRANULARITY_LEVELS.get(target_granularity, 0)
-        
+        tlevel = self._target_level(target_granularity)
+
         current_urn = urn
-        visited = set()
-        
+        visited: Set[str] = set()
+
         while current_urn and current_urn not in visited:
             visited.add(current_urn)
             node = node_map.get(current_urn)
-            # Use node.entity_type if available, else infer from URN (for ancestors not in our set)
             if node:
-                entity_key = str(node.entity_type)
-                node_gran = self._entity_granularity(entity_key)
+                node_level = self._entity_level(str(node.entity_type))
             else:
-                node_gran = self._infer_granularity_from_urn(current_urn)
-            node_level = GRANULARITY_LEVELS.get(node_gran, 0)
-            
-            if node_level >= target_level:
+                # Ancestor not in our node set — treat as coarser (level 0) so we stop here
+                node_level = 0
+
+            if node_level <= tlevel:
                 return current_urn
-            
+
             current_urn = containment_map.get(current_urn)
-            
+
         return None
 
     def _aggregate_lineage_edges(
@@ -618,7 +601,7 @@ class ContextEngine:
         edges: List[GraphEdge],
         nodes: List[GraphNode],
         containment_map: Dict[str, str],
-        target_granularity: Granularity,
+        target_granularity: Optional[str],
         containment_types: Optional[Set[str]] = None
     ) -> List[Dict[str, Any]]:
         

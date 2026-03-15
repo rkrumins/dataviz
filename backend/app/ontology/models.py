@@ -56,7 +56,6 @@ class EntityTypeDefEntry:
     name: str = ""
     plural_name: str = ""
     description: Optional[str] = None
-    granularity: str = "table"
     visual: EntityVisualData = field(default_factory=EntityVisualData)
     hierarchy: EntityHierarchyData = field(default_factory=EntityHierarchyData)
     behavior: EntityBehaviorData = field(default_factory=EntityBehaviorData)

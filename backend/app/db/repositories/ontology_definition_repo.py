@@ -28,6 +28,7 @@ def _to_response(row: OntologyORM) -> OntologyDefinitionResponse:
     return OntologyDefinitionResponse(
         id=row.id,
         name=row.name,
+        description=getattr(row, "description", None),
         version=row.version,
         evolutionPolicy=getattr(row, "evolution_policy", "reject") or "reject",
         containmentEdgeTypes=json.loads(row.containment_edge_types or "[]"),
@@ -118,6 +119,7 @@ async def create_ontology(
 ) -> OntologyDefinitionResponse:
     row = OntologyORM(
         name=req.name,
+        description=req.description,
         version=1,
         evolution_policy=req.evolution_policy or "reject",
         containment_edge_types=json.dumps(req.containment_edge_types),
@@ -136,24 +138,42 @@ async def create_ontology(
     return _to_response(row)
 
 
+def _is_metadata_only(req: OntologyUpdateRequest) -> bool:
+    """Return True if the request only touches metadata fields (name, description, evolution_policy)."""
+    return (
+        req.containment_edge_types is None
+        and req.lineage_edge_types is None
+        and req.edge_type_metadata is None
+        and req.entity_type_hierarchy is None
+        and req.root_entity_types is None
+        and req.entity_type_definitions is None
+        and req.relationship_type_definitions is None
+    )
+
+
 async def update_ontology(
     session: AsyncSession,
     ontology_id: str,
     req: OntologyUpdateRequest,
 ) -> Optional[OntologyDefinitionResponse]:
     """
-    Update an ontology. If published, creates a new version row instead.
+    Update an ontology.
+    - Metadata-only updates (name, description, evolution_policy) are always applied in-place,
+      even for published ontologies — they don't change semantic content.
+    - Type definition changes on published ontologies create a new version row instead.
     Returns the updated (or newly created) ontology.
     """
     row = await get_ontology_orm(session, ontology_id)
     if not row:
         return None
 
-    if row.is_published:
+    if row.is_published and not _is_metadata_only(req):
         return await _create_new_version(session, row, req)
 
     if req.name is not None:
         row.name = req.name
+    if req.description is not None:
+        row.description = req.description
     if req.containment_edge_types is not None:
         row.containment_edge_types = json.dumps(req.containment_edge_types)
     if req.lineage_edge_types is not None:
@@ -191,6 +211,7 @@ async def _create_new_version(
 
     new_row = OntologyORM(
         name=req.name if req.name is not None else original.name,
+        description=req.description if req.description is not None else getattr(original, "description", None),
         version=max_version + 1,
         containment_edge_types=(
             json.dumps(req.containment_edge_types)
@@ -271,5 +292,33 @@ async def has_data_sources(session: AsyncSession, ontology_id: str) -> bool:
         .limit(1)
     )
     return result.scalar_one_or_none() is not None
+
+
+async def get_assignments(session: AsyncSession, ontology_id: str) -> list:
+    """
+    Return all data sources (across all workspaces) that are currently assigned to this ontology.
+    Result: list of dicts with workspaceId, workspaceName, dataSourceId, dataSourceLabel.
+    """
+    from ..models import WorkspaceDataSourceORM, WorkspaceORM
+    rows = await session.execute(
+        select(
+            WorkspaceDataSourceORM.id.label("data_source_id"),
+            WorkspaceDataSourceORM.label.label("data_source_label"),
+            WorkspaceORM.id.label("workspace_id"),
+            WorkspaceORM.name.label("workspace_name"),
+        )
+        .join(WorkspaceORM, WorkspaceORM.id == WorkspaceDataSourceORM.workspace_id)
+        .where(WorkspaceDataSourceORM.ontology_id == ontology_id)
+        .order_by(WorkspaceORM.name, WorkspaceDataSourceORM.label)
+    )
+    return [
+        {
+            "workspaceId": r.workspace_id,
+            "workspaceName": r.workspace_name,
+            "dataSourceId": r.data_source_id,
+            "dataSourceLabel": r.data_source_label or r.data_source_id,
+        }
+        for r in rows.all()
+    ]
 
 

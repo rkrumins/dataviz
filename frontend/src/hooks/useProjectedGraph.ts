@@ -15,7 +15,6 @@ import { useSchemaStore } from '@/store/schema'
 import {
   projectGraph,
   getViewProjectionConfig,
-  GranularityLevel,
   type ViewProjectionConfig,
   type ProjectedGraph,
 } from '@/lib/projection-engine'
@@ -60,7 +59,7 @@ export function useProjectedGraph(): UseProjectedGraphResult {
 
     if (viewProjection) {
       return {
-        targetGranularity: viewProjection.targetGranularity ?? GranularityLevel.Table,
+        targetGranularityType: viewProjection.targetGranularityType ?? (viewProjection as any).targetGranularity ?? 'dataset',
         visibleEntityTypes: activeView?.content?.visibleEntityTypes ?? [],
         visibleRelationshipTypes: activeView?.content?.visibleRelationshipTypes ?? [],
         aggregateLineage: viewProjection.aggregateLineage ?? false,

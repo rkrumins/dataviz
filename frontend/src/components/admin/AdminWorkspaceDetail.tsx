@@ -6,13 +6,13 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
     ChevronLeft, Plus, Database, Edit2,
-    Loader2, Settings, X, AlertTriangle, Save,
-    Tag, Trash2,
+    Loader2, Settings, X, Save,
+    Tag, Trash2, GitBranch,
 } from 'lucide-react'
-import { cn } from '@/lib/utils'
 import { ShieldAlert } from 'lucide-react'
 import { workspaceService, type WorkspaceResponse, type DataSourceResponse, type WorkspaceDataSourceImpactResponse } from '@/services/workspaceService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
+import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import { useSchemaStore } from '@/store/schema'
 import { DataSourceCard } from './DataSourceCard'
@@ -22,10 +22,14 @@ import { AdminWizard, type WizardStep } from './AdminWizard'
 // Edit Data Source Modal
 // ─────────────────────────────────────────────────────────────────────
 
-function EditDsModal({ ds, onSave, onClose }: {
-    ds: DataSourceResponse; onSave: (label: string) => void; onClose: () => void
+function EditDsModal({ ds, ontologies, onSave, onClose }: {
+    ds: DataSourceResponse
+    ontologies: OntologyDefinitionResponse[]
+    onSave: (label: string, ontologyId: string | undefined) => void
+    onClose: () => void
 }) {
     const [label, setLabel] = useState(ds.label || '')
+    const [ontologyId, setOntologyId] = useState(ds.ontologyId || '')
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
             <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
@@ -41,13 +45,24 @@ function EditDsModal({ ds, onSave, onClose }: {
                             className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
                     </div>
                     <div>
+                        <label className="block text-sm font-medium text-ink mb-1.5">Ontology</label>
+                        <select value={ontologyId} onChange={e => setOntologyId(e.target.value)}
+                            className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50">
+                            <option value="">None (use system defaults)</option>
+                            {ontologies.map(o => (
+                                <option key={o.id} value={o.id}>{o.name} v{o.version}{o.isPublished ? '' : ' (draft)'}</option>
+                            ))}
+                        </select>
+                        <p className="text-xs text-ink-muted mt-1">Assigns a semantic ontology to this data source for entity type resolution.</p>
+                    </div>
+                    <div>
                         <label className="block text-sm font-medium text-ink-muted mb-1">Catalog Item</label>
                         <p className="text-sm font-mono text-ink">{ds.catalogItemId}</p>
                     </div>
                 </div>
                 <div className="flex justify-end gap-3">
                     <button onClick={onClose} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5">Cancel</button>
-                    <button onClick={() => onSave(label)} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors">
+                    <button onClick={() => onSave(label, ontologyId || undefined)} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors">
                         <Save className="w-3.5 h-3.5" /> Save
                     </button>
                 </div>
@@ -67,6 +82,7 @@ export function AdminWorkspaceDetail() {
 
     const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null)
     const [catalogItems, setCatalogItems] = useState<CatalogItemResponse[]>([])
+    const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
     const [dsStatsMap, setDsStatsMap] = useState<Record<string, DataSourceStats>>({})
     const [isLoading, setIsLoading] = useState(true)
 
@@ -79,6 +95,7 @@ export function AdminWorkspaceDetail() {
     const [showAddDs, setShowAddDs] = useState(false)
     const [addDsCatalogId, setAddDsCatalogId] = useState('')
     const [addDsLabel, setAddDsLabel] = useState('')
+    const [addDsOntologyId, setAddDsOntologyId] = useState('')
     const [addDsSubmitting, setAddDsSubmitting] = useState(false)
 
     // Delete confirm
@@ -94,12 +111,14 @@ export function AdminWorkspaceDetail() {
         if (!wsId) return
         setIsLoading(true)
         try {
-            const [ws, calatogList] = await Promise.all([
+            const [ws, calatogList, ontologyList] = await Promise.all([
                 workspaceService.get(wsId),
-                catalogService.list()
+                catalogService.list(),
+                ontologyDefinitionService.list().catch(() => [] as OntologyDefinitionResponse[]),
             ])
             setWorkspace(ws)
             setCatalogItems(calatogList)
+            setOntologies(ontologyList)
             setEditName(ws.name)
             setEditDesc(ws.description || '')
 
@@ -126,6 +145,13 @@ export function AdminWorkspaceDetail() {
     }, [wsId])
 
     useEffect(() => { loadWorkspace() }, [loadWorkspace])
+
+    // Ontology id→name lookup
+    const ontologyNameMap = useMemo(() => {
+        const map: Record<string, string> = {}
+        for (const o of ontologies) map[o.id] = `${o.name} v${o.version}`
+        return map
+    }, [ontologies])
 
     // Filter allowed catalog items for this workspace
     const allowedCatalogItems = useMemo(() => {
@@ -193,14 +219,14 @@ export function AdminWorkspaceDetail() {
         await workspaceService.updateDataSource(wsId, dsId, { dedicatedGraphName: name })
     }
 
-    const handleEditDsSave = async (label: string) => {
+    const handleEditDsSave = async (label: string, ontologyId: string | undefined) => {
         if (!wsId || !editingDs) return
-        await workspaceService.updateDataSource(wsId, editingDs.id, { label })
+        await workspaceService.updateDataSource(wsId, editingDs.id, { label, ontologyId })
         setEditingDs(null)
         loadWorkspace()
     }
 
-    const resetAddDs = () => { setAddDsCatalogId(''); setAddDsLabel('') }
+    const resetAddDs = () => { setAddDsCatalogId(''); setAddDsLabel(''); setAddDsOntologyId('') }
 
     const handleAddDsComplete = async () => {
         if (!wsId) return
@@ -209,6 +235,7 @@ export function AdminWorkspaceDetail() {
             await workspaceService.addDataSource(wsId, {
                 catalogItemId: addDsCatalogId,
                 label: addDsLabel || undefined,
+                ontologyId: addDsOntologyId || undefined,
             })
             setShowAddDs(false)
             resetAddDs()
@@ -242,6 +269,19 @@ export function AdminWorkspaceDetail() {
                         <input value={addDsLabel} onChange={e => setAddDsLabel(e.target.value)} placeholder="Optional display label in this workspace"
                             className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
                     </div>
+                    <div>
+                        <label className="block text-sm font-medium text-ink mb-1.5 flex items-center gap-1.5">
+                            <GitBranch className="w-3.5 h-3.5 text-ink-muted" /> Ontology
+                        </label>
+                        <select value={addDsOntologyId} onChange={e => setAddDsOntologyId(e.target.value)}
+                            className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50">
+                            <option value="">None (use system defaults)</option>
+                            {ontologies.map(o => (
+                                <option key={o.id} value={o.id}>{o.name} v{o.version}{o.isPublished ? '' : ' (draft)'}</option>
+                            ))}
+                        </select>
+                        <p className="text-xs text-ink-muted mt-1">Optional. Assigns a semantic ontology for entity type and edge classification.</p>
+                    </div>
                 </div>
             ),
         },
@@ -257,6 +297,7 @@ export function AdminWorkspaceDetail() {
                         <div><dt className="text-ink-muted">Catalog Item</dt><dd className="text-ink mt-0.5">{catalogItems.find(c => c.id === addDsCatalogId)?.name || '—'}</dd></div>
                         <div><dt className="text-ink-muted">Label</dt><dd className="text-ink mt-0.5">{addDsLabel || '—'}</dd></div>
                         <div><dt className="text-ink-muted">Workspace</dt><dd className="text-ink mt-0.5">{workspace?.name || '—'}</dd></div>
+                        <div><dt className="text-ink-muted">Ontology</dt><dd className="text-ink mt-0.5">{addDsOntologyId ? ontologies.find(o => o.id === addDsOntologyId)?.name || addDsOntologyId : 'System defaults'}</dd></div>
                     </dl>
                 </div>
             ),
@@ -353,6 +394,7 @@ export function AdminWorkspaceDetail() {
                             ds={ds}
                             stats={dsStatsMap[ds.id]}
                             providerName={catalogItems.find(c => c.id === ds.catalogItemId)?.name || ds.catalogItemId}
+                            ontologyName={ds.ontologyId ? ontologyNameMap[ds.ontologyId] : undefined}
                             isActive={ds.isPrimary}
                             views={viewsByDs[ds.id] || []}
                             onSetPrimary={() => handleSetPrimary(ds.id)}
@@ -425,6 +467,7 @@ export function AdminWorkspaceDetail() {
             {editingDs && (
                 <EditDsModal
                     ds={editingDs}
+                    ontologies={ontologies}
                     onSave={handleEditDsSave}
                     onClose={() => setEditingDs(null)}
                 />

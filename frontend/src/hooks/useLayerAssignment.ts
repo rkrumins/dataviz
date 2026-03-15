@@ -76,18 +76,21 @@ export function useLayerAssignment({
         })
       }
 
-      // 2. Default entity type rules - REMOVED to prevent implicit auto-assignment
-      // If users want type-based assignment, they should add an explicit rule.
-      /*
-      layer.entityTypes.forEach((entityType, idx) => {
-        generatedRules.push({
-          id: `${layer.id}-${entityType}`,
-          layerId: layer.id,
-          entityTypes: [entityType as any],
-          priority: layer.order * 10 + idx,
+      // 2. Auto-generate entity-type rules from layer.entityTypes.
+      // When a layer declares entityTypes: ['glossary', 'term'], nodes of those
+      // types are automatically routed here — this is the primary ontology-driven
+      // assignment mechanism. Explicit entity assignments and rules above take
+      // precedence (higher priority values win in resolveLayerAssignment).
+      if (layer.entityTypes && layer.entityTypes.length > 0) {
+        layer.entityTypes.forEach((entityType, idx) => {
+          generatedRules.push({
+            id: `${layer.id}-type-${entityType}`,
+            layerId: layer.id,
+            entityTypes: [entityType],
+            priority: layer.order * 10 + idx,
+          })
         })
-      })
-      */
+      }
     })
 
     return generatedRules
@@ -118,7 +121,7 @@ export function useLayerAssignment({
       // Rule match
       const graphNode: GraphNode = {
         urn: node.data.urn || node.id,
-        entityType: (node.data.type as EntityType) || 'dataset', // Generic fallback
+        entityType: (node.data.type as string) || '',
         displayName: node.data.label || node.data.businessLabel || node.id,
         properties: node.data as Record<string, unknown>,
         tags: node.data.classifications || []
@@ -228,7 +231,7 @@ export function useLayerAssignment({
         children: validChildren,
         depth,
         urn: node.data.urn || node.id,
-        entityTypeOption: (node.data.type as EntityType) || 'dataset',
+        entityTypeOption: (node.data.type as string) || '',
         tags: node.data.classifications || []
       }
     }

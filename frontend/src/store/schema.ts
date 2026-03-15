@@ -100,7 +100,7 @@ interface SchemaState {
 // Converters: Backend Schema → Frontend Schema
 // ============================================
 
-function convertBackendEntityType(backendEntity: EntityTypeDefinition): EntityTypeSchema {
+export function convertBackendEntityType(backendEntity: EntityTypeDefinition): EntityTypeSchema {
   return {
     id: backendEntity.id,
     name: backendEntity.name,
@@ -142,7 +142,7 @@ function convertBackendEntityType(backendEntity: EntityTypeDefinition): EntityTy
   }
 }
 
-function convertBackendRelationshipType(backendRel: RelationshipTypeDefinition): RelationshipTypeSchema {
+export function convertBackendRelationshipType(backendRel: RelationshipTypeDefinition): RelationshipTypeSchema {
   return {
     id: backendRel.id,
     name: backendRel.name,
@@ -606,12 +606,9 @@ export function useGetEdgeTypeDefinition() {
 }
 
 /**
- * Hook: returns a GranularityLevel map derived from the loaded ontology's entity
- * hierarchy levels. The map inverts ontology levels so that a lower level
- * (root/domain) maps to a higher GranularityLevel enum value.
- *
- * Falls back to the hardcoded projection-engine map when no schema is loaded.
- * Import buildGranularityMap from projection-engine to convert the entity types.
+ * Hook: returns the ontology entity type schemas for the active data source.
+ * Each entry includes hierarchy.level (0 = coarsest/root, higher = finer/leaf)
+ * which drives all granularity-based projections and lineage aggregation.
  */
 export function useSchemaEntityTypes() {
   return useSchemaStore((s) => s.schema?.entityTypes ?? EMPTY_ENTITY_TYPES)

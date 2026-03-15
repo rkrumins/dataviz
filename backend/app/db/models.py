@@ -210,6 +210,7 @@ class OntologyORM(Base):
 
     id = Column(Text, primary_key=True, default=lambda: f"bp_{uuid.uuid4().hex[:12]}")
     name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True, default=None)
     version = Column(Integer, nullable=False, default=1)
     # Legacy flat edge type lists (kept for backward compat; derived from definitions when present)
     containment_edge_types = Column(Text, nullable=False, default="[]")   # JSON

@@ -255,7 +255,6 @@ def _entity_def_to_dict(e: EntityTypeDefEntry) -> dict:
         "name": e.name,
         "plural_name": e.plural_name,
         "description": e.description,
-        "granularity": e.granularity,
         "visual": {
             "icon": e.visual.icon,
             "color": e.visual.color,

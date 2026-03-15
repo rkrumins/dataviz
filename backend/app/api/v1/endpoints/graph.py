@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.graph import (
-    GraphNode, GraphEdge, LineageResult, EntityType, EdgeType, Granularity,
+    GraphNode, GraphEdge, LineageResult,
     NodeQuery, EdgeQuery, GraphSchemaStats,
     AggregatedEdgeRequest, AggregatedEdgeResult,
     CreateNodeRequest, CreateNodeResult,
@@ -58,7 +58,7 @@ async def get_lineage_trace(
     depth: int = Body(3, embed=True),
     upstream_depth: Optional[int] = Body(None, embed=True, alias="upstreamDepth"),
     downstream_depth: Optional[int] = Body(None, embed=True, alias="downstreamDepth"),
-    granularity: Granularity = Body(Granularity.TABLE, embed=True),
+    granularity: Optional[str] = Body(None, embed=True),
     aggregate_edges: bool = Body(True, embed=True, alias="aggregateEdges"),
     exclude_containment_edges: bool = Body(True, embed=True, alias="excludeContainmentEdges"),
     include_inherited_lineage: bool = Body(True, embed=True, alias="includeInheritedLineage"),
@@ -140,7 +140,7 @@ async def search_nodes(
 
 @router.get("/edges", response_model=List[GraphEdge], response_model_by_alias=True)
 async def get_edges(
-    edge_type: Optional[EdgeType] = Query(None, alias="edgeType"),
+    edge_type: Optional[str] = Query(None, alias="edgeType"),
     source_urn: Optional[str] = Query(None, alias="sourceUrn"),
     target_urn: Optional[str] = Query(None, alias="targetUrn"),
     offset: int = Query(0, ge=0),
@@ -200,7 +200,7 @@ async def get_graph_stats(
 
 @router.get("/nodes", response_model=List[GraphNode], response_model_by_alias=True)
 async def get_nodes(
-    entity_type: Optional[EntityType] = Query(None, alias="entityType"),
+    entity_type: Optional[str] = Query(None, alias="entityType"),
     tag: Optional[str] = Query(None),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
@@ -230,7 +230,7 @@ async def get_node_ancestors(
 async def get_node_descendants(
     urn: str,
     depth: int = Query(5, ge=1),
-    entity_type: Optional[EntityType] = Query(None, alias="entityType"),
+    entity_type: Optional[str] = Query(None, alias="entityType"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),

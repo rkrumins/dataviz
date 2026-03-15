@@ -51,6 +51,8 @@ export interface ViewWizardProps {
     isOpen: boolean
     onClose: () => void
     onComplete?: (view: ViewConfiguration) => void
+    /** Data source whose assigned ontology scopes the wizard's entity/relationship type pickers. */
+    dataSourceId?: string
 }
 
 export interface ActiveFilter {
@@ -67,6 +69,8 @@ export interface WizardFormData {
     icon: string
     visibility: 'private' | 'workspace' | 'enterprise'
     tags: string[]
+    /** Data source whose ontology scopes entity/relationship type pickers throughout the wizard. */
+    dataSourceId?: string
 
     // Step 2: Layout Type
     layoutType: 'graph' | 'hierarchy' | 'reference'
@@ -119,7 +123,7 @@ const LAYOUT_TYPES = [
 // Main Component
 // ============================================
 
-export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWizardProps) {
+export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete, dataSourceId }: ViewWizardProps) {
     const navigate = useNavigate()
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
@@ -136,7 +140,7 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
     const [linkedContextModelId, setLinkedContextModelId] = useState<string | null>(null)
 
     // Form data
-    const [formData, setFormData] = useState<WizardFormData>(() => getInitialFormData(schema))
+    const [formData, setFormData] = useState<WizardFormData>(() => ({ ...getInitialFormData(schema), dataSourceId }))
 
     // Load existing view for edit mode
     useEffect(() => {
@@ -195,10 +199,10 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
             clearAssignments()
 
             if (mode === 'create') {
-                setFormData(getInitialFormData(schema))
+                setFormData({ ...getInitialFormData(schema), dataSourceId })
             }
         }
-    }, [isOpen, mode, schema, clearSelection, clearAssignments])
+    }, [isOpen, mode, schema, dataSourceId, clearSelection, clearAssignments])
 
     // Step validation
     const canProceed = useMemo(() => {
@@ -431,6 +435,7 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                                     formData={formData}
                                     updateFormData={updateFormData}
                                     layoutTypes={LAYOUT_TYPES}
+                                    dataSourceId={formData.dataSourceId}
                                 />
                             )}
                             {currentStep === 'assignment' && (
@@ -445,6 +450,7 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete }: ViewWi
                                 <EntitiesStep
                                     formData={formData}
                                     updateFormData={updateFormData}
+                                    dataSourceId={formData.dataSourceId}
                                 />
                             )}
                             {currentStep === 'preview' && (

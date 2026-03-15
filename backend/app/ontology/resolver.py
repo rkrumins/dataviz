@@ -39,7 +39,6 @@ def _entity_def_from_dict(data: Dict[str, Any]) -> EntityTypeDefEntry:
         name=data.get("name", ""),
         plural_name=data.get("plural_name", data.get("pluralName", "")),
         description=data.get("description"),
-        granularity=data.get("granularity", "table"),
         visual=EntityVisualData(
             icon=vis.get("icon", "Box"),
             color=vis.get("color", "#6366f1"),

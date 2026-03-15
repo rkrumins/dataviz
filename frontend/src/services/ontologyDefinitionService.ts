@@ -7,6 +7,9 @@ const ADMIN_API = '/api/v1/admin/ontologies'
 
 export interface OntologyCreateRequest {
     name: string
+    description?: string
+    evolutionPolicy?: string
+    scope?: string
     containmentEdgeTypes?: string[]
     lineageEdgeTypes?: string[]
     edgeTypeMetadata?: Record<string, unknown>
@@ -18,6 +21,8 @@ export interface OntologyCreateRequest {
 
 export interface OntologyUpdateRequest {
     name?: string
+    description?: string
+    evolutionPolicy?: string
     containmentEdgeTypes?: string[]
     lineageEdgeTypes?: string[]
     edgeTypeMetadata?: Record<string, unknown>
@@ -30,7 +35,9 @@ export interface OntologyUpdateRequest {
 export interface OntologyDefinitionResponse {
     id: string
     name: string
+    description: string | null
     version: number
+    evolutionPolicy: string
     containmentEdgeTypes: string[]
     lineageEdgeTypes: string[]
     edgeTypeMetadata: Record<string, unknown>
@@ -120,6 +127,21 @@ export const ontologyDefinitionService = {
             body: JSON.stringify(stats),
         })
     },
+
+    /**
+     * List all data sources currently assigned to this ontology (across all workspaces).
+     */
+    getAssignments(id: string): Promise<OntologyAssignment[]> {
+        return request<OntologyAssignment[]>(`${ADMIN_API}/${id}/assignments`)
+    },
+
+    /**
+     * Preview the impact of publishing this ontology draft.
+     * Returns added/removed types and whether the evolution_policy allows the publish.
+     */
+    impact(id: string): Promise<OntologyImpactResponse> {
+        return request<OntologyImpactResponse>(`${ADMIN_API}/${id}/impact`)
+    },
 }
 
 export interface OntologyValidationIssue {
@@ -141,4 +163,23 @@ export interface OntologyCoverageResponse {
     extraEntityTypes: string[]
     coveredRelationshipTypes: string[]
     uncoveredRelationshipTypes: string[]
+}
+
+/** A single data source assignment returned by getAssignments(). */
+export interface OntologyAssignment {
+    workspaceId: string
+    workspaceName: string
+    dataSourceId: string
+    dataSourceLabel: string
+}
+
+/** Impact preview for a draft ontology publish. */
+export interface OntologyImpactResponse {
+    allowed: boolean
+    reason: string | null
+    evolutionPolicy: string
+    addedEntityTypes: string[]
+    removedEntityTypes: string[]
+    addedRelationshipTypes: string[]
+    removedRelationshipTypes: string[]
 }

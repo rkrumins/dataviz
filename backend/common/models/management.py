@@ -195,6 +195,7 @@ class ProviderResponse(BaseModel):
 
 class OntologyCreateRequest(BaseModel):
     name: str
+    description: Optional[str] = None
     version: int = 1
     scope: str = "universal"  # "universal" | "workspace"
     # Schema evolution policy: what happens when this ontology is updated and published.
@@ -216,6 +217,7 @@ class OntologyCreateRequest(BaseModel):
 
 class OntologyUpdateRequest(BaseModel):
     name: Optional[str] = None
+    description: Optional[str] = None
     evolution_policy: Optional[str] = Field(None, alias="evolutionPolicy")
     containment_edge_types: Optional[List[str]] = Field(None, alias="containmentEdgeTypes")
     lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
@@ -232,6 +234,7 @@ class OntologyUpdateRequest(BaseModel):
 class OntologyDefinitionResponse(BaseModel):
     id: str
     name: str
+    description: Optional[str] = None
     version: int
     evolution_policy: str = Field("reject", alias="evolutionPolicy")
     containment_edge_types: List[str] = Field(alias="containmentEdgeTypes")

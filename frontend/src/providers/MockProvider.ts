@@ -796,7 +796,7 @@ export class MockProvider implements GraphDataProvider {
     // Schema Operations (Dynamic Schema Loading)
     // ==========================================
 
-    async getFullSchema(): Promise<GraphSchema> {
+    async getFullSchema(_dataSourceId?: string): Promise<GraphSchema> {
         // Mock implementation: build schema from existing data
         const entityTypeCounts: Record<string, number> = {}
         for (const node of this.nodes.values()) {

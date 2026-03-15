@@ -360,8 +360,10 @@ export class RemoteGraphProvider implements GraphDataProvider {
     // Schema Operations (Dynamic Schema Loading)
     // ==========================================
 
-    async getFullSchema(): Promise<GraphSchema> {
-        return await this.fetch<GraphSchema>('/metadata/schema')
+    async getFullSchema(dataSourceId?: string): Promise<GraphSchema> {
+        return await this.fetch<GraphSchema>('/metadata/schema', {
+            extraParams: dataSourceId ? { dataSourceId } : undefined,
+        })
     }
 
     // ==========================================

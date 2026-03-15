@@ -157,15 +157,12 @@ async def update_data_source(
     if not old_ds or old_ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
 
-    # Validate new catalog item/ontology if changing
-    from backend.app.db.repositories import catalog_repo
-    if req.catalog_item_id and not await catalog_repo.get_catalog_item(session, req.catalog_item_id):
-        raise HTTPException(status_code=404, detail=f"Catalog Item '{req.catalog_item_id}' not found")
+    # Validate new ontology if changing
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
         raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
 
-    # Evict old cache entry
-    if req.catalog_item_id or req.projection_mode is not None or req.dedicated_graph_name is not None:
+    # Evict old cache entry if provider/graph config changed
+    if req.projection_mode is not None or req.dedicated_graph_name is not None:
         await provider_registry.evict_workspace(workspace_id, session)
 
     ds = await data_source_repo.update_data_source(session, ds_id, req)

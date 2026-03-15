@@ -6,7 +6,6 @@
       "name": "Domain",
       "plural_name": "Domains",
       "description": "Business domain grouping related entities under a governance boundary.",
-      "granularity": "domain",
       "visual": {
         "icon": "FolderTree",
         "color": "#8b5cf6",
@@ -74,7 +73,6 @@
       "name": "System",
       "plural_name": "Systems",
       "description": "A system or platform that hosts data assets.",
-      "granularity": "system",
       "visual": {
         "icon": "Database",
         "color": "#06b6d4",
@@ -135,7 +133,6 @@
       "name": "Data Platform",
       "plural_name": "Data Platforms",
       "description": "A data platform such as Snowflake, BigQuery, or dbt.",
-      "granularity": "system",
       "visual": {
         "icon": "Server",
         "color": "#06b6d4",
@@ -184,7 +181,6 @@
       "name": "Application",
       "plural_name": "Applications",
       "description": "A software application or service.",
-      "granularity": "system",
       "visual": {
         "icon": "AppWindow",
         "color": "#06b6d4",
@@ -229,7 +225,6 @@
       "name": "Container",
       "plural_name": "Containers",
       "description": "A logical container grouping datasets (e.g. folder, bucket, schema).",
-      "granularity": "schema",
       "visual": {
         "icon": "Box",
         "color": "#10b981",
@@ -278,7 +273,6 @@
       "name": "Schema",
       "plural_name": "Schemas",
       "description": "A database schema or namespace.",
-      "granularity": "schema",
       "visual": {
         "icon": "Layers",
         "color": "#10b981",
@@ -327,7 +321,6 @@
       "name": "Data Flow",
       "plural_name": "Data Flows",
       "description": "A logical orchestration pipeline or workflow grouping jobs.",
-      "granularity": "schema",
       "visual": {
         "icon": "GitBranch",
         "color": "#ec4899",
@@ -374,7 +367,6 @@
       "name": "Pipeline",
       "plural_name": "Pipelines",
       "description": "A data pipeline executing ETL or ELT transformations.",
-      "granularity": "schema",
       "visual": {
         "icon": "Workflow",
         "color": "#ec4899",
@@ -422,7 +414,6 @@
       "name": "Dataset",
       "plural_name": "Datasets",
       "description": "A tabular dataset, table, or view.",
-      "granularity": "table",
       "visual": {
         "icon": "Table2",
         "color": "#22c55e",
@@ -493,7 +484,6 @@
       "name": "Data Job",
       "plural_name": "Data Jobs",
       "description": "A discrete data transformation or processing job.",
-      "granularity": "table",
       "visual": {
         "icon": "Workflow",
         "color": "#ec4899",
@@ -540,7 +530,6 @@
       "name": "Dashboard",
       "plural_name": "Dashboards",
       "description": "A BI dashboard or report grouping charts.",
-      "granularity": "table",
       "visual": {
         "icon": "LayoutDashboard",
         "color": "#3b82f6",
@@ -588,7 +577,6 @@
       "name": "Report",
       "plural_name": "Reports",
       "description": "A report or document produced from data.",
-      "granularity": "table",
       "visual": {
         "icon": "FileText",
         "color": "#22c55e",
@@ -634,7 +622,6 @@
       "name": "Schema Field",
       "plural_name": "Schema Fields",
       "description": "A field or column within a dataset schema.",
-      "granularity": "column",
       "visual": {
         "icon": "Columns3",
         "color": "#f59e0b",
@@ -699,7 +686,6 @@
       "name": "Column",
       "plural_name": "Columns",
       "description": "A column in a database table.",
-      "granularity": "column",
       "visual": {
         "icon": "Columns3",
         "color": "#f59e0b",
@@ -754,7 +740,6 @@
       "name": "Chart",
       "plural_name": "Charts",
       "description": "A visualization or chart within a dashboard.",
-      "granularity": "column",
       "visual": {
         "icon": "BarChart3",
         "color": "#3b82f6",
@@ -799,7 +784,6 @@
       "name": "Glossary Term",
       "plural_name": "Glossary Terms",
       "description": "A business glossary term or definition.",
-      "granularity": "column",
       "visual": {
         "icon": "BookOpen",
         "color": "#a855f7",
@@ -852,7 +836,6 @@
       "name": "Tag",
       "plural_name": "Tags",
       "description": "A classification tag applied to entities.",
-      "granularity": "column",
       "visual": {
         "icon": "Tag",
         "color": "#64748b",

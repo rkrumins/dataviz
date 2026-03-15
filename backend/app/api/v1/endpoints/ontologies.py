@@ -301,6 +301,21 @@ async def get_ontology_impact(
     }
 
 
+@router.get("/{ontology_id}/assignments")
+async def get_ontology_assignments(
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    List all data sources (across all workspaces) currently assigned to this ontology.
+    Returns [{workspaceId, workspaceName, dataSourceId, dataSourceLabel}].
+    """
+    row = await ontology_definition_repo.get_ontology(session, ontology_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    return await ontology_definition_repo.get_assignments(session, ontology_id)
+
+
 @router.post("/suggest", response_model=OntologyCreateRequest, status_code=200)
 async def suggest_ontology(
     stats: GraphSchemaStats = Body(...),

@@ -173,33 +173,49 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception as e:
             logger.error(f"Seed failed: {e}")
 
-    async def ensure_indices(self):
-        """Create indices for standard node labels and properties."""
-        labels = [
+    async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None):
+        """Create indices for node labels and properties.
+
+        When *entity_type_ids* is provided (e.g. from the resolved ontology),
+        those labels are indexed in addition to the hardcoded defaults.
+        """
+        default_labels = [
             EntityType.DOMAIN.value,
             EntityType.DATA_PLATFORM.value,
             EntityType.CONTAINER.value,
             EntityType.DATASET.value,
-            EntityType.SCHEMA_FIELD.value
+            EntityType.SCHEMA_FIELD.value,
         ]
+        extra = list(entity_type_ids) if entity_type_ids else []
+        seen: set[str] = set()
+        labels: list[str] = []
+        for lbl in default_labels + extra:
+            if lbl not in seen:
+                seen.add(lbl)
+                labels.append(lbl)
+
         properties = ["urn", "displayName", "qualifiedName"]
-        
+
         for label in labels:
             for prop in properties:
                 try:
-                    # CREATE INDEX FOR (n:Label) ON (n.property)
-                    # Using query instead of ro_query as it's a schema change
                     await self._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
-                except Exception as e:
-                    # If index already exists, FalkorDB 2.x+ might throw or just be silent.
-                    # We catch all and continue.
+                except Exception:
                     pass
 
     @property
     def name(self) -> str:
         return "FalkorDBProvider"
 
+    def set_containment_edge_types(self, types: List[str]) -> None:
+        """Called by ContextEngine after ontology resolution to inject the
+        authoritative containment edge types from the resolver."""
+        self._resolved_containment_types: Set[str] = {t.upper() for t in types}
+
     def _get_containment_edge_types(self) -> Set[str]:
+        # Prefer ontology-resolved types if available (set by ContextEngine after resolution)
+        if getattr(self, "_resolved_containment_types", None):
+            return self._resolved_containment_types
         if not hasattr(self, "_containment_cache"):
             config = os.getenv("CONTAINMENT_EDGE_TYPES", "").strip()
             if config:

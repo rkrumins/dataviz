@@ -154,6 +154,9 @@ async def init_db() -> None:
             "ALTER TABLE ontologies ADD COLUMN relationship_type_definitions TEXT DEFAULT '{}'",
             "ALTER TABLE ontologies ADD COLUMN is_system INTEGER DEFAULT 0",
             "ALTER TABLE ontologies ADD COLUMN scope TEXT DEFAULT 'universal'",
+            # Phase 2: Add description and evolution_policy to ontologies
+            "ALTER TABLE ontologies ADD COLUMN description TEXT",
+            "ALTER TABLE ontologies ADD COLUMN evolution_policy TEXT DEFAULT 'reject'",
         ]
         for stmt in migrations:
             try:

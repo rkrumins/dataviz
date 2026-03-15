@@ -1,111 +1,77 @@
 /**
  * Projection Engine - Derives context views from underlying data
- * 
+ *
  * This engine transforms raw physical metadata into view-specific
  * representations with:
- * - Lineage Aggregation (column→table→schema→domain)
- * - Edge Promotion (if columns have lineage, so do parent tables)
+ * - Lineage Aggregation (fine → coarse, driven by ontology hierarchy levels)
+ * - Edge Promotion (if fine-grained nodes have lineage, so do their ancestors)
  * - Visibility Filtering (hide/show entity types per view)
  * - Containment Collapse (roll up children into parents)
+ *
+ * All granularity knowledge is now driven by the ontology DB via
+ * EntityTypeSchema.hierarchy.level — no hardcoded type lists or enum buckets.
  */
 
 import type { Node, Edge } from '@xyflow/react'
 
-// Granularity levels from finest to coarsest
-export enum GranularityLevel {
-  Column = 0,
-  Table = 1,
-  Schema = 2,
-  System = 3,
-  Domain = 4,
-}
+// Minimal entity type descriptor needed for level-based comparisons.
+// Matches the EntityTypeSchema shape from the schema store.
+type EntityTypeLevel = { id: string; hierarchy: { level: number } }
 
 /**
- * Internal fallback granularity map — only used when the schema store has not yet
- * loaded. All production code paths should derive granularity from
- * EntityTypeSchema.hierarchy.level via useSchemaGranularityMap().
+ * Build a parent type map from ontology entity type hierarchy.
+ * Returns: { childTypeId: parentTypeId } using the first entry of canBeContainedBy.
  *
- * Domain is the coarsest (level 0 in ontology → highest GranularityLevel enum value).
- * Column is the finest (level 4 in ontology → GranularityLevel.Column = 0).
- * The mapping inverts the ontology level: granularityLevel = MAX_LEVEL - ontologyLevel.
- *
- * @internal Do not import this directly — use useSchemaGranularityMap() instead.
+ * Use this to construct a type-level containment map for ancestor walks
+ * when only entity type IDs are known (not full node sets).
  */
-const _FALLBACK_ENTITY_GRANULARITY: Record<string, GranularityLevel> = {
-  'column': GranularityLevel.Column,
-  'schemaField': GranularityLevel.Column,
-  'dataset': GranularityLevel.Table,
-  'asset': GranularityLevel.Table,
-  'table': GranularityLevel.Table,
-  'pipeline': GranularityLevel.Table,
-  'dashboard': GranularityLevel.Table,
-  'container': GranularityLevel.Schema,
-  'schema': GranularityLevel.Schema,
-  'system': GranularityLevel.System,
-  'app': GranularityLevel.System,
-  'dataPlatform': GranularityLevel.System,
-  'domain': GranularityLevel.Domain,
-}
-
-/**
- * @deprecated Import ENTITY_GRANULARITY only for backward-compat; prefer
- * useSchemaGranularityMap() to get an ontology-driven map.
- */
-export const ENTITY_GRANULARITY: Record<string, GranularityLevel> = _FALLBACK_ENTITY_GRANULARITY
-
-/**
- * Build a granularity map from an array of entity type schemas.
- * The ontology hierarchy level is inverted so that a lower ontology level
- * (closer to root/domain) maps to a higher GranularityLevel enum value.
- *
- * @param entityTypes - Array of EntityTypeSchema objects from the schema store.
- * @returns Record mapping entity type id → GranularityLevel
- */
-export function buildGranularityMap(
-  entityTypes: Array<{ id: string; hierarchy: { level: number } }>,
-): Record<string, GranularityLevel> {
-  if (entityTypes.length === 0) return _FALLBACK_ENTITY_GRANULARITY
-
-  const maxLevel = Math.max(...entityTypes.map((e) => e.hierarchy.level))
-  const result: Record<string, GranularityLevel> = {}
-  for (const e of entityTypes) {
-    // Invert: finest (highest ontology level) → Column (0), coarsest (0) → Domain (4)
-    result[e.id] = (maxLevel - e.hierarchy.level) as GranularityLevel
+export function buildParentTypeMap(
+  entityTypes: Array<{ id: string; hierarchy: { canBeContainedBy: string[] } }>,
+): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const et of entityTypes) {
+    if (et.hierarchy.canBeContainedBy.length > 0) {
+      result[et.id] = et.hierarchy.canBeContainedBy[0]
+    }
   }
   return result
 }
 
 /**
- * @deprecated Use buildGranularityMap() + containment from schema instead.
- * Retained for isolated usages not yet migrated to schema store.
+ * Returns true if nodeTypeId is finer-grained than targetTypeId.
+ *
+ * "Finer" means a higher hierarchy.level in the ontology
+ * (e.g. column at level 4 is finer than dataset at level 3).
+ * Unknown types default to level 9999 (treated as finest leaf).
  */
-export const ENTITY_PARENT_TYPE: Record<string, string> = {
-  'column': 'dataset',
-  'schemaField': 'dataset',
-  'dataset': 'schema',
-  'asset': 'app',
-  'table': 'schema',
-  'container': 'dataPlatform',
-  'schema': 'system',
-  'system': 'domain',
-  'app': 'domain',
-  'dataPlatform': 'domain',
+export function isFinerThan(
+  nodeTypeId: string,
+  targetTypeId: string,
+  entityTypes: EntityTypeLevel[],
+): boolean {
+  const nodeLevel = entityTypes.find((e) => e.id === nodeTypeId)?.hierarchy.level ?? 9999
+  const targetLevel = entityTypes.find((e) => e.id === targetTypeId)?.hierarchy.level ?? 0
+  return nodeLevel > targetLevel
 }
 
 export interface ViewProjectionConfig {
-  // Target granularity for the view
-  targetGranularity: GranularityLevel
+  /**
+   * Target entity type ID for lineage aggregation (e.g. "dataset", "term").
+   * null = no aggregation — show finest-grained lineage as-is.
+   * The value must be a valid entity type ID from the active ontology.
+   */
+  targetGranularityType: string | null
 
-  // Visible entity types
+  // Visible entity types (by ID). Empty array = show all types.
   visibleEntityTypes: string[]
 
-  // Visible relationship/edge types
+  // Visible relationship/edge types (by ID). Empty array = show all types.
   visibleRelationshipTypes: string[]
 
-  // Whether to aggregate lineage edges upward
+  // Whether to aggregate lineage edges upward to targetGranularityType
   aggregateLineage: boolean
 
-  // Whether to collapse children into parents
+  // Whether to collapse children into parents (show count badge)
   collapseChildren: boolean
 
   // Max depth to show (-1 for unlimited)
@@ -128,28 +94,27 @@ export interface AggregatedEdge {
   id: string
   sourceId: string
   targetId: string
-  // Original column-level edges that were aggregated
+  // Original fine-grained edges that were aggregated into this one
   sourceEdges: string[]
-  // Confidence based on number of supporting edges
+  // Confidence based on number of supporting source edges (0–1)
   confidence: number
-  // The granularity level of this aggregated edge
-  granularity: GranularityLevel
+  // The entity type ID used as the aggregation target (e.g. "dataset")
+  granularityType: string | null
 }
 
 /**
- * Build containment map from nodes and edges
+ * Build containment map from nodes and edges.
  * Returns: childId → parentId
  */
 export function buildContainmentMap(
   _nodes: Node[],
   edges: Edge[],
-  containmentEdgeTypes: string[] = ['contains'] // Default for backward compatibility
+  containmentEdgeTypes: string[] = ['contains'],
 ): Map<string, string> {
   const containmentMap = new Map<string, string>()
 
   edges.forEach((edge) => {
-    // Dynamic check for containment
-    const edgeType = edge.data?.relationship as string || edge.data?.edgeType as string || ''
+    const edgeType = (edge.data?.relationship as string) || (edge.data?.edgeType as string) || ''
     if (containmentEdgeTypes.includes(edgeType)) {
       containmentMap.set(edge.target, edge.source)
     }
@@ -164,19 +129,19 @@ export function buildContainmentMap(
 export interface NodeCountSummary {
   directChildren: number
   totalDescendants: number
-  byType: Record<string, number> // e.g., { table: 5, column: 47 }
+  byType: Record<string, number> // e.g., { dataset: 5, column: 47 }
 }
 
 /**
- * Compute child counts for a node
- * Returns direct children count, total descendants, and breakdown by entity type
+ * Compute child counts for a node.
+ * Returns direct children count, total descendants, and breakdown by entity type.
  */
 export function computeNodeCounts(
   nodeId: string,
   nodes: Node[],
-  containmentMap: Map<string, string>
+  containmentMap: Map<string, string>,
 ): NodeCountSummary {
-  const nodeMap = new Map(nodes.map(n => [n.id, n]))
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]))
   const result: NodeCountSummary = {
     directChildren: 0,
     totalDescendants: 0,
@@ -192,14 +157,12 @@ export function computeNodeCounts(
     childrenMap.get(parentId)!.push(childId)
   })
 
-  // Count direct children
   const directChildren = childrenMap.get(nodeId) ?? []
   result.directChildren = directChildren.length
 
-  // Recursively count all descendants
   const countDescendants = (id: string): void => {
     const children = childrenMap.get(id) ?? []
-    children.forEach(childId => {
+    children.forEach((childId) => {
       result.totalDescendants++
       const childNode = nodeMap.get(childId)
       if (childNode) {
@@ -216,37 +179,40 @@ export function computeNodeCounts(
 }
 
 /**
- * Compute counts for all nodes in the graph
- * Returns a map of nodeId → NodeCountSummary
+ * Compute counts for all nodes in the graph.
+ * Returns a map of nodeId → NodeCountSummary.
  */
-export function computeAllNodeCounts(
-  nodes: Node[],
-  edges: Edge[]
-): Map<string, NodeCountSummary> {
+export function computeAllNodeCounts(nodes: Node[], edges: Edge[]): Map<string, NodeCountSummary> {
   const containmentMap = buildContainmentMap(nodes, edges)
   const countMap = new Map<string, NodeCountSummary>()
-
-  nodes.forEach(node => {
+  nodes.forEach((node) => {
     countMap.set(node.id, computeNodeCounts(node.id, nodes, containmentMap))
   })
-
   return countMap
 }
 
 /**
- * Find ancestor at a specific granularity level.
+ * Find the nearest ancestor of nodeId that is at or coarser than targetTypeId.
  *
- * @param granularityMap - Schema-derived map (from buildGranularityMap).
- *   Falls back to the internal hardcoded map when not supplied.
+ * Walk the containment chain upward until reaching a node whose entity type
+ * is NOT finer than the target (i.e., hierarchy.level <= target level).
+ *
+ * @param nodeId - Starting node
+ * @param targetTypeId - Entity type ID to aggregate to (e.g. "dataset"). null = return nodeId immediately.
+ * @param nodes - Full node set
+ * @param containmentMap - childId → parentId map
+ * @param entityTypes - Ontology entity type definitions for level comparison
  */
 export function findAncestorAtGranularity(
   nodeId: string,
-  targetGranularity: GranularityLevel,
+  targetTypeId: string | null,
   nodes: Node[],
   containmentMap: Map<string, string>,
-  granularityMap: Record<string, GranularityLevel> = _FALLBACK_ENTITY_GRANULARITY,
+  entityTypes: EntityTypeLevel[] = [],
 ): string | null {
-  const nodeMap = new Map(nodes.map(n => [n.id, n]))
+  if (targetTypeId === null) return nodeId
+
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]))
 
   let currentId: string | undefined = nodeId
   const visited = new Set<string>()
@@ -257,9 +223,8 @@ export function findAncestorAtGranularity(
     if (!node) return null
 
     const nodeType = node.data?.type as string
-    const nodeGranularity = granularityMap[nodeType] ?? GranularityLevel.Column
-
-    if (nodeGranularity >= targetGranularity) {
+    if (!isFinerThan(nodeType, targetTypeId, entityTypes)) {
+      // This node is at or coarser than the target — it's our ancestor
       return currentId
     }
 
@@ -270,32 +235,47 @@ export function findAncestorAtGranularity(
 }
 
 /**
- * Aggregate lineage edges to a higher granularity level
- * 
- * If column A (in table X) → column B (in table Y),
- * then we derive: table X → table Y
+ * Aggregate lineage edges to a coarser entity type level.
+ *
+ * For example, if column A (in dataset X) → column B (in dataset Y),
+ * this derives: dataset X → dataset Y.
+ *
+ * @param targetGranularityType - Entity type ID to aggregate to (e.g. "dataset").
+ *   null or empty string = return empty (no aggregation; caller should use raw edges).
+ * @param entityTypes - Ontology entity type definitions for level comparison.
+ * @param containmentEdgeTypes - Edge types that are containment (excluded from lineage).
  */
 export function aggregateLineageEdges(
   edges: Edge[],
   nodes: Node[],
   containmentMap: Map<string, string>,
-  targetGranularity: GranularityLevel
+  targetGranularityType: string | null,
+  entityTypes: EntityTypeLevel[] = [],
+  containmentEdgeTypes: string[] = ['contains', 'has_schema', 'has_dataset', 'has_column'],
 ): AggregatedEdge[] {
+  if (!targetGranularityType) return []
+
   const aggregatedEdges = new Map<string, AggregatedEdge>()
 
-  // Filter to lineage edges (not containment)
   const lineageEdges = edges.filter((edge) => {
-    const rel = edge.data?.relationship ?? edge.data?.edgeType ?? ''
-    return rel !== 'contains' && rel !== 'has_schema' && rel !== 'has_dataset' && rel !== 'has_column'
+    const rel = (edge.data?.relationship ?? edge.data?.edgeType ?? '') as string
+    return !containmentEdgeTypes.includes(rel)
   })
 
   lineageEdges.forEach((edge) => {
-    // Find ancestors at target granularity
     const sourceAncestor = findAncestorAtGranularity(
-      edge.source, targetGranularity, nodes, containmentMap
+      edge.source,
+      targetGranularityType,
+      nodes,
+      containmentMap,
+      entityTypes,
     )
     const targetAncestor = findAncestorAtGranularity(
-      edge.target, targetGranularity, nodes, containmentMap
+      edge.target,
+      targetGranularityType,
+      nodes,
+      containmentMap,
+      entityTypes,
     )
 
     if (sourceAncestor && targetAncestor && sourceAncestor !== targetAncestor) {
@@ -304,7 +284,7 @@ export function aggregateLineageEdges(
       if (aggregatedEdges.has(edgeKey)) {
         const existing = aggregatedEdges.get(edgeKey)!
         existing.sourceEdges.push(edge.id)
-        existing.confidence = Math.min(1, existing.sourceEdges.length / 10) // More edges = higher confidence
+        existing.confidence = Math.min(1, existing.sourceEdges.length / 10)
       } else {
         aggregatedEdges.set(edgeKey, {
           id: `agg-${edgeKey}`,
@@ -312,7 +292,7 @@ export function aggregateLineageEdges(
           targetId: targetAncestor,
           sourceEdges: [edge.id],
           confidence: 0.5,
-          granularity: targetGranularity,
+          granularityType: targetGranularityType,
         })
       }
     }
@@ -322,137 +302,63 @@ export function aggregateLineageEdges(
 }
 
 /**
- * Project a graph view based on configuration
+ * Project a graph view based on configuration.
+ *
+ * @param entityTypes - Ontology entity type definitions. Required for
+ *   granularity-based lineage aggregation. Can be omitted if aggregateLineage is false.
  */
 export function projectGraph(
   nodes: Node[],
   edges: Edge[],
-  config: ViewProjectionConfig
+  config: ViewProjectionConfig,
+  entityTypes: EntityTypeLevel[] = [],
 ): ProjectedGraph {
-  // Use View-Specific containment definition
   const containmentTypes = config.containmentEdgeTypes ?? ['contains', 'has_schema', 'has_dataset', 'has_column']
   const containmentMap = buildContainmentMap(nodes, edges, containmentTypes)
 
-  // 1. Filter nodes by visible entity types
-  let filteredNodes = nodes.filter((node) => {
-    const nodeType = node.data?.type as string
-    return config.visibleEntityTypes.includes(nodeType)
-  })
+  // 1. Filter nodes by visible entity types (empty = show all)
+  let filteredNodes =
+    config.visibleEntityTypes.length > 0
+      ? nodes.filter((node) => {
+          const nodeType = node.data?.type as string
+          return config.visibleEntityTypes.includes(nodeType)
+        })
+      : [...nodes]
 
-  // 2. Collapse children for ALL levels (Generic)
+  // 2. Collapse children — count hidden children and generate ghost nodes for pagination
   if (config.collapseChildren) {
-    // For each visible node, count hidden children based on view hierarchy
     filteredNodes = filteredNodes.flatMap((node) => {
-      // Find children in the FULL node list (rawNodes) using our dynamic map
-      // NOTE: nodes passed to projectGraph are usually the Full Raw set? 
-      // If 'nodes' is full raw set, we check which ones have 'node.id' as parent.
-
-      const children = nodes.filter((n) =>
-        containmentMap.get(n.id) === node.id
-      )
-
+      const children = nodes.filter((n) => containmentMap.get(n.id) === node.id)
       const childCount = children.length
-
-      // Update the node with count info
       const updatedNode = {
         ...node,
         data: {
           ...node.data,
           _collapsedChildCount: childCount,
-          _totalDescendants: 0, // Need full calc for this, skipping for perf now
-        }
+          _totalDescendants: 0,
+        },
       }
 
-      // GENERIC PAGINATION CHECK
-      // If this node is "expanded" (meaning its children are supposed to be visible),
-      // we check if all children are actually in the 'nodes' array.
-      // Wait, 'nodes' IS the store nodes. If we are paginating, 'nodes' only contains loaded ones.
-      // 'childCount' (from metadata) > 'children.length' (loaded) -> Show Load More.
-
-      // We rely on node metadata for the TRUE total count from server
       const serverTotalCount = (node.data?.childCount as number) ?? childCount
-
-      // How many are currently loaded/visible in this projection?
-      // We only filtered by entity type above.
-      // But 'children' array here is from 'nodes' (the store).
-      // So if store has 5 columns, children.length is 5.
-      // If server has 100, serverTotalCount is 100.
-
       const loadedChildrenCount = children.length
 
       if (serverTotalCount > loadedChildrenCount) {
-        // Identify the type of missing children (heuristic)
-        // Usually homogenous, take type of first child or generic 'item'
-        const childType = children[0]?.data?.type as string || 'item'
-
-        // Create Ghost Node
+        const childType = (children[0]?.data?.type as string) || 'item'
         const ghostNode: Node = {
           id: `ghost-${node.id}`,
           type: 'ghost',
-          position: { x: 0, y: 0 }, // Layout will fix
+          position: { x: 0, y: 0 },
           data: {
-            label: `Load More`,
-            hiddenCount: serverTotalCount - loadedChildrenCount, // Remaining to load
+            label: 'Load More',
+            hiddenCount: serverTotalCount - loadedChildrenCount,
             nodeCount: serverTotalCount - loadedChildrenCount,
             parentId: node.id,
             entityType: childType,
-            type: 'ghost' // For rendering
+            type: 'ghost',
           },
-          parentId: node.id, // Important for ELK if we supported compound nodes
+          parentId: node.id,
           extent: 'parent',
         }
-
-        // Return [node, ghostNode] IF the node is expanded? 
-        // Actually, if collapseChildren is TRUE, we are hiding children anyway. 
-        // This block is named "Collapse Children". Usually this means "Don't show children".
-        // BUT standard behavior in this app seems to be: 
-        // IF collapsed -> Show Badge. 
-        // IF expanded -> Show Children.
-        // 'collapseChildren' config might mean "Enable collapsible behavior".
-
-        // Let's assume proper expansion handling happens in the HOOK or LAYOUT.
-        // Wait, projectGraph does filtering. 
-        // If a node is in 'expandedIds', we typically want its children to survive filter?
-
-        // Re-reading logic:
-        // Typical pattern: Container Node is visible. Its children are visible ONLY if container is expanded.
-        // Current code just returns the node with updated data.
-        // UseLineageExploration handles the expansion logic by adding children to 'visibleNodes'.
-
-        // Actually, I should insert the Ghost Node into the result list
-        // IF the node is expanded and we have partial data.
-        // But projectGraph doesn't know about expansion state directly?
-        // Ah, 'projectGraph' is receiving 'nodes' which are ALL loaded nodes.
-
-        // If I insert a Ghost Node here, it becomes a visible node.
-        // It should only be inserted if the parent is "open" visually?
-        // Or does the user see "Load More" inside the collapsed node? No, usually as a sibling to children.
-
-        // We'll insert it. The layout/renderer will decide where to put it. 
-        // If children are visible, Ghost should be visible.
-        // How do we know if children are visible?
-        // In `projectToGranularity` we filtered by Granularity.
-        // Here `projectGraph` seems to be the main projection.
-
-        // Strategy: ALWAYS return the Ghost Node if there are missing children.
-        // The filtering step downstream (or upstream in hook) will decide if we show it.
-        // Actually, if we return it here, it will be rendered.
-        // We only want to render it if the Parent is "expanded".
-        // But we don't have expanded state here.
-
-        // Alternative: The Ghost Node is a CHILD of the parent.
-        // If the parent is collapsed, the Ghost Node is hidden (rolled up).
-        // If the parent is expanded, the Ghost Node is shown.
-        // This implies we need a "parent-child" relationship in React Flow? 
-        // Or just containment edges?
-
-        // Let's just return it. If the parent is collapsed, `useLineageExploration` (which calls this?)
-        // wait, `useProjectedGraph` calls this.
-        // It doesn't know about expansion.
-
-        // Let's stick to the plan: Generic Pagination Logic.
-        // If we detect partial data, we generate a Ghost Node.
-        // We adding it to the list.
         return [updatedNode, ghostNode]
       }
 
@@ -460,33 +366,39 @@ export function projectGraph(
     })
   }
 
-  // 3. Filter edges by visible relationship types
-  let filteredEdges = edges.filter((edge) => {
-    const edgeType = (edge.data?.relationship ?? edge.data?.edgeType ?? 'lineage') as string
-    return config.visibleRelationshipTypes.includes(edgeType)
-  })
+  // 3. Filter edges by visible relationship types (empty = show all)
+  let filteredEdges =
+    config.visibleRelationshipTypes.length > 0
+      ? edges.filter((edge) => {
+          const edgeType = (edge.data?.relationship ?? edge.data?.edgeType ?? 'lineage') as string
+          return config.visibleRelationshipTypes.includes(edgeType)
+        })
+      : [...edges]
 
-  // 4. Keep only edges where both source and target are visible
-  const visibleNodeIds = new Set(filteredNodes.map(n => n.id))
-  filteredEdges = filteredEdges.filter((edge) =>
-    visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)
+  // 4. Keep only edges where both endpoints are visible
+  const visibleNodeIds = new Set(filteredNodes.map((n) => n.id))
+  filteredEdges = filteredEdges.filter(
+    (edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target),
   )
 
   // 5. Aggregate lineage if configured
   const aggregatedEdges = new Map<string, AggregatedEdge>()
-  if (config.aggregateLineage) {
+  if (config.aggregateLineage && config.targetGranularityType) {
     const aggregated = aggregateLineageEdges(
-      edges, nodes, containmentMap, config.targetGranularity
+      edges,
+      nodes,
+      containmentMap,
+      config.targetGranularityType,
+      entityTypes,
+      containmentTypes,
     )
 
-    // Convert aggregated edges to React Flow edges
     aggregated.forEach((agg) => {
       if (visibleNodeIds.has(agg.sourceId) && visibleNodeIds.has(agg.targetId)) {
         aggregatedEdges.set(agg.id, agg)
 
-        // Add as a visible edge if not already present
         const directEdgeExists = filteredEdges.some(
-          e => e.source === agg.sourceId && e.target === agg.targetId
+          (e) => e.source === agg.sourceId && e.target === agg.targetId,
         )
 
         if (!directEdgeExists) {
@@ -494,7 +406,7 @@ export function projectGraph(
             id: agg.id,
             source: agg.sourceId,
             target: agg.targetId,
-            type: 'aggregated', // Use the AggregatedEdge component for visual distinction
+            type: 'aggregated',
             data: {
               edgeType: 'aggregated',
               confidence: agg.confidence,
@@ -515,39 +427,46 @@ export function projectGraph(
 }
 
 /**
- * Default view configurations
+ * Default view projection configs for standard ontology views.
+ *
+ * These are fallback definitions for built-in view types when no
+ * saved view configuration is available. For custom ontologies, the
+ * saved view record in the DB provides visibleEntityTypes/visibleRelationshipTypes.
+ *
+ * targetGranularityType uses standard ontology entity type IDs.
+ * Callers using custom ontologies should override this with the appropriate type ID.
  */
 export const VIEW_PROJECTION_CONFIGS: Record<string, ViewProjectionConfig> = {
   'data-lineage': {
-    targetGranularity: GranularityLevel.Table,
+    targetGranularityType: 'dataset',
     visibleEntityTypes: ['domain', 'app', 'system', 'dataset', 'asset', 'dashboard', 'pipeline'],
     visibleRelationshipTypes: ['produces', 'consumes', 'transforms', 'feeds', 'derives_from', 'lineage'],
-    aggregateLineage: true, // Column lineage → Table lineage
-    collapseChildren: true, // Hide columns, show count
+    aggregateLineage: true,
+    collapseChildren: true,
     maxDepth: -1,
     containerTypes: ['domain', 'app'],
-    containmentEdgeTypes: ['contains', 'has_dataset', 'has_schema'], // Default for lineage view
+    containmentEdgeTypes: ['contains', 'has_dataset', 'has_schema'],
   },
   'column-lineage': {
-    targetGranularity: GranularityLevel.Column,
+    targetGranularityType: null,
     visibleEntityTypes: ['dataset', 'column', 'pipeline'],
     visibleRelationshipTypes: ['produces', 'consumes', 'transforms', 'derives_from', 'lineage', 'contains'],
-    aggregateLineage: false, // Show actual column lineage
+    aggregateLineage: false,
     collapseChildren: false,
     maxDepth: -1,
     containerTypes: [],
   },
   'physical-fabric': {
-    targetGranularity: GranularityLevel.Column,
+    targetGranularityType: null,
     visibleEntityTypes: ['domain', 'system', 'schema', 'dataset', 'column'],
     visibleRelationshipTypes: ['contains', 'has_schema', 'has_dataset', 'has_column'],
     aggregateLineage: false,
-    collapseChildren: false, // Show all in hierarchy
+    collapseChildren: false,
     maxDepth: -1,
     containerTypes: ['domain', 'system', 'schema', 'dataset'],
   },
   'impact-analysis': {
-    targetGranularity: GranularityLevel.Table,
+    targetGranularityType: 'dataset',
     visibleEntityTypes: ['domain', 'app', 'dataset', 'dashboard'],
     visibleRelationshipTypes: ['produces', 'consumes', 'feeds'],
     aggregateLineage: true,
@@ -558,9 +477,9 @@ export const VIEW_PROJECTION_CONFIGS: Record<string, ViewProjectionConfig> = {
 }
 
 /**
- * Get or create projection config for a view
+ * Get the default projection config for a named view type.
+ * Falls back to 'data-lineage' for unknown view IDs.
  */
 export function getViewProjectionConfig(viewId: string): ViewProjectionConfig {
   return VIEW_PROJECTION_CONFIGS[viewId] ?? VIEW_PROJECTION_CONFIGS['data-lineage']
 }
-
