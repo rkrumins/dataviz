@@ -22,6 +22,7 @@ import { generateId } from '@/lib/utils'
 const EMPTY_ENTITY_TYPES: EntityTypeSchema[] = []
 const EMPTY_REL_TYPES: RelationshipTypeSchema[] = []
 const EMPTY_STRING_ARRAY: string[] = []
+const EMPTY_VIEWS: ViewConfiguration[] = []
 const EMPTY_ENTITY_HIERARCHY_MAP: Record<string, { canContain: string[]; canBeContainedBy: string[] }> = {}
 const EMPTY_EDGE_TYPE_METADATA_MAP: Record<string, EdgeTypeMetadata> = {}
 // These are intentionally EMPTY — the backend's ontology (or its graph introspection)
@@ -87,6 +88,8 @@ interface SchemaState {
   addView: (view: ViewConfiguration) => void;
   updateView: (id: string, updates: Partial<ViewConfiguration>) => void;
   addOrUpdateView: (view: ViewConfiguration) => void;
+  /** Upsert many views in a single set() call — avoids N sequential store updates. */
+  upsertViews: (views: ViewConfiguration[]) => void;
   removeView: (id: string) => void;
   duplicateView: (id: string) => string;
   getActiveView: () => ViewConfiguration | undefined;
@@ -423,6 +426,20 @@ export const useSchemaStore = create<SchemaState>()(
         };
       }),
 
+      upsertViews: (views) => set((state) => {
+        if (!state.schema || views.length === 0) return state
+        const existingMap = new Map(state.schema.views.map(v => [v.id, v]))
+        for (const view of views) {
+          existingMap.set(view.id, { ...view, updatedAt: new Date().toISOString() })
+        }
+        return {
+          schema: {
+            ...state.schema,
+            views: Array.from(existingMap.values()),
+          },
+        }
+      }),
+
       removeView: (id) => set((state) => {
         if (!state.schema) return state;
         return {
@@ -517,7 +534,9 @@ export const useSchemaIsLoading = () => useSchemaStore((s) => s.isLoadingFromBac
 export const useSchemaError = () => useSchemaStore((s) => s.backendSchemaError);
 export const useContainmentEdgeTypes = () => useSchemaStore((s) => s.schema?.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES);
 export const useLineageEdgeTypes = () => useSchemaStore((s) => s.schema?.lineageEdgeTypes ?? DEFAULT_LINEAGE_EDGE_TYPES);
-export const useRootEntityTypes = () => useSchemaStore((s) => s.schema?.rootEntityTypes ?? EMPTY_STRING_ARRAY);
+export const useRootEntityTypes = () => useSchemaStore((s) => s.schema?.rootEntityTypes ?? EMPTY_STRING_ARRAY)
+/** All views from the schema, stable empty-array fallback — safe to use as a Zustand selector. */
+export const useSchemaViews = () => useSchemaStore((s) => s.schema?.views ?? EMPTY_VIEWS);
 export function useEntityTypeHierarchyMap() {
   const entityTypes = useEntityTypes()
   return useMemo(() => {

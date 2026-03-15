@@ -3,7 +3,7 @@ import { DashboardStats as StatsType, TemplateBrief, BlueprintBrief, DataSourceS
 import { type WorkspaceResponse, type DataSourceResponse } from '@/services/workspaceService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useNavigationStore } from '@/store/navigation'
-import { useSchemaStore } from '@/store/schema'
+import { useSchemaStore, useSchemaViews } from '@/store/schema'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Search,
@@ -654,7 +654,7 @@ export function WorkspaceGrid({ workspaces, dataSourceStats }: {
     const activeDataSourceId = useWorkspacesStore(s => s.activeDataSourceId)
     const setActiveWorkspace = useWorkspacesStore(s => s.setActiveWorkspace)
     // Safely read schema views (stable: only recomputes when view count changes)
-    const schemaViews = useSchemaStore(s => s.schema?.views ?? [])
+    const schemaViews = useSchemaViews()
     const [wsQuery, setWsQuery] = useState('')
     const [page, setPage] = useState(0)
 

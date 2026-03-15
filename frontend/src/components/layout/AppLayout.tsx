@@ -20,7 +20,6 @@ import { useSchemaStore } from '@/store/schema'
 import { listViews, viewToViewConfig } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useRouteSync } from '@/hooks/useRouteSync'
-import { useGraphSchema } from '@/hooks/useGraphSchema'
 import { cn } from '@/lib/utils'
 
 // Context for View Editor Modal
@@ -42,10 +41,6 @@ export function useViewEditorModal() {
 export function AppLayout() {
   const { isAuthenticated } = useAuthStore()
   const { theme, sidebarCollapsed } = usePreferencesStore()
-
-  // React Query-backed schema loading (replaces manual mergeBackendSchema pattern)
-  const { isLoading: isLoadingBackendSchema } = useGraphSchema()
-  const hasLoadedBackendSchema = !isLoadingBackendSchema
 
   // View editor state
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
@@ -70,21 +65,20 @@ export function AppLayout() {
   // Re-runs when activeWorkspaceId changes so newly created views are picked up.
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
   useEffect(() => {
-    if (!isAuthenticated || !hasLoadedBackendSchema) return
+    if (!isAuthenticated) return
 
     const loadViews = async () => {
       try {
         const views = await listViews()
-        const { addOrUpdateView } = useSchemaStore.getState()
-        for (const v of views) {
-          addOrUpdateView(viewToViewConfig(v))
-        }
+        // Single set() call — avoids N sequential Zustand updates that can
+        // overwhelm useSyncExternalStore subscribers during mount.
+        useSchemaStore.getState().upsertViews(views.map(viewToViewConfig))
       } catch (err) {
         console.error('[AppLayout] Failed to load views from API:', err)
       }
     }
     loadViews()
-  }, [isAuthenticated, hasLoadedBackendSchema, activeWorkspaceId])
+  }, [isAuthenticated, activeWorkspaceId])
 
   // Apply theme
   useEffect(() => {

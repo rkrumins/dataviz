@@ -14,7 +14,7 @@ import { workspaceService, type WorkspaceResponse, type DataSourceResponse, type
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
-import { useSchemaStore } from '@/store/schema'
+import { useSchemaViews } from '@/store/schema'
 import { DataSourceCard } from './DataSourceCard'
 import { AdminWizard, type WizardStep } from './AdminWizard'
 
@@ -78,7 +78,7 @@ function EditDsModal({ ds, ontologies, onSave, onClose }: {
 export function AdminWorkspaceDetail() {
     const { wsId } = useParams<{ wsId: string }>()
     const navigate = useNavigate()
-    const allViews = useSchemaStore(s => s.schema?.views || [])
+    const allViews = useSchemaViews()
 
     const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null)
     const [catalogItems, setCatalogItems] = useState<CatalogItemResponse[]>([])

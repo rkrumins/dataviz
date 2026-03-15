@@ -12,7 +12,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useSchemaStore, useEntityTypes } from '@/store/schema'
+import { useEntityTypes, useSchemaViews } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 
 // ============================================
@@ -62,7 +62,7 @@ export function CommandPalette({
     
     const entityTypes = useEntityTypes()
     const nodes = useCanvasStore(s => s.nodes)
-    const views = useSchemaStore(s => s.schema?.views || [])
+    const views = useSchemaViews()
     
     const [query, setQuery] = useState('')
     const [highlightedIndex, setHighlightedIndex] = useState(0)

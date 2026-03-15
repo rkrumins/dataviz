@@ -1,6 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useWorkspaces } from './useWorkspaces'
 import { useSchemaStore } from '@/store/schema'
+import type { ViewConfiguration } from '@/types/schema'
+
+const EMPTY_VIEWS: ViewConfiguration[] = []
 
 export interface DashboardStats {
     totalWorkspaces: number
@@ -37,9 +40,12 @@ export type BlueprintBrief = OntologyBrief
 
 export function useDashboardData() {
     const { workspaces, isLoading: isLoadingWorkspaces } = useWorkspaces()
-    const views = useSchemaStore(s => s.schema?.views || [])
+    const views = useSchemaStore(s => s.schema?.views ?? EMPTY_VIEWS)
     const activeScopeKey = useSchemaStore(s => s.activeScopeKey)
-    const visibleViews = views.filter(v => !v.scopeKey || v.scopeKey === activeScopeKey)
+    const visibleViews = useMemo(
+        () => views.filter(v => !v.scopeKey || v.scopeKey === activeScopeKey),
+        [views, activeScopeKey]
+    )
 
     const [stats, setStats] = useState<DashboardStats>({
         totalWorkspaces: 0,
@@ -155,14 +161,15 @@ export function useDashboardData() {
         fetchOntologies()
     }, [])
 
-    // Derive recent and popular views
-    const recentViews = [...(visibleViews || [])]
-        .filter(v => !v.isDefault)
-        .slice(0, 8)
-
-    const popularViews = [...(visibleViews || [])]
-        .filter(v => v.isDefault)
-        .slice(0, 8)
+    // Derive recent and popular views — memoized so downstream effects get stable refs
+    const recentViews = useMemo(
+        () => visibleViews.filter(v => !v.isDefault).slice(0, 8),
+        [visibleViews]
+    )
+    const popularViews = useMemo(
+        () => visibleViews.filter(v => v.isDefault).slice(0, 8),
+        [visibleViews]
+    )
 
     return {
         stats,

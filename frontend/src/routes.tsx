@@ -1,6 +1,7 @@
 import { lazy, Suspense } from 'react'
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
+import { CanvasLayout } from '@/components/layout/CanvasLayout'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 
 // Lazy-load all page-level components so their module code and hooks only
@@ -37,12 +38,19 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: 'dashboard', element: <Lazy><Dashboard /></Lazy> },
-      { path: 'explorer', element: <Lazy><ExplorerPage /></Lazy> },
-      { path: 'views', element: <Lazy><ViewsGallery /></Lazy> },
-      { path: 'views/:viewId', element: <Lazy><ViewPage /></Lazy> },
-      { path: 'workspaces/:workspaceId', element: <Lazy><WorkspaceView /></Lazy> },
-      { path: 'workspaces/:workspaceId/views', element: <Lazy><WorkspaceViewsManager /></Lazy> },
-      { path: 'schema', element: <Lazy><OntologySchemaPage /></Lazy> },
+      // CanvasLayout gates these routes behind a schema fetch so the heavy
+      // ontology data only loads when the user navigates to a canvas section.
+      {
+        element: <CanvasLayout />,
+        children: [
+          { path: 'explorer', element: <Lazy><ExplorerPage /></Lazy> },
+          { path: 'views', element: <Lazy><ViewsGallery /></Lazy> },
+          { path: 'views/:viewId', element: <Lazy><ViewPage /></Lazy> },
+          { path: 'workspaces/:workspaceId', element: <Lazy><WorkspaceView /></Lazy> },
+          { path: 'workspaces/:workspaceId/views', element: <Lazy><WorkspaceViewsManager /></Lazy> },
+          { path: 'schema', element: <Lazy><OntologySchemaPage /></Lazy> },
+        ],
+      },
       {
         path: 'admin',
         element: <Lazy><AdminPage /></Lazy>,
