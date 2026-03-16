@@ -37,7 +37,7 @@ import { cn } from '@/lib/utils'
 import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig } from '@/types/schema'
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
 import { useCanvasStore } from '@/store/canvas'
-import { useEntityLoader } from '@/hooks/useEntityLoader'
+import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useContainmentEdgeTypes, useEntityTypes } from '@/store/schema'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -136,7 +136,7 @@ function AssignedEntityItem({
     const node = useCanvasStore(s => s.nodes.find(n => n.id === entityId))
     const edges = useCanvasStore(s => s.edges)
     const containmentEdgeTypes = useContainmentEdgeTypes()
-    const { loadChildren, loadingNodes } = useEntityLoader()
+    const { loadChildren, loadingNodes } = useGraphHydration()
 
     const isNodeLoading = loadingNodes.has(entityId)
 

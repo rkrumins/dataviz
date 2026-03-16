@@ -46,6 +46,10 @@ interface CanvasState {
   setEdges: (edges: LineageEdge[]) => void
   addNodes: (nodes: LineageNode[]) => void
   addEdges: (edges: LineageEdge[]) => void
+  /** Atomic set of both nodes and edges (1 re-render, prevents flash-of-no-edges) */
+  setGraph: (nodes: LineageNode[], edges: LineageEdge[]) => void
+  /** Atomic add of both nodes and edges with dedup (1 re-render) */
+  addGraph: (nodes: LineageNode[], edges: LineageEdge[]) => void
 
   // Selection
   selectedNodeIds: string[]
@@ -122,6 +126,27 @@ export const useCanvasStore = create<CanvasState>()(
         const nextIndex = new Set(existingIds)
         uniqueEdges.forEach((e) => nextIndex.add(e.id))
         return { edges: [...state.edges, ...uniqueEdges], _edgeIndex: nextIndex }
+      }),
+      setGraph: (nodes, edges) => set(() => ({
+        nodes,
+        edges,
+        _nodeIndex: new Set(nodes.map((n) => n.id)),
+        _edgeIndex: new Set(edges.map((e) => e.id)),
+      })),
+      addGraph: (newNodes, newEdges) => set((state) => {
+        const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id))
+        const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id))
+        if (uniqueNodes.length === 0 && uniqueEdges.length === 0) return state
+        const nodeIndex = new Set(state._nodeIndex)
+        const edgeIndex = new Set(state._edgeIndex)
+        uniqueNodes.forEach((n) => nodeIndex.add(n.id))
+        uniqueEdges.forEach((e) => edgeIndex.add(e.id))
+        return {
+          nodes: [...state.nodes, ...uniqueNodes],
+          edges: [...state.edges, ...uniqueEdges],
+          _nodeIndex: nodeIndex,
+          _edgeIndex: edgeIndex,
+        }
       }),
 
       // Selection

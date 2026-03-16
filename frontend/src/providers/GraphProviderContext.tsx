@@ -96,9 +96,8 @@ export function GraphProvider({ children }: GraphProviderProps) {
 
         // Clear canvas immediately on workspace/connection change so stale nodes
         // from the previous workspace don't linger while the new data loads.
-        const { setNodes, setEdges } = useCanvasStore.getState()
-        setNodes([])
-        setEdges([])
+        const { setGraph } = useCanvasStore.getState()
+        setGraph([], [])
 
         const initProvider = async () => {
             setError(null)

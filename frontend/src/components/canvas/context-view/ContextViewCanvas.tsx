@@ -30,7 +30,7 @@ import { useCanvasStore } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useGraphProvider } from '@/providers'
-import { useEntityLoader } from '@/hooks/useEntityLoader'
+import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useAggregatedLineage } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/EntityDrawer'
@@ -621,7 +621,7 @@ export function ContextViewCanvas({
   }, [])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, searchChildren, isLoading: isLoadingChildren, loadingNodes, failedNodes } = useEntityLoader()
+  const { loadChildren, searchChildren, isLoading: isLoadingChildren, loadingNodes, failedNodes } = useGraphHydration()
 
   // Tracks nodes currently being fetched — prevents duplicate fetches on rapid clicks.
   // A ref (not state) because we need synchronous reads inside the toggle callback.

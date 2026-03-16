@@ -259,6 +259,30 @@ async def get_nodes_by_layer_endpoint(
     return await engine.get_nodes_by_layer(layer_id, limit=limit, offset=offset)
 
 
+class InternalEdgeQuery(BaseModel):
+    """Fetch edges where BOTH source and target are in the provided URN set."""
+    urns: List[str]
+    edge_types: Optional[List[str]] = Field(None, alias="edgeTypes")
+    limit: int = Field(5000)
+    class Config:
+        populate_by_name = True
+
+
+@router.post("/edges/between", response_model=List[GraphEdge], response_model_by_alias=True)
+async def get_edges_between(
+    query: InternalEdgeQuery = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Fetch edges where both source and target are in the URN set."""
+    all_edges = await engine.get_edges(EdgeQuery(
+        any_urns=query.urns,
+        edge_types=query.edge_types,
+        limit=query.limit * 2,  # Over-fetch since we'll filter
+    ))
+    urn_set = set(query.urns)
+    return [e for e in all_edges if e.source_urn in urn_set and e.target_urn in urn_set][:query.limit]
+
+
 @router.post("/edges/query", response_model=List[GraphEdge], response_model_by_alias=True)
 async def query_edges(
     query: EdgeQuery = Body(..., embed=True),

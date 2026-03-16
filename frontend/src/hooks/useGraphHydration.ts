@@ -1,0 +1,577 @@
+import { useState, useCallback, useRef, useEffect } from 'react'
+import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
+import { useGraphProvider } from '@/providers/GraphProviderContext'
+import {
+    useContainmentEdgeTypes,
+    useRootEntityTypes,
+    useEntityTypes,
+    useSchemaIsLoading,
+    useActiveView,
+} from '@/store/schema'
+import type { GraphNode, GraphEdge, EntityTypeDefinition } from '@/providers/GraphDataProvider'
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+/** Max entities per type per fetch. Keeps initial loads manageable. */
+const PER_TYPE_LIMIT = 200
+
+// ─── Interfaces ─────────────────────────────────────────────────────────────
+
+interface LoadChildrenOptions {
+    /** When true, load all schema entity types for root (used by Assignment tree) */
+    useAllSchemaTypes?: boolean
+}
+
+export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete'
+
+export interface UseGraphHydrationResult {
+    /** Load children for a node (empty string = load roots). */
+    loadChildren: (parentId: string, options?: LoadChildrenOptions) => Promise<void>
+    /** Search children under a parent node. */
+    searchChildren: (parentId: string, query: string) => Promise<void>
+    /** True when any loading operation is in progress. */
+    isLoading: boolean
+    /** Set of node IDs currently being loaded. */
+    loadingNodes: Set<string>
+    /** Set of node IDs that failed to load. */
+    failedNodes: Set<string>
+    /** Current phase of initial hydration (only meaningful when hydrate=true). */
+    hydrationPhase: HydrationPhase
+}
+
+interface UseGraphHydrationOptions {
+    /**
+     * When true, runs the initial hydration effect that loads root nodes + edges
+     * on mount / view change. Only ONE component should set this to true
+     * (CanvasRouter). All other consumers should leave it false (default) and
+     * only use loadChildren / searchChildren.
+     */
+    hydrate?: boolean
+}
+
+// ─── Conversion Utilities (exported for reuse) ──────────────────────────────
+
+/** Convert a backend GraphNode to a canvas LineageNode. */
+export function toCanvasNode(n: GraphNode, opts?: { randomPosition?: boolean }): LineageNode {
+    return {
+        id: n.urn,
+        type: 'generic' as const,
+        position: opts?.randomPosition
+            ? { x: Math.random() * 800, y: Math.random() * 600 }
+            : { x: 0, y: 0 },
+        data: {
+            ...n,
+            label: n.displayName,
+            type: n.entityType,
+            urn: n.urn,
+            metadata: n.properties,
+            childCount: n.childCount,
+            classifications: n.tags,
+            businessLabel: (n.properties?.businessLabel as string) ?? undefined,
+        },
+    } as any
+}
+
+/** Convert a backend GraphEdge to a canvas LineageEdge using real backend edge data. */
+export function toCanvasEdge(e: GraphEdge): LineageEdge {
+    return {
+        id: e.id,
+        source: e.sourceUrn,
+        target: e.targetUrn,
+        type: 'lineage',
+        data: {
+            edgeType: e.edgeType,
+            relationship: e.edgeType,
+            confidence: e.confidence,
+        },
+    }
+}
+
+/**
+ * Compute the "view-scoped root types" for a reference/context view.
+ *
+ * A type is a VIEW ROOT if none of its canBeContainedBy parents appear in
+ * the view's visibleEntityTypes set.
+ */
+export function computeViewScopedRoots(
+    visibleTypes: string[],
+    schemaEntityTypes: EntityTypeDefinition[],
+    globalRoots: string[],
+): string[] {
+    if (visibleTypes.length === 0) return globalRoots
+
+    const visibleSet = new Set(visibleTypes)
+
+    const roots = visibleTypes.filter(typeId => {
+        const et = schemaEntityTypes.find(e => e.id === typeId)
+        if (!et) return true
+        const parents = et.hierarchy?.canBeContainedBy ?? []
+        return parents.every(parentType => !visibleSet.has(parentType))
+    })
+
+    if (roots.length > 0) return roots
+
+    const globalOverlap = globalRoots.filter(r => visibleSet.has(r))
+    return globalOverlap.length > 0 ? globalOverlap : [visibleTypes[0]]
+}
+
+// ─── The Hook ───────────────────────────────────────────────────────────────
+
+export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphHydrationResult {
+    const enableHydration = options?.hydrate ?? false
+
+    const provider = useGraphProvider()
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+    const rootEntityTypes = useRootEntityTypes()
+    const schemaEntityTypes = useEntityTypes()
+    const isSchemaLoading = useSchemaIsLoading()
+    const activeView = useActiveView()
+
+    const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
+    const [failedNodes, setFailedNodes] = useState<Set<string>>(new Set())
+    const [hydrationPhase, setHydrationPhase] = useState<HydrationPhase>('idle')
+
+    // Prevent infinite retries when API returns [] for roots
+    const rootsAttemptedForRef = useRef<string | null>(null)
+
+    // Track (provider, viewId) so reference views reload when the active view changes.
+    const initializedKeyRef = useRef<string | null>(null)
+
+    // Reset when provider changes (e.g. workspace/datasource switch)
+    useEffect(() => {
+        rootsAttemptedForRef.current = null
+        // Also reset the hydration guard so re-hydration happens on provider change
+        initializedKeyRef.current = null
+    }, [provider])
+
+    // ─── Initial Hydration Effect (only when hydrate=true) ──────────────
+    //
+    // This effect ONLY fires in CanvasRouter. Individual canvas components
+    // (HierarchyCanvas, ContextViewCanvas, etc.) call useGraphHydration()
+    // without { hydrate: true }, so they skip this entirely and only use
+    // loadChildren / searchChildren.
+
+    useEffect(() => {
+        if (!enableHydration) return
+        if (isSchemaLoading) return
+
+        const layoutType = activeView?.layout.type ?? 'graph'
+        const isReferenceView = layoutType === 'reference' || layoutType === 'layered-lineage'
+
+        // Key on both provider AND view ID so switching views triggers re-hydration.
+        // Without the view ID, switching from a hierarchy view to a different hierarchy
+        // view wouldn't reload data because the provider hasn't changed.
+        const initKey = `${String(provider)}:${activeView?.id ?? 'default'}:${layoutType}`
+
+        if (initializedKeyRef.current === initKey) return
+        initializedKeyRef.current = initKey
+
+        const { setGraph } = useCanvasStore.getState()
+
+        // Clear canvas atomically
+        setGraph([], [])
+
+        const controller = new AbortController()
+
+        const hydrate = async () => {
+            try {
+                if (isReferenceView) {
+                    // ── Reference / Context View ────────────────────────
+                    // Load entity types defined in the view's visibleEntityTypes.
+                    // These come from the view config / context model assignment step.
+                    const viewTypes = activeView?.content?.visibleEntityTypes ?? []
+                    const rootTypes = computeViewScopedRoots(viewTypes, schemaEntityTypes, rootEntityTypes)
+                    if (rootTypes.length === 0) return
+
+                    // Pass 1: Root nodes
+                    setHydrationPhase('roots')
+                    const rootResults = await Promise.all(
+                        rootTypes.map(et =>
+                            provider.getNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
+                                .catch(() => [] as GraphNode[])
+                        )
+                    )
+                    const rootNodes = rootResults.flat()
+                    if (controller.signal.aborted || rootNodes.length === 0) return
+
+                    // Show roots immediately (edges come next)
+                    setGraph(
+                        rootNodes.map(n => toCanvasNode(n)),
+                        [],
+                    )
+
+                    // Pass 2: Remaining visible types (child layers)
+                    setHydrationPhase('children')
+                    const loadedRootTypes = new Set(rootNodes.map(n => n.entityType))
+                    const remainingTypes = viewTypes.filter(t => !loadedRootTypes.has(t))
+
+                    let allNodes = [...rootNodes]
+
+                    if (remainingTypes.length > 0) {
+                        const childResults = await Promise.all(
+                            remainingTypes.map(et =>
+                                provider.getNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
+                                    .catch(() => [] as GraphNode[])
+                            )
+                        )
+                        const childNodes = childResults.flat()
+                        if (controller.signal.aborted) return
+                        allNodes = [...rootNodes, ...childNodes]
+                    }
+
+                    // Pass 3: Fetch ALL edges between loaded nodes
+                    setHydrationPhase('edges')
+                    const allUrns = allNodes.map(n => n.urn)
+                    const allEdges = await provider.getEdgesBetween(allUrns).catch(() => [] as GraphEdge[])
+                    if (controller.signal.aborted) return
+
+                    // Replace with complete dataset atomically
+                    setGraph(
+                        allNodes.map(n => toCanvasNode(n)),
+                        allEdges.map(e => toCanvasEdge(e)),
+                    )
+                } else {
+                    // ── Hierarchy / Graph view ──────────────────────────
+                    // Mirrors old App.tsx behavior: load roots, then first-level
+                    // children for each root, then all edges between them.
+                    // This ensures HierarchyCanvas has containment edges to
+                    // build its tree immediately.
+                    const typesToLoad = rootEntityTypes.length > 0
+                        ? rootEntityTypes
+                        : schemaEntityTypes.map(et => et.id)
+
+                    if (typesToLoad.length === 0) return
+
+                    // Step 1: Fetch root nodes
+                    setHydrationPhase('roots')
+                    const rootNodes = await provider.getNodes({
+                        entityTypes: typesToLoad as any[],
+                        limit: PER_TYPE_LIMIT,
+                    })
+                    if (controller.signal.aborted || rootNodes.length === 0) return
+
+                    // Show roots immediately
+                    setGraph(
+                        rootNodes.map(n => toCanvasNode(n, { randomPosition: true })),
+                        [],
+                    )
+
+                    // Step 2: Fetch first-level children for all roots (parallel)
+                    setHydrationPhase('children')
+                    const childrenPromises = rootNodes.map(root =>
+                        provider.getChildren(root.urn, { limit: 100 })
+                            .catch(() => [] as GraphNode[])
+                    )
+                    const childrenResults = await Promise.all(childrenPromises)
+                    const allChildren = childrenResults.flat()
+                    if (controller.signal.aborted) return
+
+                    // Step 3: Fetch orphaned nodes of child types (nodes without
+                    // a parent in our root set, e.g. dataPlatforms without a domain)
+                    const entityTypeHierarchy = schemaEntityTypes
+                    const childTypes = new Set<string>()
+                    for (const rootType of typesToLoad) {
+                        const et = entityTypeHierarchy.find(e => e.id === rootType)
+                        et?.hierarchy?.canContain?.forEach((t: string) => childTypes.add(t))
+                    }
+
+                    let orphanNodes: GraphNode[] = []
+                    if (childTypes.size > 0) {
+                        const childTypeNodes = await provider.getNodes({
+                            entityTypes: [...childTypes] as any[],
+                            limit: PER_TYPE_LIMIT,
+                        }).catch(() => [] as GraphNode[])
+                        if (controller.signal.aborted) return
+
+                        // Filter out nodes we already have
+                        const knownUrns = new Set([
+                            ...rootNodes.map(n => n.urn),
+                            ...allChildren.map(n => n.urn),
+                        ])
+                        orphanNodes = childTypeNodes.filter(n => !knownUrns.has(n.urn))
+                    }
+
+                    // Deduplicate all nodes
+                    const nodeMap = new Map<string, GraphNode>()
+                    for (const n of [...rootNodes, ...allChildren, ...orphanNodes]) {
+                        nodeMap.set(n.urn, n)
+                    }
+                    const uniqueNodes = Array.from(nodeMap.values())
+                    if (uniqueNodes.length === 0) return
+
+                    // Step 4: Fetch edges between ALL loaded nodes
+                    setHydrationPhase('edges')
+                    const allUrns = uniqueNodes.map(n => n.urn)
+                    const allEdges = await provider.getEdgesBetween(allUrns).catch(() => [] as GraphEdge[])
+                    if (controller.signal.aborted) return
+
+                    console.log(`[useGraphHydration] Loaded ${uniqueNodes.length} nodes (${rootNodes.length} roots, ${allChildren.length} children, ${orphanNodes.length} orphans), ${allEdges.length} edges`)
+
+                    setGraph(
+                        uniqueNodes.map(n => toCanvasNode(n, { randomPosition: true })),
+                        allEdges.map(e => toCanvasEdge(e)),
+                    )
+                }
+
+                setHydrationPhase('complete')
+            } catch (err) {
+                if (!controller.signal.aborted) {
+                    console.error('[useGraphHydration] Hydration failed:', err)
+                }
+            }
+        }
+
+        hydrate()
+        return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [enableHydration, provider, activeView?.id, activeView?.layout.type, rootEntityTypes, schemaEntityTypes, isSchemaLoading])
+
+    // ─── loadChildren ───────────────────────────────────────────────────
+
+    const loadChildren = useCallback(async (parentId: string, options?: LoadChildrenOptions) => {
+        const { nodes, edges, addGraph } = useCanvasStore.getState()
+
+        // ── Handle root loading (empty parentId) ────────────────────
+        if (!parentId) {
+            if (loadingNodes.has('ROOT')) return
+            if (isSchemaLoading) return
+
+            const typesToLoad = options?.useAllSchemaTypes && schemaEntityTypes.length > 0
+                ? schemaEntityTypes.map((et) => et.id)
+                : rootEntityTypes
+
+            if (typesToLoad.length === 0) return
+
+            const key = `all:${options?.useAllSchemaTypes ?? false}:${typesToLoad.join(',')}`
+            if (rootsAttemptedForRef.current === key) return
+            rootsAttemptedForRef.current = key
+
+            setLoadingNodes(prev => new Set(prev).add('ROOT'))
+            try {
+                const roots = await provider.getNodes({
+                    entityTypes: typesToLoad as any[],
+                    limit: 200,
+                })
+
+                if (roots.length > 0) {
+                    const nodesToAdd = roots.map(root => toCanvasNode(root))
+
+                    // Fetch real edges from backend
+                    const existingUrns = useCanvasStore.getState().nodes.map(n => n.id)
+                    const allUrns = [...new Set([...roots.map(r => r.urn), ...existingUrns])]
+                    const backendEdges = await provider.getEdgesBetween(allUrns).catch(() => [] as GraphEdge[])
+
+                    addGraph(nodesToAdd, backendEdges.map(e => toCanvasEdge(e)))
+                }
+            } catch (err) {
+                console.error('[useGraphHydration] Failed to load roots', err)
+            } finally {
+                setLoadingNodes(prev => {
+                    const next = new Set(prev)
+                    next.delete('ROOT')
+                    return next
+                })
+            }
+            return
+        }
+
+        // ── Handle child loading (specific parentId) ────────────────
+        const parentNode = nodes.find(n => n.id === parentId)
+        if (!parentNode) return
+        if (loadingNodes.has(parentId)) return
+
+        const nodeData = parentNode.data as any
+        const childCount = (nodeData.childCount as number) ?? (nodeData.metadata?.childCount as number) ?? 0
+        if (childCount === 0) return
+
+        const existingNodeIds = new Set(nodes.map(n => n.id))
+
+        // Count loaded children via containment edges
+        const currentChildrenCount = edges.filter(e => {
+            if (e.source !== parentId) return false
+            if (!existingNodeIds.has(e.target)) return false
+            const type = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
+            return containmentEdgeTypes.some(t => t.toUpperCase() === type)
+        }).length
+
+        // If we have all children, don't refetch
+        if (currentChildrenCount >= childCount && childCount > 0) return
+
+        // Fetch children
+        setFailedNodes(prev => { const next = new Set(prev); next.delete(parentId); return next })
+        setLoadingNodes(prev => new Set(prev).add(parentId))
+        try {
+            const urn = (parentNode.data.urn as string) || parentId
+            const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
+
+            const children = await provider.getChildren(urn, {
+                edgeTypes: fetchTypes,
+                limit: 20,
+                offset: currentChildrenCount,
+            })
+
+            if (children.length > 0) {
+                const freshNodes = useCanvasStore.getState().nodes
+                const freshEdges = useCanvasStore.getState().edges
+                const currentExistingNodeIds = new Set(freshNodes.map(n => n.id))
+
+                const nodesToAdd: LineageNode[] = []
+                const edgesToAdd: LineageEdge[] = []
+                const newIds = new Set<string>()
+
+                children.forEach(child => {
+                    if (!currentExistingNodeIds.has(child.urn) && !newIds.has(child.urn)) {
+                        nodesToAdd.push(toCanvasNode(child))
+                        newIds.add(child.urn)
+                    }
+
+                    // Containment edge (synthetic ID for loaded-count tracking)
+                    const edgeId = `contains-${urn}-${child.urn}`
+                    const edgeExists = freshEdges.some(e => e.id === edgeId) || edgesToAdd.some(e => e.id === edgeId)
+
+                    if (!edgeExists) {
+                        const relationType = containmentEdgeTypes[0] ?? 'edge'
+                        edgesToAdd.push({
+                            id: edgeId,
+                            source: parentId,
+                            target: child.urn,
+                            type: 'lineage',
+                            data: {
+                                edgeType: relationType,
+                                relationship: relationType.toLowerCase(),
+                            },
+                        })
+                    }
+                })
+
+                // Fetch backend edges (lineage, association, etc.) for newly loaded children
+                const newChildUrns = nodesToAdd.map(n => n.id)
+                if (newChildUrns.length > 0) {
+                    const allCurrentUrns = useCanvasStore.getState().nodes.map(n => n.id)
+                    const allUrns = [...new Set([...allCurrentUrns, ...newChildUrns])]
+                    try {
+                        const backendEdges = await provider.getEdgesBetween(allUrns)
+                        edgesToAdd.push(...backendEdges.map(e => toCanvasEdge(e)))
+                    } catch {
+                        // Non-critical: containment edges still work
+                    }
+                }
+
+                const { addGraph: addGraphFresh } = useCanvasStore.getState()
+                addGraphFresh(nodesToAdd, edgesToAdd)
+
+                console.log(`[useGraphHydration] Loaded ${nodesToAdd.length} children for ${parentId}`)
+            }
+        } catch (err) {
+            console.error(`[useGraphHydration] Failed to load children for ${parentId}`, err)
+            setFailedNodes(prev => new Set(prev).add(parentId))
+        } finally {
+            setLoadingNodes(prev => {
+                const next = new Set(prev)
+                next.delete(parentId)
+                return next
+            })
+        }
+    }, [provider, containmentEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaLoading, loadingNodes])
+
+    // ─── searchChildren ─────────────────────────────────────────────────
+
+    const searchChildren = useCallback(async (parentId: string, query: string) => {
+        if (!query.trim()) return
+
+        setLoadingNodes(prev => new Set(prev).add(parentId))
+        try {
+            const { nodes, removeNodes, removeEdges, addGraph } = useCanvasStore.getState()
+
+            const parentNode = nodes.find(n => n.id === parentId)
+            const urn = parentNode ? (parentNode.data.urn as string || parentId) : parentId
+            const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
+
+            const children = await provider.getChildren(urn, {
+                edgeTypes: fetchTypes,
+                searchQuery: query,
+                limit: 50,
+            })
+
+            // Get freshest state right before mutating
+            const freshNodes = useCanvasStore.getState().nodes
+            const freshEdges = useCanvasStore.getState().edges
+
+            // Clean up existing children of this node to replace with search results
+            const existingEdgesToRemove = freshEdges.filter(e => e.source === parentId)
+            const targetNodeIdsToRemove = new Set(existingEdgesToRemove.map(e => e.target))
+
+            // Keep nodes connected to other parents
+            const otherEdges = freshEdges.filter(e => e.source !== parentId)
+            const safeNodesToKeep = new Set(otherEdges.map(e => e.target))
+            const nodeIdsToRemove = Array.from(targetNodeIdsToRemove).filter(id => !safeNodesToKeep.has(id))
+            const edgeIdsToRemove = existingEdgesToRemove.map(e => e.id)
+
+            if (nodeIdsToRemove.length > 0) removeNodes(nodeIdsToRemove)
+            if (edgeIdsToRemove.length > 0) removeEdges(edgeIdsToRemove)
+
+            if (children.length > 0) {
+                const nodesToAdd: LineageNode[] = []
+                const edgesToAdd: LineageEdge[] = []
+
+                const remainingNodeIds = new Set(freshNodes.map(n => n.id))
+                nodeIdsToRemove.forEach(id => remainingNodeIds.delete(id))
+                const newIds = new Set<string>()
+
+                children.forEach(child => {
+                    if (!remainingNodeIds.has(child.urn) && !newIds.has(child.urn)) {
+                        nodesToAdd.push(toCanvasNode(child))
+                        newIds.add(child.urn)
+                    }
+
+                    const edgeId = `contains-${urn}-${child.urn}`
+                    if (!edgesToAdd.some(e => e.id === edgeId)) {
+                        const relationType = containmentEdgeTypes[0] ?? 'edge'
+                        edgesToAdd.push({
+                            id: edgeId,
+                            source: parentId,
+                            target: child.urn,
+                            type: 'lineage',
+                            data: {
+                                edgeType: relationType,
+                                relationship: relationType.toLowerCase(),
+                            },
+                        })
+                    }
+                })
+
+                // Fetch backend edges for search results
+                const searchUrns = nodesToAdd.map(n => n.id)
+                if (searchUrns.length > 0) {
+                    const existingNodeUrns = useCanvasStore.getState().nodes.map(n => n.id)
+                    const allUrns = [...new Set([...existingNodeUrns, ...searchUrns])]
+                    try {
+                        const backendEdges = await provider.getEdgesBetween(allUrns)
+                        edgesToAdd.push(...backendEdges.map(e => toCanvasEdge(e)))
+                    } catch {
+                        // Non-critical
+                    }
+                }
+
+                addGraph(nodesToAdd, edgesToAdd)
+            }
+        } catch (err) {
+            console.error(`[useGraphHydration] Failed to search children for ${parentId}`, err)
+        } finally {
+            setLoadingNodes(prev => {
+                const next = new Set(prev)
+                next.delete(parentId)
+                return next
+            })
+        }
+    }, [provider, containmentEdgeTypes])
+
+    return {
+        loadChildren,
+        searchChildren,
+        isLoading: loadingNodes.size > 0,
+        loadingNodes,
+        failedNodes,
+        hydrationPhase,
+    }
+}

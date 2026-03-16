@@ -299,6 +299,15 @@ export class MockProvider implements GraphDataProvider {
         return results
     }
 
+    async getEdgesBetween(urns: URN[], edgeTypes?: string[], limit?: number): Promise<GraphEdge[]> {
+        const urnSet = new Set(urns)
+        let results = this.edges.filter((e) => urnSet.has(e.sourceUrn) && urnSet.has(e.targetUrn))
+        if (edgeTypes?.length) {
+            results = results.filter((e) => edgeTypes.includes(e.edgeType))
+        }
+        return results.slice(0, limit ?? 5000)
+    }
+
     // ==========================================
     // Containment Hierarchy
     // ==========================================

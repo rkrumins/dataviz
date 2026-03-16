@@ -176,6 +176,14 @@ export class RemoteGraphProvider implements GraphDataProvider {
         })
     }
 
+    async getEdgesBetween(urns: URN[], edgeTypes?: string[], limit?: number): Promise<GraphEdge[]> {
+        if (urns.length === 0) return []
+        return await this.fetch<GraphEdge[]>('/edges/between', {
+            method: 'POST',
+            body: JSON.stringify({ urns, edgeTypes, limit }),
+        })
+    }
+
     // ==========================================
     // Containment Hierarchy
     // ==========================================

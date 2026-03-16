@@ -37,7 +37,7 @@ import type { ViewLayerConfig, AssignmentConflict } from '@/types/schema'
 import { useContainmentEdgeTypes, useEntityTypes, normalizeEdgeType } from '@/store/schema'
 import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
 
-import { useEntityLoader } from '@/hooks/useEntityLoader'
+import { useGraphHydration } from '@/hooks/useGraphHydration'
 
 
 // ============================================
@@ -335,7 +335,7 @@ export function WizardAssignmentTree({
     )
 
     // Lazy Loading Hook
-    const { loadChildren } = useEntityLoader()
+    const { loadChildren } = useGraphHydration()
 
     // Always load entities for assignment browser using ALL schema types (not just roots).
     // Run even when canvas has nodes (e.g. from CanvasRouter with rootEntityTypes) so we

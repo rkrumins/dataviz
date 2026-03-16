@@ -751,7 +751,7 @@ export interface UseLineageExplorationResult {
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useEffect } from 'react'
-import { useEntityLoader } from '@/hooks/useEntityLoader'
+import { useGraphHydration } from '@/hooks/useGraphHydration'
 
 export function useLineageExploration(): UseLineageExplorationResult {
   const containmentEdgeTypes = useContainmentEdgeTypes()
@@ -866,7 +866,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
   }, [pagination, rawNodes, rawEdges, provider, containmentEdgeTypes, config.containmentEdgeTypes, setNodes, setEdges])
 
   // Entity Loader for shared logic
-  const { loadChildren } = useEntityLoader()
+  const { loadChildren } = useGraphHydration()
 
   // Side Effect: Fetch Trace when focused
   useEffect(() => {

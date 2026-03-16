@@ -479,6 +479,12 @@ export interface GraphDataProvider {
      */
     getEdges(query: EdgeQuery): Promise<GraphEdge[]>
 
+    /**
+     * Get edges where BOTH source and target are in the provided URN set.
+     * Server-side filtered — only returns internal edges between loaded nodes.
+     */
+    getEdgesBetween(urns: URN[], edgeTypes?: string[], limit?: number): Promise<GraphEdge[]>
+
     // ==========================================
     // Containment Hierarchy (CONTAINS relationships)
     // ==========================================

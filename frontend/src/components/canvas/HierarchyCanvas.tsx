@@ -15,7 +15,7 @@ import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSchemaStore, useContainmentEdgeTypes, useLineageEdgeTypes, isContainmentEdgeType, useRelationshipTypes } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
-import { useEntityLoader } from '@/hooks/useEntityLoader'
+import { useGraphHydration } from '@/hooks/useGraphHydration'
 
 // UX-first interaction components (unified with LineageCanvas)
 import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
@@ -68,7 +68,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const schema = useSchemaStore((s) => s.schema)
   const containmentEdgeTypes = useContainmentEdgeTypes()
   const lineageEdgeTypes = useLineageEdgeTypes()
-  const { loadChildren, loadingNodes } = useEntityLoader()
+  const { loadChildren, loadingNodes } = useGraphHydration()
   const relationshipTypes = useRelationshipTypes()
   const provider = useGraphProvider()
 
