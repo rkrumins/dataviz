@@ -40,6 +40,7 @@ import {
     useAssignmentConflicts
 } from '@/store/referenceModelStore'
 import { useContainmentEdgeTypes, useEntityTypes, useRootEntityTypes, normalizeEdgeType } from '@/store/schema'
+import { useGraphHydration } from '@/hooks/useGraphHydration'
 
 // ============================================
 // Types

@@ -268,6 +268,10 @@ export function useLayerAssignment({
 
     nodesByLayer.forEach((layerNodes) => {
       const traverse = (node: HierarchyNode) => {
+        // Dedup: a node should only appear once across all layers.
+        // If it was already added (e.g. during assignment transitions),
+        // skip to prevent duplicate React keys.
+        if (map.has(node.id)) return
         flat.push(node)
         map.set(node.id, node)
         node.children.forEach(traverse)

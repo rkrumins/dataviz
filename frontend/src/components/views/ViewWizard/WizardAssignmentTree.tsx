@@ -344,14 +344,22 @@ export function WizardAssignmentTree({
         loadChildren('', { useAllSchemaTypes: true })
     }, [loadChildren])
 
-    // Auto-expand effect
+    // Track previously expanded IDs so we only load children for NEWLY expanded nodes,
+    // not every expanded node on every state change.
+    const prevExpandedRef = useRef<Set<string>>(new Set())
+
     useEffect(() => {
-        // Debounce slightly to prevent rapid firing during initial render
+        const prev = prevExpandedRef.current
+        const newlyExpanded = [...expandedIds].filter(id => !prev.has(id))
+        prevExpandedRef.current = new Set(expandedIds)
+
+        if (newlyExpanded.length === 0) return
+
         const timer = setTimeout(() => {
-            expandedIds.forEach(id => {
+            newlyExpanded.forEach(id => {
                 loadChildren(id)
             })
-        }, 100)
+        }, 50)
         return () => clearTimeout(timer)
     }, [expandedIds, loadChildren])
 
@@ -740,7 +748,7 @@ export function WizardAssignmentTree({
                 </div>
 
                 {/* Type Filter Pills */}
-                <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+                <div className="flex flex-wrap gap-2 pb-1">
                     <button
                         onClick={() => setTypeFilter('all')}
                         className={cn(

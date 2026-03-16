@@ -127,12 +127,32 @@ export const useCanvasStore = create<CanvasState>()(
         uniqueEdges.forEach((e) => nextIndex.add(e.id))
         return { edges: [...state.edges, ...uniqueEdges], _edgeIndex: nextIndex }
       }),
-      setGraph: (nodes, edges) => set(() => ({
-        nodes,
-        edges,
-        _nodeIndex: new Set(nodes.map((n) => n.id)),
-        _edgeIndex: new Set(edges.map((e) => e.id)),
-      })),
+      setGraph: (nodes, edges) => set(() => {
+        // Dedup by id to prevent React duplicate-key warnings when callers
+        // pass arrays with overlapping entries (e.g. assigned + child nodes).
+        const seenNodes = new Set<string>()
+        const dedupedNodes: LineageNode[] = []
+        for (const n of nodes) {
+          if (!seenNodes.has(n.id)) {
+            seenNodes.add(n.id)
+            dedupedNodes.push(n)
+          }
+        }
+        const seenEdges = new Set<string>()
+        const dedupedEdges: LineageEdge[] = []
+        for (const e of edges) {
+          if (!seenEdges.has(e.id)) {
+            seenEdges.add(e.id)
+            dedupedEdges.push(e)
+          }
+        }
+        return {
+          nodes: dedupedNodes,
+          edges: dedupedEdges,
+          _nodeIndex: seenNodes,
+          _edgeIndex: seenEdges,
+        }
+      }),
       addGraph: (newNodes, newEdges) => set((state) => {
         const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id))
         const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id))
