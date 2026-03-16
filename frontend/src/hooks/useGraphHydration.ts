@@ -177,49 +177,116 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             try {
                 if (isReferenceView) {
                     // ── Reference / Context View ────────────────────────
-                    // Load entity types defined in the view's visibleEntityTypes.
-                    // These come from the view config / context model assignment step.
+                    // Strategy: load ONLY the entities that are relevant to this view.
+                    //
+                    // If the view has explicit layer assignments (entityAssignments),
+                    // load those specific entities by URN. This matches exactly what
+                    // the user configured in the ViewWizard/LayerStudio.
+                    //
+                    // If no assignments exist (new/empty view), fall back to loading
+                    // by entity type so the user has something to work with.
+
+                    const viewLayers = activeView?.layout?.referenceLayout?.layers ?? []
                     const viewTypes = activeView?.content?.visibleEntityTypes ?? []
-                    const rootTypes = computeViewScopedRoots(viewTypes, schemaEntityTypes, rootEntityTypes)
-                    if (rootTypes.length === 0) return
 
-                    // Pass 1: Root nodes
+                    // Collect all explicitly assigned entity URNs across all layers
+                    const assignedUrns = new Set<string>()
+                    for (const layer of viewLayers) {
+                        if (layer.entityAssignments) {
+                            for (const assignment of layer.entityAssignments) {
+                                if (assignment.entityId) assignedUrns.add(assignment.entityId)
+                            }
+                        }
+                    }
+
+                    const hasExplicitAssignments = assignedUrns.size > 0
+
                     setHydrationPhase('roots')
-                    const rootResults = await Promise.all(
-                        rootTypes.map(et =>
-                            provider.getNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
-                                .catch(() => [] as GraphNode[])
+
+                    let allNodes: GraphNode[] = []
+
+                    if (hasExplicitAssignments) {
+                        // ── Assignment-driven loading ──
+                        // Load the specific entities assigned to layers by URN.
+                        // This is precise: only what the user configured appears.
+                        const urnBatches: string[][] = []
+                        const urnArray = [...assignedUrns]
+                        // Batch URNs to avoid overly large queries
+                        for (let i = 0; i < urnArray.length; i += 100) {
+                            urnBatches.push(urnArray.slice(i, i + 100))
+                        }
+
+                        const batchResults = await Promise.all(
+                            urnBatches.map(batch =>
+                                provider.getNodes({ urns: batch as any[], limit: batch.length })
+                                    .catch(() => [] as GraphNode[])
+                            )
                         )
-                    )
-                    const rootNodes = rootResults.flat()
-                    if (controller.signal.aborted || rootNodes.length === 0) return
+                        allNodes = batchResults.flat()
+                        if (controller.signal.aborted) return
 
-                    // Show roots immediately (edges come next)
-                    setGraph(
-                        rootNodes.map(n => toCanvasNode(n)),
-                        [],
-                    )
+                        // Also load children of assigned entities (for hierarchy within layers).
+                        // This ensures containment trees are populated, not just top-level entities.
+                        setHydrationPhase('children')
+                        if (allNodes.length > 0) {
+                            const parentsWithChildren = allNodes.filter(n => (n.childCount ?? 0) > 0)
+                            if (parentsWithChildren.length > 0) {
+                                const childResults = await Promise.all(
+                                    parentsWithChildren.map(parent =>
+                                        provider.getChildren(parent.urn, { limit: 100 })
+                                            .catch(() => [] as GraphNode[])
+                                    )
+                                )
+                                const childNodes = childResults.flat()
+                                if (controller.signal.aborted) return
+                                // Dedup: children might overlap with assigned entities
+                                const knownUrns = new Set(allNodes.map(n => n.urn))
+                                const newChildren = childNodes.filter(c => !knownUrns.has(c.urn))
+                                allNodes = [...allNodes, ...newChildren]
+                            }
+                        }
+                    } else {
+                        // ── Type-based loading (empty/new views) ──
+                        // No assignments yet — load by entity type so the view has data
+                        // for the user to start assigning in the wizard.
+                        const rootTypes = computeViewScopedRoots(viewTypes, schemaEntityTypes, rootEntityTypes)
+                        if (rootTypes.length === 0) return
 
-                    // Pass 2: Remaining visible types (child layers)
-                    setHydrationPhase('children')
-                    const loadedRootTypes = new Set(rootNodes.map(n => n.entityType))
-                    const remainingTypes = viewTypes.filter(t => !loadedRootTypes.has(t))
-
-                    let allNodes = [...rootNodes]
-
-                    if (remainingTypes.length > 0) {
-                        const childResults = await Promise.all(
-                            remainingTypes.map(et =>
+                        const rootResults = await Promise.all(
+                            rootTypes.map(et =>
                                 provider.getNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
                                     .catch(() => [] as GraphNode[])
                             )
                         )
-                        const childNodes = childResults.flat()
-                        if (controller.signal.aborted) return
-                        allNodes = [...rootNodes, ...childNodes]
+                        allNodes = rootResults.flat()
+                        if (controller.signal.aborted || allNodes.length === 0) return
+
+                        // Also load remaining visible types (non-root layers)
+                        setHydrationPhase('children')
+                        const loadedRootTypes = new Set(allNodes.map(n => n.entityType))
+                        const remainingTypes = viewTypes.filter(t => !loadedRootTypes.has(t))
+                        if (remainingTypes.length > 0) {
+                            const childResults = await Promise.all(
+                                remainingTypes.map(et =>
+                                    provider.getNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
+                                        .catch(() => [] as GraphNode[])
+                                )
+                            )
+                            const childNodes = childResults.flat()
+                            if (controller.signal.aborted) return
+                            allNodes = [...allNodes, ...childNodes]
+                        }
                     }
 
-                    // Pass 3: Fetch ALL edges between loaded nodes
+                    if (allNodes.length === 0) return
+
+                    // Show nodes immediately, then fetch edges
+                    setGraph(
+                        allNodes.map(n => toCanvasNode(n)),
+                        [],
+                    )
+
+                    // Fetch edges between all loaded nodes
                     setHydrationPhase('edges')
                     const allUrns = allNodes.map(n => n.urn)
                     const allEdges = await provider.getEdgesBetween(allUrns).catch(() => [] as GraphEdge[])
@@ -230,6 +297,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         allNodes.map(n => toCanvasNode(n)),
                         allEdges.map(e => toCanvasEdge(e)),
                     )
+
+                    console.log(`[useGraphHydration] Reference view: loaded ${allNodes.length} nodes (${assignedUrns.size} assigned), ${allEdges.length} edges`)
                 } else {
                     // ── Hierarchy / Graph view ──────────────────────────
                     // Mirrors old App.tsx behavior: load roots, then first-level

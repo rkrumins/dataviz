@@ -248,19 +248,27 @@ export function ContextViewCanvas({
   // Step 2: Load assignments from backend when layers are synced and nodes are available
   // Uses a ref to track what we've computed for, preventing cascading re-fetches.
   const assignmentComputedRef = useRef<string | null>(null)
+
+  // Reset the assignment guard when the active view changes so recomputation
+  // always happens for the new view (even if layer IDs happen to match).
+  useEffect(() => {
+    assignmentComputedRef.current = null
+  }, [activeView?.id])
+
   useEffect(() => {
     if (nodes.length === 0 || !provider || storeLayers.length === 0) return
     if (assignmentStatus !== 'idle') return
 
-    // Build a fingerprint of layers that affect assignment computation
-    const layerFingerprint = storeLayers.map(l => l.id).join(',')
+    // Include activeView ID so switching between views with identical layer IDs
+    // still triggers recomputation.
+    const layerFingerprint = `${activeView?.id ?? ''}:${storeLayers.map(l => l.id).join(',')}`
 
-    // Only compute once per unique layer configuration
+    // Only compute once per unique view+layer configuration
     if (assignmentComputedRef.current === layerFingerprint) return
     assignmentComputedRef.current = layerFingerprint
 
     computeAssignments(provider)
-  }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers])
+  }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers, activeView?.id])
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
