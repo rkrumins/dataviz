@@ -15,6 +15,7 @@ const ExplorerPage = lazy(() => import('@/pages/ExplorerPage').then(m => ({ defa
 const AdminPage = lazy(() => import('@/pages/AdminPage').then(m => ({ default: m.AdminPage })))
 const AdminOverview = lazy(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
 const AdminRegistry = lazy(() => import('@/components/admin/AdminRegistry').then(m => ({ default: m.AdminRegistry })))
+const AdminFeatures = lazy(() => import('@/components/admin/AdminFeatures/index').then(m => ({ default: m.AdminFeatures })))
 const AdminWorkspaceDetail = lazy(() => import('@/components/admin/AdminWorkspaceDetail').then(m => ({ default: m.AdminWorkspaceDetail })))
 const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 
@@ -58,6 +59,7 @@ export const router = createBrowserRouter([
           { index: true, element: <Navigate to="overview" replace /> },
           { path: 'overview', element: <Lazy><AdminOverview /></Lazy> },
           { path: 'registry', element: <Lazy><AdminRegistry /></Lazy> },
+          { path: 'features', element: <Lazy><AdminFeatures /></Lazy> },
           { path: 'registry/workspaces/:wsId', element: <Lazy><AdminWorkspaceDetail /></Lazy> },
         ],
       },

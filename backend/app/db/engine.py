@@ -128,6 +128,31 @@ async def init_db() -> None:
         from . import models  # noqa: F401 — registers ORM models with Base
         await conn.run_sync(Base.metadata.create_all)
 
+    # ── Create feature_categories / feature_definitions / feature_flags if missing ─
+    async with engine.begin() as conn:
+        if DATABASE_URL.startswith("sqlite"):
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS feature_categories "
+                    "(id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL, icon TEXT NOT NULL, color TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0)"
+                )
+            )
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS feature_definitions "
+                    "(key TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, category_id TEXT NOT NULL, "
+                    "type TEXT NOT NULL, default_value TEXT NOT NULL, user_overridable INTEGER NOT NULL DEFAULT 0, "
+                    "options TEXT, help_url TEXT, admin_hint TEXT, sort_order INTEGER NOT NULL DEFAULT 0, deprecated INTEGER NOT NULL DEFAULT 0)"
+                )
+            )
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS feature_flags "
+                    "(id INTEGER PRIMARY KEY CHECK (id = 1), config TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL)"
+                )
+            )
+            logger.info("Migration: feature_categories, feature_definitions, feature_flags ensured")
+
     # ── Inline schema migrations ──────────────────────────────────────
     # SQLAlchemy create_all only creates NEW tables, not new columns on
     # existing tables.  We run safe ALTER TABLE statements here.

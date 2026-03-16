@@ -164,6 +164,57 @@ class ManagementDbConfigORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# feature_categories  (definitions: id, label, icon, color, order)     #
+# ------------------------------------------------------------------ #
+
+class FeatureCategoryORM(Base):
+    __tablename__ = "feature_categories"
+
+    id = Column(Text, primary_key=True)
+    label = Column(Text, nullable=False)
+    icon = Column(Text, nullable=False)
+    color = Column(Text, nullable=False)
+    sort_order = Column(Integer, nullable=False, default=0)
+
+
+# ------------------------------------------------------------------ #
+# feature_definitions  (definitions: key, name, type, default, etc.) #
+# ------------------------------------------------------------------ #
+
+class FeatureDefinitionORM(Base):
+    __tablename__ = "feature_definitions"
+
+    key = Column(Text, primary_key=True)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=False)
+    category_id = Column(Text, nullable=False)  # references feature_categories.id
+    type = Column(Text, nullable=False)  # "boolean" | "string[]"
+    default_value = Column(Text, nullable=False)  # JSON: true | false | ["graph",...]
+    user_overridable = Column(Boolean, nullable=False, default=False)
+    options = Column(Text, nullable=True)  # JSON: [{"id","label"},...] for string[]
+    help_url = Column(Text, nullable=True)
+    admin_hint = Column(Text, nullable=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    deprecated = Column(Boolean, nullable=False, default=False)
+
+
+# ------------------------------------------------------------------ #
+# feature_flags  (single-row config: global feature flag values)     #
+# ------------------------------------------------------------------ #
+
+class FeatureFlagsORM(Base):
+    __tablename__ = "feature_flags"
+
+    id = Column(Integer, primary_key=True, default=1)
+    config = Column(Text, nullable=False, default="{}")  # JSON: { "editModeEnabled": true, ... }
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="feature_flags_single_row"),
+    )
+
+
+# ------------------------------------------------------------------ #
 # providers  (workspace-centric: pure infrastructure)                  #
 # ------------------------------------------------------------------ #
 

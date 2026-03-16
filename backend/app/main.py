@@ -32,6 +32,14 @@ async def lifespan(_app: FastAPI):
     async with get_async_session() as session:
         await seed_templates(session)
 
+    # 2a. Seed feature categories and definitions (idempotent — skips if already present)
+    try:
+        from .db.seed_feature_registry import seed_feature_registry
+        async with get_async_session() as session:
+            await seed_feature_registry(session)
+    except Exception as exc:
+        logger.warning("Feature registry seed warning: %s", exc)
+
     # 2b. Seed system default ontology (idempotent — merge-not-overwrite strategy)
     try:
         from .ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository

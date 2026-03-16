@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from .endpoints import (
     graph, assignments, providers, ontologies, workspaces,
-    assets, context_models, catalog, views,
+    assets, context_models, catalog, views, features,
 )
 
 api_router = APIRouter()
@@ -22,6 +22,9 @@ api_router.include_router(
 api_router.include_router(
     context_models.template_router, prefix="/admin/context-model-templates",
     tags=["admin:context-model-templates"],
+)
+api_router.include_router(
+    features.router, prefix="/admin/features", tags=["admin:features"],
 )
 
 # ── Top-level views (first-class, cross-workspace) ─────────────────

@@ -8,7 +8,7 @@
 import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
-    Server, Database, BarChart3, Shield, Layers, ChevronDown, Globe
+    Server, Database, BarChart3, Shield, Layers, ChevronDown, Globe, ToggleLeft
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -22,6 +22,7 @@ const adminGroups = [
         items: [
             { path: 'overview', label: 'Global Overview', icon: BarChart3, description: 'System health & scale' },
             { path: 'registry', label: 'Unified Registry', icon: Database, description: 'Connections & Workspaces' },
+            { path: 'features', label: 'Features', icon: ToggleLeft, description: 'Feature flags & behaviour' },
         ]
     }
 ]
