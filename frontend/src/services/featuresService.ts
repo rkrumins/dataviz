@@ -54,8 +54,9 @@ export interface FeatureCategory {
   previewFooter?: string | null
 }
 
-/** Page-level early-access notice (backend-driven). */
+/** Page-level early-access notice (backend-driven). When enabled is false, UI shows "Enable" to turn it back on. */
 export interface ExperimentalNotice {
+  enabled?: boolean
   title: string
   message: string
   updatedAt?: string

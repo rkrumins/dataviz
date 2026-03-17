@@ -50,6 +50,7 @@ Returns the current feature flag schema, categories, values, experimental notice
   "updatedAt": "2025-03-15T12:00:00.000000+00:00",
   "version": 0,
   "experimentalNotice": {
+    "enabled": true,
     "title": "Early access",
     "message": "This area is in early access...",
     "updatedAt": "2025-03-15T12:00:00.000000+00:00"
@@ -62,7 +63,7 @@ Returns the current feature flag schema, categories, values, experimental notice
 - **values**: Current flag values. Keys match `schema[].key`. Missing keys use `schema[].default`.
 - **updatedAt**: ISO 8601 timestamp of last PATCH, or `null` if never persisted.
 - **version**: Integer, incremented on every write to feature flags (optimistic concurrency). Required in PATCH so the server can reject conflicting updates.
-- **experimentalNotice**: When the page-level early-access notice is enabled (in `feature_registry_meta`), `title`, `message`, and optionally `updatedAt` (ISO 8601); otherwise `null`.
+- **experimentalNotice**: When the notice is configured, returns `enabled` (boolean), `title`, `message`, and when enabled optionally `updatedAt` (ISO 8601). When disabled (`enabled: false`), title and message are still returned so the UI can show “Enable notice”. When no row or no title, `null`.
 
 ---
 

@@ -73,17 +73,21 @@ EXPERIMENTAL_NOTICE_MESSAGE_MAX_LEN = 2000
 
 
 def _build_experimental_notice(meta: dict | None) -> dict | None:
-    """Build experimentalNotice for API response from meta row or defaults."""
-    if meta and meta["experimentalNoticeEnabled"] and meta.get("experimentalNoticeTitle"):
+    """Build experimentalNotice for API response from meta row or defaults.
+    When disabled, returns { enabled: false, title, message } so the UI can show 'Enable' and re-enable with same text.
+    """
+    if meta and meta.get("experimentalNoticeTitle"):
         out = {
+            "enabled": bool(meta.get("experimentalNoticeEnabled", True)),
             "title": meta["experimentalNoticeTitle"],
             "message": meta.get("experimentalNoticeMessage") or "",
         }
-        if meta.get("experimentalNoticeUpdatedAt"):
+        if out["enabled"] and meta.get("experimentalNoticeUpdatedAt"):
             out["updatedAt"] = meta["experimentalNoticeUpdatedAt"]
         return out
     if meta is None and DEFAULT_EXPERIMENTAL_NOTICE_ENABLED and DEFAULT_EXPERIMENTAL_NOTICE_TITLE:
         return {
+            "enabled": True,
             "title": DEFAULT_EXPERIMENTAL_NOTICE_TITLE,
             "message": DEFAULT_EXPERIMENTAL_NOTICE_MESSAGE or "",
         }
