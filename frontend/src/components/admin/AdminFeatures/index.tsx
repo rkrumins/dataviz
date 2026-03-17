@@ -1,8 +1,9 @@
 /**
  * Admin Features page: schema-driven feature flags. Uses useAdminFeatures hook and subcomponents.
  */
+import { useState, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ToggleLeft, HelpCircle, BookOpen, RotateCcw, AlertCircle, Search } from 'lucide-react'
+import { ToggleLeft, HelpCircle, BookOpen, RotateCcw, AlertCircle, Search, Sparkles, X, Pencil } from 'lucide-react'
 import { featuresService, type FeatureDefinition, type FeatureCategory } from '@/services/featuresService'
 import { useAdminFeatures, SEARCH_MIN_FEATURES } from '@/hooks/useAdminFeatures'
 import { FeatureCard } from './FeatureCard'
@@ -10,7 +11,13 @@ import { Toast } from './Toast'
 import { SkeletonCards } from './SkeletonCards'
 import { ResetConfirmModal, EffectFocusCancel } from './ResetConfirmModal'
 
+const EXPERIMENTAL_BANNER_KEY = 'admin-features-experimental-banner-dismissed'
+
 export function AdminFeatures() {
+  const [experimentalBannerDismissed, setExperimentalBannerDismissed] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return window.sessionStorage?.getItem(EXPERIMENTAL_BANNER_KEY) === '1'
+  })
   const {
     data,
     isLoading,
@@ -33,34 +40,58 @@ export function AdminFeatures() {
     setSearchQuery,
     resetModalRef,
     cancelButtonRef,
+    updateNotice,
   } = useAdminFeatures()
+
+  const [editNoticeOpen, setEditNoticeOpen] = useState(false)
+  const [editEnabled, setEditEnabled] = useState(true)
+  const [editTitle, setEditTitle] = useState('')
+  const [editMessage, setEditMessage] = useState('')
+  const openEditNotice = () => {
+    setEditEnabled(!!experimentalNotice)
+    setEditTitle(experimentalNotice?.title ?? '')
+    setEditMessage(experimentalNotice?.message ?? '')
+    setEditNoticeOpen(true)
+  }
+  const saveEditNotice = () => {
+    updateNotice({ enabled: editEnabled, title: editTitle || undefined, message: editMessage || undefined })
+    setEditNoticeOpen(false)
+  }
 
   const schema = data?.schema ?? featuresService.getSchema()
   const categories: FeatureCategory[] = data?.categories ?? featuresService.getCategories()
-  const categoryMetaById = Object.fromEntries(categories.map((c) => [c.id, c]))
   const values = data?.values ?? {}
+  const experimentalNotice = data?.experimentalNotice ?? undefined
   const showSearch = schema.length >= SEARCH_MIN_FEATURES
   const q = searchQuery.trim().toLowerCase()
-  const byCategory = schema.reduce<Record<string, FeatureDefinition[]>>((acc, f) => {
-    if (f.deprecated) return acc
-    if (showSearch && q) {
-      const match =
-        f.name.toLowerCase().includes(q) ||
-        f.description.toLowerCase().includes(q) ||
-        (f.category || '').toLowerCase().includes(q)
-      if (!match) return acc
-    }
-    const cat = f.category || 'other'
-    if (!acc[cat]) acc[cat] = []
-    acc[cat].push(f)
-    return acc
-  }, {})
-  Object.keys(byCategory).forEach((cat) => {
-    byCategory[cat].sort((a, b) => (a.sortOrder ?? 99) - (b.sortOrder ?? 99))
-  })
-  const categoryIds = Object.keys(byCategory).sort(
-    (a, b) => (categoryMetaById[a]?.sortOrder ?? 99) - (categoryMetaById[b]?.sortOrder ?? 99)
+
+  const categoryMetaById = useMemo(
+    () => Object.fromEntries(categories.map((c) => [c.id, c])),
+    [categories]
   )
+  const { byCategory, categoryIds } = useMemo(() => {
+    const byCat = schema.reduce<Record<string, FeatureDefinition[]>>((acc, f) => {
+      if (f.deprecated) return acc
+      if (showSearch && q) {
+        const match =
+          f.name.toLowerCase().includes(q) ||
+          f.description.toLowerCase().includes(q) ||
+          (f.category || '').toLowerCase().includes(q)
+        if (!match) return acc
+      }
+      const cat = f.category || 'other'
+      if (!acc[cat]) acc[cat] = []
+      acc[cat].push(f)
+      return acc
+    }, {})
+    Object.keys(byCat).forEach((cat) => {
+      byCat[cat].sort((a, b) => (a.sortOrder ?? 99) - (b.sortOrder ?? 99))
+    })
+    const ids = Object.keys(byCat).sort(
+      (a, b) => (categoryMetaById[a]?.sortOrder ?? 99) - (categoryMetaById[b]?.sortOrder ?? 99)
+    )
+    return { byCategory: byCat, categoryIds: ids }
+  }, [schema, showSearch, q, categoryMetaById])
 
   if (isLoading) return <SkeletonCards />
 
@@ -69,8 +100,127 @@ export function AdminFeatures() {
     : null
   const isUsingDefaults = !data?.updatedAt && !defaultsHintDismissed
 
+  const dismissExperimentalBanner = () => {
+    setExperimentalBannerDismissed(true)
+    try {
+      window.sessionStorage?.setItem(EXPERIMENTAL_BANNER_KEY, '1')
+    } catch {
+      // ignore
+    }
+  }
+
   return (
     <div className="max-w-6xl mx-auto p-8 animate-in fade-in duration-500">
+      {/* Early access / experimental notice — backend-driven; dismissible; editable via Edit */}
+      <AnimatePresence>
+        {((!experimentalBannerDismissed && experimentalNotice?.title) || editNoticeOpen) && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, height: 0, marginBottom: 0 }}
+            transition={{ duration: 0.2 }}
+            className="mb-6 rounded-2xl border border-amber-500/20 bg-gradient-to-r from-amber-500/8 via-amber-500/5 to-transparent p-4"
+          >
+            {editNoticeOpen ? (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold text-amber-800 dark:text-amber-200">Edit early access notice</span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={saveEditNotice}
+                      className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-800 dark:text-amber-200 text-sm font-medium"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditNoticeOpen(false)}
+                      className="p-2 rounded-lg text-amber-600/80 hover:bg-amber-500/15"
+                      aria-label="Cancel"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 text-sm text-amber-800 dark:text-amber-200">
+                  <input
+                    type="checkbox"
+                    checked={editEnabled}
+                    onChange={(e) => setEditEnabled(e.target.checked)}
+                    className="rounded border-amber-500/30"
+                  />
+                  Show notice
+                </label>
+                <div>
+                  <label htmlFor="notice-title" className="block text-xs font-medium text-amber-700 dark:text-amber-300 mb-1">Title</label>
+                  <input
+                    id="notice-title"
+                    type="text"
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    placeholder="Early access"
+                    maxLength={200}
+                    className="w-full px-3 py-2 rounded-lg border border-amber-500/20 bg-white/50 dark:bg-black/20 text-ink text-sm"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="notice-message" className="block text-xs font-medium text-amber-700 dark:text-amber-300 mb-1">Message</label>
+                  <textarea
+                    id="notice-message"
+                    value={editMessage}
+                    onChange={(e) => setEditMessage(e.target.value)}
+                    placeholder="Optional body text..."
+                    maxLength={2000}
+                    rows={3}
+                    className="w-full px-3 py-2 rounded-lg border border-amber-500/20 bg-white/50 dark:bg-black/20 text-ink text-sm resize-y"
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 shrink-0 w-10 h-10 rounded-xl bg-amber-500/15 flex items-center justify-center">
+                  <Sparkles className="w-5 h-5 text-amber-600 dark:text-amber-400" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">
+                    {experimentalNotice?.title}
+                  </p>
+                  {experimentalNotice?.message && (
+                    <p className="text-sm text-amber-700/90 dark:text-amber-300/90 mt-0.5 leading-relaxed">
+                      {experimentalNotice.message}
+                    </p>
+                  )}
+                  {experimentalNotice?.updatedAt && (
+                    <p className="text-xs text-amber-600/80 dark:text-amber-400/80 mt-1.5">
+                      Last edited {new Date(experimentalNotice.updatedAt).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}
+                    </p>
+                  )}
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={openEditNotice}
+                    className="p-2 rounded-lg text-amber-600/80 hover:text-amber-700 hover:bg-amber-500/15 transition-colors focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+                    aria-label="Edit early access notice"
+                  >
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={dismissExperimentalBanner}
+                    className="p-2 rounded-lg text-amber-600/80 hover:text-amber-700 hover:bg-amber-500/15 transition-colors focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+                    aria-label="Dismiss early access notice"
+                  >
+                    <X className="w-4 h-4" aria-hidden />
+                  </button>
+                </div>
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {isUsingDefaults && (
           <motion.div
@@ -89,10 +239,7 @@ export function AdminFeatures() {
               className="p-1 rounded-lg hover:bg-indigo-500/10 transition-colors text-indigo-500/80 hover:text-indigo-600"
               aria-label="Dismiss hint"
             >
-              <span className="sr-only">Dismiss</span>
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-              </svg>
+              <X className="w-4 h-4" aria-hidden />
             </button>
           </motion.div>
         )}
@@ -115,7 +262,17 @@ export function AdminFeatures() {
             )}
           </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          {data?.experimentalNotice && (
+            <button
+              type="button"
+              onClick={openEditNotice}
+              className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors flex items-center gap-2"
+            >
+              <Pencil className="w-4 h-4" />
+              Edit notice
+            </button>
+          )}
           <a
             href="/docs/features"
             target="_blank"

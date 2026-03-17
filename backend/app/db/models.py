@@ -175,6 +175,9 @@ class FeatureCategoryORM(Base):
     icon = Column(Text, nullable=False)
     color = Column(Text, nullable=False)
     sort_order = Column(Integer, nullable=False, default=0)
+    preview = Column(Boolean, nullable=False, default=True)  # show "not yet wired" badge and footer when True
+    preview_label = Column(Text, nullable=True)  # e.g. "Not yet wired"
+    preview_footer = Column(Text, nullable=True)  # footer text when preview=True
 
 
 # ------------------------------------------------------------------ #
@@ -196,6 +199,25 @@ class FeatureDefinitionORM(Base):
     admin_hint = Column(Text, nullable=True)
     sort_order = Column(Integer, nullable=False, default=0)
     deprecated = Column(Boolean, nullable=False, default=False)
+    implemented = Column(Boolean, nullable=False, default=False)  # when True, feature is "wired" (no preview badge)
+
+
+# ------------------------------------------------------------------ #
+# feature_registry_meta  (single-row: Admin Features UI copy)         #
+# ------------------------------------------------------------------ #
+
+class FeatureRegistryMetaORM(Base):
+    __tablename__ = "feature_registry_meta"
+
+    id = Column(Integer, primary_key=True, default=1)
+    experimental_notice_enabled = Column(Boolean, nullable=False, default=True)
+    experimental_notice_title = Column(Text, nullable=True)
+    experimental_notice_message = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="feature_registry_meta_single_row"),
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -208,6 +230,7 @@ class FeatureFlagsORM(Base):
     id = Column(Integer, primary_key=True, default=1)
     config = Column(Text, nullable=False, default="{}")  # JSON: { "editModeEnabled": true, ... }
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    version = Column(Integer, nullable=False, default=0)  # optimistic concurrency; incremented on every write
 
     __table_args__ = (
         CheckConstraint("id = 1", name="feature_flags_single_row"),

@@ -7,11 +7,14 @@ export function MultiSelectFeatureRow({
   value,
   onChange,
   saving,
+  previewLabel,
 }: {
   feature: FeatureDefinition
   value: string[]
   onChange: (v: string[]) => void
   saving: boolean
+  /** When set, show a "not yet wired" style badge for this feature. */
+  previewLabel?: string
 }) {
   const options = feature.options ?? []
   const handleToggle = (id: string, checked: boolean) => {
@@ -27,6 +30,14 @@ export function MultiSelectFeatureRow({
     <div className="py-4 first:pt-0 last:pb-0 border-b border-glass-border last:border-b-0">
       <div className="flex items-center gap-2 mb-3 flex-wrap">
         <span className="text-sm font-semibold text-ink">{feature.name}</span>
+        {previewLabel && (
+          <span
+            className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/25"
+            title="Setting is saved; full behaviour will roll out in a future update."
+          >
+            {previewLabel}
+          </span>
+        )}
         {feature.adminHint && (
           <span
             title={feature.adminHint}

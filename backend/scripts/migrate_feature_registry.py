@@ -33,7 +33,10 @@ def main() -> None:
                 label TEXT NOT NULL,
                 icon TEXT NOT NULL,
                 color TEXT NOT NULL,
-                sort_order INTEGER NOT NULL DEFAULT 0
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                preview INTEGER NOT NULL DEFAULT 1,
+                preview_label TEXT,
+                preview_footer TEXT
             )
         """)
         created.append("feature_categories")
@@ -53,7 +56,8 @@ def main() -> None:
                 help_url TEXT,
                 admin_hint TEXT,
                 sort_order INTEGER NOT NULL DEFAULT 0,
-                deprecated INTEGER NOT NULL DEFAULT 0
+                deprecated INTEGER NOT NULL DEFAULT 0,
+                implemented INTEGER NOT NULL DEFAULT 0
             )
         """)
         created.append("feature_definitions")
@@ -64,10 +68,35 @@ def main() -> None:
             CREATE TABLE feature_flags (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 config TEXT NOT NULL DEFAULT '{}',
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 0
             )
         """)
         created.append("feature_flags")
+
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='feature_registry_meta'")
+    if not cur.fetchone():
+        cur.execute("""
+            CREATE TABLE feature_registry_meta (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                experimental_notice_enabled INTEGER NOT NULL DEFAULT 1,
+                experimental_notice_title TEXT,
+                experimental_notice_message TEXT,
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        created.append("feature_registry_meta")
+        # Insert default row (same defaults as backend/app/config/features.py)
+        cur.execute(
+            """
+            INSERT INTO feature_registry_meta (id, experimental_notice_enabled, experimental_notice_title, experimental_notice_message, updated_at)
+            VALUES (1, 1, 'Early access', ?, datetime('now'))
+            """,
+            (
+                "This area is in early access. Your choices are saved, but we're still wiring these options "
+                "into the rest of the product. You may not see behaviour changes until a future update.",
+            ),
+        )
 
     conn.commit()
     if created:

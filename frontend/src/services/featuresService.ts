@@ -38,6 +38,8 @@ export interface FeatureDefinition {
   adminHint?: string
   sortOrder?: number
   deprecated?: boolean
+  /** When false, show "preview / not yet wired" badge for this feature. Managed in DB per feature. */
+  implemented?: boolean
 }
 
 export interface FeatureCategory {
@@ -46,6 +48,17 @@ export interface FeatureCategory {
   icon: string
   color: string
   sortOrder?: number
+  /** When true, show "preview" badge and footer (backend-driven). */
+  preview?: boolean
+  previewLabel?: string | null
+  previewFooter?: string | null
+}
+
+/** Page-level early-access notice (backend-driven). */
+export interface ExperimentalNotice {
+  title: string
+  message: string
+  updatedAt?: string
 }
 
 export interface FeaturesResponse {
@@ -53,14 +66,76 @@ export interface FeaturesResponse {
   categories?: FeatureCategory[]
   values: Record<string, unknown>
   updatedAt?: string
+  /** Optimistic concurrency; required for PATCH. From API or 0 when using fallback. */
+  version: number
+  /** When set, show the early-access banner with this title and message. */
+  experimentalNotice?: ExperimentalNotice | null
 }
 
-// Fallback data: generated from backend seed. Regenerate with: npm run generate:features-fallback
-import fallbackData from '@/generated/featuresFallback.json'
+/** Thrown when PATCH returns 409 (version mismatch). Call load() and show "Someone else saved. Reloaded." */
+export class FeaturesConcurrencyError extends Error {
+  readonly code = 'CONFLICT' as const
+  constructor(message: string) {
+    super(message)
+    this.name = 'FeaturesConcurrencyError'
+  }
+}
 
-const EMBEDDED_SCHEMA: FeatureDefinition[] = fallbackData.schema as unknown as FeatureDefinition[]
-const EMBEDDED_CATEGORIES: FeatureCategory[] = fallbackData.categories as unknown as FeatureCategory[]
-const EMBEDDED_DEFAULTS: Record<string, unknown> = fallbackData.defaults as Record<string, unknown>
+/** Last-resort defaults when API and fallback file are both unavailable. App never hangs or crashes. */
+const FAILSAFE_VALUES: Record<string, unknown> = {
+  signupEnabled: false,
+  editModeEnabled: true,
+  traceEnabled: true,
+  allowedViewModes: ['graph', 'hierarchy', 'reference', 'layered-lineage'],
+}
+
+function buildFailsafeResponse(): FeaturesResponse {
+  return {
+    schema: [],
+    categories: [],
+    values: { ...FAILSAFE_VALUES },
+    version: 0,
+    experimentalNotice: undefined,
+  }
+}
+
+// Fallback data: loaded at runtime so missing/corrupt file does not crash the app (see get()).
+let EMBEDDED_SCHEMA: FeatureDefinition[] = []
+let EMBEDDED_CATEGORIES: FeatureCategory[] = []
+let EMBEDDED_DEFAULTS: Record<string, unknown> = { ...FAILSAFE_VALUES }
+
+async function loadFallbackData(): Promise<{
+  schema: FeatureDefinition[]
+  categories: FeatureCategory[]
+  defaults: Record<string, unknown>
+  experimentalNotice?: ExperimentalNotice | null
+}> {
+  try {
+    const fallbackData = await import('@/generated/featuresFallback.json').then((m) => m.default)
+    if (fallbackData && typeof fallbackData === 'object') {
+      const schema = (fallbackData.schema as unknown as FeatureDefinition[]) ?? []
+      const categories = (fallbackData.categories as unknown as FeatureCategory[]) ?? []
+      const defaults = (fallbackData.defaults as Record<string, unknown>) ?? { ...FAILSAFE_VALUES }
+      EMBEDDED_SCHEMA = schema
+      EMBEDDED_CATEGORIES = categories
+      EMBEDDED_DEFAULTS = defaults
+      return {
+        schema,
+        categories,
+        defaults,
+        experimentalNotice: (fallbackData as { experimentalNotice?: ExperimentalNotice | null }).experimentalNotice,
+      }
+    }
+  } catch {
+    /* missing or corrupt fallback file */
+  }
+  return {
+    schema: [],
+    categories: [],
+    defaults: { ...FAILSAFE_VALUES },
+    experimentalNotice: undefined,
+  }
+}
 
 // ─── API error shape (structured from backend) ─────────────────────────────
 
@@ -75,6 +150,13 @@ function parseApiError(status: number, body: unknown): string {
     const d = o?.detail
     if (typeof d === 'object' && d?.detail) return d.detail
     return 'Too many updates. Please wait a moment before saving again.'
+  }
+  if (status === 409 && body && typeof body === 'object') {
+    const o = body as { detail?: string | { detail?: string } }
+    const d = o.detail
+    if (typeof d === 'object' && d?.detail) return d.detail
+    if (typeof d === 'string') return d
+    return 'Feature flags were updated by someone else. Reload and try again.'
   }
   if (status === 400 && body && typeof body === 'object') {
     const o = body as { detail?: string | { detail?: string; field?: string } }
@@ -100,6 +182,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
       body = await res.text()
     }
     const message = parseApiError(res.status, body)
+    if (res.status === 409) throw new FeaturesConcurrencyError(message)
     throw new Error(message)
   }
   if (res.status === 204) return undefined as T
@@ -109,45 +192,93 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 // ─── Service ───────────────────────────────────────────────────────────────
 
 export const featuresService = {
-  /** Get feature definitions (schema). Always returns embedded schema for now. */
+  /** Feature definitions (schema). From API or embedded fallback when offline. */
   getSchema(): FeatureDefinition[] {
     return EMBEDDED_SCHEMA
   },
 
-  /** Get current feature values. Tries API first; falls back to defaults if unavailable. */
-  /** Get categories (from API or embedded fallback). */
+  /** Category metadata. From API or embedded fallback when offline. */
   getCategories(): FeatureCategory[] {
     return EMBEDDED_CATEGORIES
   },
 
+  /** Never throws: API → fallback file → hard-coded FAILSAFE_VALUES. */
   async get(): Promise<FeaturesResponse> {
     try {
-      const data = await request<FeaturesResponse>(FEATURES_API)
-      return {
-        schema: data.schema ?? EMBEDDED_SCHEMA,
-        categories: data.categories ?? EMBEDDED_CATEGORIES,
-        values: data.values ?? EMBEDDED_DEFAULTS,
-        updatedAt: data.updatedAt,
+      try {
+        const data = await request<FeaturesResponse & { version?: number }>(FEATURES_API)
+        return {
+          schema: data.schema ?? EMBEDDED_SCHEMA,
+          categories: data.categories ?? EMBEDDED_CATEGORIES,
+          values: data.values ?? { ...EMBEDDED_DEFAULTS },
+          updatedAt: data.updatedAt,
+          version: data.version ?? 0,
+          experimentalNotice: data.experimentalNotice ?? undefined,
+        }
+      } catch {
+        const fallback = await loadFallbackData()
+        return {
+          schema: fallback.schema,
+          categories: fallback.categories,
+          values: { ...fallback.defaults },
+          version: 0,
+          experimentalNotice: fallback.experimentalNotice ?? undefined,
+        }
       }
     } catch {
-      return {
-        schema: EMBEDDED_SCHEMA,
-        categories: EMBEDDED_CATEGORIES,
-        values: { ...EMBEDDED_DEFAULTS },
-      }
+      return buildFailsafeResponse()
     }
   },
 
-  /** Update feature values. Throws if API unavailable. */
-  async update(payload: Record<string, unknown>): Promise<FeaturesResponse> {
+  /** Update feature values, experimental notice, and/or per-feature implemented status. Payload must include `version` (from last GET). Throws FeaturesConcurrencyError on 409. */
+  async update(payload: Record<string, unknown> & { version: number }): Promise<FeaturesResponse> {
     return request<FeaturesResponse>(FEATURES_API, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     })
   },
 
-  /** Reset all features to defaults. */
-  async reset(): Promise<FeaturesResponse> {
-    return this.update(EMBEDDED_DEFAULTS as Record<string, unknown>)
+  /** Reset all features to defaults. Requires current version (from last GET). */
+  async reset(version: number): Promise<FeaturesResponse> {
+    return this.update({ ...EMBEDDED_DEFAULTS, version } as Record<string, unknown> & { version: number })
   },
+
+  /** Create a new feature definition. Body: key, name, description, category, type, default, optional fields. Returns full GET shape. */
+  async createDefinition(body: CreateDefinitionBody): Promise<FeaturesResponse> {
+    return request<FeaturesResponse>(`${FEATURES_API}/definitions`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+
+  /** Update a feature definition (partial). Returns full GET shape. */
+  async updateDefinition(key: string, body: Partial<CreateDefinitionBody> & { deprecated?: boolean; implemented?: boolean }): Promise<FeaturesResponse> {
+    return request<FeaturesResponse>(`${FEATURES_API}/definitions/${encodeURIComponent(key)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    })
+  },
+
+  /** Soft-delete a feature (set deprecated=true, remove from values). Returns full GET shape. */
+  async deprecateDefinition(key: string): Promise<FeaturesResponse> {
+    return request<FeaturesResponse>(`${FEATURES_API}/definitions/${encodeURIComponent(key)}/deprecate`, {
+      method: 'POST',
+    })
+  },
+}
+
+/** Body for creating a feature definition (camelCase). */
+export interface CreateDefinitionBody {
+  key: string
+  name: string
+  description: string
+  category: string
+  type: 'boolean' | 'string[]'
+  default: boolean | string[]
+  userOverridable?: boolean
+  options?: FeatureOption[]
+  helpUrl?: string | null
+  adminHint?: string | null
+  sortOrder?: number
+  implemented?: boolean
 }

@@ -3,7 +3,7 @@
  * Keeps AdminFeatures component thin and logic testable.
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { featuresService, type FeaturesResponse } from '@/services/featuresService'
+import { featuresService, FeaturesConcurrencyError, type FeaturesResponse } from '@/services/featuresService'
 
 export const SEARCH_MIN_FEATURES = 10
 
@@ -46,10 +46,19 @@ export function useAdminFeatures() {
       setData({ ...data, values: next })
       setSavingKey(key)
       try {
-        const res = await featuresService.update(next as Record<string, unknown>)
+        const res = await featuresService.update({
+          ...next,
+          version: data.version,
+        } as Record<string, unknown> & { version: number })
         setData(res)
         setToastVisible(true)
       } catch (err) {
+        if (err instanceof FeaturesConcurrencyError) {
+          await load()
+          setErrorToastMessage('Someone else saved. Reloaded.')
+          setErrorToastVisible(true)
+          return
+        }
         const msg = err instanceof Error ? err.message : 'Could not save. Please try again.'
         setError(msg)
         setErrorToastMessage(msg)
@@ -59,7 +68,7 @@ export function useAdminFeatures() {
         setSavingKey(null)
       }
     },
-    [data]
+    [data, load]
   )
 
   useEffect(() => {
@@ -75,16 +84,49 @@ export function useAdminFeatures() {
     setResetLoading(true)
     setError(null)
     try {
-      const res = await featuresService.reset()
+      const res = await featuresService.reset(data?.version ?? 0)
       setData(res)
       setResetConfirmOpen(false)
       setToastVisible(true)
     } catch (err) {
+      if (err instanceof FeaturesConcurrencyError) {
+        await load()
+        setErrorToastMessage('Someone else saved. Reloaded.')
+        setErrorToastVisible(true)
+        setResetConfirmOpen(false)
+        return
+      }
       setError(err instanceof Error ? err.message : 'Could not reset. Please try again.')
     } finally {
       setResetLoading(false)
     }
-  }, [])
+  }, [data?.version, load])
+
+  const updateNotice = useCallback(
+    async (notice: { enabled?: boolean; title?: string; message?: string }) => {
+      if (!data) return
+      try {
+        const res = await featuresService.update({
+          ...data.values,
+          version: data.version,
+          experimentalNotice: notice,
+        } as Record<string, unknown> & { version: number })
+        setData(res)
+        setToastVisible(true)
+      } catch (err) {
+        if (err instanceof FeaturesConcurrencyError) {
+          await load()
+          setErrorToastMessage('Someone else saved. Reloaded.')
+          setErrorToastVisible(true)
+          return
+        }
+        const msg = err instanceof Error ? err.message : 'Could not save notice.'
+        setErrorToastMessage(msg)
+        setErrorToastVisible(true)
+      }
+    },
+    [data, load]
+  )
 
   return {
     data,
@@ -109,5 +151,6 @@ export function useAdminFeatures() {
     setSearchQuery,
     resetModalRef,
     cancelButtonRef,
+    updateNotice,
   }
 }

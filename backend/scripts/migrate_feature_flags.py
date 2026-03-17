@@ -1,5 +1,7 @@
 """
 Migration: create feature_flags table (single-row config for admin feature flags).
+For full feature registry (feature_categories, feature_definitions, feature_flags, feature_registry_meta),
+use migrate_feature_registry.py instead. App startup (db/engine.py) also creates/upgrades tables.
 
 Run once against the target database:
     python backend/scripts/migrate_feature_flags.py
@@ -33,7 +35,8 @@ def main() -> None:
         CREATE TABLE feature_flags (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             config TEXT NOT NULL DEFAULT '{}',
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 0
         )
     """)
     conn.commit()

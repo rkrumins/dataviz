@@ -1,9 +1,19 @@
 """
 Feature flags: validation only. No hardcoded registry.
 Schema and categories come from the database (feature_definitions, feature_categories).
+Page-level experimental notice is stored in feature_registry_meta (DB); these are defaults for seed/export only.
 """
 
 from typing import Any
+
+# Defaults for experimental notice — used when seeding feature_registry_meta and by export script (no DB).
+# Runtime values come from DB; do not use these for API responses.
+DEFAULT_EXPERIMENTAL_NOTICE_ENABLED = True
+DEFAULT_EXPERIMENTAL_NOTICE_TITLE = "Early access"
+DEFAULT_EXPERIMENTAL_NOTICE_MESSAGE = (
+    "This area is in early access. Your choices are saved, but we're still wiring these options "
+    "into the rest of the product. You may not see behaviour changes until a future update."
+)
 
 
 class ValidationError(Exception):

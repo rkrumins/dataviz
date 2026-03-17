@@ -12,6 +12,11 @@ from pathlib import Path
 repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
+from backend.app.config.features import (
+    DEFAULT_EXPERIMENTAL_NOTICE_ENABLED,
+    DEFAULT_EXPERIMENTAL_NOTICE_MESSAGE,
+    DEFAULT_EXPERIMENTAL_NOTICE_TITLE,
+)
 from backend.app.db.seed_feature_registry import SEED_CATEGORIES, SEED_DEFINITIONS
 
 
@@ -23,6 +28,9 @@ def main() -> None:
             "icon": c["icon"],
             "color": c["color"],
             "sortOrder": c["sort_order"],
+            "preview": c.get("preview", True),
+            "previewLabel": c.get("preview_label"),
+            "previewFooter": c.get("preview_footer"),
         }
         for c in SEED_CATEGORIES
     ]
@@ -45,8 +53,20 @@ def main() -> None:
             "adminHint": d.get("admin_hint"),
             "sortOrder": d["sort_order"],
             "deprecated": d["deprecated"],
+            "implemented": d.get("implemented", False),
         })
-    out = {"schema": schema, "categories": categories, "defaults": defaults}
+    experimental_notice = None
+    if DEFAULT_EXPERIMENTAL_NOTICE_ENABLED and DEFAULT_EXPERIMENTAL_NOTICE_TITLE:
+        experimental_notice = {
+            "title": DEFAULT_EXPERIMENTAL_NOTICE_TITLE,
+            "message": DEFAULT_EXPERIMENTAL_NOTICE_MESSAGE or "",
+        }
+    out = {
+        "schema": schema,
+        "categories": categories,
+        "defaults": defaults,
+        "experimentalNotice": experimental_notice,
+    }
     print(json.dumps(out, indent=2))
 
 

@@ -1,28 +1,223 @@
 {
   "schema": [
-    {"key": "editModeEnabled", "name": "Edit mode", "description": "Allow users to edit node properties from views and persist changes to the underlying data.", "category": "editing", "type": "boolean", "default": true, "userOverridable": true, "options": null, "helpUrl": null, "adminHint": null, "sortOrder": 0, "deprecated": false},
-    {"key": "allowedViewModes", "name": "View modes", "description": "Choose which layout types can be created when building views (Graph, Hierarchy, Reference Model, Layered Lineage).", "category": "views", "type": "string[]", "default": ["graph", "hierarchy", "reference", "layered-lineage"], "userOverridable": false, "options": [{"id": "graph", "label": "Graph"}, {"id": "hierarchy", "label": "Hierarchy"}, {"id": "reference", "label": "Reference Model"}, {"id": "layered-lineage", "label": "Layered Lineage"}], "helpUrl": null, "adminHint": null, "sortOrder": 1, "deprecated": false},
-    {"key": "signupEnabled", "name": "Signup", "description": "Allow new users to create an account from the login page (self-registration).", "category": "auth", "type": "boolean", "default": false, "userOverridable": false, "options": null, "helpUrl": null, "adminHint": null, "sortOrder": 2, "deprecated": false},
-    {"key": "traceEnabled", "name": "Trace", "description": "Enable lineage trace in graph and context views (trace upstream/downstream from a node).", "category": "lineage", "type": "boolean", "default": true, "userOverridable": true, "options": null, "helpUrl": null, "adminHint": null, "sortOrder": 3, "deprecated": false}
+    {
+      "key": "editModeEnabled",
+      "name": "Edit mode",
+      "description": "Allow users to edit node properties from views and persist changes to the underlying data.",
+      "category": "editing",
+      "type": "boolean",
+      "default": true,
+      "userOverridable": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": null,
+      "sortOrder": 0,
+      "deprecated": false,
+      "implemented": false
+    },
+    {
+      "key": "allowedViewModes",
+      "name": "View modes",
+      "description": "Choose which layout types can be created when building views (Graph, Hierarchy, Reference Model, Layered Lineage).",
+      "category": "views",
+      "type": "string[]",
+      "default": [
+        "graph",
+        "hierarchy",
+        "reference",
+        "layered-lineage"
+      ],
+      "userOverridable": false,
+      "options": [
+        {
+          "id": "graph",
+          "label": "Graph"
+        },
+        {
+          "id": "hierarchy",
+          "label": "Hierarchy"
+        },
+        {
+          "id": "reference",
+          "label": "Reference Model"
+        },
+        {
+          "id": "layered-lineage",
+          "label": "Layered Lineage"
+        }
+      ],
+      "helpUrl": null,
+      "adminHint": null,
+      "sortOrder": 1,
+      "deprecated": false,
+      "implemented": false
+    },
+    {
+      "key": "signupEnabled",
+      "name": "Signup",
+      "description": "Allow new users to create an account from the login page (self-registration).",
+      "category": "auth",
+      "type": "boolean",
+      "default": false,
+      "userOverridable": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": null,
+      "sortOrder": 2,
+      "deprecated": false,
+      "implemented": false
+    },
+    {
+      "key": "traceEnabled",
+      "name": "Trace",
+      "description": "Enable lineage trace in graph and context views (trace upstream/downstream from a node).",
+      "category": "lineage",
+      "type": "boolean",
+      "default": true,
+      "userOverridable": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": null,
+      "sortOrder": 3,
+      "deprecated": false,
+      "implemented": false
+    }
   ],
   "categories": [
-    {"id": "editing", "label": "Editing", "icon": "Pencil", "color": "indigo", "sortOrder": 0},
-    {"id": "views", "label": "View Modes", "icon": "LayoutTemplate", "color": "violet", "sortOrder": 1},
-    {"id": "auth", "label": "Authentication", "icon": "UserPlus", "color": "emerald", "sortOrder": 2},
-    {"id": "lineage", "label": "Lineage", "icon": "GitBranch", "color": "amber", "sortOrder": 3},
-    {"id": "display", "label": "Display & UI", "icon": "Palette", "color": "blue", "sortOrder": 4},
-    {"id": "security", "label": "Security", "icon": "Shield", "color": "rose", "sortOrder": 5},
-    {"id": "integrations", "label": "Integrations", "icon": "Plug", "color": "sky", "sortOrder": 6},
-    {"id": "analytics", "label": "Analytics", "icon": "BarChart3", "color": "teal", "sortOrder": 7},
-    {"id": "experimental", "label": "Experimental", "icon": "FlaskConical", "color": "fuchsia", "sortOrder": 8},
-    {"id": "performance", "label": "Performance", "icon": "Zap", "color": "orange", "sortOrder": 9},
-    {"id": "notifications", "label": "Notifications", "icon": "Bell", "color": "slate", "sortOrder": 10},
-    {"id": "other", "label": "Other", "icon": "LayoutTemplate", "color": "slate", "sortOrder": 99}
+    {
+      "id": "editing",
+      "label": "Editing",
+      "icon": "Pencil",
+      "color": "indigo",
+      "sortOrder": 0,
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+    },
+    {
+      "id": "views",
+      "label": "View Modes",
+      "icon": "LayoutTemplate",
+      "color": "violet",
+      "sortOrder": 1,
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+    },
+    {
+      "id": "auth",
+      "label": "Authentication",
+      "icon": "UserPlus",
+      "color": "emerald",
+      "sortOrder": 2,
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+    },
+    {
+      "id": "lineage",
+      "label": "Lineage",
+      "icon": "GitBranch",
+      "color": "amber",
+      "sortOrder": 3,
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+    },
+    {
+      "id": "display",
+      "label": "Display & UI",
+      "icon": "Palette",
+      "color": "blue",
+      "sortOrder": 4,
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+    },
+    {
+      "id": "security",
+      "label": "Security",
+      "icon": "Shield",
+      "color": "rose",
+      "sortOrder": 5,
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+    },
+    {
+      "id": "integrations",
+      "label": "Integrations",
+      "icon": "Plug",
+      "color": "sky",
+      "sortOrder": 6,
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+    },
+    {
+      "id": "analytics",
+      "label": "Analytics",
+      "icon": "BarChart3",
+      "color": "teal",
+      "sortOrder": 7,
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+    },
+    {
+      "id": "experimental",
+      "label": "Experimental",
+      "icon": "FlaskConical",
+      "color": "fuchsia",
+      "sortOrder": 8,
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+    },
+    {
+      "id": "performance",
+      "label": "Performance",
+      "icon": "Zap",
+      "color": "orange",
+      "sortOrder": 9,
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+    },
+    {
+      "id": "notifications",
+      "label": "Notifications",
+      "icon": "Bell",
+      "color": "slate",
+      "sortOrder": 10,
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+    },
+    {
+      "id": "other",
+      "label": "Other",
+      "icon": "LayoutTemplate",
+      "color": "slate",
+      "sortOrder": 99,
+      "preview": true,
+      "previewLabel": "Not yet wired",
+      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+    }
   ],
   "defaults": {
     "editModeEnabled": true,
-    "allowedViewModes": ["graph", "hierarchy", "reference", "layered-lineage"],
+    "allowedViewModes": [
+      "graph",
+      "hierarchy",
+      "reference",
+      "layered-lineage"
+    ],
     "signupEnabled": false,
     "traceEnabled": true
+  },
+  "experimentalNotice": {
+    "title": "Early access",
+    "message": "This area is in early access. Your choices are saved, but we're still wiring these options into the rest of the product. You may not see behaviour changes until a future update."
   }
 }

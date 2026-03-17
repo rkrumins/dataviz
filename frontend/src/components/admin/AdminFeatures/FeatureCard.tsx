@@ -5,6 +5,10 @@ import { BooleanFeatureRow } from './BooleanFeatureRow'
 import { MultiSelectFeatureRow } from './MultiSelectFeatureRow'
 import type { FeatureDefinition, FeatureCategory } from '@/services/featuresService'
 
+/** Fallback when backend does not provide preview label/footer. */
+const DEFAULT_PREVIEW_LABEL = 'Not yet wired'
+const DEFAULT_PREVIEW_FOOTER = 'Your settings here are saved. Full behaviour for this section will be enabled in a future update.'
+
 export function FeatureCard({
   categoryId,
   meta,
@@ -24,6 +28,11 @@ export function FeatureCard({
 }) {
   const { Icon, style, label } = resolveCategoryStyle(meta, categoryId)
   const reduced = prefersReducedMotion()
+  const previewLabel = meta?.previewLabel ?? DEFAULT_PREVIEW_LABEL
+  const previewFooter = meta?.previewFooter ?? DEFAULT_PREVIEW_FOOTER
+  const categoryPreview = meta?.preview !== false
+  const anyNotImplemented = features.some((f) => f.implemented !== true)
+  const showCardFooter = categoryPreview && anyNotImplemented && previewFooter
   return (
     <motion.div
       initial={reduced ? false : { opacity: 0, y: 12 }}
@@ -36,7 +45,7 @@ export function FeatureCard({
     >
       <div className={cn('absolute inset-0 bg-gradient-to-br pointer-events-none', style.gradient)} />
       <div className="relative">
-        <div className="flex items-center gap-3 mb-4">
+        <div className="flex items-center gap-3 mb-4 flex-wrap">
           <div
             className={cn(
               'w-9 h-9 rounded-lg border flex items-center justify-center shrink-0',
@@ -49,6 +58,7 @@ export function FeatureCard({
         </div>
         <div className="space-y-0">
           {features.map((feature) => {
+            const showFeaturePreview = feature.implemented !== true
             if (feature.type === 'boolean') {
               const val = values[feature.key] as boolean | undefined
               const value = val ?? (feature.default as boolean)
@@ -59,6 +69,7 @@ export function FeatureCard({
                   value={value}
                   onChange={(v) => onChange(feature.key, v)}
                   saving={savingKey === feature.key}
+                  previewLabel={showFeaturePreview ? previewLabel : undefined}
                 />
               )
             }
@@ -72,12 +83,18 @@ export function FeatureCard({
                   value={Array.isArray(value) ? value : []}
                   onChange={(v) => onChange(feature.key, v)}
                   saving={savingKey === feature.key}
+                  previewLabel={showFeaturePreview ? previewLabel : undefined}
                 />
               )
             }
             return null
           })}
         </div>
+        {showCardFooter && (
+          <p className="mt-4 pt-3 border-t border-glass-border text-[11px] text-ink-muted leading-relaxed">
+            {previewFooter}
+          </p>
+        )}
       </div>
     </motion.div>
   )

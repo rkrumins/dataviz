@@ -32,11 +32,12 @@ async def lifespan(_app: FastAPI):
     async with get_async_session() as session:
         await seed_templates(session)
 
-    # 2a. Seed feature categories and definitions (idempotent — skips if already present)
+    # 2a. Seed feature categories, definitions, and registry meta (idempotent — skips if already present)
     try:
-        from .db.seed_feature_registry import seed_feature_registry
+        from .db.seed_feature_registry import seed_feature_registry, seed_feature_registry_meta
         async with get_async_session() as session:
             await seed_feature_registry(session)
+            await seed_feature_registry_meta(session)
     except Exception as exc:
         logger.warning("Feature registry seed warning: %s", exc)
 
