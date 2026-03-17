@@ -125,6 +125,12 @@ export interface RelationshipTypeSchema {
   bidirectional: boolean;
   showLabel: boolean;
   labelField?: string;                 // Field to use as edge label
+
+  // Ontology classification — populated from resolved backend ontology.
+  // Optional so existing hand-authored schemas don't break; defaults to false/'association'.
+  isContainment?: boolean;
+  isLineage?: boolean;
+  category?: 'structural' | 'flow' | 'metadata' | 'association';
 }
 
 export interface RelationshipVisualConfig {
@@ -133,7 +139,7 @@ export interface RelationshipVisualConfig {
   strokeStyle: 'solid' | 'dashed' | 'dotted';
   animated: boolean;
   animationSpeed: 'slow' | 'normal' | 'fast';
-  arrowType: 'arrow' | 'diamond' | 'circle' | 'none';
+  arrowType: 'arrow' | 'arrowclosed' | 'diamond' | 'circle' | 'none';
   curveType: 'bezier' | 'step' | 'straight' | 'smoothstep';
 }
 
@@ -157,6 +163,13 @@ export interface ViewConfiguration {
    * If undefined/null, the view is global and visible across all scopes (legacy behaviour).
    */
   scopeKey?: string | null;
+
+  /** Workspace this view belongs to (populated from API, absent for locally-created views). */
+  workspaceId?: string;
+  /** Display name of the workspace (enriched from API). */
+  workspaceName?: string;
+  /** Whether the current user has bookmarked/favourited this view. */
+  isFavourited?: boolean;
 
   // What to show
   content: ViewContentConfig;
@@ -385,8 +398,9 @@ export interface RuleCondition {
  * How to project/aggregate the underlying data for this view
  */
 export interface ViewProjectionConfig {
-  // Target granularity level (0=Column, 1=Table, 2=Schema, 3=System, 4=Domain)
-  targetGranularity: number;
+  // Target entity type ID for lineage aggregation (e.g. "dataset", "term").
+  // null = no aggregation (show finest-grained lineage as-is).
+  targetGranularityType: string | null;
 
   // Aggregate child lineage to parent level
   aggregateLineage: boolean;
@@ -629,7 +643,7 @@ export interface ViewGroupingConfig {
 // ============================================
 
 /**
- * Complete workspace configuration containing all schemas and views
+ * Frontend store shape: ontology-derived schema, views, and active display scope.
  */
 export interface WorkspaceSchema {
   id: string;
@@ -658,6 +672,19 @@ export interface WorkspaceSchema {
    * Can be overridden per-view via ViewLayerConfig.scopeEdges
    */
   containmentEdgeTypes?: string[];
+
+  /**
+   * Default lineage/flow edge types.
+   * Derived from relationship definitions with isLineage = true.
+   * Examples: ['FLOWS_TO', 'CONSUMES', 'PRODUCES', 'DERIVED_FROM']
+   */
+  lineageEdgeTypes?: string[];
+
+  /**
+   * Root entity types — entry points for graph traversal (e.g. 'domain').
+   * Derived from ontology resolution.
+   */
+  rootEntityTypes?: string[];
 }
 
 export interface GlobalVisualConfig {

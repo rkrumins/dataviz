@@ -13,15 +13,12 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
+import * as LucideIcons from 'lucide-react'
 import {
     Search,
     ChevronRight,
     GripVertical,
-    Database,
-    Folder,
-    Table,
     Box,
-    Columns,
     X,
     AlertTriangle,
     CheckSquare,
@@ -37,10 +34,10 @@ import {
     useEffectiveAssignments
 } from '@/store/referenceModelStore'
 import type { ViewLayerConfig, AssignmentConflict } from '@/types/schema'
-import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
+import { useContainmentEdgeTypes, useEntityTypes, normalizeEdgeType } from '@/store/schema'
 import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
 
-import { useEntityLoader } from '@/hooks/useEntityLoader'
+import { useGraphHydration } from '@/hooks/useGraphHydration'
 
 
 // ============================================
@@ -67,8 +64,6 @@ interface WizardAssignmentTreeProps {
     layers: ViewLayerConfig[]
     /** Active drop target from the Layer Studio (shows strip indicator) */
     activeTarget?: ActiveTarget | null
-    /** Edge types that define containment hierarchy */
-    containmentEdgeTypes?: string[]
     /** Callback when assignment changes */
     onAssignmentChange?: (entityId: string, layerId: string | null) => void
     /** Callback for bulk assignment */
@@ -87,29 +82,10 @@ interface FlatNode extends EntityTreeNode {
 // Constants
 // ============================================
 
-const DEFAULT_CONTAINMENT_TYPES = ['contains', 'CONTAINS', 'has_schema', 'has_dataset', 'has_column']
 
-const TYPE_ICONS: Record<string, React.ReactNode> = {
-    domain: <Database className="w-4 h-4" />,
-    system: <Folder className="w-4 h-4" />,
-    schema: <Folder className="w-4 h-4" />,
-    table: <Table className="w-4 h-4" />,
-    column: <Columns className="w-4 h-4" />,
-    dataset: <Table className="w-4 h-4" />,
-    dashboard: <Box className="w-4 h-4" />,
-    default: <Box className="w-4 h-4" />
-}
-
-const TYPE_COLORS: Record<string, string> = {
-    domain: '#8b5cf6',    // Purple
-    system: '#3b82f6',    // Blue
-    schema: '#0ea5e9',    // Sky
-    table: '#22c55e',     // Green
-    column: '#64748b',    // Slate
-    dataset: '#22c55e',
-    dashboard: '#f97316', // Orange
-    default: '#94a3b8'
-}
+// Visual config lookup built dynamically from ontology entity types.
+// See entityVisualMap in WizardAssignmentTree for the hook-driven map.
+type EntityVisualEntry = { icon?: string; color?: string }
 
 // ============================================
 // Tree Row Component
@@ -119,6 +95,7 @@ interface TreeRowProps {
     node: FlatNode
     layers: ViewLayerConfig[]
     searchQuery: string
+    entityVisualMap: Record<string, EntityVisualEntry>
     onToggle: (id: string) => void
     onSelect: (id: string, multi: boolean) => void
     onAssign: (entityId: string, layerId: string) => void
@@ -131,6 +108,7 @@ function TreeRow({
     node,
     layers,
     searchQuery,
+    entityVisualMap,
     onToggle,
     onSelect,
     onAssign,
@@ -139,8 +117,13 @@ function TreeRow({
     isDragging
 }: TreeRowProps) {
     const hasChildren = node.childCount > 0 || node.children.length > 0
-    const icon = TYPE_ICONS[node.type] || TYPE_ICONS.default
-    const typeColor = TYPE_COLORS[node.type] || TYPE_COLORS.default
+    const typeLower = node.type.toLowerCase()
+    const visual = entityVisualMap[typeLower]
+    const icon = (() => {
+        const Cmp = visual?.icon ? (LucideIcons as Record<string, any>)[visual.icon] : null
+        return Cmp ? <Cmp className="w-4 h-4" /> : <Box className="w-4 h-4" />
+    })()
+    const typeColor = visual?.color ?? '#94a3b8'
     const assignedLayer = layers.find(l => l.id === node.assignedLayerId)
 
     // Highlight search match
@@ -308,7 +291,6 @@ function TreeRow({
 
 export function WizardAssignmentTree({
     layers,
-    containmentEdgeTypes = DEFAULT_CONTAINMENT_TYPES,
     onAssignmentChange,
     onBulkAssign,
     className
@@ -332,7 +314,7 @@ export function WizardAssignmentTree({
     }, [layers])
     const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
     const removeEntityAssignment = useReferenceModelStore(s => s.removeEntityAssignment)
-    const { containmentEdgeTypes: ontologyContainmentTypes } = useOntologyMetadata()
+    const ontologyContainmentTypes = useContainmentEdgeTypes()
 
     // Local state
     const [searchQuery, setSearchQuery] = useState('')
@@ -344,34 +326,40 @@ export function WizardAssignmentTree({
     const parentRef = useRef<HTMLDivElement>(null)
     const searchInputRef = useRef<HTMLInputElement>(null)
 
-    // Build containment set for efficient lookup - prioritize ontology, then prop, then schema
-    const containmentSet = useMemo(() => {
-        const types = ontologyContainmentTypes.length > 0
-            ? ontologyContainmentTypes
-            : (containmentEdgeTypes.length > 0
-                ? containmentEdgeTypes
-                : (schema?.containmentEdgeTypes || DEFAULT_CONTAINMENT_TYPES))
-        return new Set(types)
-    }, [ontologyContainmentTypes, containmentEdgeTypes, schema?.containmentEdgeTypes])
+    // Build containment set from the ontology (single source of truth).
+    // The ontology is always loaded from the backend — either the assigned ontology
+    // or the result of graph introspection. No hardcoded fallbacks.
+    const containmentSet = useMemo(
+        () => new Set(ontologyContainmentTypes.map(t => t.toUpperCase())),
+        [ontologyContainmentTypes]
+    )
 
     // Lazy Loading Hook
-    const { loadChildren } = useEntityLoader()
+    const { loadChildren } = useGraphHydration()
 
-    // Auto-load roots if empty
+    // Always load entities for assignment browser using ALL schema types (not just roots).
+    // Run even when canvas has nodes (e.g. from CanvasRouter with rootEntityTypes) so we
+    // merge in Column, Term, Type, Glossary, etc. — ontology-driven, no hardcoding.
     useEffect(() => {
-        if (nodes.length === 0) {
-            loadChildren('')
-        }
-    }, [nodes.length, loadChildren])
+        loadChildren('', { useAllSchemaTypes: true })
+    }, [loadChildren])
 
-    // Auto-expand effect
+    // Track previously expanded IDs so we only load children for NEWLY expanded nodes,
+    // not every expanded node on every state change.
+    const prevExpandedRef = useRef<Set<string>>(new Set())
+
     useEffect(() => {
-        // Debounce slightly to prevent rapid firing during initial render
+        const prev = prevExpandedRef.current
+        const newlyExpanded = [...expandedIds].filter(id => !prev.has(id))
+        prevExpandedRef.current = new Set(expandedIds)
+
+        if (newlyExpanded.length === 0) return
+
         const timer = setTimeout(() => {
-            expandedIds.forEach(id => {
+            newlyExpanded.forEach(id => {
                 loadChildren(id)
             })
-        }, 100)
+        }, 50)
         return () => clearTimeout(timer)
     }, [expandedIds, loadChildren])
 
@@ -379,11 +367,8 @@ export function WizardAssignmentTree({
     const entityTree = useMemo<EntityTreeNode[]>(() => {
         if (!nodes.length) return []
 
-        // Build containment map using backend-provided types
-        const containmentEdges = edges.filter(e => {
-            const edgeType = normalizeEdgeType(e)
-            return containmentSet.has(edgeType) || Array.from(containmentSet).some(type => type.toUpperCase() === edgeType)
-        })
+        // Build containment map using ontology-defined edge types only.
+        const containmentEdges = edges.filter(e => containmentSet.has(normalizeEdgeType(e)))
 
         const nodeMap = new Map(nodes.map(n => [n.id, n]))
         const childMap = new Map<string, string[]>()
@@ -447,26 +432,28 @@ export function WizardAssignmentTree({
             }
         }
 
-        // Root nodes: those without parents
+        // Root nodes: no parent in containment edges. For the assignment browser we show
+        // all such nodes (no root-type filter) so the user can assign any entity to layers.
         return nodes
             .filter(n => !hasParent.has(n.id) && n.data.type !== 'ghost')
             .map(n => buildNode(n.id, 0))
             .filter((n): n is EntityTreeNode => n !== null)
             .sort((a, b) => a.name.localeCompare(b.name))
-    }, [nodes, edges, containmentSet, instanceAssignments, conflicts, layers, effectiveAssignments, manualAssignmentMap]) // Added manualAssignmentMap dependency
+    }, [nodes, edges, containmentSet, instanceAssignments, conflicts, layers, effectiveAssignments, manualAssignmentMap])
 
-    // Get unique entity types for filter
-    const entityTypes = useMemo(() => {
-        const types = new Set<string>()
-        const traverse = (nodes: EntityTreeNode[]) => {
-            nodes.forEach(n => {
-                types.add(n.type)
-                traverse(n.children)
-            })
-        }
-        traverse(entityTree)
-        return Array.from(types).sort()
-    }, [entityTree])
+    // Use schema entity types for filter (same as Entities step) — not tree-derived.
+    // This ensures Column, Term, Type, Glossary (and any custom types) always appear.
+    const schemaEntityTypes = useEntityTypes()
+    const entityTypes = useMemo(
+        () => schemaEntityTypes.map(et => et.id).sort(),
+        [schemaEntityTypes]
+    )
+
+    // Visual map: entity type id (lowercased) → { icon, color } from ontology
+    const entityVisualMap = useMemo<Record<string, EntityVisualEntry>>(
+        () => Object.fromEntries(schemaEntityTypes.map(et => [et.id.toLowerCase(), et.visual])),
+        [schemaEntityTypes]
+    )
 
     // Filter and flatten tree for virtualized rendering
     const flattenedNodes = useMemo<FlatNode[]>(() => {
@@ -480,7 +467,7 @@ export function WizardAssignmentTree({
 
         const matchesType = (node: EntityTreeNode): boolean => {
             if (typeFilter === 'all') return true
-            return node.type === typeFilter
+            return node.type.toLowerCase() === typeFilter.toLowerCase()
         }
 
         const hasMatchingDescendant = (node: EntityTreeNode): boolean => {
@@ -761,7 +748,7 @@ export function WizardAssignmentTree({
                 </div>
 
                 {/* Type Filter Pills */}
-                <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+                <div className="flex flex-wrap gap-2 pb-1">
                     <button
                         onClick={() => setTypeFilter('all')}
                         className={cn(
@@ -783,9 +770,13 @@ export function WizardAssignmentTree({
                                     ? 'text-white shadow-md'
                                     : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'
                             )}
-                            style={typeFilter === type ? { backgroundColor: TYPE_COLORS[type] || TYPE_COLORS.default } : {}}
+                            style={typeFilter === type ? { backgroundColor: entityVisualMap[type.toLowerCase()]?.color ?? '#94a3b8' } : {}}
                         >
-                            {TYPE_ICONS[type] || TYPE_ICONS.default}
+                            {(() => {
+                                const vis = entityVisualMap[type.toLowerCase()]
+                                const Cmp = vis?.icon ? (LucideIcons as Record<string, any>)[vis.icon] : null
+                                return Cmp ? <Cmp className="w-3 h-3" /> : <Box className="w-3 h-3" />
+                            })()}
                             {type}
                         </button>
                     ))}
@@ -858,6 +849,9 @@ export function WizardAssignmentTree({
                     <div className="flex flex-col items-center justify-center h-40 text-slate-400">
                         <Search className="w-10 h-10 mb-2 opacity-50" />
                         <p className="text-sm font-medium">No entities found</p>
+                        <p className="text-xs mt-1 text-center max-w-[260px] text-slate-500">
+                            The graph may be empty or entity types may not match the schema.
+                        </p>
                         {searchQuery && (
                             <button
                                 onClick={() => setSearchQuery('')}
@@ -893,6 +887,7 @@ export function WizardAssignmentTree({
                                         node={node}
                                         layers={layers}
                                         searchQuery={searchQuery}
+                                        entityVisualMap={entityVisualMap}
                                         onToggle={handleToggle}
                                         onSelect={handleSelect}
                                         onAssign={handleAssign}

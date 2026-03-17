@@ -11,7 +11,7 @@ import {
     type DataSourceResponse,
 } from '@/services/workspaceService'
 import { providerService, type ProviderResponse } from '@/services/providerService'
-import { blueprintService, type BlueprintResponse } from '@/services/blueprintService'
+import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 
 // ============================================================
 // Helpers
@@ -26,14 +26,14 @@ function statusBadge(ws: WorkspaceResponse) {
 interface DataSourceFormRow {
     providerId: string
     graphName: string
-    blueprintId: string
+    ontologyId: string
     label: string
 }
 
 const EMPTY_DS_ROW: DataSourceFormRow = {
     providerId: '',
     graphName: '',
-    blueprintId: '',
+    ontologyId: '',
     label: '',
 }
 
@@ -45,7 +45,7 @@ interface DSRowEditorProps {
     row: DataSourceFormRow
     index: number
     providers: ProviderResponse[]
-    blueprints: BlueprintResponse[]
+    ontologies: OntologyDefinitionResponse[]
     canRemove: boolean
     onChange: (index: number, row: DataSourceFormRow) => void
     onRemove: (index: number) => void
@@ -53,7 +53,7 @@ interface DSRowEditorProps {
 }
 
 export const DSRowEditor: FC<DSRowEditorProps> = ({
-    row, index, providers, blueprints, canRemove,
+    row, index, providers, ontologies, canRemove,
     onChange, onRemove, onFetchGraphs,
 }) => {
     const [availableGraphs, setAvailableGraphs] = useState<string[]>([])
@@ -171,19 +171,19 @@ export const DSRowEditor: FC<DSRowEditorProps> = ({
                     />
                 </label>
 
-                {/* Blueprint */}
+                {/* Ontology */}
                 <label className="flex flex-col gap-1.5 text-[11px] font-medium text-ink-muted">
-                    ONTOLOGY BLUEPRINT
+                    ONTOLOGY
                     <select
-                        value={row.blueprintId}
-                        onChange={(e) => update('blueprintId', e.target.value)}
+                        value={row.ontologyId}
+                        onChange={(e) => update('ontologyId', e.target.value)}
                         className="rounded-lg border border-glass-border bg-canvas px-3 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-business/50 focus:border-accent-business transition-all duration-200"
                     >
                         <option value="">None (infer schema from data)</option>
-                        {blueprints.map((bp) => (
-                            <option key={bp.id} value={bp.id}>
-                                {bp.name} v{bp.version}
-                                {bp.isPublished ? ' (published)' : ' (draft)'}
+                        {ontologies.map((ont) => (
+                            <option key={ont.id} value={ont.id}>
+                                {ont.name} v{ont.version}
+                                {ont.isPublished ? ' (published)' : ' (draft)'}
                             </option>
                         ))}
                     </select>
@@ -201,10 +201,10 @@ interface DataSourceListProps {
     workspace: WorkspaceResponse
     onRefresh: () => void
     providers: ProviderResponse[]
-    blueprints: BlueprintResponse[]
+    ontologies: OntologyDefinitionResponse[]
 }
 
-const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, providers, blueprints }) => {
+const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, providers, ontologies }) => {
     const [adding, setAdding] = useState(false)
     const [editingDsId, setEditingDsId] = useState<string | null>(null)
     const [rowState, setRowState] = useState<DataSourceFormRow>({ ...EMPTY_DS_ROW })
@@ -228,7 +228,7 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                 const req: DataSourceUpdateRequest = {
                     providerId: rowState.providerId,
                     graphName: rowState.graphName,
-                    blueprintId: rowState.blueprintId || undefined,
+                    ontologyId: rowState.ontologyId || undefined,
                     label: rowState.label || undefined,
                 }
                 await workspaceService.updateDataSource(workspace.id, editingDsId, req)
@@ -237,7 +237,7 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                 const req: DataSourceCreateRequest = {
                     providerId: rowState.providerId,
                     graphName: rowState.graphName,
-                    blueprintId: rowState.blueprintId || undefined,
+                    ontologyId: rowState.ontologyId || undefined,
                     label: rowState.label || undefined,
                 }
                 await workspaceService.addDataSource(workspace.id, req)
@@ -257,7 +257,7 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
         setRowState({
             providerId: ds.providerId,
             graphName: ds.graphName || '',
-            blueprintId: ds.blueprintId || '',
+            ontologyId: ds.ontologyId || '',
             label: ds.label || '',
         })
         setAdding(false) // make sure adding is off
@@ -326,7 +326,7 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                                         row={rowState}
                                         index={0}
                                         providers={providers}
-                                        blueprints={blueprints}
+                                        ontologies={ontologies}
                                         canRemove={false}
                                         onChange={(_, row) => setRowState(row)}
                                         onRemove={() => { }}
@@ -434,7 +434,7 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                         row={rowState}
                         index={0}
                         providers={providers}
-                        blueprints={blueprints}
+                        ontologies={ontologies}
                         canRemove={false}
                         onChange={(_, row) => setRowState(row)}
                         onRemove={() => { }}
@@ -496,12 +496,12 @@ export const EnvironmentsTab: FC = () => {
     const [actionError, setActionError] = useState<string | null>(null)
 
     const [providers, setProviders] = useState<ProviderResponse[]>([])
-    const [blueprints, setBlueprints] = useState<BlueprintResponse[]>([])
+    const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
 
     // Load available dependencies
     useEffect(() => {
         providerService.list().then(setProviders).catch(() => { })
-        blueprintService.list().then(setBlueprints).catch(() => { })
+        ontologyDefinitionService.list().then(setOntologies).catch(() => { })
     }, [])
 
     const clearError = useCallback(() => setActionError(null), [])
@@ -555,7 +555,7 @@ export const EnvironmentsTab: FC = () => {
                         .map((ds) => ({
                             providerId: ds.providerId,
                             graphName: ds.graphName,
-                            blueprintId: ds.blueprintId || undefined,
+                            ontologyId: ds.ontologyId || undefined,
                             label: ds.label || undefined,
                         })),
                 }
@@ -726,7 +726,7 @@ export const EnvironmentsTab: FC = () => {
                                                 row={ds}
                                                 index={i}
                                                 providers={providers}
-                                                blueprints={blueprints}
+                                                ontologies={ontologies}
                                                 canRemove={form.dataSources.length > 1}
                                                 onChange={updateDsRow}
                                                 onRemove={removeDsRow}
@@ -849,7 +849,7 @@ export const EnvironmentsTab: FC = () => {
                                     {/* Expanded data sources */}
                                     {isExpanded && (
                                         <div className="animate-in slide-in-from-top-2 fade-in duration-200 mt-2">
-                                            <DataSourceList workspace={ws} onRefresh={loadWorkspaces} providers={providers} blueprints={blueprints} />
+                                            <DataSourceList workspace={ws} onRefresh={loadWorkspaces} providers={providers} ontologies={ontologies} />
                                         </div>
                                     )}
                                 </li>

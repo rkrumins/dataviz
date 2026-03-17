@@ -27,9 +27,9 @@ import {
     ListTree
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useSchemaStore } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import type { GraphSchemaStats, OntologyMetadata } from '@/providers/GraphDataProvider'
+import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
+import type { GraphSchemaStats } from '@/providers/GraphDataProvider'
 import type { WizardFormData, ActiveFilter } from '../ViewWizard'
 
 // ============================================
@@ -39,6 +39,8 @@ import type { WizardFormData, ActiveFilter } from '../ViewWizard'
 interface EntitiesStepProps {
     formData: WizardFormData
     updateFormData: (updates: Partial<WizardFormData>) => void
+    /** Data source whose assigned ontology scopes entity/relationship type pickers. */
+    dataSourceId?: string
 }
 
 // interface ActiveFilter moved to ViewWizard.tsx
@@ -47,13 +49,17 @@ interface EntitiesStepProps {
 // Component
 // ============================================
 
-export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
-    const schema = useSchemaStore(s => s.schema)
+export function EntitiesStep({ formData, updateFormData, dataSourceId }: EntitiesStepProps) {
     const provider = useGraphProvider()
+    const {
+        entityTypes: dsEntityTypes,
+        relationshipTypes: dsRelationshipTypes,
+        containmentEdgeTypes,
+        rootEntityTypes,
+    } = useDataSourceSchema(dataSourceId)
 
     // Dynamic metadata and stats
     const [stats, setStats] = useState<GraphSchemaStats | null>(null)
-    const [ontology, setOntology] = useState<OntologyMetadata | null>(null)
     const [_isLoadingStats, setIsLoadingStats] = useState(true)
 
     const [searchQuery, setSearchQuery] = useState('')
@@ -66,18 +72,14 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
         async function loadDynamicData() {
             try {
                 setIsLoadingStats(true)
-                const [schemaStats, ontologyMetadata] = await Promise.all([
-                    provider.getSchemaStats(),
-                    provider.getOntologyMetadata()
-                ])
+                const schemaStats = await provider.getSchemaStats()
                 setStats(schemaStats)
-                setOntology(ontologyMetadata)
 
                 // Initialize scope if empty
                 if (!formData.scopeEdges?.edgeTypes.length) {
                     updateFormData({
                         scopeEdges: {
-                            edgeTypes: ontologyMetadata.containmentEdgeTypes,
+                            edgeTypes: containmentEdgeTypes,
                             includeAll: false
                         }
                     })
@@ -89,12 +91,11 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
             }
         }
         loadDynamicData()
-    }, [provider])
+    }, [provider, containmentEdgeTypes, formData.scopeEdges?.edgeTypes.length, updateFormData])
 
     // Entity types with selection state and real counts
     const entityTypesWithState = useMemo(() => {
-        const baseTypes = schema?.entityTypes ?? []
-        return baseTypes.map(et => {
+        return dsEntityTypes.map(et => {
             const stat = stats?.entityTypeStats.find(s => s.id === et.id)
             return {
                 ...et,
@@ -102,21 +103,20 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                 count: stat?.count ?? 0
             }
         })
-    }, [schema, formData.visibleEntityTypes, stats])
+    }, [dsEntityTypes, formData.visibleEntityTypes, stats])
 
     // Edge types with selection state and real counts
     const edgeTypesWithState = useMemo(() => {
-        const baseTypes = schema?.relationshipTypes ?? []
-        return baseTypes.map(rt => {
+        return dsRelationshipTypes.map(rt => {
             const stat = stats?.edgeTypeStats.find(s => s.id === rt.id)
             return {
                 ...rt,
                 isSelected: formData.visibleRelationshipTypes.includes(rt.id),
                 count: stat?.count ?? 0,
-                isContainment: ontology?.containmentEdgeTypes.includes(rt.id)
+                isContainment: containmentEdgeTypes.includes(rt.id)
             }
         })
-    }, [schema, formData.visibleRelationshipTypes, stats, ontology])
+    }, [dsRelationshipTypes, formData.visibleRelationshipTypes, stats, containmentEdgeTypes])
 
     // Filter entity types by search and advanced filters
     const filteredEntityTypes = useMemo(() => {
@@ -178,9 +178,9 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
 
     // Select all / none
     const handleSelectAll = useCallback(() => {
-        const allIds = schema?.entityTypes.map(e => e.id) ?? []
+        const allIds = dsEntityTypes.map(e => e.id)
         updateFormData({ visibleEntityTypes: allIds })
-    }, [schema, updateFormData])
+    }, [dsEntityTypes, updateFormData])
 
     const handleSelectNone = useCallback(() => {
         updateFormData({ visibleEntityTypes: [] })
@@ -223,7 +223,7 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
 
     // Stats
     const selectedCount = formData.visibleEntityTypes.length
-    const totalCount = schema?.entityTypes.length ?? 0
+    const totalCount = dsEntityTypes.length
 
     return (
         <div className="space-y-6">
@@ -462,7 +462,7 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                                 >
                                     {formData.scopeEdges?.edgeTypes.includes(edge.id) && <Check className="w-3 h-3" />}
                                     {edge.name}
-                                    {ontology?.containmentEdgeTypes.includes(edge.id) && (
+                                    {containmentEdgeTypes.includes(edge.id) && (
                                         <Sparkles className="w-3 h-3 text-amber-200" />
                                     )}
                                 </button>
@@ -527,7 +527,7 @@ export function EntitiesStep({ formData, updateFormData }: EntitiesStepProps) {
                         </p>
 
                         {/* Intelligence: Recommended logic */}
-                        {ontology?.rootEntityTypes.includes(entityType.id) && (
+                        {rootEntityTypes.includes(entityType.id) && (
                             <div className="mt-2 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 text-[9px] font-bold uppercase">
                                 <Sparkles className="w-2.5 h-2.5" /> Root
                             </div>

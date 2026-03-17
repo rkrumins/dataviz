@@ -1,17 +1,21 @@
 /**
- * CanvasRouter - Switches between different canvas types based on active view
- * 
+ * CanvasRouter - Thin routing shell that switches between canvas types
+ *
  * Renders the appropriate canvas component based on the view's layout type:
  * - 'graph' → LineageCanvas (React Flow graph)
  * - 'hierarchy' | 'tree' → HierarchyCanvas (Hierarchy-style nested view)
- * - 'list' → ListView (tabular representation)
- * - 'grid' → GridView (card grid)
+ * - 'reference' → ReferenceModelCanvas (context view)
+ * - 'layered-lineage' → LayeredLineageCanvas
+ *
+ * All data loading is handled by useGraphHydration (called here and in canvas components).
  */
 
 import { Suspense, useMemo } from 'react'
+import { ReactFlowProvider } from '@xyflow/react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2 } from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
+import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { LineageCanvas } from './LineageCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
@@ -26,17 +30,15 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
   const activeView = useSchemaStore((s) => s.getActiveView())
   const layoutType = activeView?.layout.type ?? 'graph'
 
+  // Single source of truth for initial graph data loading.
+  // Only CanvasRouter passes hydrate=true — canvas components use the hook
+  // without hydration (loadChildren/searchChildren only).
+  useGraphHydration({ hydrate: true })
+
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {
-    // Layered lineage view combines layers with lineage flow
-    if (layoutType === 'layered-lineage') {
-      return LayeredLineageCanvas
-    }
-
-    // Reference model view gets special horizontal layer layout
-    if (layoutType === 'reference') {
-      return ReferenceModelCanvas
-    }
+    if (layoutType === 'layered-lineage') return LayeredLineageCanvas
+    if (layoutType === 'reference') return ReferenceModelCanvas
 
     switch (layoutType) {
       case 'hierarchy':
@@ -49,8 +51,8 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
   }, [layoutType])
 
   return (
+    <ReactFlowProvider>
     <div className={cn("relative w-full h-full", className)}>
-      {/* View Type Indicator */}
       <AnimatePresence>
         <motion.div
           key={layoutType}
@@ -65,7 +67,6 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
         </motion.div>
       </AnimatePresence>
 
-      {/* Active View Badge - Only for non-graph views (LineageCanvas has its own toolbar) */}
       {activeView && layoutType !== 'graph' && (
         <div className="absolute top-4 left-4 z-10 pointer-events-none">
           <ViewBadge
@@ -76,6 +77,7 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
         </div>
       )}
     </div>
+    </ReactFlowProvider>
   )
 }
 
@@ -124,4 +126,3 @@ function ViewBadge({ name, layoutType, entityCount }: ViewBadgeProps) {
 }
 
 export default CanvasRouter
-

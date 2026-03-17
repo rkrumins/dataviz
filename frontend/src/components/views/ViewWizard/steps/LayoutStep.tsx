@@ -4,7 +4,7 @@
  * Beautiful card-based layout selection with recommended badge
  */
 
-import React, { useState, useCallback, useEffect } from 'react'
+import React, { useState, useCallback, useEffect, useMemo } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import {
     Check,
@@ -19,6 +19,7 @@ import { cn, generateId } from '@/lib/utils'
 import type { WizardFormData } from '../ViewWizard'
 import type { ViewLayerConfig } from '@/types/schema'
 import { listTemplates as fetchBackendTemplates } from '@/services/contextModelService'
+import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
 
 // ============================================
 // Types
@@ -35,6 +36,8 @@ interface LayoutStepProps {
         features: string[]
         recommended?: boolean
     }[]
+    /** Data source whose assigned ontology scopes the entity type picker. */
+    dataSourceId?: string
 }
 
 interface LayerTemplate {
@@ -49,6 +52,8 @@ interface LayerTemplate {
 // Local fallback templates (used when backend returns 0 templates)
 // ============================================
 
+// Entity types are intentionally left empty — they are driven by the active
+// data source's ontology and selected by the user in the layer editor.
 const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
     {
         id: 'data-flow',
@@ -56,10 +61,10 @@ const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
         description: 'Source → Staging → Transform → Consumption',
         category: 'data-engineering',
         layers: [
-            { name: 'Source', description: 'Raw data sources', color: '#3b82f6', entityTypes: ['database', 'file'] },
-            { name: 'Staging', description: 'Intermediate storage', color: '#8b5cf6', entityTypes: ['schema', 'table'] },
-            { name: 'Transform', description: 'Processing layer', color: '#f59e0b', entityTypes: ['table', 'view'] },
-            { name: 'Consumption', description: 'Analytics and reports', color: '#22c55e', entityTypes: ['dashboard', 'report'] }
+            { name: 'Source', description: 'Raw data sources', color: '#3b82f6', entityTypes: [] },
+            { name: 'Staging', description: 'Intermediate storage', color: '#8b5cf6', entityTypes: [] },
+            { name: 'Transform', description: 'Processing layer', color: '#f59e0b', entityTypes: [] },
+            { name: 'Consumption', description: 'Analytics and reports', color: '#22c55e', entityTypes: [] }
         ]
     },
     {
@@ -68,9 +73,9 @@ const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
         description: 'Bronze → Silver → Gold',
         category: 'data-engineering',
         layers: [
-            { name: 'Bronze', description: 'Raw data', color: '#CD7F32', entityTypes: ['database', 'file'] },
-            { name: 'Silver', description: 'Cleansed', color: '#C0C0C0', entityTypes: ['table'] },
-            { name: 'Gold', description: 'Business-ready', color: '#FFD700', entityTypes: ['view', 'dashboard'] }
+            { name: 'Bronze', description: 'Raw data', color: '#CD7F32', entityTypes: [] },
+            { name: 'Silver', description: 'Cleansed', color: '#C0C0C0', entityTypes: [] },
+            { name: 'Gold', description: 'Business-ready', color: '#FFD700', entityTypes: [] }
         ]
     },
     {
@@ -91,8 +96,13 @@ const LAYER_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#0
 // Component
 // ============================================
 
-export function LayoutStep({ formData, updateFormData, layoutTypes }: LayoutStepProps) {
+export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId }: LayoutStepProps) {
     const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null)
+    const { entityTypes: schemaEntityTypes } = useDataSourceSchema(dataSourceId)
+    const availableEntityTypes = useMemo(
+        () => schemaEntityTypes.slice().sort((a, b) => a.name.localeCompare(b.name)),
+        [schemaEntityTypes]
+    )
 
     // ── Backend templates ────────────────────────────────────────────────────
     const [backendTemplates, setBackendTemplates] = useState<LayerTemplate[]>([])
@@ -409,6 +419,37 @@ export function LayoutStep({ formData, updateFormData, layoutTypes }: LayoutStep
                                                                 placeholder="Optional description"
                                                                 className="w-full mt-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-sm"
                                                             />
+                                                        </div>
+                                                        <div>
+                                                            <label className="text-xs font-medium text-slate-500 uppercase">Entity Types</label>
+                                                            <div className="flex flex-wrap gap-1.5 mt-1 min-h-[32px]">
+                                                                {availableEntityTypes.map(et => {
+                                                                    const active = (layer.entityTypes ?? []).includes(et.id)
+                                                                    return (
+                                                                        <button
+                                                                            key={et.id}
+                                                                            type="button"
+                                                                            onClick={() => handleUpdateLayer(layer.id, {
+                                                                                entityTypes: active
+                                                                                    ? (layer.entityTypes ?? []).filter(id => id !== et.id)
+                                                                                    : [...(layer.entityTypes ?? []), et.id]
+                                                                            })}
+                                                                            className={cn(
+                                                                                'px-2 py-1 text-xs rounded-full border transition-colors',
+                                                                                active
+                                                                                    ? 'border-transparent text-white'
+                                                                                    : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'
+                                                                            )}
+                                                                            style={active ? { backgroundColor: et.visual.color } : undefined}
+                                                                        >
+                                                                            {et.name}
+                                                                        </button>
+                                                                    )
+                                                                })}
+                                                                {availableEntityTypes.length === 0 && (
+                                                                    <span className="text-xs text-slate-400 italic">No entity types in ontology yet</span>
+                                                                )}
+                                                            </div>
                                                         </div>
                                                     </div>
                                                 </motion.div>

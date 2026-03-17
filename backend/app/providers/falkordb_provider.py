@@ -33,13 +33,9 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
         return None
     entity_type = entity_type_str or props.get("entityType", "container")
     try:
-        et_enum = EntityType(entity_type) if isinstance(entity_type, str) else entity_type
-    except ValueError:
-        et_enum = EntityType.CONTAINER
-    try:
         return GraphNode(
             urn=props["urn"],
-            entityType=et_enum,
+            entityType=str(entity_type),
             displayName=props.get("displayName", ""),
             qualifiedName=props.get("qualifiedName"),
             description=props.get("description"),
@@ -58,15 +54,11 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
 def _edge_from_row(source_urn: str, target_urn: str, rel_type: str, props: Dict[str, Any]) -> GraphEdge:
     """Build GraphEdge from FalkorDB edge data."""
     edge_id = props.get("id") or f"{source_urn}|{rel_type}|{target_urn}"
-    try:
-        et = EdgeType(rel_type) if isinstance(rel_type, str) else rel_type
-    except ValueError:
-        et = EdgeType.RELATED_TO
     return GraphEdge(
         id=edge_id,
         sourceUrn=source_urn,
         targetUrn=target_urn,
-        edgeType=et,
+        edgeType=str(rel_type),
         confidence=props.get("confidence"),
         properties=json.loads(props["properties"]) if isinstance(props.get("properties"), str) else (props.get("properties") or {}),
     )
@@ -181,33 +173,49 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception as e:
             logger.error(f"Seed failed: {e}")
 
-    async def ensure_indices(self):
-        """Create indices for standard node labels and properties."""
-        labels = [
+    async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None):
+        """Create indices for node labels and properties.
+
+        When *entity_type_ids* is provided (e.g. from the resolved ontology),
+        those labels are indexed in addition to the hardcoded defaults.
+        """
+        default_labels = [
             EntityType.DOMAIN.value,
             EntityType.DATA_PLATFORM.value,
             EntityType.CONTAINER.value,
             EntityType.DATASET.value,
-            EntityType.SCHEMA_FIELD.value
+            EntityType.SCHEMA_FIELD.value,
         ]
+        extra = list(entity_type_ids) if entity_type_ids else []
+        seen: set[str] = set()
+        labels: list[str] = []
+        for lbl in default_labels + extra:
+            if lbl not in seen:
+                seen.add(lbl)
+                labels.append(lbl)
+
         properties = ["urn", "displayName", "qualifiedName"]
-        
+
         for label in labels:
             for prop in properties:
                 try:
-                    # CREATE INDEX FOR (n:Label) ON (n.property)
-                    # Using query instead of ro_query as it's a schema change
                     await self._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
-                except Exception as e:
-                    # If index already exists, FalkorDB 2.x+ might throw or just be silent.
-                    # We catch all and continue.
+                except Exception:
                     pass
 
     @property
     def name(self) -> str:
         return "FalkorDBProvider"
 
+    def set_containment_edge_types(self, types: List[str]) -> None:
+        """Called by ContextEngine after ontology resolution to inject the
+        authoritative containment edge types from the resolver."""
+        self._resolved_containment_types: Set[str] = {t.upper() for t in types}
+
     def _get_containment_edge_types(self) -> Set[str]:
+        # Prefer ontology-resolved types if available (set by ContextEngine after resolution)
+        if getattr(self, "_resolved_containment_types", None):
+            return self._resolved_containment_types
         if not hasattr(self, "_containment_cache"):
             config = os.getenv("CONTAINMENT_EDGE_TYPES", "").strip()
             if config:
@@ -284,8 +292,7 @@ class FalkorDBProvider(GraphDataProvider):
             node = self._extract_node_from_result(result.result_set[0])
             # Backfill the cache for next time
             if node:
-                lbl = node.entity_type.value if hasattr(node.entity_type, "value") else str(node.entity_type)
-                await self._cache_urn_label(urn, lbl)
+                await self._cache_urn_label(urn, str(node.entity_type))
             return node
         return None
 
@@ -295,18 +302,14 @@ class FalkorDBProvider(GraphDataProvider):
         params: Dict[str, Any] = {}
         conditions = []
 
-        # When a single entity type is provided, use label-specific MATCH for index hit
-        if query.entity_types and len(query.entity_types) == 1:
-            label = _sanitize_label(
-                query.entity_types[0].value if hasattr(query.entity_types[0], "value")
-                else str(query.entity_types[0])
-            )
-            clauses = [f"MATCH (n:{label})"]
-        elif query.entity_types:
+        # Match by entity type (label). Use case-insensitive matching so ontology types
+        # like "Glossary" match graph labels like "glossary" or "GLOSSARY".
+        if query.entity_types:
             clauses = ["MATCH (n)"]
-            types = [t.value if hasattr(t, "value") else str(t) for t in query.entity_types]
-            params["entityTypes"] = types
-            conditions.append("labels(n)[0] IN $entityTypes")
+            types = [str(t) for t in query.entity_types]
+            types_lower = [t.lower() for t in types]
+            params["entityTypesLower"] = types_lower
+            conditions.append("toLower(labels(n)[0]) IN $entityTypesLower")
         else:
             clauses = ["MATCH (n)"]
 
@@ -1714,7 +1717,7 @@ class FalkorDBProvider(GraphDataProvider):
         # Group nodes by label for label-specific MERGE
         nodes_by_label: Dict[str, list] = defaultdict(list)
         for node in nodes:
-            label = _sanitize_label(node.entity_type.value if hasattr(node.entity_type, "value") else str(node.entity_type))
+            label = _sanitize_label(str(node.entity_type))
             nodes_by_label[label].append({
                 "urn": node.urn,
                 "displayName": node.display_name or "",
@@ -1757,7 +1760,7 @@ class FalkorDBProvider(GraphDataProvider):
         # Group edges by relationship type for type-specific MERGE
         edges_by_type: Dict[str, list] = defaultdict(list)
         for edge in edges:
-            rel_type = _sanitize_label(edge.edge_type.value if hasattr(edge.edge_type, "value") else str(edge.edge_type))
+            rel_type = _sanitize_label(str(edge.edge_type))
             edges_by_type[rel_type].append({
                 "src": edge.source_urn,
                 "tgt": edge.target_urn,
@@ -1787,7 +1790,7 @@ class FalkorDBProvider(GraphDataProvider):
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         await self._ensure_connected()
         try:
-            label = _sanitize_label(node.entity_type.value if hasattr(node.entity_type, "value") else str(node.entity_type))
+            label = _sanitize_label(str(node.entity_type))
             params = {
                 "urn": node.urn,
                 "displayName": node.display_name or "",
@@ -1806,7 +1809,7 @@ class FalkorDBProvider(GraphDataProvider):
             )
             await self._cache_urn_label(node.urn, label)
             if containment_edge:
-                rel_type = _sanitize_label(containment_edge.edge_type.value if hasattr(containment_edge.edge_type, "value") else str(containment_edge.edge_type))
+                rel_type = _sanitize_label(str(containment_edge.edge_type))
                 await self._graph.query(
                     f"""
                     MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}})

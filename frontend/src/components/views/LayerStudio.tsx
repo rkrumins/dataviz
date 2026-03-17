@@ -537,7 +537,6 @@ export function LayerStudio({
                         <WizardAssignmentTree
                             layers={layers}
                             activeTarget={activeTarget}
-                            containmentEdgeTypes={containmentEdgeTypes}
                             onAssignmentChange={handleAssignmentChange}
                             onBulkAssign={handleBulkAssignment}
                             className="flex-1 min-h-0"

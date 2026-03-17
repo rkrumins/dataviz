@@ -32,6 +32,27 @@ async def lifespan(_app: FastAPI):
     async with get_async_session() as session:
         await seed_templates(session)
 
+    # 2a. Seed feature categories, definitions, and registry meta (idempotent — skips if already present)
+    try:
+        from .db.seed_feature_registry import seed_feature_registry, seed_feature_registry_meta
+        async with get_async_session() as session:
+            await seed_feature_registry(session)
+            await seed_feature_registry_meta(session)
+    except Exception as exc:
+        logger.warning("Feature registry seed warning: %s", exc)
+
+    # 2b. Seed system default ontology (idempotent — merge-not-overwrite strategy)
+    try:
+        from .ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+        from .ontology.service import LocalOntologyService
+        async with get_async_session() as session:
+            repo = SQLAlchemyOntologyRepository(session)
+            svc = LocalOntologyService(repo)
+            await svc.seed_system_defaults()
+            await session.commit()
+    except Exception as exc:
+        logger.warning("System default ontology seed warning: %s", exc)
+
     # 3. Ensure a primary connection exists; bootstrap from env vars if DB is empty
     async with get_async_session() as session:
         try:

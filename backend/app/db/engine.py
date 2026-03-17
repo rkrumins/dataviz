@@ -128,6 +128,39 @@ async def init_db() -> None:
         from . import models  # noqa: F401 — registers ORM models with Base
         await conn.run_sync(Base.metadata.create_all)
 
+    # ── Create feature_categories / feature_definitions / feature_flags if missing ─
+    async with engine.begin() as conn:
+        if DATABASE_URL.startswith("sqlite"):
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS feature_categories "
+                    "(id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL, icon TEXT NOT NULL, color TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, "
+                    "preview INTEGER NOT NULL DEFAULT 1, preview_label TEXT, preview_footer TEXT)"
+                )
+            )
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS feature_definitions "
+                    "(key TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, category_id TEXT NOT NULL, "
+                    "type TEXT NOT NULL, default_value TEXT NOT NULL, user_overridable INTEGER NOT NULL DEFAULT 0, "
+                    "options TEXT, help_url TEXT, admin_hint TEXT, sort_order INTEGER NOT NULL DEFAULT 0, deprecated INTEGER NOT NULL DEFAULT 0, implemented INTEGER NOT NULL DEFAULT 0)"
+                )
+            )
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS feature_flags "
+                    "(id INTEGER PRIMARY KEY CHECK (id = 1), config TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0)"
+                )
+            )
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS feature_registry_meta "
+                    "(id INTEGER PRIMARY KEY CHECK (id = 1), experimental_notice_enabled INTEGER NOT NULL DEFAULT 1, "
+                    "experimental_notice_title TEXT, experimental_notice_message TEXT, updated_at TEXT NOT NULL)"
+                )
+            )
+            logger.info("Migration: feature_categories, feature_definitions, feature_flags, feature_registry_meta ensured")
+
     # ── Inline schema migrations ──────────────────────────────────────
     # SQLAlchemy create_all only creates NEW tables, not new columns on
     # existing tables.  We run safe ALTER TABLE statements here.
@@ -144,6 +177,25 @@ async def init_db() -> None:
             "ALTER TABLE context_models ADD COLUMN tags TEXT",
             "ALTER TABLE context_models ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE providers ADD COLUMN permitted_workspaces TEXT DEFAULT '[\"*\"]'",
+            # Phase 0a: Rename ontology_blueprints -> ontologies
+            "ALTER TABLE ontology_blueprints RENAME TO ontologies",
+            # Phase 0a: Rename blueprint_id -> ontology_id in workspace_data_sources
+            "ALTER TABLE workspace_data_sources ADD COLUMN ontology_id TEXT REFERENCES ontologies(id) ON DELETE SET NULL",
+            "UPDATE workspace_data_sources SET ontology_id = blueprint_id WHERE blueprint_id IS NOT NULL",
+            # Phase 1: Add new definition columns to ontologies
+            "ALTER TABLE ontologies ADD COLUMN entity_type_definitions TEXT DEFAULT '{}'",
+            "ALTER TABLE ontologies ADD COLUMN relationship_type_definitions TEXT DEFAULT '{}'",
+            "ALTER TABLE ontologies ADD COLUMN is_system INTEGER DEFAULT 0",
+            "ALTER TABLE ontologies ADD COLUMN scope TEXT DEFAULT 'universal'",
+            # Phase 2: Add description and evolution_policy to ontologies
+            "ALTER TABLE ontologies ADD COLUMN description TEXT",
+            "ALTER TABLE ontologies ADD COLUMN evolution_policy TEXT DEFAULT 'reject'",
+            "ALTER TABLE feature_categories ADD COLUMN preview INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE feature_categories ADD COLUMN preview_label TEXT",
+            "ALTER TABLE feature_categories ADD COLUMN preview_footer TEXT",
+            "ALTER TABLE feature_definitions ADD COLUMN implemented INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE feature_registry_meta ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE feature_flags ADD COLUMN version INTEGER NOT NULL DEFAULT 0",
         ]
         for stmt in migrations:
             try:

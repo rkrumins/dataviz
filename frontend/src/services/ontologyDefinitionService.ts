@@ -1,0 +1,185 @@
+/**
+ * Ontology Definition Service — CRUD for ontology definitions.
+ * Ontologies are standalone, versioned, reusable semantic configurations.
+ */
+
+const ADMIN_API = '/api/v1/admin/ontologies'
+
+export interface OntologyCreateRequest {
+    name: string
+    description?: string
+    evolutionPolicy?: string
+    scope?: string
+    containmentEdgeTypes?: string[]
+    lineageEdgeTypes?: string[]
+    edgeTypeMetadata?: Record<string, unknown>
+    entityTypeHierarchy?: Record<string, unknown>
+    rootEntityTypes?: string[]
+    entityTypeDefinitions?: Record<string, unknown>
+    relationshipTypeDefinitions?: Record<string, unknown>
+}
+
+export interface OntologyUpdateRequest {
+    name?: string
+    description?: string
+    evolutionPolicy?: string
+    containmentEdgeTypes?: string[]
+    lineageEdgeTypes?: string[]
+    edgeTypeMetadata?: Record<string, unknown>
+    entityTypeHierarchy?: Record<string, unknown>
+    rootEntityTypes?: string[]
+    entityTypeDefinitions?: Record<string, unknown>
+    relationshipTypeDefinitions?: Record<string, unknown>
+}
+
+export interface OntologyDefinitionResponse {
+    id: string
+    name: string
+    description: string | null
+    version: number
+    evolutionPolicy: string
+    containmentEdgeTypes: string[]
+    lineageEdgeTypes: string[]
+    edgeTypeMetadata: Record<string, unknown>
+    entityTypeHierarchy: Record<string, unknown>
+    rootEntityTypes: string[]
+    entityTypeDefinitions: Record<string, unknown>
+    relationshipTypeDefinitions: Record<string, unknown>
+    isPublished: boolean
+    isSystem: boolean
+    scope: string
+    createdAt: string
+    updatedAt: string
+}
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+    const res = await fetch(url, {
+        ...init,
+        headers: { 'Content-Type': 'application/json', ...init?.headers },
+    })
+    if (!res.ok) {
+        const text = await res.text()
+        throw new Error(`Ontology API ${res.status}: ${text || res.statusText}`)
+    }
+    if (res.status === 204) return undefined as T
+    return res.json()
+}
+
+export const ontologyDefinitionService = {
+    list(allVersions = false): Promise<OntologyDefinitionResponse[]> {
+        const url = allVersions ? `${ADMIN_API}?all_versions=true` : ADMIN_API
+        return request<OntologyDefinitionResponse[]>(url)
+    },
+
+    get(id: string): Promise<OntologyDefinitionResponse> {
+        return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}`)
+    },
+
+    create(req: OntologyCreateRequest): Promise<OntologyDefinitionResponse> {
+        return request<OntologyDefinitionResponse>(ADMIN_API, {
+            method: 'POST',
+            body: JSON.stringify(req),
+        })
+    },
+
+    update(id: string, req: OntologyUpdateRequest): Promise<OntologyDefinitionResponse> {
+        return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}`, {
+            method: 'PUT',
+            body: JSON.stringify(req),
+        })
+    },
+
+    delete(id: string): Promise<void> {
+        return request<void>(`${ADMIN_API}/${id}`, { method: 'DELETE' })
+    },
+
+    publish(id: string): Promise<OntologyDefinitionResponse> {
+        return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}/publish`, {
+            method: 'POST',
+        })
+    },
+
+    clone(id: string): Promise<OntologyDefinitionResponse> {
+        return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}/clone`, {
+            method: 'POST',
+        })
+    },
+
+    validate(id: string): Promise<OntologyValidationResponse> {
+        return request<OntologyValidationResponse>(`${ADMIN_API}/${id}/validate`, {
+            method: 'POST',
+        })
+    },
+
+    coverage(id: string, stats: Record<string, unknown>): Promise<OntologyCoverageResponse> {
+        return request<OntologyCoverageResponse>(`${ADMIN_API}/${id}/coverage`, {
+            method: 'POST',
+            body: JSON.stringify(stats),
+        })
+    },
+
+    suggest(stats: Record<string, unknown>, baseOntologyId?: string): Promise<OntologyCreateRequest> {
+        const url = baseOntologyId
+            ? `${ADMIN_API}/suggest?base_ontology_id=${encodeURIComponent(baseOntologyId)}`
+            : `${ADMIN_API}/suggest`
+        return request<OntologyCreateRequest>(url, {
+            method: 'POST',
+            body: JSON.stringify(stats),
+        })
+    },
+
+    /**
+     * List all data sources currently assigned to this ontology (across all workspaces).
+     */
+    getAssignments(id: string): Promise<OntologyAssignment[]> {
+        return request<OntologyAssignment[]>(`${ADMIN_API}/${id}/assignments`)
+    },
+
+    /**
+     * Preview the impact of publishing this ontology draft.
+     * Returns added/removed types and whether the evolution_policy allows the publish.
+     */
+    impact(id: string): Promise<OntologyImpactResponse> {
+        return request<OntologyImpactResponse>(`${ADMIN_API}/${id}/impact`)
+    },
+}
+
+export interface OntologyValidationIssue {
+    severity: 'error' | 'warning'
+    code: string
+    message: string
+    affected?: string
+}
+
+export interface OntologyValidationResponse {
+    isValid: boolean
+    issues: OntologyValidationIssue[]
+}
+
+export interface OntologyCoverageResponse {
+    coveragePercent: number
+    coveredEntityTypes: string[]
+    uncoveredEntityTypes: string[]
+    extraEntityTypes: string[]
+    coveredRelationshipTypes: string[]
+    uncoveredRelationshipTypes: string[]
+}
+
+/** A single data source assignment returned by getAssignments(). */
+export interface OntologyAssignment {
+    workspaceId: string
+    workspaceName: string
+    dataSourceId: string
+    dataSourceLabel: string
+}
+
+/** Impact preview for a draft ontology publish. */
+export interface OntologyImpactResponse {
+    allowed: boolean
+    reason: string | null
+    evolutionPolicy: string
+    addedEntityTypes: string[]
+    removedEntityTypes: string[]
+    addedRelationshipTypes: string[]
+    removedRelationshipTypes: string[]
+}

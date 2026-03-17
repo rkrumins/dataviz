@@ -33,6 +33,13 @@ from backend.common.models.graph import (
     AggregatedEdgeResult,
     CreateNodeRequest,
     CreateNodeResult,
+    CreateEdgeRequest,
+    UpdateEdgeRequest,
+    EdgeMutationResult,
+    BatchCommand,
+    BatchCommandRequest,
+    BatchCommandResult,
+    BatchResponse,
 )
 
 __all__ = [

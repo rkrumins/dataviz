@@ -1,487 +1,295 @@
 /**
- * useLayerAssignment - Optimized hook for reactive layer assignments
- * 
- * Phase 5: Assignment Engine Optimizations
- * 
- * Features:
- * - Indexed rule matching for O(1) type lookups
- * - Caching layer for parent lookups
- * - Memoized assignment computation
- * - Incremental update support
- * - Web worker ready (computation can be offloaded)
+ * useLayerAssignment - Extracted from ReferenceModelCanvas.tsx
+ *
+ * Encapsulates:
+ * - layerRules: build layer assignment rules from sorted layers
+ * - nodesByLayer: core layer assignment algorithm with deep inheritance
+ * - displayFlat / displayMap: flattened node list and lookup map
+ * - urnToIdMap: O(1) URN-to-ID lookup
  */
 
-import { useMemo, useCallback, useRef } from 'react'
-import { useReferenceModelStore, useLayers, useLayerSequence } from '@/store/referenceModelStore'
-import type {
-    ViewLayerConfig,
-    LayerAssignmentRuleConfig,
-    EntityAssignmentConfig
-} from '@/types/schema'
-import type { GraphNode, GraphEdge } from '@/providers/GraphDataProvider'
+import { useMemo } from 'react'
+import type { ViewLayerConfig } from '@/types/schema'
+import {
+  type GraphNode,
+  resolveLayerAssignment,
+  type LayerAssignmentRule,
+  type EntityType,
+} from '@/providers/GraphDataProvider'
+import type { HierarchyNode } from '../components/canvas/context-view/types'
 
 // ============================================
 // Types
 // ============================================
 
-export interface AssignmentResult {
-    layerId: string
-    layerIndex: number
-    matchedBy: 'instance' | 'rule' | 'type' | 'inherited' | 'default'
-    priority: number
-    inheritedFrom?: string
+export interface UseLayerAssignmentOptions {
+  nodes: any[]
+  sortedLayers: ViewLayerConfig[]
+  nodeEdgeFingerprint: string
+  instanceAssignments: Map<string, { layerId: string }>
+  effectiveAssignments: Map<string, { layerId: string }>
+  nodeMap: Map<string, any>
+  childMap: Map<string, string[]>
+  parentMap: Map<string, string>
 }
 
-export interface AssignmentContext {
-    node: GraphNode
-    parentId?: string
-    parentAssignment?: AssignmentResult
-}
-
-export interface RuleIndex {
-    /** Maps entity type -> [layerId, rule] pairs for fast lookup */
-    byType: Map<string, Array<{ layerId: string; rule: LayerAssignmentRuleConfig }>>
-    /** Maps tag -> [layerId, rule] pairs */
-    byTag: Map<string, Array<{ layerId: string; rule: LayerAssignmentRuleConfig }>>
-    /** URN pattern rules (need regex matching) */
-    patterns: Array<{ layerId: string; rule: LayerAssignmentRuleConfig; regex: RegExp }>
-    /** Instance assignments by entity ID */
-    instances: Map<string, { layerId: string; config: EntityAssignmentConfig }>
-}
-
-export interface ParentCache {
-    /** Maps entity ID -> parent ID */
-    parentMap: Map<string, string>
-    /** Maps entity ID -> ancestor chain (for deep inheritance) */
-    ancestorChain: Map<string, string[]>
-}
-
-export interface AssignmentStats {
-    totalEntities: number
-    assignedCount: number
-    byLayer: Map<string, number>
-    byMethod: {
-        instance: number
-        rule: number
-        type: number
-        inherited: number
-        default: number
-    }
-    computeTimeMs: number
+export interface UseLayerAssignmentResult {
+  layerRules: LayerAssignmentRule[]
+  nodesByLayer: Map<string, HierarchyNode[]>
+  displayFlat: HierarchyNode[]
+  displayMap: Map<string, HierarchyNode>
+  urnToIdMap: Map<string, string>
 }
 
 // ============================================
-// Index Builder
+// Hook
 // ============================================
 
-function buildRuleIndex(layers: ViewLayerConfig[]): RuleIndex {
-    const byType = new Map<string, Array<{ layerId: string; rule: LayerAssignmentRuleConfig }>>()
-    const byTag = new Map<string, Array<{ layerId: string; rule: LayerAssignmentRuleConfig }>>()
-    const patterns: RuleIndex['patterns'] = []
-    const instances = new Map<string, { layerId: string; config: EntityAssignmentConfig }>()
+export function useLayerAssignment({
+  nodes,
+  sortedLayers,
+  nodeEdgeFingerprint,
+  instanceAssignments,
+  effectiveAssignments,
+  nodeMap,
+  childMap,
+  parentMap,
+}: UseLayerAssignmentOptions): UseLayerAssignmentResult {
 
-    for (const layer of layers) {
-        // Index instance assignments (highest priority)
-        if (layer.entityAssignments) {
-            for (const config of layer.entityAssignments) {
-                instances.set(config.entityId, { layerId: layer.id, config })
-            }
-        }
+  // Build layer assignment rules
+  const layerRules = useMemo<LayerAssignmentRule[]>(() => {
+    const generatedRules: LayerAssignmentRule[] = []
 
-        // Index rules
-        if (layer.rules) {
-            for (const rule of layer.rules) {
-                // Index by entity types
-                if (rule.entityTypes) {
-                    for (const type of rule.entityTypes) {
-                        if (!byType.has(type)) byType.set(type, [])
-                        byType.get(type)!.push({ layerId: layer.id, rule })
-                    }
-                }
-
-                // Index by tags
-                if (rule.tags) {
-                    for (const tag of rule.tags) {
-                        if (!byTag.has(tag)) byTag.set(tag, [])
-                        byTag.get(tag)!.push({ layerId: layer.id, rule })
-                    }
-                }
-
-                // Compile URN patterns
-                if (rule.urnPattern) {
-                    try {
-                        // Convert glob-like pattern to regex
-                        const regexPattern = rule.urnPattern
-                            .replace(/\./g, '\\.')
-                            .replace(/\*/g, '.*')
-                            .replace(/\?/g, '.')
-                        patterns.push({
-                            layerId: layer.id,
-                            rule,
-                            regex: new RegExp(`^${regexPattern}$`, 'i')
-                        })
-                    } catch {
-                        console.warn(`Invalid URN pattern: ${rule.urnPattern}`)
-                    }
-                }
-            }
-        }
-
-        // Also index basic entityTypes on the layer (lowest priority)
-        if (layer.entityTypes) {
-            for (const type of layer.entityTypes) {
-                if (!byType.has(type)) byType.set(type, [])
-                // Create a synthetic rule for type-based matching
-                byType.get(type)!.push({
-                    layerId: layer.id,
-                    rule: {
-                        id: `_type_${layer.id}_${type}`,
-                        priority: 0, // Lowest priority
-                        entityTypes: [type]
-                    }
-                })
-            }
-        }
-    }
-
-    return { byType, byTag, patterns, instances }
-}
-
-// ============================================
-// Parent Cache Builder
-// ============================================
-
-function buildParentCache(edges: GraphEdge[], containmentTypes: Set<string>): ParentCache {
-    const parentMap = new Map<string, string>()
-    const ancestorChain = new Map<string, string[]>()
-
-    // First pass: build parent map
-    for (const edge of edges) {
-        if (containmentTypes.has(edge.edgeType)) {
-            parentMap.set(edge.targetUrn, edge.sourceUrn)
-        }
-    }
-
-    // Second pass: build ancestor chains (lazy, on-demand)
-    const getAncestors = (entityId: string): string[] => {
-        if (ancestorChain.has(entityId)) {
-            return ancestorChain.get(entityId)!
-        }
-
-        const ancestors: string[] = []
-        let current = entityId
-        const visited = new Set<string>()
-
-        while (parentMap.has(current) && !visited.has(current)) {
-            visited.add(current)
-            const parent = parentMap.get(current)!
-            ancestors.push(parent)
-            current = parent
-        }
-
-        ancestorChain.set(entityId, ancestors)
-        return ancestors
-    }
-
-    // Pre-compute for all entities
-    for (const entityId of parentMap.keys()) {
-        getAncestors(entityId)
-    }
-
-    return { parentMap, ancestorChain }
-}
-
-// ============================================
-// Assignment Engine
-// ============================================
-
-function resolveAssignment(
-    context: AssignmentContext,
-    index: RuleIndex,
-    layers: ViewLayerConfig[],
-    layerSequenceMap: Map<string, number>
-): AssignmentResult | null {
-    const { node, parentAssignment } = context
-    const entityId = node.urn
-    const entityType = node.entityType
-    const entityUrn = node.urn
-    const entityTags = node.tags ?? []
-
-    // 1. Check instance assignments (highest priority)
-    const instanceMatch = index.instances.get(entityId)
-    if (instanceMatch) {
-        return {
-            layerId: instanceMatch.layerId,
-            layerIndex: layerSequenceMap.get(instanceMatch.layerId) ?? 0,
-            matchedBy: 'instance',
-            priority: 1000 // Highest
-        }
-    }
-
-    // 2. Check if parent has assignment with inheritance
-    if (parentAssignment) {
-        // Check if the rule that matched parent has inheritance enabled
-        if (parentAssignment.matchedBy !== 'default') {
-            // Inherit from parent
-            return {
-                layerId: parentAssignment.layerId,
-                layerIndex: parentAssignment.layerIndex,
-                matchedBy: 'inherited',
-                priority: parentAssignment.priority - 1,
-                inheritedFrom: context.parentId
-            }
-        }
-    }
-
-    // 3. Match by rules (sorted by priority)
-    const candidates: Array<{ layerId: string; priority: number; matchedBy: 'rule' | 'type' }> = []
-
-    // 3a. Type-based rules
-    if (entityType && index.byType.has(entityType)) {
-        for (const { layerId, rule } of index.byType.get(entityType)!) {
-            candidates.push({
-                layerId,
-                priority: rule.priority,
-                matchedBy: rule.id.startsWith('_type_') ? 'type' : 'rule'
-            })
-        }
-    }
-
-    // 3b. Tag-based rules
-    for (const tag of entityTags) {
-        if (index.byTag.has(tag)) {
-            for (const { layerId, rule } of index.byTag.get(tag)!) {
-                candidates.push({
-                    layerId,
-                    priority: rule.priority,
-                    matchedBy: 'rule'
-                })
-            }
-        }
-    }
-
-    // 3c. URN pattern rules
-    if (entityUrn) {
-        for (const { layerId, rule, regex } of index.patterns) {
-            if (regex.test(entityUrn)) {
-                candidates.push({
-                    layerId,
-                    priority: rule.priority,
-                    matchedBy: 'rule'
-                })
-            }
-        }
-    }
-
-    // Sort by priority (descending) and pick highest
-    if (candidates.length > 0) {
-        candidates.sort((a, b) => b.priority - a.priority)
-        const winner = candidates[0]
-        return {
-            layerId: winner.layerId,
-            layerIndex: layerSequenceMap.get(winner.layerId) ?? 0,
-            matchedBy: winner.matchedBy,
-            priority: winner.priority
-        }
-    }
-
-    // 4. Default: first layer
-    if (layers.length > 0) {
-        return {
-            layerId: layers[0].id,
-            layerIndex: 0,
-            matchedBy: 'default',
-            priority: -1
-        }
-    }
-
-    return null
-}
-
-// ============================================
-// Main Hook
-// ============================================
-
-export function useLayerAssignment(
-    nodes: GraphNode[],
-    edges: GraphEdge[],
-    options: {
-        containmentEdgeTypes?: string[]
-        enableCaching?: boolean
-    } = {}
-) {
-    const {
-        containmentEdgeTypes = ['CONTAINS', 'HAS_CHILD', 'BELONGS_TO'],
-        enableCaching = true
-    } = options
-
-    const layers = useLayers()
-    const layerSequence = useLayerSequence()
-    const instanceAssignments = useReferenceModelStore(s => s.instanceAssignments)
-
-    // Refs for caching
-    const indexCacheRef = useRef<{ layers: ViewLayerConfig[]; index: RuleIndex } | null>(null)
-    const parentCacheRef = useRef<{ edges: GraphEdge[]; cache: ParentCache } | null>(null)
-
-    // Build layer sequence map for fast index lookup
-    const layerSequenceMap = useMemo(() => {
-        const map = new Map<string, number>()
-        layerSequence.forEach((layerId, index) => {
-            map.set(layerId, index)
+    sortedLayers.forEach(layer => {
+      // 1. Explicit rules from config
+      if (layer.rules) {
+        layer.rules.forEach(rule => {
+          generatedRules.push({
+            id: rule.id,
+            layerId: layer.id,
+            entityTypes: (rule.entityTypes ?? []) as EntityType[],
+            tags: rule.tags,
+            urnPattern: rule.urnPattern,
+            propertyMatch: rule.propertyMatch,
+            priority: rule.priority
+          })
         })
-        return map
-    }, [layerSequence])
+      }
 
-    // Memoized rule index (rebuilds when layers change)
-    const ruleIndex = useMemo(() => {
-        if (enableCaching && indexCacheRef.current?.layers === layers) {
-            return indexCacheRef.current.index
-        }
-
-        // Merge instance assignments into layers for indexing
-        const layersWithInstances = layers.map(layer => ({
-            ...layer,
-            entityAssignments: [
-                ...(layer.entityAssignments || []),
-                ...Array.from(instanceAssignments.entries())
-                    .filter(([_, config]) => config.layerId === layer.id)
-                    .map(([_, config]) => config)
-            ]
-        }))
-
-        const index = buildRuleIndex(layersWithInstances)
-
-        if (enableCaching) {
-            indexCacheRef.current = { layers, index }
-        }
-
-        return index
-    }, [layers, instanceAssignments, enableCaching])
-
-    // Memoized parent cache (rebuilds when edges change)
-    const parentCache = useMemo(() => {
-        if (enableCaching && parentCacheRef.current?.edges === edges) {
-            return parentCacheRef.current.cache
-        }
-
-        const containmentSet = new Set(containmentEdgeTypes)
-        const cache = buildParentCache(edges, containmentSet)
-
-        if (enableCaching) {
-            parentCacheRef.current = { edges, cache }
-        }
-
-        return cache
-    }, [edges, containmentEdgeTypes, enableCaching])
-
-    // Compute all assignments
-    const assignments = useMemo(() => {
-        const startTime = performance.now()
-        const results = new Map<string, AssignmentResult>()
-
-        // Sort nodes by depth (parents first) for proper inheritance
-        const nodesByDepth = [...nodes].sort((a, b) => {
-            const depthA = parentCache.ancestorChain.get(a.urn)?.length ?? 0
-            const depthB = parentCache.ancestorChain.get(b.urn)?.length ?? 0
-            return depthA - depthB
+      // 2. Auto-generate entity-type rules from layer.entityTypes.
+      // When a layer declares entityTypes: ['glossary', 'term'], nodes of those
+      // types are automatically routed here — this is the primary ontology-driven
+      // assignment mechanism. Explicit entity assignments and rules above take
+      // precedence (higher priority values win in resolveLayerAssignment).
+      if (layer.entityTypes && layer.entityTypes.length > 0) {
+        layer.entityTypes.forEach((entityType, idx) => {
+          generatedRules.push({
+            id: `${layer.id}-type-${entityType}`,
+            layerId: layer.id,
+            entityTypes: [entityType],
+            priority: layer.order * 10 + idx,
+          })
         })
+      }
+    })
 
-        for (const node of nodesByDepth) {
-            const parentId = parentCache.parentMap.get(node.urn)
-            const parentAssignment = parentId ? results.get(parentId) : undefined
+    return generatedRules
+  }, [sortedLayers])
 
-            const context: AssignmentContext = {
-                node,
-                parentId,
-                parentAssignment
-            }
+  // Core Logic: Group nodes by layer with Deep Inheritance support
+  const nodesByLayer = useMemo(() => {
+    const grouped = new Map<string, HierarchyNode[]>()
 
-            const result = resolveAssignment(context, ruleIndex, layers, layerSequenceMap)
-            if (result) {
-                results.set(node.urn, result)
-            }
+    // Initialize layers
+    sortedLayers.forEach(l => grouped.set(l.id, []))
+
+    // 1. Build explicit assignments from view layers (lowest priority, used as fallback)
+    // These come from saved entityAssignments in the view configuration
+    const explicitAssignments = new Map<string, string>() // nodeId -> layerId
+    sortedLayers.forEach(l => {
+      l.entityAssignments?.forEach(a => {
+        explicitAssignments.set(a.entityId, l.id)
+      })
+    })
+
+    // 2. Build rule-based assignments (fallback if no explicit assignment)
+    const ruleAssignments = new Map<string, string>() // nodeId -> layerId
+    nodes.forEach(node => {
+      // Skip if already has explicit assignment from view
+      if (explicitAssignments.has(node.id)) return
+
+      // Rule match
+      const graphNode: GraphNode = {
+        urn: node.data.urn || node.id,
+        entityType: (node.data.type as string) || '',
+        displayName: node.data.label || node.data.businessLabel || node.id,
+        properties: node.data as Record<string, unknown>,
+        tags: node.data.classifications || []
+      }
+
+      const ruleLayerId = resolveLayerAssignment(graphNode, layerRules)
+      if (ruleLayerId) {
+        ruleAssignments.set(node.id, ruleLayerId)
+      }
+    })
+
+    // 2. Determine "Effective Layer" for every node, considering inheritance
+    // We traverse top-down. If a node has explicit, it wins. If not, it inherits.
+    const effectiveLayer = new Map<string, string>() // nodeId -> layerId
+
+    // We can't just iterate nodes orderless. We need top-down.
+    // Use a Set to track processed.
+    const processed = new Set<string>()
+
+    const calculateEffectiveLayer = (nodeId: string, inheritedLayerId?: string) => {
+      // Allow revisiting if we are providing a layer assignment where there was none?
+      // For simple containment tree, we visit once.
+      if (processed.has(nodeId)) return
+      processed.add(nodeId)
+
+      // Priority order (highest to lowest):
+      // 1. effectiveAssignments (from backend computation - source of truth)
+      // 2. instanceAssignments (from store - user drag-and-drop)
+      // 3. explicitAssignments (from view layers - saved assignments)
+      // 4. ruleAssignments (from rules - pattern/tag/type matching)
+      // 5. inheritance (from parent)
+
+      let myLayerId: string | undefined
+
+      // 1. Backend-computed effective assignment (highest priority)
+      const backendAssignment = effectiveAssignments.get(nodeId)
+      if (backendAssignment?.layerId) {
+        myLayerId = backendAssignment.layerId
+      }
+
+      // 2. Instance assignment from store (user manual assignment)
+      if (!myLayerId) {
+        const instanceAssignment = instanceAssignments.get(nodeId)
+        if (instanceAssignment) {
+          myLayerId = instanceAssignment.layerId
         }
+      }
 
-        const computeTimeMs = performance.now() - startTime
-        console.debug(`[useLayerAssignment] Computed ${results.size} assignments in ${computeTimeMs.toFixed(2)}ms`)
+      // 3. Explicit assignment from view layers (saved in view config)
+      if (!myLayerId) {
+        myLayerId = explicitAssignments.get(nodeId)
+      }
 
-        return results
-    }, [nodes, layers, ruleIndex, parentCache, layerSequenceMap])
+      // 4. Rule-based assignment
+      if (!myLayerId) {
+        myLayerId = ruleAssignments.get(nodeId)
+      }
 
-    // Get assignment for a single entity
-    const getAssignment = useCallback((entityId: string): AssignmentResult | undefined => {
-        return assignments.get(entityId)
-    }, [assignments])
+      // 5. Inheritance from parent
+      if (!myLayerId && inheritedLayerId) {
+        myLayerId = inheritedLayerId
+      }
 
-    // Get all entities for a layer
-    const getEntitiesByLayer = useCallback((layerId: string): string[] => {
-        const entities: string[] = []
-        assignments.forEach((result, entityId) => {
-            if (result.layerId === layerId) {
-                entities.push(entityId)
-            }
-        })
-        return entities
-    }, [assignments])
+      if (myLayerId === '__UNASSIGNED__') {
+        myLayerId = undefined
+      }
 
-    // Compute statistics
-    const stats = useMemo((): AssignmentStats => {
-        const byLayer = new Map<string, number>()
-        const byMethod = {
-            instance: 0,
-            rule: 0,
-            type: 0,
-            inherited: 0,
-            default: 0
-        }
+      if (myLayerId) {
+        effectiveLayer.set(nodeId, myLayerId)
+      }
 
-        assignments.forEach((result) => {
-            byLayer.set(result.layerId, (byLayer.get(result.layerId) ?? 0) + 1)
-            byMethod[result.matchedBy]++
-        })
-
-        return {
-            totalEntities: nodes.length,
-            assignedCount: assignments.size,
-            byLayer,
-            byMethod,
-            computeTimeMs: 0 // Would need to track separately
-        }
-    }, [assignments, nodes.length])
-
-    return {
-        /** All assignments as a Map<entityId, AssignmentResult> */
-        assignments,
-        /** Get assignment for a single entity */
-        getAssignment,
-        /** Get all entity IDs assigned to a layer */
-        getEntitiesByLayer,
-        /** Assignment statistics */
-        stats,
-        /** The built rule index (for debugging) */
-        ruleIndex,
-        /** Parent cache (for debugging) */
-        parentCache
+      const children = childMap.get(nodeId) || []
+      children.forEach(childId => calculateEffectiveLayer(childId, myLayerId))
     }
-}
 
-/**
- * Simplified hook for just getting layer assignments from store
- */
-export function useEntityLayerAssignment(entityId: string) {
-    const assignment = useReferenceModelStore(s => s.getAssignment(entityId))
-    const layers = useLayers()
+    // Find true roots (nodes with no parents) and start there
+    const roots = nodes.filter((n: any) => !parentMap.has(n.id))
+    roots.forEach((r: any) => calculateEffectiveLayer(r.id))
 
-    const layer = useMemo(() =>
-        layers.find(l => l.id === assignment?.layerId),
-        [layers, assignment?.layerId]
-    )
+    // Also handle orphans (cycles or disconnected) if any missed?
+    // The recursive step above should cover all reachable from roots.
+    // If there are unparented nodes that are not in `roots` (impossible by definition), they are covered.
 
-    return {
-        assignment,
-        layer,
-        layerName: layer?.name,
-        layerColor: layer?.color,
-        isAssigned: !!assignment
+    // 3. Construct Hierarchy Trees per Layer
+    // A node is a "Visual Root" in Layer L if:
+    // - It is effectively in Layer L
+    // - AND (Its parent is NOT in Layer L OR it has no parent)
+
+    // Helper to build hierarchy node
+    const buildHierarchyNode = (nodeId: string, depth: number): HierarchyNode | null => {
+      const node = nodeMap.get(nodeId)
+      if (!node) return null
+
+      const childrenIds = childMap.get(nodeId) || []
+      // Filter children: Only include those that are effectively in the SAME layer
+      const validChildren = childrenIds
+        .filter(cid => effectiveLayer.get(cid) === effectiveLayer.get(nodeId))
+        .map(cid => buildHierarchyNode(cid, depth + 1))
+        .filter((n): n is HierarchyNode => n !== null)
+        .sort((a, b) => a.name.localeCompare(b.name))
+
+      return {
+        id: node.id,
+        typeId: node.data.type,
+        name: node.data.label ?? node.data.businessLabel ?? node.id,
+        data: node.data as Record<string, unknown>,
+        children: validChildren,
+        depth,
+        urn: node.data.urn || node.id,
+        entityTypeOption: (node.data.type as string) || '',
+        tags: node.data.classifications || []
+      }
     }
+
+    nodes.forEach((node: any) => {
+      const layerId = effectiveLayer.get(node.id)
+      if (!layerId) return // Unassigned
+
+      // Check if this is a Visual Root for this layer
+      const parentId = parentMap.get(node.id)
+      const parentLayerId = parentId ? effectiveLayer.get(parentId) : undefined
+
+      if (layerId !== parentLayerId) {
+        // It's a root in this layer context!
+        const hNode = buildHierarchyNode(node.id, 0)
+        if (hNode) {
+          const list = grouped.get(layerId)
+          if (list) list.push(hNode)
+        }
+      }
+    })
+
+    // Sort all lists
+    grouped.forEach(list => list.sort((a, b) => a.name.localeCompare(b.name)))
+
+    return grouped
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments])
+
+  // Flatten logical/physical nodes for search and lookup
+  const { displayFlat, displayMap } = useMemo(() => {
+    const flat: HierarchyNode[] = []
+    const map = new Map<string, HierarchyNode>()
+
+    nodesByLayer.forEach((layerNodes) => {
+      const traverse = (node: HierarchyNode) => {
+        // Dedup: a node should only appear once across all layers.
+        // If it was already added (e.g. during assignment transitions),
+        // skip to prevent duplicate React keys.
+        if (map.has(node.id)) return
+        flat.push(node)
+        map.set(node.id, node)
+        node.children.forEach(traverse)
+      }
+      layerNodes.forEach(traverse)
+    })
+
+    return { displayFlat: flat, displayMap: map }
+  }, [nodesByLayer])
+
+  // O(1) URN->ID lookup (replaces O(N) displayFlat.find() per edge)
+  const urnToIdMap = useMemo(() => {
+    const map = new Map<string, string>()
+    displayFlat.forEach(node => {
+      if (node.urn) map.set(node.urn, node.id)
+    })
+    return map
+  }, [displayFlat])
+
+  return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap }
 }

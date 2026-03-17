@@ -30,8 +30,11 @@ export interface AggregatedEdgeState {
 }
 
 export interface UseAggregatedLineageOptions {
-    /** Initial granularity level */
-    granularity?: 'column' | 'table' | 'schema' | 'system' | 'domain'
+    /**
+     * Entity type ID to aggregate lineage to (e.g. "dataset", "term").
+     * null = no aggregation, show all fine-grained edges.
+     */
+    granularity?: string | null
     /** Whether to automatically fetch aggregated edges */
     autoFetch?: boolean
     /** Cache TTL in milliseconds (default: 5 minutes) */
@@ -48,8 +51,10 @@ export interface UseAggregatedLineageResult {
     /** Last error encountered */
     error: string | null
 
-    /** Current granularity level */
-    granularity: 'column' | 'table' | 'schema' | 'system' | 'domain'
+    /**
+     * Current granularity: entity type ID string, or null (no aggregation).
+     */
+    granularity: string | null
 
     /** Fetch aggregated edges for given source URNs */
     fetchAggregated: (sourceUrns: string[], targetUrns?: string[]) => Promise<void>
@@ -69,8 +74,8 @@ export interface UseAggregatedLineageResult {
     /** Get all visible edges (both aggregated and detailed) */
     getVisibleEdges: () => Array<GraphEdge | AggregatedEdgeInfo>
 
-    /** Change granularity level (triggers refetch) */
-    setGranularity: (granularity: 'column' | 'table' | 'schema' | 'system' | 'domain') => void
+    /** Change granularity (entity type ID string, or null for no aggregation) */
+    setGranularity: (granularity: string | null) => void
 
     /** Clear all cached data */
     clearCache: () => void
@@ -109,7 +114,7 @@ function getCacheKey(sourceUrns: string[], targetUrns: string[] | undefined, gra
 
 export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}): UseAggregatedLineageResult {
     const {
-        granularity: initialGranularity = 'table',
+        granularity: initialGranularity = null,
         cacheTtl = 5 * 60 * 1000, // 5 minutes
     } = options
 
@@ -305,7 +310,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
     }, [aggregatedEdges])
 
     // Change granularity and refetch
-    const handleSetGranularity = useCallback((newGranularity: 'column' | 'table' | 'schema' | 'system' | 'domain') => {
+    const handleSetGranularity = useCallback((newGranularity: string | null) => {
         if (newGranularity === granularity) return
 
         setGranularity(newGranularity)

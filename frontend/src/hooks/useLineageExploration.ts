@@ -19,13 +19,12 @@ import type {
 } from '@/types/schema'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import {
-  GranularityLevel,
-  ENTITY_GRANULARITY,
   buildContainmentMap,
   aggregateLineageEdges,
   computeAllNodeCounts,
+  isFinerThan,
 } from '@/lib/projection-engine'
-import { useOntologyMetadata, normalizeEdgeType, isContainmentEdgeType } from '@/services/ontologyService'
+import { useSchemaEntityTypes, useContainmentEdgeTypes, normalizeEdgeType, useIsContainmentEdge } from '@/store/schema'
 
 // ============================================
 // EXPLORATION STORE
@@ -507,6 +506,17 @@ export function computeTrace(
 /**
  * Project nodes/edges to target granularity
  */
+// Maps legacy LineageGranularity strings to ontology entity type IDs.
+// Used only within projectToGranularity for backward compatibility.
+// 'column' → null means show all nodes (finest detail, no granularity filter).
+const _LEGACY_GRAN_TO_TYPE_ID: Record<string, string | null> = {
+  column: null,      // show everything
+  table: 'dataset',  // standard ontology: table-level entity
+  schema: 'schema',
+  system: 'system',
+  domain: 'domain',
+}
+
 export function projectToGranularity(
   nodes: Node[],
   edges: Edge[],
@@ -514,28 +524,22 @@ export function projectToGranularity(
   inheritFromChildren: boolean,
   pagination: Record<string, number>,
   focusId: string | null = null,
-  tracePath: Set<string> = new Set()
+  tracePath: Set<string> = new Set(),
+  entityTypes: Array<{ id: string; hierarchy: { level: number } }> = [],
 ): { nodes: Node[]; edges: Edge[]; aggregatedEdges: Map<string, { sourceCount: number; confidence: number }> } {
-  const granularityMap: Record<LineageGranularity, GranularityLevel> = {
-    column: GranularityLevel.Column,
-    table: GranularityLevel.Table,
-    schema: GranularityLevel.Schema,
-    system: GranularityLevel.System,
-    domain: GranularityLevel.Domain,
-  }
+  const targetTypeId = _LEGACY_GRAN_TO_TYPE_ID[targetGranularity] ?? null
 
-  const targetLevel = granularityMap[targetGranularity] || GranularityLevel.Column
-
-  // Use View-Specific containment - passed in options? 
-  // For now using a broad set to ensure we catch all potential parents
   const containmentMap = buildContainmentMap(nodes, edges, ['contains', 'has_schema', 'has_dataset', 'has_column'])
 
-  // Filter nodes at or above target granularity
-  const filteredNodes = nodes.filter((node) => {
-    const nodeType = node.data?.type as string
-    const nodeGranularity = ENTITY_GRANULARITY[nodeType] ?? GranularityLevel.Column
-    return nodeGranularity >= targetLevel
-  })
+  // Filter nodes at or coarser than the target granularity type.
+  // When targetTypeId is null (finest detail), show all nodes.
+  const filteredNodes =
+    targetTypeId === null
+      ? [...nodes]
+      : nodes.filter((node) => {
+          const nodeType = node.data?.type as string
+          return !isFinerThan(nodeType, targetTypeId, entityTypes)
+        })
 
   const visibleNodes: Node[] = []
   const visibleNodeIds = new Set<string>()
@@ -623,7 +627,7 @@ export function projectToGranularity(
   const aggregatedEdges = new Map<string, { sourceCount: number; confidence: number; sourceEdges: string[] }>()
 
   if (inheritFromChildren) {
-    const aggregated = aggregateLineageEdges(edges, nodes, containmentMap, targetLevel)
+    const aggregated = aggregateLineageEdges(edges, nodes, containmentMap, targetTypeId, entityTypes)
     aggregated.forEach((agg) => {
       if (visibleNodeIds.has(agg.sourceId) && visibleNodeIds.has(agg.targetId)) {
         aggregatedEdges.set(`${agg.sourceId}->${agg.targetId}`, {
@@ -747,10 +751,12 @@ export interface UseLineageExplorationResult {
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useEffect } from 'react'
-import { useEntityLoader } from '@/hooks/useEntityLoader'
+import { useGraphHydration } from '@/hooks/useGraphHydration'
 
 export function useLineageExploration(): UseLineageExplorationResult {
-  const { containmentEdgeTypes, isContainmentEdge } = useOntologyMetadata()
+  const containmentEdgeTypes = useContainmentEdgeTypes()
+  const isContainmentEdge = useIsContainmentEdge()
+  const schemaEntityTypes = useSchemaEntityTypes()
   const provider = useGraphProvider()
   const {
     config,
@@ -860,7 +866,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
   }, [pagination, rawNodes, rawEdges, provider, containmentEdgeTypes, config.containmentEdgeTypes, setNodes, setEdges])
 
   // Entity Loader for shared logic
-  const { loadChildren } = useEntityLoader()
+  const { loadChildren } = useGraphHydration()
 
   // Side Effect: Fetch Trace when focused
   useEffect(() => {
@@ -1023,7 +1029,8 @@ export function useLineageExploration(): UseLineageExplorationResult {
       config.aggregation.inheritFromChildren,
       pagination,
       focusEntityId,
-      highlightedPath
+      highlightedPath,
+      schemaEntityTypes,
     )
 
     return {

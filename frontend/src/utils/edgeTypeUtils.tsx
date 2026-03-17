@@ -10,10 +10,9 @@
 
 import type { LineageEdge } from '@/store/canvas'
 import type { RelationshipTypeSchema } from '@/types/schema'
-import { normalizeEdgeType as normalizeEdgeTypeFromService } from '@/services/ontologyService'
+import { normalizeEdgeType } from '@/store/schema'
 
-// Re-export normalizeEdgeType for convenience
-export { normalizeEdgeTypeFromService as normalizeEdgeType }
+export { normalizeEdgeType }
 import {
     GitBranch,
     ArrowRight,
@@ -44,7 +43,7 @@ export interface EdgeTypeDefinition {
 export function discoverEdgeTypes(edges: LineageEdge[]): Set<string> {
     const types = new Set<string>()
     edges.forEach(edge => {
-        const normalized = normalizeEdgeTypeFromService(edge)
+        const normalized = normalizeEdgeType(edge)
         if (normalized) {
             types.add(normalized)
         }
@@ -246,6 +245,6 @@ export function getAllEdgeTypeDefinitions(
  * Converts to lowercase for matching against filter/legend types
  */
 export function normalizeEdgeTypeForMatching(edgeType: string): string {
-    return normalizeEdgeTypeFromService({ data: { edgeType } }).toLowerCase()
+    return normalizeEdgeType({ data: { edgeType } }).toLowerCase()
 }
 

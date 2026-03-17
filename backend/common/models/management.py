@@ -2,7 +2,7 @@
 Pydantic models for the management database layer.
 Covers: graph connections, ontology configs, assignment rule sets, saved views.
 """
-from typing import List, Optional, Dict, Any, Literal
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from enum import Enum
 
@@ -87,37 +87,6 @@ class ConnectionTestResult(BaseModel):
 class GraphListResponse(BaseModel):
     graphs: List[str]
     connection_id: str = Field(alias="connectionId")
-
-    class Config:
-        populate_by_name = True
-
-
-# ============================================
-# Ontology Config Models
-# ============================================
-
-class OntologyConfigUpdate(BaseModel):
-    containment_edge_types: Optional[List[str]] = Field(None, alias="containmentEdgeTypes")
-    lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
-    edge_type_metadata: Optional[Dict[str, Any]] = Field(None, alias="edgeTypeMetadata")
-    entity_type_hierarchy: Optional[Dict[str, Any]] = Field(None, alias="entityTypeHierarchy")
-    root_entity_types: Optional[List[str]] = Field(None, alias="rootEntityTypes")
-    override_mode: Literal["merge", "replace"] = Field("merge", alias="overrideMode")
-
-    class Config:
-        populate_by_name = True
-
-
-class OntologyConfigResponse(BaseModel):
-    connection_id: str = Field(alias="connectionId")
-    containment_edge_types: List[str] = Field(alias="containmentEdgeTypes")
-    lineage_edge_types: List[str] = Field(alias="lineageEdgeTypes")
-    edge_type_metadata: Dict[str, Any] = Field(alias="edgeTypeMetadata")
-    entity_type_hierarchy: Dict[str, Any] = Field(alias="entityTypeHierarchy")
-    root_entity_types: List[str] = Field(alias="rootEntityTypes")
-    override_mode: str = Field(alias="overrideMode")
-    updated_at: Optional[str] = Field(None, alias="updatedAt")
-    source: str = "merged"  # 'merged' | 'db_only' | 'introspected_only'
 
     class Config:
         populate_by_name = True
@@ -221,48 +190,92 @@ class ProviderResponse(BaseModel):
 
 
 # ============================================
-# Ontology Blueprint Models (workspace-centric)
+# Ontology Definition Models (standalone, versioned)
 # ============================================
 
-class BlueprintCreateRequest(BaseModel):
+class OntologyCreateRequest(BaseModel):
     name: str
+    description: Optional[str] = None
+    version: int = 1
+    scope: str = "universal"  # "universal" | "workspace"
+    # Schema evolution policy: what happens when this ontology is updated and published.
+    # reject   — block publish if it breaks existing data (default, safest).
+    # deprecate — mark removed/renamed types deprecated; still served.
+    # migrate  — apply a migration manifest to remap types automatically.
+    evolution_policy: str = Field("reject", alias="evolutionPolicy")
     containment_edge_types: List[str] = Field(default_factory=list, alias="containmentEdgeTypes")
     lineage_edge_types: List[str] = Field(default_factory=list, alias="lineageEdgeTypes")
     edge_type_metadata: Dict[str, Any] = Field(default_factory=dict, alias="edgeTypeMetadata")
     entity_type_hierarchy: Dict[str, Any] = Field(default_factory=dict, alias="entityTypeHierarchy")
     root_entity_types: List[str] = Field(default_factory=list, alias="rootEntityTypes")
-    visual_overrides: Dict[str, Any] = Field(default_factory=dict, alias="visualOverrides")
+    entity_type_definitions: Dict[str, Any] = Field(default_factory=dict, alias="entityTypeDefinitions")
+    relationship_type_definitions: Dict[str, Any] = Field(default_factory=dict, alias="relationshipTypeDefinitions")
 
     class Config:
         populate_by_name = True
 
 
-class BlueprintUpdateRequest(BaseModel):
+class OntologyUpdateRequest(BaseModel):
     name: Optional[str] = None
+    description: Optional[str] = None
+    evolution_policy: Optional[str] = Field(None, alias="evolutionPolicy")
     containment_edge_types: Optional[List[str]] = Field(None, alias="containmentEdgeTypes")
     lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
     edge_type_metadata: Optional[Dict[str, Any]] = Field(None, alias="edgeTypeMetadata")
     entity_type_hierarchy: Optional[Dict[str, Any]] = Field(None, alias="entityTypeHierarchy")
     root_entity_types: Optional[List[str]] = Field(None, alias="rootEntityTypes")
-    visual_overrides: Optional[Dict[str, Any]] = Field(None, alias="visualOverrides")
+    entity_type_definitions: Optional[Dict[str, Any]] = Field(None, alias="entityTypeDefinitions")
+    relationship_type_definitions: Optional[Dict[str, Any]] = Field(None, alias="relationshipTypeDefinitions")
 
     class Config:
         populate_by_name = True
 
 
-class BlueprintResponse(BaseModel):
+class OntologyDefinitionResponse(BaseModel):
     id: str
     name: str
+    description: Optional[str] = None
     version: int
+    evolution_policy: str = Field("reject", alias="evolutionPolicy")
     containment_edge_types: List[str] = Field(alias="containmentEdgeTypes")
     lineage_edge_types: List[str] = Field(alias="lineageEdgeTypes")
     edge_type_metadata: Dict[str, Any] = Field(alias="edgeTypeMetadata")
     entity_type_hierarchy: Dict[str, Any] = Field(alias="entityTypeHierarchy")
     root_entity_types: List[str] = Field(alias="rootEntityTypes")
-    visual_overrides: Dict[str, Any] = Field(default_factory=dict, alias="visualOverrides")
+    entity_type_definitions: Dict[str, Any] = Field(default_factory=dict, alias="entityTypeDefinitions")
+    relationship_type_definitions: Dict[str, Any] = Field(default_factory=dict, alias="relationshipTypeDefinitions")
     is_published: bool = Field(alias="isPublished")
+    is_system: bool = Field(False, alias="isSystem")
+    scope: str = "universal"
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class OntologyValidationIssue(BaseModel):
+    severity: str  # "error" | "warning"
+    code: str
+    message: str
+    affected: Optional[str] = None
+
+
+class OntologyValidationResponse(BaseModel):
+    is_valid: bool = Field(alias="isValid")
+    issues: List[OntologyValidationIssue] = Field(default_factory=list)
+
+    class Config:
+        populate_by_name = True
+
+
+class OntologyCoverageResponse(BaseModel):
+    coverage_percent: float = Field(alias="coveragePercent")
+    covered_entity_types: List[str] = Field(default_factory=list, alias="coveredEntityTypes")
+    uncovered_entity_types: List[str] = Field(default_factory=list, alias="uncoveredEntityTypes")
+    extra_entity_types: List[str] = Field(default_factory=list, alias="extraEntityTypes")
+    covered_relationship_types: List[str] = Field(default_factory=list, alias="coveredRelationshipTypes")
+    uncovered_relationship_types: List[str] = Field(default_factory=list, alias="uncoveredRelationshipTypes")
 
     class Config:
         populate_by_name = True
@@ -276,7 +289,7 @@ class DataSourceCreateRequest(BaseModel):
     provider_id: Optional[str] = Field(None, alias="providerId")
     catalog_item_id: Optional[str] = Field(None, alias="catalogItemId")
     graph_name: Optional[str] = Field(None, alias="graphName")
-    blueprint_id: Optional[str] = Field(None, alias="blueprintId")
+    ontology_id: Optional[str] = Field(None, alias="ontologyId")
     label: Optional[str] = None
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
 
@@ -287,7 +300,7 @@ class DataSourceCreateRequest(BaseModel):
 class DataSourceUpdateRequest(BaseModel):
     provider_id: Optional[str] = Field(None, alias="providerId")
     graph_name: Optional[str] = Field(None, alias="graphName")
-    blueprint_id: Optional[str] = Field(None, alias="blueprintId")
+    ontology_id: Optional[str] = Field(None, alias="ontologyId")
     label: Optional[str] = None
     is_active: Optional[bool] = Field(None, alias="isActive")
     projection_mode: Optional[str] = Field(None, alias="projectionMode")  # None | "in_source" | "dedicated"
@@ -303,7 +316,7 @@ class DataSourceResponse(BaseModel):
     provider_id: Optional[str] = Field(None, alias="providerId")
     catalog_item_id: Optional[str] = Field(None, alias="catalogItemId")
     graph_name: Optional[str] = Field(None, alias="graphName")
-    blueprint_id: Optional[str] = Field(None, alias="blueprintId")
+    ontology_id: Optional[str] = Field(None, alias="ontologyId")
     label: Optional[str] = None
     is_primary: bool = Field(alias="isPrimary")
     is_active: bool = Field(alias="isActive")
@@ -373,10 +386,10 @@ class WorkspaceResponse(BaseModel):
         return ds.graph_name if ds else None
 
     @property
-    def blueprint_id(self) -> Optional[str]:
-        """Convenience: blueprint_id from primary data source (backward compat)."""
+    def ontology_id(self) -> Optional[str]:
+        """Convenience: ontology_id from primary data source."""
         ds = self.primary_data_source
-        return ds.blueprint_id if ds else None
+        return ds.ontology_id if ds else None
 
 
 # ============================================

@@ -9,7 +9,7 @@
  * - Node-centric edge exploration
  */
 
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     X,
@@ -42,9 +42,9 @@ import {
     EDGE_DIRECTION_FILTERS,
     type EdgeDirection,
 } from '@/hooks/useEdgeFilters'
-import { useSchemaStore } from '@/store/schema'
-import { useOntologyMetadata } from '@/services/ontologyService'
+import { useSchemaStore, useContainmentEdgeTypes, useEdgeTypeMetadataMap, useRelationshipTypes } from '@/store/schema'
 import { getAllEdgeTypeDefinitions, normalizeEdgeType } from '@/utils/edgeTypeUtils'
+import { useEdgeVisual } from '@/hooks/useEntityVisual'
 import { cn } from '@/lib/utils'
 
 // ============================================
@@ -107,8 +107,23 @@ export function EdgeDetailPanel({
     const selectedEdgeIds = useCanvasStore((s) => s.selectedEdgeIds)
     const selectEdge = useCanvasStore((s) => s.selectEdge)
     const clearSelection = useCanvasStore((s) => s.clearSelection)
-    const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
-    const { containmentEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
+    const relationshipTypes = useRelationshipTypes()
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+    const edgeTypeMetadata = useEdgeTypeMetadataMap()
+    const ontologyMetadata = useMemo(() => ({ edgeTypeMetadata }), [edgeTypeMetadata])
+    const panelRef = useRef<HTMLDivElement>(null)
+
+    // Click-outside to close panel
+    useEffect(() => {
+        if (!isOpen) return
+        const handleMouseDown = (e: MouseEvent) => {
+            if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+                onClose()
+            }
+        }
+        document.addEventListener('mousedown', handleMouseDown)
+        return () => document.removeEventListener('mousedown', handleMouseDown)
+    }, [isOpen, onClose])
 
     // Generate filters dynamically if not provided
     const edgeFilters = useMemo(() => {
@@ -232,6 +247,7 @@ export function EdgeDetailPanel({
 
     return (
         <motion.div
+            ref={panelRef}
             initial={{ x: 300, opacity: 0 }}
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: 300, opacity: 0 }}
@@ -657,34 +673,11 @@ function EdgeCard({
     const confidence = edge.data?.confidence
     const label = edge.data?.label
 
-    const getEdgeColor = (type: string) => {
-        const colors: Record<string, string> = {
-            transforms: '#f59e0b',
-            produces: '#22c55e',
-            consumes: '#3b82f6',
-            contains: '#8b5cf6',
-            lineage: '#06b6d4',
-        }
-        return colors[type] || '#6b7280'
-    }
-
-    const getEdgeIcon = (type: string) => {
-        switch (type) {
-            case 'transforms':
-                return Workflow
-            case 'produces':
-                return Package
-            case 'consumes':
-                return Database
-            case 'contains':
-                return Table2
-            default:
-                return GitBranch
-        }
-    }
-
-    const EdgeIcon = getEdgeIcon(edgeType)
-    const color = getEdgeColor(edgeType)
+    // Resolve color from schema via hook (falls back to #6366f1 for unknown types)
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const edgeVisual = useEdgeVisual(edgeType)
+    const color = edgeVisual.strokeColor
+    const EdgeIcon = GitBranch  // Generic fallback; icon resolution TBD in Phase 4d
 
     return (
         <motion.div

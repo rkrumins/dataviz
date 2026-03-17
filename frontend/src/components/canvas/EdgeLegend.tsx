@@ -1,39 +1,58 @@
 /**
  * EdgeLegend - Displays a legend explaining edge types, colors, and meanings
- * 
- * Features:
- * - List of all edge types currently in view
- * - Click on legend item to highlight all edges of that type
- * - Toggle visibility per edge type
- * - Shows count of edges per type
+ *
+ * Operates in two modes:
+ * - Canvas mode (no visibleEdges prop): uses raw canvas store edges
+ * - Context View mode (visibleEdges provided): uses projected/aggregated edges
+ *   from the canvas render pipeline, which have a different data structure
+ *   (edge.types[] array + edge.edgeCount bundle count)
  */
 
 import { useState, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import {
-    GitBranch,
-    ChevronDown,
-    ChevronUp,
-    Eye,
-    EyeOff,
-} from 'lucide-react'
+import { GitBranch, ChevronDown, ChevronUp, Eye, EyeOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
 import { useEdgeFiltersStore } from '@/hooks/useEdgeFilters'
-import { useSchemaStore } from '@/store/schema'
-import { useOntologyMetadata } from '@/services/ontologyService'
-import { getAllEdgeTypeDefinitions, normalizeEdgeType, type EdgeTypeDefinition } from '@/utils/edgeTypeUtils'
+import { useSchemaStore, useContainmentEdgeTypes, useRelationshipTypes } from '@/store/schema'
+import { getAllEdgeTypeDefinitions, normalizeEdgeType } from '@/utils/edgeTypeUtils'
+
+// ─── Data-shape helpers ───────────────────────────────────────────────────────
+// Projected edges (from useEdgeProjection) carry a `types: string[]` array and
+// an `edgeCount` representing how many underlying lineage edges are bundled.
+// Canvas store edges carry `data.edgeType` (string) and count as 1 each.
+
+function edgeTypesOf(edge: any): string[] {
+    if (Array.isArray(edge.types) && edge.types.length > 0) return edge.types
+    if (Array.isArray(edge.data?.edgeTypes) && edge.data.edgeTypes.length > 0) return edge.data.edgeTypes
+    const normalized = normalizeEdgeType(edge)
+    return normalized ? [normalized] : []
+}
+
+function edgeBundleCount(edge: any): number {
+    return typeof edge.edgeCount === 'number' && edge.edgeCount > 0 ? edge.edgeCount : 1
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
 
 interface EdgeLegendProps {
     className?: string
     defaultExpanded?: boolean
+    /**
+     * Projected/rendered edges for this view (from useEdgeProjection).
+     * When provided, the legend enters Context View mode and derives all type
+     * discovery, counts, and highlighting from these edges instead of the
+     * raw canvas store.
+     */
+    visibleEdges?: any[]
 }
 
-export function EdgeLegend({ className, defaultExpanded = false }: EdgeLegendProps) {
+export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }: EdgeLegendProps) {
     const [isExpanded, setIsExpanded] = useState(defaultExpanded)
-    const edges = useCanvasStore((s) => s.edges)
-    const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
-    const { containmentEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
+
+    const storeEdges = useCanvasStore((s) => s.edges)
+    const relationshipTypes = useRelationshipTypes()
+    const containmentEdgeTypes = useContainmentEdgeTypes()
 
     const {
         highlightedEdgeIds,
@@ -43,59 +62,104 @@ export function EdgeLegend({ className, defaultExpanded = false }: EdgeLegendPro
         toggleFilter,
     } = useEdgeFiltersStore()
 
-    // Get all edge type definitions dynamically from schema and actual edges
+    // In Context View mode we work from projected edges; otherwise raw store edges.
+    const isProjectedMode = visibleEdges !== undefined
+    const activeEdges = isProjectedMode ? (visibleEdges ?? []) : storeEdges
+
+    // Edge type metadata (color, label, icon, stroke style) always comes from
+    // the store — the schema-driven definitions live there regardless of mode.
     const edgeTypeDefinitions = useMemo(() => {
         return getAllEdgeTypeDefinitions(
-            edges,
+            storeEdges,
             relationshipTypes,
             containmentEdgeTypes,
-            ontologyMetadata ? { edgeTypeMetadata: ontologyMetadata.edgeTypeMetadata } : undefined
         )
-    }, [edges, relationshipTypes, containmentEdgeTypes, ontologyMetadata])
+    }, [storeEdges, relationshipTypes, containmentEdgeTypes])
 
-    // Count edges by type (normalized for matching)
-    const edgeCountsByType = useMemo(() => {
+    // Per-type counts from the *active* edge list.
+    // For projected edges each entry may represent multiple underlying edges
+    // (edge.edgeCount), so we sum those to get meaningful counts.
+    const countsByType = useMemo(() => {
         const counts: Record<string, number> = {}
-        edges.forEach(edge => {
-            const normalized = normalizeEdgeType(edge)
-            if (normalized) {
-                counts[normalized] = (counts[normalized] ?? 0) + 1
-            }
+        activeEdges.forEach(edge => {
+            const types = edgeTypesOf(edge)
+            const n = edgeBundleCount(edge)
+            types.forEach(t => {
+                const key = t.toUpperCase()
+                counts[key] = (counts[key] ?? 0) + n
+            })
         })
         return counts
-    }, [edges])
+    }, [activeEdges])
 
-    // Get unique edge types in current view (only those with edges)
+    // Types present in the active edge set.
+    // In projected mode we build rows from countsByType directly — the projected
+    // edges may include synthetic types (e.g. "AGGREGATED") that have no entry in
+    // the schema-based edgeTypeDefinitions.  Building from countsByType guarantees
+    // that sum(row counts) == header total.
     const activeEdgeTypes = useMemo(() => {
+        if (isProjectedMode) {
+            return Object.entries(countsByType).map(([typeKey]) => {
+                const schemaDef = edgeTypeDefinitions.find(
+                    d => d.type.toUpperCase() === typeKey
+                )
+                return schemaDef ?? {
+                    type: typeKey,
+                    label: typeKey,
+                    color: '#6b7280',
+                    description: `Relationship type: ${typeKey}`,
+                    strokeStyle: 'solid' as const,
+                    animated: false,
+                    icon: null,
+                }
+            }).sort((a, b) => (countsByType[b.type.toUpperCase()] ?? 0) - (countsByType[a.type.toUpperCase()] ?? 0))
+        }
         return edgeTypeDefinitions.filter(
-            (def) => edgeCountsByType[def.type] && edgeCountsByType[def.type] > 0
+            def => (countsByType[def.type.toUpperCase()] ?? 0) > 0
         )
-    }, [edgeTypeDefinitions, edgeCountsByType])
+    }, [isProjectedMode, edgeTypeDefinitions, countsByType])
 
-    // Handle legend item click - highlight all edges of that type
+    // Total = sum of all type row counts — always consistent with what the rows show.
+    const totalOnScreen = useMemo(
+        () => Object.values(countsByType).reduce((s, n) => s + n, 0),
+        [countsByType]
+    )
+
+    // Click a type row → highlight all edges of that type in the overlay.
     const handleHighlightType = (type: string) => {
-        const edgeIds = edges
-            .filter((e) => {
-                const normalized = normalizeEdgeType(e)
-                return normalized === type
-            })
-            .map((e) => e.id)
+        const upper = type.toUpperCase()
+        const matchingIds = activeEdges
+            .filter(e => edgeTypesOf(e).some(t => t.toUpperCase() === upper))
+            .map(e => e.id)
 
-        // Toggle behavior - if already highlighted, clear
-        const allHighlighted = edgeIds.every((id) => highlightedEdgeIds.has(id))
-        if (allHighlighted && edgeIds.length > 0) {
+        const allHighlighted = matchingIds.length > 0 && matchingIds.every(id => highlightedEdgeIds.has(id))
+        if (allHighlighted) {
             clearHighlightedEdges()
         } else {
-            setHighlightedEdges(edgeIds)
+            setHighlightedEdges(matchingIds)
         }
     }
 
-    // Check if edge type is visible (match by normalized type)
+    const isTypeHighlighted = (type: string) => {
+        const upper = type.toUpperCase()
+        return activeEdges
+            .filter(e => edgeTypesOf(e).some(t => t.toUpperCase() === upper))
+            .some(e => highlightedEdgeIds.has(e.id))
+    }
+
     const isTypeVisible = (type: string) => {
-        // Match against filter types (which may be lowercase)
-        const filter = filters.find((f) => f.type.toUpperCase() === type || f.type === type)
+        const filter = filters.find(f => f.type.toUpperCase() === type.toUpperCase())
         return filter?.enabled ?? true
     }
+
+    // ─── Header summary string ────────────────────────────────────────────────
+    // Context View: "X relationships on screen" (sum of bundled counts)
+    // Canvas mode:  "X edges" (raw count)
+    const headerSummary = isProjectedMode
+        ? totalOnScreen === 0
+            ? 'No edges on screen'
+            : `${totalOnScreen.toLocaleString()} on screen`
+        : `${storeEdges.length} edges`
 
     return (
         <div className={cn("glass-panel rounded-xl overflow-hidden", className)}>
@@ -107,18 +171,17 @@ export function EdgeLegend({ className, defaultExpanded = false }: EdgeLegendPro
                 <div className="flex items-center gap-2">
                     <GitBranch className="w-4 h-4 text-accent-lineage" />
                     <span className="text-sm font-medium">Edge Legend</span>
-                    <span className="text-2xs text-ink-muted px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5">
-                        {edges.length} edges
+                    <span className="text-2xs text-ink-muted px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 tabular-nums">
+                        {headerSummary}
                     </span>
                 </div>
-                {isExpanded ? (
-                    <ChevronUp className="w-4 h-4 text-ink-muted" />
-                ) : (
-                    <ChevronDown className="w-4 h-4 text-ink-muted" />
-                )}
+                {isExpanded
+                    ? <ChevronUp className="w-4 h-4 text-ink-muted" />
+                    : <ChevronDown className="w-4 h-4 text-ink-muted" />
+                }
             </button>
 
-            {/* Legend Content */}
+            {/* Legend content */}
             <AnimatePresence>
                 {isExpanded && (
                     <motion.div
@@ -130,17 +193,15 @@ export function EdgeLegend({ className, defaultExpanded = false }: EdgeLegendPro
                     >
                         <div className="px-3 pb-3 space-y-1.5">
                             {activeEdgeTypes.length === 0 ? (
-                                <p className="text-xs text-ink-muted py-2">No edges to display</p>
+                                <p className="text-xs text-ink-muted py-3 text-center">
+                                    {isProjectedMode ? 'No edges visible in this view' : 'No edges to display'}
+                                </p>
                             ) : (
-                                activeEdgeTypes.map((def) => {
-                                    const count = edgeCountsByType[def.type] ?? 0
+                                activeEdgeTypes.map(def => {
+                                    const typeKey = def.type.toUpperCase()
+                                    const count = countsByType[typeKey] ?? 0
                                     const isVisible = isTypeVisible(def.type)
-                                    const isHighlighted = edges
-                                        .filter((e) => {
-                                            const normalized = normalizeEdgeType(e)
-                                            return normalized === def.type
-                                        })
-                                        .some((e) => highlightedEdgeIds.has(e.id))
+                                    const isHighlighted = isTypeHighlighted(def.type)
 
                                     return (
                                         <div
@@ -152,82 +213,69 @@ export function EdgeLegend({ className, defaultExpanded = false }: EdgeLegendPro
                                             )}
                                             onClick={() => handleHighlightType(def.type)}
                                         >
-                                            {/* Edge Line Sample */}
-                                            <div className="flex items-center w-12">
+                                            {/* Edge line sample */}
+                                            <div className="flex items-center w-12 flex-shrink-0">
                                                 <svg width="48" height="8" viewBox="0 0 48 8">
                                                     <line
-                                                        x1="0"
-                                                        y1="4"
-                                                        x2="48"
-                                                        y2="4"
+                                                        x1="0" y1="4" x2="42" y2="4"
                                                         stroke={def.color}
                                                         strokeWidth="2"
                                                         strokeDasharray={
                                                             def.strokeStyle === 'dashed' ? '6,3' :
-                                                                def.strokeStyle === 'dotted' ? '2,2' : 'none'
+                                                            def.strokeStyle === 'dotted' ? '2,2' : 'none'
                                                         }
                                                     />
-                                                    {/* Arrow head */}
-                                                    <polygon
-                                                        points="42,1 48,4 42,7"
-                                                        fill={def.color}
-                                                    />
+                                                    <polygon points="42,1 48,4 42,7" fill={def.color} />
                                                 </svg>
                                             </div>
 
-                                            {/* Icon & Label */}
+                                            {/* Label + description */}
                                             <div className="flex-1 min-w-0">
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{ color: def.color }}>{def.icon}</span>
-                                                    <span className="text-xs font-medium">{def.label}</span>
+                                                    <span className="text-xs font-medium truncate">{def.label}</span>
                                                     {def.animated && (
-                                                        <span className="text-2xs text-ink-muted">●</span>
+                                                        <span className="text-2xs text-ink-muted flex-shrink-0">●</span>
                                                     )}
                                                 </div>
                                                 <p className="text-2xs text-ink-muted truncate">{def.description}</p>
                                             </div>
 
-                                            {/* Count */}
-                                            <span className="text-xs font-medium text-ink-muted tabular-nums">
-                                                {count}
+                                            {/* Count — represents underlying relationships, not bundle objects */}
+                                            <span className="text-xs font-semibold text-ink-muted tabular-nums flex-shrink-0">
+                                                {count.toLocaleString()}
                                             </span>
 
-                                            {/* Visibility Toggle */}
+                                            {/* Visibility toggle */}
                                             <button
-                                                onClick={(e) => {
+                                                onClick={e => {
                                                     e.stopPropagation()
-                                                    // Toggle filter by matching type (case-insensitive)
-                                                    const filter = filters.find((f) => f.type.toUpperCase() === def.type || f.type === def.type)
-                                                    if (filter) {
-                                                        toggleFilter(filter.type)
-                                                    } else {
-                                                        // If no filter exists, create one by toggling the normalized type
-                                                        toggleFilter(def.type.toLowerCase())
-                                                    }
+                                                    const filter = filters.find(f =>
+                                                        f.type.toUpperCase() === def.type.toUpperCase()
+                                                    )
+                                                    toggleFilter(filter ? filter.type : def.type.toLowerCase())
                                                 }}
                                                 className={cn(
-                                                    "p-1 rounded transition-colors",
+                                                    "p-1 rounded transition-colors flex-shrink-0",
                                                     isVisible
                                                         ? "text-accent-lineage hover:bg-accent-lineage/10"
                                                         : "text-ink-muted hover:bg-black/5 dark:hover:bg-white/5"
                                                 )}
-                                                title={isVisible ? "Hide edges" : "Show edges"}
+                                                title={isVisible ? "Hide this edge type" : "Show this edge type"}
                                             >
-                                                {isVisible ? (
-                                                    <Eye className="w-3.5 h-3.5" />
-                                                ) : (
-                                                    <EyeOff className="w-3.5 h-3.5" />
-                                                )}
+                                                {isVisible
+                                                    ? <Eye className="w-3.5 h-3.5" />
+                                                    : <EyeOff className="w-3.5 h-3.5" />
+                                                }
                                             </button>
                                         </div>
                                     )
                                 })
                             )}
 
-                            {/* Tip for new users */}
                             <div className="mt-2 pt-2 border-t border-glass-border">
                                 <p className="text-2xs text-ink-muted">
-                                    💡 Click a row to highlight edges of that type
+                                    💡 Click a row to highlight all edges of that type
                                 </p>
                             </div>
                         </div>

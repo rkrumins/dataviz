@@ -30,7 +30,7 @@ interface DataSourceCardProps {
     ds: DataSourceResponse
     stats?: DataSourceStats
     providerName?: string
-    blueprintName?: string
+    ontologyName?: string
     isActive?: boolean
     views?: DataSourceView[]
     onSetPrimary?: () => void
@@ -114,7 +114,7 @@ export function DataSourceCard({
     ds,
     stats,
     providerName,
-    blueprintName,
+    ontologyName,
     isActive,
     views = [],
     onSetPrimary,
@@ -245,7 +245,7 @@ export function DataSourceCard({
 
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3 text-xs text-ink-muted">
-                        {blueprintName && <span className="flex items-center gap-1"><GitBranch className="w-3 h-3" />{blueprintName}</span>}
+                        {ontologyName && <span className="flex items-center gap-1"><GitBranch className="w-3 h-3" />{ontologyName}</span>}
                         {ds.updatedAt && <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{new Date(ds.updatedAt).toLocaleDateString()}</span>}
                         {isOverridden && <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-500/10 text-amber-500 border border-amber-500/20">OVERRIDE</span>}
                     </div>

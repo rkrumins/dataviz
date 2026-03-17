@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from .endpoints import (
-    graph, assignments, providers, blueprints, workspaces,
-    assets, context_models, catalog, views,
+    graph, assignments, providers, ontologies, workspaces,
+    assets, context_models, catalog, views, features,
 )
 
 api_router = APIRouter()
@@ -14,7 +14,7 @@ api_router.include_router(
     catalog.router, prefix="/admin/catalog", tags=["admin:catalog"],
 )
 api_router.include_router(
-    blueprints.router, prefix="/admin/blueprints", tags=["admin:blueprints"],
+    ontologies.router, prefix="/admin/ontologies", tags=["admin:ontologies"],
 )
 api_router.include_router(
     workspaces.router, prefix="/admin/workspaces", tags=["admin:workspaces"],
@@ -22,6 +22,9 @@ api_router.include_router(
 api_router.include_router(
     context_models.template_router, prefix="/admin/context-model-templates",
     tags=["admin:context-model-templates"],
+)
+api_router.include_router(
+    features.router, prefix="/admin/features", tags=["admin:features"],
 )
 
 # ── Top-level views (first-class, cross-workspace) ─────────────────

@@ -9,19 +9,27 @@ import { useNavigationStore } from '@/store/navigation'
 
 export function useRouteSync() {
   const location = useLocation()
-  const { setActiveTab } = useNavigationStore()
+  const activeTab = useNavigationStore((s) => s.activeTab)
+  const setActiveTab = useNavigationStore((s) => s.setActiveTab)
 
   useEffect(() => {
     const path = location.pathname
+    let nextTab: 'dashboard' | 'explore' | 'schema' | null = null
 
     if (path.startsWith('/dashboard')) {
-      setActiveTab('dashboard')
+      nextTab = 'dashboard'
     } else if (path.startsWith('/views')) {
-      setActiveTab('explore')
+      nextTab = 'explore'
     } else if (path.startsWith('/workspaces')) {
-      setActiveTab('explore')
+      nextTab = 'explore'
     } else if (path.startsWith('/schema')) {
-      setActiveTab('schema')
+      nextTab = 'schema'
     }
-  }, [location.pathname, setActiveTab])
+
+    // Guard against no-op store writes (important for preventing update loops
+    // in strict mode and during router/store sync).
+    if (nextTab && nextTab !== activeTab) {
+      setActiveTab(nextTab)
+    }
+  }, [location.pathname, activeTab, setActiveTab])
 }

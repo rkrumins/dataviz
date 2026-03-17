@@ -1,14 +1,14 @@
 """
 Admin Workspace endpoints — CRUD for workspaces and their data sources.
 A workspace is an operational context containing one or more data sources,
-each binding a Provider + Graph Name + Blueprint.
+each binding a Provider + Graph Name + Ontology.
 """
 from typing import List
 from fastapi import APIRouter, Body, Depends, HTTPException, Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import workspace_repo, provider_repo, blueprint_repo, data_source_repo
+from backend.app.db.repositories import workspace_repo, provider_repo, ontology_definition_repo, data_source_repo
 from backend.app.registry.provider_registry import provider_registry
 from backend.common.models.management import (
     WorkspaceCreateRequest,
@@ -45,13 +45,13 @@ async def create_workspace(
     if not req.data_sources:
         req.data_sources = []
 
-    # Validate all referenced catalog items and blueprints exist
+    # Validate all referenced catalog items and ontologies exist
     from backend.app.db.repositories import catalog_repo
     for ds in req.data_sources:
         if not await catalog_repo.get_catalog_item(session, ds.catalog_item_id):
             raise HTTPException(status_code=404, detail=f"Catalog Item '{ds.catalog_item_id}' not found")
-        if ds.blueprint_id and not await blueprint_repo.get_blueprint(session, ds.blueprint_id):
-            raise HTTPException(status_code=404, detail=f"Blueprint '{ds.blueprint_id}' not found")
+        if ds.ontology_id and not await ontology_definition_repo.get_ontology(session, ds.ontology_id):
+            raise HTTPException(status_code=404, detail=f"Ontology '{ds.ontology_id}' not found")
 
     return await workspace_repo.create_workspace(session, req)
 
@@ -140,8 +140,8 @@ async def add_data_source(
     from backend.app.db.repositories import catalog_repo
     if not await catalog_repo.get_catalog_item(session, req.catalog_item_id):
         raise HTTPException(status_code=404, detail=f"Catalog Item '{req.catalog_item_id}' not found")
-    if req.blueprint_id and not await blueprint_repo.get_blueprint(session, req.blueprint_id):
-        raise HTTPException(status_code=404, detail=f"Blueprint '{req.blueprint_id}' not found")
+    if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
+        raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
     return await data_source_repo.create_data_source(session, workspace_id, req)
 
 
@@ -157,15 +157,12 @@ async def update_data_source(
     if not old_ds or old_ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
 
-    # Validate new catalog item/blueprint if changing
-    from backend.app.db.repositories import catalog_repo
-    if req.catalog_item_id and not await catalog_repo.get_catalog_item(session, req.catalog_item_id):
-        raise HTTPException(status_code=404, detail=f"Catalog Item '{req.catalog_item_id}' not found")
-    if req.blueprint_id and not await blueprint_repo.get_blueprint(session, req.blueprint_id):
-        raise HTTPException(status_code=404, detail=f"Blueprint '{req.blueprint_id}' not found")
+    # Validate new ontology if changing
+    if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
+        raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
 
-    # Evict old cache entry
-    if req.catalog_item_id or req.projection_mode is not None or req.dedicated_graph_name is not None:
+    # Evict old cache entry if provider/graph config changed
+    if req.projection_mode is not None or req.dedicated_graph_name is not None:
         await provider_registry.evict_workspace(workspace_id, session)
 
     ds = await data_source_repo.update_data_source(session, ds_id, req)

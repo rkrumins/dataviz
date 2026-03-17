@@ -22,23 +22,13 @@ import { LogicalNodeConfig, LayerAssignmentRuleConfig, RuleCondition, ScopeFilte
 export type URN = string
 
 /**
- * Entity types aligned with DataHub and common metadata catalogs
+ * Entity type identifier — any string ID defined in the active ontology.
+ * Custom ontologies (Glossary, PII, etc.) produce type IDs that are not
+ * enumerable at compile time, so this is intentionally `string` rather
+ * than a closed union. Use the schema store or `useEntityTypes()` hook to
+ * get the list of available types at runtime.
  */
-export type EntityType =
-    | 'dataPlatform'   // Snowflake, Databricks, etc.
-    | 'container'      // Database, Schema, Folder
-    | 'dataset'        // Table, View, File
-    | 'schemaField'    // Column
-    | 'dataJob'        // Pipeline, Job
-    | 'dataFlow'       // DAG, Workflow
-    | 'dashboard'      // BI Dashboard
-    | 'chart'          // Individual chart/visualization
-    | 'glossaryTerm'   // Business term
-    | 'tag'            // Classification tag
-    | 'domain'         // Business Domain
-    | 'system'         // System
-    | 'app'            // Application
-    | 'report'         // Report
+export type EntityType = string
 
 /**
  * Edge types for relationships between entities
@@ -236,6 +226,8 @@ export interface RelationshipTypeDefinition {
     bidirectional: boolean
     showLabel: boolean
     isContainment: boolean
+    isLineage: boolean
+    category: 'structural' | 'flow' | 'metadata' | 'association'
 }
 
 export interface GraphSchema {
@@ -244,6 +236,7 @@ export interface GraphSchema {
     relationshipTypes: RelationshipTypeDefinition[]
     rootEntityTypes: string[]
     containmentEdgeTypes: string[]
+    lineageEdgeTypes: string[]
 }
 
 // ============================================
@@ -253,7 +246,8 @@ export interface GraphSchema {
 export interface AggregatedEdgeRequest {
     sourceUrns: string[]
     targetUrns?: string[]
-    granularity: 'column' | 'table' | 'schema' | 'system' | 'domain'
+    /** Entity type ID to aggregate to (e.g. "dataset", "term"). null = no aggregation. */
+    granularity: string | null
     includeEdgeTypes?: string[]
     lineageEdgeTypes?: string[]
     containmentEdgeTypes?: string[]
@@ -420,8 +414,8 @@ export interface TraceOptions {
     /** Include inherited lineage from children (default: true) */
     includeInheritedLineage?: boolean
 
-    /** Target granularity for aggregation (default: 'table') */
-    granularity?: 'column' | 'table' | 'schema' | 'system' | 'domain'
+    /** Target entity type ID to aggregate to (e.g. "dataset", "term"). null = no aggregation. */
+    granularity?: string | null
 
     /** Aggregate edges at granularity level (default: true) */
     aggregateEdges?: boolean
@@ -484,6 +478,12 @@ export interface GraphDataProvider {
      * Query edges matching criteria
      */
     getEdges(query: EdgeQuery): Promise<GraphEdge[]>
+
+    /**
+     * Get edges where BOTH source and target are in the provided URN set.
+     * Server-side filtered — only returns internal edges between loaded nodes.
+     */
+    getEdgesBetween(urns: URN[], edgeTypes?: string[], limit?: number): Promise<GraphEdge[]>
 
     // ==========================================
     // Containment Hierarchy (CONTAINS relationships)
@@ -631,10 +631,11 @@ export interface GraphDataProvider {
     // ==========================================
 
     /**
-     * Get complete graph schema from backend
-     * Enables dynamic loading of entity types, relationship types, and visual configs
+     * Get complete graph schema from backend.
+     * @param dataSourceId - Optional override. When provided, returns the schema for
+     *   that specific data source (and its assigned ontology) rather than the default.
      */
-    getFullSchema(): Promise<GraphSchema>
+    getFullSchema(dataSourceId?: string): Promise<GraphSchema>
 
     // ==========================================
     // Aggregated Edge Operations

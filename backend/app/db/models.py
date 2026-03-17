@@ -49,10 +49,6 @@ class GraphConnectionORM(Base):
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     # Relationships
-    ontology_config = relationship(
-        "OntologyConfigORM", back_populates="connection",
-        uselist=False, cascade="all, delete-orphan",
-    )
     assignment_rule_sets = relationship(
         "AssignmentRuleSetORM", back_populates="connection",
         cascade="all, delete-orphan",
@@ -68,35 +64,6 @@ class GraphConnectionORM(Base):
 
     def __repr__(self) -> str:
         return f"<GraphConnection id={self.id!r} name={self.name!r} type={self.provider_type!r}>"
-
-
-# ------------------------------------------------------------------ #
-# ontology_configs                                                      #
-# ------------------------------------------------------------------ #
-
-class OntologyConfigORM(Base):
-    __tablename__ = "ontology_configs"
-
-    id = Column(Text, primary_key=True, default=lambda: f"ont_{uuid.uuid4().hex[:12]}")
-    connection_id = Column(
-        Text,
-        ForeignKey("graph_connections.id", ondelete="CASCADE"),
-        nullable=False,
-        unique=True,
-    )
-    containment_edge_types = Column(Text, nullable=False, default="[]")   # JSON
-    lineage_edge_types = Column(Text, nullable=False, default="[]")       # JSON
-    edge_type_metadata = Column(Text, nullable=False, default="{}")       # JSON
-    entity_type_hierarchy = Column(Text, nullable=False, default="{}")    # JSON
-    root_entity_types = Column(Text, nullable=False, default="[]")        # JSON
-    override_mode = Column(Text, nullable=False, default="merge")         # merge | replace
-    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
-    updated_by = Column(Text, nullable=True)
-
-    connection = relationship("GraphConnectionORM", back_populates="ontology_config")
-
-    def __repr__(self) -> str:
-        return f"<OntologyConfig conn={self.connection_id!r} mode={self.override_mode!r}>"
 
 
 # ------------------------------------------------------------------ #
@@ -197,6 +164,80 @@ class ManagementDbConfigORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# feature_categories  (definitions: id, label, icon, color, order)     #
+# ------------------------------------------------------------------ #
+
+class FeatureCategoryORM(Base):
+    __tablename__ = "feature_categories"
+
+    id = Column(Text, primary_key=True)
+    label = Column(Text, nullable=False)
+    icon = Column(Text, nullable=False)
+    color = Column(Text, nullable=False)
+    sort_order = Column(Integer, nullable=False, default=0)
+    preview = Column(Boolean, nullable=False, default=True)  # show "not yet wired" badge and footer when True
+    preview_label = Column(Text, nullable=True)  # e.g. "Not yet wired"
+    preview_footer = Column(Text, nullable=True)  # footer text when preview=True
+
+
+# ------------------------------------------------------------------ #
+# feature_definitions  (definitions: key, name, type, default, etc.) #
+# ------------------------------------------------------------------ #
+
+class FeatureDefinitionORM(Base):
+    __tablename__ = "feature_definitions"
+
+    key = Column(Text, primary_key=True)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=False)
+    category_id = Column(Text, nullable=False)  # references feature_categories.id
+    type = Column(Text, nullable=False)  # "boolean" | "string[]"
+    default_value = Column(Text, nullable=False)  # JSON: true | false | ["graph",...]
+    user_overridable = Column(Boolean, nullable=False, default=False)
+    options = Column(Text, nullable=True)  # JSON: [{"id","label"},...] for string[]
+    help_url = Column(Text, nullable=True)
+    admin_hint = Column(Text, nullable=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    deprecated = Column(Boolean, nullable=False, default=False)
+    implemented = Column(Boolean, nullable=False, default=False)  # when True, feature is "wired" (no preview badge)
+
+
+# ------------------------------------------------------------------ #
+# feature_registry_meta  (single-row: Admin Features UI copy)         #
+# ------------------------------------------------------------------ #
+
+class FeatureRegistryMetaORM(Base):
+    __tablename__ = "feature_registry_meta"
+
+    id = Column(Integer, primary_key=True, default=1)
+    experimental_notice_enabled = Column(Boolean, nullable=False, default=True)
+    experimental_notice_title = Column(Text, nullable=True)
+    experimental_notice_message = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="feature_registry_meta_single_row"),
+    )
+
+
+# ------------------------------------------------------------------ #
+# feature_flags  (single-row config: global feature flag values)     #
+# ------------------------------------------------------------------ #
+
+class FeatureFlagsORM(Base):
+    __tablename__ = "feature_flags"
+
+    id = Column(Integer, primary_key=True, default=1)
+    config = Column(Text, nullable=False, default="{}")  # JSON: { "editModeEnabled": true, ... }
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    version = Column(Integer, nullable=False, default=0)  # optimistic concurrency; incremented on every write
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="feature_flags_single_row"),
+    )
+
+
+# ------------------------------------------------------------------ #
 # providers  (workspace-centric: pure infrastructure)                  #
 # ------------------------------------------------------------------ #
 
@@ -235,36 +276,93 @@ class ProviderORM(Base):
 
 
 # ------------------------------------------------------------------ #
-# ontology_blueprints  (standalone, versioned, reusable)               #
+# ontologies  (standalone, versioned, reusable semantic definitions)   #
 # ------------------------------------------------------------------ #
 
-class OntologyBlueprintORM(Base):
-    __tablename__ = "ontology_blueprints"
+class OntologyORM(Base):
+    __tablename__ = "ontologies"
 
     id = Column(Text, primary_key=True, default=lambda: f"bp_{uuid.uuid4().hex[:12]}")
     name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True, default=None)
     version = Column(Integer, nullable=False, default=1)
+    # Legacy flat edge type lists (kept for backward compat; derived from definitions when present)
     containment_edge_types = Column(Text, nullable=False, default="[]")   # JSON
     lineage_edge_types = Column(Text, nullable=False, default="[]")       # JSON
     edge_type_metadata = Column(Text, nullable=False, default="{}")       # JSON
     entity_type_hierarchy = Column(Text, nullable=False, default="{}")    # JSON
     root_entity_types = Column(Text, nullable=False, default="[]")        # JSON
-    visual_overrides = Column(Text, nullable=False, default="{}")         # JSON
+    # Rich definition columns (Phase 1+): nested dicts keyed by type ID
+    entity_type_definitions = Column(Text, nullable=False, default="{}")  # JSON Dict[str, EntityTypeDefEntry]
+    relationship_type_definitions = Column(Text, nullable=False, default="{}")  # JSON Dict[str, RelTypeDefEntry]
+    # Ontology metadata
     is_published = Column(Boolean, nullable=False, default=False)
+    is_system = Column(Boolean, nullable=False, default=False)
+    scope = Column(Text, nullable=False, default="universal")             # universal | workspace
+    # Schema evolution policy applied when a newer version of this ontology is published.
+    # reject   — do not allow changes that would break existing data (safest).
+    # deprecate — mark removed types as deprecated; continue to serve them.
+    # migrate  — automatically rename/remap types per a migration manifest.
+    evolution_policy = Column(Text, nullable=False, default="reject")   # reject | deprecate | migrate
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     # Relationships
     data_sources = relationship(
-        "WorkspaceDataSourceORM", back_populates="blueprint",
+        "WorkspaceDataSourceORM", back_populates="ontology",
     )
 
     __table_args__ = (
-        Index("idx_blueprints_name_version", "name", "version"),
+        Index("idx_ontologies_name_version", "name", "version"),
+        Index("idx_ontologies_is_system", "is_system"),
     )
 
     def __repr__(self) -> str:
-        return f"<OntologyBlueprint id={self.id!r} name={self.name!r} v{self.version}>"
+        return f"<Ontology id={self.id!r} name={self.name!r} v{self.version}>"
+
+
+# ------------------------------------------------------------------ #
+# ontology_source_mappings — per-source type mapping profiles          #
+# ------------------------------------------------------------------ #
+
+class OntologySourceMappingORM(Base):
+    """
+    Maps external provider type labels to Synodic ontology type IDs.
+
+    When a DataHub asset arrives with type "DATASET" from platform "snowflake",
+    the mapping profile for that data source translates it to the Synodic
+    entity type "dataset" before writing to the graph.
+
+    One row per (data_source_id, external_type) pair.
+    entity_type_mappings and relationship_type_mappings are JSON dicts:
+      { "<external_label>": "<synodic_type_id>", … }
+    """
+    __tablename__ = "ontology_source_mappings"
+
+    id = Column(Text, primary_key=True, default=lambda: f"osm_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(Text, nullable=False, index=True)
+    ontology_id = Column(Text, nullable=True)                        # optional pinned ontology
+    # JSON dict: external entity type label → Synodic entity type id
+    entity_type_mappings = Column(Text, nullable=False, default="{}")
+    # JSON dict: external relationship type label → Synodic relationship type id
+    relationship_type_mappings = Column(Text, nullable=False, default="{}")
+    # EXTENSION POINT: add conditional aliasing/ignore rules when DataHub/OpenMetadata
+    # ingestion needs source-context-aware mappings beyond simple label->type maps.
+    # Snapshot of the last-seen external schema (for drift detection)
+    last_seen_schema_hash = Column(Text, nullable=True)
+    last_seen_at = Column(Text, nullable=True)
+    # Whether the last drift check found unmapped types
+    has_drift = Column(Boolean, nullable=False, default=False)
+    drift_details = Column(Text, nullable=True)                      # JSON list of issues
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        Index("idx_osm_data_source", "data_source_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OntologySourceMapping ds={self.data_source_id!r}>"
 
 
 # ------------------------------------------------------------------ #
@@ -301,7 +399,7 @@ class WorkspaceORM(Base):
 
 
 # ------------------------------------------------------------------ #
-# workspace_data_sources  (binds provider + graph + blueprint)         #
+# workspace_data_sources  (binds provider + graph + assigned ontology)  #
 # ------------------------------------------------------------------ #
 
 class WorkspaceDataSourceORM(Base):
@@ -324,9 +422,9 @@ class WorkspaceDataSourceORM(Base):
         ForeignKey("catalog_items.id", ondelete="SET NULL"),
         nullable=True,
     )
-    blueprint_id = Column(
+    ontology_id = Column(
         Text,
-        ForeignKey("ontology_blueprints.id", ondelete="SET NULL"),
+        ForeignKey("ontologies.id", ondelete="SET NULL"),
         nullable=True,
     )
     label = Column(Text, nullable=True)
@@ -342,7 +440,10 @@ class WorkspaceDataSourceORM(Base):
     workspace = relationship("WorkspaceORM", back_populates="data_sources")
     provider = relationship("ProviderORM", back_populates="data_sources")
     catalog_item = relationship("CatalogItemORM")
-    blueprint = relationship("OntologyBlueprintORM", back_populates="data_sources")
+    ontology = relationship("OntologyORM", back_populates="data_sources")
+    # EXTENSION POINT: add ontology_version_strategy (pinned|floating) and
+    # ontology_enforcement (permissive|strict) when multi-source governance
+    # requires per-data-source resolution policies.
     stats = relationship("DataSourceStatsORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
     polling_config = relationship("DataSourcePollingConfigORM", back_populates="data_source", uselist=False, cascade="all, delete-orphan")
 
@@ -423,6 +524,8 @@ class ViewORM(Base):
     )
     view_type = Column(Text, nullable=False, default="graph")
     config = Column(Text, nullable=False, default="{}")       # JSON: full ViewConfiguration
+    # EXTENSION POINT: persist referenced_entity_types / referenced_relationship_types
+    # for view-ontology compatibility checks once real breakage workflows appear.
     visibility = Column(Text, nullable=False, default="private")
     created_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                        # JSON array

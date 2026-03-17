@@ -64,13 +64,6 @@ const DEFAULT_SHORTCUTS: ShortcutConfig[] = [
   { id: 'toggle-sidebar', label: 'Toggle Sidebar', keys: 'mod+b', action: 'toggleSidebar' },
 ]
 
-const DEFAULT_NODE_STYLES: Record<string, NodeStyleConfig> = {
-  domain: { color: '#8b5cf6', shape: 'rounded', sizeMultiplier: 1.2 },
-  app: { color: '#06b6d4', shape: 'rounded', sizeMultiplier: 1 },
-  asset: { color: '#22c55e', shape: 'rectangle', sizeMultiplier: 0.9 },
-  ghost: { color: '#94a3b8', shape: 'rounded', sizeMultiplier: 0.8 },
-}
-
 export const usePreferencesStore = create<PreferencesState>()(
   persist(
     (set) => ({
@@ -80,8 +73,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       setTheme: (theme) => set({ theme }),
       setAccentColor: (accentColor) => set({ accentColor }),
 
-      // Node Styling
-      nodeStyles: DEFAULT_NODE_STYLES,
+      // Node Styling — now driven by ontology definitions; empty defaults here.
+      nodeStyles: {},
       setNodeStyle: (nodeType, config) => set((state) => ({
         nodeStyles: {
           ...state.nodeStyles,

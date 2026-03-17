@@ -12,8 +12,8 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { useMemo } from 'react'
 import { useCanvasStore, type LineageEdge } from '@/store/canvas'
+import { useContainmentEdgeTypes, normalizeEdgeType } from '@/store/schema'
 import type { EdgeTypeFilter } from '@/components/panels/EdgeDetailPanel'
-import { useOntologyMetadata, normalizeEdgeType } from '@/services/ontologyService'
 
 // ============================================
 // Types
@@ -274,7 +274,7 @@ export function useFilteredEdges(): {
     const focusedNodeId = useEdgeFiltersStore((s) => s.focusedNodeId)
     const highlightedEdgeIds = useEdgeFiltersStore((s) => s.highlightedEdgeIds)
     const isolateMode = useEdgeFiltersStore((s) => s.isolateMode)
-    const { containmentEdgeTypes } = useOntologyMetadata()
+    const containmentEdgeTypes = useContainmentEdgeTypes()
 
     return useMemo(() => {
         const enabledTypes = new Set(

@@ -25,11 +25,12 @@ const COLOR_PALETTE = [
 
 interface EntityTypeEditorProps {
   entityType?: EntityTypeSchema
+  availableEntityTypes?: { id: string; name: string }[]
   onSave: (entityType: EntityTypeSchema) => void
   onCancel: () => void
 }
 
-export function EntityTypeEditor({ entityType, onSave, onCancel }: EntityTypeEditorProps) {
+export function EntityTypeEditor({ entityType, availableEntityTypes = [], onSave, onCancel }: EntityTypeEditorProps) {
   const isNew = !entityType
 
   const [form, setForm] = useState<EntityTypeSchema>(
@@ -93,7 +94,7 @@ export function EntityTypeEditor({ entityType, onSave, onCancel }: EntityTypeEdi
           <FieldsTab form={form} setForm={setForm} />
         )}
         {activeTab === 'hierarchy' && (
-          <HierarchyTab form={form} updateForm={updateForm} />
+          <HierarchyTab form={form} updateForm={updateForm} availableEntityTypes={availableEntityTypes} />
         )}
       </div>
 
@@ -502,10 +503,11 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
 // Hierarchy Tab
 interface HierarchyTabProps {
   form: EntityTypeSchema
+  availableEntityTypes: { id: string; name: string }[]
   updateForm: <K extends keyof EntityTypeSchema>(key: K, value: EntityTypeSchema[K]) => void
 }
 
-function HierarchyTab({ form, updateForm }: HierarchyTabProps) {
+function HierarchyTab({ form, availableEntityTypes, updateForm }: HierarchyTabProps) {
   const updateHierarchy = <K extends keyof typeof form.hierarchy>(
     key: K,
     value: typeof form.hierarchy[K]
@@ -513,63 +515,142 @@ function HierarchyTab({ form, updateForm }: HierarchyTabProps) {
     updateForm('hierarchy', { ...form.hierarchy, [key]: value })
   }
 
+  // Types available as children (exclude self)
+  const childCandidates = availableEntityTypes.filter(t => t.id !== form.id)
+  const parentCandidates = availableEntityTypes.filter(t => t.id !== form.id)
+
+  function toggleChild(typeId: string) {
+    const current = form.hierarchy.canContain
+    const next = current.includes(typeId)
+      ? current.filter(c => c !== typeId)
+      : [...current, typeId]
+    updateHierarchy('canContain', next)
+  }
+
+  function toggleParent(typeId: string) {
+    const current = form.hierarchy.canBeContainedBy
+    const next = current.includes(typeId)
+      ? current.filter(p => p !== typeId)
+      : [...current, typeId]
+    updateHierarchy('canBeContainedBy', next)
+  }
+
+  const isRoot = form.hierarchy.canBeContainedBy.length === 0
+
   return (
     <div className="space-y-6">
+      {/* Root status indicator */}
+      <div className={cn(
+        'flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium',
+        isRoot
+          ? 'bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800'
+          : 'bg-black/5 dark:bg-white/5 text-ink-muted border border-glass-border'
+      )}>
+        <LucideIcons.Crown className={cn('w-3.5 h-3.5', isRoot ? 'text-amber-500' : 'opacity-30')} />
+        {isRoot ? 'Root type — no parent (top of hierarchy)' : 'Has parent(s) — nested in hierarchy'}
+      </div>
+
+      {/* Can Contain — chip selector */}
       <div>
-        <label className="block text-sm font-medium text-ink mb-1">
+        <label className="block text-sm font-semibold text-ink mb-1">
+          Can Contain <span className="text-ink-muted font-normal">(child types)</span>
+        </label>
+        <p className="text-[11px] text-ink-muted mb-2">
+          Types this entity can parent in the containment hierarchy
+        </p>
+        {childCandidates.length === 0 ? (
+          <p className="text-xs text-ink-muted italic">No other entity types defined yet</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {childCandidates.map(t => {
+              const selected = form.hierarchy.canContain.includes(t.id)
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => toggleChild(t.id)}
+                  className={cn(
+                    'px-2.5 py-1 rounded-lg text-xs font-medium border transition-all',
+                    selected
+                      ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 border-indigo-300 dark:border-indigo-700'
+                      : 'bg-black/5 dark:bg-white/5 text-ink-muted border-glass-border hover:border-indigo-300 hover:text-indigo-600'
+                  )}
+                >
+                  {selected && <LucideIcons.Check className="w-2.5 h-2.5 inline mr-1" />}
+                  {t.name}
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Can Be Contained By — chip selector */}
+      <div>
+        <label className="block text-sm font-semibold text-ink mb-1">
+          Can Be Contained By <span className="text-ink-muted font-normal">(parent types)</span>
+        </label>
+        <p className="text-[11px] text-ink-muted mb-2">
+          Types that can parent this entity. Leave empty to make this a root type.
+        </p>
+        {parentCandidates.length === 0 ? (
+          <p className="text-xs text-ink-muted italic">No other entity types defined yet</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {parentCandidates.map(t => {
+              const selected = form.hierarchy.canBeContainedBy.includes(t.id)
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => toggleParent(t.id)}
+                  className={cn(
+                    'px-2.5 py-1 rounded-lg text-xs font-medium border transition-all',
+                    selected
+                      ? 'bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300 border-green-300 dark:border-green-700'
+                      : 'bg-black/5 dark:bg-white/5 text-ink-muted border-glass-border hover:border-green-300 hover:text-green-600'
+                  )}
+                >
+                  {selected && <LucideIcons.Check className="w-2.5 h-2.5 inline mr-1" />}
+                  {t.name}
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Level — read-only computed hint with manual override */}
+      <div>
+        <label className="block text-sm font-semibold text-ink mb-1">
           Hierarchy Level
         </label>
+        <p className="text-[11px] text-ink-muted mb-2">
+          Usually auto-computed from tree depth in the Hierarchy Map tab. Override only if needed.
+        </p>
         <input
           type="number"
           value={form.hierarchy.level}
-          onChange={(e) => updateHierarchy('level', parseInt(e.target.value))}
+          onChange={(e) => updateHierarchy('level', parseInt(e.target.value) || 0)}
           min={0}
-          max={10}
-          className="input w-24"
-        />
-        <p className="text-2xs text-ink-muted mt-1">
-          0 = root level, higher numbers = deeper in hierarchy
-        </p>
-      </div>
-
-      <div>
-        <label className="block text-sm font-medium text-ink mb-1">
-          Can Contain (Child Types)
-        </label>
-        <input
-          type="text"
-          value={form.hierarchy.canContain.join(', ')}
-          onChange={(e) => updateHierarchy('canContain', e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
-          placeholder="e.g., schema, table, column"
-          className="input"
-        />
-        <p className="text-2xs text-ink-muted mt-1">
-          Comma-separated list of entity type IDs this can contain
-        </p>
-      </div>
-
-      <div>
-        <label className="block text-sm font-medium text-ink mb-1">
-          Can Be Contained By (Parent Types)
-        </label>
-        <input
-          type="text"
-          value={form.hierarchy.canBeContainedBy.join(', ')}
-          onChange={(e) => updateHierarchy('canBeContainedBy', e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
-          placeholder="e.g., domain, system"
-          className="input"
+          max={20}
+          className="input w-20"
         />
       </div>
 
-      <div className="flex items-center gap-4">
-        <label className="flex items-center gap-2">
+      {/* Expanded by default */}
+      <div className="flex items-center gap-3">
+        <label className="flex items-center gap-2 cursor-pointer select-none">
           <input
             type="checkbox"
             checked={form.hierarchy.defaultExpanded}
             onChange={(e) => updateHierarchy('defaultExpanded', e.target.checked)}
-            className="w-4 h-4"
+            className="w-4 h-4 rounded"
           />
-          <span className="text-sm">Expanded by Default</span>
+          <div>
+            <span className="text-sm font-medium text-ink">Expanded by Default</span>
+            <p className="text-[11px] text-ink-muted">Show children automatically when this type is first rendered in a view</p>
+          </div>
         </label>
       </div>
     </div>

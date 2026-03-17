@@ -283,7 +283,9 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     layers,
                     layerSequence: sequence,
                     instanceAssignments: newInstanceMap,
-
+                    // Reset assignment status so ContextViewCanvas re-computes
+                    // assignments when layers change (e.g. switching views).
+                    assignmentStatus: 'idle',
                 })
 
                 // Notify subscribers

@@ -1,0 +1,1153 @@
+{
+  "name": "Synodic Default Ontology",
+  "version": 1,
+  "entity_types": {
+    "domain": {
+      "name": "Domain",
+      "plural_name": "Domains",
+      "description": "Business domain grouping related entities under a governance boundary.",
+      "visual": {
+        "icon": "FolderTree",
+        "color": "#8b5cf6",
+        "color_secondary": "#7c3aed",
+        "shape": "rounded",
+        "size": "lg",
+        "border_style": "solid",
+        "show_in_minimap": true
+      },
+      "hierarchy": {
+        "level": 0,
+        "can_contain": [
+          "system",
+          "dataPlatform",
+          "app",
+          "domain"
+        ],
+        "can_be_contained_by": [],
+        "default_expanded": true,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": true,
+        "expandable": true,
+        "traceable": false,
+        "click_action": "select",
+        "double_click_action": "expand",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        },
+        {
+          "id": "description",
+          "name": "Description",
+          "type": "markdown",
+          "required": false,
+          "show_in_node": false,
+          "show_in_panel": true,
+          "show_in_tooltip": false,
+          "display_order": 2
+        },
+        {
+          "id": "owner",
+          "name": "Owner",
+          "type": "string",
+          "required": false,
+          "show_in_node": false,
+          "show_in_panel": true,
+          "show_in_tooltip": false,
+          "display_order": 3
+        }
+      ]
+    },
+    "system": {
+      "name": "System",
+      "plural_name": "Systems",
+      "description": "A system or platform that hosts data assets.",
+      "visual": {
+        "icon": "Database",
+        "color": "#06b6d4",
+        "color_secondary": "#0891b2",
+        "shape": "rounded",
+        "size": "md",
+        "border_style": "solid",
+        "show_in_minimap": true
+      },
+      "hierarchy": {
+        "level": 1,
+        "can_contain": [
+          "schema",
+          "container",
+          "dataset",
+          "dataFlow",
+          "pipeline"
+        ],
+        "can_be_contained_by": [
+          "domain"
+        ],
+        "default_expanded": true,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": true,
+        "expandable": true,
+        "traceable": false,
+        "click_action": "select",
+        "double_click_action": "expand",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        },
+        {
+          "id": "description",
+          "name": "Description",
+          "type": "markdown",
+          "required": false,
+          "show_in_node": false,
+          "show_in_panel": true,
+          "show_in_tooltip": false,
+          "display_order": 2
+        }
+      ]
+    },
+    "dataPlatform": {
+      "name": "Data Platform",
+      "plural_name": "Data Platforms",
+      "description": "A data platform such as Snowflake, BigQuery, or dbt.",
+      "visual": {
+        "icon": "Server",
+        "color": "#06b6d4",
+        "color_secondary": "#0891b2",
+        "shape": "rounded",
+        "size": "md",
+        "border_style": "solid",
+        "show_in_minimap": true
+      },
+      "hierarchy": {
+        "level": 1,
+        "can_contain": [
+          "schema",
+          "container",
+          "dataset"
+        ],
+        "can_be_contained_by": [
+          "domain"
+        ],
+        "default_expanded": true,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": true,
+        "expandable": true,
+        "traceable": false,
+        "click_action": "select",
+        "double_click_action": "expand",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        }
+      ]
+    },
+    "app": {
+      "name": "Application",
+      "plural_name": "Applications",
+      "description": "A software application or service.",
+      "visual": {
+        "icon": "AppWindow",
+        "color": "#06b6d4",
+        "color_secondary": "#0891b2",
+        "shape": "rounded",
+        "size": "md",
+        "border_style": "solid",
+        "show_in_minimap": true
+      },
+      "hierarchy": {
+        "level": 1,
+        "can_contain": [],
+        "can_be_contained_by": [
+          "domain"
+        ],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": true,
+        "expandable": false,
+        "traceable": true,
+        "click_action": "select",
+        "double_click_action": "panel",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        }
+      ]
+    },
+    "container": {
+      "name": "Container",
+      "plural_name": "Containers",
+      "description": "A logical container grouping datasets (e.g. folder, bucket, schema).",
+      "visual": {
+        "icon": "Box",
+        "color": "#10b981",
+        "color_secondary": "#059669",
+        "shape": "rounded",
+        "size": "md",
+        "border_style": "solid",
+        "show_in_minimap": true
+      },
+      "hierarchy": {
+        "level": 2,
+        "can_contain": [
+          "container",
+          "dataset"
+        ],
+        "can_be_contained_by": [
+          "system",
+          "dataPlatform"
+        ],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": true,
+        "expandable": true,
+        "traceable": false,
+        "click_action": "select",
+        "double_click_action": "expand",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        }
+      ]
+    },
+    "schema": {
+      "name": "Schema",
+      "plural_name": "Schemas",
+      "description": "A database schema or namespace.",
+      "visual": {
+        "icon": "Layers",
+        "color": "#10b981",
+        "color_secondary": "#059669",
+        "shape": "rounded",
+        "size": "md",
+        "border_style": "solid",
+        "show_in_minimap": true
+      },
+      "hierarchy": {
+        "level": 2,
+        "can_contain": [
+          "dataset",
+          "dataJob"
+        ],
+        "can_be_contained_by": [
+          "system",
+          "dataPlatform"
+        ],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": true,
+        "expandable": true,
+        "traceable": false,
+        "click_action": "select",
+        "double_click_action": "expand",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        }
+      ]
+    },
+    "dataFlow": {
+      "name": "Data Flow",
+      "plural_name": "Data Flows",
+      "description": "A logical orchestration pipeline or workflow grouping jobs.",
+      "visual": {
+        "icon": "GitBranch",
+        "color": "#ec4899",
+        "color_secondary": "#db2777",
+        "shape": "diamond",
+        "size": "md",
+        "border_style": "solid",
+        "show_in_minimap": true
+      },
+      "hierarchy": {
+        "level": 2,
+        "can_contain": [
+          "dataJob"
+        ],
+        "can_be_contained_by": [
+          "system"
+        ],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": true,
+        "expandable": true,
+        "traceable": true,
+        "click_action": "select",
+        "double_click_action": "expand",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        }
+      ]
+    },
+    "pipeline": {
+      "name": "Pipeline",
+      "plural_name": "Pipelines",
+      "description": "A data pipeline executing ETL or ELT transformations.",
+      "visual": {
+        "icon": "Workflow",
+        "color": "#ec4899",
+        "color_secondary": "#db2777",
+        "shape": "diamond",
+        "size": "md",
+        "border_style": "solid",
+        "show_in_minimap": true
+      },
+      "hierarchy": {
+        "level": 2,
+        "can_contain": [
+          "dataJob"
+        ],
+        "can_be_contained_by": [
+          "system",
+          "domain"
+        ],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": true,
+        "expandable": true,
+        "traceable": true,
+        "click_action": "select",
+        "double_click_action": "expand",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        }
+      ]
+    },
+    "dataset": {
+      "name": "Dataset",
+      "plural_name": "Datasets",
+      "description": "A tabular dataset, table, or view.",
+      "visual": {
+        "icon": "Table2",
+        "color": "#22c55e",
+        "color_secondary": "#16a34a",
+        "shape": "rectangle",
+        "size": "sm",
+        "border_style": "solid",
+        "show_in_minimap": true
+      },
+      "hierarchy": {
+        "level": 3,
+        "can_contain": [
+          "schemaField",
+          "column"
+        ],
+        "can_be_contained_by": [
+          "schema",
+          "container",
+          "system",
+          "dataPlatform"
+        ],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": true,
+        "expandable": true,
+        "traceable": true,
+        "click_action": "select",
+        "double_click_action": "expand",
+        "expansion_mode": "inline"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        },
+        {
+          "id": "description",
+          "name": "Description",
+          "type": "markdown",
+          "required": false,
+          "show_in_node": false,
+          "show_in_panel": true,
+          "show_in_tooltip": false,
+          "display_order": 2
+        },
+        {
+          "id": "qualified_name",
+          "name": "Qualified Name",
+          "type": "string",
+          "required": false,
+          "show_in_node": false,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 3
+        }
+      ]
+    },
+    "dataJob": {
+      "name": "Data Job",
+      "plural_name": "Data Jobs",
+      "description": "A discrete data transformation or processing job.",
+      "visual": {
+        "icon": "Workflow",
+        "color": "#ec4899",
+        "color_secondary": "#db2777",
+        "shape": "diamond",
+        "size": "md",
+        "border_style": "solid",
+        "show_in_minimap": true
+      },
+      "hierarchy": {
+        "level": 3,
+        "can_contain": [],
+        "can_be_contained_by": [
+          "dataFlow",
+          "pipeline",
+          "schema"
+        ],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": true,
+        "expandable": false,
+        "traceable": true,
+        "click_action": "select",
+        "double_click_action": "panel",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        }
+      ]
+    },
+    "dashboard": {
+      "name": "Dashboard",
+      "plural_name": "Dashboards",
+      "description": "A BI dashboard or report grouping charts.",
+      "visual": {
+        "icon": "LayoutDashboard",
+        "color": "#3b82f6",
+        "color_secondary": "#2563eb",
+        "shape": "rounded",
+        "size": "md",
+        "border_style": "solid",
+        "show_in_minimap": true
+      },
+      "hierarchy": {
+        "level": 3,
+        "can_contain": [
+          "chart"
+        ],
+        "can_be_contained_by": [
+          "system",
+          "domain"
+        ],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": true,
+        "expandable": true,
+        "traceable": true,
+        "click_action": "select",
+        "double_click_action": "expand",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        }
+      ]
+    },
+    "report": {
+      "name": "Report",
+      "plural_name": "Reports",
+      "description": "A report or document produced from data.",
+      "visual": {
+        "icon": "FileText",
+        "color": "#22c55e",
+        "color_secondary": "#16a34a",
+        "shape": "rounded",
+        "size": "md",
+        "border_style": "solid",
+        "show_in_minimap": true
+      },
+      "hierarchy": {
+        "level": 3,
+        "can_contain": [],
+        "can_be_contained_by": [
+          "system",
+          "domain"
+        ],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": true,
+        "expandable": false,
+        "traceable": true,
+        "click_action": "select",
+        "double_click_action": "panel",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        }
+      ]
+    },
+    "schemaField": {
+      "name": "Schema Field",
+      "plural_name": "Schema Fields",
+      "description": "A field or column within a dataset schema.",
+      "visual": {
+        "icon": "Columns3",
+        "color": "#f59e0b",
+        "color_secondary": "#d97706",
+        "shape": "rectangle",
+        "size": "xs",
+        "border_style": "solid",
+        "show_in_minimap": false
+      },
+      "hierarchy": {
+        "level": 4,
+        "can_contain": [],
+        "can_be_contained_by": [
+          "dataset"
+        ],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": false,
+        "expandable": false,
+        "traceable": true,
+        "click_action": "select",
+        "double_click_action": "panel",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        },
+        {
+          "id": "data_type",
+          "name": "Data Type",
+          "type": "string",
+          "required": false,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 2
+        },
+        {
+          "id": "nullable",
+          "name": "Nullable",
+          "type": "boolean",
+          "required": false,
+          "show_in_node": false,
+          "show_in_panel": true,
+          "show_in_tooltip": false,
+          "display_order": 3
+        }
+      ]
+    },
+    "column": {
+      "name": "Column",
+      "plural_name": "Columns",
+      "description": "A column in a database table.",
+      "visual": {
+        "icon": "Columns3",
+        "color": "#f59e0b",
+        "color_secondary": "#d97706",
+        "shape": "rectangle",
+        "size": "xs",
+        "border_style": "solid",
+        "show_in_minimap": false
+      },
+      "hierarchy": {
+        "level": 4,
+        "can_contain": [],
+        "can_be_contained_by": [
+          "dataset"
+        ],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": false,
+        "expandable": false,
+        "traceable": true,
+        "click_action": "select",
+        "double_click_action": "panel",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        },
+        {
+          "id": "data_type",
+          "name": "Data Type",
+          "type": "string",
+          "required": false,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 2
+        }
+      ]
+    },
+    "chart": {
+      "name": "Chart",
+      "plural_name": "Charts",
+      "description": "A visualization or chart within a dashboard.",
+      "visual": {
+        "icon": "BarChart3",
+        "color": "#3b82f6",
+        "color_secondary": "#2563eb",
+        "shape": "rounded",
+        "size": "sm",
+        "border_style": "solid",
+        "show_in_minimap": false
+      },
+      "hierarchy": {
+        "level": 4,
+        "can_contain": [],
+        "can_be_contained_by": [
+          "dashboard"
+        ],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": false,
+        "expandable": false,
+        "traceable": true,
+        "click_action": "select",
+        "double_click_action": "panel",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        }
+      ]
+    },
+    "glossaryTerm": {
+      "name": "Glossary Term",
+      "plural_name": "Glossary Terms",
+      "description": "A business glossary term or definition.",
+      "visual": {
+        "icon": "BookOpen",
+        "color": "#a855f7",
+        "color_secondary": "#9333ea",
+        "shape": "rounded",
+        "size": "sm",
+        "border_style": "dashed",
+        "show_in_minimap": false
+      },
+      "hierarchy": {
+        "level": 5,
+        "can_contain": [],
+        "can_be_contained_by": [],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": false,
+        "expandable": false,
+        "traceable": false,
+        "click_action": "select",
+        "double_click_action": "panel",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        },
+        {
+          "id": "definition",
+          "name": "Definition",
+          "type": "markdown",
+          "required": false,
+          "show_in_node": false,
+          "show_in_panel": true,
+          "show_in_tooltip": false,
+          "display_order": 2
+        }
+      ]
+    },
+    "tag": {
+      "name": "Tag",
+      "plural_name": "Tags",
+      "description": "A classification tag applied to entities.",
+      "visual": {
+        "icon": "Tag",
+        "color": "#64748b",
+        "color_secondary": "#475569",
+        "shape": "rounded",
+        "size": "xs",
+        "border_style": "solid",
+        "show_in_minimap": false
+      },
+      "hierarchy": {
+        "level": 5,
+        "can_contain": [],
+        "can_be_contained_by": [],
+        "default_expanded": false,
+        "roll_up_fields": []
+      },
+      "behavior": {
+        "selectable": true,
+        "draggable": false,
+        "expandable": false,
+        "traceable": false,
+        "click_action": "select",
+        "double_click_action": "panel",
+        "expansion_mode": "graph"
+      },
+      "fields": [
+        {
+          "id": "name",
+          "name": "Name",
+          "type": "string",
+          "required": true,
+          "show_in_node": true,
+          "show_in_panel": true,
+          "show_in_tooltip": true,
+          "display_order": 1
+        }
+      ]
+    }
+  },
+  "relationship_types": {
+    "CONTAINS": {
+      "name": "Contains",
+      "description": "Structural containment: parent physically contains child.",
+      "category": "structural",
+      "is_containment": true,
+      "is_lineage": false,
+      "direction": "source-to-target",
+      "visual": {
+        "stroke_color": "#6366f1",
+        "stroke_width": 2,
+        "stroke_style": "solid",
+        "animated": false,
+        "animation_speed": "normal",
+        "arrow_type": "arrow",
+        "curve_type": "bezier"
+      },
+      "source_types": [
+        "domain",
+        "system",
+        "dataPlatform",
+        "container",
+        "schema",
+        "dataFlow",
+        "pipeline",
+        "dashboard"
+      ],
+      "target_types": [
+        "system",
+        "dataPlatform",
+        "app",
+        "container",
+        "schema",
+        "dataset",
+        "dataJob",
+        "chart",
+        "report"
+      ],
+      "bidirectional": false,
+      "show_label": false,
+      "label_field": null
+    },
+    "BELONGS_TO": {
+      "name": "Belongs To",
+      "description": "Inverse containment: child belongs to parent.",
+      "category": "structural",
+      "is_containment": true,
+      "is_lineage": false,
+      "direction": "target-to-source",
+      "visual": {
+        "stroke_color": "#6366f1",
+        "stroke_width": 1,
+        "stroke_style": "dashed",
+        "animated": false,
+        "animation_speed": "normal",
+        "arrow_type": "arrow",
+        "curve_type": "bezier"
+      },
+      "source_types": [],
+      "target_types": [],
+      "bidirectional": false,
+      "show_label": false,
+      "label_field": null
+    },
+    "FLOWS_TO": {
+      "name": "Flows To",
+      "description": "Data lineage: data flows from source to target.",
+      "category": "flow",
+      "is_containment": false,
+      "is_lineage": true,
+      "direction": "source-to-target",
+      "visual": {
+        "stroke_color": "#22c55e",
+        "stroke_width": 2,
+        "stroke_style": "solid",
+        "animated": true,
+        "animation_speed": "normal",
+        "arrow_type": "arrow",
+        "curve_type": "bezier"
+      },
+      "source_types": [
+        "dataset",
+        "dataJob",
+        "schemaField",
+        "column"
+      ],
+      "target_types": [
+        "dataset",
+        "dataJob",
+        "schemaField",
+        "column"
+      ],
+      "bidirectional": false,
+      "show_label": false,
+      "label_field": null
+    },
+    "CONSUMES": {
+      "name": "Consumes",
+      "description": "A job or application reads from a dataset.",
+      "category": "flow",
+      "is_containment": false,
+      "is_lineage": true,
+      "direction": "source-to-target",
+      "visual": {
+        "stroke_color": "#f59e0b",
+        "stroke_width": 2,
+        "stroke_style": "solid",
+        "animated": true,
+        "animation_speed": "slow",
+        "arrow_type": "arrow",
+        "curve_type": "bezier"
+      },
+      "source_types": [
+        "dataJob",
+        "dashboard",
+        "chart"
+      ],
+      "target_types": [
+        "dataset",
+        "schemaField",
+        "column"
+      ],
+      "bidirectional": false,
+      "show_label": false,
+      "label_field": null
+    },
+    "PRODUCES": {
+      "name": "Produces",
+      "description": "A job or application writes to a dataset.",
+      "category": "flow",
+      "is_containment": false,
+      "is_lineage": true,
+      "direction": "source-to-target",
+      "visual": {
+        "stroke_color": "#3b82f6",
+        "stroke_width": 2,
+        "stroke_style": "solid",
+        "animated": true,
+        "animation_speed": "slow",
+        "arrow_type": "arrow",
+        "curve_type": "bezier"
+      },
+      "source_types": [
+        "dataJob"
+      ],
+      "target_types": [
+        "dataset"
+      ],
+      "bidirectional": false,
+      "show_label": false,
+      "label_field": null
+    },
+    "DERIVED_FROM": {
+      "name": "Derived From",
+      "description": "An entity is semantically derived or computed from another.",
+      "category": "flow",
+      "is_containment": false,
+      "is_lineage": true,
+      "direction": "source-to-target",
+      "visual": {
+        "stroke_color": "#8b5cf6",
+        "stroke_width": 2,
+        "stroke_style": "dashed",
+        "animated": true,
+        "animation_speed": "slow",
+        "arrow_type": "arrow",
+        "curve_type": "bezier"
+      },
+      "source_types": [
+        "dataset",
+        "schemaField",
+        "column"
+      ],
+      "target_types": [
+        "dataset",
+        "schemaField",
+        "column"
+      ],
+      "bidirectional": false,
+      "show_label": false,
+      "label_field": null
+    },
+    "DEPENDS_ON": {
+      "name": "Depends On",
+      "description": "A logical dependency between two entities.",
+      "category": "association",
+      "is_containment": false,
+      "is_lineage": true,
+      "direction": "source-to-target",
+      "visual": {
+        "stroke_color": "#ec4899",
+        "stroke_width": 2,
+        "stroke_style": "dashed",
+        "animated": true,
+        "animation_speed": "normal",
+        "arrow_type": "arrow",
+        "curve_type": "bezier"
+      },
+      "source_types": [],
+      "target_types": [],
+      "bidirectional": false,
+      "show_label": false,
+      "label_field": null
+    },
+    "TAGGED_WITH": {
+      "name": "Tagged With",
+      "description": "An entity is classified with a tag.",
+      "category": "metadata",
+      "is_containment": false,
+      "is_lineage": false,
+      "direction": "source-to-target",
+      "visual": {
+        "stroke_color": "#64748b",
+        "stroke_width": 1,
+        "stroke_style": "dotted",
+        "animated": false,
+        "animation_speed": "normal",
+        "arrow_type": "arrow",
+        "curve_type": "straight"
+      },
+      "source_types": [],
+      "target_types": [
+        "tag"
+      ],
+      "bidirectional": false,
+      "show_label": false,
+      "label_field": null
+    },
+    "DEFINED_BY": {
+      "name": "Defined By",
+      "description": "An entity is defined or governed by a glossary term.",
+      "category": "metadata",
+      "is_containment": false,
+      "is_lineage": false,
+      "direction": "source-to-target",
+      "visual": {
+        "stroke_color": "#a855f7",
+        "stroke_width": 1,
+        "stroke_style": "dotted",
+        "animated": false,
+        "animation_speed": "normal",
+        "arrow_type": "arrow",
+        "curve_type": "straight"
+      },
+      "source_types": [],
+      "target_types": [
+        "glossaryTerm"
+      ],
+      "bidirectional": false,
+      "show_label": false,
+      "label_field": null
+    },
+    "AGGREGATED": {
+      "name": "Aggregated",
+      "description": "A synthetic aggregated lineage edge computed from column-level lineage.",
+      "category": "flow",
+      "is_containment": false,
+      "is_lineage": true,
+      "direction": "source-to-target",
+      "visual": {
+        "stroke_color": "#22c55e",
+        "stroke_width": 3,
+        "stroke_style": "solid",
+        "animated": true,
+        "animation_speed": "fast",
+        "arrow_type": "arrow",
+        "curve_type": "bezier"
+      },
+      "source_types": [],
+      "target_types": [],
+      "bidirectional": false,
+      "show_label": true,
+      "label_field": "source_edge_count"
+    }
+  }
+}

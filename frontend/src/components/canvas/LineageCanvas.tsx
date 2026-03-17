@@ -19,9 +19,6 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { GitBranch, ArrowRight, ArrowDown, Loader2 } from 'lucide-react'
 
 // Legacy nodes for backward compatibility
-import { DomainNode } from './nodes/DomainNode'
-import { AppNode } from './nodes/AppNode'
-import { AssetNode } from './nodes/AssetNode'
 import { GhostNode } from './nodes/GhostNode'
 // New generic node for schema-driven rendering
 import { GenericNode } from './nodes/GenericNode'
@@ -43,8 +40,7 @@ import { NodePalette } from './NodePalette'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
-import { useSchemaStore } from '@/store/schema'
-import { useOntologyMetadata } from '@/services/ontologyService'
+import { useSchemaStore, useContainmentEdgeTypes, useLineageEdgeTypes, useRelationshipTypes } from '@/store/schema'
 import { cn } from '@/lib/utils'
 import { useGraphProvider } from '@/providers'
 import * as LucideIcons from 'lucide-react'
@@ -58,22 +54,22 @@ import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
 
-// Register custom node types - includes both legacy and generic
+// All node types use GenericNode — schema-driven rendering via ontology definitions.
+// GhostNode is kept for collapsed/offscreen placeholder nodes.
 const nodeTypes = {
-  // Legacy nodes for demo data compatibility
-  domain: DomainNode,
-  app: AppNode,
-  asset: AssetNode,
   ghost: GhostNode,
-  // Generic node for schema-driven entities
+  // GenericNode handles all entity types dynamically
   generic: GenericNode,
-  // Schema types mapped to generic node
+  domain: GenericNode,
+  app: GenericNode,
+  asset: GenericNode,
   system: GenericNode,
   dataset: GenericNode,
   pipeline: GenericNode,
   dashboard: GenericNode,
   column: GenericNode,
   schemaField: GenericNode,
+  container: GenericNode,
 }
 
 // Register custom edge types
@@ -104,8 +100,9 @@ export function LineageCanvas() {
 
   const { showMinimap, showGrid, snapToGrid } = usePreferencesStore()
   const schema = useSchemaStore((s) => s.schema)
-  const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes || [])
-  const { containmentEdgeTypes, lineageEdgeTypes, metadata: ontologyMetadata } = useOntologyMetadata()
+  const relationshipTypes = useRelationshipTypes()
+  const containmentEdgeTypes = useContainmentEdgeTypes()
+  const lineageEdgeTypes = useLineageEdgeTypes()
 
   // Edge detail panel
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
@@ -118,9 +115,8 @@ export function LineageCanvas() {
       rawEdges,
       relationshipTypes,
       containmentEdgeTypes,
-      ontologyMetadata
     )
-  }, [rawEdges, relationshipTypes, containmentEdgeTypes, ontologyMetadata, edgeFilters])
+  }, [rawEdges, relationshipTypes, containmentEdgeTypes, edgeFilters])
 
   const provider = useGraphProvider()
 

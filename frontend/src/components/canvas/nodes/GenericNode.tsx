@@ -4,7 +4,6 @@ import * as LucideIcons from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSchemaStore } from '@/store/schema'
 import { useLineageExplorationStore } from '@/hooks/useLineageExploration'
-// import { usePersonaStore } from '@/store/persona'
 import { cn } from '@/lib/utils'
 import type { EntityInstance } from '@/types/schema'
 
@@ -27,6 +26,10 @@ interface GenericNodeData extends EntityInstance {
   isUpstream?: boolean
   isDownstream?: boolean
   isFocus?: boolean
+  // Persona (business | technical display mode)
+  persona?: 'business' | 'technical'
+  // Ghost state (unknown/placeholder node)
+  isGhost?: boolean
   // Layout triggers
   onLoadMore?: () => void
 }
@@ -53,8 +56,7 @@ export const GenericNode = memo(function GenericNode({
     ? (rawData.data as GenericNodeData)
     : (rawData as unknown as GenericNodeData)
 
-  const { isTraced, isDimmed, isUpstream, isDownstream, isFocus } = entityData
-
+  const { isTraced, isDimmed, isUpstream, isDownstream, isFocus, persona = 'business' } = entityData
 
   const loadMoreNodes = useLineageExplorationStore((s) => s.loadMoreNodes)
   const toggleExpanded = useLineageExplorationStore((s) => s.toggleExpanded)
@@ -62,13 +64,11 @@ export const GenericNode = memo(function GenericNode({
   const hiddenCount = (entityData as any)._hiddenCount || 0
   const paginationId = (entityData as any)._paginationId
 
-
   // Support both typeId and type fields
   const typeId = entityData.typeId || (entityData as unknown as Record<string, unknown>).type as string || 'unknown'
 
   const getEntityType = useSchemaStore((s) => s.getEntityType)
   const getEntityVisual = useSchemaStore((s) => s.getEntityVisual)
-  // const mode = usePersonaStore((s) => s.mode)
 
   const entityType = getEntityType(typeId)
   const visual = getEntityVisual(typeId)
@@ -90,9 +90,11 @@ export const GenericNode = memo(function GenericNode({
     entityFields['label'] as string ||
     entityFields['businessLabel'] as string ||
     entityData.id || 'Unknown'
-  // const secondaryLabel = mode === 'technical'
-  //   ? (entityFields['urn'] as string)
-  //   : (entityFields['description'] as string)
+
+  // Secondary label based on persona
+  const secondaryLabel: string | undefined = persona === 'technical'
+    ? (entityFields['urn'] as string) || (entityFields['qualified_name'] as string)
+    : (entityFields['description'] as string)
 
   // Size classes
   const sizeClasses = {
@@ -121,8 +123,11 @@ export const GenericNode = memo(function GenericNode({
     none: 'border-0',
   }
 
-  const isGhost = entityType.id === 'ghost'
+  // isGhost: use data prop (set by graph loader for placeholder/unknown nodes) rather than hardcoded type check
+  const isGhost = entityData.isGhost ?? false
   const isExpandable = entityType.behavior.expandable && ((entityData.childCount ?? 0) > 0)
+  // Expansion mode from ontology definition: 'inline' expands in-place, 'graph' expands the canvas
+  const expansionMode: 'inline' | 'graph' = (entityType.behavior as any).expansionMode ?? 'graph'
 
   return (
     <>
@@ -242,11 +247,19 @@ export const GenericNode = memo(function GenericNode({
             )}>
               {primaryLabel}
             </h3>
+
+            {/* Secondary Label (persona-driven) */}
+            {secondaryLabel && visual.size !== 'xs' && (
+              <p className="text-2xs text-ink-muted truncate mt-0.5">
+                {secondaryLabel}
+              </p>
+            )}
           </div>
 
           {/* Expand Button */}
           {isExpandable && (
             <button
+              title={expansionMode === 'inline' ? 'Expand inline' : 'Expand on canvas'}
               onClick={(e) => {
                 e.stopPropagation()
                 toggleExpanded(id)
@@ -257,7 +270,9 @@ export const GenericNode = memo(function GenericNode({
               )}
             >
               <DynamicIcon
-                name={entityData.isExpanded ? "ChevronDown" : "ChevronRight"}
+                name={entityData.isExpanded
+                  ? "ChevronDown"
+                  : expansionMode === 'inline' ? "ChevronsDown" : "ChevronRight"}
                 className="w-3 h-3 text-ink-muted"
               />
             </button>

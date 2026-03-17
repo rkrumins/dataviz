@@ -12,10 +12,14 @@ import React, { useState, useMemo, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useSchemaStore, useEntityTypes } from '@/store/schema'
+import {
+    useEntityTypes,
+    useContainmentEdgeTypes,
+    useRootEntityTypes,
+    useEntityTypeHierarchyMap,
+} from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { useOntologyMetadata } from '@/services/ontologyService'
 import type { EntityTypeSchema } from '@/types/schema'
 
 // Dynamic icon component
@@ -59,7 +63,9 @@ export function EntityCreationPanel({
     const addNodes = useCanvasStore((s) => s.addNodes)
     const addEdges = useCanvasStore((s) => s.addEdges)
     const provider = useGraphProvider()
-    const { metadata: ontologyMetadata, containmentEdgeTypes } = useOntologyMetadata()
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+    const rootEntityTypes = useRootEntityTypes()
+    const entityTypeHierarchy = useEntityTypeHierarchyMap()
 
     // Form state
     const [formData, setFormData] = useState<FormData>({
@@ -83,9 +89,13 @@ export function EntityCreationPanel({
     // Filter entity types based on parent selection (ontology rules)
     const availableEntityTypes = useMemo(() => {
         if (!parentNode) {
-            // No parent selected - show root-level entity types
-            const rootTypes = ontologyMetadata?.rootEntityTypes || ['domain', 'system', 'dataPlatform']
-            return entityTypes.filter(et => rootTypes.includes(et.id) || et.hierarchy.canBeContainedBy.length === 0)
+            // No parent selected — show root-level entity types as defined by the ontology.
+            // Use canBeContainedBy === [] as the canonical definition of a root type.
+            if (rootEntityTypes.length > 0) {
+                return entityTypes.filter(et => rootEntityTypes.includes(et.id))
+            }
+            // Ontology not yet loaded — show types the ontology says can't be contained.
+            return entityTypes.filter(et => et.hierarchy.canBeContainedBy.length === 0)
         }
 
         // Get parent entity type
@@ -97,7 +107,7 @@ export function EntityCreationPanel({
         const canContain = parentSchema?.hierarchy.canContain || []
 
         // Also check ontology metadata
-        const ontologyCanContain = ontologyMetadata?.entityTypeHierarchy?.[parentType]?.canContain || []
+        const ontologyCanContain = entityTypeHierarchy[parentType]?.canContain || []
         const allCanContain = [...new Set([...canContain, ...ontologyCanContain])]
 
         if (allCanContain.length === 0) {
@@ -106,7 +116,7 @@ export function EntityCreationPanel({
         }
 
         return entityTypes.filter(et => allCanContain.includes(et.id))
-    }, [entityTypes, parentNode, ontologyMetadata])
+    }, [entityTypes, parentNode, rootEntityTypes, entityTypeHierarchy])
 
     // Get potential parent containers from existing nodes
     const potentialParents = useMemo(() => {
@@ -279,8 +289,8 @@ export function EntityCreationPanel({
                         target: fakeUrn,
                         type: 'containment',
                         data: {
-                            edgeType: 'CONTAINS',
-                            relationship: 'contains',
+                            edgeType: containmentEdgeTypes[0] ?? 'edge',
+                            relationship: (containmentEdgeTypes[0] ?? 'edge').toLowerCase(),
                         },
                     }])
                 }

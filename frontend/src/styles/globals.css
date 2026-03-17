@@ -38,10 +38,7 @@
     --nx-glass-blur: 16px;
     --nx-glass-saturation: 180%;
     
-    /* Node Colors */
-    --nx-node-domain: #8b5cf6;
-    --nx-node-app: #06b6d4;
-    --nx-node-asset: #22c55e;
+    /* Ghost node color — other node colors are defined in ontology definitions */
     --nx-node-ghost: #94a3b8;
     
     /* Shadows */
@@ -126,21 +123,6 @@
   .nx-node.selected {
     border-color: var(--nx-accent-lineage);
     box-shadow: var(--nx-shadow-glow);
-  }
-
-  .nx-node-domain {
-    --node-accent: var(--nx-node-domain);
-    border-left: 3px solid var(--node-accent);
-  }
-
-  .nx-node-app {
-    --node-accent: var(--nx-node-app);
-    border-left: 3px solid var(--node-accent);
-  }
-
-  .nx-node-asset {
-    --node-accent: var(--nx-node-asset);
-    border-left: 3px solid var(--node-accent);
   }
 
   .nx-node-ghost {

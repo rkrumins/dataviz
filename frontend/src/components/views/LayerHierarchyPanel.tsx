@@ -17,6 +17,7 @@
 
 import { useState, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence, Reorder, useDragControls } from 'framer-motion'
+import * as LucideIcons from 'lucide-react'
 import {
     ChevronRight,
     ChevronDown,
@@ -28,9 +29,6 @@ import {
     FolderOpen,
     Layers,
     FolderPlus,
-    Database,
-    Table,
-    Columns,
     Box,
     Loader2,
     X,
@@ -39,8 +37,8 @@ import { cn } from '@/lib/utils'
 import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig } from '@/types/schema'
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
 import { useCanvasStore } from '@/store/canvas'
-import { useEntityLoader } from '@/hooks/useEntityLoader'
-import { useOntologyMetadata } from '@/services/ontologyService'
+import { useGraphHydration } from '@/hooks/useGraphHydration'
+import { useContainmentEdgeTypes, useEntityTypes } from '@/store/schema'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -83,27 +81,6 @@ function parseTransfer(e: React.DragEvent): DropPayload | null {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const TYPE_ICONS: Record<string, React.ReactNode> = {
-    domain: <Database className="w-3 h-3" />,
-    system: <Folder className="w-3 h-3" />,
-    schema: <Folder className="w-3 h-3" />,
-    table: <Table className="w-3 h-3" />,
-    column: <Columns className="w-3 h-3" />,
-    dataset: <Table className="w-3 h-3" />,
-    dashboard: <Box className="w-3 h-3" />,
-    default: <Box className="w-3 h-3" />
-}
-
-const TYPE_COLORS: Record<string, string> = {
-    domain: '#8b5cf6',    // Purple
-    system: '#3b82f6',    // Blue
-    schema: '#0ea5e9',    // Sky
-    table: '#22c55e',     // Green
-    column: '#64748b',    // Slate
-    dataset: '#22c55e',
-    dashboard: '#f97316', // Orange
-    default: '#94a3b8'
-}
 
 // ─── Inline Text Input ────────────────────────────────────────────────────────
 
@@ -158,8 +135,8 @@ function AssignedEntityItem({
     const [isExpanded, setIsExpanded] = useState(false)
     const node = useCanvasStore(s => s.nodes.find(n => n.id === entityId))
     const edges = useCanvasStore(s => s.edges)
-    const { containmentEdgeTypes } = useOntologyMetadata()
-    const { loadChildren, loadingNodes } = useEntityLoader()
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+    const { loadChildren, loadingNodes } = useGraphHydration()
 
     const isNodeLoading = loadingNodes.has(entityId)
 
@@ -189,8 +166,17 @@ function AssignedEntityItem({
         setIsExpanded(v => !v)
     }
 
-    const icon = TYPE_ICONS[type] || TYPE_ICONS.default
-    const color = TYPE_COLORS[type] || TYPE_COLORS.default
+    const schemaEntityTypes = useEntityTypes()
+    const typeLower = type.toLowerCase()
+    const visual = useMemo(
+        () => schemaEntityTypes.find(et => et.id.toLowerCase() === typeLower)?.visual,
+        [schemaEntityTypes, typeLower]
+    )
+    const icon = (() => {
+        const Cmp = visual?.icon ? (LucideIcons as Record<string, any>)[visual.icon] : null
+        return Cmp ? <Cmp className="w-3 h-3" /> : <Box className="w-3 h-3" />
+    })()
+    const color = visual?.color ?? '#94a3b8'
 
     return (
         <div>

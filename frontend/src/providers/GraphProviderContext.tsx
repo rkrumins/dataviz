@@ -11,10 +11,22 @@
 
 import { createContext, useContext, useState, useEffect, useRef, type ReactNode } from 'react'
 import type { GraphDataProvider, GraphProviderContextValue } from './GraphDataProvider'
-import { getMockProvider } from './MockProvider'
 import { RemoteGraphProvider } from './RemoteGraphProvider'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useConnectionsStore } from '@/store/connections'
+import { useCanvasStore } from '@/store/canvas'
+
+// MockProvider (+ its 113 kB demo-data.ts) is loaded lazily so it never
+// appears in the initial bundle. It is only fetched when the backend is
+// unreachable or when a component is rendered outside a GraphProvider.
+let _mockProvider: GraphDataProvider | null = null
+async function ensureMockProvider(): Promise<GraphDataProvider> {
+  if (!_mockProvider) {
+    const { getMockProvider } = await import('./MockProvider')
+    _mockProvider = getMockProvider()
+  }
+  return _mockProvider
+}
 
 // ============================================
 // Extended context value
@@ -80,45 +92,65 @@ export function GraphProvider({ children }: GraphProviderProps) {
         prevDataSourceId.current = activeDataSourceId
         prevConnectionId.current = activeConnectionId
 
+        let cancelled = false
+
+        // Clear canvas immediately on workspace/connection change so stale nodes
+        // from the previous workspace don't linger while the new data loads.
+        const { setGraph } = useCanvasStore.getState()
+        setGraph([], [])
+
         const initProvider = async () => {
-            try {
-                setIsLoading(true)
-                setError(null)
+            setError(null)
 
-                let p: RemoteGraphProvider
-                if (activeWorkspaceId) {
-                    // Workspace-scoped: /v1/{ws_id}/graph/... with optional dataSourceId
-                    p = new RemoteGraphProvider({
-                        workspaceId: activeWorkspaceId,
-                        dataSourceId: activeDataSourceId ?? undefined,
-                    })
-                } else if (activeConnectionId) {
-                    // Legacy connection-scoped: ?connectionId=xxx
-                    p = new RemoteGraphProvider({ connectionId: activeConnectionId })
-                } else {
-                    // No workspace or connection → server uses primary/default
-                    p = new RemoteGraphProvider()
-                }
+            let p: RemoteGraphProvider
+            if (activeWorkspaceId) {
+                // Workspace-scoped: /v1/{ws_id}/graph/... with optional dataSourceId
+                p = new RemoteGraphProvider({
+                    workspaceId: activeWorkspaceId,
+                    dataSourceId: activeDataSourceId ?? undefined,
+                })
+            } else if (activeConnectionId) {
+                // Legacy connection-scoped: ?connectionId=xxx
+                p = new RemoteGraphProvider({ connectionId: activeConnectionId })
+            } else {
+                // No workspace or connection → server uses primary/default
+                p = new RemoteGraphProvider()
+            }
 
-                await p.getStats()
+            // Set the provider IMMEDIATELY — don't block on getStats().
+            // This ensures navigation works instantly when switching workspaces.
+            if (!cancelled) {
                 setCurrentProvider(p)
-            } catch (err) {
-                setError(err instanceof Error ? err : new Error('Failed to initialize provider'))
-                setCurrentProvider(getMockProvider())
-            } finally {
                 setIsLoading(false)
+            }
+
+            // Validate connectivity in the background — on failure, surface an error
+            // but keep the provider in place (don't silently fall back to mock).
+            try {
+                await p.getStats()
+            } catch (err) {
+                if (!cancelled) {
+                    setError(err instanceof Error ? err : new Error('Provider connection failed'))
+                }
             }
         }
 
+        setIsLoading(true)
         initProvider()
+
+        return () => { cancelled = true }
     }, [activeWorkspaceId, activeDataSourceId, activeConnectionId])
 
+    // Only block render on the very first load (no provider yet).
+    // During workspace switches the OLD provider stays in place so
+    // navigation keeps working while the new one initialises.
     if (!currentProvider && isLoading) {
         return null
     }
 
     const value: GraphProviderContextValueExtended = {
-        provider: currentProvider ?? getMockProvider(),
+        // currentProvider is guaranteed non-null here: the early-return above handles the null+loading case.
+        provider: currentProvider!,
         isLoading,
         error,
         workspaceId: activeWorkspaceId,
@@ -147,8 +179,10 @@ export function useGraphProvider(): GraphDataProvider {
     const context = useContext(GraphProviderContext)
 
     if (!context) {
-        console.warn('useGraphProvider: No GraphProvider found, using MockProvider')
-        return getMockProvider()
+        // Trigger background load for next render cycle
+        void ensureMockProvider()
+        if (_mockProvider) return _mockProvider
+        throw new Error('useGraphProvider must be used within a <GraphProvider>')
     }
 
     return context.provider
@@ -161,8 +195,10 @@ export function useGraphProviderContext(): GraphProviderContextValueExtended {
     const context = useContext(GraphProviderContext)
 
     if (!context) {
+        void ensureMockProvider()
+        if (!_mockProvider) throw new Error('useGraphProviderContext must be used within a <GraphProvider>')
         return {
-            provider: getMockProvider(),
+            provider: _mockProvider,
             isLoading: false,
             error: null,
             workspaceId: null,

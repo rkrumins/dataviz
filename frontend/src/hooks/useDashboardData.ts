@@ -1,6 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useWorkspaces } from './useWorkspaces'
 import { useSchemaStore } from '@/store/schema'
+import type { ViewConfiguration } from '@/types/schema'
+
+const EMPTY_VIEWS: ViewConfiguration[] = []
 
 export interface DashboardStats {
     totalWorkspaces: number
@@ -23,7 +26,7 @@ export interface TemplateBrief {
     entityTypesCount?: number
 }
 
-export interface BlueprintBrief {
+export interface OntologyBrief {
     id: string
     name: string
     description?: string
@@ -32,11 +35,17 @@ export interface BlueprintBrief {
     createdAt?: string
 }
 
+/** @deprecated Use OntologyBrief */
+export type BlueprintBrief = OntologyBrief
+
 export function useDashboardData() {
     const { workspaces, isLoading: isLoadingWorkspaces } = useWorkspaces()
-    const views = useSchemaStore(s => s.schema?.views || [])
+    const views = useSchemaStore(s => s.schema?.views ?? EMPTY_VIEWS)
     const activeScopeKey = useSchemaStore(s => s.activeScopeKey)
-    const visibleViews = views.filter(v => !v.scopeKey || v.scopeKey === activeScopeKey)
+    const visibleViews = useMemo(
+        () => views.filter(v => !v.scopeKey || v.scopeKey === activeScopeKey),
+        [views, activeScopeKey]
+    )
 
     const [stats, setStats] = useState<DashboardStats>({
         totalWorkspaces: 0,
@@ -49,10 +58,10 @@ export function useDashboardData() {
     const [dataSourceStats, setDataSourceStats] = useState<Record<string, DataSourceStats>>({})
 
     const [templates, setTemplates] = useState<TemplateBrief[]>([])
-    const [blueprints, setBlueprints] = useState<BlueprintBrief[]>([])
+    const [ontologies, setOntologies] = useState<OntologyBrief[]>([])
 
     const [isLoadingTemplates, setIsLoadingTemplates] = useState(false)
-    const [isLoadingBlueprints, setIsLoadingBlueprints] = useState(false)
+    const [isLoadingOntologies, setIsLoadingOntologies] = useState(false)
     const [error, setError] = useState<Error | null>(null)
 
     // Calculate high level stats whenever workspaces change
@@ -133,33 +142,34 @@ export function useDashboardData() {
         fetchTemplates()
     }, [])
 
-    // Fetch Blueprints (Lenses)
+    // Fetch Ontologies
     useEffect(() => {
-        const fetchBlueprints = async () => {
-            setIsLoadingBlueprints(true)
+        const fetchOntologies = async () => {
+            setIsLoadingOntologies(true)
             try {
-                const res = await fetch('/api/v1/admin/blueprints')
+                const res = await fetch('/api/v1/admin/ontologies')
                 if (res.ok) {
                     const data = await res.json()
-                    setBlueprints(data || [])
+                    setOntologies(data || [])
                 }
             } catch (err) {
-                setError(err instanceof Error ? err : new Error('Failed to load blueprints'))
+                setError(err instanceof Error ? err : new Error('Failed to load ontologies'))
             } finally {
-                setIsLoadingBlueprints(false)
+                setIsLoadingOntologies(false)
             }
         }
-        fetchBlueprints()
+        fetchOntologies()
     }, [])
 
-    // Derive recent and popular views
-    const recentViews = [...(visibleViews || [])]
-        .filter(v => !v.isDefault)
-        .slice(0, 8)
-
-    const popularViews = [...(visibleViews || [])]
-        .filter(v => v.isDefault)
-        .slice(0, 8)
+    // Derive recent and popular views — memoized so downstream effects get stable refs
+    const recentViews = useMemo(
+        () => visibleViews.filter(v => !v.isDefault).slice(0, 8),
+        [visibleViews]
+    )
+    const popularViews = useMemo(
+        () => visibleViews.filter(v => v.isDefault).slice(0, 8),
+        [visibleViews]
+    )
 
     return {
         stats,
@@ -168,8 +178,10 @@ export function useDashboardData() {
         recentViews,
         popularViews,
         templates,
-        blueprints,
-        isLoading: isLoadingWorkspaces || isLoadingTemplates || isLoadingBlueprints,
+        ontologies,
+        /** @deprecated Use ontologies */
+        blueprints: ontologies,
+        isLoading: isLoadingWorkspaces || isLoadingTemplates || isLoadingOntologies,
         error
     }
 }

@@ -46,6 +46,10 @@ interface CanvasState {
   setEdges: (edges: LineageEdge[]) => void
   addNodes: (nodes: LineageNode[]) => void
   addEdges: (edges: LineageEdge[]) => void
+  /** Atomic set of both nodes and edges (1 re-render, prevents flash-of-no-edges) */
+  setGraph: (nodes: LineageNode[], edges: LineageEdge[]) => void
+  /** Atomic add of both nodes and edges with dedup (1 re-render) */
+  addGraph: (nodes: LineageNode[], edges: LineageEdge[]) => void
 
   // Selection
   selectedNodeIds: string[]
@@ -123,6 +127,47 @@ export const useCanvasStore = create<CanvasState>()(
         uniqueEdges.forEach((e) => nextIndex.add(e.id))
         return { edges: [...state.edges, ...uniqueEdges], _edgeIndex: nextIndex }
       }),
+      setGraph: (nodes, edges) => set(() => {
+        // Dedup by id to prevent React duplicate-key warnings when callers
+        // pass arrays with overlapping entries (e.g. assigned + child nodes).
+        const seenNodes = new Set<string>()
+        const dedupedNodes: LineageNode[] = []
+        for (const n of nodes) {
+          if (!seenNodes.has(n.id)) {
+            seenNodes.add(n.id)
+            dedupedNodes.push(n)
+          }
+        }
+        const seenEdges = new Set<string>()
+        const dedupedEdges: LineageEdge[] = []
+        for (const e of edges) {
+          if (!seenEdges.has(e.id)) {
+            seenEdges.add(e.id)
+            dedupedEdges.push(e)
+          }
+        }
+        return {
+          nodes: dedupedNodes,
+          edges: dedupedEdges,
+          _nodeIndex: seenNodes,
+          _edgeIndex: seenEdges,
+        }
+      }),
+      addGraph: (newNodes, newEdges) => set((state) => {
+        const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id))
+        const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id))
+        if (uniqueNodes.length === 0 && uniqueEdges.length === 0) return state
+        const nodeIndex = new Set(state._nodeIndex)
+        const edgeIndex = new Set(state._edgeIndex)
+        uniqueNodes.forEach((n) => nodeIndex.add(n.id))
+        uniqueEdges.forEach((e) => edgeIndex.add(e.id))
+        return {
+          nodes: [...state.nodes, ...uniqueNodes],
+          edges: [...state.edges, ...uniqueEdges],
+          _nodeIndex: nodeIndex,
+          _edgeIndex: edgeIndex,
+        }
+      }),
 
       // Selection
       selectedNodeIds: [],
@@ -132,7 +177,9 @@ export const useCanvasStore = create<CanvasState>()(
           ? state.selectedNodeIds.includes(id)
             ? state.selectedNodeIds.filter((nid) => nid !== id)
             : [...state.selectedNodeIds, id]
-          : [id],
+          : state.selectedNodeIds.length === 1 && state.selectedNodeIds[0] === id
+            ? [] // Toggle off: clicking the already-selected node deselects it
+            : [id],
         selectedEdgeIds: multi ? state.selectedEdgeIds : [],
       })),
       selectEdge: (id, multi = false) => set((state) => ({
