@@ -244,6 +244,9 @@ export function EntityAssignmentPanel({
     const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
     const removeEntityAssignment = useReferenceModelStore(s => s.removeEntityAssignment)
 
+    // Lazy loading hook — loads children on expand
+    const { loadChildren } = useGraphHydration()
+
     // Local state
     const [searchQuery, setSearchQuery] = useState('')
     const [granularity, setGranularity] = useState<string>('all')
@@ -252,6 +255,24 @@ export function EntityAssignmentPanel({
     const [draggingNode, setDraggingNode] = useState<EntityTreeNode | null>(null)
     const searchInputRef = useRef<HTMLInputElement>(null)
     const lastSelectedRef = useRef<string | null>(null)
+
+    // Load root entities on mount so the panel has data to display
+    useEffect(() => {
+        loadChildren('', { useAllSchemaTypes: true })
+    }, [loadChildren])
+
+    // Load children for newly expanded nodes
+    const prevExpandedRef = useRef<Set<string>>(new Set())
+    useEffect(() => {
+        const prev = prevExpandedRef.current
+        const newlyExpanded = [...expandedIds].filter(id => !prev.has(id))
+        prevExpandedRef.current = new Set(expandedIds)
+        if (newlyExpanded.length === 0) return
+        const timer = setTimeout(() => {
+            newlyExpanded.forEach(id => loadChildren(id))
+        }, 50)
+        return () => clearTimeout(timer)
+    }, [expandedIds, loadChildren])
 
     // Build entity tree from canvas nodes/edges
     // Note: We need to create a key from instanceAssignments to ensure reactivity

@@ -427,14 +427,31 @@ export const useSchemaStore = create<SchemaState>()(
       }),
 
       upsertViews: (views) => set((state) => {
-        if (!state.schema || views.length === 0) return state
-        const existingMap = new Map(state.schema.views.map(v => [v.id, v]))
+        if (views.length === 0) return state
+        // If schema hasn't been created yet (ontology not loaded), create a
+        // minimal shell so views are stored and available immediately. The
+        // ontology data (entity types, relationship types, etc.) will be
+        // merged in later by loadFromBackend — it preserves views.
+        const schema: WorkspaceSchema = state.schema ?? {
+          id: generateId('workspace'),
+          name: 'Dynamic Workspace',
+          version: '0',
+          entityTypes: [],
+          relationshipTypes: [],
+          views: [],
+          defaultViewId: '',
+          globalVisuals: DEFAULT_GLOBAL_VISUALS,
+          containmentEdgeTypes: DEFAULT_CONTAINMENT_EDGE_TYPES,
+          lineageEdgeTypes: DEFAULT_LINEAGE_EDGE_TYPES,
+          rootEntityTypes: [],
+        }
+        const existingMap = new Map(schema.views.map(v => [v.id, v]))
         for (const view of views) {
           existingMap.set(view.id, { ...view, updatedAt: new Date().toISOString() })
         }
         return {
           schema: {
-            ...state.schema,
+            ...schema,
             views: Array.from(existingMap.values()),
           },
         }
