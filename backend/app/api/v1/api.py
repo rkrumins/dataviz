@@ -2,9 +2,21 @@ from fastapi import APIRouter
 from .endpoints import (
     graph, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
+    auth, users,
 )
 
 api_router = APIRouter()
+
+# ── Auth & user routers ───────────────────────────────────────────────
+api_router.include_router(
+    auth.router, prefix="/auth", tags=["auth"],
+)
+api_router.include_router(
+    users.router, prefix="/users", tags=["users"],
+)
+api_router.include_router(
+    users.admin_router, prefix="/admin/users", tags=["admin:users"],
+)
 
 # ── Admin routers (workspace-centric) ───────────────────────────────
 api_router.include_router(

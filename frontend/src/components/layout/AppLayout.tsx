@@ -8,12 +8,11 @@
  * Refactored from AppShell + App.tsx to support route-based navigation.
  */
 import { useEffect, useState, createContext, useContext } from 'react'
-import { Outlet } from 'react-router-dom'
+import { Outlet, Navigate } from 'react-router-dom'
 import { TopBar } from './TopBar'
 import { SidebarNav } from './SidebarNav'
 import { CommandPalette } from './CommandPalette'
 import { ViewWizard } from '@/components/views/ViewWizard'
-import { LoginPage } from '@/components/auth/LoginPage'
 import { useAuthStore } from '@/store/auth'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
@@ -96,7 +95,7 @@ export function AppLayout() {
   }, [theme])
 
   if (!isAuthenticated) {
-    return <LoginPage />
+    return <Navigate to="/login" replace />
   }
 
   return (

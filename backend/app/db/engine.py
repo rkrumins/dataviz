@@ -161,6 +161,44 @@ async def init_db() -> None:
             )
             logger.info("Migration: feature_categories, feature_definitions, feature_flags, feature_registry_meta ensured")
 
+    # ── Create user / auth tables if missing ───────────────────────────
+    async with engine.begin() as conn:
+        if DATABASE_URL.startswith("sqlite"):
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS users "
+                    "(id TEXT NOT NULL PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, "
+                    "first_name TEXT NOT NULL, last_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', "
+                    "auth_provider TEXT NOT NULL DEFAULT 'local', external_id TEXT, metadata TEXT DEFAULT '{}', "
+                    "reset_token_hash TEXT, reset_token_expires_at TEXT, "
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT)"
+                )
+            )
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS user_roles "
+                    "(id TEXT NOT NULL PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
+                    "role_name TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL, "
+                    "UNIQUE(user_id, role_name))"
+                )
+            )
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS user_approvals "
+                    "(id TEXT NOT NULL PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
+                    "approved_by TEXT, status TEXT NOT NULL DEFAULT 'pending', rejection_reason TEXT, "
+                    "created_at TEXT NOT NULL, resolved_at TEXT)"
+                )
+            )
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS outbox_events "
+                    "(id TEXT NOT NULL PRIMARY KEY, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', "
+                    "processed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"
+                )
+            )
+            logger.info("Migration: users, user_roles, user_approvals, outbox_events ensured")
+
     # ── Inline schema migrations ──────────────────────────────────────
     # SQLAlchemy create_all only creates NEW tables, not new columns on
     # existing tables.  We run safe ALTER TABLE statements here.

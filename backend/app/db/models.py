@@ -639,3 +639,104 @@ class CatalogItemORM(Base):
     def __repr__(self) -> str:
         return f"<CatalogItem id={self.id!r} name={self.name!r} provider={self.provider_id!r}>"
 
+
+# ------------------------------------------------------------------ #
+# users  (authentication & identity)                                   #
+# ------------------------------------------------------------------ #
+
+class UserORM(Base):
+    __tablename__ = "users"
+
+    id = Column(Text, primary_key=True, default=lambda: f"usr_{uuid.uuid4().hex[:12]}")
+    email = Column(Text, nullable=False)
+    password_hash = Column(Text, nullable=False)
+    first_name = Column(Text, nullable=False)
+    last_name = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="pending")       # pending | active | suspended
+    auth_provider = Column(Text, nullable=False, default="local")  # local | saml2 | oidc
+    external_id = Column(Text, nullable=True)                      # SSO subject
+    metadata_ = Column("metadata", Text, nullable=True, default="{}")  # JSON: SSO claims, prefs
+    reset_token_hash = Column(Text, nullable=True)
+    reset_token_expires_at = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    deleted_at = Column(Text, nullable=True)                       # soft delete
+
+    # Relationships
+    roles = relationship("UserRoleORM", back_populates="user", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_users_email"),
+        Index("idx_users_status_created", "status", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<User id={self.id!r} email={self.email!r} status={self.status!r}>"
+
+
+# ------------------------------------------------------------------ #
+# user_roles  (one row per user × role)                                #
+# ------------------------------------------------------------------ #
+
+class UserRoleORM(Base):
+    __tablename__ = "user_roles"
+
+    id = Column(Text, primary_key=True, default=lambda: f"urole_{uuid.uuid4().hex[:12]}")
+    user_id = Column(Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    role_name = Column(Text, nullable=False, default="user")  # admin | user | viewer
+    created_at = Column(Text, nullable=False, default=_now)
+
+    user = relationship("UserORM", back_populates="roles")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "role_name", name="uq_user_role"),
+        Index("idx_user_roles_user", "user_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<UserRole user={self.user_id!r} role={self.role_name!r}>"
+
+
+# ------------------------------------------------------------------ #
+# user_approvals  (audit trail for signup approval / rejection)        #
+# ------------------------------------------------------------------ #
+
+class UserApprovalORM(Base):
+    __tablename__ = "user_approvals"
+
+    id = Column(Text, primary_key=True, default=lambda: f"uapr_{uuid.uuid4().hex[:12]}")
+    user_id = Column(Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    approved_by = Column(Text, nullable=True)                     # admin user_id (logical ref)
+    status = Column(Text, nullable=False, default="pending")      # pending | approved | rejected
+    rejection_reason = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    resolved_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_user_approvals_user_status", "user_id", "status"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<UserApproval user={self.user_id!r} status={self.status!r}>"
+
+
+# ------------------------------------------------------------------ #
+# outbox_events  (transactional outbox for domain events)              #
+# ------------------------------------------------------------------ #
+
+class OutboxEventORM(Base):
+    __tablename__ = "outbox_events"
+
+    id = Column(Text, primary_key=True, default=lambda: f"evt_{uuid.uuid4().hex[:12]}")
+    event_type = Column(Text, nullable=False)         # e.g. user.created, user.approved
+    payload = Column(Text, nullable=False, default="{}")  # JSON
+    processed = Column(Boolean, nullable=False, default=False)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_outbox_processed_created", "processed", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OutboxEvent id={self.id!r} type={self.event_type!r}>"
+

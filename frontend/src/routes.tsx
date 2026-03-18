@@ -17,7 +17,14 @@ const AdminOverview = lazy(() => import('@/components/admin/AdminOverview').then
 const AdminRegistry = lazy(() => import('@/components/admin/AdminRegistry').then(m => ({ default: m.AdminRegistry })))
 const AdminFeatures = lazy(() => import('@/components/admin/AdminFeatures/index').then(m => ({ default: m.AdminFeatures })))
 const AdminWorkspaceDetail = lazy(() => import('@/components/admin/AdminWorkspaceDetail').then(m => ({ default: m.AdminWorkspaceDetail })))
+const AdminUsers = lazy(() => import('@/components/admin/AdminUsers').then(m => ({ default: m.AdminUsers })))
 const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
+
+// Auth pages (unauthenticated)
+const LoginPage = lazy(() => import('@/components/auth/LoginPage').then(m => ({ default: m.LoginPage })))
+const SignUpPage = lazy(() => import('@/components/auth/SignUpPage').then(m => ({ default: m.SignUpPage })))
+const ForgotPasswordPage = lazy(() => import('@/components/auth/ForgotPasswordPage').then(m => ({ default: m.ForgotPasswordPage })))
+const ResetPasswordPage = lazy(() => import('@/components/auth/ResetPasswordPage').then(m => ({ default: m.ResetPasswordPage })))
 
 // Thin suspense wrapper used for each lazy route — shows a centred spinner.
 function PageLoader() {
@@ -33,6 +40,13 @@ function Lazy({ children }: { children: React.ReactNode }) {
 }
 
 export const router = createBrowserRouter([
+  // Unauthenticated routes
+  { path: '/login', element: <Lazy><LoginPage /></Lazy> },
+  { path: '/signup', element: <Lazy><SignUpPage /></Lazy> },
+  { path: '/forgot-password', element: <Lazy><ForgotPasswordPage /></Lazy> },
+  { path: '/reset-password', element: <Lazy><ResetPasswordPage /></Lazy> },
+
+  // Authenticated routes (guarded by AppLayout)
   {
     path: '/',
     element: <AppLayout />,
@@ -60,6 +74,7 @@ export const router = createBrowserRouter([
           { path: 'overview', element: <Lazy><AdminOverview /></Lazy> },
           { path: 'registry', element: <Lazy><AdminRegistry /></Lazy> },
           { path: 'features', element: <Lazy><AdminFeatures /></Lazy> },
+          { path: 'users', element: <Lazy><AdminUsers /></Lazy> },
           { path: 'registry/workspaces/:wsId', element: <Lazy><AdminWorkspaceDetail /></Lazy> },
         ],
       },

@@ -53,6 +53,37 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("System default ontology seed warning: %s", exc)
 
+    # 2c. Bootstrap system admin (idempotent — skips if any user exists)
+    # Always ensures at least one admin account is present.
+    # Customizable via ADMIN_EMAIL / ADMIN_PASSWORD env vars; defaults provided.
+    try:
+        import os
+        from .db.repositories import user_repo
+        from .auth.password import hash_password
+        admin_email = os.getenv("ADMIN_EMAIL", "admin@nexuslineage.local")
+        admin_password = os.getenv("ADMIN_PASSWORD", "changeme")
+        async with get_async_session() as session:
+            user_count = await user_repo.count_users(session)
+            if user_count == 0:
+                user = await user_repo.create_user(
+                    session,
+                    email=admin_email,
+                    password_hash=hash_password(admin_password),
+                    first_name="System",
+                    last_name="Admin",
+                    status="active",
+                )
+                await user_repo.assign_role(session, user.id, "admin")
+                await user_repo.create_approval(
+                    session, user.id, status="approved", approved_by="system",
+                )
+                logger.info(
+                    "System admin created: %s (change password after first login!)",
+                    admin_email,
+                )
+    except Exception as exc:
+        logger.warning("Admin bootstrap warning: %s", exc)
+
     # 3. Ensure a primary connection exists; bootstrap from env vars if DB is empty
     async with get_async_session() as session:
         try:
