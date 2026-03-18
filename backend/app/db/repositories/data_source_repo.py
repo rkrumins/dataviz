@@ -2,6 +2,7 @@
 Repository for workspace_data_sources table.
 Each data source binds a Provider + Graph Name + Blueprint within a Workspace.
 """
+import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -38,6 +39,7 @@ def _to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         providerId=row.provider_id,
         graphName=row.graph_name,
         accessLevel=row.access_level,
+        extraConfig=json.loads(row.extra_config) if row.extra_config else None,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
@@ -130,6 +132,7 @@ async def create_data_source(
         label=req.label,
         is_primary=make_primary,
         is_active=True,
+        extra_config=json.dumps(req.extra_config) if req.extra_config else None,
     )
     session.add(row)
     await session.flush()
@@ -158,6 +161,8 @@ async def update_data_source(
         row.dedicated_graph_name = req.dedicated_graph_name if req.dedicated_graph_name else None
     if getattr(req, "access_level", None) is not None:
         row.access_level = req.access_level
+    if req.extra_config is not None:
+        row.extra_config = json.dumps(req.extra_config) if req.extra_config else None
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()

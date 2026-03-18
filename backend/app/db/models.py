@@ -433,6 +433,7 @@ class WorkspaceDataSourceORM(Base):
     projection_mode = Column(Text, nullable=True)  # None = inherit from provider, "in_source" | "dedicated"
     dedicated_graph_name = Column(Text, nullable=True)  # graph name when projection_mode == "dedicated"
     access_level = Column(Text, nullable=True, default="read")  # read | write | admin
+    extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 

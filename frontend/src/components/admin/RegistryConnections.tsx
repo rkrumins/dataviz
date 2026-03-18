@@ -2,19 +2,20 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
     Server, Plus, RefreshCw, Wifi, WifiOff, Edit2, Trash2, Zap,
-    Shield, Globe, ChevronDown, ChevronUp, Loader2, BookOpen
+    Shield, Globe, ChevronDown, ChevronUp, Loader2, BookOpen, Scan, ArrowRight
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { providerService, type ProviderResponse, type ProviderCreateRequest, type ProviderUpdateRequest, type ProviderImpactResponse } from '@/services/providerService'
+import { providerService, type ProviderResponse, type ProviderCreateRequest, type ProviderUpdateRequest, type ProviderImpactResponse, type SchemaDiscoveryResult } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { AdminWizard, type WizardStep } from './AdminWizard'
+import { Neo4jLogo, FalkorDBLogo, DataHubLogo, MockLogo } from './ProviderLogos'
 
 const PROVIDER_TYPES = [
-    { type: 'falkordb' as const, label: 'FalkorDB', icon: '⚡', color: 'text-amber-500 bg-amber-500/10 border-amber-500/20', desc: 'High-performance graph database' },
-    { type: 'neo4j' as const, label: 'Neo4j', icon: '🔵', color: 'text-blue-500 bg-blue-500/10 border-blue-500/20', desc: 'The original graph database' },
-    { type: 'datahub' as const, label: 'DataHub', icon: '📊', color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20', desc: 'LinkedIn metadata platform' },
-    { type: 'mock' as const, label: 'Mock', icon: '🧪', color: 'text-violet-500 bg-violet-500/10 border-violet-500/20', desc: 'Testing & development' },
+    { type: 'falkordb' as const, label: 'FalkorDB', Logo: FalkorDBLogo, color: 'text-amber-500 bg-amber-500/10 border-amber-500/20', desc: 'High-performance graph database' },
+    { type: 'neo4j' as const, label: 'Neo4j', Logo: Neo4jLogo, color: 'text-blue-500 bg-blue-500/10 border-blue-500/20', desc: 'The original graph database' },
+    { type: 'datahub' as const, label: 'DataHub', Logo: DataHubLogo, color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20', desc: 'LinkedIn metadata platform' },
+    { type: 'mock' as const, label: 'Mock', Logo: MockLogo, color: 'text-violet-500 bg-violet-500/10 border-violet-500/20', desc: 'Testing & development' },
 ]
 
 function getProviderConfig(type: string) {
@@ -34,7 +35,7 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
             <div className="p-5">
                 <div className="flex items-start justify-between mb-4">
                     <div className="flex items-center gap-3">
-                        <div className={cn("w-10 h-10 rounded-xl border flex items-center justify-center text-lg", config.color)}>{config.icon}</div>
+                        <div className={cn("w-10 h-10 rounded-xl border flex items-center justify-center", config.color)}><config.Logo className="w-5 h-5" /></div>
                         <div>
                             <h3 className="text-sm font-bold text-ink">{provider.name}</h3>
                             <p className="text-xs text-ink-muted">{config.label}</p>
@@ -97,6 +98,21 @@ export function RegistryConnections() {
     const [deleteImpact, setDeleteImpact] = useState<ProviderImpactResponse | null>(null)
     const [loadingImpact, setLoadingImpact] = useState(false)
 
+    // Schema mapping state (Neo4j / external DBs)
+    const [schemaDiscovery, setSchemaDiscovery] = useState<SchemaDiscoveryResult | null>(null)
+    const [schemaLoading, setSchemaLoading] = useState(false)
+    const [schemaError, setSchemaError] = useState('')
+    const [schemaMapping, setSchemaMapping] = useState<Record<string, string>>({
+        identityField: 'urn',
+        displayNameField: 'displayName',
+        qualifiedNameField: 'qualifiedName',
+        descriptionField: 'description',
+        tagsField: 'tags',
+        entityTypeStrategy: 'label',
+        entityTypeField: 'entityType',
+    })
+    const [schemaMappingEnabled, setSchemaMappingEnabled] = useState(false)
+
     const loadProviders = useCallback(async () => {
         setIsLoading(true)
         try {
@@ -146,8 +162,29 @@ export function RegistryConnections() {
     const resetWizard = () => {
         setWizType(''); setWizName(''); setWizHost(''); setWizPort(6379)
         setWizTls(false); setWizUsername(''); setWizPassword('')
+        setSchemaDiscovery(null); setSchemaLoading(false); setSchemaError('')
+        setSchemaMappingEnabled(false)
+        setSchemaMapping({
+            identityField: 'urn', displayNameField: 'displayName', qualifiedNameField: 'qualifiedName',
+            descriptionField: 'description', tagsField: 'tags', entityTypeStrategy: 'label', entityTypeField: 'entityType',
+        })
     }
 
+
+    const buildExtraConfig = () => {
+        if (!schemaMappingEnabled) return undefined
+        return {
+            schemaMapping: {
+                identity_field: schemaMapping.identityField,
+                display_name_field: schemaMapping.displayNameField,
+                qualified_name_field: schemaMapping.qualifiedNameField,
+                description_field: schemaMapping.descriptionField,
+                tags_field: schemaMapping.tagsField,
+                entity_type_strategy: schemaMapping.entityTypeStrategy,
+                entity_type_field: schemaMapping.entityTypeField,
+            },
+        }
+    }
 
     const handleWizardComplete = async () => {
         setWizSubmitting(true)
@@ -155,6 +192,7 @@ export function RegistryConnections() {
             const req: ProviderCreateRequest = {
                 name: wizName, providerType: wizType as any, host: wizHost || undefined, port: wizPort || undefined, tlsEnabled: wizTls,
                 credentials: (wizUsername || wizPassword) ? { username: wizUsername || undefined, password: wizPassword || undefined } : undefined,
+                extraConfig: buildExtraConfig(),
             }
             const newlyCreated = await providerService.create(req)
             setShowWizard(false)
@@ -167,12 +205,6 @@ export function RegistryConnections() {
         finally { setWizSubmitting(false) }
     }
 
-    const handleEditProvider = (p: ProviderResponse) => {
-        setEditingProvider(p); setWizType(p.providerType); setWizName(p.name); setWizHost(p.host || ''); setWizPort(p.port || 6379)
-        setWizTls(p.tlsEnabled); setWizUsername(''); setWizPassword('')
-        setShowWizard(true)
-    }
-
     const handleEditComplete = async () => {
         if (!editingProvider) return
         setWizSubmitting(true)
@@ -180,11 +212,32 @@ export function RegistryConnections() {
             const req: ProviderUpdateRequest = {
                 name: wizName, host: wizHost || undefined, port: wizPort || undefined, tlsEnabled: wizTls,
                 credentials: (wizUsername || wizPassword) ? { username: wizUsername || undefined, password: wizPassword || undefined } : undefined,
+                extraConfig: buildExtraConfig(),
             }
             await providerService.update(editingProvider.id, req)
             setShowWizard(false); setEditingProvider(null); resetWizard(); loadProviders()
         } catch (err) { console.error('Failed to update provider', err) }
         finally { setWizSubmitting(false) }
+    }
+
+    const handleEditProvider = (p: ProviderResponse) => {
+        setEditingProvider(p); setWizType(p.providerType); setWizName(p.name); setWizHost(p.host || ''); setWizPort(p.port || 6379)
+        setWizTls(p.tlsEnabled); setWizUsername(''); setWizPassword('')
+        // Restore schema mapping from extraConfig if present
+        const existingMapping = p.extraConfig?.schemaMapping
+        if (existingMapping) {
+            setSchemaMappingEnabled(true)
+            setSchemaMapping({
+                identityField: existingMapping.identity_field || 'urn',
+                displayNameField: existingMapping.display_name_field || 'displayName',
+                qualifiedNameField: existingMapping.qualified_name_field || 'qualifiedName',
+                descriptionField: existingMapping.description_field || 'description',
+                tagsField: existingMapping.tags_field || 'tags',
+                entityTypeStrategy: existingMapping.entity_type_strategy || 'label',
+                entityTypeField: existingMapping.entity_type_field || 'entityType',
+            })
+        }
+        setShowWizard(true)
     }
 
     const wizardSteps: WizardStep[] = [
@@ -196,7 +249,7 @@ export function RegistryConnections() {
                         <button key={pt.type} onClick={() => { setWizType(pt.type); if (pt.type === 'falkordb') setWizPort(6379); else if (pt.type === 'neo4j') setWizPort(7687); }}
                             className={cn("p-5 rounded-xl border-2 text-left transition-all duration-200 hover:shadow-md", wizType === pt.type ? "border-indigo-500 bg-indigo-500/5 shadow-md shadow-indigo-500/10" : "border-glass-border hover:border-indigo-500/30")}
                         >
-                            <div className="text-2xl mb-2">{pt.icon}</div><h4 className="text-sm font-bold text-ink">{pt.label}</h4><p className="text-xs text-ink-muted mt-1">{pt.desc}</p>
+                            <pt.Logo className="w-7 h-7 mb-2" /><h4 className="text-sm font-bold text-ink">{pt.label}</h4><p className="text-xs text-ink-muted mt-1">{pt.desc}</p>
                         </button>
                     ))}
                 </div>
@@ -218,8 +271,175 @@ export function RegistryConnections() {
                 </div>
             ),
         },
+        // Schema Mapping step — only for Neo4j and external databases
+        ...(wizType === 'neo4j' ? [{
+            id: 'schema-mapping',
+            title: 'Schema Mapping',
+            icon: Scan,
+            validate: () => true as boolean | string,
+            content: (
+                <div className="space-y-5">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h4 className="text-sm font-bold text-ink">Property Schema Mapping</h4>
+                            <p className="text-xs text-ink-muted mt-1">
+                                Map your Neo4j property names to Synodic's canonical model. Skip this if your database already uses Synodic's schema.
+                            </p>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" checked={schemaMappingEnabled} onChange={e => setSchemaMappingEnabled(e.target.checked)} className="sr-only peer" />
+                            <div className="w-9 h-5 bg-black/10 dark:bg-white/10 peer-checked:bg-indigo-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] peer-checked:after:translate-x-full after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all" />
+                        </label>
+                    </div>
+
+                    {schemaMappingEnabled && (
+                        <>
+                            {/* Discover button */}
+                            <button
+                                onClick={async () => {
+                                    setSchemaLoading(true); setSchemaError('')
+                                    try {
+                                        // Create a temporary provider to discover schema
+                                        const tempReq: ProviderCreateRequest = {
+                                            name: `_temp_discovery_${Date.now()}`, providerType: 'neo4j',
+                                            host: wizHost || 'localhost', port: wizPort || 7687, tlsEnabled: wizTls,
+                                            credentials: { username: wizUsername || undefined, password: wizPassword || undefined },
+                                        }
+                                        const temp = await providerService.create(tempReq)
+                                        try {
+                                            const result = await providerService.discoverSchema(temp.id)
+                                            setSchemaDiscovery(result)
+                                            // Auto-apply suggested mapping if available
+                                            if (result.suggestedMapping) {
+                                                const s = result.suggestedMapping
+                                                setSchemaMapping(prev => ({
+                                                    ...prev,
+                                                    identityField: s.identity_field || prev.identityField,
+                                                    displayNameField: s.display_name_field || prev.displayNameField,
+                                                    qualifiedNameField: s.qualified_name_field || prev.qualifiedNameField,
+                                                    descriptionField: s.description_field || prev.descriptionField,
+                                                    entityTypeStrategy: s.entity_type_strategy || prev.entityTypeStrategy,
+                                                }))
+                                            }
+                                        } finally {
+                                            // Clean up temp provider
+                                            await providerService.delete(temp.id).catch(() => {})
+                                        }
+                                    } catch (err: any) {
+                                        setSchemaError(err.message || 'Failed to discover schema')
+                                    } finally {
+                                        setSchemaLoading(false)
+                                    }
+                                }}
+                                disabled={schemaLoading || !wizHost}
+                                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-sm font-semibold hover:bg-indigo-500/20 transition-colors disabled:opacity-50 w-full justify-center"
+                            >
+                                {schemaLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Scan className="w-4 h-4" />}
+                                {schemaLoading ? 'Introspecting Database...' : 'Auto-Discover Schema'}
+                            </button>
+
+                            {schemaError && (
+                                <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-500">{schemaError}</div>
+                            )}
+
+                            {/* Discovery results preview */}
+                            {schemaDiscovery && (
+                                <div className="p-4 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] space-y-2">
+                                    <h5 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Discovered Schema</h5>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {schemaDiscovery.labels.map(l => (
+                                            <span key={l} className="px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 text-[11px] font-medium border border-blue-500/20">{l}</span>
+                                        ))}
+                                    </div>
+                                    <div className="flex flex-wrap gap-1.5 mt-1">
+                                        {schemaDiscovery.relationshipTypes.map(r => (
+                                            <span key={r} className="px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-600 dark:text-violet-400 text-[11px] font-medium border border-violet-500/20">{r}</span>
+                                        ))}
+                                    </div>
+                                    {schemaDiscovery.labelDetails && Object.keys(schemaDiscovery.labelDetails).length > 0 && (
+                                        <div className="mt-2 text-xs text-ink-muted">
+                                            {Object.entries(schemaDiscovery.labelDetails).slice(0, 3).map(([label, detail]) => (
+                                                <div key={label} className="mt-1">
+                                                    <span className="font-semibold text-ink">{label}</span>
+                                                    <span className="ml-1">({detail.count} nodes)</span>
+                                                    <span className="ml-1 text-ink-muted">— props: {detail.propertyKeys.join(', ')}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Mapping fields */}
+                            <div className="space-y-3">
+                                <h5 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Field Mapping</h5>
+                                {([
+                                    ['identityField', 'Identity (URN)', 'The property used as unique identifier'],
+                                    ['displayNameField', 'Display Name', 'Human-readable name property'],
+                                    ['qualifiedNameField', 'Qualified Name', 'Fully qualified path name'],
+                                    ['descriptionField', 'Description', 'Description / notes property'],
+                                    ['tagsField', 'Tags', 'Tags array property (JSON string or list)'],
+                                ] as const).map(([key, label, hint]) => (
+                                    <div key={key} className="grid grid-cols-5 gap-2 items-center">
+                                        <div className="col-span-2">
+                                            <label className="text-xs font-medium text-ink">{label}</label>
+                                            <p className="text-[10px] text-ink-muted leading-tight">{hint}</p>
+                                        </div>
+                                        <div className="col-span-1 flex items-center justify-center text-ink-muted">
+                                            <ArrowRight className="w-3 h-3" />
+                                        </div>
+                                        <div className="col-span-2">
+                                            <input
+                                                value={schemaMapping[key]}
+                                                onChange={e => setSchemaMapping(prev => ({ ...prev, [key]: e.target.value }))}
+                                                className="w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-xs font-mono text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                                            />
+                                        </div>
+                                    </div>
+                                ))}
+
+                                {/* Entity type strategy */}
+                                <div className="pt-2 border-t border-glass-border">
+                                    <label className="text-xs font-medium text-ink block mb-2">Entity Type Resolution</label>
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={() => setSchemaMapping(prev => ({ ...prev, entityTypeStrategy: 'label' }))}
+                                            className={cn("flex-1 px-3 py-2 rounded-lg border text-xs font-semibold transition-colors",
+                                                schemaMapping.entityTypeStrategy === 'label' ? "bg-indigo-500/10 border-indigo-500/30 text-indigo-600" : "border-glass-border text-ink-muted hover:text-ink")}
+                                        >
+                                            From Neo4j Label
+                                        </button>
+                                        <button
+                                            onClick={() => setSchemaMapping(prev => ({ ...prev, entityTypeStrategy: 'property' }))}
+                                            className={cn("flex-1 px-3 py-2 rounded-lg border text-xs font-semibold transition-colors",
+                                                schemaMapping.entityTypeStrategy === 'property' ? "bg-indigo-500/10 border-indigo-500/30 text-indigo-600" : "border-glass-border text-ink-muted hover:text-ink")}
+                                        >
+                                            From Property
+                                        </button>
+                                    </div>
+                                    {schemaMapping.entityTypeStrategy === 'property' && (
+                                        <input
+                                            value={schemaMapping.entityTypeField}
+                                            onChange={e => setSchemaMapping(prev => ({ ...prev, entityTypeField: e.target.value }))}
+                                            placeholder="entityType"
+                                            className="mt-2 w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-xs font-mono text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                                        />
+                                    )}
+                                </div>
+                            </div>
+                        </>
+                    )}
+
+                    {!schemaMappingEnabled && (
+                        <div className="p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20 text-sm text-emerald-600 dark:text-emerald-400">
+                            Using default Synodic schema. Your Neo4j database should use properties like <code className="font-mono text-xs bg-emerald-500/10 px-1 py-0.5 rounded">urn</code>, <code className="font-mono text-xs bg-emerald-500/10 px-1 py-0.5 rounded">displayName</code>, <code className="font-mono text-xs bg-emerald-500/10 px-1 py-0.5 rounded">entityType</code>.
+                        </div>
+                    )}
+                </div>
+            ),
+        }] : []),
         {
-            id: 'review', title: 'Review & Save', icon: Shield, validate: () => true,
+            id: 'review', title: 'Review & Save', icon: Shield, validate: () => true as boolean | string,
             content: (
                 <div className="space-y-4">
                     <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-5">
@@ -228,6 +448,14 @@ export function RegistryConnections() {
                             <div><dt className="text-ink-muted">Type</dt><dd className="font-semibold text-ink mt-0.5">{getProviderConfig(wizType).label}</dd></div>
                             <div><dt className="text-ink-muted">Name</dt><dd className="font-semibold text-ink mt-0.5">{wizName || '—'}</dd></div>
                             <div><dt className="text-ink-muted">Host</dt><dd className="font-mono text-ink mt-0.5">{wizHost || 'localhost'}:{wizPort}</dd></div>
+                            {schemaMappingEnabled && (
+                                <div className="col-span-2">
+                                    <dt className="text-ink-muted">Schema Mapping</dt>
+                                    <dd className="font-mono text-ink mt-0.5 text-xs">
+                                        {schemaMapping.identityField} → urn, {schemaMapping.displayNameField} → displayName
+                                    </dd>
+                                </div>
+                            )}
                         </dl>
                     </div>
                 </div>

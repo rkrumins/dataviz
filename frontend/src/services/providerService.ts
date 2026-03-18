@@ -18,6 +18,7 @@ export interface ProviderCreateRequest {
         token?: string
     }
     tlsEnabled?: boolean
+    extraConfig?: Record<string, any>
     permittedWorkspaces?: string[]
 }
 
@@ -32,6 +33,7 @@ export interface ProviderUpdateRequest {
     }
     tlsEnabled?: boolean
     isActive?: boolean
+    extraConfig?: Record<string, any>
     permittedWorkspaces?: string[]
 }
 
@@ -68,9 +70,21 @@ export interface ProviderResponse {
     port?: number
     tlsEnabled: boolean
     isActive: boolean
+    extraConfig?: Record<string, any>
     permittedWorkspaces: string[]
     createdAt: string
     updatedAt: string
+}
+
+export interface SchemaDiscoveryResult {
+    labels: string[]
+    relationshipTypes: string[]
+    labelDetails: Record<string, {
+        count: number
+        propertyKeys: string[]
+        samples: Record<string, any>[]
+    }>
+    suggestedMapping?: Record<string, any>
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -130,5 +144,12 @@ export const providerService = {
 
     getAssetStats(providerId: string, assetName: string): Promise<any> {
         return request<any>(`${ADMIN_API}/${providerId}/assets/${assetName}/stats`)
+    },
+
+    discoverSchema(providerId: string, assetName?: string): Promise<SchemaDiscoveryResult> {
+        return request<SchemaDiscoveryResult>(
+            `${ADMIN_API}/${providerId}/discover-schema`,
+            { method: 'POST', body: JSON.stringify({ assetName: assetName || null }) },
+        )
     },
 }

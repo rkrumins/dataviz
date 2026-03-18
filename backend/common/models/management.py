@@ -292,6 +292,7 @@ class DataSourceCreateRequest(BaseModel):
     ontology_id: Optional[str] = Field(None, alias="ontologyId")
     label: Optional[str] = None
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
+    extra_config: Optional[dict] = Field(None, alias="extraConfig")  # per-data-source config (schema mapping, etc.)
 
     class Config:
         populate_by_name = True
@@ -305,6 +306,7 @@ class DataSourceUpdateRequest(BaseModel):
     is_active: Optional[bool] = Field(None, alias="isActive")
     projection_mode: Optional[str] = Field(None, alias="projectionMode")  # None | "in_source" | "dedicated"
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")  # graph name when dedicated
+    extra_config: Optional[dict] = Field(None, alias="extraConfig")  # per-data-source config (schema mapping, etc.)
 
     class Config:
         populate_by_name = True
@@ -323,6 +325,7 @@ class DataSourceResponse(BaseModel):
     projection_mode: Optional[str] = Field(None, alias="projectionMode")
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
+    extra_config: Optional[dict] = Field(None, alias="extraConfig")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 

@@ -221,6 +221,23 @@ class GraphDataProvider(ABC):
         """Called when a node's containment (parent) changes. Rebuilds ancestor chains."""
         pass
 
+    async def discover_schema(self) -> Dict[str, Any]:
+        """Introspect the database and return available labels, relationship
+        types, property keys, and sample data.
+
+        Used for schema mapping configuration when connecting to an external
+        graph database with an unknown property schema.
+
+        Returns
+        -------
+        dict
+            Keys may include ``labels``, ``relationshipTypes``,
+            ``labelDetails`` (per-label counts, property keys, samples),
+            and ``suggestedMapping`` (a best-guess SchemaMapping dict).
+            Returns empty dict by default.
+        """
+        return {}
+
     async def list_graphs(self) -> List[str]:
         """
         List named graph keys / databases available on this provider instance.

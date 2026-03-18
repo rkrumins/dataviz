@@ -21,13 +21,14 @@ import {
 } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
+import { Neo4jLogo, FalkorDBLogo, DataHubLogo, MockLogo } from './ProviderLogos'
 
 // ─── Provider type helpers ────────────────────────────────────────────────────
 const PROVIDER_TYPES = [
-    { type: 'falkordb', label: 'FalkorDB', icon: '⚡', color: 'text-amber-500 bg-amber-500/10 border-amber-500/20' },
-    { type: 'neo4j', label: 'Neo4j', icon: '🔵', color: 'text-blue-500 bg-blue-500/10 border-blue-500/20' },
-    { type: 'datahub', label: 'DataHub', icon: '📊', color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20' },
-    { type: 'mock', label: 'Mock', icon: '🧪', color: 'text-violet-500 bg-violet-500/10 border-violet-500/20' },
+    { type: 'falkordb', label: 'FalkorDB', Logo: FalkorDBLogo, color: 'text-amber-500 bg-amber-500/10 border-amber-500/20' },
+    { type: 'neo4j', label: 'Neo4j', Logo: Neo4jLogo, color: 'text-blue-500 bg-blue-500/10 border-blue-500/20' },
+    { type: 'datahub', label: 'DataHub', Logo: DataHubLogo, color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20' },
+    { type: 'mock', label: 'Mock', Logo: MockLogo, color: 'text-violet-500 bg-violet-500/10 border-violet-500/20' },
 ]
 function getProviderConfig(type: string) {
     return PROVIDER_TYPES.find(p => p.type === type) || PROVIDER_TYPES[3]
@@ -804,8 +805,8 @@ export function RegistryAssets() {
                                         : 'bg-canvas-elevated border-glass-border hover:border-indigo-400/30 hover:bg-indigo-500/5'
                                 )}
                             >
-                                <div className={cn('w-8 h-8 rounded-lg border flex items-center justify-center text-sm shrink-0', config.color)}>
-                                    {config.icon}
+                                <div className={cn('w-8 h-8 rounded-lg border flex items-center justify-center shrink-0', config.color)}>
+                                    <config.Logo className="w-4 h-4" />
                                 </div>
                                 <div className="flex-1 min-w-0">
                                     <p className="text-sm font-semibold text-ink truncate">{p.name}</p>
@@ -861,7 +862,7 @@ export function RegistryAssets() {
                         <div className="flex items-center justify-between mb-4 shrink-0">
                             <div>
                                 <h2 className="text-base font-bold text-ink flex items-center gap-2">
-                                    <span>{getProviderConfig(selectedProvider.providerType).icon}</span>
+                                    {(() => { const C = getProviderConfig(selectedProvider.providerType); return <C.Logo className="w-5 h-5" /> })()}
                                     {selectedProvider.name}
                                 </h2>
                                 <p className="text-sm text-ink-muted mt-0.5">
