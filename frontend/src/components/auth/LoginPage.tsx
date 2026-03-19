@@ -1,30 +1,31 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Lock, User, AtSign, ChevronRight, AlertCircle, ShieldCheck } from 'lucide-react'
+import { Lock, AtSign, ChevronRight, AlertCircle, ShieldCheck } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { cn } from '@/lib/utils'
 
 export function LoginPage() {
-    const [username, setUsername] = useState('')
+    const [email, setEmail] = useState('')
     const [password, setPassword] = useState('')
-    const [isLoading, setIsLoading] = useState(false)
+    const navigate = useNavigate()
 
-    const { login, error, clearError, lockoutUntil } = useAuthStore()
+    const { login, error, clearError, isLoading, isAuthenticated } = useAuthStore()
 
-    const isLockedOut = lockoutUntil ? new Date(lockoutUntil) > new Date() : false
+    // If already authenticated, redirect to dashboard
+    useEffect(() => {
+        if (isAuthenticated) navigate('/', { replace: true })
+    }, [isAuthenticated, navigate])
 
     useEffect(() => {
-        // Clear errors when mounting
         clearError()
     }, [clearError])
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
-        if (!username || !password || isLockedOut) return
-
-        setIsLoading(true)
-        await login(username, password)
-        setIsLoading(false)
+        if (!email || !password || isLoading) return
+        const ok = await login(email, password)
+        if (ok) navigate('/', { replace: true })
     }
 
     return (
@@ -83,19 +84,19 @@ export function LoginPage() {
                     {/* Form */}
                     <form onSubmit={handleSubmit} className="space-y-5">
                         <div className="space-y-2">
-                            <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted ml-1" htmlFor="username">
-                                Username
+                            <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted ml-1" htmlFor="email">
+                                Email
                             </label>
                             <div className="relative group">
                                 <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted group-focus-within:text-accent-lineage transition-colors">
-                                    <User className="w-4 h-4" />
+                                    <AtSign className="w-4 h-4" />
                                 </div>
                                 <input
-                                    id="username"
-                                    type="text"
-                                    placeholder="admin"
-                                    value={username}
-                                    onChange={(e) => setUsername(e.target.value)}
+                                    id="email"
+                                    type="email"
+                                    placeholder="admin@company.com"
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
                                     className="input pl-10 h-12 bg-white/50 dark:bg-black/20 border-white/40 dark:border-white/10"
                                     required
                                 />
@@ -140,10 +141,10 @@ export function LoginPage() {
                         {/* Submit Button */}
                         <button
                             type="submit"
-                            disabled={isLoading || isLockedOut}
+                            disabled={isLoading}
                             className={cn(
                                 "w-full h-12 rounded-xl bg-accent-lineage text-white font-semibold shadow-lg shadow-accent-lineage/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2",
-                                (isLoading || isLockedOut) ? "opacity-70 cursor-not-allowed" : "hover:brightness-110"
+                                isLoading ? "opacity-70 cursor-not-allowed" : "hover:brightness-110"
                             )}
                         >
                             {isLoading ? (
@@ -158,9 +159,17 @@ export function LoginPage() {
                     </form>
 
                     {/* Footer Info */}
-                    <div className="mt-8 text-center">
+                    <div className="mt-8 text-center space-y-3">
                         <p className="text-xs text-ink-muted">
-                            Secure access for authorized personnel only
+                            <Link to="/forgot-password" className="text-accent-lineage font-semibold hover:underline">
+                                Forgot your password?
+                            </Link>
+                        </p>
+                        <p className="text-xs text-ink-muted">
+                            Don't have an account?{' '}
+                            <Link to="/signup" className="text-accent-lineage font-semibold hover:underline">
+                                Sign up
+                            </Link>
                         </p>
                     </div>
                 </div>

@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 
@@ -11,6 +12,9 @@ from .db.engine import init_db, close_db, get_async_session
 from .db.seed_templates import seed_templates
 from .middleware.request_id import RequestIdMiddleware
 from .middleware.logging import StructuredLoggingMiddleware, configure_json_logging
+from .middleware.security_headers import SecurityHeadersMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from .registry.provider_registry import provider_registry
 
 logger = logging.getLogger(__name__)
@@ -53,6 +57,37 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("System default ontology seed warning: %s", exc)
 
+    # 2c. Bootstrap system admin (idempotent — skips if any user exists)
+    # Always ensures at least one admin account is present.
+    # Customizable via ADMIN_EMAIL / ADMIN_PASSWORD env vars; defaults provided.
+    try:
+        import os
+        from .db.repositories import user_repo
+        from .auth.password import hash_password
+        admin_email = os.getenv("ADMIN_EMAIL", "admin@nexuslineage.local")
+        admin_password = os.getenv("ADMIN_PASSWORD", "changeme")
+        async with get_async_session() as session:
+            user_count = await user_repo.count_users(session)
+            if user_count == 0:
+                user = await user_repo.create_user(
+                    session,
+                    email=admin_email,
+                    password_hash=hash_password(admin_password),
+                    first_name="System",
+                    last_name="Admin",
+                    status="active",
+                )
+                await user_repo.assign_role(session, user.id, "admin")
+                await user_repo.create_approval(
+                    session, user.id, status="approved", approved_by="system",
+                )
+                logger.info(
+                    "System admin created: %s (change password after first login!)",
+                    admin_email,
+                )
+    except Exception as exc:
+        logger.warning("Admin bootstrap warning: %s", exc)
+
     # 3. Ensure a primary connection exists; bootstrap from env vars if DB is empty
     async with get_async_session() as session:
         try:
@@ -83,16 +118,26 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Rate-limit 429 handler
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # ------------------------------------------------------------------ #
 # Middleware (outermost → innermost order)                             #
 # ------------------------------------------------------------------ #
 
+_cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
+_cors_origins = (
+    [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+    if _cors_origins_env
+    else ["http://localhost:3000", "http://localhost:5173"]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173", "*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
 
 # GZip compression for responses > 1 KB
@@ -103,6 +148,9 @@ app.add_middleware(StructuredLoggingMiddleware)
 
 # X-Request-ID generation / propagation
 app.add_middleware(RequestIdMiddleware)
+
+# Security headers (X-Content-Type-Options, X-Frame-Options, CSP, HSTS, etc.)
+app.add_middleware(SecurityHeadersMiddleware)
 
 # ------------------------------------------------------------------ #
 # Routers                                                              #

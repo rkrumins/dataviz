@@ -6,6 +6,7 @@ from . import (
     ontology_definition_repo,
     feature_flags_repo,
     feature_registry_repo,
+    user_repo,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "ontology_definition_repo",
     "feature_flags_repo",
     "feature_registry_repo",
+    "user_repo",
 ]
