@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 
@@ -11,6 +12,9 @@ from .db.engine import init_db, close_db, get_async_session
 from .db.seed_templates import seed_templates
 from .middleware.request_id import RequestIdMiddleware
 from .middleware.logging import StructuredLoggingMiddleware, configure_json_logging
+from .middleware.security_headers import SecurityHeadersMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from .registry.provider_registry import provider_registry
 
 logger = logging.getLogger(__name__)
@@ -114,16 +118,26 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Rate-limit 429 handler
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # ------------------------------------------------------------------ #
 # Middleware (outermost → innermost order)                             #
 # ------------------------------------------------------------------ #
 
+_cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
+_cors_origins = (
+    [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+    if _cors_origins_env
+    else ["http://localhost:3000", "http://localhost:5173"]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173", "*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
 
 # GZip compression for responses > 1 KB
@@ -134,6 +148,9 @@ app.add_middleware(StructuredLoggingMiddleware)
 
 # X-Request-ID generation / propagation
 app.add_middleware(RequestIdMiddleware)
+
+# Security headers (X-Content-Type-Options, X-Frame-Options, CSP, HSTS, etc.)
+app.add_middleware(SecurityHeadersMiddleware)
 
 # ------------------------------------------------------------------ #
 # Routers                                                              #

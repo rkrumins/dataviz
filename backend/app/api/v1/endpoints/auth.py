@@ -8,7 +8,9 @@ POST /api/v1/auth/reset-password    → 200 + message
 """
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.password import hash_password, verify_password
@@ -28,6 +30,14 @@ from backend.common.models.auth import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+limiter = Limiter(key_func=get_remote_address)
+
+# Pre-computed Argon2id hash used for constant-time login responses when
+# the user doesn't exist.  The actual plaintext doesn't matter — it just
+# needs to be a valid Argon2id hash so verify_password runs in the same
+# time as a real check.
+_DUMMY_HASH = hash_password("__timing_dummy_do_not_use__")
 
 
 # ── helpers ────────────────────────────────────────────────────────────
@@ -80,20 +90,21 @@ async def _build_user_response(session: AsyncSession, user) -> UserPublicRespons
 # ── POST /auth/signup ─────────────────────────────────────────────────
 
 @router.post("/signup", response_model=SignUpResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("5/minute")
 async def signup(
+    request: Request,
     body: SignUpRequest,
     session: AsyncSession = Depends(get_db_session),
 ):
     # 1. Password strength
     _check_password_strength(body.password)
 
-    # 2. Email uniqueness
+    # 2. Check email uniqueness — return the same 201 response regardless
+    # to prevent email enumeration attacks.
     existing = await user_repo.get_user_by_email(session, body.email)
     if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists.",
-        )
+        logger.debug("Signup attempt with existing email (suppressed)")
+        return SignUpResponse(message="Account created. Awaiting administrator approval.")
 
     # 3. Hash password
     hashed = hash_password(body.password)
@@ -125,11 +136,12 @@ async def signup(
 # ── POST /auth/login ──────────────────────────────────────────────────
 
 @router.post("/login", response_model=LoginResponse)
+@limiter.limit("10/minute")
 async def login(
+    request: Request,
     body: LoginRequest,
     session: AsyncSession = Depends(get_db_session),
 ):
-    # Generic error to prevent email enumeration
     _invalid = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid email or password",
@@ -137,24 +149,20 @@ async def login(
 
     # 1. Find user
     user = await user_repo.get_user_by_email(session, body.email)
+
+    # 2. Verify password — always run a hash comparison to prevent timing
+    #    side-channels that reveal whether an email exists.
     if user is None:
+        # Dummy verify so the response time is indistinguishable from a real
+        # user with a wrong password (Argon2id is deliberately slow).
+        verify_password(body.password, _DUMMY_HASH)
         raise _invalid
 
-    # 2. Verify password
     if not verify_password(body.password, user.password_hash):
         raise _invalid
 
-    # 3. Check status
-    if user.status == "pending":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your account is pending administrator approval.",
-        )
-    if user.status == "suspended":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your account has been disabled. Contact an administrator.",
-        )
+    # 3. Check status — use a single generic message to avoid leaking
+    #    whether an email exists and what state the account is in.
     if user.status != "active":
         raise _invalid
 
@@ -172,7 +180,9 @@ async def login(
 # ── POST /auth/forgot-password ──────────────────────────────────────
 
 @router.post("/forgot-password")
+@limiter.limit("3/minute")
 async def forgot_password(
+    request: Request,
     body: ForgotPasswordRequest,
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -183,7 +193,10 @@ async def forgot_password(
     """
     user = await user_repo.get_user_by_email(session, body.email)
     if user is not None and user.status in ("active", "pending"):
-        raw_token, expires_at = await user_repo.create_reset_token(session, user.id)
+        # Flag the user as having requested a reset — do NOT generate a
+        # token here. The admin will see the flag in the dashboard and
+        # generate a shareable token via the admin endpoint.
+        await user_repo.flag_reset_requested(session, user.id)
         await user_repo.create_outbox_event(
             session,
             event_type="user.password_reset_requested",
@@ -199,7 +212,9 @@ async def forgot_password(
 # ── POST /auth/reset-password ───────────────────────────────────────
 
 @router.post("/reset-password")
+@limiter.limit("5/minute")
 async def reset_password(
+    request: Request,
     body: ResetPasswordRequest,
     session: AsyncSession = Depends(get_db_session),
 ):

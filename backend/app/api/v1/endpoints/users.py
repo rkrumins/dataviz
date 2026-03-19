@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import get_current_user, require_admin
 from backend.app.auth.password import hash_password
+from backend.app.api.v1.endpoints.auth import _check_password_strength
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
 from backend.common.models.auth import (
@@ -268,6 +269,7 @@ async def admin_reset_password(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
+    _check_password_strength(body.new_password)
     hashed = hash_password(body.new_password)
     await user_repo.update_password(session, user_id, hashed)
 

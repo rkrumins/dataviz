@@ -29,3 +29,5 @@ def _resolve_secret() -> str:
 JWT_SECRET_KEY: str = _resolve_secret()
 JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", _DEFAULT_ALGORITHM)
 JWT_EXPIRY_MINUTES: int = int(os.getenv("JWT_EXPIRY_MINUTES", str(_DEFAULT_EXPIRY_MINUTES)))
+JWT_ISSUER: str = os.getenv("JWT_ISSUER", "nexus-lineage")
+JWT_AUDIENCE: str = os.getenv("JWT_AUDIENCE", "nexus-lineage")

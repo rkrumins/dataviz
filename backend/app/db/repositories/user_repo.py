@@ -200,7 +200,7 @@ def _hash_token(token: str) -> str:
 async def create_reset_token(
     session: AsyncSession,
     user_id: str,
-    expiry_hours: int = 24,
+    expiry_hours: int = 1,
 ) -> tuple[str, str]:
     """Generate a reset token, store its hash, and return (raw_token, expires_at)."""
     user = await get_user_by_id(session, user_id)
@@ -244,11 +244,26 @@ async def clear_reset_token(session: AsyncSession, user_id: str) -> None:
         await session.flush()
 
 
+async def flag_reset_requested(session: AsyncSession, user_id: str) -> None:
+    """Mark a user as having requested a password reset (without creating
+    a token).  Sets a sentinel value on reset_token_hash so that
+    has_pending_reset() returns True for the admin dashboard."""
+    user = await get_user_by_id(session, user_id)
+    if user:
+        user.reset_token_hash = "__requested__"
+        user.reset_token_expires_at = None
+        user.updated_at = _now()
+        await session.flush()
+
+
 async def has_pending_reset(session: AsyncSession, user_id: str) -> bool:
-    """Check if a user has a non-expired reset token."""
+    """Check if a user has a pending reset request or a non-expired reset token."""
     user = await get_user_by_id(session, user_id)
     if user is None or not user.reset_token_hash:
         return False
+    # Sentinel means user requested a reset but admin hasn't generated a token yet
+    if user.reset_token_hash == "__requested__":
+        return True
     if user.reset_token_expires_at:
         expires = datetime.fromisoformat(user.reset_token_expires_at)
         return datetime.now(timezone.utc) <= expires

@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 
 import jwt
 
-from .config import JWT_SECRET_KEY, JWT_ALGORITHM, JWT_EXPIRY_MINUTES
+from .config import JWT_SECRET_KEY, JWT_ALGORITHM, JWT_EXPIRY_MINUTES, JWT_ISSUER, JWT_AUDIENCE
 
 
 def create_access_token(
@@ -27,6 +27,8 @@ def create_access_token(
         "sub": user_id,
         "email": email,
         "role": role,
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
         "iat": now,
         "exp": now + timedelta(minutes=JWT_EXPIRY_MINUTES),
     }
@@ -41,4 +43,10 @@ def decode_token(token: str) -> dict:
 
     Raises jwt.ExpiredSignatureError or jwt.InvalidTokenError on failure.
     """
-    return jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+    return jwt.decode(
+        token,
+        JWT_SECRET_KEY,
+        algorithms=[JWT_ALGORITHM],
+        issuer=JWT_ISSUER,
+        audience=JWT_AUDIENCE,
+    )

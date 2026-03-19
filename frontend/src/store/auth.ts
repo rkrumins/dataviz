@@ -1,3 +1,11 @@
+// SECURITY NOTE: The JWT is stored in localStorage via Zustand persist.
+// localStorage is accessible to any JS running on the page, making it
+// vulnerable to XSS.  The backend's CSP headers mitigate this, but for
+// maximum security the token should migrate to an HttpOnly cookie set by
+// the backend.  This requires backend cookie-setting endpoints, CSRF
+// protection, and updating all API calls to use credentials: 'include'.
+// Tracked for v2.
+
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { authService, type UserPublicResponse, type SignUpRequest } from '@/services/authService'
