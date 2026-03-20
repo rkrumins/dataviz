@@ -208,6 +208,7 @@ async def init_db() -> None:
             "ALTER TABLE workspace_data_sources ADD COLUMN dedicated_graph_name TEXT",
             "ALTER TABLE workspace_data_sources ADD COLUMN catalog_item_id TEXT",
             "ALTER TABLE workspace_data_sources ADD COLUMN access_level TEXT DEFAULT 'read'",
+            "ALTER TABLE workspace_data_sources ADD COLUMN extra_config TEXT",
             "ALTER TABLE context_models ADD COLUMN view_type TEXT",
             "ALTER TABLE context_models ADD COLUMN config TEXT",
             "ALTER TABLE context_models ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
