@@ -42,6 +42,8 @@ interface CanvasState {
   edges: LineageEdge[]
   _nodeIndex: Set<string>
   _edgeIndex: Set<string>
+  /** Monotonic counter — incremented on every node/edge mutation. */
+  _version: number
   setNodes: (nodes: LineageNode[]) => void
   setEdges: (edges: LineageEdge[]) => void
   addNodes: (nodes: LineageNode[]) => void
@@ -100,15 +102,43 @@ interface CanvasState {
 }
 
 import { persist, createJSONStorage } from 'zustand/middleware'
+import type { StateCreator } from 'zustand'
+
+/**
+ * Middleware: auto-increment `_version` whenever nodes or edges change.
+ * Replaces brittle fingerprint sampling with a monotonic counter.
+ */
+const withVersion: (
+  config: StateCreator<CanvasState, [], []>,
+) => StateCreator<CanvasState, [], []> =
+  (config) => (rawSet, get, api) => {
+    const wrappedSet: typeof rawSet = (...args: any[]) => {
+      const [partial, replace] = args
+      const update: Record<string, unknown> =
+        typeof partial === 'function' ? partial(get()) : partial
+      const touchesGraph = 'nodes' in update || 'edges' in update
+        || '_nodeIndex' in update || '_edgeIndex' in update
+      if (touchesGraph) {
+        return (rawSet as any)(
+          { ...update, _version: get()._version + 1 } as Partial<CanvasState>,
+          replace,
+        )
+      }
+      return (rawSet as any)(partial, replace)
+    }
+    return config(wrappedSet, get, api)
+  }
 
 export const useCanvasStore = create<CanvasState>()(
   persist(
+    withVersion(
     (set, get) => ({
       // Nodes and Edges
       nodes: [],
       edges: [],
       _nodeIndex: new Set(),
       _edgeIndex: new Set(),
+      _version: 0,
       setNodes: (nodes) => set({ nodes, _nodeIndex: new Set(nodes.map((n) => n.id)) }),
       setEdges: (edges) => set({ edges, _edgeIndex: new Set(edges.map((e) => e.id)) }),
       addNodes: (newNodes) => set((state) => {
@@ -290,7 +320,7 @@ export const useCanvasStore = create<CanvasState>()(
           _edgeIndex: nextEdgeIndex,
         }
       }),
-    }),
+    })),
     {
       name: 'canvas-storage',
       storage: createJSONStorage(() => localStorage),
@@ -307,4 +337,5 @@ export const useNodes = () => useCanvasStore((s) => s.nodes)
 export const useEdges = () => useCanvasStore((s) => s.edges)
 export const useSelectedNodes = () => useCanvasStore((s) => s.selectedNodeIds)
 export const useIsLoading = () => useCanvasStore((s) => s.isLoading)
+export const useCanvasVersion = () => useCanvasStore((s) => s._version)
 

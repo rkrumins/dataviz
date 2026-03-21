@@ -31,6 +31,8 @@ class EdgeType(str, Enum):
     TAGGED_WITH = 'TAGGED_WITH'
     RELATED_TO = 'RELATED_TO'
     AGGREGATED = 'AGGREGATED'
+    DEPENDS_ON = 'DEPENDS_ON'
+    DEFINED_BY = 'DEFINED_BY'
 
 class Granularity(str, Enum):
     """

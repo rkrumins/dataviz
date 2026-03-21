@@ -128,6 +128,7 @@ interface ReferenceModelState {
 
     // ===== Lazy Loading =====
     toggleNodeExpanded: (nodeId: string) => void
+    setExpandedNodeIds: (ids: Set<string>) => void
     isNodeExpanded: (nodeId: string) => boolean
 
     // ===== Query Helpers =====
@@ -465,6 +466,10 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     newExpanded.add(nodeId)
                 }
                 set({ expandedNodeIds: newExpanded })
+            },
+
+            setExpandedNodeIds: (ids) => {
+                set({ expandedNodeIds: ids })
             },
 
             isNodeExpanded: (nodeId) => {

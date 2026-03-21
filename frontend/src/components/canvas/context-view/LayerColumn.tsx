@@ -260,6 +260,13 @@ export const LayerColumn = React.memo(function LayerColumn({
     [flatTree]
   )
 
+  // O(1) lookup: node ID → navigable index (replaces O(N²) findIndex in render loop)
+  const navigableIndexMap = useMemo(() => {
+    const map = new Map<string, number>()
+    navigableItems.forEach((item, idx) => map.set(item.node.id, idx))
+    return map
+  }, [navigableItems])
+
   // Reset focus when tree content changes
   useEffect(() => {
     setFocusIndex(-1)
@@ -654,7 +661,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                 }
 
                 const { node, depth, isLast, parentIsLast } = item
-                const navIdx = navigableItems.findIndex(ni => ni.node.id === node.id)
+                const navIdx = navigableIndexMap.get(node.id) ?? -1
                 return (
                   <FlatTreeItem
                     key={node.id}

@@ -172,10 +172,14 @@ export function useEdgeProjection({
           }
         })))
 
-    // 3. Trace / Regular Edges (only when tracing)
+    // 3. Regular canvas edges — included when lineage flow is enabled OR tracing.
+    // Performance guard: only include edges where at least one endpoint is in displayMap.
     let regularEdges: any[] = []
-    if (isTracing) {
-      regularEdges = edges.filter(edge => !isContainmentEdge(normalizeEdgeType(edge)))
+    if (showLineageFlow || isTracing) {
+      regularEdges = edges.filter(edge => {
+        if (isContainmentEdge(normalizeEdgeType(edge))) return false
+        return displayMap.has(edge.source) || displayMap.has(edge.target)
+      })
     }
 
     return [...aggEdges, ...expandedDetailedEdges, ...regularEdges]
