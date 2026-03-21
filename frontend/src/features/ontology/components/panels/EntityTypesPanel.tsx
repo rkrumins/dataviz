@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useState, useMemo } from 'react'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -182,13 +182,20 @@ export function EntityTypesPanel({
   onDelete: (id: string, name: string) => void
   onDismissValidation: () => void
 }) {
+  const [showStagedOnly, setShowStagedOnly] = useState(false)
+  const hasChanges = changedIds && changedIds.size > 0
+
   const filtered = useMemo(() => {
-    if (!search) return entityTypes
+    let list = entityTypes
+    if (showStagedOnly && changedIds && changedIds.size > 0) {
+      list = list.filter(et => changedIds.has(et.id))
+    }
+    if (!search) return list
     const q = search.toLowerCase()
-    return entityTypes.filter(et =>
+    return list.filter(et =>
       et.name.toLowerCase().includes(q) || et.id.toLowerCase().includes(q)
     )
-  }, [entityTypes, search])
+  }, [entityTypes, search, showStagedOnly, changedIds])
 
   // Build a map from entity type id to validation issues that mention it
   const validationIssuesByType = useMemo(() => {
@@ -241,30 +248,46 @@ export function EntityTypesPanel({
         </div>
       )}
 
-      {/* Search bar — full width with clear button */}
-      <div className="relative mb-4">
-        <LucideIcons.Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
-        <input
-          type="text"
-          value={search}
-          onChange={e => onSearch(e.target.value)}
-          placeholder="Search entity types by name or ID..."
-          className="w-full pl-10 pr-10 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-all"
-        />
-        {search && (
+      {/* Search bar + staged filter */}
+      <div className="flex items-center gap-2 mb-4">
+        <div className="relative flex-1">
+          <LucideIcons.Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
+          <input
+            type="text"
+            value={search}
+            onChange={e => onSearch(e.target.value)}
+            placeholder="Search entity types by name or ID..."
+            className="w-full pl-10 pr-10 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-all"
+          />
+          {search && (
+            <button
+              onClick={() => onSearch('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 text-ink-muted transition-colors"
+            >
+              <LucideIcons.X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+        {hasChanges && (
           <button
-            onClick={() => onSearch('')}
-            className="absolute right-3 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 text-ink-muted transition-colors"
+            onClick={() => setShowStagedOnly(v => !v)}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-semibold border transition-all whitespace-nowrap',
+              showStagedOnly
+                ? 'bg-amber-500 text-white border-amber-500 shadow-sm shadow-amber-500/20'
+                : 'bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800/50 hover:bg-amber-100 dark:hover:bg-amber-950/40',
+            )}
           >
-            <LucideIcons.X className="w-3.5 h-3.5" />
+            <LucideIcons.Filter className="w-3.5 h-3.5" />
+            Staged ({changedIds!.size})
           </button>
         )}
       </div>
 
-      {/* Results count when searching */}
-      {search && filtered.length > 0 && (
+      {/* Results count when filtering */}
+      {(search || showStagedOnly) && filtered.length > 0 && (
         <p className="text-[11px] text-ink-muted mb-3">
-          {filtered.length} of {entityTypes.length} entity type{entityTypes.length !== 1 ? 's' : ''} match "{search}"
+          {filtered.length} of {entityTypes.length} entity type{entityTypes.length !== 1 ? 's' : ''}{search ? ` match "${search}"` : ''}{showStagedOnly ? ' (staged only)' : ''}
         </p>
       )}
 

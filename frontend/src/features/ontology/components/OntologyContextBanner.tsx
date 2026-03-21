@@ -27,7 +27,7 @@ import {
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
-import { workspaceService } from '@/services/workspaceService'
+import { listViews, type View } from '@/services/viewApiService'
 import type { GraphSchemaStats } from '@/providers/GraphDataProvider'
 import { OntologyStatusBadge } from './OntologyStatusBadge'
 import { formatCount } from '../lib/ontology-parsers'
@@ -104,17 +104,17 @@ export function OntologyContextBanner({
     )
   }, [ontologies, search])
 
-  // Fetch impacted views and show confirmation
+  // Fetch impacted views (workspace-level, not data-source-level) and show confirmation
   const initiateAssign = useCallback(async (ontologyId: string | undefined, ontologyName: string) => {
     if (!workspace || !dataSource) return
 
-    // If there's already an assigned ontology, fetch impact before confirming
+    // If there's already an assigned ontology, fetch workspace views before confirming
     if (assignedOntology) {
       setLoadingImpact(true)
       setConfirmTarget({ ontologyId, ontologyName })
       try {
-        const impact = await workspaceService.getDataSourceImpact(workspace.id, dataSource.id)
-        setImpactedViews(impact.views ?? [])
+        const views = await listViews({ workspaceId: workspace.id })
+        setImpactedViews(views.map((v: View) => ({ id: v.id, name: v.name, type: v.viewType ?? 'view' })))
       } catch {
         setImpactedViews([])
       } finally {
@@ -224,22 +224,6 @@ export function OntologyContextBanner({
                   >
                     {isAssigning ? <Loader2 className="w-3 h-3 animate-spin" /> : <AlertTriangle className="w-3 h-3" />}
                     Re-assign to Current
-                  </button>
-                )}
-
-                {dataSource && (
-                  <button
-                    onClick={() => setShowPicker(!showPicker)}
-                    disabled={isAssigning}
-                    className={cn(
-                      'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-semibold transition-all',
-                      showPicker
-                        ? 'bg-indigo-500 text-white shadow-md shadow-indigo-500/20'
-                        : 'bg-indigo-500/10 border border-indigo-500/20 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500 hover:text-white hover:shadow-md hover:shadow-indigo-500/20',
-                    )}
-                  >
-                    {isAssigning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
-                    Change Ontology
                   </button>
                 )}
               </div>

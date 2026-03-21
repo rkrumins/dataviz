@@ -23,6 +23,26 @@ const COLOR_PALETTE = [
   '#64748b', '#6b7280', '#71717a',
 ]
 
+const TAB_DEFS = [
+  { id: 'basic' as const, label: 'Identity', icon: LucideIcons.FileText },
+  { id: 'visual' as const, label: 'Appearance', icon: LucideIcons.Palette },
+  { id: 'fields' as const, label: 'Fields', icon: LucideIcons.List },
+  { id: 'hierarchy' as const, label: 'Hierarchy', icon: LucideIcons.FolderTree },
+]
+
+const FIELD_TYPE_OPTIONS: Array<{ value: EntityFieldDefinition['type']; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { value: 'string', label: 'String', icon: LucideIcons.Type },
+  { value: 'number', label: 'Number', icon: LucideIcons.Hash },
+  { value: 'boolean', label: 'Boolean', icon: LucideIcons.ToggleLeft },
+  { value: 'date', label: 'Date', icon: LucideIcons.Calendar },
+  { value: 'urn', label: 'URN', icon: LucideIcons.Link },
+  { value: 'tags', label: 'Tags', icon: LucideIcons.Tags },
+  { value: 'badge', label: 'Badge', icon: LucideIcons.Award },
+  { value: 'progress', label: 'Progress', icon: LucideIcons.BarChart3 },
+  { value: 'status', label: 'Status', icon: LucideIcons.CircleDot },
+  { value: 'user', label: 'User', icon: LucideIcons.User },
+]
+
 interface EntityTypeEditorProps {
   entityType?: EntityTypeSchema
   availableEntityTypes?: { id: string; name: string }[]
@@ -48,183 +68,229 @@ export function EntityTypeEditor({ entityType, availableEntityTypes = [], readOn
     setForm((prev) => ({ ...prev, visual: { ...prev.visual, [key]: value } }))
   }
 
+  const canSave = form.name.trim() && form.id.trim()
+
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b border-glass-border">
-        <div>
-          <h2 className="text-lg font-display font-semibold">
-            {isNew ? 'Create Entity Type' : 'Edit Entity Type'}
-          </h2>
-          <p className="text-sm text-ink-muted">
-            Define how this type of entity appears and behaves
-          </p>
-        </div>
-        <button onClick={onCancel} className="btn btn-ghost p-2">
-          <LucideIcons.X className="w-5 h-5" />
-        </button>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex items-center gap-1 p-2 border-b border-glass-border">
-        {(['basic', 'visual', 'fields', 'hierarchy'] as const).map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={cn(
-              "px-4 py-2 rounded-lg text-sm font-medium transition-colors",
-              activeTab === tab
-                ? "bg-accent-lineage/10 text-accent-lineage"
-                : "text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5"
-            )}
-          >
-            {tab.charAt(0).toUpperCase() + tab.slice(1)}
-          </button>
-        ))}
+      {/* Tabs — underline style matching page tabs */}
+      <div className="flex items-center border-b border-glass-border px-4 shrink-0">
+        {TAB_DEFS.map(t => {
+          const Icon = t.icon
+          const isActive = activeTab === t.id
+          return (
+            <button
+              key={t.id}
+              onClick={() => setActiveTab(t.id)}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-3 text-xs font-semibold transition-all border-b-2',
+                isActive
+                  ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
+                  : 'border-transparent text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
+              )}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              {t.label}
+            </button>
+          )
+        })}
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-        {activeTab === 'basic' && (
-          <BasicTab form={form} updateForm={updateForm} readOnly={readOnly} />
-        )}
-        {activeTab === 'visual' && (
-          <VisualTab form={form} updateVisual={updateVisual} readOnly={readOnly} />
-        )}
-        {activeTab === 'fields' && (
-          <FieldsTab form={form} setForm={setForm} readOnly={readOnly} />
-        )}
-        {activeTab === 'hierarchy' && (
-          <HierarchyTab form={form} updateForm={updateForm} availableEntityTypes={availableEntityTypes} readOnly={readOnly} />
-        )}
+      <div className="flex-1 overflow-y-auto custom-scrollbar">
+        <fieldset disabled={readOnly} className={cn(readOnly && 'opacity-75')}>
+          <div className="p-5">
+            {activeTab === 'basic' && (
+              <BasicTab form={form} updateForm={updateForm} isNew={isNew} />
+            )}
+            {activeTab === 'visual' && (
+              <VisualTab form={form} updateVisual={updateVisual} />
+            )}
+            {activeTab === 'fields' && (
+              <FieldsTab form={form} setForm={setForm} readOnly={readOnly} />
+            )}
+            {activeTab === 'hierarchy' && (
+              <HierarchyTab form={form} updateForm={updateForm} availableEntityTypes={availableEntityTypes} />
+            )}
+          </div>
+        </fieldset>
       </div>
 
-      {/* Footer */}
-      <div className="flex items-center justify-between p-4 border-t border-glass-border">
-        <button onClick={onCancel} className="btn btn-secondary btn-md">
+      {/* Footer — prominent action bar */}
+      <div className="flex items-center justify-between px-5 py-4 border-t border-glass-border bg-canvas-elevated/50">
+        <button
+          onClick={onCancel}
+          className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium text-ink-secondary border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-all"
+        >
           {readOnly ? 'Close' : 'Cancel'}
         </button>
         {!readOnly && (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => onSave(form)}
-              className="btn btn-primary btn-md"
-            >
-              {isNew ? 'Create Entity Type' : 'Stage Changes'}
-            </button>
-          </div>
+          <button
+            onClick={() => onSave(form)}
+            disabled={!canSave}
+            className={cn(
+              'flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold transition-all',
+              canSave
+                ? 'bg-indigo-500 text-white hover:bg-indigo-600 shadow-md shadow-indigo-500/25 hover:shadow-lg'
+                : 'bg-indigo-500/40 text-white/60 cursor-not-allowed',
+            )}
+          >
+            <LucideIcons.Check className="w-4 h-4" />
+            {isNew ? 'Create Entity Type' : 'Stage Changes'}
+          </button>
         )}
       </div>
     </div>
   )
 }
 
-// Basic Tab
-interface BasicTabProps {
-  form: EntityTypeSchema
-  updateForm: <K extends keyof EntityTypeSchema>(key: K, value: EntityTypeSchema[K]) => void
-  readOnly?: boolean
-}
+// ---------------------------------------------------------------------------
+// Section wrapper for consistent styling
+// ---------------------------------------------------------------------------
 
-function BasicTab({ form, updateForm, readOnly }: BasicTabProps) {
+function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-6">
-      <div>
-        <label className="block text-sm font-medium text-ink mb-1">
-          Type ID <span className="text-red-500">*</span>
-        </label>
-        <input
-          type="text"
-          value={form.id}
-          onChange={(e) => updateForm('id', e.target.value.toLowerCase().replace(/\s+/g, '-'))}
-          placeholder="e.g., dataset, pipeline, dashboard"
-          className="input"
-          disabled={readOnly}
-        />
-        <p className="text-2xs text-ink-muted mt-1">
-          Unique identifier used in configuration and API
-        </p>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm font-medium text-ink mb-1">
-            Display Name <span className="text-red-500">*</span>
-          </label>
-          <input
-            type="text"
-            value={form.name}
-            onChange={(e) => updateForm('name', e.target.value)}
-            placeholder="e.g., Dataset"
-            className="input"
-            disabled={readOnly}
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-ink mb-1">
-            Plural Name
-          </label>
-          <input
-            type="text"
-            value={form.pluralName}
-            onChange={(e) => updateForm('pluralName', e.target.value)}
-            placeholder="e.g., Datasets"
-            className="input"
-            disabled={readOnly}
-          />
-        </div>
-      </div>
-
-      <div>
-        <label className="block text-sm font-medium text-ink mb-1">
-          Description
-        </label>
-        <textarea
-          value={form.description || ''}
-          onChange={(e) => updateForm('description', e.target.value)}
-          placeholder="Describe what this entity type represents..."
-          rows={3}
-          className="input resize-none"
-          disabled={readOnly}
-        />
-      </div>
+    <div className="mb-5 last:mb-0">
+      <h3 className="text-xs font-bold text-ink-muted uppercase tracking-wider mb-1">{title}</h3>
+      {description && <p className="text-[11px] text-ink-muted/70 mb-3">{description}</p>}
+      {!description && <div className="mb-3" />}
+      {children}
     </div>
   )
 }
 
-// Visual Tab
-interface VisualTabProps {
+// ---------------------------------------------------------------------------
+// Basic Tab
+// ---------------------------------------------------------------------------
+
+function BasicTab({ form, updateForm, isNew }: {
   form: EntityTypeSchema
-  updateVisual: <K extends keyof EntityVisualConfig>(key: K, value: EntityVisualConfig[K]) => void
-  readOnly?: boolean
+  updateForm: <K extends keyof EntityTypeSchema>(key: K, value: EntityTypeSchema[K]) => void
+  isNew: boolean
+}) {
+  return (
+    <div className="space-y-5">
+      <Section title="Identification">
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-ink mb-1.5">
+              Type ID <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="text"
+              value={form.id}
+              onChange={(e) => updateForm('id', e.target.value.toLowerCase().replace(/\s+/g, '-'))}
+              placeholder="e.g., dataset, pipeline, dashboard"
+              className="w-full px-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/20 transition-all"
+              disabled={!isNew}
+            />
+            <p className="text-[10px] text-ink-muted/60 mt-1">Unique identifier — cannot be changed after creation</p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-ink mb-1.5">
+                Display Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={form.name}
+                onChange={(e) => updateForm('name', e.target.value)}
+                placeholder="e.g., Dataset"
+                className="w-full px-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/20 transition-all"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-ink mb-1.5">Plural Name</label>
+              <input
+                type="text"
+                value={form.pluralName}
+                onChange={(e) => updateForm('pluralName', e.target.value)}
+                placeholder="e.g., Datasets"
+                className="w-full px-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/20 transition-all"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-ink mb-1.5">Description</label>
+            <textarea
+              value={form.description || ''}
+              onChange={(e) => updateForm('description', e.target.value)}
+              placeholder="Describe what this entity type represents..."
+              rows={2}
+              className="w-full px-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/20 transition-all resize-none"
+            />
+          </div>
+        </div>
+      </Section>
+
+      <Section title="Behavior" description="How this entity type behaves in the graph">
+        <div className="space-y-2">
+          {([
+            { key: 'traceable' as const, label: 'Traceable', desc: 'Include in lineage traces', icon: LucideIcons.Route },
+            { key: 'expandable' as const, label: 'Expandable', desc: 'Can expand to show children', icon: LucideIcons.Maximize2 },
+            { key: 'draggable' as const, label: 'Draggable', desc: 'Can be repositioned on canvas', icon: LucideIcons.Move },
+          ]).map(({ key, label, desc, icon: Icon }) => (
+            <label
+              key={key}
+              className={cn(
+                'flex items-center gap-3 px-3.5 py-2.5 rounded-xl border cursor-pointer transition-all',
+                form.behavior[key]
+                  ? 'border-indigo-200 dark:border-indigo-800/50 bg-indigo-50/50 dark:bg-indigo-950/20'
+                  : 'border-glass-border hover:border-glass-border-hover hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+              )}
+            >
+              <Icon className={cn('w-4 h-4 flex-shrink-0', form.behavior[key] ? 'text-indigo-500' : 'text-ink-muted/50')} />
+              <div className="flex-1 min-w-0">
+                <span className="text-sm font-medium text-ink">{label}</span>
+                <p className="text-[10px] text-ink-muted">{desc}</p>
+              </div>
+              <input
+                type="checkbox"
+                checked={form.behavior[key]}
+                onChange={(e) => updateForm('behavior', { ...form.behavior, [key]: e.target.checked })}
+                className="w-4 h-4 rounded accent-indigo-500"
+              />
+            </label>
+          ))}
+        </div>
+      </Section>
+    </div>
+  )
 }
 
-function VisualTab({ form, updateVisual, readOnly }: VisualTabProps) {
+// ---------------------------------------------------------------------------
+// Visual Tab
+// ---------------------------------------------------------------------------
+
+function VisualTab({ form, updateVisual }: {
+  form: EntityTypeSchema
+  updateVisual: <K extends keyof EntityVisualConfig>(key: K, value: EntityVisualConfig[K]) => void
+}) {
   return (
-    <div className="space-y-6">
-      {/* Preview */}
-      <div className="p-4 rounded-xl bg-canvas border border-glass-border">
-        <p className="text-2xs text-ink-muted uppercase tracking-wider mb-3">Preview</p>
-        <div className="flex justify-center">
+    <div className="space-y-5">
+      {/* Live Preview */}
+      <div className="p-5 rounded-2xl bg-gradient-to-br from-black/[0.02] to-black/[0.04] dark:from-white/[0.02] dark:to-white/[0.04] border border-glass-border">
+        <p className="text-[10px] text-ink-muted uppercase tracking-widest font-bold mb-3">Live Preview</p>
+        <div className="flex justify-center py-2">
           <EntityPreview visual={form.visual} name={form.name} />
         </div>
       </div>
 
-      {/* Icon Picker */}
-      <div className={cn(readOnly && 'opacity-60 pointer-events-none')}>
-        <label className="block text-sm font-medium text-ink mb-2">Icon</label>
-        <div className="grid grid-cols-10 gap-1 p-2 rounded-lg bg-canvas border border-glass-border">
+      <Section title="Icon">
+        <div className="grid grid-cols-10 gap-1 p-2 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-glass-border">
           {COMMON_ICONS.map((iconName) => {
             const Icon = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string }>>)[iconName]
+            const selected = form.visual.icon === iconName
             return (
               <button
                 key={iconName}
                 onClick={() => updateVisual('icon', iconName)}
                 className={cn(
-                  "w-8 h-8 rounded-md flex items-center justify-center transition-colors",
-                  form.visual.icon === iconName
-                    ? "bg-accent-lineage text-white"
-                    : "hover:bg-black/5 dark:hover:bg-white/5 text-ink-secondary"
+                  'w-8 h-8 rounded-lg flex items-center justify-center transition-all',
+                  selected
+                    ? 'bg-indigo-500 text-white shadow-sm shadow-indigo-500/30 scale-110'
+                    : 'hover:bg-black/5 dark:hover:bg-white/5 text-ink-secondary hover:text-ink',
                 )}
               >
                 {Icon && <Icon className="w-4 h-4" />}
@@ -232,98 +298,97 @@ function VisualTab({ form, updateVisual, readOnly }: VisualTabProps) {
             )
           })}
         </div>
-      </div>
+      </Section>
 
-      {/* Color Picker */}
-      <div className={cn(readOnly && 'opacity-60 pointer-events-none')}>
-        <label className="block text-sm font-medium text-ink mb-2">Color</label>
-        <div className="flex flex-wrap gap-2">
+      <Section title="Color">
+        <div className="flex flex-wrap gap-1.5">
           {COLOR_PALETTE.map((color) => (
             <button
               key={color}
               onClick={() => updateVisual('color', color)}
               className={cn(
-                "w-8 h-8 rounded-lg transition-transform",
-                form.visual.color === color && "ring-2 ring-offset-2 ring-ink scale-110"
+                'w-8 h-8 rounded-lg transition-all',
+                form.visual.color === color
+                  ? 'ring-2 ring-offset-2 ring-offset-canvas ring-ink scale-110 shadow-md'
+                  : 'hover:scale-110',
               )}
               style={{ backgroundColor: color }}
             />
           ))}
         </div>
+      </Section>
+
+      <div className="grid grid-cols-2 gap-4">
+        <Section title="Shape">
+          <div className="flex flex-col gap-1.5">
+            {(['rectangle', 'rounded', 'pill'] as const).map((shape) => (
+              <button
+                key={shape}
+                onClick={() => updateVisual('shape', shape)}
+                className={cn(
+                  'px-3 py-2 text-left text-xs font-medium border transition-all',
+                  shape === 'rectangle' ? 'rounded-md' :
+                    shape === 'rounded' ? 'rounded-xl' : 'rounded-full',
+                  form.visual.shape === shape
+                    ? 'border-indigo-400 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 dark:text-indigo-400'
+                    : 'border-glass-border hover:border-glass-border-hover text-ink-secondary',
+                )}
+              >
+                <span className="capitalize">{shape}</span>
+              </button>
+            ))}
+          </div>
+        </Section>
+
+        <Section title="Size">
+          <div className="flex flex-col gap-1.5">
+            {(['xs', 'sm', 'md', 'lg', 'xl'] as const).map((size) => (
+              <button
+                key={size}
+                onClick={() => updateVisual('size', size)}
+                className={cn(
+                  'px-3 py-2 rounded-xl text-left text-xs font-medium border transition-all',
+                  form.visual.size === size
+                    ? 'border-indigo-400 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 dark:text-indigo-400'
+                    : 'border-glass-border hover:border-glass-border-hover text-ink-secondary',
+                )}
+              >
+                <span className="uppercase">{size}</span>
+              </button>
+            ))}
+          </div>
+        </Section>
       </div>
 
-      {/* Shape */}
-      <div className={cn(readOnly && 'opacity-60 pointer-events-none')}>
-        <label className="block text-sm font-medium text-ink mb-2">Shape</label>
-        <div className="flex items-center gap-2">
-          {(['rectangle', 'rounded', 'pill'] as const).map((shape) => (
-            <button
-              key={shape}
-              onClick={() => updateVisual('shape', shape)}
-              className={cn(
-                "px-4 py-2 border-2 transition-colors",
-                shape === 'rectangle' ? 'rounded-md' :
-                  shape === 'rounded' ? 'rounded-xl' : 'rounded-full',
-                form.visual.shape === shape
-                  ? "border-accent-lineage bg-accent-lineage/10"
-                  : "border-glass-border hover:border-ink-muted"
-              )}
-            >
-              <span className="text-sm capitalize">{shape}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Size */}
-      <div className={cn(readOnly && 'opacity-60 pointer-events-none')}>
-        <label className="block text-sm font-medium text-ink mb-2">Size</label>
-        <div className="flex items-center gap-2">
-          {(['xs', 'sm', 'md', 'lg', 'xl'] as const).map((size) => (
-            <button
-              key={size}
-              onClick={() => updateVisual('size', size)}
-              className={cn(
-                "px-3 py-1.5 rounded-lg border-2 text-sm uppercase transition-colors",
-                form.visual.size === size
-                  ? "border-accent-lineage bg-accent-lineage/10"
-                  : "border-glass-border hover:border-ink-muted"
-              )}
-            >
-              {size}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Border Style */}
-      <div className={cn(readOnly && 'opacity-60 pointer-events-none')}>
-        <label className="block text-sm font-medium text-ink mb-2">Border Style</label>
-        <div className="flex items-center gap-2">
+      <Section title="Border Style">
+        <div className="flex items-center gap-1.5">
           {(['solid', 'dashed', 'dotted', 'none'] as const).map((style) => (
             <button
               key={style}
               onClick={() => updateVisual('borderStyle', style)}
               className={cn(
-                "px-4 py-2 rounded-lg transition-colors",
+                'flex-1 px-3 py-2 rounded-xl text-xs font-medium transition-all',
                 style === 'solid' ? 'border-2' :
                   style === 'dashed' ? 'border-2 border-dashed' :
-                    style === 'dotted' ? 'border-2 border-dotted' : 'border-0 bg-black/5 dark:bg-white/5',
+                    style === 'dotted' ? 'border-2 border-dotted' : 'border-2 border-transparent bg-black/5 dark:bg-white/5',
                 form.visual.borderStyle === style
-                  ? "border-accent-lineage"
-                  : "border-glass-border"
+                  ? 'border-indigo-400 text-indigo-600 dark:text-indigo-400'
+                  : 'border-glass-border text-ink-secondary',
               )}
             >
-              <span className="text-sm capitalize">{style}</span>
+              <span className="capitalize">{style}</span>
             </button>
           ))}
         </div>
-      </div>
+      </Section>
     </div>
   )
 }
 
-// Entity Preview Component
+// ---------------------------------------------------------------------------
+// Entity Preview
+// ---------------------------------------------------------------------------
+
 function EntityPreview({ visual, name }: { visual: EntityVisualConfig; name: string }) {
   const Icon = ((LucideIcons as any)[visual.icon] || LucideIcons.Box) as React.ComponentType<any>
 
@@ -348,7 +413,7 @@ function EntityPreview({ visual, name }: { visual: EntityVisualConfig; name: str
     <motion.div
       layout
       className={cn(
-        "bg-canvas-elevated border-2",
+        'bg-canvas-elevated border-2 shadow-lg',
         sizeClasses[visual.size],
         shapeClasses[visual.shape],
         visual.borderStyle === 'dashed' && 'border-dashed',
@@ -368,7 +433,7 @@ function EntityPreview({ visual, name }: { visual: EntityVisualConfig; name: str
         </div>
         <div>
           <span className="text-2xs font-medium uppercase" style={{ color: visual.color }}>
-            {name}
+            {name || 'Entity'}
           </span>
           <p className="text-sm font-medium text-ink">Example Entity</p>
         </div>
@@ -377,18 +442,19 @@ function EntityPreview({ visual, name }: { visual: EntityVisualConfig; name: str
   )
 }
 
+// ---------------------------------------------------------------------------
 // Fields Tab
-interface FieldsTabProps {
+// ---------------------------------------------------------------------------
+
+function FieldsTab({ form, setForm, readOnly }: {
   form: EntityTypeSchema
   setForm: React.Dispatch<React.SetStateAction<EntityTypeSchema>>
   readOnly?: boolean
-}
-
-function FieldsTab({ form, setForm, readOnly }: FieldsTabProps) {
+}) {
   const addField = () => {
     const newField: EntityFieldDefinition = {
       id: generateId('field'),
-      name: 'New Field',
+      name: '',
       type: 'string',
       required: false,
       showInNode: false,
@@ -396,25 +462,17 @@ function FieldsTab({ form, setForm, readOnly }: FieldsTabProps) {
       showInTooltip: false,
       displayOrder: form.fields.length,
     }
-    setForm((prev) => ({
-      ...prev,
-      fields: [...prev.fields, newField],
-    }))
+    setForm((prev) => ({ ...prev, fields: [...prev.fields, newField] }))
   }
 
   const removeField = (fieldId: string) => {
-    setForm((prev) => ({
-      ...prev,
-      fields: prev.fields.filter((f) => f.id !== fieldId),
-    }))
+    setForm((prev) => ({ ...prev, fields: prev.fields.filter((f) => f.id !== fieldId) }))
   }
 
   const updateField = (fieldId: string, updates: Partial<EntityFieldDefinition>) => {
     setForm((prev) => ({
       ...prev,
-      fields: prev.fields.map((f) =>
-        f.id === fieldId ? { ...f, ...updates } : f
-      ),
+      fields: prev.fields.map((f) => f.id === fieldId ? { ...f, ...updates } : f),
     }))
   }
 
@@ -422,109 +480,103 @@ function FieldsTab({ form, setForm, readOnly }: FieldsTabProps) {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-medium text-ink">Fields</h3>
-          <p className="text-2xs text-ink-muted">Define the data fields for this entity type</p>
+          <h3 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Fields</h3>
+          <p className="text-[10px] text-ink-muted/70 mt-0.5">{form.fields.length} field{form.fields.length !== 1 ? 's' : ''} defined</p>
         </div>
         {!readOnly && (
-          <button onClick={addField} className="btn btn-secondary btn-sm">
-            <LucideIcons.Plus className="w-4 h-4" />
+          <button
+            onClick={addField}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/50 hover:bg-indigo-100 dark:hover:bg-indigo-950/50 transition-all"
+          >
+            <LucideIcons.Plus className="w-3.5 h-3.5" />
             Add Field
           </button>
         )}
       </div>
 
-      <div className="space-y-2">
-        {form.fields.map((field) => (
-          <div
-            key={field.id}
-            className="flex items-center gap-3 p-3 rounded-lg border border-glass-border bg-canvas"
-          >
-            <LucideIcons.GripVertical className="w-4 h-4 text-ink-muted cursor-grab" />
-
-            <input
-              type="text"
-              value={field.name}
-              onChange={(e) => updateField(field.id, { name: e.target.value })}
-              className="input py-1 px-2 w-32"
-              placeholder="Field name"
-              disabled={readOnly}
-            />
-
-            <select
-              value={field.type}
-              onChange={(e) => updateField(field.id, { type: e.target.value as EntityFieldDefinition['type'] })}
-              className="input py-1 px-2 w-28"
-              disabled={readOnly}
+      {form.fields.length === 0 ? (
+        <div className="text-center py-8 rounded-xl border-2 border-dashed border-glass-border">
+          <LucideIcons.List className="w-6 h-6 mx-auto mb-2 text-ink-muted/30" />
+          <p className="text-xs text-ink-muted">No fields defined yet</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {form.fields.map((field) => (
+            <div
+              key={field.id}
+              className="rounded-xl border border-glass-border bg-canvas hover:border-glass-border-hover transition-all overflow-hidden"
             >
-              <option value="string">String</option>
-              <option value="number">Number</option>
-              <option value="boolean">Boolean</option>
-              <option value="date">Date</option>
-              <option value="urn">URN</option>
-              <option value="tags">Tags</option>
-              <option value="badge">Badge</option>
-              <option value="progress">Progress</option>
-              <option value="status">Status</option>
-              <option value="user">User</option>
-            </select>
+              {/* Field header row */}
+              <div className="flex items-center gap-2 px-3 py-2.5">
+                <LucideIcons.GripVertical className="w-3.5 h-3.5 text-ink-muted/40 cursor-grab flex-shrink-0" />
 
-            <label className="flex items-center gap-1 text-2xs text-ink-muted">
-              <input
-                type="checkbox"
-                checked={field.showInNode}
-                onChange={(e) => updateField(field.id, { showInNode: e.target.checked })}
-                className="w-3 h-3"
-                disabled={readOnly}
-              />
-              Node
-            </label>
+                <input
+                  type="text"
+                  value={field.name}
+                  onChange={(e) => updateField(field.id, { name: e.target.value })}
+                  className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-transparent border border-transparent hover:border-glass-border focus:border-indigo-500/30 focus:bg-black/[0.02] dark:focus:bg-white/[0.02] text-sm font-medium text-ink placeholder:text-ink-muted/50 focus:outline-none transition-all"
+                  placeholder="Field name"
+                  disabled={readOnly}
+                />
 
-            <label className="flex items-center gap-1 text-2xs text-ink-muted">
-              <input
-                type="checkbox"
-                checked={field.showInPanel}
-                onChange={(e) => updateField(field.id, { showInPanel: e.target.checked })}
-                className="w-3 h-3"
-                disabled={readOnly}
-              />
-              Panel
-            </label>
+                <select
+                  value={field.type}
+                  onChange={(e) => updateField(field.id, { type: e.target.value as EntityFieldDefinition['type'] })}
+                  className="px-2 py-1.5 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-xs text-ink-secondary font-medium focus:outline-none focus:ring-1 focus:ring-indigo-500/30 cursor-pointer"
+                  disabled={readOnly}
+                >
+                  {FIELD_TYPE_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
 
-            <label className="flex items-center gap-1 text-2xs text-ink-muted">
-              <input
-                type="checkbox"
-                checked={field.required}
-                onChange={(e) => updateField(field.id, { required: e.target.checked })}
-                className="w-3 h-3"
-                disabled={readOnly}
-              />
-              Required
-            </label>
+                {!readOnly && (
+                  <button
+                    onClick={() => removeField(field.id)}
+                    className="p-1 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30 text-ink-muted/40 hover:text-red-500 transition-colors flex-shrink-0"
+                  >
+                    <LucideIcons.Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
 
-            {!readOnly && (
-              <button
-                onClick={() => removeField(field.id)}
-                className="ml-auto p-1 rounded hover:bg-red-500/10 text-ink-muted hover:text-red-500"
-              >
-                <LucideIcons.Trash2 className="w-4 h-4" />
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
+              {/* Field options row */}
+              <div className="flex items-center gap-3 px-3 py-1.5 bg-black/[0.015] dark:bg-white/[0.015] border-t border-glass-border/50">
+                {([
+                  { key: 'showInNode' as const, label: 'Node' },
+                  { key: 'showInPanel' as const, label: 'Panel' },
+                  { key: 'showInTooltip' as const, label: 'Tooltip' },
+                  { key: 'required' as const, label: 'Required' },
+                ] as const).map(({ key, label }) => (
+                  <label key={key} className="flex items-center gap-1 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={field[key]}
+                      onChange={(e) => updateField(field.id, { [key]: e.target.checked })}
+                      className="w-3 h-3 rounded accent-indigo-500"
+                      disabled={readOnly}
+                    />
+                    <span className="text-[10px] text-ink-muted font-medium">{label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
 
+// ---------------------------------------------------------------------------
 // Hierarchy Tab
-interface HierarchyTabProps {
+// ---------------------------------------------------------------------------
+
+function HierarchyTab({ form, availableEntityTypes, updateForm }: {
   form: EntityTypeSchema
   availableEntityTypes: { id: string; name: string }[]
   updateForm: <K extends keyof EntityTypeSchema>(key: K, value: EntityTypeSchema[K]) => void
-  readOnly?: boolean
-}
-
-function HierarchyTab({ form, availableEntityTypes, updateForm, readOnly }: HierarchyTabProps) {
+}) {
   const updateHierarchy = <K extends keyof typeof form.hierarchy>(
     key: K,
     value: typeof form.hierarchy[K]
@@ -532,7 +584,6 @@ function HierarchyTab({ form, availableEntityTypes, updateForm, readOnly }: Hier
     updateForm('hierarchy', { ...form.hierarchy, [key]: value })
   }
 
-  // Types available as children (exclude self)
   const childCandidates = availableEntityTypes.filter(t => t.id !== form.id)
   const parentCandidates = availableEntityTypes.filter(t => t.id !== form.id)
 
@@ -555,30 +606,23 @@ function HierarchyTab({ form, availableEntityTypes, updateForm, readOnly }: Hier
   const isRoot = form.hierarchy.canBeContainedBy.length === 0
 
   return (
-    <div className="space-y-6">
-      {/* Root status indicator */}
+    <div className="space-y-5">
+      {/* Root status */}
       <div className={cn(
-        'flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium',
+        'flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-semibold',
         isRoot
           ? 'bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800'
-          : 'bg-black/5 dark:bg-white/5 text-ink-muted border border-glass-border'
+          : 'bg-black/[0.03] dark:bg-white/[0.03] text-ink-muted border border-glass-border',
       )}>
-        <LucideIcons.Crown className={cn('w-3.5 h-3.5', isRoot ? 'text-amber-500' : 'opacity-30')} />
-        {isRoot ? 'Root type — no parent (top of hierarchy)' : 'Has parent(s) — nested in hierarchy'}
+        <LucideIcons.Crown className={cn('w-4 h-4', isRoot ? 'text-amber-500' : 'opacity-30')} />
+        {isRoot ? 'Root type — top of hierarchy' : 'Nested — has parent type(s)'}
       </div>
 
-      {/* Can Contain — chip selector */}
-      <div>
-        <label className="block text-sm font-semibold text-ink mb-1">
-          Can Contain <span className="text-ink-muted font-normal">(child types)</span>
-        </label>
-        <p className="text-[11px] text-ink-muted mb-2">
-          Types this entity can parent in the containment hierarchy
-        </p>
+      <Section title="Can Contain" description="Child types this entity can parent in the hierarchy">
         {childCandidates.length === 0 ? (
-          <p className="text-xs text-ink-muted italic">No other entity types defined yet</p>
+          <p className="text-xs text-ink-muted/60 italic">No other entity types defined</p>
         ) : (
-          <div className={cn('flex flex-wrap gap-1.5', readOnly && 'opacity-60 pointer-events-none')}>
+          <div className="flex flex-wrap gap-1.5">
             {childCandidates.map(t => {
               const selected = form.hierarchy.canContain.includes(t.id)
               return (
@@ -587,10 +631,10 @@ function HierarchyTab({ form, availableEntityTypes, updateForm, readOnly }: Hier
                   type="button"
                   onClick={() => toggleChild(t.id)}
                   className={cn(
-                    'px-2.5 py-1 rounded-lg text-xs font-medium border transition-all',
+                    'px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-all',
                     selected
-                      ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 border-indigo-300 dark:border-indigo-700'
-                      : 'bg-black/5 dark:bg-white/5 text-ink-muted border-glass-border hover:border-indigo-300 hover:text-indigo-600'
+                      ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 border-indigo-300 dark:border-indigo-700 shadow-sm'
+                      : 'bg-black/[0.03] dark:bg-white/[0.04] text-ink-muted border-glass-border hover:border-indigo-300 hover:text-indigo-600',
                   )}
                 >
                   {selected && <LucideIcons.Check className="w-2.5 h-2.5 inline mr-1" />}
@@ -600,20 +644,13 @@ function HierarchyTab({ form, availableEntityTypes, updateForm, readOnly }: Hier
             })}
           </div>
         )}
-      </div>
+      </Section>
 
-      {/* Can Be Contained By — chip selector */}
-      <div>
-        <label className="block text-sm font-semibold text-ink mb-1">
-          Can Be Contained By <span className="text-ink-muted font-normal">(parent types)</span>
-        </label>
-        <p className="text-[11px] text-ink-muted mb-2">
-          Types that can parent this entity. Leave empty to make this a root type.
-        </p>
+      <Section title="Can Be Contained By" description="Parent types. Leave empty for a root type.">
         {parentCandidates.length === 0 ? (
-          <p className="text-xs text-ink-muted italic">No other entity types defined yet</p>
+          <p className="text-xs text-ink-muted/60 italic">No other entity types defined</p>
         ) : (
-          <div className={cn('flex flex-wrap gap-1.5', readOnly && 'opacity-60 pointer-events-none')}>
+          <div className="flex flex-wrap gap-1.5">
             {parentCandidates.map(t => {
               const selected = form.hierarchy.canBeContainedBy.includes(t.id)
               return (
@@ -622,10 +659,10 @@ function HierarchyTab({ form, availableEntityTypes, updateForm, readOnly }: Hier
                   type="button"
                   onClick={() => toggleParent(t.id)}
                   className={cn(
-                    'px-2.5 py-1 rounded-lg text-xs font-medium border transition-all',
+                    'px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-all',
                     selected
-                      ? 'bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300 border-green-300 dark:border-green-700'
-                      : 'bg-black/5 dark:bg-white/5 text-ink-muted border-glass-border hover:border-green-300 hover:text-green-600'
+                      ? 'bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300 border-green-300 dark:border-green-700 shadow-sm'
+                      : 'bg-black/[0.03] dark:bg-white/[0.04] text-ink-muted border-glass-border hover:border-green-300 hover:text-green-600',
                   )}
                 >
                   {selected && <LucideIcons.Check className="w-2.5 h-2.5 inline mr-1" />}
@@ -635,48 +672,40 @@ function HierarchyTab({ form, availableEntityTypes, updateForm, readOnly }: Hier
             })}
           </div>
         )}
-      </div>
+      </Section>
 
-      {/* Level — read-only computed hint with manual override */}
-      <div>
-        <label className="block text-sm font-semibold text-ink mb-1">
-          Hierarchy Level
-        </label>
-        <p className="text-[11px] text-ink-muted mb-2">
-          Usually auto-computed from tree depth in the Hierarchy Map tab. Override only if needed.
-        </p>
-        <input
-          type="number"
-          value={form.hierarchy.level}
-          onChange={(e) => updateHierarchy('level', parseInt(e.target.value) || 0)}
-          min={0}
-          max={20}
-          className="input w-20"
-          disabled={readOnly}
-        />
-      </div>
-
-      {/* Expanded by default */}
-      <div className="flex items-center gap-3">
-        <label className="flex items-center gap-2 cursor-pointer select-none">
+      <div className="grid grid-cols-2 gap-4">
+        <Section title="Hierarchy Level">
           <input
-            type="checkbox"
-            checked={form.hierarchy.defaultExpanded}
-            onChange={(e) => updateHierarchy('defaultExpanded', e.target.checked)}
-            className="w-4 h-4 rounded"
-            disabled={readOnly}
+            type="number"
+            value={form.hierarchy.level}
+            onChange={(e) => updateHierarchy('level', parseInt(e.target.value) || 0)}
+            min={0}
+            max={20}
+            className="w-full px-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-all"
           />
-          <div>
-            <span className="text-sm font-medium text-ink">Expanded by Default</span>
-            <p className="text-[11px] text-ink-muted">Show children automatically when this type is first rendered in a view</p>
-          </div>
-        </label>
+        </Section>
+
+        <Section title="Default State">
+          <label className="flex items-center gap-2 px-3 py-2 rounded-xl border border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02] cursor-pointer transition-all">
+            <input
+              type="checkbox"
+              checked={form.hierarchy.defaultExpanded}
+              onChange={(e) => updateHierarchy('defaultExpanded', e.target.checked)}
+              className="w-4 h-4 rounded accent-indigo-500"
+            />
+            <span className="text-xs font-medium text-ink">Expanded</span>
+          </label>
+        </Section>
       </div>
     </div>
   )
 }
 
-// Helper to create default entity type
+// ---------------------------------------------------------------------------
+// Default entity type factory
+// ---------------------------------------------------------------------------
+
 function createDefaultEntityType(): EntityTypeSchema {
   return {
     id: '',
@@ -711,4 +740,3 @@ function createDefaultEntityType(): EntityTypeSchema {
     },
   }
 }
-

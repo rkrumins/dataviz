@@ -699,16 +699,16 @@ export function OntologySchemaPage() {
                         {/* Discard */}
                         <button
                           onClick={discardChanges}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20 transition-all"
+                          className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/20 hover:bg-red-100 dark:hover:bg-red-950/40 border border-red-200/60 dark:border-red-800/40 transition-all"
                         >
-                          <X className="w-3.5 h-3.5" />
+                          <X className="w-4 h-4" />
                           Discard
                         </button>
                         <button
                           onClick={handleValidate}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-emerald-300 hover:bg-emerald-500/[0.06] text-ink-secondary hover:text-emerald-600 transition-all"
+                          className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold border border-glass-border hover:border-emerald-300 hover:bg-emerald-500/[0.06] text-ink-secondary hover:text-emerald-600 transition-all"
                         >
-                          <ShieldCheck className="w-3.5 h-3.5" />
+                          <ShieldCheck className="w-4 h-4" />
                           Validate
                         </button>
                         {/* Save Changes — primary action when editing */}
@@ -716,48 +716,42 @@ export function OntologySchemaPage() {
                           onClick={handleSaveAllChanges}
                           disabled={!hasPendingChanges || isSaving}
                           className={cn(
-                            'flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold transition-all shadow-sm',
+                            'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-bold transition-all',
                             hasPendingChanges
-                              ? 'bg-emerald-500 text-white hover:bg-emerald-600 shadow-emerald-500/20'
-                              : 'bg-emerald-500/50 text-white/70 cursor-not-allowed shadow-none',
+                              ? 'bg-emerald-500 text-white hover:bg-emerald-600 shadow-md shadow-emerald-500/25 hover:shadow-lg hover:shadow-emerald-500/30'
+                              : 'bg-emerald-500/40 text-white/60 cursor-not-allowed shadow-none',
                           )}
                         >
-                          {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                          {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                           {isSaving ? 'Saving...' : 'Save Changes'}
-                        </button>
-                        {/* Publish */}
-                        <button
-                          onClick={handlePublish}
-                          disabled={hasPendingChanges}
-                          className={cn(
-                            'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors shadow-sm shadow-indigo-500/20',
-                            hasPendingChanges
-                              ? 'bg-indigo-500/50 text-white/70 cursor-not-allowed'
-                              : 'bg-indigo-500 text-white hover:bg-indigo-600',
-                          )}
-                          title={hasPendingChanges ? 'Save changes before publishing' : undefined}
-                        >
-                          <Upload className="w-3.5 h-3.5" />
-                          Publish
                         </button>
                       </>
                     ) : (
                       <>
                         <button
                           onClick={handleValidate}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-emerald-300 hover:bg-emerald-500/[0.06] text-ink-secondary hover:text-emerald-600 transition-all"
+                          className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold border border-glass-border hover:border-emerald-300 hover:bg-emerald-500/[0.06] text-ink-secondary hover:text-emerald-600 transition-all"
                         >
-                          <ShieldCheck className="w-3.5 h-3.5" />
+                          <ShieldCheck className="w-4 h-4" />
                           Validate
                         </button>
                         {!isImmutable && (
-                          <button
-                            onClick={enterEditMode}
-                            className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20"
-                          >
-                            <PenLine className="w-3.5 h-3.5" />
-                            Edit
-                          </button>
+                          <>
+                            <button
+                              onClick={enterEditMode}
+                              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20"
+                            >
+                              <PenLine className="w-4 h-4" />
+                              Edit
+                            </button>
+                            <button
+                              onClick={handlePublish}
+                              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:from-indigo-600 hover:to-purple-600 transition-all shadow-md shadow-indigo-500/25"
+                            >
+                              <Upload className="w-4 h-4" />
+                              Publish
+                            </button>
+                          </>
                         )}
                       </>
                     )}
