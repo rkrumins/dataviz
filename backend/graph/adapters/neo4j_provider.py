@@ -353,11 +353,22 @@ class Neo4jProvider(GraphDataProvider):
     # ------------------------------------------------------------------ #
 
     def set_containment_edge_types(self, types: List[str]) -> None:
-        """Called by ContextEngine after ontology resolution."""
+        """Called by ContextEngine after ontology resolution.
+
+        An empty list is valid — it means no containment types (flat graph).
+        """
         self._resolved_containment_types: Set[str] = {t.upper() for t in types}
+        self._resolved_containment_types_set = True  # sentinel: distinguishes "set to empty" from "never set"
 
     def _get_containment_edge_types(self) -> Set[str]:
-        if getattr(self, "_resolved_containment_types", None):
+        """Return the authoritative containment edge type set.
+
+        Resolution chain (first match wins):
+        1. Ontology-resolved types injected by ContextEngine (may be empty = no hierarchy)
+        2. CONTAINMENT_EDGE_TYPES env var
+        3. Hardcoded fallback {CONTAINS, BELONGS_TO} — only used before ontology resolves
+        """
+        if getattr(self, "_resolved_containment_types_set", False):
             return self._resolved_containment_types
         if not hasattr(self, "_containment_cache"):
             config = os.getenv("CONTAINMENT_EDGE_TYPES", "").strip()
@@ -555,13 +566,17 @@ class Neo4jProvider(GraphDataProvider):
 
         if include_child_count:
             containment = list(self._get_containment_edge_types())
-            containment_rel = "|".join(f"`{_sanitize_label(t)}`" for t in containment) if containment else "`CONTAINS`"
-            cypher = (
-                f"MATCH (n) {where} "
-                f"WITH n SKIP $skip LIMIT $limit "
-                f"OPTIONAL MATCH (n)-[:{containment_rel}]->(child) "
-                f"RETURN n, count(child) as childCount"
-            )
+            if containment:
+                containment_rel = "|".join(f"`{_sanitize_label(t)}`" for t in containment)
+                cypher = (
+                    f"MATCH (n) {where} "
+                    f"WITH n SKIP $skip LIMIT $limit "
+                    f"OPTIONAL MATCH (n)-[:{containment_rel}]->(child) "
+                    f"RETURN n, count(child) as childCount"
+                )
+            else:
+                # No containment types — childCount is always 0
+                cypher = f"MATCH (n) {where} WITH n SKIP $skip LIMIT $limit RETURN n, 0 as childCount"
         else:
             cypher = f"MATCH (n) {where} RETURN n SKIP $skip LIMIT $limit"
 
@@ -665,7 +680,11 @@ class Neo4jProvider(GraphDataProvider):
     ) -> List[GraphNode]:
         ip = self._id_prop()
         name_field = self._mapping.display_name_field
-        target_edge_types = list(set(edge_types) if edge_types else {EdgeType.CONTAINS.value})
+        # None = caller didn't specify, use ontology/fallback; [] = explicitly no containment
+        target_edge_types = list(set(edge_types) if edge_types is not None else self._get_containment_edge_types())
+        if not target_edge_types:
+            # No containment types — flat graph, no children
+            return []
         params: Dict[str, Any] = {
             "parent": parent_urn, "skip": offset, "lim": limit,
             "relTypes": target_edge_types,
@@ -719,6 +738,9 @@ class Neo4jProvider(GraphDataProvider):
     async def get_parent(self, child_urn: str) -> Optional[GraphNode]:
         ip = self._id_prop()
         containment = list(self._get_containment_edge_types())
+        if not containment:
+            # No containment types — flat graph, no parent
+            return None
         rows = await self._run_read(
             f"MATCH (p)-[r]->(c) WHERE c.{ip} = $child AND type(r) IN $ctypes RETURN p",
             {"child": child_urn, "ctypes": containment},
@@ -1306,6 +1328,9 @@ class Neo4jProvider(GraphDataProvider):
         """Single Cypher to walk containment edges upward."""
         ip = self._id_prop()
         containment = list(self._get_containment_edge_types())
+        if not containment:
+            # No containment types — flat graph, no ancestors
+            return []
         containment_cypher = "|".join(f"`{_sanitize_label(t)}`" for t in containment)
 
         rows = await self._run_read(
@@ -1357,6 +1382,9 @@ class Neo4jProvider(GraphDataProvider):
     ) -> List[GraphNode]:
         ip = self._id_prop()
         containment = list(self._get_containment_edge_types())
+        if not containment:
+            # No containment types — flat graph, no descendants
+            return []
         containment_cypher = "|".join(f"`{_sanitize_label(t)}`" for t in containment)
 
         conditions = [f"root.{ip} = $urn"]
@@ -1640,6 +1668,15 @@ class Neo4jProvider(GraphDataProvider):
         ip = self._id_prop()
         cache_key = f"{self._database}:ancestors"
         containment = list(self._get_containment_edge_types())
+
+        if not containment:
+            # No containment types — only invalidate the node itself
+            try:
+                await self._redis.hdel(cache_key, urn)
+            except Exception:
+                pass
+            logger.info("Invalidated ancestor cache for 1 node (no containment types): %s", urn)
+            return
 
         # Single query to find all descendants instead of N+1 BFS
         containment_cypher = "|".join(f"`{_sanitize_label(t)}`" for t in containment)

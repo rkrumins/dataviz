@@ -44,7 +44,9 @@ class AssignmentEngine:
 
         # 2. Build Indices
         rule_index = self._build_rule_index(request.layers)
-        parent_cache = self._build_parent_cache(all_edges, containment_edge_types=containment_edge_types or None)
+        # Pass the resolved set directly — an empty set is valid (flat graph, no hierarchy).
+        # Do NOT convert empty set to None, as that triggers hardcoded fallbacks.
+        parent_cache = self._build_parent_cache(all_edges, containment_edge_types=containment_edge_types)
         layer_sequence_map = {l.id: i for i, l in enumerate(request.layers)}
 
         # 3. Compute Assignments
@@ -148,8 +150,18 @@ class AssignmentEngine:
         containment_edge_types: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
         parent_map = {}
-        # Use ontology-provided containment types; fall back to provider introspection set
-        ct = {t.upper() for t in containment_edge_types} if containment_edge_types else {EdgeType.CONTAINS.value.upper(), EdgeType.BELONGS_TO.value.upper()}
+        # Use ontology-provided containment types.
+        # None = caller didn't resolve ontology yet, use hardcoded fallback.
+        # Empty set = ontology explicitly defines no containment (flat graph).
+        if containment_edge_types is not None:
+            ct = {t.upper() for t in containment_edge_types}
+        else:
+            logger.warning(
+                "containment_edge_types is None in _build_parent_cache — "
+                "falling back to hardcoded {CONTAINS, BELONGS_TO}. "
+                "This should only happen during legacy/un-resolved paths."
+            )
+            ct = {EdgeType.CONTAINS.value.upper(), EdgeType.BELONGS_TO.value.upper()}
 
         # Determine parent->child direction from edge semantics:
         # Convention: if source has *more* children than target for this edge type,

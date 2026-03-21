@@ -159,6 +159,12 @@ export function useLayerAssignment({
 
       let myLayerId: string | undefined
 
+      // Does this node have a containment parent? If so, inheritance should
+      // take priority over rule-based assignment to keep children in the same
+      // layer column as their parent. Only explicit/manual assignments can
+      // override containment inheritance.
+      const hasContainmentParent = parentMap.has(nodeId)
+
       const backendAssignment = effectiveAssignments.get(nodeId)
       if (backendAssignment?.layerId) myLayerId = backendAssignment.layerId
 
@@ -168,6 +174,14 @@ export function useLayerAssignment({
       }
 
       if (!myLayerId) myLayerId = explicitAssignments.get(nodeId)
+
+      // Containment inheritance takes priority over rules: children should
+      // stay in the same layer as their parent unless explicitly assigned.
+      // Rule-based assignment only applies to root-level nodes (no parent).
+      if (!myLayerId && inheritedLayerId && hasContainmentParent) {
+        myLayerId = inheritedLayerId
+      }
+
       if (!myLayerId) myLayerId = ruleAssignments.get(nodeId)
       if (!myLayerId && inheritedLayerId) myLayerId = inheritedLayerId
       if (myLayerId === '__UNASSIGNED__') myLayerId = undefined

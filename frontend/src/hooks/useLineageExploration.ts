@@ -524,10 +524,11 @@ export function projectToGranularity(
   focusId: string | null = null,
   tracePath: Set<string> = new Set(),
   entityTypes: Array<{ id: string; hierarchy: { level: number } }> = [],
+  containmentEdgeTypes: string[] = [],
 ): { nodes: Node[]; edges: Edge[]; aggregatedEdges: Map<string, { sourceCount: number; confidence: number }> } {
   const targetTypeId = _LEGACY_GRAN_TO_TYPE_ID[targetGranularity] ?? null
 
-  const containmentMap = buildContainmentMap(nodes, edges, ['contains', 'has_schema', 'has_dataset', 'has_column'])
+  const containmentMap = buildContainmentMap(nodes, edges, containmentEdgeTypes)
 
   // Filter nodes at or coarser than the target granularity type.
   // When targetTypeId is null (finest detail), show all nodes.
@@ -664,7 +665,7 @@ export function projectToGranularity(
   })
 
   // Compute all node counts (direct children, total descendants, breakdown by type)
-  const allNodeCounts = computeAllNodeCounts(nodes, edges)
+  const allNodeCounts = computeAllNodeCounts(nodes, edges, containmentEdgeTypes)
 
   // Add child counts to visible nodes
   const nodesWithCounts = visibleNodes.map((node) => {
@@ -769,7 +770,6 @@ export function useLineageExploration(): UseLineageExplorationResult {
     toggleExpanded,
     expandAll,
     collapseAll,
-    setHighlightedPath,
     toggleIncludeChildLineage,
     resetToDefault,
     loadMoreNodes,
@@ -1026,6 +1026,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
       focusEntityId,
       highlightedPath,
       schemaEntityTypes,
+      containmentEdgeTypes,
     )
 
     return {
@@ -1046,7 +1047,10 @@ export function useLineageExploration(): UseLineageExplorationResult {
     config.aggregation.inheritFromChildren,
     pagination,
     focusEntityId,
-    setHighlightedPath,
+    highlightedPath,
+    expandedIds,
+    containmentEdgeTypes,
+    schemaEntityTypes,
   ])
 
   return {

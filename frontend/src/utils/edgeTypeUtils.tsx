@@ -102,13 +102,13 @@ function getDefaultIcon(_type: string): React.ReactNode {
 /**
  * Determine if edge type should be animated by default
  */
-function getDefaultAnimated(type: string, isContainment: boolean): boolean {
+function getDefaultAnimated(_type: string, isContainment: boolean): boolean {
     // Containment edges are typically not animated
     if (isContainment) return false
 
-    // Lineage edges are typically animated
-    const lineageTypes = ['PRODUCES', 'CONSUMES', 'TRANSFORMS', 'DERIVES_FROM', 'LINEAGE']
-    return lineageTypes.includes(type.toUpperCase())
+    // Non-containment edges are animated by default (lineage/flow edges).
+    // The schema definition overrides this when available.
+    return true
 }
 
 /**

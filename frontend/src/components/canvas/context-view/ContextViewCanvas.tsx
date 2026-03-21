@@ -848,6 +848,13 @@ export function ContextViewCanvas({
       />
 
       <div className="flex-1 w-full h-full relative overflow-hidden bg-canvas flex flex-col">
+        {/* Warning: missing ontology configuration */}
+        {schema && containmentEdgeTypes.length === 0 && edges.length > 0 && (
+          <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 text-xs flex items-center gap-2 z-20">
+            <span className="font-medium">No containment types configured.</span>
+            <span className="text-amber-600 dark:text-amber-500">Hierarchy is disabled — all nodes appear flat. Configure your ontology to enable parent-child nesting.</span>
+          </div>
+        )}
         {/* Edge Panel */}
         <AnimatePresence>
           {isEdgePanelOpen && (

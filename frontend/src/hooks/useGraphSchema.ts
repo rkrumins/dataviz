@@ -63,6 +63,11 @@ export function useGraphSchema() {
       }
     } else if (query.isError) {
       // No data at all — fall back to defaults so the app remains usable
+      console.warn(
+        '[useGraphSchema] Schema fetch failed — falling back to default schema.',
+        'Edge classification (containment/lineage) will use defaults until schema loads.',
+        query.error,
+      )
       const currentSchema = useSchemaStore.getState().schema
       if (currentSchema?.id === defaultWorkspaceSchema.id) return
       loadSchema(defaultWorkspaceSchema)

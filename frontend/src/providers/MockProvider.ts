@@ -29,6 +29,7 @@ import type {
     AggregatedEdgeResult,
     CreateNodeRequest,
     CreateNodeResult,
+    RelationshipTypeDefinition,
 } from './GraphDataProvider'
 
 // ============================================
@@ -380,10 +381,14 @@ export class MockProvider implements GraphDataProvider {
         const containmentEdges: GraphEdge[] = []
         const lineageEdges: GraphEdge[] = []
 
+        // Derive containment types from the edge types filter or fall back to ontology
+        const containmentTypes = new Set(
+            (options?.edgeTypes ?? ['CONTAINS', 'BELONGS_TO']).map(t => t.toUpperCase())
+        )
+
         for (const edge of this.edges.values()) {
             if (!allUrns.has(edge.sourceUrn) || !allUrns.has(edge.targetUrn)) continue
-            const edgeType = edge.edgeType.toUpperCase()
-            if (edgeType === 'CONTAINS' || edgeType === 'BELONGS_TO') {
+            if (containmentTypes.has(edge.edgeType.toUpperCase())) {
                 containmentEdges.push(edge)
             } else if (options?.includeLineageEdges !== false) {
                 lineageEdges.push(edge)
@@ -908,15 +913,17 @@ export class MockProvider implements GraphDataProvider {
             },
             bidirectional: false,
             showLabel: false,
-            isContainment: id === 'CONTAINS' || id === 'BELONGS_TO'
-        }))
+            isContainment: id === 'CONTAINS' || id === 'BELONGS_TO',
+            isLineage: id !== 'CONTAINS' && id !== 'BELONGS_TO' && id !== 'TAGGED_WITH'
+        })) as RelationshipTypeDefinition[]
 
         return {
             version: '1.0.0',
             entityTypes,
             relationshipTypes,
             rootEntityTypes: ['domain', 'container', 'dataPlatform'],
-            containmentEdgeTypes: ['CONTAINS', 'BELONGS_TO']
+            containmentEdgeTypes: ['CONTAINS', 'BELONGS_TO'],
+            lineageEdgeTypes: Array.from(edgeTypes).filter(t => t !== 'CONTAINS' && t !== 'BELONGS_TO' && t !== 'TAGGED_WITH'),
         }
     }
 

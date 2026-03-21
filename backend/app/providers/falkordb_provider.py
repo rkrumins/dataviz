@@ -210,12 +210,25 @@ class FalkorDBProvider(GraphDataProvider):
 
     def set_containment_edge_types(self, types: List[str]) -> None:
         """Called by ContextEngine after ontology resolution to inject the
-        authoritative containment edge types from the resolver."""
+        authoritative containment edge types from the resolver.
+
+        An empty list is a valid input — it means the ontology explicitly
+        defines no containment types (flat graph, no hierarchy).
+        """
         self._resolved_containment_types: Set[str] = {t.upper() for t in types}
+        self._resolved_containment_types_set = True  # sentinel: distinguishes "set to empty" from "never set"
 
     def _get_containment_edge_types(self) -> Set[str]:
-        # Prefer ontology-resolved types if available (set by ContextEngine after resolution)
-        if getattr(self, "_resolved_containment_types", None):
+        """Return the authoritative containment edge type set.
+
+        Resolution chain (first match wins):
+        1. Ontology-resolved types injected by ContextEngine (may be empty = no hierarchy)
+        2. CONTAINMENT_EDGE_TYPES env var
+        3. Hardcoded fallback {CONTAINS, BELONGS_TO} — only used before ontology resolves
+        """
+        # Prefer ontology-resolved types if they have been explicitly set
+        # (even if the set is empty — empty is a valid resolved state)
+        if getattr(self, "_resolved_containment_types_set", False):
             return self._resolved_containment_types
         if not hasattr(self, "_containment_cache"):
             config = os.getenv("CONTAINMENT_EDGE_TYPES", "").strip()
@@ -348,9 +361,10 @@ class FalkorDBProvider(GraphDataProvider):
             clauses.append("WITH n SKIP $skip LIMIT $limit")
             if containment_rel_types:
                 clauses.append(f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)")
+                clauses.append("RETURN n, count(child) as childCount")
             else:
-                clauses.append("OPTIONAL MATCH (n)-[]->(child)")
-            clauses.append("RETURN n, count(child) as childCount")
+                # No containment types defined — childCount is always 0
+                clauses.append("RETURN n, 0 as childCount")
         else:
             clauses.append("RETURN n SKIP $skip LIMIT $limit")
 
@@ -505,8 +519,12 @@ class FalkorDBProvider(GraphDataProvider):
         sort_property: Optional[str] = "displayName",
     ) -> List[GraphNode]:
         await self._ensure_connected()
-        target_edge_types = set(edge_types) if edge_types else set(self._get_containment_edge_types())
+        # None = caller didn't specify, use ontology/fallback; [] = explicitly no containment
+        target_edge_types = set(edge_types) if edge_types is not None else set(self._get_containment_edge_types())
         rel_list = list(target_edge_types)
+        if not rel_list:
+            # No containment types defined — hierarchy is flat, no children exist
+            return []
 
         search_where = ""
         params: Dict[str, Any] = {"parent": parent_urn, "skip": offset, "lim": limit, "relTypes": rel_list}
@@ -570,8 +588,14 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
 
         # --- Step 1: Fetch children with containment edges (returns edge r) ---
-        target_edge_types = set(edge_types) if edge_types else set(self._get_containment_edge_types())
+        target_edge_types = set(edge_types) if edge_types is not None else set(self._get_containment_edge_types())
         rel_list = list(target_edge_types)
+        if not rel_list:
+            # No containment types — return empty result
+            return ChildrenWithEdgesResult(
+                children=[], containmentEdges=[], lineageEdges=[],
+                totalChildren=0, hasMore=False,
+            )
 
         search_where = ""
         params: Dict[str, Any] = {"parent": parent_urn, "skip": offset, "lim": limit, "relTypes": rel_list}
@@ -667,6 +691,9 @@ class FalkorDBProvider(GraphDataProvider):
     async def get_parent(self, child_urn: str) -> Optional[GraphNode]:
         await self._ensure_connected()
         containment = self._get_containment_edge_types()
+        if not containment:
+            # No containment types — flat graph, no parent
+            return None
         # Match any containment-type edge where child is target
         result = await self._graph.ro_query(
             "MATCH (p)-[r]->(c) WHERE c.urn = $child AND type(r) IN $ctypes RETURN p",
@@ -836,6 +863,9 @@ class FalkorDBProvider(GraphDataProvider):
     async def _compute_ancestor_chain(self, urn: str) -> List[str]:
         """Single Cypher query to walk containment edges upward (1 query instead of N)."""
         containment = list(self._get_containment_edge_types())
+        if not containment:
+            # No containment types — flat graph, no ancestors
+            return []
         containment_cypher = "|".join(_sanitize_label(t) for t in containment)
 
         # Variable-length path: returns ordered list of ancestor URNs
@@ -1775,6 +1805,9 @@ class FalkorDBProvider(GraphDataProvider):
         """Single Cypher query to fetch descendants instead of per-node BFS."""
         await self._ensure_connected()
         containment = list(self._get_containment_edge_types())
+        if not containment:
+            # No containment types — flat graph, no descendants
+            return []
         containment_cypher = "|".join([_sanitize_label(t) for t in containment])
 
         conditions = ["root.urn = $urn"]

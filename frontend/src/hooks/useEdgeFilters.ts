@@ -276,13 +276,20 @@ export function useFilteredEdges(): {
             filters.filter((f) => f.enabled).map((f) => f.type)
         )
 
+        // When no filters are defined yet (schema not loaded, no edges discovered),
+        // pass all edges through rather than filtering everything out.
+        const hasFilters = filters.length > 0
+
         // Type-filtered edges (case-insensitive matching)
         const typeFiltered = edges.filter((edge) => {
+            const confidence = edge.data?.confidence ?? 1
+            if (confidence < confidenceThreshold) return false
+            // If no filters defined, show all edges
+            if (!hasFilters) return true
             const normalized = normalizeEdgeType(edge).toLowerCase()
             const originalType = (edge.data?.edgeType || edge.data?.relationship || 'unknown').toLowerCase()
-            const confidence = edge.data?.confidence ?? 1
             // Match against normalized or original type (case-insensitive)
-            return (enabledTypes.has(normalized) || enabledTypes.has(originalType)) && confidence >= confidenceThreshold
+            return enabledTypes.has(normalized) || enabledTypes.has(originalType)
         })
 
         const containment = edges.filter((e) =>
@@ -367,8 +374,14 @@ export function useNodeEdges(nodeId: string | null): {
             filters.filter((f) => f.enabled).map((f) => f.type)
         )
 
+        // When no filters are defined yet (schema not loaded, no edges discovered),
+        // pass all edges through rather than filtering everything out.
+        const hasFilters = filters.length > 0
+
         // Filter by type first (case-insensitive matching)
         const typeFiltered = edges.filter((edge) => {
+            // If no filters defined, show all edges
+            if (!hasFilters) return true
             const normalized = normalizeEdgeType(edge).toLowerCase()
             const originalType = (edge.data?.edgeType || edge.data?.relationship || 'unknown').toLowerCase()
             // Match against normalized or original type (case-insensitive)
