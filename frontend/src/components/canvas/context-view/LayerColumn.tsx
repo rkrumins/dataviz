@@ -123,96 +123,110 @@ export const LayerColumn = React.memo(function LayerColumn({
   const flatTree = useMemo(() => {
     const result: FlatTreeNode[] = []
 
-    // If focused on a specific node, only show that subtree
-    const rootNodes = localFocusId
-      ? nodes.flatMap(function findNode(n: HierarchyNode): HierarchyNode[] {
-        if (n.id === localFocusId) return [n]
-        return n.children.flatMap(findNode)
-      })
-      : nodes
-
-    const traverse = (
-      node: HierarchyNode,
-      depth: number,
-      isLast: boolean,
-      parentIsLast: boolean[]
-    ) => {
-      result.push({ node, depth, isLast, parentIsLast: [...parentIsLast] })
-
-      // Only traverse children if expanded
-      if (expandedNodes.has(node.id) && (node.children.length > 0 || (node.data.childCount as number || 0) > 0)) {
-        const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || node.children.length
-        const isNodeLoading = loadingNodes?.has(node.id) ?? false
-
-        // Push the inline search box item ONLY if active
-        if (activeSearchNodes.has(node.id)) {
-          result.push({
-            node,
-            depth: depth + 1,
-            isLast: node.children.length === 0 && !isNodeLoading,
-            parentIsLast: [...parentIsLast, isLast],
-            isSearchBox: true
-          })
-        }
-
-        // Show error row if the last fetch for this node failed
-        const isNodeFailed = (failedNodes?.has(node.id) ?? false) && !isNodeLoading && node.children.length === 0
-        if (isNodeFailed) {
-          result.push({
-            node,
-            depth: depth + 1,
-            isLast: true,
-            parentIsLast: [...parentIsLast, isLast],
-            isFailed: true,
-          })
-        }
-
-        // Show skeleton placeholders while children are being loaded
-        else if (isNodeLoading && node.children.length === 0) {
-          const skeletonCount = Math.min(childCount || 3, 4)
-          for (let i = 0; i < skeletonCount; i++) {
-            result.push({
-              node,
-              depth: depth + 1,
-              isLast: i === skeletonCount - 1,
-              parentIsLast: [...parentIsLast, isLast],
-              isSkeleton: true,
-              skeletonIndex: i,
-            })
-          }
-        } else {
-          // Render all existing children dynamically since the server-side search directly controls the contents of `node.children`
-          const displayChildren = node.children
-          const activeQuery = childSearchQueries[node.id]?.trim().toLowerCase()
-
-          const hasMore = node.children.length < childCount && !activeQuery // Disable load more if actively searching
-
-          displayChildren.forEach((child, idx) => {
-            traverse(
-              child,
-              depth + 1,
-              idx === displayChildren.length - 1 && !hasMore,
-              [...parentIsLast, isLast]
-            )
-          })
-
-          if (hasMore) {
-            result.push({
-              node,
-              depth: depth + 1,
-              isLast: true,
-              parentIsLast: [...parentIsLast, isLast],
-              isLoadMore: true,
-              loadMoreCount: childCount - node.children.length
-            })
-          }
-        }
+    // Iterative findNode — prevents stack overflow on deep hierarchies
+    let rootNodes = nodes
+    if (localFocusId) {
+      const findStack = [...nodes]
+      rootNodes = []
+      while (findStack.length > 0) {
+        const n = findStack.pop()!
+        if (n.id === localFocusId) { rootNodes = [n]; break }
+        for (let i = n.children.length - 1; i >= 0; i--) findStack.push(n.children[i])
       }
     }
 
-    rootNodes.forEach((node, idx) => {
-      traverse(node, 0, idx === rootNodes.length - 1, [])
-    })
+    // Iterative flat-tree builder using explicit stack
+    type FrameItem =
+      | { kind: 'node'; node: HierarchyNode; depth: number; isLast: boolean; parentIsLast: boolean[] }
+      | { kind: 'loadMore'; parent: HierarchyNode; depth: number; parentIsLast: boolean[]; count: number }
+
+    const stack: FrameItem[] = []
+    // Push root nodes in reverse so first root is processed first
+    for (let i = rootNodes.length - 1; i >= 0; i--) {
+      stack.push({ kind: 'node', node: rootNodes[i], depth: 0, isLast: i === rootNodes.length - 1, parentIsLast: [] })
+    }
+
+    while (stack.length > 0) {
+      const frame = stack.pop()!
+
+      if (frame.kind === 'loadMore') {
+        result.push({
+          node: frame.parent,
+          depth: frame.depth,
+          isLast: true,
+          parentIsLast: frame.parentIsLast,
+          isLoadMore: true,
+          loadMoreCount: frame.count,
+        })
+        continue
+      }
+
+      const { node, depth, isLast, parentIsLast } = frame
+      result.push({ node, depth, isLast, parentIsLast: [...parentIsLast] })
+
+      // Only expand children if node is expanded
+      if (!expandedNodes.has(node.id) || (node.children.length === 0 && !((node.data.childCount as number) || 0))) continue
+
+      const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || node.children.length
+      const isNodeLoading = loadingNodes?.has(node.id) ?? false
+      const childParentIsLast = [...parentIsLast, isLast]
+
+      // Inline search box
+      if (activeSearchNodes.has(node.id)) {
+        result.push({
+          node,
+          depth: depth + 1,
+          isLast: node.children.length === 0 && !isNodeLoading,
+          parentIsLast: childParentIsLast,
+          isSearchBox: true,
+        })
+      }
+
+      // Error row
+      const isNodeFailed = (failedNodes?.has(node.id) ?? false) && !isNodeLoading && node.children.length === 0
+      if (isNodeFailed) {
+        result.push({
+          node,
+          depth: depth + 1,
+          isLast: true,
+          parentIsLast: childParentIsLast,
+          isFailed: true,
+        })
+      }
+      // Skeleton placeholders
+      else if (isNodeLoading && node.children.length === 0) {
+        const skeletonCount = Math.min(childCount || 3, 4)
+        for (let i = 0; i < skeletonCount; i++) {
+          result.push({
+            node,
+            depth: depth + 1,
+            isLast: i === skeletonCount - 1,
+            parentIsLast: childParentIsLast,
+            isSkeleton: true,
+            skeletonIndex: i,
+          })
+        }
+      } else {
+        // Push children onto stack in reverse order (+ optional loadMore at bottom)
+        const displayChildren = node.children
+        const activeQuery = childSearchQueries[node.id]?.trim().toLowerCase()
+        const hasMore = node.children.length < childCount && !activeQuery
+
+        if (hasMore) {
+          stack.push({ kind: 'loadMore', parent: node, depth: depth + 1, parentIsLast: childParentIsLast, count: childCount - node.children.length })
+        }
+
+        for (let i = displayChildren.length - 1; i >= 0; i--) {
+          stack.push({
+            kind: 'node',
+            node: displayChildren[i],
+            depth: depth + 1,
+            isLast: i === displayChildren.length - 1 && !hasMore,
+            parentIsLast: childParentIsLast,
+          })
+        }
+      }
+    }
 
     return result
   }, [nodes, expandedNodes, localFocusId, activeSearchNodes, childSearchQueries, loadingNodes, failedNodes])

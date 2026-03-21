@@ -42,40 +42,49 @@ export interface UseEdgeProjectionOptions {
 /** Build a flat id→node lookup from the full tree. O(N) once, then O(1) per lookup. */
 function buildNodeIndex(nodesByLayer: Map<string, HierarchyNode[]>): Map<string, HierarchyNode> {
   const index = new Map<string, HierarchyNode>()
-  const visit = (node: HierarchyNode) => {
+  const stack: HierarchyNode[] = []
+  nodesByLayer.forEach(roots => { for (let i = roots.length - 1; i >= 0; i--) stack.push(roots[i]) })
+  while (stack.length > 0) {
+    const node = stack.pop()!
     index.set(node.id, node)
-    node.children.forEach(visit)
+    for (let i = node.children.length - 1; i >= 0; i--) stack.push(node.children[i])
   }
-  nodesByLayer.forEach(roots => roots.forEach(visit))
   return index
 }
 
-/** Map a node and all its descendants to `anchor` in the given map. */
-function collapseSubtreeInMap(node: HierarchyNode, anchor: string, map: Map<string, string>) {
-  if (node.urn) map.set(node.urn, anchor)
-  map.set(node.id, anchor)
-  node.children.forEach(c => collapseSubtreeInMap(c, anchor, map))
+/** Map a node and all its descendants to `anchor` in the given map. Iterative. */
+function collapseSubtreeInMap(root: HierarchyNode, anchor: string, map: Map<string, string>) {
+  const stack: HierarchyNode[] = [root]
+  while (stack.length > 0) {
+    const node = stack.pop()!
+    if (node.urn) map.set(node.urn, anchor)
+    map.set(node.id, anchor)
+    for (let i = node.children.length - 1; i >= 0; i--) stack.push(node.children[i])
+  }
 }
 
 /**
  * When `node` is expanded, each direct child becomes visible and maps to
- * itself. If a child is already expanded, recurse so its children also
- * map correctly. If a child is collapsed, all its descendants roll up to it.
+ * itself. If a child is already expanded, process its children too.
+ * If a child is collapsed, all its descendants roll up to it. Iterative.
  */
 function expandNodeInMap(node: HierarchyNode, expandedNodes: Set<string>, map: Map<string, string>) {
-  node.children.forEach(child => {
-    if (child.urn) map.set(child.urn, child.id)
-    map.set(child.id, child.id)
-    if (expandedNodes.has(child.id)) {
-      expandNodeInMap(child, expandedNodes, map)
-    } else {
-      // Ensure all of this collapsed child's descendants roll up to it
-      child.children.forEach(gc => collapseSubtreeInMap(gc, child.id, map))
+  const stack: HierarchyNode[] = [node]
+  while (stack.length > 0) {
+    const current = stack.pop()!
+    for (const child of current.children) {
+      if (child.urn) map.set(child.urn, child.id)
+      map.set(child.id, child.id)
+      if (expandedNodes.has(child.id)) {
+        stack.push(child)
+      } else {
+        for (const gc of child.children) collapseSubtreeInMap(gc, child.id, map)
+      }
     }
-  })
+  }
 }
 
-/** Full O(N) build. Called on initial load and whenever nodesByLayer changes. */
+/** Full O(N) build. Called on initial load and whenever nodesByLayer changes. Iterative. */
 function buildFullAncestorMap(
   nodesByLayer: Map<string, HierarchyNode[]>,
   expandedNodes: Set<string>,
@@ -83,21 +92,26 @@ function buildFullAncestorMap(
 ): Map<string, string> {
   const map = new Map<string, string>()
 
-  const processNode = (node: HierarchyNode, currentVisibleAnchor: string) => {
-    if (node.urn) map.set(node.urn, currentVisibleAnchor)
-    map.set(node.id, currentVisibleAnchor)
+  const stack: Array<{ node: HierarchyNode; anchor: string }> = []
+  nodesByLayer.forEach(roots => {
+    for (let i = roots.length - 1; i >= 0; i--) stack.push({ node: roots[i], anchor: roots[i].id })
+  })
 
-    let childAnchor = currentVisibleAnchor
-    if (node.id === currentVisibleAnchor) {
+  while (stack.length > 0) {
+    const { node, anchor } = stack.pop()!
+    if (node.urn) map.set(node.urn, anchor)
+    map.set(node.id, anchor)
+
+    let childAnchor = anchor
+    if (node.id === anchor) {
       childAnchor = expandedNodes.has(node.id) ? 'USE_CHILD_ID' : node.id
     }
 
-    node.children?.forEach(child => {
-      processNode(child, childAnchor === 'USE_CHILD_ID' ? child.id : childAnchor)
-    })
+    for (let i = node.children.length - 1; i >= 0; i--) {
+      const child = node.children[i]
+      stack.push({ node: child, anchor: childAnchor === 'USE_CHILD_ID' ? child.id : childAnchor })
+    }
   }
-
-  nodesByLayer.forEach(roots => roots.forEach(root => processNode(root, root.id)))
 
   // Safety pass: visible nodes always map to themselves
   displayFlat.forEach(node => {

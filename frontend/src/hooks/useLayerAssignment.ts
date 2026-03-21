@@ -141,65 +141,44 @@ export function useLayerAssignment({
     // Use a Set to track processed.
     const processed = new Set<string>()
 
-    const calculateEffectiveLayer = (nodeId: string, inheritedLayerId?: string) => {
-      // Allow revisiting if we are providing a layer assignment where there was none?
-      // For simple containment tree, we visit once.
-      if (processed.has(nodeId)) return
-      processed.add(nodeId)
+    // Iterative top-down traversal (prevents stack overflow on deep hierarchies)
+    // Priority order (highest to lowest):
+    // 1. effectiveAssignments (backend) 2. instanceAssignments (user drag)
+    // 3. explicitAssignments (view config) 4. ruleAssignments (rules) 5. inheritance
+    const roots = nodes.filter((n: any) => !parentMap.has(n.id))
+    const stack: Array<{ nodeId: string; inheritedLayerId?: string }> = []
+    // Push roots in reverse so first root is processed first
+    for (let i = roots.length - 1; i >= 0; i--) {
+      stack.push({ nodeId: roots[i].id })
+    }
 
-      // Priority order (highest to lowest):
-      // 1. effectiveAssignments (from backend computation - source of truth)
-      // 2. instanceAssignments (from store - user drag-and-drop)
-      // 3. explicitAssignments (from view layers - saved assignments)
-      // 4. ruleAssignments (from rules - pattern/tag/type matching)
-      // 5. inheritance (from parent)
+    while (stack.length > 0) {
+      const { nodeId, inheritedLayerId } = stack.pop()!
+      if (processed.has(nodeId)) continue
+      processed.add(nodeId)
 
       let myLayerId: string | undefined
 
-      // 1. Backend-computed effective assignment (highest priority)
       const backendAssignment = effectiveAssignments.get(nodeId)
-      if (backendAssignment?.layerId) {
-        myLayerId = backendAssignment.layerId
-      }
+      if (backendAssignment?.layerId) myLayerId = backendAssignment.layerId
 
-      // 2. Instance assignment from store (user manual assignment)
       if (!myLayerId) {
         const instanceAssignment = instanceAssignments.get(nodeId)
-        if (instanceAssignment) {
-          myLayerId = instanceAssignment.layerId
-        }
+        if (instanceAssignment) myLayerId = instanceAssignment.layerId
       }
 
-      // 3. Explicit assignment from view layers (saved in view config)
-      if (!myLayerId) {
-        myLayerId = explicitAssignments.get(nodeId)
-      }
+      if (!myLayerId) myLayerId = explicitAssignments.get(nodeId)
+      if (!myLayerId) myLayerId = ruleAssignments.get(nodeId)
+      if (!myLayerId && inheritedLayerId) myLayerId = inheritedLayerId
+      if (myLayerId === '__UNASSIGNED__') myLayerId = undefined
 
-      // 4. Rule-based assignment
-      if (!myLayerId) {
-        myLayerId = ruleAssignments.get(nodeId)
-      }
-
-      // 5. Inheritance from parent
-      if (!myLayerId && inheritedLayerId) {
-        myLayerId = inheritedLayerId
-      }
-
-      if (myLayerId === '__UNASSIGNED__') {
-        myLayerId = undefined
-      }
-
-      if (myLayerId) {
-        effectiveLayer.set(nodeId, myLayerId)
-      }
+      if (myLayerId) effectiveLayer.set(nodeId, myLayerId)
 
       const children = childMap.get(nodeId) || []
-      children.forEach(childId => calculateEffectiveLayer(childId, myLayerId))
+      for (let i = children.length - 1; i >= 0; i--) {
+        stack.push({ nodeId: children[i], inheritedLayerId: myLayerId })
+      }
     }
-
-    // Find true roots (nodes with no parents) and start there
-    const roots = nodes.filter((n: any) => !parentMap.has(n.id))
-    roots.forEach((r: any) => calculateEffectiveLayer(r.id))
 
     // Also handle orphans (cycles or disconnected) if any missed?
     // The recursive step above should cover all reachable from roots.
@@ -210,30 +189,58 @@ export function useLayerAssignment({
     // - It is effectively in Layer L
     // - AND (Its parent is NOT in Layer L OR it has no parent)
 
-    // Helper to build hierarchy node
-    const buildHierarchyNode = (nodeId: string, depth: number): HierarchyNode | null => {
-      const node = nodeMap.get(nodeId)
-      if (!node) return null
+    // Iterative hierarchy builder — post-order traversal so children are ready before parents
+    const buildHierarchyNode = (rootId: string): HierarchyNode | null => {
+      const rootNode = nodeMap.get(rootId)
+      if (!rootNode) return null
 
-      const childrenIds = childMap.get(nodeId) || []
-      // Filter children: Only include those that are effectively in the SAME layer
-      const validChildren = childrenIds
-        .filter(cid => effectiveLayer.get(cid) === effectiveLayer.get(nodeId))
-        .map(cid => buildHierarchyNode(cid, depth + 1))
-        .filter((n): n is HierarchyNode => n !== null)
-        .sort((a, b) => a.name.localeCompare(b.name))
+      const rootLayer = effectiveLayer.get(rootId)
+      // Phase 1: collect nodes in DFS order (iterative)
+      const order: Array<{ nodeId: string; depth: number; parentIdx: number }> = []
+      const dfsStack: Array<{ nodeId: string; depth: number; parentIdx: number }> = [
+        { nodeId: rootId, depth: 0, parentIdx: -1 }
+      ]
+      while (dfsStack.length > 0) {
+        const item = dfsStack.pop()!
+        const idx = order.length
+        order.push(item)
 
-      return {
-        id: node.id,
-        typeId: node.data.type,
-        name: node.data.label ?? node.data.businessLabel ?? node.id,
-        data: node.data as Record<string, unknown>,
-        children: validChildren,
-        depth,
-        urn: node.data.urn || node.id,
-        entityTypeOption: (node.data.type as string) || '',
-        tags: node.data.classifications || []
+        const childrenIds = childMap.get(item.nodeId) || []
+        // Push in reverse so first child is processed first
+        for (let i = childrenIds.length - 1; i >= 0; i--) {
+          const cid = childrenIds[i]
+          if (effectiveLayer.get(cid) === rootLayer) {
+            dfsStack.push({ nodeId: cid, depth: item.depth + 1, parentIdx: idx })
+          }
+        }
       }
+
+      // Phase 2: build HierarchyNodes bottom-up
+      const built: (HierarchyNode | null)[] = new Array(order.length).fill(null)
+      const childrenOf: HierarchyNode[][] = order.map(() => [])
+
+      for (let i = order.length - 1; i >= 0; i--) {
+        const { nodeId, depth, parentIdx } = order[i]
+        const node = nodeMap.get(nodeId)
+        if (!node) continue
+
+        const children = childrenOf[i].sort((a, b) => a.name.localeCompare(b.name))
+        const hNode: HierarchyNode = {
+          id: node.id,
+          typeId: node.data.type,
+          name: node.data.label ?? node.data.businessLabel ?? node.id,
+          data: node.data as Record<string, unknown>,
+          children,
+          depth,
+          urn: node.data.urn || node.id,
+          entityTypeOption: (node.data.type as string) || '',
+          tags: node.data.classifications || []
+        }
+        built[i] = hNode
+        if (parentIdx >= 0) childrenOf[parentIdx].push(hNode)
+      }
+
+      return built[0]
     }
 
     nodes.forEach((node: any) => {
@@ -246,7 +253,7 @@ export function useLayerAssignment({
 
       if (layerId !== parentLayerId) {
         // It's a root in this layer context!
-        const hNode = buildHierarchyNode(node.id, 0)
+        const hNode = buildHierarchyNode(node.id)
         if (hNode) {
           const list = grouped.get(layerId)
           if (list) list.push(hNode)
@@ -267,16 +274,18 @@ export function useLayerAssignment({
     const map = new Map<string, HierarchyNode>()
 
     nodesByLayer.forEach((layerNodes) => {
-      const traverse = (node: HierarchyNode) => {
-        // Dedup: a node should only appear once across all layers.
-        // If it was already added (e.g. during assignment transitions),
-        // skip to prevent duplicate React keys.
-        if (map.has(node.id)) return
+      // Iterative DFS to prevent stack overflow on deep hierarchies
+      const stack = [...layerNodes]
+      while (stack.length > 0) {
+        const node = stack.pop()!
+        if (map.has(node.id)) continue
         flat.push(node)
         map.set(node.id, node)
-        node.children.forEach(traverse)
+        // Push children in reverse so first child is visited first
+        for (let i = node.children.length - 1; i >= 0; i--) {
+          stack.push(node.children[i])
+        }
       }
-      layerNodes.forEach(traverse)
     })
 
     return { displayFlat: flat, displayMap: map }
