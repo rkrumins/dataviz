@@ -1,42 +1,8 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import type { ComputedEdge } from './types'
 
-// Global visibility tracker for extreme performance on 10k+ nodes
+// Global visibility tracker — which layer-node-* elements are currently in the viewport
 const globalVisibleNodes = new Set<string>()
-let globalNodeObserver: IntersectionObserver | null = null
-
-function getSharedNodeObserver(triggerRedraw: () => void) {
-  if (typeof window === 'undefined') return null
-  if (!globalNodeObserver) {
-    globalNodeObserver = new IntersectionObserver((entries) => {
-      let changed = false
-      entries.forEach(entry => {
-        const id = entry.target.id
-        if (!id) return
-        if (entry.isIntersecting) {
-          if (!globalVisibleNodes.has(id)) {
-            globalVisibleNodes.add(id)
-            changed = true
-          }
-        } else {
-          if (globalVisibleNodes.has(id)) {
-            globalVisibleNodes.delete(id)
-            changed = true
-          }
-        }
-      })
-      if (changed) {
-        // Schedule redraw if visibility changes
-        triggerRedraw()
-      }
-    }, {
-      root: null, // observe relative to viewport
-      rootMargin: '100px', // start rendering slightly before it enters screen
-      threshold: 0
-    })
-  }
-  return globalNodeObserver
-}
 
 export function LineageFlowOverlay({
   nodes,
@@ -306,29 +272,116 @@ export function LineageFlowOverlay({
     }
   }, [updateFlow, scheduleUpdate, triggerRedrawRef])
 
-  // ResizeObserver to detect when node elements finish resizing/moving
+  // ResizeObserver + IntersectionObserver for node elements.
+  // Uses MutationObserver to dynamically track layer-node-* elements as they're
+  // added/removed by the virtualizer (which mounts/unmounts DOM elements on scroll).
   useEffect(() => {
     if (!containerRef.current) return
+    const container = containerRef.current
 
-    const observer = new ResizeObserver(() => {
-      // Debounce using requestAnimationFrame to avoid excessive calls
+    const resizeObserver = new ResizeObserver(() => {
       scheduleUpdate()
     })
 
-    const visibilityObserver = getSharedNodeObserver(scheduleUpdate)
-
-    // Observe all visible node elements
-    nodes.forEach(node => {
-      const el = document.getElementById(`layer-node-${node.id}`)
-      if (el) {
-        observer.observe(el)
-        if (visibilityObserver) visibilityObserver.observe(el)
-      }
+    // Fresh IntersectionObserver per effect lifecycle (no stale singleton)
+    const visibilityObserver = new IntersectionObserver((entries) => {
+      let changed = false
+      entries.forEach(entry => {
+        const id = entry.target.id
+        if (!id) return
+        if (entry.isIntersecting) {
+          if (!globalVisibleNodes.has(id)) {
+            globalVisibleNodes.add(id)
+            changed = true
+          }
+        } else {
+          if (globalVisibleNodes.has(id)) {
+            globalVisibleNodes.delete(id)
+            changed = true
+          }
+        }
+      })
+      if (changed) scheduleUpdate()
+    }, {
+      root: null,
+      rootMargin: '100px',
+      threshold: 0,
     })
 
+    // Track which elements we're currently observing
+    const observedElements = new Set<Element>()
+
+    const observeElement = (el: Element) => {
+      if (observedElements.has(el)) return
+      observedElements.add(el)
+      resizeObserver.observe(el)
+      visibilityObserver.observe(el)
+    }
+
+    const unobserveElement = (el: Element) => {
+      if (!observedElements.has(el)) return
+      observedElements.delete(el)
+      resizeObserver.unobserve(el)
+      visibilityObserver.unobserve(el)
+      if (el.id) globalVisibleNodes.delete(el.id)
+    }
+
+    // The overlay is a sibling of the layer columns, so we need to observe
+    // the common parent that contains both.
+    const observeRoot = container.parentElement || container
+
+    // Scan for already-present node elements
+    const scanAndObserve = () => {
+      observeRoot.querySelectorAll('[id^="layer-node-"]').forEach(el => observeElement(el))
+    }
+    scanAndObserve()
+
+    // Re-scan after next frame — virtualizer may mount items slightly after this effect runs
+    const scanRaf = requestAnimationFrame(() => {
+      scanAndObserve()
+      scheduleUpdate()
+    })
+
+    // MutationObserver to pick up elements added/removed by the virtualizer
+    const mutationObserver = new MutationObserver((mutations) => {
+      let changed = false
+      for (const mutation of mutations) {
+        for (const added of mutation.addedNodes) {
+          if (added instanceof HTMLElement) {
+            if (added.id?.startsWith('layer-node-')) {
+              observeElement(added)
+              changed = true
+            }
+            added.querySelectorAll('[id^="layer-node-"]').forEach(el => {
+              observeElement(el)
+              changed = true
+            })
+          }
+        }
+        for (const removed of mutation.removedNodes) {
+          if (removed instanceof HTMLElement) {
+            if (removed.id?.startsWith('layer-node-')) {
+              unobserveElement(removed)
+              changed = true
+            }
+            removed.querySelectorAll('[id^="layer-node-"]').forEach(el => {
+              unobserveElement(el)
+              changed = true
+            })
+          }
+        }
+      }
+      if (changed) scheduleUpdate()
+    })
+
+    mutationObserver.observe(observeRoot, { childList: true, subtree: true })
+
     return () => {
-      observer.disconnect()
-      if (visibilityObserver) visibilityObserver.disconnect()
+      cancelAnimationFrame(scanRaf)
+      mutationObserver.disconnect()
+      resizeObserver.disconnect()
+      visibilityObserver.disconnect()
+      observedElements.clear()
       globalVisibleNodes.clear()
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current)

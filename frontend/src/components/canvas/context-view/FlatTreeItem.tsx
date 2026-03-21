@@ -33,7 +33,6 @@ interface FlatTreeItemProps {
   onFocus: (node: HierarchyNode) => void
   onToggleSearch?: (id: string) => void
   isSearchVisible?: boolean
-  animationDelay?: number
 }
 
 export const FlatTreeItem = React.memo(function FlatTreeItem({
@@ -62,7 +61,6 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onFocus,
   onToggleSearch,
   isSearchVisible = false,
-  animationDelay = 0
 }: FlatTreeItemProps) {
   const itemRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
@@ -89,23 +87,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // Tree line indent - reduced to save horizontal space
   const indentWidth = depth * 16
 
-  // Auto-scroll when this node becomes the focus of a trace
-  useEffect(() => {
-    if (isFocusNode && itemRef.current) {
-      setTimeout(() => {
-        itemRef.current?.scrollIntoView({
-          behavior: 'smooth',
-          block: 'center',
-          inline: 'nearest'
-        })
-      }, 100)
-    }
-  }, [isFocusNode])
-
   // 4.3 Drag-and-drop — only root-level nodes (depth === 0, no parentId) may
   // be re-assigned between layers. Children live inside their parent's
   // containment scope; moving a column without its table would break the
-  // ontology. Attach native events via ref (avoids Framer Motion type conflict).
+  // ontology. Attach native events via ref (avoids type conflict).
   const isLayerDraggable = depth === 0 && !node.parentId
   useEffect(() => {
     const el = itemRef.current
@@ -138,19 +123,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   }, [node.id, node.name, isLayerDraggable])
 
   return (
-    <motion.div
+    <div
       ref={itemRef}
       id={`layer-node-${node.id}`}
       data-canvas-interactive
-      initial={{ opacity: 0, x: -12, scale: 0.97 }}
-      animate={{ opacity: 1, x: 0, scale: 1 }}
-      exit={{ opacity: 0, x: -8, scale: 0.96, transition: { duration: 0.18, ease: [0.4, 0, 1, 1] } }}
-      transition={{
-        duration: 0.3,
-        delay: Math.min(animationDelay, 0.4),
-        ease: [0.25, 0.46, 0.45, 0.94],
-        scale: { duration: 0.25, delay: Math.min(animationDelay, 0.4) },
-      }}
       className={cn(
         "flex items-center gap-2 mx-1 rounded-xl cursor-pointer transition-all duration-200 group/item relative",
         heightClass,
@@ -179,7 +155,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // Subtle left border accent for root items
         ...(depth === 0 && {
           borderLeft: `3px solid ${nodeColor}40`,
-        })
+        }),
       }}
       onClick={(e) => {
         e.stopPropagation()
@@ -407,6 +383,6 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         }}
         transition={{ duration: 0.2 }}
       />
-    </motion.div>
+    </div>
   )
 })
