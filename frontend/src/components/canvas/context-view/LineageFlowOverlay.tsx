@@ -116,13 +116,13 @@ export function LineageFlowOverlay({
         const sRect = sourceEl.getBoundingClientRect()
         const tRect = targetEl.getBoundingClientRect()
 
-        // Relative coordinates
-        // Offset sx/tx slightly from the card boundary to make arrowheads/terminals visible
-        const sx = sRect.right - containerRect.left + 2
+        // Relative coordinates — offset from column edges so curves are visible
+        // in the gutter between columns (gap-12 = 48px gap)
+        const sx = sRect.right - containerRect.left + 6
         const sy = sRect.top + sRect.height / 2 - containerRect.top
 
-        // Target: point slightly before the card boundary
-        let tx = tRect.left - containerRect.left - 4
+        // Target: leave room for the arrowhead
+        let tx = tRect.left - containerRect.left - 8
         const ty = tRect.top + tRect.height / 2 - containerRect.top
 
         // We no longer cull here based on window.innerHeight, because the container itself scrolls.
@@ -157,21 +157,16 @@ export function LineageFlowOverlay({
           pathD = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
         } else {
           // Standard Left-to-Right S-Curve (Sigmoid)
-          // This creates a beautiful, simple flow without "ballooning"
           const dist = Math.abs(tx - sx)
 
-          // Fixed curvature creates a uniform look. 0.5 = standard S-curve.
-          const curvature = 0.5
+          // Ensure minimum control point spread so short-distance edges
+          // (adjacent columns with ~48px gap) still show a visible curve
+          const minSpread = 24
+          const spread = Math.max(dist * 0.5, minSpread)
 
-          const cp1x = sx + dist * curvature
-          const cp2x = tx - dist * curvature
+          const cp1x = sx + spread
+          const cp2x = tx - spread
 
-          // CRITICAL: Keep control point Ys aligned with Source/Target Ys
-          // This ensures the line leaves horizontally and enters horizontally.
-          // We apply vOffset ONLY to the middle if we wanted separation,
-          // but for "prettiness", pure S-curves usually look best.
-          // If we really need separation for multi-edges, we can adjust the CP x-values slightly
-          // or just let them overlap cleanly as "highways".
           const cp1y = sy
           const cp2y = ty
 
@@ -185,16 +180,16 @@ export function LineageFlowOverlay({
           : '#3b82f6'
 
         let color = typeColor
-        // Base opacity varies by confidence (if available) - increased base for vibrancy
-        let edgeOpacity = 0.5 + (edge.confidence || 0.4) * 0.5
+        // Base opacity — high enough to be clearly visible; confidence modulates it
+        let edgeOpacity = 0.6 + (edge.confidence || 0.4) * 0.4
 
-        // Base stroke width — refined and modern
-        let baseStrokeWidth = 1.2
+        // Base stroke width — thick enough to be clearly visible between columns
+        let baseStrokeWidth = 1.8
         if (edge.isBundled) {
-          // Subtle logarithmic scaling — stays elegant even at high counts
-          baseStrokeWidth = Math.min(1.5 + Math.log2(edge.edgeCount) * 0.5, 3.5)
+          // Logarithmic scaling — stays elegant even at high counts
+          baseStrokeWidth = Math.min(2 + Math.log2(edge.edgeCount) * 0.6, 4)
         } else if (edge.isAggregated) {
-          baseStrokeWidth = 1.5
+          baseStrokeWidth = 2.2
         }
 
         let dynamicStrokeWidth = baseStrokeWidth
@@ -519,18 +514,6 @@ export function LineageFlowOverlay({
               }
             `}
           </style>
-          {/* arrowhead marker */}
-          <marker
-            id="arrowhead"
-            markerWidth="10"
-            markerHeight="7"
-            refX="9"
-            refY="3.5"
-            orient="auto"
-          >
-            <polygon points="0 0, 10 3.5, 0 7" fill="currentColor" opacity="0.8" />
-          </marker>
-
           {/* Glow filter */}
           <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
             <feGaussianBlur stdDeviation="2" result="blur" />
@@ -584,11 +567,12 @@ export function LineageFlowOverlay({
                   stroke: color,
                   strokeWidth: dynamicStrokeWidth,
                   fill: 'none',
-                  strokeOpacity: isHighlighted ? Math.min(0.85, edgeOpacity * 1.3) : edgeOpacity * 0.8,
-                  strokeDasharray: isGhost ? '4 4' : 'none',
+                  strokeOpacity: isHighlighted ? Math.min(0.95, edgeOpacity * 1.2) : edgeOpacity,
+                  strokeDasharray: isGhost ? '6 4' : 'none',
                   strokeLinecap: 'round',
                   transition: 'all 0.3s ease',
                 }}
+                markerEnd={!isGhost ? `url(#arrowhead-${edge.id})` : undefined}
                 className="pointer-events-none"
               />
 
@@ -632,9 +616,27 @@ export function LineageFlowOverlay({
                 </g>
               )}
 
+              {/* Arrowhead marker (per-edge, inherits edge color) */}
+              <defs>
+                <marker
+                  id={`arrowhead-${edge.id}`}
+                  markerWidth="8"
+                  markerHeight="6"
+                  refX="7"
+                  refY="3"
+                  orient="auto"
+                >
+                  <polygon
+                    points="0 0.5, 7 3, 0 5.5"
+                    fill={color}
+                    opacity={isHighlighted ? 0.9 : edgeOpacity * 0.85}
+                  />
+                </marker>
+              </defs>
+
               {/* Source terminal dot */}
               {!isGhost && (
-                <circle cx={sx} cy={sy} r="1.5" fill="currentColor" style={{ opacity: edgeOpacity * 0.7 }} />
+                <circle cx={sx} cy={sy} r={isHighlighted ? 3 : 2.5} fill={color} style={{ opacity: edgeOpacity * 0.8, transition: 'r 0.2s ease' }} />
               )}
 
               <title>{edge.source} → {edge.target} {isBundled ? `(${edge.edgeCount} bundled logs)` : ''}</title>

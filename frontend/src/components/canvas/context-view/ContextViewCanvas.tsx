@@ -878,7 +878,7 @@ export function ContextViewCanvas({
             />
           )}
 
-          <div className="flex h-full min-h-0 relative z-10 divide-x divide-glass-border">
+          <div className="flex h-full min-h-0 relative z-10 gap-12">
             {sortedLayers.map((layer) => (
               <LayerColumn
                 key={layer.id}
