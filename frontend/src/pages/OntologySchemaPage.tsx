@@ -7,7 +7,8 @@
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { Lock, PenLine, Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, Copy, ShieldCheck, Upload, X, Clock } from 'lucide-react'
+import { useBlocker } from 'react-router'
+import { Lock, PenLine, Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, Copy, ShieldCheck, Upload, X, Clock, Save, CircleDot } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { EntityTypeEditor } from '@/components/schema/EntityTypeEditor'
 import { RelationshipTypeEditor } from '@/components/schema/RelationshipTypeEditor'
@@ -48,6 +49,7 @@ import { UsagePanel } from '@/features/ontology/components/panels/UsagePanel'
 import { VersionHistoryPanel } from '@/features/ontology/components/panels/VersionHistoryPanel'
 import { SettingsPanel } from '@/features/ontology/components/panels/SettingsPanel'
 import { DeleteConfirmDialog } from '@/features/ontology/components/dialogs/DeleteConfirmDialog'
+import { UnsavedChangesDialog } from '@/features/ontology/components/dialogs/UnsavedChangesDialog'
 
 // ---------------------------------------------------------------------------
 // Tab configuration
@@ -118,22 +120,82 @@ export function OntologySchemaPage() {
   } | null>(null)
   const toastIdRef = useRef(0)
 
+  // ── Edit mode + working copies ──────────────────────────────────
+  const [isEditing, setIsEditing] = useState(false)
+  const [workingEntityDefs, setWorkingEntityDefs] = useState<Record<string, unknown> | null>(null)
+  const [workingRelDefs, setWorkingRelDefs] = useState<Record<string, unknown> | null>(null)
+  const [workingContainment, setWorkingContainment] = useState<string[] | null>(null)
+  const [workingLineage, setWorkingLineage] = useState<string[] | null>(null)
+
   // ── Derived ────────────────────────────────────────────────────────
-  const isLocked = !selectedOntology || selectedOntology.isSystem || selectedOntology.isPublished
+  const isImmutable = !selectedOntology || selectedOntology.isSystem || selectedOntology.isPublished
+  const isLocked = isImmutable || !isEditing
+
+  // Use working copies when editing, otherwise server data
+  const effectiveEntityDefs = useMemo(() => {
+    if (isEditing && workingEntityDefs) return workingEntityDefs
+    return (selectedOntology?.entityTypeDefinitions as Record<string, unknown>) ?? {}
+  }, [isEditing, workingEntityDefs, selectedOntology])
+
+  const effectiveRelDefs = useMemo(() => {
+    if (isEditing && workingRelDefs) return workingRelDefs
+    return (selectedOntology?.relationshipTypeDefinitions as Record<string, unknown>) ?? {}
+  }, [isEditing, workingRelDefs, selectedOntology])
 
   const entityTypes = useMemo((): EntityTypeSchema[] => {
-    if (!selectedOntology?.entityTypeDefinitions) return []
-    return Object.entries(selectedOntology.entityTypeDefinitions as Record<string, Record<string, unknown>>)
+    return Object.entries(effectiveEntityDefs as Record<string, Record<string, unknown>>)
       .map(([id, def]) => entityDefToSchema(id, def))
       .sort((a, b) => a.hierarchy.level - b.hierarchy.level || a.name.localeCompare(b.name))
-  }, [selectedOntology])
+  }, [effectiveEntityDefs])
 
   const relTypes = useMemo((): RelTypeWithClassifications[] => {
-    if (!selectedOntology?.relationshipTypeDefinitions) return []
-    return Object.entries(selectedOntology.relationshipTypeDefinitions as Record<string, Record<string, unknown>>)
+    return Object.entries(effectiveRelDefs as Record<string, Record<string, unknown>>)
       .map(([id, def]) => relDefToSchema(id, def))
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [selectedOntology])
+  }, [effectiveRelDefs])
+
+  // Detect pending changes
+  const hasPendingChanges = useMemo(() => {
+    if (!isEditing || !selectedOntology) return false
+    if (workingEntityDefs && JSON.stringify(workingEntityDefs) !== JSON.stringify(selectedOntology.entityTypeDefinitions ?? {})) return true
+    if (workingRelDefs && JSON.stringify(workingRelDefs) !== JSON.stringify(selectedOntology.relationshipTypeDefinitions ?? {})) return true
+    if (workingContainment && JSON.stringify(workingContainment) !== JSON.stringify(selectedOntology.containmentEdgeTypes ?? [])) return true
+    if (workingLineage && JSON.stringify(workingLineage) !== JSON.stringify(selectedOntology.lineageEdgeTypes ?? [])) return true
+    return false
+  }, [isEditing, selectedOntology, workingEntityDefs, workingRelDefs, workingContainment, workingLineage])
+
+  // Track which individual entity/rel IDs have been modified
+  const changedEntityIds = useMemo((): Set<string> => {
+    if (!isEditing || !selectedOntology || !workingEntityDefs) return new Set()
+    const serverDefs = (selectedOntology.entityTypeDefinitions as Record<string, unknown>) ?? {}
+    const changed = new Set<string>()
+    const allIds = new Set([...Object.keys(serverDefs), ...Object.keys(workingEntityDefs)])
+    for (const id of allIds) {
+      if (JSON.stringify(serverDefs[id]) !== JSON.stringify(workingEntityDefs[id])) {
+        changed.add(id)
+      }
+    }
+    return changed
+  }, [isEditing, selectedOntology, workingEntityDefs])
+
+  const changedRelIds = useMemo((): Set<string> => {
+    if (!isEditing || !selectedOntology || !workingRelDefs) return new Set()
+    const serverDefs = (selectedOntology.relationshipTypeDefinitions as Record<string, unknown>) ?? {}
+    const changed = new Set<string>()
+    const allIds = new Set([...Object.keys(serverDefs), ...Object.keys(workingRelDefs)])
+    for (const id of allIds) {
+      if (JSON.stringify(serverDefs[id]) !== JSON.stringify(workingRelDefs[id])) {
+        changed.add(id)
+      }
+    }
+    return changed
+  }, [isEditing, selectedOntology, workingRelDefs])
+
+  const hasEntityChanges = changedEntityIds.size > 0
+  const hasRelChanges = changedRelIds.size > 0 ||
+    (workingContainment && JSON.stringify(workingContainment) !== JSON.stringify(selectedOntology?.containmentEdgeTypes ?? [])) ||
+    (workingLineage && JSON.stringify(workingLineage) !== JSON.stringify(selectedOntology?.lineageEdgeTypes ?? []))
+  const hasHierarchyChanges = hasEntityChanges // hierarchy changes come from entity reparenting
 
   const entityStatMap = useMemo((): Map<string, EntityTypeSummary> => {
     const m = new Map<string, EntityTypeSummary>()
@@ -160,6 +222,59 @@ export function OntologySchemaPage() {
   const showToast = useCallback((type: ToastType, message: string) => {
     setToast({ type, message, id: ++toastIdRef.current })
   }, [])
+
+  // ── Edit mode helpers ─────────────────────────────────────────────
+  function enterEditMode() {
+    if (isImmutable || !selectedOntology) return
+    setWorkingEntityDefs({ ...((selectedOntology.entityTypeDefinitions as Record<string, unknown>) ?? {}) })
+    setWorkingRelDefs({ ...((selectedOntology.relationshipTypeDefinitions as Record<string, unknown>) ?? {}) })
+    setWorkingContainment([...(selectedOntology.containmentEdgeTypes ?? [])])
+    setWorkingLineage([...(selectedOntology.lineageEdgeTypes ?? [])])
+    setIsEditing(true)
+  }
+
+  function discardChanges() {
+    setWorkingEntityDefs(null)
+    setWorkingRelDefs(null)
+    setWorkingContainment(null)
+    setWorkingLineage(null)
+    setIsEditing(false)
+    setEditorPanel(null)
+  }
+
+  async function handleSaveAllChanges() {
+    if (!selectedOntology || !hasPendingChanges) return
+    setIsSaving(true)
+    try {
+      const req: Record<string, unknown> = {}
+      if (workingEntityDefs) req.entityTypeDefinitions = workingEntityDefs
+      if (workingRelDefs) req.relationshipTypeDefinitions = workingRelDefs
+      if (workingContainment) req.containmentEdgeTypes = workingContainment
+      if (workingLineage) req.lineageEdgeTypes = workingLineage
+
+      await mutations.update.mutateAsync({ id: selectedOntology.id, req })
+      showToast('success', 'All changes saved')
+      discardChanges()
+    } catch (err: unknown) {
+      showToast('error', `Failed to save: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  // ── Navigation guards ───────────────────────────────────────────
+  // Browser close / reload
+  useEffect(() => {
+    if (!hasPendingChanges) return
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [hasPendingChanges])
+
+  // React Router navigation
+  const blocker = useBlocker(hasPendingChanges)
 
   // ── Auto-redirect to first ontology if none selected ───────────────
   useEffect(() => {
@@ -189,11 +304,12 @@ export function OntologySchemaPage() {
       .catch(() => setCoverage(null))
   }, [ontologyId, graphStats])
 
-  // Clear editor / validation on ontology change
+  // Clear editor / validation / edit mode on ontology change
   useEffect(() => {
     setEditorPanel(null)
     setValidationResult(null)
     setSearch('')
+    discardChanges()
   }, [ontologyId])
 
   // ── Handlers ───────────────────────────────────────────────────────
@@ -216,145 +332,114 @@ export function OntologySchemaPage() {
     }
   }
 
-  async function handleSaveEntityType(entityType: EntityTypeSchema) {
-    if (!selectedOntology) return
+  function handleSaveEntityType(entityType: EntityTypeSchema) {
+    if (!selectedOntology || !workingEntityDefs) return
     if (isLocked) { showToast('warning', 'Clone this ontology to make edits'); return }
-    setIsSaving(true)
-    try {
-      const current = await ontologyDefinitionService.get(selectedOntology.id)
-      const currentDefs = (current.entityTypeDefinitions as Record<string, Record<string, unknown>>) ?? {}
 
-      const oldDef = currentDefs[entityType.id]
-      const oldHierarchy = (oldDef?.hierarchy as Record<string, unknown>) ?? {}
-      const oldCanContain: string[] = (oldHierarchy.can_contain as string[]) ?? []
-      const oldCanBeContainedBy: string[] = (oldHierarchy.can_be_contained_by as string[]) ?? []
-      const newCanContain = entityType.hierarchy.canContain
-      const newCanBeContainedBy = entityType.hierarchy.canBeContainedBy
+    const currentDefs = { ...(workingEntityDefs as Record<string, Record<string, unknown>>) }
 
-      const updatedDefs: Record<string, unknown> = {
-        ...currentDefs,
-        [entityType.id]: entitySchemaToBackend(entityType),
-      }
+    const oldDef = currentDefs[entityType.id]
+    const oldHierarchy = (oldDef?.hierarchy as Record<string, unknown>) ?? {}
+    const oldCanContain: string[] = (oldHierarchy.can_contain as string[]) ?? []
+    const oldCanBeContainedBy: string[] = (oldHierarchy.can_be_contained_by as string[]) ?? []
+    const newCanContain = entityType.hierarchy.canContain
+    const newCanBeContainedBy = entityType.hierarchy.canBeContainedBy
 
-      // Bidirectional sync — canContain side
-      for (const childId of oldCanContain.filter(c => !newCanContain.includes(c))) {
-        if (updatedDefs[childId]) {
-          const d = updatedDefs[childId] as Record<string, unknown>
-          const h = (d.hierarchy as Record<string, unknown>) ?? {}
-          updatedDefs[childId] = { ...d, hierarchy: { ...h, can_be_contained_by: ((h.can_be_contained_by as string[]) ?? []).filter(p => p !== entityType.id) } }
-        }
-      }
-      for (const childId of newCanContain.filter(c => !oldCanContain.includes(c))) {
-        if (updatedDefs[childId]) {
-          const d = updatedDefs[childId] as Record<string, unknown>
-          const h = (d.hierarchy as Record<string, unknown>) ?? {}
-          const existing: string[] = (h.can_be_contained_by as string[]) ?? []
-          if (!existing.includes(entityType.id)) {
-            updatedDefs[childId] = { ...d, hierarchy: { ...h, can_be_contained_by: [...existing, entityType.id] } }
-          }
-        }
-      }
-
-      // Bidirectional sync — canBeContainedBy side
-      for (const parentId of oldCanBeContainedBy.filter(p => !newCanBeContainedBy.includes(p))) {
-        if (updatedDefs[parentId]) {
-          const d = updatedDefs[parentId] as Record<string, unknown>
-          const h = (d.hierarchy as Record<string, unknown>) ?? {}
-          updatedDefs[parentId] = { ...d, hierarchy: { ...h, can_contain: ((h.can_contain as string[]) ?? []).filter(c => c !== entityType.id) } }
-        }
-      }
-      for (const parentId of newCanBeContainedBy.filter(p => !oldCanBeContainedBy.includes(p))) {
-        if (updatedDefs[parentId]) {
-          const d = updatedDefs[parentId] as Record<string, unknown>
-          const h = (d.hierarchy as Record<string, unknown>) ?? {}
-          const existing: string[] = (h.can_contain as string[]) ?? []
-          if (!existing.includes(entityType.id)) {
-            updatedDefs[parentId] = { ...d, hierarchy: { ...h, can_contain: [...existing, entityType.id] } }
-          }
-        }
-      }
-
-      await mutations.update.mutateAsync({ id: selectedOntology.id, req: { entityTypeDefinitions: updatedDefs } })
-      showToast('success', `Entity type "${entityType.name}" saved`)
-      setEditorPanel(null)
-    } catch (err: unknown) {
-      showToast('error', `Failed to save: ${err instanceof Error ? err.message : 'Unknown error'}`)
-    } finally {
-      setIsSaving(false)
+    const updatedDefs: Record<string, unknown> = {
+      ...currentDefs,
+      [entityType.id]: entitySchemaToBackend(entityType),
     }
+
+    // Bidirectional sync — canContain side
+    for (const childId of oldCanContain.filter(c => !newCanContain.includes(c))) {
+      if (updatedDefs[childId]) {
+        const d = updatedDefs[childId] as Record<string, unknown>
+        const h = (d.hierarchy as Record<string, unknown>) ?? {}
+        updatedDefs[childId] = { ...d, hierarchy: { ...h, can_be_contained_by: ((h.can_be_contained_by as string[]) ?? []).filter(p => p !== entityType.id) } }
+      }
+    }
+    for (const childId of newCanContain.filter(c => !oldCanContain.includes(c))) {
+      if (updatedDefs[childId]) {
+        const d = updatedDefs[childId] as Record<string, unknown>
+        const h = (d.hierarchy as Record<string, unknown>) ?? {}
+        const existing: string[] = (h.can_be_contained_by as string[]) ?? []
+        if (!existing.includes(entityType.id)) {
+          updatedDefs[childId] = { ...d, hierarchy: { ...h, can_be_contained_by: [...existing, entityType.id] } }
+        }
+      }
+    }
+
+    // Bidirectional sync — canBeContainedBy side
+    for (const parentId of oldCanBeContainedBy.filter(p => !newCanBeContainedBy.includes(p))) {
+      if (updatedDefs[parentId]) {
+        const d = updatedDefs[parentId] as Record<string, unknown>
+        const h = (d.hierarchy as Record<string, unknown>) ?? {}
+        updatedDefs[parentId] = { ...d, hierarchy: { ...h, can_contain: ((h.can_contain as string[]) ?? []).filter(c => c !== entityType.id) } }
+      }
+    }
+    for (const parentId of newCanBeContainedBy.filter(p => !oldCanBeContainedBy.includes(p))) {
+      if (updatedDefs[parentId]) {
+        const d = updatedDefs[parentId] as Record<string, unknown>
+        const h = (d.hierarchy as Record<string, unknown>) ?? {}
+        const existing: string[] = (h.can_contain as string[]) ?? []
+        if (!existing.includes(entityType.id)) {
+          updatedDefs[parentId] = { ...d, hierarchy: { ...h, can_contain: [...existing, entityType.id] } }
+        }
+      }
+    }
+
+    setWorkingEntityDefs(updatedDefs)
+    showToast('info', `"${entityType.name}" updated — save to persist`)
+    setEditorPanel(null)
   }
 
-  async function handleSaveRelType(relType: RelTypeWithClassifications) {
-    if (!selectedOntology) return
+  function handleSaveRelType(relType: RelTypeWithClassifications) {
+    if (!selectedOntology || !workingRelDefs) return
     if (isLocked) { showToast('warning', 'Clone this ontology to make edits'); return }
-    setIsSaving(true)
-    try {
-      const current = await ontologyDefinitionService.get(selectedOntology.id)
-      const relId = relType.id.toUpperCase()
-      const updatedRelDefs = {
-        ...((current.relationshipTypeDefinitions as Record<string, unknown>) ?? {}),
-        [relId]: relSchemaToBackend(relType),
-      }
 
-      let containmentEdgeTypes = [...(current.containmentEdgeTypes ?? [])]
-      if (relType.isContainment) {
-        if (!containmentEdgeTypes.includes(relId)) containmentEdgeTypes.push(relId)
-      } else {
-        containmentEdgeTypes = containmentEdgeTypes.filter(t => t !== relId)
-      }
-
-      let lineageEdgeTypes = [...(current.lineageEdgeTypes ?? [])]
-      if (relType.isLineage) {
-        if (!lineageEdgeTypes.includes(relId)) lineageEdgeTypes.push(relId)
-      } else {
-        lineageEdgeTypes = lineageEdgeTypes.filter(t => t !== relId)
-      }
-
-      await mutations.update.mutateAsync({
-        id: selectedOntology.id,
-        req: { relationshipTypeDefinitions: updatedRelDefs, containmentEdgeTypes, lineageEdgeTypes },
-      })
-      showToast('success', `Relationship type "${relType.name}" saved`)
-      setEditorPanel(null)
-    } catch (err: unknown) {
-      showToast('error', `Failed to save: ${err instanceof Error ? err.message : 'Unknown error'}`)
-    } finally {
-      setIsSaving(false)
+    const relId = relType.id.toUpperCase()
+    const updatedRelDefs = {
+      ...workingRelDefs,
+      [relId]: relSchemaToBackend(relType),
     }
+
+    let containment = [...(workingContainment ?? selectedOntology.containmentEdgeTypes ?? [])]
+    if (relType.isContainment) {
+      if (!containment.includes(relId)) containment.push(relId)
+    } else {
+      containment = containment.filter(t => t !== relId)
+    }
+
+    let lineage = [...(workingLineage ?? selectedOntology.lineageEdgeTypes ?? [])]
+    if (relType.isLineage) {
+      if (!lineage.includes(relId)) lineage.push(relId)
+    } else {
+      lineage = lineage.filter(t => t !== relId)
+    }
+
+    setWorkingRelDefs(updatedRelDefs)
+    setWorkingContainment(containment)
+    setWorkingLineage(lineage)
+    showToast('info', `"${relType.name}" updated — save to persist`)
+    setEditorPanel(null)
   }
 
-  async function handleDeleteEntityType(id: string, name: string) {
-    if (!selectedOntology || isLocked) return
-    if (!window.confirm(`Delete entity type "${name}"? This cannot be undone.`)) return
-    setIsSaving(true)
-    try {
-      const current = await ontologyDefinitionService.get(selectedOntology.id)
-      const defs = { ...((current.entityTypeDefinitions as Record<string, unknown>) ?? {}) }
-      delete defs[id]
-      await mutations.update.mutateAsync({ id: selectedOntology.id, req: { entityTypeDefinitions: defs } })
-      showToast('success', `"${name}" deleted`)
-    } catch (err: unknown) {
-      showToast('error', `Failed to delete: ${err instanceof Error ? err.message : 'Unknown error'}`)
-    } finally {
-      setIsSaving(false)
-    }
+  function handleDeleteEntityType(id: string, name: string) {
+    if (!selectedOntology || isLocked || !workingEntityDefs) return
+    if (!window.confirm(`Delete entity type "${name}"?`)) return
+    const defs = { ...workingEntityDefs }
+    delete defs[id]
+    setWorkingEntityDefs(defs)
+    showToast('info', `"${name}" removed — save to persist`)
   }
 
-  async function handleDeleteRelType(id: string, name: string) {
-    if (!selectedOntology || isLocked) return
-    if (!window.confirm(`Delete relationship type "${name}"? This cannot be undone.`)) return
-    setIsSaving(true)
-    try {
-      const current = await ontologyDefinitionService.get(selectedOntology.id)
-      const defs = { ...((current.relationshipTypeDefinitions as Record<string, unknown>) ?? {}) }
-      delete defs[id.toUpperCase()]
-      await mutations.update.mutateAsync({ id: selectedOntology.id, req: { relationshipTypeDefinitions: defs } })
-      showToast('success', `"${name}" deleted`)
-    } catch (err: unknown) {
-      showToast('error', `Failed to delete: ${err instanceof Error ? err.message : 'Unknown error'}`)
-    } finally {
-      setIsSaving(false)
-    }
+  function handleDeleteRelType(id: string, name: string) {
+    if (!selectedOntology || isLocked || !workingRelDefs) return
+    if (!window.confirm(`Delete relationship type "${name}"?`)) return
+    const defs = { ...workingRelDefs }
+    delete defs[id.toUpperCase()]
+    setWorkingRelDefs(defs)
+    showToast('info', `"${name}" removed — save to persist`)
   }
 
   async function handleSuggestOntology() {
@@ -480,64 +565,44 @@ export function OntologySchemaPage() {
     }
   }
 
-  async function handleReparentEntityType(childId: string, newParentId: string | null) {
-    if (!selectedOntology || isLocked) return
-    setIsSaving(true)
-    try {
-      const current = await ontologyDefinitionService.get(selectedOntology.id)
-      const defs = { ...((current.entityTypeDefinitions as Record<string, Record<string, unknown>>) ?? {}) } as Record<string, Record<string, unknown>>
+  function handleReparentEntityType(childId: string, newParentId: string | null) {
+    if (!selectedOntology || isLocked || !workingEntityDefs) return
 
-      const childDef = defs[childId]
-      if (!childDef) return
-      const childHierarchy = (childDef.hierarchy as Record<string, unknown>) ?? {}
-      const oldParents: string[] = (childHierarchy.can_be_contained_by as string[]) ?? []
+    const defs = { ...(workingEntityDefs as Record<string, Record<string, unknown>>) }
 
-      for (const oldParentId of oldParents) {
-        if (defs[oldParentId]) {
-          const pDef = defs[oldParentId]
-          const pH = (pDef.hierarchy as Record<string, unknown>) ?? {}
-          const pCC: string[] = (pH.can_contain as string[]) ?? []
-          defs[oldParentId] = { ...pDef, hierarchy: { ...pH, can_contain: pCC.filter(c => c !== childId) } }
-        }
-      }
+    const childDef = defs[childId]
+    if (!childDef) return
+    const childHierarchy = (childDef.hierarchy as Record<string, unknown>) ?? {}
+    const oldParents: string[] = (childHierarchy.can_be_contained_by as string[]) ?? []
 
-      defs[childId] = { ...childDef, hierarchy: { ...childHierarchy, can_be_contained_by: newParentId ? [newParentId] : [] } }
-
-      if (newParentId && defs[newParentId]) {
-        const pDef = defs[newParentId]
+    for (const oldParentId of oldParents) {
+      if (defs[oldParentId]) {
+        const pDef = defs[oldParentId]
         const pH = (pDef.hierarchy as Record<string, unknown>) ?? {}
         const pCC: string[] = (pH.can_contain as string[]) ?? []
-        if (!pCC.includes(childId)) {
-          defs[newParentId] = { ...pDef, hierarchy: { ...pH, can_contain: [...pCC, childId] } }
-        }
+        defs[oldParentId] = { ...pDef, hierarchy: { ...pH, can_contain: pCC.filter(c => c !== childId) } }
       }
-
-      await mutations.update.mutateAsync({
-        id: selectedOntology.id,
-        req: { entityTypeDefinitions: defs as Record<string, unknown> },
-      })
-      showToast('success', newParentId ? `Moved under ${humanizeId(newParentId)}` : `"${humanizeId(childId)}" is now a root type`)
-    } catch (err: unknown) {
-      showToast('error', `Failed to update hierarchy: ${err instanceof Error ? err.message : 'Unknown error'}`)
-    } finally {
-      setIsSaving(false)
     }
+
+    defs[childId] = { ...childDef, hierarchy: { ...childHierarchy, can_be_contained_by: newParentId ? [newParentId] : [] } }
+
+    if (newParentId && defs[newParentId]) {
+      const pDef = defs[newParentId]
+      const pH = (pDef.hierarchy as Record<string, unknown>) ?? {}
+      const pCC: string[] = (pH.can_contain as string[]) ?? []
+      if (!pCC.includes(childId)) {
+        defs[newParentId] = { ...pDef, hierarchy: { ...pH, can_contain: [...pCC, childId] } }
+      }
+    }
+
+    setWorkingEntityDefs(defs)
+    showToast('info', newParentId ? `Moved under ${humanizeId(newParentId)} — save to persist` : `"${humanizeId(childId)}" is now a root type — save to persist`)
   }
 
-  async function handleUpdateContainmentEdgeTypes(newList: string[]) {
+  function handleUpdateContainmentEdgeTypes(newList: string[]) {
     if (!selectedOntology || isLocked) return
-    setIsSaving(true)
-    try {
-      await mutations.update.mutateAsync({
-        id: selectedOntology.id,
-        req: { containmentEdgeTypes: newList },
-      })
-      showToast('success', 'Containment edge types updated')
-    } catch (err: unknown) {
-      showToast('error', `Failed to update: ${err instanceof Error ? err.message : 'Unknown error'}`)
-    } finally {
-      setIsSaving(false)
-    }
+    setWorkingContainment(newList)
+    showToast('info', 'Containment edge types updated — save to persist')
   }
 
   // ── Editor panel title helper ──────────────────────────────────────
@@ -593,9 +658,17 @@ export function OntologySchemaPage() {
                       <h1 className="text-2xl font-bold tracking-tight text-ink truncate">{selectedOntology.name}</h1>
                       <span className="text-xs text-ink-muted font-mono flex-shrink-0">v{selectedOntology.version}</span>
                       <OntologyStatusBadge ontology={selectedOntology} />
-                      {isLocked
+                      {isImmutable
                         ? <Lock className="w-3.5 h-3.5 text-ink-muted flex-shrink-0" />
-                        : <PenLine className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />}
+                        : isEditing
+                          ? <PenLine className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
+                          : <Lock className="w-3.5 h-3.5 text-ink-muted/40 flex-shrink-0" />}
+                      {hasPendingChanges && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/10 text-[10px] font-bold text-amber-600 dark:text-amber-400 ring-1 ring-amber-500/20 animate-pulse">
+                          <CircleDot className="w-2.5 h-2.5" />
+                          Unsaved
+                        </span>
+                      )}
                     </div>
                     <p className="text-sm text-ink-muted mt-1 max-w-2xl">
                       {selectedOntology.description || `${Object.keys(selectedOntology.entityTypeDefinitions ?? {}).length} entity types · ${Object.keys(selectedOntology.relationshipTypeDefinitions ?? {}).length} relationships`}
@@ -604,7 +677,7 @@ export function OntologySchemaPage() {
 
                   {/* Action toolbar */}
                   <div className="flex items-center gap-1.5 flex-shrink-0 ml-4">
-                    {!selectedOntology.isSystem && (
+                    {!selectedOntology.isSystem && !isEditing && (
                       <button
                         onClick={() => setEditDetailsTarget(selectedOntology)}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-all"
@@ -620,21 +693,73 @@ export function OntologySchemaPage() {
                       <Copy className="w-3.5 h-3.5" />
                       Clone
                     </button>
-                    <button
-                      onClick={handleValidate}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-emerald-300 hover:bg-emerald-500/[0.06] text-ink-secondary hover:text-emerald-600 transition-all"
-                    >
-                      <ShieldCheck className="w-3.5 h-3.5" />
-                      Validate
-                    </button>
-                    {!isLocked && (
-                      <button
-                        onClick={handlePublish}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20"
-                      >
-                        <Upload className="w-3.5 h-3.5" />
-                        Publish
-                      </button>
+
+                    {isEditing ? (
+                      <>
+                        {/* Discard */}
+                        <button
+                          onClick={discardChanges}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20 transition-all"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          Discard
+                        </button>
+                        <button
+                          onClick={handleValidate}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-emerald-300 hover:bg-emerald-500/[0.06] text-ink-secondary hover:text-emerald-600 transition-all"
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          Validate
+                        </button>
+                        {/* Save Changes — primary action when editing */}
+                        <button
+                          onClick={handleSaveAllChanges}
+                          disabled={!hasPendingChanges || isSaving}
+                          className={cn(
+                            'flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold transition-all shadow-sm',
+                            hasPendingChanges
+                              ? 'bg-emerald-500 text-white hover:bg-emerald-600 shadow-emerald-500/20'
+                              : 'bg-emerald-500/50 text-white/70 cursor-not-allowed shadow-none',
+                          )}
+                        >
+                          {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                          {isSaving ? 'Saving...' : 'Save Changes'}
+                        </button>
+                        {/* Publish */}
+                        <button
+                          onClick={handlePublish}
+                          disabled={hasPendingChanges}
+                          className={cn(
+                            'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors shadow-sm shadow-indigo-500/20',
+                            hasPendingChanges
+                              ? 'bg-indigo-500/50 text-white/70 cursor-not-allowed'
+                              : 'bg-indigo-500 text-white hover:bg-indigo-600',
+                          )}
+                          title={hasPendingChanges ? 'Save changes before publishing' : undefined}
+                        >
+                          <Upload className="w-3.5 h-3.5" />
+                          Publish
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          onClick={handleValidate}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-emerald-300 hover:bg-emerald-500/[0.06] text-ink-secondary hover:text-emerald-600 transition-all"
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          Validate
+                        </button>
+                        {!isImmutable && (
+                          <button
+                            onClick={enterEditMode}
+                            className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20"
+                          >
+                            <PenLine className="w-3.5 h-3.5" />
+                            Edit
+                          </button>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -648,12 +773,17 @@ export function OntologySchemaPage() {
                   const count = t.id === 'entities' ? entityTypes.length
                     : t.id === 'relationships' ? relTypes.length
                     : undefined
+                  const tabHasChanges = isEditing && (
+                    (t.id === 'entities' && hasEntityChanges) ||
+                    (t.id === 'relationships' && hasRelChanges) ||
+                    (t.id === 'hierarchy' && hasHierarchyChanges)
+                  )
                   return (
                     <button
                       key={t.id}
                       onClick={() => setSearchParams({ tab: t.id })}
                       className={cn(
-                        'flex items-center gap-2 px-4 py-3 text-sm font-semibold transition-all border-b-2',
+                        'flex items-center gap-2 px-4 py-3 text-sm font-semibold transition-all border-b-2 relative',
                         isActive
                           ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
                           : 'border-transparent text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 rounded-t-xl',
@@ -670,6 +800,9 @@ export function OntologySchemaPage() {
                         )}>
                           {count}
                         </span>
+                      )}
+                      {tabHasChanges && (
+                        <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse flex-shrink-0" />
                       )}
                     </button>
                   )
@@ -696,6 +829,7 @@ export function OntologySchemaPage() {
                           search={search}
                           validationResult={validationResult}
                           editorPanel={editorPanel}
+                          changedIds={changedEntityIds}
                           onSearch={setSearch}
                           onEdit={et => setEditorPanel({ kind: 'entity', data: et })}
                           onNew={() => setEditorPanel({ kind: 'entity' })}
@@ -711,6 +845,7 @@ export function OntologySchemaPage() {
                           isLocked={isLocked}
                           search={search}
                           editorPanel={editorPanel}
+                          changedIds={changedRelIds}
                           onSearch={setSearch}
                           onEdit={rt => setEditorPanel({ kind: 'rel', data: rt })}
                           onNew={() => setEditorPanel({ kind: 'rel' })}
@@ -835,6 +970,7 @@ export function OntologySchemaPage() {
                           <EntityTypeEditor
                             entityType={editorPanel.data}
                             availableEntityTypes={entityTypes.map(et => ({ id: et.id, name: et.name }))}
+                            readOnly={isLocked}
                             onSave={handleSaveEntityType}
                             onCancel={() => setEditorPanel(null)}
                           />
@@ -843,6 +979,7 @@ export function OntologySchemaPage() {
                           <RelationshipTypeEditor
                             relType={editorPanel.data}
                             availableEntityTypes={entityTypes.map(et => ({ id: et.id, name: et.name }))}
+                            readOnly={isLocked}
                             onSave={handleSaveRelType as (rt: RelationshipTypeSchema & { isContainment?: boolean; isLineage?: boolean; category?: string; direction?: string }) => void}
                             onCancel={() => setEditorPanel(null)}
                           />
@@ -899,6 +1036,22 @@ export function OntologySchemaPage() {
           assignmentCount={assignmentCountMap.get(selectedOntology.id) ?? 0}
           onConfirm={handleConfirmDelete}
           onClose={() => setShowDeleteDialog(false)}
+        />
+      )}
+
+      {/* Navigation blocker dialog */}
+      {blocker.state === 'blocked' && (
+        <UnsavedChangesDialog
+          isSaving={isSaving}
+          onSave={async () => {
+            await handleSaveAllChanges()
+            blocker.proceed()
+          }}
+          onDiscard={() => {
+            discardChanges()
+            blocker.proceed()
+          }}
+          onCancel={() => blocker.reset()}
         />
       )}
 

@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, Plus, Sparkles, Shield, CheckCircle2, PenLine, Box, GitBranch, Loader2, BookOpen, Database, X } from 'lucide-react'
+import { Search, Plus, Sparkles, Shield, CheckCircle2, PenLine, Box, GitBranch, Loader2, BookOpen, Database, X, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceResponse } from '@/services/workspaceService'
@@ -20,11 +20,11 @@ interface OntologySidebarProps {
 const STATUS_CONFIGS: Record<Exclude<StatusFilter, 'all'>, {
   icon: React.ComponentType<{ className?: string }>
   color: string
-  dotColor: string
+  activeColor: string
 }> = {
-  system: { icon: Shield, color: 'text-indigo-500', dotColor: 'bg-indigo-500' },
-  published: { icon: CheckCircle2, color: 'text-emerald-500', dotColor: 'bg-emerald-500' },
-  draft: { icon: PenLine, color: 'text-amber-500', dotColor: 'bg-amber-500' },
+  system: { icon: Shield, color: 'text-indigo-500', activeColor: 'bg-indigo-500/15' },
+  published: { icon: CheckCircle2, color: 'text-emerald-500', activeColor: 'bg-emerald-500/15' },
+  draft: { icon: PenLine, color: 'text-amber-500', activeColor: 'bg-amber-500/15' },
 }
 
 const filters: { id: StatusFilter; label: string }[] = [
@@ -38,6 +38,13 @@ function getStatusKey(o: OntologyDefinitionResponse): Exclude<StatusFilter, 'all
   if (o.isSystem) return 'system'
   if (o.isPublished) return 'published'
   return 'draft'
+}
+
+/** Cap a description to ~60 chars for sidebar display */
+function truncateDescription(desc: string | null | undefined, max = 60): string | null {
+  if (!desc) return null
+  if (desc.length <= max) return desc
+  return desc.slice(0, max).trimEnd() + '…'
 }
 
 export function OntologySidebar({
@@ -54,6 +61,9 @@ export function OntologySidebar({
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
 
+  // The active ontology for the current data source
+  const activeOntologyId = activeDataSource?.ontologyId
+
   const filtered = useMemo(() => {
     let list = ontologies
     if (statusFilter === 'system') list = list.filter(o => o.isSystem)
@@ -61,10 +71,18 @@ export function OntologySidebar({
     else if (statusFilter === 'draft') list = list.filter(o => !o.isPublished && !o.isSystem)
     if (search) {
       const q = search.toLowerCase()
-      list = list.filter(o => o.name.toLowerCase().includes(q))
+      list = list.filter(o => o.name.toLowerCase().includes(q) || o.description?.toLowerCase().includes(q))
     }
     return list
   }, [ontologies, statusFilter, search])
+
+  // Split: active ontology pinned to top, rest below
+  const { pinnedOntology, restOntologies } = useMemo(() => {
+    if (!activeOntologyId) return { pinnedOntology: null, restOntologies: filtered }
+    const pinned = filtered.find(o => o.id === activeOntologyId) ?? null
+    const rest = filtered.filter(o => o.id !== activeOntologyId)
+    return { pinnedOntology: pinned, restOntologies: rest }
+  }, [filtered, activeOntologyId])
 
   // Count per status for filter badges
   const counts = useMemo(() => ({
@@ -73,6 +91,112 @@ export function OntologySidebar({
     published: ontologies.filter(o => o.isPublished && !o.isSystem).length,
     draft: ontologies.filter(o => !o.isPublished && !o.isSystem).length,
   }), [ontologies])
+
+  // Render a single ontology item
+  function renderItem(o: OntologyDefinitionResponse, isPinned = false) {
+    const entityCount = Object.keys(o.entityTypeDefinitions ?? {}).length
+    const relCount = Object.keys(o.relationshipTypeDefinitions ?? {}).length
+    const isSelected = o.id === selectedOntologyId
+    const statusKey = getStatusKey(o)
+    const config = STATUS_CONFIGS[statusKey]
+    const StatusIcon = config.icon
+    const isActive = o.id === activeOntologyId
+    const dsCount = assignmentCountMap.get(o.id) ?? 0
+    const desc = truncateDescription(o.description)
+
+    return (
+      <button
+        key={o.id}
+        onClick={() => navigate(`/schema/${o.id}`)}
+        className={cn(
+          'w-full text-left rounded-xl p-3 transition-all group relative',
+          isPinned && 'border border-emerald-500/20 bg-gradient-to-r from-emerald-500/[0.06] to-emerald-500/[0.02] dark:from-emerald-500/[0.10] dark:to-emerald-500/[0.03]',
+          !isPinned && isSelected && 'bg-gradient-to-r from-indigo-500/[0.08] to-violet-500/[0.04] dark:from-indigo-500/[0.12] dark:to-violet-500/[0.06] ring-1 ring-indigo-500/20 shadow-sm',
+          !isPinned && !isSelected && 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
+        )}
+      >
+        {/* Row 1: Icon + Name + badges */}
+        <div className="flex items-center gap-2.5">
+          {/* Status icon container */}
+          <div className={cn(
+            'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors',
+            isPinned
+              ? 'bg-emerald-500/15 dark:bg-emerald-500/20'
+              : isSelected
+                ? 'bg-indigo-500/15 dark:bg-indigo-500/20'
+                : 'bg-black/[0.04] dark:bg-white/[0.06] group-hover:bg-black/[0.06] dark:group-hover:bg-white/[0.08]',
+          )}>
+            <StatusIcon className={cn(
+              'w-3.5 h-3.5',
+              isPinned ? 'text-emerald-500' : isSelected ? 'text-indigo-500' : config.color,
+            )} />
+          </div>
+
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className={cn(
+                'text-[13px] font-semibold truncate',
+                isSelected || isPinned ? 'text-ink' : 'text-ink-secondary group-hover:text-ink',
+              )}>
+                {o.name}
+              </span>
+              {isActive && (
+                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-[8px] font-bold text-emerald-600 dark:text-emerald-400 flex-shrink-0 ring-1 ring-emerald-500/20">
+                  <Zap className="w-2 h-2" />
+                  ACTIVE
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Row 2: Description (if available) */}
+        {desc && (
+          <p className={cn(
+            'text-[11px] leading-snug mt-1.5 ml-[38px]',
+            isSelected || isPinned ? 'text-ink-muted' : 'text-ink-muted/50',
+          )}>
+            {desc}
+          </p>
+        )}
+
+        {/* Row 3: Meta info */}
+        <div className="flex items-center gap-2 mt-1.5 ml-[38px]">
+          <span className={cn(
+            'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-semibold',
+            o.version > 1
+              ? 'bg-violet-500/10 text-violet-600 dark:text-violet-400'
+              : isSelected || isPinned ? 'text-ink-muted/70' : 'text-ink-muted/50',
+          )}>
+            v{o.version}
+          </span>
+          <span className={cn(
+            'inline-flex items-center gap-0.5 text-[10px]',
+            isSelected || isPinned ? 'text-ink-muted' : 'text-ink-muted/50',
+          )}>
+            <Box className="w-2.5 h-2.5" />
+            {entityCount}
+          </span>
+          <span className={cn(
+            'inline-flex items-center gap-0.5 text-[10px]',
+            isSelected || isPinned ? 'text-ink-muted' : 'text-ink-muted/50',
+          )}>
+            <GitBranch className="w-2.5 h-2.5" />
+            {relCount}
+          </span>
+          {dsCount > 0 && !isActive && (
+            <>
+              <span className="text-ink-muted/20">·</span>
+              <span className="inline-flex items-center gap-0.5 text-[10px] text-ink-muted/50">
+                <Database className="w-2.5 h-2.5" />
+                {dsCount}
+              </span>
+            </>
+          )}
+        </div>
+      </button>
+    )
+  }
 
   return (
     <div className="w-[280px] flex-shrink-0 flex flex-col border-r border-glass-border bg-canvas-elevated/40 h-full">
@@ -127,7 +251,7 @@ export function OntologySidebar({
       </div>
 
       {/* Scrollable list */}
-      <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-1">
+      <div className="flex-1 overflow-y-auto px-3 pb-3">
         {isLoading ? (
           <div className="flex items-center justify-center py-16">
             <Loader2 className="w-5 h-5 animate-spin text-ink-muted/40" />
@@ -145,92 +269,36 @@ export function OntologySidebar({
             </p>
           </div>
         ) : (
-          filtered.map(o => {
-            const entityCount = Object.keys(o.entityTypeDefinitions ?? {}).length
-            const relCount = Object.keys(o.relationshipTypeDefinitions ?? {}).length
-            const isSelected = o.id === selectedOntologyId
-            const statusKey = getStatusKey(o)
-            const config = STATUS_CONFIGS[statusKey]
-            const StatusIcon = config.icon
-            const isAssignedToCurrentDs = activeDataSource?.ontologyId === o.id
-            const dsCount = assignmentCountMap.get(o.id) ?? 0
-
-            return (
-              <button
-                key={o.id}
-                onClick={() => navigate(`/schema/${o.id}`)}
-                className={cn(
-                  'w-full text-left rounded-xl p-3 transition-all group relative',
-                  isSelected
-                    ? 'bg-gradient-to-r from-indigo-500/[0.08] to-violet-500/[0.04] dark:from-indigo-500/[0.12] dark:to-violet-500/[0.06] ring-1 ring-indigo-500/20 shadow-sm'
-                    : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
-                )}
-              >
-                {/* Row 1: Icon + Name + badges */}
-                <div className="flex items-center gap-2.5 mb-1.5">
-                  {/* Status dot indicator */}
-                  <div className={cn(
-                    'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors',
-                    isSelected
-                      ? 'bg-indigo-500/15 dark:bg-indigo-500/20'
-                      : 'bg-black/[0.04] dark:bg-white/[0.06] group-hover:bg-black/[0.06] dark:group-hover:bg-white/[0.08]',
-                  )}>
-                    <StatusIcon className={cn('w-3.5 h-3.5', isSelected ? 'text-indigo-500' : config.color)} />
-                  </div>
-
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className={cn(
-                        'text-[13px] font-semibold truncate',
-                        isSelected ? 'text-ink' : 'text-ink-secondary group-hover:text-ink',
-                      )}>
-                        {o.name}
-                      </span>
-                      {isAssignedToCurrentDs && (
-                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-[8px] font-bold text-emerald-600 dark:text-emerald-400 flex-shrink-0 ring-1 ring-emerald-500/20">
-                          <Database className="w-2 h-2" />
-                          ACTIVE
-                        </span>
-                      )}
-                    </div>
-                  </div>
+          <>
+            {/* Pinned active ontology */}
+            {pinnedOntology && (
+              <div className="mb-2">
+                <div className="flex items-center gap-1.5 px-1 mb-1.5">
+                  <Zap className="w-3 h-3 text-emerald-500" />
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                    Active Ontology
+                  </span>
                 </div>
+                {renderItem(pinnedOntology, true)}
+              </div>
+            )}
 
-                {/* Row 2: Meta info */}
-                <div className="flex items-center gap-2 ml-[38px]">
-                  <span className={cn(
-                    'text-[10px] font-medium',
-                    isSelected ? 'text-indigo-500/70' : 'text-ink-muted/60',
-                  )}>
-                    v{o.version}
-                  </span>
-                  <span className="text-ink-muted/20">·</span>
-                  <span className={cn(
-                    'inline-flex items-center gap-0.5 text-[10px]',
-                    isSelected ? 'text-ink-muted' : 'text-ink-muted/60',
-                  )}>
-                    <Box className="w-2.5 h-2.5" />
-                    {entityCount}
-                  </span>
-                  <span className={cn(
-                    'inline-flex items-center gap-0.5 text-[10px]',
-                    isSelected ? 'text-ink-muted' : 'text-ink-muted/60',
-                  )}>
-                    <GitBranch className="w-2.5 h-2.5" />
-                    {relCount}
-                  </span>
-                  {dsCount > 0 && !isAssignedToCurrentDs && (
-                    <>
-                      <span className="text-ink-muted/20">·</span>
-                      <span className="text-[10px] text-ink-muted/50" title={`Assigned to ${dsCount} data source${dsCount !== 1 ? 's' : ''}`}>
-                        {dsCount} ds
-                      </span>
-                    </>
-                  )}
-                </div>
-              </button>
-            )
-          })
+            {/* Separator between pinned and rest */}
+            {pinnedOntology && restOntologies.length > 0 && (
+              <div className="flex items-center gap-2 px-1 py-2">
+                <div className="flex-1 h-px bg-glass-border/60" />
+                <span className="text-[9px] font-medium text-ink-muted/40 uppercase tracking-wider">
+                  {statusFilter === 'all' ? 'All' : filters.find(f => f.id === statusFilter)?.label}
+                </span>
+                <div className="flex-1 h-px bg-glass-border/60" />
+              </div>
+            )}
+
+            {/* Rest of ontologies */}
+            <div className="space-y-1">
+              {restOntologies.map(o => renderItem(o))}
+            </div>
+          </>
         )}
       </div>
 

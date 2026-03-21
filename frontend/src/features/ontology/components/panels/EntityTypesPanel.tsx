@@ -18,6 +18,7 @@ export function EntityTypeRow({
   graphCount,
   isLocked,
   isEditing,
+  isChanged,
   validationIssues,
   onEdit,
   onDelete,
@@ -26,6 +27,7 @@ export function EntityTypeRow({
   graphCount?: number
   isLocked: boolean
   isEditing: boolean
+  isChanged?: boolean
   validationIssues?: Array<{ severity: string; message: string }>
   onEdit: () => void
   onDelete: () => void
@@ -58,6 +60,9 @@ export function EntityTypeRow({
           <div className="flex items-center gap-2 mb-0.5">
             <span className="font-semibold text-sm text-ink truncate">{et.name}</span>
             <code className="text-[10px] text-ink-muted/60 font-mono hidden sm:inline">{et.id}</code>
+            {isChanged && (
+              <span className="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0" title="Modified" />
+            )}
           </div>
           <div className="flex items-center gap-1.5 flex-wrap">
             {et.description && (
@@ -157,6 +162,7 @@ export function EntityTypesPanel({
   search,
   validationResult,
   editorPanel,
+  changedIds,
   onSearch,
   onEdit,
   onNew,
@@ -169,6 +175,7 @@ export function EntityTypesPanel({
   search: string
   validationResult: { isValid: boolean; issues: Array<{ severity: string; message: string }> } | null
   editorPanel: EditorPanel
+  changedIds?: Set<string>
   onSearch: (s: string) => void
   onEdit: (et: EntityTypeSchema) => void
   onNew: () => void
@@ -277,6 +284,7 @@ export function EntityTypesPanel({
               graphCount={entityStatMap.get(et.id.toLowerCase())?.count}
               isLocked={isLocked}
               isEditing={editorPanel?.kind === 'entity' && editorPanel.data?.id === et.id}
+              isChanged={changedIds?.has(et.id)}
               validationIssues={validationIssuesByType.get(et.id)}
               onEdit={() => onEdit(et)}
               onDelete={() => onDelete(et.id, et.name)}

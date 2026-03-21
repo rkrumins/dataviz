@@ -18,6 +18,7 @@ export function RelTypeRow({
   graphSourceTargets,
   isLocked,
   isEditing,
+  isChanged,
   onEdit,
   onDelete,
 }: {
@@ -26,6 +27,7 @@ export function RelTypeRow({
   graphSourceTargets?: EdgeTypeSummary
   isLocked: boolean
   isEditing: boolean
+  isChanged?: boolean
   onEdit: () => void
   onDelete: () => void
 }) {
@@ -62,6 +64,9 @@ export function RelTypeRow({
           <div className="flex items-center gap-2 mb-0.5">
             <span className="font-semibold text-sm text-ink truncate">{rt.name}</span>
             <code className="text-[10px] text-ink-muted/60 font-mono hidden sm:inline">{rt.id.toUpperCase()}</code>
+            {isChanged && (
+              <span className="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0" title="Modified" />
+            )}
           </div>
           <div className="flex items-center gap-1.5 flex-wrap">
             {/* Source -> Target type chips */}
@@ -209,6 +214,7 @@ export function RelationshipsPanel({
   isLocked,
   search,
   editorPanel,
+  changedIds,
   onSearch,
   onEdit,
   onNew,
@@ -219,6 +225,7 @@ export function RelationshipsPanel({
   isLocked: boolean
   search: string
   editorPanel: EditorPanel
+  changedIds?: Set<string>
   onSearch: (s: string) => void
   onEdit: (rt: RelTypeWithClassifications) => void
   onNew: () => void
@@ -327,6 +334,7 @@ export function RelationshipsPanel({
                     graphSourceTargets={edgeStatMap.get(rt.id.toUpperCase())}
                     isLocked={isLocked}
                     isEditing={editorPanel?.kind === 'rel' && editorPanel.data?.id === rt.id}
+                    isChanged={changedIds?.has(rt.id.toUpperCase())}
                     onEdit={() => onEdit(rt)}
                     onDelete={() => onDelete(rt.id, rt.name)}
                   />

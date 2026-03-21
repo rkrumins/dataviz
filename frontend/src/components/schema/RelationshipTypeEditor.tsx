@@ -29,6 +29,7 @@ interface RelTypeWithClassifications extends RelationshipTypeSchema {
 interface RelationshipTypeEditorProps {
   relType?: RelTypeWithClassifications
   availableEntityTypes?: { id: string; name: string }[]
+  readOnly?: boolean
   onSave: (relType: RelTypeWithClassifications) => void
   onCancel: () => void
 }
@@ -61,6 +62,7 @@ function createDefaultRelType(): RelTypeWithClassifications {
 export function RelationshipTypeEditor({
   relType,
   availableEntityTypes = [],
+  readOnly,
   onSave,
   onCancel,
 }: RelationshipTypeEditorProps) {
@@ -151,7 +153,7 @@ export function RelationshipTypeEditor({
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <fieldset disabled={readOnly} className={cn('flex-1 overflow-y-auto p-4 space-y-4', readOnly && 'opacity-75')}>
         {activeTab === 'basic' && (
           <>
             <div>
@@ -441,18 +443,20 @@ export function RelationshipTypeEditor({
             )}
           </>
         )}
-      </div>
+      </fieldset>
 
       {/* Footer */}
       <div className="p-4 border-t border-glass-border flex items-center justify-end gap-2">
-        <button onClick={onCancel} className="btn btn-ghost">Cancel</button>
-        <button
-          onClick={() => onSave(form)}
-          disabled={!form.name.trim()}
-          className="btn btn-primary"
-        >
-          {isNew ? 'Create' : 'Save Changes'}
-        </button>
+        <button onClick={onCancel} className="btn btn-ghost">{readOnly ? 'Close' : 'Cancel'}</button>
+        {!readOnly && (
+          <button
+            onClick={() => onSave(form)}
+            disabled={!form.name.trim()}
+            className="btn btn-primary"
+          >
+            {isNew ? 'Create' : 'Stage Changes'}
+          </button>
+        )}
       </div>
     </div>
   )

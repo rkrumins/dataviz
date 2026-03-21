@@ -26,11 +26,12 @@ const COLOR_PALETTE = [
 interface EntityTypeEditorProps {
   entityType?: EntityTypeSchema
   availableEntityTypes?: { id: string; name: string }[]
+  readOnly?: boolean
   onSave: (entityType: EntityTypeSchema) => void
   onCancel: () => void
 }
 
-export function EntityTypeEditor({ entityType, availableEntityTypes = [], onSave, onCancel }: EntityTypeEditorProps) {
+export function EntityTypeEditor({ entityType, availableEntityTypes = [], readOnly, onSave, onCancel }: EntityTypeEditorProps) {
   const isNew = !entityType
 
   const [form, setForm] = useState<EntityTypeSchema>(
@@ -85,35 +86,34 @@ export function EntityTypeEditor({ entityType, availableEntityTypes = [], onSave
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
         {activeTab === 'basic' && (
-          <BasicTab form={form} updateForm={updateForm} />
+          <BasicTab form={form} updateForm={updateForm} readOnly={readOnly} />
         )}
         {activeTab === 'visual' && (
-          <VisualTab form={form} updateVisual={updateVisual} />
+          <VisualTab form={form} updateVisual={updateVisual} readOnly={readOnly} />
         )}
         {activeTab === 'fields' && (
-          <FieldsTab form={form} setForm={setForm} />
+          <FieldsTab form={form} setForm={setForm} readOnly={readOnly} />
         )}
         {activeTab === 'hierarchy' && (
-          <HierarchyTab form={form} updateForm={updateForm} availableEntityTypes={availableEntityTypes} />
+          <HierarchyTab form={form} updateForm={updateForm} availableEntityTypes={availableEntityTypes} readOnly={readOnly} />
         )}
       </div>
 
       {/* Footer */}
       <div className="flex items-center justify-between p-4 border-t border-glass-border">
         <button onClick={onCancel} className="btn btn-secondary btn-md">
-          Cancel
+          {readOnly ? 'Close' : 'Cancel'}
         </button>
-        <div className="flex items-center gap-2">
-          <button className="btn btn-ghost btn-md">
-            Preview
-          </button>
-          <button
-            onClick={() => onSave(form)}
-            className="btn btn-primary btn-md"
-          >
-            {isNew ? 'Create Entity Type' : 'Save Changes'}
-          </button>
-        </div>
+        {!readOnly && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => onSave(form)}
+              className="btn btn-primary btn-md"
+            >
+              {isNew ? 'Create Entity Type' : 'Stage Changes'}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -123,9 +123,10 @@ export function EntityTypeEditor({ entityType, availableEntityTypes = [], onSave
 interface BasicTabProps {
   form: EntityTypeSchema
   updateForm: <K extends keyof EntityTypeSchema>(key: K, value: EntityTypeSchema[K]) => void
+  readOnly?: boolean
 }
 
-function BasicTab({ form, updateForm }: BasicTabProps) {
+function BasicTab({ form, updateForm, readOnly }: BasicTabProps) {
   return (
     <div className="space-y-6">
       <div>
@@ -138,6 +139,7 @@ function BasicTab({ form, updateForm }: BasicTabProps) {
           onChange={(e) => updateForm('id', e.target.value.toLowerCase().replace(/\s+/g, '-'))}
           placeholder="e.g., dataset, pipeline, dashboard"
           className="input"
+          disabled={readOnly}
         />
         <p className="text-2xs text-ink-muted mt-1">
           Unique identifier used in configuration and API
@@ -155,6 +157,7 @@ function BasicTab({ form, updateForm }: BasicTabProps) {
             onChange={(e) => updateForm('name', e.target.value)}
             placeholder="e.g., Dataset"
             className="input"
+            disabled={readOnly}
           />
         </div>
         <div>
@@ -167,6 +170,7 @@ function BasicTab({ form, updateForm }: BasicTabProps) {
             onChange={(e) => updateForm('pluralName', e.target.value)}
             placeholder="e.g., Datasets"
             className="input"
+            disabled={readOnly}
           />
         </div>
       </div>
@@ -181,6 +185,7 @@ function BasicTab({ form, updateForm }: BasicTabProps) {
           placeholder="Describe what this entity type represents..."
           rows={3}
           className="input resize-none"
+          disabled={readOnly}
         />
       </div>
     </div>
@@ -191,9 +196,10 @@ function BasicTab({ form, updateForm }: BasicTabProps) {
 interface VisualTabProps {
   form: EntityTypeSchema
   updateVisual: <K extends keyof EntityVisualConfig>(key: K, value: EntityVisualConfig[K]) => void
+  readOnly?: boolean
 }
 
-function VisualTab({ form, updateVisual }: VisualTabProps) {
+function VisualTab({ form, updateVisual, readOnly }: VisualTabProps) {
   return (
     <div className="space-y-6">
       {/* Preview */}
@@ -205,7 +211,7 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
       </div>
 
       {/* Icon Picker */}
-      <div>
+      <div className={cn(readOnly && 'opacity-60 pointer-events-none')}>
         <label className="block text-sm font-medium text-ink mb-2">Icon</label>
         <div className="grid grid-cols-10 gap-1 p-2 rounded-lg bg-canvas border border-glass-border">
           {COMMON_ICONS.map((iconName) => {
@@ -229,7 +235,7 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
       </div>
 
       {/* Color Picker */}
-      <div>
+      <div className={cn(readOnly && 'opacity-60 pointer-events-none')}>
         <label className="block text-sm font-medium text-ink mb-2">Color</label>
         <div className="flex flex-wrap gap-2">
           {COLOR_PALETTE.map((color) => (
@@ -247,7 +253,7 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
       </div>
 
       {/* Shape */}
-      <div>
+      <div className={cn(readOnly && 'opacity-60 pointer-events-none')}>
         <label className="block text-sm font-medium text-ink mb-2">Shape</label>
         <div className="flex items-center gap-2">
           {(['rectangle', 'rounded', 'pill'] as const).map((shape) => (
@@ -270,7 +276,7 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
       </div>
 
       {/* Size */}
-      <div>
+      <div className={cn(readOnly && 'opacity-60 pointer-events-none')}>
         <label className="block text-sm font-medium text-ink mb-2">Size</label>
         <div className="flex items-center gap-2">
           {(['xs', 'sm', 'md', 'lg', 'xl'] as const).map((size) => (
@@ -291,7 +297,7 @@ function VisualTab({ form, updateVisual }: VisualTabProps) {
       </div>
 
       {/* Border Style */}
-      <div>
+      <div className={cn(readOnly && 'opacity-60 pointer-events-none')}>
         <label className="block text-sm font-medium text-ink mb-2">Border Style</label>
         <div className="flex items-center gap-2">
           {(['solid', 'dashed', 'dotted', 'none'] as const).map((style) => (
@@ -375,9 +381,10 @@ function EntityPreview({ visual, name }: { visual: EntityVisualConfig; name: str
 interface FieldsTabProps {
   form: EntityTypeSchema
   setForm: React.Dispatch<React.SetStateAction<EntityTypeSchema>>
+  readOnly?: boolean
 }
 
-function FieldsTab({ form, setForm }: FieldsTabProps) {
+function FieldsTab({ form, setForm, readOnly }: FieldsTabProps) {
   const addField = () => {
     const newField: EntityFieldDefinition = {
       id: generateId('field'),
@@ -418,10 +425,12 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
           <h3 className="text-sm font-medium text-ink">Fields</h3>
           <p className="text-2xs text-ink-muted">Define the data fields for this entity type</p>
         </div>
-        <button onClick={addField} className="btn btn-secondary btn-sm">
-          <LucideIcons.Plus className="w-4 h-4" />
-          Add Field
-        </button>
+        {!readOnly && (
+          <button onClick={addField} className="btn btn-secondary btn-sm">
+            <LucideIcons.Plus className="w-4 h-4" />
+            Add Field
+          </button>
+        )}
       </div>
 
       <div className="space-y-2">
@@ -438,12 +447,14 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
               onChange={(e) => updateField(field.id, { name: e.target.value })}
               className="input py-1 px-2 w-32"
               placeholder="Field name"
+              disabled={readOnly}
             />
 
             <select
               value={field.type}
               onChange={(e) => updateField(field.id, { type: e.target.value as EntityFieldDefinition['type'] })}
               className="input py-1 px-2 w-28"
+              disabled={readOnly}
             >
               <option value="string">String</option>
               <option value="number">Number</option>
@@ -463,6 +474,7 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
                 checked={field.showInNode}
                 onChange={(e) => updateField(field.id, { showInNode: e.target.checked })}
                 className="w-3 h-3"
+                disabled={readOnly}
               />
               Node
             </label>
@@ -473,6 +485,7 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
                 checked={field.showInPanel}
                 onChange={(e) => updateField(field.id, { showInPanel: e.target.checked })}
                 className="w-3 h-3"
+                disabled={readOnly}
               />
               Panel
             </label>
@@ -483,16 +496,19 @@ function FieldsTab({ form, setForm }: FieldsTabProps) {
                 checked={field.required}
                 onChange={(e) => updateField(field.id, { required: e.target.checked })}
                 className="w-3 h-3"
+                disabled={readOnly}
               />
               Required
             </label>
 
-            <button
-              onClick={() => removeField(field.id)}
-              className="ml-auto p-1 rounded hover:bg-red-500/10 text-ink-muted hover:text-red-500"
-            >
-              <LucideIcons.Trash2 className="w-4 h-4" />
-            </button>
+            {!readOnly && (
+              <button
+                onClick={() => removeField(field.id)}
+                className="ml-auto p-1 rounded hover:bg-red-500/10 text-ink-muted hover:text-red-500"
+              >
+                <LucideIcons.Trash2 className="w-4 h-4" />
+              </button>
+            )}
           </div>
         ))}
       </div>
@@ -505,9 +521,10 @@ interface HierarchyTabProps {
   form: EntityTypeSchema
   availableEntityTypes: { id: string; name: string }[]
   updateForm: <K extends keyof EntityTypeSchema>(key: K, value: EntityTypeSchema[K]) => void
+  readOnly?: boolean
 }
 
-function HierarchyTab({ form, availableEntityTypes, updateForm }: HierarchyTabProps) {
+function HierarchyTab({ form, availableEntityTypes, updateForm, readOnly }: HierarchyTabProps) {
   const updateHierarchy = <K extends keyof typeof form.hierarchy>(
     key: K,
     value: typeof form.hierarchy[K]
@@ -561,7 +578,7 @@ function HierarchyTab({ form, availableEntityTypes, updateForm }: HierarchyTabPr
         {childCandidates.length === 0 ? (
           <p className="text-xs text-ink-muted italic">No other entity types defined yet</p>
         ) : (
-          <div className="flex flex-wrap gap-1.5">
+          <div className={cn('flex flex-wrap gap-1.5', readOnly && 'opacity-60 pointer-events-none')}>
             {childCandidates.map(t => {
               const selected = form.hierarchy.canContain.includes(t.id)
               return (
@@ -596,7 +613,7 @@ function HierarchyTab({ form, availableEntityTypes, updateForm }: HierarchyTabPr
         {parentCandidates.length === 0 ? (
           <p className="text-xs text-ink-muted italic">No other entity types defined yet</p>
         ) : (
-          <div className="flex flex-wrap gap-1.5">
+          <div className={cn('flex flex-wrap gap-1.5', readOnly && 'opacity-60 pointer-events-none')}>
             {parentCandidates.map(t => {
               const selected = form.hierarchy.canBeContainedBy.includes(t.id)
               return (
@@ -635,6 +652,7 @@ function HierarchyTab({ form, availableEntityTypes, updateForm }: HierarchyTabPr
           min={0}
           max={20}
           className="input w-20"
+          disabled={readOnly}
         />
       </div>
 
@@ -646,6 +664,7 @@ function HierarchyTab({ form, availableEntityTypes, updateForm }: HierarchyTabPr
             checked={form.hierarchy.defaultExpanded}
             onChange={(e) => updateHierarchy('defaultExpanded', e.target.checked)}
             className="w-4 h-4 rounded"
+            disabled={readOnly}
           />
           <div>
             <span className="text-sm font-medium text-ink">Expanded by Default</span>
