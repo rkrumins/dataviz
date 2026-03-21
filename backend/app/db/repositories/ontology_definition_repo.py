@@ -10,14 +10,89 @@ from typing import List, Optional
 from sqlalchemy import select, delete, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import OntologyORM
+from ..models import OntologyORM, OntologyAuditLogORM
 from backend.common.models.management import (
     OntologyCreateRequest,
     OntologyUpdateRequest,
     OntologyDefinitionResponse,
+    OntologyAuditEntry,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------------ #
+# Audit trail helper                                                   #
+# ------------------------------------------------------------------ #
+
+async def _record_audit(
+    session: AsyncSession,
+    row: OntologyORM,
+    action: str,
+    *,
+    actor: str | None = None,
+    summary: str | None = None,
+    changes: dict | None = None,
+) -> None:
+    """Append an immutable audit log entry for an ontology lifecycle event."""
+    entry = OntologyAuditLogORM(
+        ontology_id=row.id,
+        schema_id=getattr(row, "schema_id", None) or row.id,
+        action=action,
+        actor=actor or getattr(row, "updated_by", None) or getattr(row, "created_by", None),
+        version=row.version,
+        summary=summary,
+        changes=json.dumps(changes) if changes else None,
+    )
+    session.add(entry)
+    await session.flush()
+
+
+def _compute_type_diff(
+    old_entities: set, new_entities: set,
+    old_rels: set, new_rels: set,
+) -> dict:
+    """Compute added/removed entity and relationship types."""
+    return {
+        "addedEntityTypes": sorted(new_entities - old_entities),
+        "removedEntityTypes": sorted(old_entities - new_entities),
+        "addedRelationshipTypes": sorted(new_rels - old_rels),
+        "removedRelationshipTypes": sorted(old_rels - new_rels),
+    }
+
+
+async def get_audit_log(
+    session: AsyncSession,
+    schema_id: str,
+    *,
+    action: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[OntologyAuditEntry]:
+    """Return audit entries for an ontology schema, newest first. Supports filtering and pagination."""
+    q = (
+        select(OntologyAuditLogORM)
+        .where(OntologyAuditLogORM.schema_id == schema_id)
+    )
+    if action:
+        q = q.where(OntologyAuditLogORM.action == action)
+    q = q.order_by(OntologyAuditLogORM.created_at.desc()).limit(limit).offset(offset)
+    result = await session.execute(q)
+    rows = result.scalars().all()
+    return [
+        OntologyAuditEntry(
+            id=r.id,
+            ontologyId=r.ontology_id,
+            schemaId=r.schema_id,
+            action=r.action,
+            actor=r.actor,
+            version=r.version,
+            summary=r.summary,
+            changes=json.loads(r.changes) if r.changes else None,
+            createdAt=r.created_at,
+        )
+        for r in rows
+    ]
 
 
 # ------------------------------------------------------------------ #
@@ -45,6 +120,10 @@ def _to_response(row: OntologyORM) -> OntologyDefinitionResponse:
         revision=getattr(row, "revision", 0) or 0,
         createdBy=getattr(row, "created_by", None),
         updatedBy=getattr(row, "updated_by", None),
+        publishedBy=getattr(row, "published_by", None),
+        publishedAt=getattr(row, "published_at", None),
+        deletedBy=getattr(row, "deleted_by", None),
+        deletedAt=getattr(row, "deleted_at", None),
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
@@ -184,6 +263,12 @@ async def create_ontology(
     # First version seeds its own schema_id
     row.schema_id = row.id
     await session.flush()
+    entity_count = len(json.loads(row.entity_type_definitions or "{}"))
+    rel_count = len(json.loads(row.relationship_type_definitions or "{}"))
+    await _record_audit(
+        session, row, "created",
+        summary=f"Created draft v1 with {entity_count} entity types, {rel_count} relationships",
+    )
     return _to_response(row)
 
 
@@ -219,6 +304,10 @@ async def update_ontology(
     if row.is_published and not _is_metadata_only(req):
         return await _create_new_version(session, row, req)
 
+    # Snapshot before-state for audit diff
+    old_entities = set(json.loads(row.entity_type_definitions or "{}").keys())
+    old_rels = set(json.loads(row.relationship_type_definitions or "{}").keys())
+
     if req.name is not None:
         row.name = req.name
     if req.description is not None:
@@ -243,6 +332,27 @@ async def update_ontology(
     row.revision = (getattr(row, 'revision', 0) or 0) + 1
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
+
+    # Compute change diff for audit
+    new_entities = set(json.loads(row.entity_type_definitions or "{}").keys())
+    new_rels = set(json.loads(row.relationship_type_definitions or "{}").keys())
+    changes = _compute_type_diff(old_entities, new_entities, old_rels, new_rels)
+    parts = []
+    if _is_metadata_only(req):
+        parts.append("Updated metadata")
+    else:
+        if changes.get("addedEntityTypes"):
+            parts.append(f"Added {len(changes['addedEntityTypes'])} entity type(s)")
+        if changes.get("removedEntityTypes"):
+            parts.append(f"Removed {len(changes['removedEntityTypes'])} entity type(s)")
+        if changes.get("addedRelationshipTypes"):
+            parts.append(f"Added {len(changes['addedRelationshipTypes'])} relationship(s)")
+        if changes.get("removedRelationshipTypes"):
+            parts.append(f"Removed {len(changes['removedRelationshipTypes'])} relationship(s)")
+        if not parts:
+            parts.append("Updated type definitions")
+    await _record_audit(session, row, "updated", summary="; ".join(parts), changes=changes if not _is_metadata_only(req) else None)
+
     return _to_response(row)
 
 
@@ -311,6 +421,10 @@ async def _create_new_version(
     )
     session.add(new_row)
     await session.flush()
+    await _record_audit(
+        session, new_row, "cloned",
+        summary=f"Created v{new_row.version} from published v{original.version}",
+    )
     return _to_response(new_row)
 
 
@@ -320,9 +434,13 @@ async def publish_ontology(
     row = await get_ontology_orm(session, ontology_id)
     if not row:
         return None
+    now = datetime.now(timezone.utc).isoformat()
     row.is_published = True
-    row.updated_at = datetime.now(timezone.utc).isoformat()
+    row.published_at = now
+    row.updated_at = now
     await session.flush()
+    # Audit trail
+    await _record_audit(session, row, "published", summary=f"Published v{row.version}")
     return _to_response(row)
 
 
@@ -330,14 +448,14 @@ async def delete_ontology(
     session: AsyncSession, ontology_id: str
 ) -> bool:
     """Soft-delete an ontology by setting deleted_at timestamp."""
+    row = await get_ontology_orm(session, ontology_id)
+    if not row or row.deleted_at:
+        return False
     now = datetime.now(timezone.utc).isoformat()
-    result = await session.execute(
-        update(OntologyORM)
-        .where(OntologyORM.id == ontology_id)
-        .where(OntologyORM.deleted_at.is_(None))
-        .values(deleted_at=now)
-    )
-    return result.rowcount > 0
+    row.deleted_at = now
+    await session.flush()
+    await _record_audit(session, row, "deleted", summary=f"Deleted \"{row.name}\" v{row.version}")
+    return True
 
 
 async def restore_ontology(
@@ -345,18 +463,18 @@ async def restore_ontology(
 ) -> Optional[OntologyDefinitionResponse]:
     """Restore a soft-deleted ontology by clearing deleted_at."""
     result = await session.execute(
-        update(OntologyORM)
+        select(OntologyORM)
         .where(OntologyORM.id == ontology_id)
         .where(OntologyORM.deleted_at.isnot(None))
-        .values(deleted_at=None)
     )
-    if result.rowcount == 0:
+    row = result.scalar_one_or_none()
+    if not row:
         return None
-    row = await session.execute(
-        select(OntologyORM).where(OntologyORM.id == ontology_id)
-    )
-    orm = row.scalar_one_or_none()
-    return _to_response(orm) if orm else None
+    row.deleted_at = None
+    row.deleted_by = None
+    await session.flush()
+    await _record_audit(session, row, "restored", summary=f"Restored \"{row.name}\" v{row.version}")
+    return _to_response(row)
 
 
 async def list_versions_by_schema(session: AsyncSession, schema_id: str) -> List[OntologyDefinitionResponse]:

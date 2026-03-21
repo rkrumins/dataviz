@@ -308,6 +308,9 @@ class OntologyORM(Base):
     revision = Column(Integer, nullable=False, default=0)              # optimistic locking counter
     created_by = Column(Text, nullable=True, default=None)             # who created this version
     updated_by = Column(Text, nullable=True, default=None)             # last modifier
+    published_by = Column(Text, nullable=True, default=None)           # who published this version
+    published_at = Column(Text, nullable=True, default=None)           # when published
+    deleted_by = Column(Text, nullable=True, default=None)             # who soft-deleted
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)             # soft delete timestamp
@@ -321,10 +324,48 @@ class OntologyORM(Base):
         Index("idx_ontologies_name_version", "name", "version"),
         Index("idx_ontologies_is_system", "is_system"),
         Index("idx_ontologies_schema_id", "schema_id"),
+        Index("idx_ontologies_deleted", "deleted_at"),
     )
 
     def __repr__(self) -> str:
         return f"<Ontology id={self.id!r} name={self.name!r} v{self.version}>"
+
+
+# ------------------------------------------------------------------ #
+# ontology_audit_log — immutable trail of ontology lifecycle events    #
+# ------------------------------------------------------------------ #
+
+class OntologyAuditLogORM(Base):
+    """
+    Immutable audit trail for ontology lifecycle events.
+    Each row captures a single action (create, update, publish, delete, restore, clone)
+    along with who performed it and a summary of what changed.
+    """
+    __tablename__ = "ontology_audit_log"
+
+    id = Column(Text, primary_key=True, default=lambda: f"oal_{uuid.uuid4().hex[:12]}")
+    ontology_id = Column(Text, nullable=False, index=True)
+    schema_id = Column(Text, nullable=False, index=True)           # groups events across versions
+    action = Column(Text, nullable=False)                           # created | updated | published | deleted | restored | cloned
+    actor = Column(Text, nullable=True)                             # user who performed the action
+    version = Column(Integer, nullable=True)                        # ontology version at time of action
+    summary = Column(Text, nullable=True)                           # human-readable summary
+    changes = Column(Text, nullable=True, default=None)             # JSON: detailed diff (added/removed types, changed fields)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_oal_ontology", "ontology_id"),
+        Index("idx_oal_schema", "schema_id"),
+        Index("idx_oal_created", "created_at"),
+        Index("idx_oal_actor_action", "actor", "action", "created_at"),
+        CheckConstraint(
+            "action IN ('created', 'updated', 'published', 'deleted', 'restored', 'cloned')",
+            name="ck_oal_action_enum",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OntologyAuditLog id={self.id!r} action={self.action!r} ontology={self.ontology_id!r}>"
 
 
 # ------------------------------------------------------------------ #

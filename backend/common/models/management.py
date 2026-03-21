@@ -251,8 +251,27 @@ class OntologyDefinitionResponse(BaseModel):
     revision: int = Field(0)
     created_by: Optional[str] = Field(None, alias="createdBy")
     updated_by: Optional[str] = Field(None, alias="updatedBy")
+    published_by: Optional[str] = Field(None, alias="publishedBy")
+    published_at: Optional[str] = Field(None, alias="publishedAt")
+    deleted_by: Optional[str] = Field(None, alias="deletedBy")
+    deleted_at: Optional[str] = Field(None, alias="deletedAt")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class OntologyAuditEntry(BaseModel):
+    id: str
+    ontology_id: str = Field(alias="ontologyId")
+    schema_id: str = Field(alias="schemaId")
+    action: str
+    actor: Optional[str] = None
+    version: Optional[int] = None
+    summary: Optional[str] = None
+    changes: Optional[Dict[str, Any]] = None
+    created_at: str = Field(alias="createdAt")
 
     class Config:
         populate_by_name = True

@@ -112,16 +112,19 @@ export function OverviewPanel({
                 </div>
                 <div className="flex items-center gap-1.5 text-xs text-ink-muted">
                   <Calendar className="w-3.5 h-3.5" />
-                  <span>Created {createdDate}</span>
+                  <span>Created {createdDate}{ontology.createdBy ? ` by ${ontology.createdBy}` : ''}</span>
                 </div>
                 <div className="flex items-center gap-1.5 text-xs text-ink-muted">
                   <PenLine className="w-3.5 h-3.5" />
-                  <span>Updated {updatedDate}</span>
+                  <span>Updated {updatedDate}{ontology.updatedBy ? ` by ${ontology.updatedBy}` : ''}</span>
                 </div>
-                {ontology.createdBy && (
+                {ontology.publishedAt && (
                   <div className="flex items-center gap-1.5 text-xs text-ink-muted">
-                    <Users className="w-3.5 h-3.5" />
-                    <span>{ontology.createdBy}</span>
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                    <span>
+                      Published {new Date(ontology.publishedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
+                      {ontology.publishedBy ? ` by ${ontology.publishedBy}` : ''}
+                    </span>
                   </div>
                 )}
                 <div className="flex items-center gap-1.5 text-xs text-ink-muted">

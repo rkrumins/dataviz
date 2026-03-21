@@ -26,6 +26,7 @@ from backend.common.models.management import (
     OntologySuggestResponse,
     OntologyValidationIssue,
     OntologyValidationResponse,
+    OntologyAuditEntry,
 )
 from backend.common.models.graph import GraphSchemaStats
 
@@ -387,6 +388,28 @@ async def get_ontology_assignments(
     if not row:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
     return await ontology_definition_repo.get_assignments(session, ontology_id)
+
+
+@router.get("/{ontology_id}/audit", response_model=List[OntologyAuditEntry])
+async def get_ontology_audit_log(
+    ontology_id: str = Path(...),
+    action: Optional[str] = Query(None, description="Filter by action type (created, updated, published, deleted, restored, cloned)"),
+    limit: int = Query(100, ge=1, le=500, description="Max results per page"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Return the audit trail for an ontology (all versions sharing the same schema_id).
+    Includes create, update, publish, delete, restore, and clone events with
+    change diffs and actor information. Paginated, newest first.
+    """
+    orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
+    if not orm:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    schema_id = getattr(orm, "schema_id", None) or orm.id
+    return await ontology_definition_repo.get_audit_log(
+        session, schema_id, action=action, limit=limit, offset=offset,
+    )
 
 
 @router.post("/suggest", response_model=OntologySuggestResponse, status_code=200)

@@ -66,8 +66,29 @@ export interface OntologyDefinitionResponse {
     scope: string
     createdBy: string | null
     updatedBy: string | null
+    publishedBy: string | null
+    publishedAt: string | null
+    deletedBy: string | null
+    deletedAt: string | null
     createdAt: string
     updatedAt: string
+}
+
+export interface OntologyAuditEntry {
+    id: string
+    ontologyId: string
+    schemaId: string
+    action: 'created' | 'updated' | 'published' | 'deleted' | 'restored' | 'cloned'
+    actor: string | null
+    version: number | null
+    summary: string | null
+    changes: {
+        addedEntityTypes?: string[]
+        removedEntityTypes?: string[]
+        addedRelationshipTypes?: string[]
+        removedRelationshipTypes?: string[]
+    } | null
+    createdAt: string
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -125,6 +146,10 @@ export const ontologyDefinitionService = {
         return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}/clone`, {
             method: 'POST',
         })
+    },
+
+    auditLog(id: string): Promise<OntologyAuditEntry[]> {
+        return request<OntologyAuditEntry[]>(`${ADMIN_API}/${id}/audit`)
     },
 
     restore(id: string): Promise<OntologyDefinitionResponse> {

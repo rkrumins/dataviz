@@ -7,6 +7,7 @@ export const ONTOLOGY_KEYS = {
   detail: (id: string) => [...ONTOLOGY_KEYS.all, 'detail', id] as const,
   versions: (id: string) => [...ONTOLOGY_KEYS.all, 'versions', id] as const,
   assignments: (id: string) => [...ONTOLOGY_KEYS.all, 'assignments', id] as const,
+  audit: (id: string) => [...ONTOLOGY_KEYS.all, 'audit', id] as const,
 }
 
 export function useOntologies() {
@@ -39,6 +40,15 @@ export function useOntologyAssignments(id: string | undefined) {
   return useQuery({
     queryKey: ONTOLOGY_KEYS.assignments(id!),
     queryFn: () => ontologyDefinitionService.getAssignments(id!),
+    enabled: !!id,
+    staleTime: 30_000,
+  })
+}
+
+export function useOntologyAuditLog(id: string | undefined) {
+  return useQuery({
+    queryKey: ONTOLOGY_KEYS.audit(id!),
+    queryFn: () => ontologyDefinitionService.auditLog(id!),
     enabled: !!id,
     staleTime: 30_000,
   })
