@@ -9,15 +9,15 @@
  * - Auto-organize suggestions
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { LayerStudio } from '../../LayerStudio'
 import { WizardAssignmentTree } from '../WizardAssignmentTree'
 import { LayerManager } from '../../LayerManager'
+import { ChildReassignConfirmDialog, type ChildReassignInfo } from '../../../dialogs/ChildReassignConfirmDialog'
 
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
 import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
-import type { EntityAssignmentConfig } from '@/types/schema'
 import type { WizardFormData } from '../ViewWizard'
 
 interface AssignmentStepProps {
@@ -28,15 +28,10 @@ interface AssignmentStepProps {
 }
 
 export function AssignmentStep({ formData, updateFormData, linkedContextModelId, onDraftSaved }: AssignmentStepProps) {
-    const setLayers = useReferenceModelStore(s => s.setLayers)
-    const bulkAssignEntitiesToLayer = useReferenceModelStore(s => s.bulkAssignEntitiesToLayer)
-
-    // Sync layers with store for conflict detection
-    useEffect(() => {
-        if (formData.layers) {
-            setLayers(formData.layers)
-        }
-    }, [formData.layers, setLayers])
+    // NOTE: We intentionally do NOT sync formData.layers to the store here.
+    // The wizard buffers all changes locally in formData and only commits
+    // to the store on final submit (in ViewWizard.handleSubmit). Syncing
+    // during the wizard causes premature background rendering in ContextViewCanvas.
 
     // Build containment parent map from canvas edges (ground truth for wizard context)
     const canvasEdges = useCanvasStore(s => s.edges)
@@ -64,8 +59,43 @@ export function AssignmentStep({ formData, updateFormData, linkedContextModelId,
         return map
     }, [storeEffectiveAssignments, formData.layers])
 
+    // Build reverse child map from parentMap for DOWN checks
+    const childMap = useMemo(() => {
+        const map = new Map<string, string[]>()
+        parentMap.forEach((pId, cId) => {
+            const list = map.get(pId) ?? []
+            list.push(cId)
+            map.set(pId, list)
+        })
+        return map
+    }, [parentMap])
+
+    /** Get all containment descendants currently assigned to a different layer */
+    const getDescendantsInDifferentLayer = useCallback((entityId: string, targetLayerId: string): string[] => {
+        const result: string[] = []
+        const queue = [...(childMap.get(entityId) ?? [])]
+        const visited = new Set<string>()
+        while (queue.length > 0) {
+            const cId = queue.shift()!
+            if (visited.has(cId)) continue
+            visited.add(cId)
+            const currentLayer = layerAssignmentMap.get(cId)
+            if (currentLayer && currentLayer !== targetLayerId) {
+                result.push(cId)
+            }
+            queue.push(...(childMap.get(cId) ?? []))
+        }
+        return result
+    }, [childMap, layerAssignmentMap])
+
     const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
     const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+    const showAssignmentWarning = useCallback((message: string) => {
+        setAssignmentWarning(message)
+        if (warningTimerRef.current) clearTimeout(warningTimerRef.current)
+        warningTimerRef.current = setTimeout(() => setAssignmentWarning(null), 5000)
+    }, [])
 
     const isReferenceLayout = formData.layoutType === 'reference'
 
@@ -85,47 +115,92 @@ export function AssignmentStep({ formData, updateFormData, linkedContextModelId,
 
     // ── Fallback: original two-panel for non-reference layouts ─────────────────
     // eslint-disable-next-line react-hooks/rules-of-hooks
+    const canvasNodes = useCanvasStore(s => s.nodes)
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const nodeNameMap = useMemo(() => {
+        const map = new Map<string, string>()
+        canvasNodes.forEach(n => {
+            map.set(n.id, (n.data as { label?: string; businessLabel?: string }).label
+                ?? (n.data as { businessLabel?: string }).businessLabel ?? n.id)
+        })
+        return map
+    }, [canvasNodes])
+
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const [pendingReassign, setPendingReassign] = useState<{
+        info: ChildReassignInfo; commit: () => void
+    } | null>(null)
+
+    /** Commit entity + descendants to a layer (local formData only) */
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const commitAssignment = useCallback((entityIds: string[], descendantsToMove: string[], layerId: string) => {
+        if (!formData.layers) return
+        const allMovedIds = new Set([...entityIds, ...descendantsToMove])
+        const updatedLayers = formData.layers.map(layer => {
+            const filtered = (layer.entityAssignments || []).filter(a => !allMovedIds.has(a.entityId))
+            if (layer.id === layerId) {
+                return {
+                    ...layer,
+                    entityAssignments: [
+                        ...filtered,
+                        ...entityIds.map(id => ({ entityId: id, layerId: layer.id, inheritsChildren: true, priority: 1000, assignedBy: 'user' as const, assignedAt: new Date().toISOString() })),
+                        ...descendantsToMove.map(dId => ({ entityId: dId, layerId: layer.id, inheritsChildren: true, priority: 999, assignedBy: 'rule' as const, assignedAt: new Date().toISOString() })),
+                    ],
+                }
+            }
+            return { ...layer, entityAssignments: filtered }
+        })
+        updateFormData({ layers: updatedLayers })
+    }, [formData.layers, updateFormData])
+
+    /** Show confirmation dialog if descendants need moving, otherwise commit immediately */
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const confirmOrCommit = useCallback((entityIds: string[], descendantsToMove: string[], layerId: string) => {
+        if (descendantsToMove.length === 0) {
+            commitAssignment(entityIds, [], layerId)
+            return
+        }
+        const info: ChildReassignInfo = {
+            entityId: entityIds[0],
+            entityName: entityIds.length === 1 ? (nodeNameMap.get(entityIds[0]) ?? entityIds[0]) : `${entityIds.length} entities`,
+            targetLayerId: layerId,
+            descendantsToMove: descendantsToMove.map(dId => ({
+                id: dId, name: nodeNameMap.get(dId) ?? dId, currentLayerId: layerAssignmentMap.get(dId) ?? '',
+            })),
+        }
+        setPendingReassign({
+            info,
+            commit: () => { commitAssignment(entityIds, descendantsToMove, layerId); setPendingReassign(null) },
+        })
+    }, [commitAssignment, nodeNameMap, layerAssignmentMap])
+
+    // eslint-disable-next-line react-hooks/rules-of-hooks
     const handleAssignmentChange = useCallback((entityId: string, layerId: string | null) => {
         if (!formData.layers) return
 
-        // HARD RULE: Block containment children from being assigned to a different layer
         if (layerId) {
             const parentId = parentMap.get(entityId)
             if (parentId) {
                 const parentLayerId = layerAssignmentMap.get(parentId)
                 if (parentLayerId && parentLayerId !== layerId) {
-                    setAssignmentWarning('Cannot assign child to a different layer than its parent. Children always inherit their parent\'s layer assignment.')
-                    if (warningTimerRef.current) clearTimeout(warningTimerRef.current)
-                    warningTimerRef.current = setTimeout(() => setAssignmentWarning(null), 5000)
+                    showAssignmentWarning('Cannot assign child to a different layer than its parent.')
                     return
                 }
             }
         }
 
-        const updatedLayers = formData.layers.map(layer => {
-            const filteredAssignments = (layer.entityAssignments || [])
-                .filter(a => a.entityId !== entityId)
-            if (layer.id === layerId) {
-                const newAssignment: EntityAssignmentConfig = {
-                    entityId,
-                    layerId: layer.id,
-                    inheritsChildren: true,
-                    priority: 1000,
-                    assignedBy: 'user',
-                    assignedAt: new Date().toISOString()
-                }
-                return { ...layer, entityAssignments: [...filteredAssignments, newAssignment] }
-            }
-            return { ...layer, entityAssignments: filteredAssignments }
-        })
-        updateFormData({ layers: updatedLayers })
-    }, [formData.layers, updateFormData, parentMap, layerAssignmentMap])
+        const descendantsToMove = layerId ? getDescendantsInDifferentLayer(entityId, layerId) : []
+        if (!layerId) {
+            commitAssignment([entityId], [], '')
+        } else {
+            confirmOrCommit([entityId], descendantsToMove, layerId)
+        }
+    }, [formData.layers, parentMap, layerAssignmentMap, getDescendantsInDifferentLayer, showAssignmentWarning, confirmOrCommit, commitAssignment])
 
     // eslint-disable-next-line react-hooks/rules-of-hooks
     const handleBulkAssignment = useCallback((layerId: string, entityIds: string[]) => {
         if (!formData.layers) return
 
-        // Filter out containment-locked children
         const allowed = entityIds.filter(id => {
             const parentId = parentMap.get(id)
             if (!parentId) return true
@@ -134,36 +209,18 @@ export function AssignmentStep({ formData, updateFormData, linkedContextModelId,
         })
         const blockedCount = entityIds.length - allowed.length
         if (blockedCount > 0) {
-            setAssignmentWarning(`${blockedCount} assignment(s) blocked: children inherit their parent's layer.`)
-            if (warningTimerRef.current) clearTimeout(warningTimerRef.current)
-            warningTimerRef.current = setTimeout(() => setAssignmentWarning(null), 5000)
+            showAssignmentWarning(`${blockedCount} assignment(s) blocked: children inherit their parent's layer.`)
         }
         if (allowed.length === 0) return
 
-        bulkAssignEntitiesToLayer(allowed, layerId, { inheritsChildren: true })
-        const allowedSet = new Set(allowed)
-        const updatedLayers = formData.layers.map(layer => {
-            const filteredAssignments = (layer.entityAssignments || [])
-                .filter(a => !allowedSet.has(a.entityId))
-            if (layer.id === layerId) {
-                const newConfigs: EntityAssignmentConfig[] = allowed.map(id => ({
-                    entityId: id,
-                    layerId: layer.id,
-                    inheritsChildren: true,
-                    priority: 1000,
-                    assignedBy: 'user' as const,
-                    assignedAt: new Date().toISOString()
-                }))
-                return { ...layer, entityAssignments: [...filteredAssignments, ...newConfigs] }
-            }
-            return { ...layer, entityAssignments: filteredAssignments }
-        })
-        updateFormData({ layers: updatedLayers })
-    }, [formData.layers, bulkAssignEntitiesToLayer, updateFormData, parentMap, layerAssignmentMap])
+        const allDescendantsToMove: string[] = []
+        allowed.forEach(id => allDescendantsToMove.push(...getDescendantsInDifferentLayer(id, layerId)))
+
+        confirmOrCommit(allowed, allDescendantsToMove, layerId)
+    }, [formData.layers, parentMap, layerAssignmentMap, getDescendantsInDifferentLayer, showAssignmentWarning, confirmOrCommit])
 
     return (
         <div className="flex flex-col h-[650px] gap-2">
-            {/* Containment inheritance warning */}
             {assignmentWarning && (
                 <div className="mx-2 px-3 py-2 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-xs flex items-center gap-2">
                     <span className="font-medium">Assignment blocked.</span>
@@ -196,6 +253,13 @@ export function AssignmentStep({ formData, updateFormData, linkedContextModelId,
                 </div>
             </div>
             </div>
+
+            <ChildReassignConfirmDialog
+                info={pendingReassign?.info ?? null}
+                layers={formData.layers || []}
+                onConfirm={() => pendingReassign?.commit()}
+                onCancel={() => setPendingReassign(null)}
+            />
         </div>
     )
 }

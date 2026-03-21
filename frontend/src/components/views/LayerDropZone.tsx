@@ -16,6 +16,7 @@ import { Layers, Plus, X, AlertTriangle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useReferenceModelStore, useInstanceAssignments } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
+import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 import type { ViewLayerConfig } from '@/types/schema'
 
 // ============================================
@@ -62,6 +63,40 @@ export function LayerDropZone({
     const removeEntityAssignment = useReferenceModelStore(s => s.removeEntityAssignment)
     const instanceAssignments = useInstanceAssignments()
     const nodes = useCanvasStore(s => s.nodes)
+    const canvasEdges = useCanvasStore(s => s.edges)
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+    const storeParentMap = useReferenceModelStore(s => s.parentMap)
+    const storeEffectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
+
+    // Derive parentMap from canvas edges (ground truth, works even when store is empty)
+    const parentMap = useMemo(() => {
+        const map = new Map<string, string>()
+        canvasEdges.forEach(edge => {
+            if (isContainmentEdgeType(normalizeEdgeType(edge), containmentEdgeTypes)) {
+                map.set(edge.target, edge.source)
+            }
+        })
+        return map.size > 0 ? map : storeParentMap
+    }, [canvasEdges, containmentEdgeTypes, storeParentMap])
+
+    // Reverse: parent -> children
+    const childMap = useMemo(() => {
+        const map = new Map<string, string[]>()
+        parentMap.forEach((pId, cId) => {
+            const list = map.get(pId) ?? []
+            list.push(cId)
+            map.set(pId, list)
+        })
+        return map
+    }, [parentMap])
+
+    // Merged assignment lookup: instanceAssignments + effectiveAssignments
+    const layerAssignmentMap = useMemo(() => {
+        const map = new Map<string, string>()
+        storeEffectiveAssignments.forEach((a, entityId) => map.set(entityId, a.layerId))
+        instanceAssignments.forEach((a, entityId) => map.set(entityId, a.layerId))
+        return map
+    }, [storeEffectiveAssignments, instanceAssignments])
 
     // Build node name lookup for displaying assigned entities
     const nodeNameMap = useMemo(() => {
@@ -130,10 +165,41 @@ export function LayerDropZone({
             if (entityIds.length === 0) return
 
             let blockedCount = 0
+            let movedChildCount = 0
+
             entityIds.forEach(entityId => {
+                // UP check: block if containment parent is in a different layer
+                const pid = parentMap.get(entityId)
+                if (pid) {
+                    const parentLayer = layerAssignmentMap.get(pid)
+                    if (parentLayer && parentLayer !== layer.id) {
+                        blockedCount++
+                        return
+                    }
+                }
+
+                // DOWN check: find containment descendants in a different layer
+                const descendantsToMove: string[] = []
+                const queue = [...(childMap.get(entityId) ?? [])]
+                const visited = new Set<string>()
+                while (queue.length > 0) {
+                    const cId = queue.shift()!
+                    if (visited.has(cId)) continue
+                    visited.add(cId)
+                    const cLayer = layerAssignmentMap.get(cId)
+                    if (cLayer && cLayer !== layer.id) {
+                        descendantsToMove.push(cId)
+                    }
+                    queue.push(...(childMap.get(cId) ?? []))
+                }
+                movedChildCount += descendantsToMove.length
+
                 if (onDrop) {
                     onDrop(entityId, layer.id)
+                    // Also move descendants via onDrop
+                    descendantsToMove.forEach(dId => onDrop(dId, layer.id))
                 } else {
+                    // Store handles DOWN reassignment internally
                     const result = assignEntityToLayer(entityId, layer.id, { inheritsChildren: true })
                     if (!result.success && result.conflict?.type === 'containment_locked') {
                         blockedCount++
@@ -147,11 +213,13 @@ export function LayerDropZone({
                         ? 'Assignment blocked: child inherits its parent\'s layer.'
                         : `${blockedCount} assignment(s) blocked: children inherit their parent's layer.`
                 )
+            } else if (movedChildCount > 0) {
+                showWarning(`${movedChildCount} child(ren) automatically moved to follow parent's layer.`)
             }
         } catch (err) {
             console.error('Failed to parse drop data:', err)
         }
-    }, [layer.id, onDrop, assignEntityToLayer, showWarning])
+    }, [layer.id, onDrop, assignEntityToLayer, showWarning, parentMap, childMap, layerAssignmentMap])
 
     const handleUnassign = useCallback((entityId: string) => {
         if (onUnassign) {

@@ -48,8 +48,9 @@ export function EntityDrawer({
   const { schema } = useSchemaStore()
   const mode = usePersonaStore((s) => s.mode)
 
-  // Only show if exactly one node is selected
-  const selectedNode = selectedNodeIds.length === 1
+  // Only show if exactly one non-logical node is selected.
+  // Logical nodes (id starts with "logical:") are virtual groupings, not physical entities.
+  const selectedNode = selectedNodeIds.length === 1 && !selectedNodeIds[0].startsWith('logical:')
     ? nodes.find(n => n.id === selectedNodeIds[0])
     : null
 

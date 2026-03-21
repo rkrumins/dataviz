@@ -596,10 +596,50 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     }
                 }
 
-                // Check for other conflicts
-                const conflict = state.checkAssignmentConflict(entityId, layerId)
-                if (conflict) {
+                // HARD RULE (DOWN): If this entity has containment children already
+                // assigned to a different layer, those children must follow the parent.
+                // Build childMap from parentMap for descendant lookup.
+                const childMap = new Map<string, string[]>()
+                state.parentMap.forEach((pId, cId) => {
+                    const list = childMap.get(pId) ?? []
+                    list.push(cId)
+                    childMap.set(pId, list)
+                })
+
+                // BFS to collect all containment descendants
+                const descendantsToReassign: string[] = []
+                const queue = [...(childMap.get(entityId) ?? [])]
+                const visited = new Set<string>()
+                while (queue.length > 0) {
+                    const cId = queue.shift()!
+                    if (visited.has(cId)) continue
+                    visited.add(cId)
+                    const childAssignment = state.effectiveAssignments.get(cId)
+                    if (childAssignment && childAssignment.layerId !== layerId) {
+                        descendantsToReassign.push(cId)
+                    }
+                    queue.push(...(childMap.get(cId) ?? []))
+                }
+
+                // Report conflict if children will be moved (informational, not blocking)
+                let conflict: AssignmentConflict | null = null
+                if (descendantsToReassign.length > 0) {
+                    conflict = {
+                        entityId,
+                        conflictingEntityId: descendantsToReassign[0],
+                        type: 'child_assigned',
+                        message: `${descendantsToReassign.length} child(ren) reassigned to follow parent's layer.`,
+                        conflictingLayerId: layerId
+                    }
                     set({ assignmentConflicts: [...state.assignmentConflicts, conflict] })
+                }
+
+                // Also check for other non-containment conflicts
+                if (!conflict) {
+                    conflict = state.checkAssignmentConflict(entityId, layerId)
+                    if (conflict) {
+                        set({ assignmentConflicts: [...state.assignmentConflicts, conflict] })
+                    }
                 }
 
                 // Create the assignment config
@@ -613,25 +653,37 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     assignedAt: new Date().toISOString()
                 }
 
-                // Update instance assignments
+                // Update instance assignments (parent + all descendants that need to follow)
                 const newAssignments = new Map(state.instanceAssignments)
                 newAssignments.set(entityId, assignment)
 
+                // Reassign descendants to same layer (children inherit parent)
+                const descendantAssignments: EntityAssignmentConfig[] = descendantsToReassign.map(dId => ({
+                    entityId: dId,
+                    layerId,
+                    inheritsChildren: true,
+                    priority: 999, // Slightly lower than direct assignment
+                    assignedBy: 'rule' as const,
+                    assignedAt: new Date().toISOString()
+                }))
+                descendantAssignments.forEach(da => newAssignments.set(da.entityId, da))
+
+                // Collect all entity IDs being moved (parent + descendants)
+                const movedEntityIds = new Set([entityId, ...descendantsToReassign])
+
                 // Also update the layer's entityAssignments array for persistence
                 const updatedLayers = state.layers.map(layer => {
+                    // Remove moved entities from all layers first
+                    const filtered = (layer.entityAssignments ?? [])
+                        .filter(a => !movedEntityIds.has(a.entityId))
                     if (layer.id === layerId) {
-                        const existing = layer.entityAssignments?.filter(a => a.entityId !== entityId) ?? []
                         return {
                             ...layer,
-                            entityAssignments: [...existing, assignment]
+                            entityAssignments: [...filtered, assignment, ...descendantAssignments]
                         }
                     }
-                    // Remove from other layers
-                    if (layer.entityAssignments?.some(a => a.entityId === entityId)) {
-                        return {
-                            ...layer,
-                            entityAssignments: layer.entityAssignments.filter(a => a.entityId !== entityId)
-                        }
+                    if (filtered.length !== (layer.entityAssignments ?? []).length) {
+                        return { ...layer, entityAssignments: filtered }
                     }
                     return layer
                 })
@@ -644,6 +696,15 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     logicalNodeId,
                     isInherited: false,
                     confidence: 1.0
+                })
+                // Also update descendants in effective assignments
+                descendantsToReassign.forEach(dId => {
+                    newEffective.set(dId, {
+                        entityId: dId,
+                        layerId,
+                        isInherited: true,
+                        confidence: 1.0
+                    })
                 })
 
                 set({

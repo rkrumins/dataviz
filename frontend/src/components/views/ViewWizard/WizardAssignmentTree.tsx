@@ -22,7 +22,8 @@ import {
     X,
     AlertTriangle,
     CheckSquare,
-    Square
+    Square,
+    GitBranch
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
@@ -90,11 +91,19 @@ type EntityVisualEntry = { icon?: string; color?: string }
 // Tree Row Component
 // ============================================
 
+interface ChildAllocationSummary {
+    layerId: string
+    layerName: string
+    layerColor: string
+    count: number
+}
+
 interface TreeRowProps {
     node: FlatNode
     layers: ViewLayerConfig[]
     searchQuery: string
     entityVisualMap: Record<string, EntityVisualEntry>
+    childAllocations?: ChildAllocationSummary[]
     onToggle: (id: string) => void
     onSelect: (id: string, multi: boolean) => void
     onAssign: (entityId: string, layerId: string) => void
@@ -108,6 +117,7 @@ function TreeRow({
     layers,
     searchQuery,
     entityVisualMap,
+    childAllocations,
     onToggle,
     onSelect,
     onAssign,
@@ -223,6 +233,34 @@ function TreeRow({
                 <span className="text-xs px-1.5 py-0.5 bg-slate-100 dark:bg-slate-700 text-slate-500 rounded-full flex-shrink-0">
                     {node.childCount || node.children.length}
                 </span>
+            )}
+
+            {/* Children Allocated Indicator */}
+            {childAllocations && childAllocations.length > 0 && (
+                <div
+                    className="flex items-center gap-1.5 flex-shrink-0 px-2 py-1 rounded-lg bg-indigo-50/80 dark:bg-indigo-950/30 border border-indigo-200/60 dark:border-indigo-800/40"
+                    title={childAllocations.map(a => `${a.layerName}: ${a.count} child${a.count > 1 ? 'ren' : ''}`).join('\n')}
+                >
+                    <GitBranch className="w-3 h-3 text-indigo-500 dark:text-indigo-400 flex-shrink-0" />
+                    <span className="text-[10px] font-medium text-indigo-600 dark:text-indigo-300 whitespace-nowrap">
+                        {childAllocations.reduce((sum, a) => sum + a.count, 0)} in
+                    </span>
+                    {childAllocations.slice(0, 3).map(a => (
+                        <span
+                            key={a.layerId}
+                            className="text-[10px] font-medium px-1.5 py-px rounded whitespace-nowrap"
+                            style={{
+                                backgroundColor: (a.layerColor) + '20',
+                                color: a.layerColor,
+                            }}
+                        >
+                            {a.layerName}
+                        </span>
+                    ))}
+                    {childAllocations.length > 3 && (
+                        <span className="text-[10px] text-indigo-400 dark:text-indigo-500">+{childAllocations.length - 3}</span>
+                    )}
+                </div>
             )}
 
             {/* Conflict Warning */}
@@ -440,6 +478,48 @@ export function WizardAssignmentTree({
             .filter((n): n is EntityTreeNode => n !== null)
             .sort((a, b) => a.name.localeCompare(b.name))
     }, [nodes, edges, containmentSet, instanceAssignments, conflicts, layers, effectiveAssignments, manualAssignmentMap])
+
+    // Build child allocation map: for each entity with children, which layers are descendants assigned to?
+    const childAllocationMap = useMemo(() => {
+        const map = new Map<string, ChildAllocationSummary[]>()
+        const layerLookup = new Map(layers.map(l => [l.id, l]))
+
+        const collectDescendantLayers = (node: EntityTreeNode): Map<string, number> => {
+            const layerCounts = new Map<string, number>()
+            for (const child of node.children) {
+                if (child.assignedLayerId && !child.isInherited) {
+                    layerCounts.set(child.assignedLayerId, (layerCounts.get(child.assignedLayerId) ?? 0) + 1)
+                }
+                // Recurse into grandchildren
+                const childLayers = collectDescendantLayers(child)
+                childLayers.forEach((count, layerId) => {
+                    layerCounts.set(layerId, (layerCounts.get(layerId) ?? 0) + count)
+                })
+            }
+            return layerCounts
+        }
+
+        const processNode = (node: EntityTreeNode) => {
+            if (node.children.length > 0) {
+                const layerCounts = collectDescendantLayers(node)
+                if (layerCounts.size > 0) {
+                    const summaries: ChildAllocationSummary[] = []
+                    layerCounts.forEach((count, layerId) => {
+                        const layer = layerLookup.get(layerId)
+                        if (layer) {
+                            summaries.push({ layerId, layerName: layer.name, layerColor: layer.color ?? '#94a3b8', count })
+                        }
+                    })
+                    if (summaries.length > 0) {
+                        map.set(node.id, summaries.sort((a, b) => b.count - a.count))
+                    }
+                }
+                node.children.forEach(processNode)
+            }
+        }
+        entityTree.forEach(processNode)
+        return map
+    }, [entityTree, layers])
 
     // Use schema entity types for filter (same as Entities step) — not tree-derived.
     // This ensures Column, Term, Type, Glossary (and any custom types) always appear.
@@ -902,6 +982,7 @@ export function WizardAssignmentTree({
                                         layers={layers}
                                         searchQuery={searchQuery}
                                         entityVisualMap={entityVisualMap}
+                                        childAllocations={childAllocationMap.get(node.id)}
                                         onToggle={handleToggle}
                                         onSelect={handleSelect}
                                         onAssign={handleAssign}
