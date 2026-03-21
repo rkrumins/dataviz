@@ -24,7 +24,7 @@ import {
   computeAllNodeCounts,
   isFinerThan,
 } from '@/lib/projection-engine'
-import { useSchemaEntityTypes, useContainmentEdgeTypes, normalizeEdgeType, useIsContainmentEdge } from '@/store/schema'
+import { useSchemaEntityTypes, useContainmentEdgeTypes, isContainmentEdgeType } from '@/store/schema'
 
 // ============================================
 // EXPLORATION STORE
@@ -329,7 +329,7 @@ export function computeTrace(
   allEdges.forEach((edge) => {
     const rel = String(edge.data?.relationship ?? edge.data?.edgeType ?? '').toUpperCase()
     // Skip containment edges for lineage trace
-    if (containmentTypes.some(type => type.toUpperCase() === rel)) {
+    if (isContainmentEdgeType(rel, containmentTypes)) {
       return
     }
 
@@ -755,7 +755,6 @@ import { useGraphHydration } from '@/hooks/useGraphHydration'
 
 export function useLineageExploration(): UseLineageExplorationResult {
   const containmentEdgeTypes = useContainmentEdgeTypes()
-  const isContainmentEdge = useIsContainmentEdge()
   const schemaEntityTypes = useSchemaEntityTypes()
   const provider = useGraphProvider()
   const {
@@ -982,7 +981,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
         const childrenMap = new Map<string, string[]>()
         rawEdges.forEach(e => {
           const type = e.data?.relationship || e.data?.edgeType || ''
-          if (containmentTypes.some(t => t.toLowerCase() === type.toLowerCase())) {
+          if (isContainmentEdgeType(type, containmentTypes)) {
             if (!childrenMap.has(e.source)) childrenMap.set(e.source, [])
             childrenMap.get(e.source)!.push(e.target)
           }

@@ -1,7 +1,10 @@
 from typing import List, Optional, Any
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.graph import (
@@ -107,12 +110,17 @@ async def get_node(
     return node
 
 
-@router.get("/nodes/{urn}/parent", response_model=Optional[GraphNode], response_model_by_alias=True)
+@router.get("/nodes/{urn}/parent", response_model=Optional[GraphNode], response_model_by_alias=True,
+             deprecated=True)
 async def get_node_parent(
     urn: str,
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Get parent node (containment hierarchy)."""
+    """Get parent node (containment hierarchy).
+
+    **Deprecated:** Use `GET /nodes/{urn}/ancestors?limit=1` instead.
+    """
+    logger.warning("Deprecated endpoint GET /nodes/%s/parent called — use GET /nodes/%s/ancestors?limit=1", urn, urn)
     return await engine.provider.get_parent(urn)
 
 
@@ -161,7 +169,8 @@ async def search_nodes(
     return await engine.provider.search_nodes(query, limit=limit, offset=offset)
 
 
-@router.get("/edges", response_model=List[GraphEdge], response_model_by_alias=True)
+@router.get("/edges", response_model=List[GraphEdge], response_model_by_alias=True,
+             deprecated=True)
 async def get_edges(
     edge_type: Optional[str] = Query(None, alias="edgeType"),
     source_urn: Optional[str] = Query(None, alias="sourceUrn"),
@@ -170,7 +179,11 @@ async def get_edges(
     limit: int = Query(100, ge=1),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Generic edge query."""
+    """Generic edge query.
+
+    **Deprecated:** Use `POST /edges/query` instead — supports bulk URN lists and complex filters.
+    """
+    logger.warning("Deprecated endpoint GET /edges called — use POST /edges/query")
     q = EdgeQuery(offset=offset, limit=limit)
     if edge_type:
         q.edge_types = [edge_type]
@@ -193,12 +206,14 @@ async def get_neighborhood_map(
     return result
 
 
-@router.get("/stats")
+@router.get("/stats", deprecated=True)
 async def get_graph_stats(
     dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_db_session),
 ):
+    """**Deprecated:** Use `GET /introspection` instead — returns a superset of stats with full schema details."""
+    logger.warning("Deprecated endpoint GET /stats called — use GET /introspection")
     from backend.app.db.repositories.stats_repo import get_data_source_stats
     import json
     
@@ -221,7 +236,8 @@ async def get_graph_stats(
     return await engine.get_stats()
 
 
-@router.get("/nodes", response_model=List[GraphNode], response_model_by_alias=True)
+@router.get("/nodes", response_model=List[GraphNode], response_model_by_alias=True,
+             deprecated=True)
 async def get_nodes(
     entity_type: Optional[str] = Query(None, alias="entityType"),
     tag: Optional[str] = Query(None),
@@ -229,7 +245,11 @@ async def get_nodes(
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Generic node query."""
+    """Generic node query.
+
+    **Deprecated:** Use `POST /nodes/query` instead — supports complex filters and bulk operations.
+    """
+    logger.warning("Deprecated endpoint GET /nodes called — use POST /nodes/query")
     q = NodeQuery(
         entity_types=[entity_type] if entity_type else None,
         tags=[tag] if tag else None,
@@ -262,13 +282,16 @@ async def get_node_descendants(
     return await engine.get_descendants(urn, depth=depth, entity_types=entity_types, limit=limit, offset=offset)
 
 
-@router.get("/nodes/by-tag/{tag}", response_model=List[GraphNode], response_model_by_alias=True)
+@router.get("/nodes/by-tag/{tag}", response_model=List[GraphNode], response_model_by_alias=True,
+             deprecated=True)
 async def get_nodes_by_tag_endpoint(
     tag: str,
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
+    """**Deprecated:** Use `POST /nodes/query` with `tags` filter instead."""
+    logger.warning("Deprecated endpoint GET /nodes/by-tag/%s called — use POST /nodes/query with tags filter", tag)
     return await engine.get_nodes_by_tag(tag, limit=limit, offset=offset)
 
 
@@ -394,13 +417,17 @@ async def get_graph_introspection(
     return await engine.get_schema_stats()
 
 
-@router.get("/metadata/ontology")
+@router.get("/metadata/ontology", deprecated=True)
 async def get_ontology_metadata(
     dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Get ontology metadata including containment edge types and entity hierarchies."""
+    """Get ontology metadata including containment edge types and entity hierarchies.
+
+    **Deprecated:** Use `GET /metadata/schema` instead — returns a superset including ontology, entity types, and relationship definitions.
+    """
+    logger.warning("Deprecated endpoint GET /metadata/ontology called — use GET /metadata/schema")
     from backend.app.db.repositories.stats_repo import get_data_source_stats
     import json
     

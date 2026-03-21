@@ -12,7 +12,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { useMemo } from 'react'
 import { useCanvasStore, type LineageEdge } from '@/store/canvas'
-import { useContainmentEdgeTypes, normalizeEdgeType } from '@/store/schema'
+import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 import type { EdgeTypeFilter } from '@/components/panels/EdgeDetailPanel'
 
 // ============================================
@@ -290,18 +290,13 @@ export function useFilteredEdges(): {
             return (enabledTypes.has(normalized) || enabledTypes.has(originalType)) && confidence >= confidenceThreshold
         })
 
-        // Get containment types from ontology
-        const containmentTypes = containmentEdgeTypes || []
+        const containment = edges.filter((e) =>
+            isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
+        )
 
-        const containment = edges.filter((e) => {
-            const edgeType = normalizeEdgeType(e)
-            return containmentTypes.some(type => type.toUpperCase() === edgeType)
-        })
-
-        const lineage = edges.filter((e) => {
-            const edgeType = normalizeEdgeType(e)
-            return !containmentTypes.some(type => type.toUpperCase() === edgeType)
-        })
+        const lineage = edges.filter((e) =>
+            !isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
+        )
 
         // Apply direction filter if we have a focused node
         let directionFiltered = typeFiltered
