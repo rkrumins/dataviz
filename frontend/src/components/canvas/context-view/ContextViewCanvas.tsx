@@ -59,7 +59,7 @@ import type { ViewLayerConfig, LogicalNodeConfig } from '@/types/schema'
 import { defaultReferenceModelLayers } from './constants'
 import { useLayerAssignment } from '@/hooks/useLayerAssignment'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
-import { useHighlightState } from '@/hooks/useHighlightState'
+import { useHighlightState, useHoverHighlight } from '@/hooks/useHighlightState'
 import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay } from './LineageFlowOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
@@ -730,10 +730,23 @@ export function ContextViewCanvas({
   })
 
   // Highlight state: connected nodes/edges for selected node
-  const { highlightState, isHighlightActive } = useHighlightState({
+  const { highlightState, isHighlightActive: isClickHighlightActive } = useHighlightState({
     selectedNodeId, visibleLineageEdges,
     isTracing: trace.isTracing, displayMap, childMap,
   })
+
+  // Hover highlight: same visual effect on hover (lighter), defers to click-highlight
+  const { hoverHighlight, isHoverActive } = useHoverHighlight({
+    visibleLineageEdges,
+    isTracing: trace.isTracing,
+    displayMap, childMap,
+    isClickHighlightActive,
+  })
+
+  // Merge: click takes priority, hover used when no click selection
+  const isHighlightActive = isClickHighlightActive || isHoverActive
+  const mergedHighlightNodes = isClickHighlightActive ? highlightState.nodes : hoverHighlight.nodes
+  const mergedHighlightEdges = isClickHighlightActive ? highlightState.edges : hoverHighlight.edges
 
   const clearSelection = useCanvasStore((s) => s.clearSelection)
 
@@ -854,7 +867,7 @@ export function ContextViewCanvas({
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={trace.isTracing}
               traceResult={trace.result}
-              highlightedEdges={highlightState.edges}
+              highlightedEdges={mergedHighlightEdges}
               isHighlightActive={isHighlightActive}
               resolveEdgeColor={resolveEdgeColor}
             />
@@ -883,8 +896,9 @@ export function ContextViewCanvas({
                 traceFocusId={trace.focusId}
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
-                highlightedNodes={highlightState.nodes}
+                highlightedNodes={mergedHighlightNodes}
                 isHighlightActive={isHighlightActive}
+                isHoverHighlight={isHoverActive && !isClickHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
                 onLoadMore={loadChildren}
                 onSearchChildren={searchChildren}

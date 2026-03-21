@@ -22,6 +22,7 @@ interface FlatTreeItemProps {
   isHighlighted: boolean
   isFocusNode: boolean
   isClickHighlighted?: boolean
+  isHoverHighlighted?: boolean
   isDimmedByHighlight?: boolean
   isFocused?: boolean
   onSelect: (id: string) => void
@@ -50,6 +51,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   isHighlighted,
   isFocusNode,
   isClickHighlighted = false,
+  isHoverHighlighted = false,
   isDimmedByHighlight = false,
   isFocused = false,
   onSelect,
@@ -165,6 +167,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         isHighlighted && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
         // Click-highlight: subtle glow on connected nodes
         isClickHighlighted && !isSelected && "ring-1 ring-blue-400/40 bg-gradient-to-r from-blue-500/10 to-transparent",
+        // Hover-highlight: lighter ephemeral glow on connected nodes
+        isHoverHighlighted && !isSelected && !isClickHighlighted && "bg-gradient-to-r from-blue-500/[0.05] to-transparent ring-1 ring-blue-400/15 dark:from-blue-400/[0.06] dark:ring-blue-400/12",
         // Keyboard focus ring (4.5)
         isFocused && !isSelected && "ring-2 ring-accent-lineage/40 bg-gradient-to-r from-accent-lineage/[0.06] to-transparent",
         // Dimmed when not in trace path or not connected to highlighted node

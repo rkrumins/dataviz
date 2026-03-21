@@ -38,6 +38,7 @@ interface LayerColumnProps {
   traceContextSet: Set<string>
   highlightedNodes?: Set<string>
   isHighlightActive?: boolean
+  isHoverHighlight?: boolean
   onAnimationComplete?: () => void
   onLoadMore?: (parentId: string) => void
   onSearchChildren?: (parentId: string, query: string) => void
@@ -66,6 +67,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   traceContextSet,
   highlightedNodes,
   isHighlightActive = false,
+  isHoverHighlight = false,
   onAnimationComplete: _onAnimationComplete,
   onLoadMore,
   onSearchChildren,
@@ -678,7 +680,8 @@ export const LayerColumn = React.memo(function LayerColumn({
                     isTraceActive={traceFocusId !== null}
                     isHighlighted={traceContextSet.has(node.id)}
                     isFocusNode={traceFocusId === node.id}
-                    isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
+                    isClickHighlighted={isHighlightActive && !isHoverHighlight && (highlightedNodes?.has(node.id) ?? false)}
+                    isHoverHighlighted={isHighlightActive && isHoverHighlight && (highlightedNodes?.has(node.id) ?? false)}
                     isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
                     isFocused={focusIndex >= 0 && navIdx === focusIndex}
                     onSelect={onSelect}
