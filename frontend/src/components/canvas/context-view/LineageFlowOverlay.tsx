@@ -222,11 +222,17 @@ export function LineageFlowOverlay({
         } else {
           // Normal/highlight mode
           if (isEdgeHighlighted) {
+            // Full intensity when hovering or clicking a connected node
             edgeOpacity = 0.9
             dynamicStrokeWidth = baseStrokeWidth + 1
           } else if (isEdgeDimmed) {
             edgeOpacity = edge.isGhost ? 0.05 : 0.1
             dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
+          } else {
+            // Resting state: half intensity — edges are present but subtle,
+            // hover/click on a node brings connected edges to full strength
+            edgeOpacity = edgeOpacity * 0.5
+            dynamicStrokeWidth = baseStrokeWidth * 0.75
           }
         }
 
