@@ -64,6 +64,7 @@ export const router = createBrowserRouter([
           { path: 'workspaces/:workspaceId', element: <Lazy><WorkspaceView /></Lazy> },
           { path: 'workspaces/:workspaceId/views', element: <Lazy><WorkspaceViewsManager /></Lazy> },
           { path: 'schema', element: <Lazy><OntologySchemaPage /></Lazy> },
+          { path: 'schema/:ontologyId', element: <Lazy><OntologySchemaPage /></Lazy> },
         ],
       },
       {

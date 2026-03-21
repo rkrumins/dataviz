@@ -32,11 +32,27 @@ export interface OntologyUpdateRequest {
     relationshipTypeDefinitions?: Record<string, unknown>
 }
 
+export interface OntologyMatchResult {
+    ontologyId: string
+    ontologyName: string
+    version: number
+    jaccardScore: number
+    coveredEntityTypes: string[]
+    uncoveredEntityTypes: string[]
+}
+
+export interface OntologySuggestResponse {
+    suggested: OntologyCreateRequest
+    matchingOntologies: OntologyMatchResult[]
+}
+
 export interface OntologyDefinitionResponse {
     id: string
+    schemaId: string
     name: string
     description: string | null
     version: number
+    revision: number
     evolutionPolicy: string
     containmentEdgeTypes: string[]
     lineageEdgeTypes: string[]
@@ -48,6 +64,8 @@ export interface OntologyDefinitionResponse {
     isPublished: boolean
     isSystem: boolean
     scope: string
+    createdBy: string | null
+    updatedBy: string | null
     createdAt: string
     updatedAt: string
 }
@@ -73,6 +91,10 @@ export const ontologyDefinitionService = {
 
     get(id: string): Promise<OntologyDefinitionResponse> {
         return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}`)
+    },
+
+    listVersions(id: string): Promise<OntologyDefinitionResponse[]> {
+        return request<OntologyDefinitionResponse[]>(`${ADMIN_API}/${id}/versions`)
     },
 
     create(req: OntologyCreateRequest): Promise<OntologyDefinitionResponse> {
@@ -118,11 +140,11 @@ export const ontologyDefinitionService = {
         })
     },
 
-    suggest(stats: Record<string, unknown>, baseOntologyId?: string): Promise<OntologyCreateRequest> {
+    suggest(stats: Record<string, unknown>, baseOntologyId?: string): Promise<OntologySuggestResponse> {
         const url = baseOntologyId
             ? `${ADMIN_API}/suggest?base_ontology_id=${encodeURIComponent(baseOntologyId)}`
             : `${ADMIN_API}/suggest`
-        return request<OntologyCreateRequest>(url, {
+        return request<OntologySuggestResponse>(url, {
             method: 'POST',
             body: JSON.stringify(stats),
         })

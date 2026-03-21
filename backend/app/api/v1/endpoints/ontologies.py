@@ -22,6 +22,8 @@ from backend.common.models.management import (
     OntologyUpdateRequest,
     OntologyDefinitionResponse,
     OntologyCoverageResponse,
+    OntologyMatchResult,
+    OntologySuggestResponse,
     OntologyValidationIssue,
     OntologyValidationResponse,
 )
@@ -48,6 +50,19 @@ async def create_ontology(
 ):
     """Create a new ontology (starts at version 1, unpublished)."""
     return await ontology_definition_repo.create_ontology(session, req)
+
+
+@router.get("/{ontology_id}/versions", response_model=List[OntologyDefinitionResponse])
+async def list_ontology_versions(
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """List all versions of an ontology (grouped by schema_id)."""
+    orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
+    if not orm:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    schema_id = getattr(orm, 'schema_id', None) or orm.id
+    return await ontology_definition_repo.list_versions_by_schema(session, schema_id)
 
 
 @router.get("/{ontology_id}", response_model=OntologyDefinitionResponse)
@@ -241,12 +256,13 @@ async def get_ontology_impact(
     if draft_row.is_published:
         raise HTTPException(status_code=409, detail="Ontology is already published.")
 
-    # Find the latest published version of the same ontology name
+    # Find the latest published version of the same ontology (by schema_id)
     from sqlalchemy import select
     from backend.app.db.models import OntologyORM
+    schema_id = getattr(draft_row, 'schema_id', None) or draft_row.id
     result = await session.execute(
         select(OntologyORM)
-        .where(OntologyORM.name == draft_row.name)
+        .where(OntologyORM.schema_id == schema_id)
         .where(OntologyORM.is_published == True)  # noqa: E712
         .order_by(OntologyORM.version.desc())
         .limit(1)
@@ -316,7 +332,7 @@ async def get_ontology_assignments(
     return await ontology_definition_repo.get_assignments(session, ontology_id)
 
 
-@router.post("/suggest", response_model=OntologyCreateRequest, status_code=200)
+@router.post("/suggest", response_model=OntologySuggestResponse, status_code=200)
 async def suggest_ontology(
     stats: GraphSchemaStats = Body(...),
     base_ontology_id: Optional[str] = None,
@@ -325,7 +341,8 @@ async def suggest_ontology(
     """
     Suggest an ontology definition from graph schema stats.
     If base_ontology_id is provided, extends that ontology with new types found in the graph.
-    The result is a draft OntologyCreateRequest — call POST /admin/ontologies to save it.
+    The result includes a draft OntologyCreateRequest and matching existing ontologies.
+    Call POST /admin/ontologies to save the suggestion.
     """
     from backend.app.registry.provider_registry import provider_registry
 
@@ -342,8 +359,42 @@ async def suggest_ontology(
         rootEntityTypes=[],
     )
 
-    return await svc.suggest_from_introspection(
+    suggestion = await svc.suggest_from_introspection(
         introspected_stats=stats,
         introspected_ontology=introspected,
         base_ontology_id=base_ontology_id,
+    )
+
+    # Find matching existing ontologies
+    graph_entity_ids = {s.id for s in stats.entity_type_stats}
+    graph_rel_ids = {s.id.upper() for s in stats.edge_type_stats}
+    graph_types = graph_entity_ids | graph_rel_ids
+
+    matches = []
+    if graph_types:
+        all_ontologies = await ontology_definition_repo.list_latest_ontologies(session)
+        for ont in all_ontologies:
+            ont_entity_ids = set((ont.entity_type_definitions or {}).keys())
+            ont_rel_ids = set((ont.relationship_type_definitions or {}).keys())
+            ont_types = ont_entity_ids | ont_rel_ids
+
+            intersection = graph_types & ont_types
+            union = graph_types | ont_types
+            jaccard = len(intersection) / len(union) if union else 0.0
+
+            if jaccard > 0.1:
+                matches.append(OntologyMatchResult(
+                    ontologyId=ont.id,
+                    ontologyName=ont.name,
+                    version=ont.version,
+                    jaccardScore=round(jaccard, 3),
+                    coveredEntityTypes=sorted(graph_entity_ids & ont_entity_ids),
+                    uncoveredEntityTypes=sorted(graph_entity_ids - ont_entity_ids),
+                ))
+
+        matches.sort(key=lambda m: m.jaccard_score, reverse=True)
+
+    return OntologySuggestResponse(
+        suggested=suggestion,
+        matchingOntologies=matches[:5],
     )

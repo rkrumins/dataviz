@@ -41,6 +41,10 @@ def _to_response(row: OntologyORM) -> OntologyDefinitionResponse:
         isPublished=bool(row.is_published),
         isSystem=bool(row.is_system) if row.is_system is not None else False,
         scope=row.scope or "universal",
+        schemaId=getattr(row, "schema_id", None) or row.id,
+        revision=getattr(row, "revision", 0) or 0,
+        createdBy=getattr(row, "created_by", None),
+        updatedBy=getattr(row, "updated_by", None),
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
@@ -62,8 +66,48 @@ async def list_ontologies(session: AsyncSession) -> List[OntologyDefinitionRespo
 
 
 async def list_latest_ontologies(session: AsyncSession) -> List[OntologyDefinitionResponse]:
-    """List only the latest version of each ontology name."""
+    """List only the latest version of each ontology schema.
+
+    Primary strategy: group by schema_id (populated by backfill migration).
+    Fallback: if no ontologies have schema_id set but ontologies exist,
+    fall back to name-based grouping (pre-migration compatibility).
+    """
+    # Try schema_id-based grouping first
     sub = (
+        select(
+            OntologyORM.schema_id,
+            func.max(OntologyORM.version).label("max_ver"),
+        )
+        .where(OntologyORM.schema_id != "")
+        .group_by(OntologyORM.schema_id)
+        .subquery()
+    )
+    result = await session.execute(
+        select(OntologyORM)
+        .join(
+            sub,
+            (OntologyORM.schema_id == sub.c.schema_id)
+            & (OntologyORM.version == sub.c.max_ver),
+        )
+        .order_by(OntologyORM.name)
+    )
+    rows = result.scalars().all()
+    if rows:
+        return [_to_response(r) for r in rows]
+
+    # Fallback: check if ontologies exist but lack schema_id (backfill hasn't run)
+    total = await session.execute(
+        select(func.count()).select_from(OntologyORM)
+    )
+    if total.scalar() == 0:
+        return []
+
+    # Name-based grouping fallback
+    logger.warning(
+        "list_latest_ontologies: no ontologies with schema_id set; "
+        "falling back to name-based grouping"
+    )
+    name_sub = (
         select(
             OntologyORM.name,
             func.max(OntologyORM.version).label("max_ver"),
@@ -74,9 +118,9 @@ async def list_latest_ontologies(session: AsyncSession) -> List[OntologyDefiniti
     result = await session.execute(
         select(OntologyORM)
         .join(
-            sub,
-            (OntologyORM.name == sub.c.name)
-            & (OntologyORM.version == sub.c.max_ver),
+            name_sub,
+            (OntologyORM.name == name_sub.c.name)
+            & (OntologyORM.version == name_sub.c.max_ver),
         )
         .order_by(OntologyORM.name)
     )
@@ -135,6 +179,9 @@ async def create_ontology(
     )
     session.add(row)
     await session.flush()
+    # First version seeds its own schema_id
+    row.schema_id = row.id
+    await session.flush()
     return _to_response(row)
 
 
@@ -191,6 +238,7 @@ async def update_ontology(
     if req.evolution_policy is not None:
         row.evolution_policy = req.evolution_policy
 
+    row.revision = (getattr(row, 'revision', 0) or 0) + 1
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
     return _to_response(row)
@@ -202,14 +250,16 @@ async def _create_new_version(
     req: OntologyUpdateRequest,
 ) -> OntologyDefinitionResponse:
     """Create a new version of a published ontology with the requested changes."""
+    schema_id = original.schema_id or original.id
     result = await session.execute(
         select(func.max(OntologyORM.version)).where(
-            OntologyORM.name == original.name
+            OntologyORM.schema_id == schema_id
         )
     )
     max_version = result.scalar() or 0
 
     new_row = OntologyORM(
+        schema_id=schema_id,
         name=req.name if req.name is not None else original.name,
         description=req.description if req.description is not None else getattr(original, "description", None),
         version=max_version + 1,
@@ -281,6 +331,16 @@ async def delete_ontology(
         delete(OntologyORM).where(OntologyORM.id == ontology_id)
     )
     return result.rowcount > 0
+
+
+async def list_versions_by_schema(session: AsyncSession, schema_id: str) -> List[OntologyDefinitionResponse]:
+    """List all versions of an ontology by schema_id."""
+    result = await session.execute(
+        select(OntologyORM)
+        .where(OntologyORM.schema_id == schema_id)
+        .order_by(OntologyORM.version.desc())
+    )
+    return [_to_response(r) for r in result.scalars().all()]
 
 
 async def has_data_sources(session: AsyncSession, ontology_id: str) -> bool:

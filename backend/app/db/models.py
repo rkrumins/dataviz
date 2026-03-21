@@ -304,6 +304,10 @@ class OntologyORM(Base):
     # deprecate — mark removed types as deprecated; continue to serve them.
     # migrate  — automatically rename/remap types per a migration manifest.
     evolution_policy = Column(Text, nullable=False, default="reject")   # reject | deprecate | migrate
+    schema_id = Column(Text, nullable=False, default="")               # stable identifier grouping all versions
+    revision = Column(Integer, nullable=False, default=0)              # optimistic locking counter
+    created_by = Column(Text, nullable=True, default=None)             # who created this version
+    updated_by = Column(Text, nullable=True, default=None)             # last modifier
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -315,6 +319,7 @@ class OntologyORM(Base):
     __table_args__ = (
         Index("idx_ontologies_name_version", "name", "version"),
         Index("idx_ontologies_is_system", "is_system"),
+        Index("idx_ontologies_schema_id", "schema_id"),
     )
 
     def __repr__(self) -> str:

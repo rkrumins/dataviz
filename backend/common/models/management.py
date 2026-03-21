@@ -247,6 +247,10 @@ class OntologyDefinitionResponse(BaseModel):
     is_published: bool = Field(alias="isPublished")
     is_system: bool = Field(False, alias="isSystem")
     scope: str = "universal"
+    schema_id: str = Field("", alias="schemaId")
+    revision: int = Field(0)
+    created_by: Optional[str] = Field(None, alias="createdBy")
+    updated_by: Optional[str] = Field(None, alias="updatedBy")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -276,6 +280,26 @@ class OntologyCoverageResponse(BaseModel):
     extra_entity_types: List[str] = Field(default_factory=list, alias="extraEntityTypes")
     covered_relationship_types: List[str] = Field(default_factory=list, alias="coveredRelationshipTypes")
     uncovered_relationship_types: List[str] = Field(default_factory=list, alias="uncoveredRelationshipTypes")
+
+    class Config:
+        populate_by_name = True
+
+
+class OntologyMatchResult(BaseModel):
+    ontology_id: str = Field(alias="ontologyId")
+    ontology_name: str = Field(alias="ontologyName")
+    version: int
+    jaccard_score: float = Field(alias="jaccardScore")
+    covered_entity_types: List[str] = Field(default_factory=list, alias="coveredEntityTypes")
+    uncovered_entity_types: List[str] = Field(default_factory=list, alias="uncoveredEntityTypes")
+
+    class Config:
+        populate_by_name = True
+
+
+class OntologySuggestResponse(BaseModel):
+    suggested: OntologyCreateRequest
+    matching_ontologies: List[OntologyMatchResult] = Field(default_factory=list, alias="matchingOntologies")
 
     class Config:
         populate_by_name = True

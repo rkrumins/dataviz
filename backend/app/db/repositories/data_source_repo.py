@@ -192,15 +192,27 @@ async def count_data_sources(
     return result.scalar() or 0
 
 async def get_data_source_impact(session: AsyncSession, ds_id: str):
-    """Return the set of context models (views) that would be broken by deleting this data source."""
-    from ..models import ContextModelORM
+    """Return the set of views that would be affected by changing/deleting this data source."""
+    from ..models import ContextModelORM, ViewORM
     from backend.common.models.management import WorkspaceDataSourceImpactResponse, ImpactedEntity
-    
+
+    # Query the views table (primary source of truth for new views)
     view_result = await session.execute(
+        select(ViewORM.id, ViewORM.name, ViewORM.view_type)
+        .where(ViewORM.data_source_id == ds_id)
+    )
+    views = [{"id": r[0], "name": r[1], "type": r[2] or "view"} for r in view_result.all()]
+
+    # Also check legacy context_models for backward compatibility
+    seen_ids = {v["id"] for v in views}
+    cm_result = await session.execute(
         select(ContextModelORM.id, ContextModelORM.name)
         .where(ContextModelORM.data_source_id == ds_id)
     )
-    views = [{"id": r[0], "name": r[1], "type": "view"} for r in view_result.all()]
+    for r in cm_result.all():
+        if r[0] not in seen_ids:
+            views.append({"id": r[0], "name": r[1], "type": "context_model"})
+
     return WorkspaceDataSourceImpactResponse(
         views=[ImpactedEntity(**v) for v in views]
     )

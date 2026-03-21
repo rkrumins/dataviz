@@ -235,6 +235,11 @@ async def init_db() -> None:
             "ALTER TABLE feature_definitions ADD COLUMN implemented INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE feature_registry_meta ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE feature_flags ADD COLUMN version INTEGER NOT NULL DEFAULT 0",
+            # Phase 3: Ontology versioning + audit columns
+            "ALTER TABLE ontologies ADD COLUMN schema_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE ontologies ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ontologies ADD COLUMN created_by TEXT",
+            "ALTER TABLE ontologies ADD COLUMN updated_by TEXT",
         ]
         for stmt in migrations:
             try:
@@ -245,6 +250,36 @@ async def init_db() -> None:
             except Exception:
                 # Column already exists — safe to ignore
                 pass
+
+    # ── Backfill schema_id for existing ontologies ───────────────────
+    async with engine.begin() as conn:
+        try:
+            result = await conn.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT id, name FROM ontologies WHERE schema_id = '' ORDER BY name, version"
+                )
+            )
+            rows = result.fetchall()
+            if rows:
+                name_to_schema: dict[str, str] = {}
+                for row_id, name in rows:
+                    # NULL/empty names get their own id as schema_id (no grouping)
+                    if not name:
+                        # Each unnamed ontology is its own schema lineage
+                        schema_id = row_id
+                    else:
+                        if name not in name_to_schema:
+                            name_to_schema[name] = row_id
+                        schema_id = name_to_schema[name]
+                    await conn.execute(
+                        __import__("sqlalchemy").text(
+                            "UPDATE ontologies SET schema_id = :sid WHERE id = :rid"
+                        ),
+                        {"sid": schema_id, "rid": row_id},
+                    )
+                logger.info("Backfilled schema_id for %d ontologies", len(rows))
+        except Exception:
+            pass
 
     logger.info("Management DB initialised at %s", DATABASE_URL)
 
