@@ -29,7 +29,7 @@ export function DeleteConfirmDialog({
     inputRef.current?.focus()
   }, [])
 
-  const blocked = ontology.isSystem || ontology.isPublished || assignmentCount > 0
+  const blocked = ontology.isSystem || assignmentCount > 0
 
   async function handleDelete() {
     if (blocked || !nameMatch) return
@@ -61,8 +61,8 @@ export function DeleteConfirmDialog({
             <div className="min-w-0 flex-1">
               <h3 className="text-base font-bold text-ink">Delete Ontology</h3>
               <p className="text-sm text-ink-muted mt-1">
-                You are about to permanently delete <span className="font-semibold text-ink">"{ontology.name}"</span> (v{ontology.version}).
-                This action cannot be undone.
+                You are about to delete <span className="font-semibold text-ink">"{ontology.name}"</span> (v{ontology.version}).
+                You can undo this action briefly after deletion.
               </p>
             </div>
           </div>
@@ -77,12 +77,6 @@ export function DeleteConfirmDialog({
                 <li className="flex items-center gap-2 text-xs text-red-600 dark:text-red-400">
                   <div className="w-1 h-1 rounded-full bg-red-500" />
                   System ontologies cannot be deleted
-                </li>
-              )}
-              {ontology.isPublished && (
-                <li className="flex items-center gap-2 text-xs text-red-600 dark:text-red-400">
-                  <div className="w-1 h-1 rounded-full bg-red-500" />
-                  Published ontologies cannot be deleted
                 </li>
               )}
               {assignmentCount > 0 && (

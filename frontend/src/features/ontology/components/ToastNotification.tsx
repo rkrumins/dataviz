@@ -64,6 +64,14 @@ export function ToastNotification({ toast, onDismiss }: { toast: Toast; onDismis
       <div className="flex items-center gap-3 px-4 py-3.5">
         <Icon className={cn('w-4.5 h-4.5 flex-shrink-0', iconColors[toast.type])} />
         <span className="flex-1 text-sm text-ink leading-snug">{toast.message}</span>
+        {toast.action && (
+          <button
+            onClick={() => { toast.action!.onClick(); onDismiss() }}
+            className="flex-shrink-0 px-2.5 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
+          >
+            {toast.action.label}
+          </button>
+        )}
         <button
           onClick={onDismiss}
           className="opacity-40 hover:opacity-100 transition-opacity flex-shrink-0 rounded-md p-0.5 hover:bg-black/5 dark:hover:bg-white/5"

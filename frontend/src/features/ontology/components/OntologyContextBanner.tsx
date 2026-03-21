@@ -66,6 +66,7 @@ export function OntologyContextBanner({
   const [confirmTarget, setConfirmTarget] = useState<{ ontologyId: string | undefined; ontologyName: string } | null>(null)
   const [impactedViews, setImpactedViews] = useState<ImpactedView[]>([])
   const [loadingImpact, setLoadingImpact] = useState(false)
+  const [confirmText, setConfirmText] = useState('')
 
   const assignedOntology = dataSource?.ontologyId
     ? ontologies.find(o => o.id === dataSource.ontologyId) ?? null
@@ -138,6 +139,7 @@ export function OntologyContextBanner({
   const handleCancelAssign = () => {
     setConfirmTarget(null)
     setImpactedViews([])
+    setConfirmText('')
   }
 
   // No workspace state
@@ -494,23 +496,44 @@ export function OntologyContextBanner({
               )}
             </div>
 
+            {/* Typed confirmation when views are affected */}
+            {impactedViews.length > 0 && !loadingImpact && (
+              <div className="mx-6 mb-4">
+                <div className="rounded-xl border border-red-200 dark:border-red-800/50 bg-red-50/50 dark:bg-red-950/20 p-4">
+                  <p className="text-xs font-semibold text-red-700 dark:text-red-400 mb-2">
+                    This action may break {impactedViews.length} existing view{impactedViews.length !== 1 ? 's' : ''}. This cannot be undone.
+                  </p>
+                  <p className="text-[11px] text-red-600/70 dark:text-red-400/60 mb-3">
+                    Type <span className="font-mono font-bold">change</span> to confirm you understand the risks.
+                  </p>
+                  <input
+                    type="text"
+                    value={confirmText}
+                    onChange={e => setConfirmText(e.target.value)}
+                    placeholder='Type "change" to confirm'
+                    className="w-full px-3 py-2 rounded-lg bg-white dark:bg-black/20 border border-red-200 dark:border-red-800/50 text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-red-500/30 transition-all"
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Footer */}
             <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-glass-border bg-black/[0.01] dark:bg-white/[0.01] rounded-b-2xl">
               <button
                 onClick={handleCancelAssign}
-                className="px-4 py-2 rounded-lg text-sm font-medium text-ink-secondary border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                className="px-4 py-2 rounded-xl text-sm font-medium text-ink-secondary border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={handleConfirmAssign}
-                disabled={loadingImpact || isAssigning}
+                disabled={loadingImpact || isAssigning || (impactedViews.length > 0 && confirmText.toLowerCase() !== 'change')}
                 className={cn(
-                  'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all',
+                  'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all',
                   impactedViews.length > 0
-                    ? 'bg-amber-500 text-white hover:bg-amber-600 shadow-sm shadow-amber-500/20'
+                    ? 'bg-red-500 text-white hover:bg-red-600 shadow-sm shadow-red-500/20'
                     : 'bg-indigo-500 text-white hover:bg-indigo-600 shadow-sm shadow-indigo-500/20',
-                  (loadingImpact || isAssigning) && 'opacity-50 cursor-not-allowed',
+                  (loadingImpact || isAssigning || (impactedViews.length > 0 && confirmText.toLowerCase() !== 'change')) && 'opacity-50 cursor-not-allowed',
                 )}
               >
                 {isAssigning ? (

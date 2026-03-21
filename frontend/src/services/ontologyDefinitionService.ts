@@ -127,6 +127,12 @@ export const ontologyDefinitionService = {
         })
     },
 
+    restore(id: string): Promise<OntologyDefinitionResponse> {
+        return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}/restore`, {
+            method: 'POST',
+        })
+    },
+
     validate(id: string): Promise<OntologyValidationResponse> {
         return request<OntologyValidationResponse>(`${ADMIN_API}/${id}/validate`, {
             method: 'POST',

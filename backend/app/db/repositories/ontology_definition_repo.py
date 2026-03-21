@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import OntologyORM
@@ -54,14 +54,15 @@ def _to_response(row: OntologyORM) -> OntologyDefinitionResponse:
 # CRUD                                                                 #
 # ------------------------------------------------------------------ #
 
-async def list_ontologies(session: AsyncSession) -> List[OntologyDefinitionResponse]:
+async def list_ontologies(session: AsyncSession, include_deleted: bool = False) -> List[OntologyDefinitionResponse]:
     """List all ontologies (all versions)."""
-    result = await session.execute(
-        select(OntologyORM).order_by(
-            OntologyORM.name,
-            OntologyORM.version.desc(),
-        )
+    q = select(OntologyORM).order_by(
+        OntologyORM.name,
+        OntologyORM.version.desc(),
     )
+    if not include_deleted:
+        q = q.where(OntologyORM.deleted_at.is_(None))
+    result = await session.execute(q)
     return [_to_response(r) for r in result.scalars().all()]
 
 
@@ -79,6 +80,7 @@ async def list_latest_ontologies(session: AsyncSession) -> List[OntologyDefiniti
             func.max(OntologyORM.version).label("max_ver"),
         )
         .where(OntologyORM.schema_id != "")
+        .where(OntologyORM.deleted_at.is_(None))
         .group_by(OntologyORM.schema_id)
         .subquery()
     )
@@ -327,10 +329,34 @@ async def publish_ontology(
 async def delete_ontology(
     session: AsyncSession, ontology_id: str
 ) -> bool:
+    """Soft-delete an ontology by setting deleted_at timestamp."""
+    now = datetime.now(timezone.utc).isoformat()
     result = await session.execute(
-        delete(OntologyORM).where(OntologyORM.id == ontology_id)
+        update(OntologyORM)
+        .where(OntologyORM.id == ontology_id)
+        .where(OntologyORM.deleted_at.is_(None))
+        .values(deleted_at=now)
     )
     return result.rowcount > 0
+
+
+async def restore_ontology(
+    session: AsyncSession, ontology_id: str
+) -> Optional[OntologyDefinitionResponse]:
+    """Restore a soft-deleted ontology by clearing deleted_at."""
+    result = await session.execute(
+        update(OntologyORM)
+        .where(OntologyORM.id == ontology_id)
+        .where(OntologyORM.deleted_at.isnot(None))
+        .values(deleted_at=None)
+    )
+    if result.rowcount == 0:
+        return None
+    row = await session.execute(
+        select(OntologyORM).where(OntologyORM.id == ontology_id)
+    )
+    orm = row.scalar_one_or_none()
+    return _to_response(orm) if orm else None
 
 
 async def list_versions_by_schema(session: AsyncSession, schema_id: str) -> List[OntologyDefinitionResponse]:

@@ -8,7 +8,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useBlocker } from 'react-router'
-import { Lock, PenLine, Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, Copy, ShieldCheck, Upload, X, Clock, Save, CircleDot } from 'lucide-react'
+import { Lock, PenLine, Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, Copy, ShieldCheck, Upload, X, Clock, Save, CircleDot, LayoutDashboard, Download } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { EntityTypeEditor } from '@/components/schema/EntityTypeEditor'
 import { RelationshipTypeEditor } from '@/components/schema/RelationshipTypeEditor'
@@ -50,6 +50,9 @@ import { VersionHistoryPanel } from '@/features/ontology/components/panels/Versi
 import { SettingsPanel } from '@/features/ontology/components/panels/SettingsPanel'
 import { DeleteConfirmDialog } from '@/features/ontology/components/dialogs/DeleteConfirmDialog'
 import { UnsavedChangesDialog } from '@/features/ontology/components/dialogs/UnsavedChangesDialog'
+import { PublishConfirmDialog } from '@/features/ontology/components/dialogs/PublishConfirmDialog'
+import { OverviewPanel } from '@/features/ontology/components/panels/OverviewPanel'
+import type { OntologyImpactResponse } from '@/services/ontologyDefinitionService'
 
 // ---------------------------------------------------------------------------
 // Tab configuration
@@ -60,6 +63,7 @@ const TAB_DEFS: Array<{
   label: string
   icon: React.ComponentType<{ className?: string }>
 }> = [
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'entities', label: 'Entity Types', icon: Box },
   { id: 'relationships', label: 'Relationships', icon: GitBranch },
   { id: 'hierarchy', label: 'Hierarchy', icon: FolderTree },
@@ -77,7 +81,7 @@ export function OntologySchemaPage() {
   const navigate = useNavigate()
   const { ontologyId } = useParams<{ ontologyId: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
-  const activeTab = (searchParams.get('tab') || 'entities') as OntologyTab
+  const activeTab = (searchParams.get('tab') || 'overview') as OntologyTab
 
   const invalidateSchema = useInvalidateGraphSchema()
   const provider = useGraphProvider()
@@ -113,6 +117,8 @@ export function OntologySchemaPage() {
   const [isAssigning, setIsAssigning] = useState(false)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [publishImpact, setPublishImpact] = useState<OntologyImpactResponse | null>(null)
+  const [isPublishing, setIsPublishing] = useState(false)
   const [editDetailsTarget, setEditDetailsTarget] = useState<OntologyDefinitionResponse | null>(null)
   const [validationResult, setValidationResult] = useState<{
     isValid: boolean
@@ -219,8 +225,8 @@ export function OntologySchemaPage() {
     return m
   }, [workspaces])
 
-  const showToast = useCallback((type: ToastType, message: string) => {
-    setToast({ type, message, id: ++toastIdRef.current })
+  const showToast = useCallback((type: ToastType, message: string, action?: { label: string; onClick: () => void }) => {
+    setToast({ type, message, id: ++toastIdRef.current, action })
   }, [])
 
   // ── Edit mode helpers ─────────────────────────────────────────────
@@ -491,19 +497,43 @@ export function OntologySchemaPage() {
     if (!selectedOntology) return
     try {
       const impact = await ontologyDefinitionService.impact(selectedOntology.id)
-      const diffLines = [
-        impact.addedEntityTypes.length > 0 ? `+ Adding: ${impact.addedEntityTypes.join(', ')}` : '',
-        impact.removedEntityTypes.length > 0 ? `- Removing: ${impact.removedEntityTypes.join(', ')}` : '',
-      ].filter(Boolean).join('\n')
-      const msg = impact.allowed
-        ? `Publish "${selectedOntology.name}" v${selectedOntology.version}? This is irreversible.\n\n${diffLines}`.trim()
-        : `Blocked: ${impact.reason}\n\nPublish anyway?`
-      if (!window.confirm(msg)) return
+      setPublishImpact(impact)
+    } catch (err: unknown) {
+      showToast('error', `Failed to check impact: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    }
+  }
+
+  async function handleConfirmPublish() {
+    if (!selectedOntology) return
+    setIsPublishing(true)
+    try {
       await mutations.publish.mutateAsync(selectedOntology.id)
       showToast('success', 'Published — active for all assigned data sources')
       setValidationResult(null)
+      setPublishImpact(null)
     } catch (err: unknown) {
       showToast('error', `Publish failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    } finally {
+      setIsPublishing(false)
+    }
+  }
+
+  async function handleExport() {
+    if (!selectedOntology) return
+    try {
+      const res = await fetch(`/api/v1/admin/ontologies/${selectedOntology.id}/export`)
+      if (!res.ok) throw new Error(`Export failed: ${res.statusText}`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${selectedOntology.name.replace(/\s+/g, '_')}_v${selectedOntology.version}.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err: unknown) {
+      showToast('error', `Export failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
   }
 
@@ -554,12 +584,26 @@ export function OntologySchemaPage() {
 
   async function handleConfirmDelete() {
     if (!selectedOntology) return
+    const deletedId = selectedOntology.id
+    const deletedName = selectedOntology.name
     setShowDeleteDialog(false)
     try {
-      await mutations.remove.mutateAsync(selectedOntology.id)
-      const remaining = ontologies.filter(x => x.id !== selectedOntology.id)
+      await mutations.remove.mutateAsync(deletedId)
+      const remaining = ontologies.filter(x => x.id !== deletedId)
       navigate(remaining.length > 0 ? `/schema/${remaining[0].id}` : '/schema', { replace: true })
-      showToast('success', 'Ontology deleted')
+      showToast('success', `"${deletedName}" deleted`, {
+        label: 'Undo',
+        onClick: async () => {
+          try {
+            await ontologyDefinitionService.restore(deletedId)
+            mutations.invalidateAll()
+            navigate(`/schema/${deletedId}`)
+            showToast('success', `"${deletedName}" restored`)
+          } catch {
+            showToast('error', 'Failed to restore ontology')
+          }
+        },
+      })
     } catch (err: unknown) {
       showToast('error', `Failed to delete: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
@@ -686,6 +730,13 @@ export function OntologySchemaPage() {
                         Details
                       </button>
                     )}
+                    <button
+                      onClick={handleExport}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-glass-border-hover hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-secondary transition-all"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Export
+                    </button>
                     <button
                       onClick={handleClone}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-indigo-300 hover:bg-indigo-500/[0.06] text-ink-secondary hover:text-indigo-600 transition-all"
@@ -815,6 +866,17 @@ export function OntologySchemaPage() {
                       transition={{ duration: 0.15, ease: 'easeOut' }}
                       className="p-8"
                     >
+                      {activeTab === 'overview' && (
+                        <OverviewPanel
+                          ontology={selectedOntology}
+                          graphStats={graphStats}
+                          coverage={coverage}
+                          assignmentCount={assignmentCountMap.get(selectedOntology.id) ?? 0}
+                          onNavigateTab={(tab) => setSearchParams({ tab })}
+                          onExport={handleExport}
+                        />
+                      )}
+
                       {activeTab === 'entities' && (
                         <EntityTypesPanel
                           entityTypes={entityTypes}
@@ -1030,6 +1092,17 @@ export function OntologySchemaPage() {
           assignmentCount={assignmentCountMap.get(selectedOntology.id) ?? 0}
           onConfirm={handleConfirmDelete}
           onClose={() => setShowDeleteDialog(false)}
+        />
+      )}
+
+      {/* Publish Confirmation */}
+      {publishImpact && selectedOntology && (
+        <PublishConfirmDialog
+          ontology={selectedOntology}
+          impact={publishImpact}
+          isPublishing={isPublishing}
+          onConfirm={handleConfirmPublish}
+          onClose={() => setPublishImpact(null)}
         />
       )}
 

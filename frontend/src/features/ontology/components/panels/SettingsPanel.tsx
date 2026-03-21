@@ -17,7 +17,6 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
   const [name, setName] = useState(ontology.name)
   const [description, setDescription] = useState(ontology.description ?? '')
   const [evolutionPolicy, setEvolutionPolicy] = useState(ontology.evolutionPolicy ?? 'reject')
-  const [deleteConfirm, setDeleteConfirm] = useState(false)
   const isLocked = ontology.isSystem || ontology.isPublished
   const hasChanges = name !== ontology.name || description !== (ontology.description ?? '') || evolutionPolicy !== (ontology.evolutionPolicy ?? 'reject')
 
@@ -49,14 +48,7 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
   ]
 
   function handleDelete() {
-    if (!deleteConfirm) {
-      setDeleteConfirm(true)
-      // Reset after 4 seconds if not confirmed
-      setTimeout(() => setDeleteConfirm(false), 4000)
-      return
-    }
     onDelete()
-    setDeleteConfirm(false)
   }
 
   return (
@@ -194,14 +186,15 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
       )}
 
       {/* Danger Zone */}
-      {!ontology.isSystem && !ontology.isPublished && (
+      {!ontology.isSystem && (
         <div className="rounded-xl border border-red-500/20 bg-red-500/[0.03] dark:bg-red-500/[0.03] p-5">
           <h3 className="text-sm font-semibold text-red-600 dark:text-red-400 mb-2 flex items-center gap-2">
             <AlertTriangle className="w-4 h-4" />
             Danger Zone
           </h3>
           <p className="text-xs text-ink-muted mb-4 leading-relaxed">
-            Deleting this ontology is <strong className="text-red-600 dark:text-red-400">permanent</strong> and cannot be undone.
+            Deleting this ontology will remove it from all listings.
+            {' '}You can recover it shortly after deletion via the undo action.
             {assignmentCount > 0 && (
               <span className="block mt-1 text-red-600/80 dark:text-red-400/80">
                 This ontology is assigned to {assignmentCount} data source(s) — unassign them first.
@@ -211,15 +204,10 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
           <button
             onClick={handleDelete}
             disabled={assignmentCount > 0}
-            className={cn(
-              'flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed',
-              deleteConfirm
-                ? 'bg-red-500 text-white hover:bg-red-600 shadow-sm'
-                : 'text-red-600 border border-red-200 dark:border-red-800 hover:bg-red-50 dark:hover:bg-red-950/30'
-            )}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed text-red-600 border border-red-200 dark:border-red-800 hover:bg-red-50 dark:hover:bg-red-950/30"
           >
             <Trash2 className="w-3.5 h-3.5" />
-            {deleteConfirm ? 'Click again to confirm deletion' : 'Delete Ontology'}
+            Delete Ontology
           </button>
         </div>
       )}

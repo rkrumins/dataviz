@@ -77,6 +77,51 @@ async def get_ontology(
     return ontology
 
 
+@router.get("/{ontology_id}/export")
+async def export_ontology(
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Export a full ontology definition as a downloadable JSON file.
+    Returns the complete definition including entity types, relationship types,
+    hierarchy, containment, lineage, and all metadata.
+    """
+    import json as _json
+    from fastapi.responses import Response
+
+    orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
+    if not orm:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+
+    export_data = {
+        "id": orm.id,
+        "name": orm.name,
+        "description": orm.description,
+        "version": orm.version,
+        "scope": orm.scope or "universal",
+        "evolutionPolicy": getattr(orm, "evolution_policy", "reject") or "reject",
+        "isPublished": orm.is_published,
+        "isSystem": orm.is_system,
+        "createdAt": str(orm.created_at) if orm.created_at else None,
+        "updatedAt": str(orm.updated_at) if orm.updated_at else None,
+        "entityTypeDefinitions": _json.loads(orm.entity_type_definitions or "{}"),
+        "relationshipTypeDefinitions": _json.loads(orm.relationship_type_definitions or "{}"),
+        "containmentEdgeTypes": _json.loads(orm.containment_edge_types or "[]"),
+        "lineageEdgeTypes": _json.loads(orm.lineage_edge_types or "[]"),
+        "edgeTypeMetadata": _json.loads(orm.edge_type_metadata or "{}"),
+        "entityTypeHierarchy": _json.loads(orm.entity_type_hierarchy or "{}"),
+        "rootEntityTypes": _json.loads(orm.root_entity_types or "[]"),
+    }
+
+    filename = f"{orm.name.replace(' ', '_')}_v{orm.version}.json"
+    return Response(
+        content=_json.dumps(export_data, indent=2, default=str),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.put("/{ontology_id}", response_model=OntologyDefinitionResponse)
 async def update_ontology(
     ontology_id: str = Path(...),
@@ -113,6 +158,18 @@ async def delete_ontology(
             detail="Cannot delete ontology: one or more data sources still reference it.",
         )
     await ontology_definition_repo.delete_ontology(session, ontology_id)
+
+
+@router.post("/{ontology_id}/restore", response_model=OntologyDefinitionResponse)
+async def restore_ontology(
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Restore a soft-deleted ontology."""
+    restored = await ontology_definition_repo.restore_ontology(session, ontology_id)
+    if not restored:
+        raise HTTPException(status_code=404, detail=f"No deleted ontology '{ontology_id}' found to restore")
+    return restored
 
 
 @router.post("/{ontology_id}/publish", response_model=OntologyDefinitionResponse)

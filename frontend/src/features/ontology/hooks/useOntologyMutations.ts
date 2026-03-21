@@ -46,5 +46,5 @@ export function useOntologyMutations() {
     mutationFn: (id: string) => ontologyDefinitionService.validate(id),
   })
 
-  return { create, update, remove, publish, clone, validate }
+  return { create, update, remove, publish, clone, validate, invalidateAll }
 }

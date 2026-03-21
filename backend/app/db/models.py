@@ -310,6 +310,7 @@ class OntologyORM(Base):
     updated_by = Column(Text, nullable=True, default=None)             # last modifier
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    deleted_at = Column(Text, nullable=True, default=None)             # soft delete timestamp
 
     # Relationships
     data_sources = relationship(
