@@ -9,7 +9,7 @@
  */
 
 import { useMemo } from 'react'
-import type { ViewLayerConfig } from '@/types/schema'
+import type { ViewLayerConfig, LogicalNodeConfig } from '@/types/schema'
 import {
   type GraphNode,
   resolveLayerAssignment,
@@ -142,7 +142,8 @@ export function useLayerAssignment({
     const processed = new Set<string>()
 
     // Iterative top-down traversal (prevents stack overflow on deep hierarchies)
-    // Priority order (highest to lowest):
+    // HARD RULE: Containment children ALWAYS inherit parent's layer (no override).
+    // Root-level nodes use priority chain:
     // 1. effectiveAssignments (backend) 2. instanceAssignments (user drag)
     // 3. explicitAssignments (view config) 4. ruleAssignments (rules) 5. inheritance
     const roots = nodes.filter((n: any) => !parentMap.has(n.id))
@@ -159,31 +160,36 @@ export function useLayerAssignment({
 
       let myLayerId: string | undefined
 
-      // Does this node have a containment parent? If so, inheritance should
-      // take priority over rule-based assignment to keep children in the same
-      // layer column as their parent. Only explicit/manual assignments can
-      // override containment inheritance.
+      // HARD RULE: Containment children ALWAYS inherit parent's layer.
+      // No assignment (backend, user drag, explicit, rules) can override this.
+      // Only root-level nodes (no containment parent) use the priority chain.
       const hasContainmentParent = parentMap.has(nodeId)
 
-      const backendAssignment = effectiveAssignments.get(nodeId)
-      if (backendAssignment?.layerId) myLayerId = backendAssignment.layerId
-
-      if (!myLayerId) {
-        const instanceAssignment = instanceAssignments.get(nodeId)
-        if (instanceAssignment) myLayerId = instanceAssignment.layerId
-      }
-
-      if (!myLayerId) myLayerId = explicitAssignments.get(nodeId)
-
-      // Containment inheritance takes priority over rules: children should
-      // stay in the same layer as their parent unless explicitly assigned.
-      // Rule-based assignment only applies to root-level nodes (no parent).
-      if (!myLayerId && inheritedLayerId && hasContainmentParent) {
+      if (hasContainmentParent && inheritedLayerId) {
+        // Absolute inheritance — child is locked to parent's layer
         myLayerId = inheritedLayerId
+      } else {
+        // Root-level node: use priority chain
+        // 1. effectiveAssignments (backend)
+        const backendAssignment = effectiveAssignments.get(nodeId)
+        if (backendAssignment?.layerId) myLayerId = backendAssignment.layerId
+
+        // 2. instanceAssignments (user drag)
+        if (!myLayerId) {
+          const instanceAssignment = instanceAssignments.get(nodeId)
+          if (instanceAssignment) myLayerId = instanceAssignment.layerId
+        }
+
+        // 3. explicitAssignments (view config)
+        if (!myLayerId) myLayerId = explicitAssignments.get(nodeId)
+
+        // 4. ruleAssignments (ontology rules)
+        if (!myLayerId) myLayerId = ruleAssignments.get(nodeId)
+
+        // 5. inheritance (for non-containment relationships, if any)
+        if (!myLayerId && inheritedLayerId) myLayerId = inheritedLayerId
       }
 
-      if (!myLayerId) myLayerId = ruleAssignments.get(nodeId)
-      if (!myLayerId && inheritedLayerId) myLayerId = inheritedLayerId
       if (myLayerId === '__UNASSIGNED__') myLayerId = undefined
 
       if (myLayerId) effectiveLayer.set(nodeId, myLayerId)
@@ -277,6 +283,90 @@ export function useLayerAssignment({
 
     // Sort all lists
     grouped.forEach(list => list.sort((a, b) => a.name.localeCompare(b.name)))
+
+    // 4. Wrap entities in logical groups where configured.
+    // Build entityId -> logicalNodeId map from all layer entityAssignments,
+    // then for each layer with logicalNodes, create wrapper HierarchyNodes
+    // and move assigned entities under them.
+    const entityLogicalMap = new Map<string, string>() // entityId -> logicalNodeId
+    sortedLayers.forEach(l => {
+      l.entityAssignments?.forEach(a => {
+        if (a.logicalNodeId) entityLogicalMap.set(a.entityId, a.logicalNodeId)
+      })
+    })
+    // Also check instanceAssignments (user drag in current session)
+    instanceAssignments.forEach((a, entityId) => {
+      if ('logicalNodeId' in a && (a as { logicalNodeId?: string }).logicalNodeId) {
+        entityLogicalMap.set(entityId, (a as { logicalNodeId?: string }).logicalNodeId!)
+      }
+    })
+
+    if (entityLogicalMap.size > 0) {
+      sortedLayers.forEach(layer => {
+        if (!layer.logicalNodes || layer.logicalNodes.length === 0) return
+        const layerNodes = grouped.get(layer.id)
+        if (!layerNodes || layerNodes.length === 0) return
+
+        // Build a flat lookup of all logical nodes in this layer (recursive)
+        const logicalLookup = new Map<string, LogicalNodeConfig>()
+        const collectLogicalNodes = (nodes: LogicalNodeConfig[]) => {
+          nodes.forEach(n => {
+            logicalLookup.set(n.id, n)
+            if (n.children) collectLogicalNodes(n.children)
+          })
+        }
+        collectLogicalNodes(layer.logicalNodes)
+
+        if (logicalLookup.size === 0) return
+
+        // Partition: entities assigned to a logical group vs unassigned
+        const logicalChildren = new Map<string, HierarchyNode[]>() // logicalNodeId -> entities
+        const ungrouped: HierarchyNode[] = []
+
+        layerNodes.forEach(hNode => {
+          const logicalId = entityLogicalMap.get(hNode.id)
+          if (logicalId && logicalLookup.has(logicalId)) {
+            const list = logicalChildren.get(logicalId) ?? []
+            list.push(hNode)
+            logicalChildren.set(logicalId, list)
+          } else {
+            ungrouped.push(hNode)
+          }
+        })
+
+        // Only restructure if at least one entity is assigned to a logical group
+        if (logicalChildren.size === 0) return
+
+        // Build logical group wrapper HierarchyNodes (recursive for nested groups)
+        const buildLogicalHierarchy = (configs: LogicalNodeConfig[], depth: number): HierarchyNode[] => {
+          return configs.map(config => {
+            const assignedEntities = logicalChildren.get(config.id) ?? []
+            const childGroups = config.children
+              ? buildLogicalHierarchy(config.children, depth + 1)
+              : []
+
+            return {
+              id: `logical:${config.id}`,
+              typeId: config.type,
+              name: config.name,
+              data: { type: config.type, label: config.name, isLogical: true },
+              children: [...childGroups, ...assignedEntities].sort((a, b) => a.name.localeCompare(b.name)),
+              depth,
+              urn: `logical:${config.id}`,
+              entityTypeOption: config.type,
+              tags: [],
+              isLogical: true,
+              logicalConfig: config,
+            } satisfies HierarchyNode
+          }).filter(g => g.children.length > 0 || logicalChildren.has(g.id.replace('logical:', '')))
+        }
+
+        const logicalWrappers = buildLogicalHierarchy(layer.logicalNodes, 0)
+
+        // Replace layer's node list: logical groups first, then ungrouped
+        grouped.set(layer.id, [...logicalWrappers, ...ungrouped])
+      })
+    }
 
     return grouped
     // eslint-disable-next-line react-hooks/exhaustive-deps

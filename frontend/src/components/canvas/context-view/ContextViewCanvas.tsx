@@ -278,6 +278,20 @@ export function ContextViewCanvas({
   const [creationParentId, setCreationParentId] = useState<string | null>(null)
   const [creationLayerId, setCreationLayerId] = useState<string | null>(null)
 
+  // Assignment warning state (shown when user tries to assign child to different layer)
+  const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
+  const assignmentWarningTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const handleAssignToLayer = useCallback((entityId: string, layerId: string) => {
+    const result = assignEntityToLayer(entityId, layerId)
+    if (!result.success && result.conflict?.type === 'containment_locked') {
+      setAssignmentWarning(result.conflict.message)
+      // Auto-dismiss after 5 seconds
+      if (assignmentWarningTimer.current) clearTimeout(assignmentWarningTimer.current)
+      assignmentWarningTimer.current = setTimeout(() => setAssignmentWarning(null), 5000)
+    }
+  }, [assignEntityToLayer])
+
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
 
@@ -855,6 +869,19 @@ export function ContextViewCanvas({
             <span className="text-amber-600 dark:text-amber-500">Hierarchy is disabled — all nodes appear flat. Configure your ontology to enable parent-child nesting.</span>
           </div>
         )}
+        {/* Warning: containment inheritance violation attempt */}
+        {assignmentWarning && (
+          <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-xs flex items-center gap-2 z-20">
+            <span className="font-medium">Assignment blocked.</span>
+            <span className="text-red-600 dark:text-red-500">{assignmentWarning}</span>
+            <button
+              className="ml-auto text-red-400 hover:text-red-600 dark:hover:text-red-300"
+              onClick={() => setAssignmentWarning(null)}
+            >
+              &times;
+            </button>
+          </div>
+        )}
         {/* Edge Panel */}
         <AnimatePresence>
           {isEdgePanelOpen && (
@@ -954,7 +981,7 @@ export function ContextViewCanvas({
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
                 onScroll={handleLayerScroll}
-                onAssignToLayer={(entityId) => assignEntityToLayer(entityId, layer.id)}
+                onAssignToLayer={(entityId) => handleAssignToLayer(entityId, layer.id)}
               />
             ))}
           </div>

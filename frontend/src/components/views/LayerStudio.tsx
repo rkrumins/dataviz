@@ -48,6 +48,9 @@ import { makeDraftSave, type ContextModelCreateRequest } from '@/services/contex
 import type { ViewLayerConfig, EntityAssignmentConfig } from '@/types/schema'
 import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useReferenceModelStore } from '@/store/referenceModelStore'
+import { useCanvasStore } from '@/store/canvas'
+import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -184,6 +187,68 @@ export function LayerStudio({
     onDraftSaved,
 }: LayerStudioProps) {
     const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
+    const storeParentMap = useReferenceModelStore(s => s.parentMap)
+    const storeEffectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
+
+    // Build containment parent map from canvas edges (ground truth).
+    // The referenceModelStore.parentMap may be empty in the wizard context
+    // because computeAssignments hasn't run yet.
+    const canvasEdges = useCanvasStore(s => s.edges)
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+
+    const canvasParentMap = useMemo(() => {
+        const map = new Map<string, string>() // childId -> parentId
+        canvasEdges.forEach(edge => {
+            if (isContainmentEdgeType(normalizeEdgeType(edge), containmentEdgeTypes)) {
+                map.set(edge.target, edge.source)
+            }
+        })
+        return map
+    }, [canvasEdges, containmentEdgeTypes])
+
+    // Merge: canvas-derived parent map takes precedence (always fresh),
+    // then fall back to store parent map (populated after computeAssignments)
+    const parentMap = useMemo(() => {
+        if (canvasParentMap.size > 0) return canvasParentMap
+        return storeParentMap
+    }, [canvasParentMap, storeParentMap])
+
+    // Build layer assignment lookup from formData.layers (wizard state)
+    // AND store effectiveAssignments (backend state).
+    // Wizard formData.layers entityAssignments are the immediate source of truth
+    // when the user is actively assigning in the wizard.
+    const layerAssignmentMap = useMemo(() => {
+        const map = new Map<string, string>() // entityId -> layerId
+        // Start with store assignments (lower priority)
+        storeEffectiveAssignments.forEach((a, entityId) => {
+            map.set(entityId, a.layerId)
+        })
+        // Override with wizard formData.layers assignments (higher priority)
+        ;(formData.layers ?? []).forEach(layer => {
+            layer.entityAssignments?.forEach(a => {
+                map.set(a.entityId, layer.id)
+            })
+        })
+        return map
+    }, [storeEffectiveAssignments, formData.layers])
+
+    // ── Containment inheritance enforcement ──────────────────────────────────────
+    const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
+    const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+    const showAssignmentWarning = useCallback((message: string) => {
+        setAssignmentWarning(message)
+        if (warningTimerRef.current) clearTimeout(warningTimerRef.current)
+        warningTimerRef.current = setTimeout(() => setAssignmentWarning(null), 5000)
+    }, [])
+
+    /** Check if an entity is a containment child whose parent is in a different layer */
+    const isContainmentLocked = useCallback((entityId: string, targetLayerId: string): boolean => {
+        const parentId = parentMap.get(entityId)
+        if (!parentId) return false
+        const parentLayerId = layerAssignmentMap.get(parentId)
+        return !!parentLayerId && parentLayerId !== targetLayerId
+    }, [parentMap, layerAssignmentMap])
 
     // ── Layer state ─────────────────────────────────────────────────────────────
     const layers = formData.layers ?? []
@@ -267,6 +332,12 @@ export function LayerStudio({
                 return
             }
 
+            // HARD RULE: Block containment children from being assigned to a different layer
+            if (isContainmentLocked(entityId, layerId)) {
+                showAssignmentWarning('Cannot assign child to a different layer than its parent. Children always inherit their parent\'s layer assignment.')
+                return
+            }
+
             const targetLayerId = layerId
             const targetNodeId =
                 layerId === activeTarget?.layerId ? activeTarget?.nodeId : undefined
@@ -296,24 +367,33 @@ export function LayerStudio({
             })
             handleUpdateLayers(next)
         },
-        [activeTarget, layers, handleUpdateLayers]
+        [activeTarget, layers, handleUpdateLayers, isContainmentLocked, showAssignmentWarning]
     )
 
     const handleBulkAssignment = useCallback(
         (layerId: string, entityIds: string[]) => {
+            // Filter out containment-locked children
+            const allowed = entityIds.filter(id => !isContainmentLocked(id, layerId))
+            const blockedCount = entityIds.length - allowed.length
+            if (blockedCount > 0) {
+                showAssignmentWarning(`${blockedCount} assignment(s) blocked: children inherit their parent's layer.`)
+            }
+            if (allowed.length === 0) return
+
             const targetNodeId =
                 layerId === activeTarget?.layerId ? activeTarget?.nodeId : undefined
 
+            const allowedSet = new Set(allowed)
             const next = layers.map(l => {
                 const filtered = (l.entityAssignments ?? []).filter(
-                    a => !entityIds.includes(a.entityId)
+                    a => !allowedSet.has(a.entityId)
                 )
                 if (l.id === layerId) {
                     return {
                         ...l,
                         entityAssignments: [
                             ...filtered,
-                            ...entityIds.map(id => ({
+                            ...allowed.map(id => ({
                                 entityId: id,
                                 layerId,
                                 logicalNodeId: targetNodeId,
@@ -329,18 +409,26 @@ export function LayerStudio({
             })
             handleUpdateLayers(next)
         },
-        [activeTarget, layers, handleUpdateLayers]
+        [activeTarget, layers, handleUpdateLayers, isContainmentLocked, showAssignmentWarning]
     )
 
     // ── Direct drop onto hierarchy panel layer/node ─────────────────────────────
     const handleHierarchyDrop = useCallback(
         (layerId: string, nodeId: string | undefined, payload: DropPayload) => {
-            const entityIds: string[] = payload.entityIds?.length
+            const rawIds: string[] = payload.entityIds?.length
                 ? payload.entityIds
                 : payload.entityId
                     ? [payload.entityId]
                     : []
 
+            if (rawIds.length === 0) return
+
+            // Filter out containment-locked children
+            const entityIds = rawIds.filter(id => !isContainmentLocked(id, layerId))
+            const blockedCount = rawIds.length - entityIds.length
+            if (blockedCount > 0) {
+                showAssignmentWarning(`${blockedCount} assignment(s) blocked: children inherit their parent's layer.`)
+            }
             if (entityIds.length === 0) return
 
             const next = layers.map(l => {
@@ -382,7 +470,7 @@ export function LayerStudio({
                 })
             }
         },
-        [layers, handleUpdateLayers, logicalNodes]
+        [layers, handleUpdateLayers, logicalNodes, isContainmentLocked, showAssignmentWarning]
     )
 
     // ── Auto-organize ───────────────────────────────────────────────────────────
@@ -393,8 +481,6 @@ export function LayerStudio({
     const [showPreview, setShowPreview] = useState(false)
 
     // ── Render ──────────────────────────────────────────────────────────────────
-
-    const containmentEdgeTypes = formData.scopeEdges?.edgeTypes ?? []
 
     return (
         <div className="flex flex-col h-full gap-0">
@@ -501,6 +587,15 @@ export function LayerStudio({
                     </button>
                 </div>
             </div>
+
+            {/* Containment inheritance warning */}
+            {assignmentWarning && (
+                <div className="mx-1 mb-2 px-3 py-2 rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-xs flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    <span className="flex-1"><span className="font-medium">Assignment blocked.</span> {assignmentWarning}</span>
+                    <button onClick={() => setAssignmentWarning(null)} className="text-red-400 hover:text-red-600">&times;</button>
+                </div>
+            )}
 
             {/* Three-panel layout */}
             <div className="relative flex-1 min-h-0">

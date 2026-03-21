@@ -26,7 +26,6 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
-import { useSchemaStore } from '@/store/schema'
 import {
     useReferenceModelStore,
     useInstanceAssignments,
@@ -297,7 +296,6 @@ export function WizardAssignmentTree({
 }: WizardAssignmentTreeProps) {
     // Store hooks
     const { nodes, edges } = useCanvasStore()
-    const schema = useSchemaStore(s => s.schema)
     const instanceAssignments = useInstanceAssignments()
     const effectiveAssignments = useEffectiveAssignments()
     const conflicts = useAssignmentConflicts()
@@ -322,6 +320,8 @@ export function WizardAssignmentTree({
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
     const [draggingNode, setDraggingNode] = useState<EntityTreeNode | null>(null)
     const [typeFilter, setTypeFilter] = useState<string>('all')
+    const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
+    const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
     const parentRef = useRef<HTMLDivElement>(null)
     const searchInputRef = useRef<HTMLInputElement>(null)
@@ -545,13 +545,15 @@ export function WizardAssignmentTree({
         }
     }, [])
 
+    const showAssignmentWarning = useCallback((message: string) => {
+        setAssignmentWarning(message)
+        if (warningTimerRef.current) clearTimeout(warningTimerRef.current)
+        warningTimerRef.current = setTimeout(() => setAssignmentWarning(null), 5000)
+    }, [])
+
     const handleAssign = useCallback((entityId: string, layerId: string) => {
         if (!layerId) {
             // "Remove" action logic
-            // We need to know if we are currently inherited or explicit
-            // Re-find the node in the flattened list (most efficient since we have it)
-            // Or look it up in the instance assignments map
-
             const instanceAssignment = instanceAssignments.get(entityId)
             const isExplicitlyExcluded = instanceAssignment?.layerId === '__UNASSIGNED__'
 
@@ -559,30 +561,24 @@ export function WizardAssignmentTree({
                 // Was excluded -> Revert to Default (Inheritance)
                 removeEntityAssignment(entityId)
             } else {
-                // Check if current effective assignment matches a parent's assignment (Inheritance check)
-                // This is tricky without the tree context. 
-                // Let's use the `flattenedNodes` to find the node state if possible, 
-                // BUT `flattenedNodes` only has VISIBLE nodes.
-                // We should assume that if user clicked X, they accessed it via UI. 
-                // But `handleAssign` might be called from outside UI context? No, internal use.
-
-                // Let's try to find it in the flat list
                 const nodeInTree = flattenedNodes.find(n => n.id === entityId)
 
-                // If found and isInherited -> Exclude
                 if (nodeInTree?.isInherited) {
                     assignEntityToLayer(entityId, '__UNASSIGNED__', { inheritsChildren: true })
-                }
-                // Else (Explicitly assigned or Unassigned Root) -> Remove Assignment
-                else {
+                } else {
                     removeEntityAssignment(entityId)
                 }
             }
+            onAssignmentChange?.(entityId, null)
         } else {
-            assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
+            const result = assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
+            if (!result.success && result.conflict?.type === 'containment_locked') {
+                showAssignmentWarning(result.conflict.message)
+                return // Don't propagate blocked assignment
+            }
+            onAssignmentChange?.(entityId, layerId)
         }
-        onAssignmentChange?.(entityId, layerId || null)
-    }, [assignEntityToLayer, removeEntityAssignment, onAssignmentChange, instanceAssignments, flattenedNodes])
+    }, [assignEntityToLayer, removeEntityAssignment, onAssignmentChange, instanceAssignments, flattenedNodes, showAssignmentWarning])
 
     const handleBulkAssign = useCallback((layerId: string) => {
         const ids = Array.from(selectedIds)
@@ -596,18 +592,27 @@ export function WizardAssignmentTree({
         }
 
         // Fallback to one-by-one if onBulkAssign not provided
+        let blockedCount = 0
         ids.forEach(entityId => {
             if (!layerId) {
                 removeEntityAssignment(entityId)
+                onAssignmentChange?.(entityId, null)
             } else {
-                assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
+                const result = assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
+                if (!result.success && result.conflict?.type === 'containment_locked') {
+                    blockedCount++
+                    return
+                }
+                onAssignmentChange?.(entityId, layerId)
             }
-            onAssignmentChange?.(entityId, layerId || null)
         })
+        if (blockedCount > 0) {
+            showAssignmentWarning(`${blockedCount} assignment(s) blocked: children inherit their parent's layer.`)
+        }
 
         // Clear selection after bulk action
         setSelectedIds(new Set())
-    }, [selectedIds, onBulkAssign, onAssignmentChange, removeEntityAssignment, assignEntityToLayer])
+    }, [selectedIds, onBulkAssign, onAssignmentChange, removeEntityAssignment, assignEntityToLayer, showAssignmentWarning])
 
     const handleSelectAllChildren = useCallback(() => {
         if (selectedIds.size !== 1) return
@@ -720,6 +725,15 @@ export function WizardAssignmentTree({
                         </div>
                     )}
                 </div>
+
+                {/* Containment inheritance warning */}
+                {assignmentWarning && (
+                    <div className="flex items-center gap-2 px-3 py-2 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-xl text-xs text-red-700 dark:text-red-400">
+                        <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                        <span className="flex-1"><span className="font-medium">Assignment blocked.</span> {assignmentWarning}</span>
+                        <button onClick={() => setAssignmentWarning(null)} className="text-red-400 hover:text-red-600">&times;</button>
+                    </div>
+                )}
 
                 {/* Search */}
                 <div className="relative">

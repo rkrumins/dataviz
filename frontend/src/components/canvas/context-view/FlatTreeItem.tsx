@@ -64,9 +64,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
 }: FlatTreeItemProps) {
   const itemRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
+  const isLogical = node.isLogical === true
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
   const nodeColor = visual?.color ?? layer.color
+  // Logical nodes use a folder/group icon instead of entity type icon
+  const logicalIcon = isLogical
+    ? (node.typeId === 'system' ? 'Server' : node.typeId === 'container' ? 'Package' : 'FolderOpen')
+    : undefined
 
   const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || 0
   const hasChildren = node.children.length > 0 || childCount > 0
@@ -91,7 +96,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // be re-assigned between layers. Children live inside their parent's
   // containment scope; moving a column without its table would break the
   // ontology. Attach native events via ref (avoids type conflict).
-  const isLayerDraggable = depth === 0 && !node.parentId
+  const isLayerDraggable = depth === 0 && !node.parentId && !isLogical
   useEffect(() => {
     const el = itemRef.current
     if (!el) return
@@ -268,11 +273,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}
         style={{
           background: `linear-gradient(135deg, ${nodeColor}25 0%, ${nodeColor}10 100%)`,
-          boxShadow: isSelected ? `0 4px 12px ${nodeColor}30` : `0 2px 4px ${nodeColor}15`
+          boxShadow: isSelected ? `0 4px 12px ${nodeColor}30` : `0 2px 4px ${nodeColor}15`,
+          ...(isLogical && { border: `1px dashed ${nodeColor}50` }),
         }}
       >
         <DynamicIcon
-          name={visual?.icon ?? 'Box'}
+          name={logicalIcon ?? visual?.icon ?? 'Box'}
           className={cn(iconSize, "transition-transform duration-200")}
           style={{ color: nodeColor }}
         />
@@ -299,7 +305,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             className="w-1.5 h-1.5 rounded-full flex-shrink-0"
             style={{ backgroundColor: nodeColor }}
           />
-          {entityType?.name ?? node.typeId}
+          {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
         </span>
       </div>
 

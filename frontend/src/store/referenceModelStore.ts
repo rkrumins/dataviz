@@ -272,22 +272,31 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     .sort((a, b) => (a.sequence ?? a.order) - (b.sequence ?? b.order))
                     .map(l => l.id)
 
-                // Sync instanceAssignments map from layers
-                const newInstanceMap = new Map<string, EntityAssignmentConfig>()
-                layers.forEach(layer => {
-                    layer.entityAssignments?.forEach(assignment => {
-                        newInstanceMap.set(assignment.entityId, assignment)
-                    })
-                })
+                // Detect whether this is a VIEW SWITCH (different layer set) vs
+                // an IN-PLACE UPDATE (same layers, different assignments — e.g. wizard editing).
+                // On view switch: clear instanceAssignments to prevent stale phantom assignments.
+                // On in-place update: preserve instanceAssignments (user's active drag assignments).
+                const prevLayerIds = new Set(prevLayers.map(l => l.id))
+                const newLayerIds = new Set(layers.map(l => l.id))
+                const isViewSwitch = prevLayerIds.size !== newLayerIds.size ||
+                    [...newLayerIds].some(id => !prevLayerIds.has(id))
 
-                set({
-                    layers,
-                    layerSequence: sequence,
-                    instanceAssignments: newInstanceMap,
-                    // Reset assignment status so ContextViewCanvas re-computes
-                    // assignments when layers change (e.g. switching views).
-                    assignmentStatus: 'idle',
-                })
+                if (isViewSwitch) {
+                    set({
+                        layers,
+                        layerSequence: sequence,
+                        instanceAssignments: new Map(),
+                        effectiveAssignments: new Map(),
+                        assignmentConflicts: [],
+                        assignmentStatus: 'idle',
+                    })
+                } else {
+                    set({
+                        layers,
+                        layerSequence: sequence,
+                        assignmentStatus: 'idle',
+                    })
+                }
 
                 // Notify subscribers
                 state._subscribers.forEach(cb => cb({
@@ -569,10 +578,27 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                 const state = get()
                 const { logicalNodeId, inheritsChildren = true } = options
 
-                // Check for conflicts first
+                // HARD RULE: Containment children cannot be assigned to a different
+                // layer than their parent. They always inherit. Block the operation.
+                const parentId = state.parentMap.get(entityId)
+                if (parentId) {
+                    const parentAssignment = state.effectiveAssignments.get(parentId)
+                    if (parentAssignment && parentAssignment.layerId !== layerId) {
+                        const conflict: AssignmentConflict = {
+                            entityId,
+                            conflictingEntityId: parentId,
+                            type: 'containment_locked',
+                            message: `Cannot assign child to a different layer than its parent. Children always inherit their parent's layer assignment.`,
+                            conflictingLayerId: parentAssignment.layerId
+                        }
+                        set({ assignmentConflicts: [...state.assignmentConflicts, conflict] })
+                        return { success: false, conflict }
+                    }
+                }
+
+                // Check for other conflicts
                 const conflict = state.checkAssignmentConflict(entityId, layerId)
                 if (conflict) {
-                    // Still allow assignment but record the conflict
                     set({ assignmentConflicts: [...state.assignmentConflicts, conflict] })
                 }
 
@@ -773,8 +799,27 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                 const newInstanceAssignments = new Map(state.instanceAssignments)
                 const newEffectiveAssignments = new Map(state.effectiveAssignments)
 
-                // 1. Process assignments in Map first
-                entityIds.forEach(entityId => {
+                // 1. Filter out containment children — they cannot override parent layer
+                const allowedIds = entityIds.filter(entityId => {
+                    const parentId = state.parentMap.get(entityId)
+                    if (parentId) {
+                        const parentAssignment = state.effectiveAssignments.get(parentId)
+                        if (parentAssignment && parentAssignment.layerId !== layerId) {
+                            conflicts.push({
+                                entityId,
+                                conflictingEntityId: parentId,
+                                type: 'containment_locked',
+                                message: `Cannot assign child to a different layer than its parent. Children always inherit their parent's layer assignment.`,
+                                conflictingLayerId: parentAssignment.layerId
+                            })
+                            return false
+                        }
+                    }
+                    return true
+                })
+
+                // 2. Process allowed assignments
+                allowedIds.forEach(entityId => {
                     const conflict = state.checkAssignmentConflict(entityId, layerId)
                     if (conflict) {
                         conflicts.push(conflict)
@@ -802,15 +847,15 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     successful.push(entityId)
                 })
 
-                // 2. Batch update layers
+                // 3. Batch update layers (only for allowed IDs)
+                const allowedSet = new Set(allowedIds)
                 const updatedLayers = state.layers.map(layer => {
                     if (layer.id === layerId) {
-                        // Add all to target layer, filtering existing ones that are in entityIds
                         const existing = layer.entityAssignments?.filter(
-                            a => !entityIds.includes(a.entityId)
+                            a => !allowedSet.has(a.entityId)
                         ) ?? []
 
-                        const newConfigs = entityIds.map(id => ({
+                        const newConfigs = allowedIds.map(id => ({
                             entityId: id,
                             layerId: layer.id,
                             inheritsChildren,
@@ -826,12 +871,12 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     }
 
                     // Remove these entities from any other layer
-                    const hasAny = layer.entityAssignments?.some(a => entityIds.includes(a.entityId))
+                    const hasAny = layer.entityAssignments?.some(a => allowedSet.has(a.entityId))
                     if (hasAny) {
                         return {
                             ...layer,
                             entityAssignments: layer.entityAssignments!.filter(
-                                a => !entityIds.includes(a.entityId)
+                                a => !allowedSet.has(a.entityId)
                             )
                         }
                     }

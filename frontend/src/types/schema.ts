@@ -335,7 +335,7 @@ export interface AssignmentConflict {
   conflictingEntityId: string;
 
   /** Type of conflict */
-  type: 'parent_assigned' | 'child_assigned' | 'circular';
+  type: 'parent_assigned' | 'child_assigned' | 'circular' | 'containment_locked';
 
   /** Human-readable message */
   message: string;

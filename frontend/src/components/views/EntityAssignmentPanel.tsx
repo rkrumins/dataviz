@@ -253,8 +253,16 @@ export function EntityAssignmentPanel({
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
     const [draggingNode, setDraggingNode] = useState<EntityTreeNode | null>(null)
+    const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
+    const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const searchInputRef = useRef<HTMLInputElement>(null)
     const lastSelectedRef = useRef<string | null>(null)
+
+    const showAssignmentWarning = useCallback((message: string) => {
+        setAssignmentWarning(message)
+        if (warningTimerRef.current) clearTimeout(warningTimerRef.current)
+        warningTimerRef.current = setTimeout(() => setAssignmentWarning(null), 5000)
+    }, [])
 
     // Load root entities on mount so the panel has data to display
     useEffect(() => {
@@ -458,19 +466,29 @@ export function EntityAssignmentPanel({
         if (!layerId) {
             removeEntityAssignment(entityId)
         } else {
-            assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
+            const result = assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
+            if (!result.success && result.conflict?.type === 'containment_locked') {
+                showAssignmentWarning(result.conflict.message)
+            }
         }
-    }, [assignEntityToLayer, removeEntityAssignment])
+    }, [assignEntityToLayer, removeEntityAssignment, showAssignmentWarning])
 
     const handleBulkAssign = useCallback((layerId: string) => {
+        let blockedCount = 0
         selectedIds.forEach(entityId => {
             if (!layerId) {
                 removeEntityAssignment(entityId)
             } else {
-                assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
+                const result = assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
+                if (!result.success && result.conflict?.type === 'containment_locked') {
+                    blockedCount++
+                }
             }
         })
-    }, [selectedIds, assignEntityToLayer, removeEntityAssignment])
+        if (blockedCount > 0) {
+            showAssignmentWarning(`${blockedCount} assignment(s) blocked: children inherit their parent's layer.`)
+        }
+    }, [selectedIds, assignEntityToLayer, removeEntityAssignment, showAssignmentWarning])
 
     // Drag & Drop
     const handleDragStart = useCallback((e: React.DragEvent, node: EntityTreeNode) => {
@@ -628,11 +646,21 @@ export function EntityAssignmentPanel({
                 )}
             </div>
 
+            {/* Containment inheritance warning */}
+            {assignmentWarning && (
+                <div className="px-4 py-2 bg-red-50 dark:bg-red-900/30 border-b border-red-200 dark:border-red-700 flex items-center gap-2">
+                    <p className="text-sm text-red-700 dark:text-red-300 flex-1">
+                        <span className="font-medium">Assignment blocked.</span> {assignmentWarning}
+                    </p>
+                    <button onClick={() => setAssignmentWarning(null)} className="text-red-400 hover:text-red-600">&times;</button>
+                </div>
+            )}
+
             {/* Conflicts Banner */}
             {conflicts.length > 0 && (
                 <div className="px-4 py-2 bg-amber-50 dark:bg-amber-900/30 border-b border-amber-200 dark:border-amber-700">
                     <p className="text-sm text-amber-700 dark:text-amber-300">
-                        ⚠️ {conflicts.length} assignment conflict{conflicts.length > 1 ? 's' : ''} detected
+                        {conflicts.length} assignment conflict{conflicts.length > 1 ? 's' : ''} detected
                     </p>
                 </div>
             )}

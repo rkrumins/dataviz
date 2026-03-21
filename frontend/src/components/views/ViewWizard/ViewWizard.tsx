@@ -201,6 +201,10 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete, dataSour
             if (mode === 'create') {
                 setFormData({ ...getInitialFormData(schema), dataSourceId })
             }
+        } else {
+            // Clear store on wizard close to prevent stale instanceAssignments
+            // from leaking into ContextViewCanvas when navigating to a view
+            clearAssignments()
         }
     }, [isOpen, mode, schema, dataSourceId, clearSelection, clearAssignments])
 
