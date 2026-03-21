@@ -33,14 +33,18 @@ class AssignmentEngine:
         # Let's fetch all nodes.
         from backend.app.models.graph import NodeQuery, EdgeQuery
         # Use Pydantic models instead of dicts
-        all_nodes = await context_engine.provider.get_nodes(NodeQuery()) 
+        all_nodes = await context_engine.provider.get_nodes(NodeQuery())
         all_edges = await context_engine.provider.get_edges(EdgeQuery())
+
+        # Resolve containment edge types from the ontology
+        ontology = await context_engine.get_ontology_metadata()
+        containment_edge_types: Set[str] = set(ontology.containment_edge_types) if ontology.containment_edge_types else set()
 
         logging.info(f"Computing assignments for {len(all_nodes)} nodes and {len(all_edges)} edges")
 
         # 2. Build Indices
         rule_index = self._build_rule_index(request.layers)
-        parent_cache = self._build_parent_cache(all_edges)
+        parent_cache = self._build_parent_cache(all_edges, containment_edge_types=containment_edge_types or None)
         layer_sequence_map = {l.id: i for i, l in enumerate(request.layers)}
 
         # 3. Compute Assignments
@@ -138,20 +142,34 @@ class AssignmentEngine:
             "instances": instances
         }
 
-    def _build_parent_cache(self, edges: List[GraphEdge]) -> Dict[str, Any]:
+    def _build_parent_cache(
+        self,
+        edges: List[GraphEdge],
+        containment_edge_types: Optional[Set[str]] = None,
+    ) -> Dict[str, Any]:
         parent_map = {}
-        containment_types = {EdgeType.CONTAINS, EdgeType.BELONGS_TO} # Add others if needed
-        
-        # Assume Target IS CHILD OF Source for CONTAINS
-        # Assume Source IS CHILD OF Target for BELONGS_TO
-        # Normalizing to map: child -> parent
+        # Use ontology-provided containment types; fall back to provider introspection set
+        ct = {t.upper() for t in containment_edge_types} if containment_edge_types else {EdgeType.CONTAINS.value.upper(), EdgeType.BELONGS_TO.value.upper()}
+
+        # Determine parent->child direction from edge semantics:
+        # Convention: if source has *more* children than target for this edge type,
+        # source is the parent. As a simple heuristic compatible with the existing
+        # CONTAINS (parent->child) and BELONGS_TO (child->parent) semantics,
+        # we check if the edge type matches the BELONGS_TO pattern (child is source).
+        # For any other containment type we assume source=parent, target=child.
+        belongs_to_upper = EdgeType.BELONGS_TO.value.upper()
 
         for edge in edges:
-            if edge.edge_type == EdgeType.CONTAINS:
-                parent_map[edge.target_urn] = edge.source_urn
-            elif edge.edge_type == EdgeType.BELONGS_TO:
+            et = edge.edge_type.upper() if isinstance(edge.edge_type, str) else str(edge.edge_type).upper()
+            if et not in ct:
+                continue
+            if et == belongs_to_upper:
+                # BELONGS_TO: source is child, target is parent
                 parent_map[edge.source_urn] = edge.target_urn
-        
+            else:
+                # Default containment direction: source is parent, target is child
+                parent_map[edge.target_urn] = edge.source_urn
+
         return {"parent_map": parent_map}
 
     def _get_ancestors(self, entity_id: str, cache: Dict[str, Any]) -> List[str]:

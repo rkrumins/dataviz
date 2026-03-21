@@ -193,7 +193,17 @@ class ContextEngine:
     async def get_schema_stats(self) -> GraphSchemaStats:
         return await self.provider.get_schema_stats()
     
+    async def _ensure_containment_edge_types(self, edge_types: Optional[List[str]]) -> Optional[List[str]]:
+        """If caller did not supply explicit edge_types, resolve from ontology."""
+        if edge_types:
+            return edge_types
+        resolved = await self._resolve_ontology()
+        if resolved and resolved.containment_edge_types:
+            return list(resolved.containment_edge_types)
+        return None  # let provider use its own fallback
+
     async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, search_query: Optional[str] = None, limit: int = 100, offset: int = 0, sort_property: Optional[str] = "displayName") -> List[GraphNode]:
+        edge_types = await self._ensure_containment_edge_types(edge_types)
         return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property)
 
     async def get_children_with_edges(
@@ -204,6 +214,11 @@ class ContextEngine:
         include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName",
     ) -> ChildrenWithEdgesResult:
+        edge_types = await self._ensure_containment_edge_types(edge_types)
+        if not lineage_edge_types:
+            resolved = await self._resolve_ontology()
+            if resolved and resolved.lineage_edge_types:
+                lineage_edge_types = list(resolved.lineage_edge_types)
         return await self.provider.get_children_with_edges(
             urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
             search_query=search_query, limit=limit, offset=offset,

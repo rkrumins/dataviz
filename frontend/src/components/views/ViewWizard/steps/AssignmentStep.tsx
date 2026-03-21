@@ -9,11 +9,11 @@
  * - Auto-organize suggestions
  */
 
-import { useMemo, useCallback, useEffect } from 'react'
+import { useCallback, useEffect } from 'react'
 import { LayerStudio } from '../../LayerStudio'
 import { WizardAssignmentTree } from '../WizardAssignmentTree'
 import { LayerManager } from '../../LayerManager'
-import { useSchemaStore } from '@/store/schema'
+
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import type { EntityAssignmentConfig } from '@/types/schema'
 import type { WizardFormData } from '../ViewWizard'
@@ -26,7 +26,6 @@ interface AssignmentStepProps {
 }
 
 export function AssignmentStep({ formData, updateFormData, linkedContextModelId, onDraftSaved }: AssignmentStepProps) {
-    const schema = useSchemaStore(s => s.schema)
     const setLayers = useReferenceModelStore(s => s.setLayers)
     const bulkAssignEntitiesToLayer = useReferenceModelStore(s => s.bulkAssignEntitiesToLayer)
 
@@ -54,18 +53,6 @@ export function AssignmentStep({ formData, updateFormData, linkedContextModelId,
     }
 
     // ── Fallback: original two-panel for non-reference layouts ─────────────────
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    const containmentEdgeTypes = useMemo(() => {
-        const configured = formData.scopeEdges?.edgeTypes
-        if (configured && configured.length > 0) return configured
-        return schema?.containmentEdgeTypes || [
-            'contains', 'CONTAINS',
-            'has_schema', 'HAS_SCHEMA',
-            'has_dataset', 'HAS_DATASET',
-            'has_column', 'HAS_COLUMN'
-        ]
-    }, [formData.scopeEdges?.edgeTypes, schema?.containmentEdgeTypes])
-
     // eslint-disable-next-line react-hooks/rules-of-hooks
     const handleAssignmentChange = useCallback((entityId: string, layerId: string | null) => {
         if (!formData.layers) return

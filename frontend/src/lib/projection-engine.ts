@@ -109,7 +109,7 @@ export interface AggregatedEdge {
 export function buildContainmentMap(
   _nodes: Node[],
   edges: Edge[],
-  containmentEdgeTypes: string[] = ['contains'],
+  containmentEdgeTypes: string[] = [],
 ): Map<string, string> {
   const containmentMap = new Map<string, string>()
 
@@ -251,7 +251,7 @@ export function aggregateLineageEdges(
   containmentMap: Map<string, string>,
   targetGranularityType: string | null,
   entityTypes: EntityTypeLevel[] = [],
-  containmentEdgeTypes: string[] = ['contains', 'has_schema', 'has_dataset', 'has_column'],
+  containmentEdgeTypes: string[] = [],
 ): AggregatedEdge[] {
   if (!targetGranularityType) return []
 
@@ -313,7 +313,7 @@ export function projectGraph(
   config: ViewProjectionConfig,
   entityTypes: EntityTypeLevel[] = [],
 ): ProjectedGraph {
-  const containmentTypes = config.containmentEdgeTypes ?? ['contains', 'has_schema', 'has_dataset', 'has_column']
+  const containmentTypes = config.containmentEdgeTypes ?? []
   const containmentMap = buildContainmentMap(nodes, edges, containmentTypes)
 
   // 1. Filter nodes by visible entity types (empty = show all)

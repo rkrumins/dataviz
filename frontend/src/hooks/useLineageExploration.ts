@@ -298,10 +298,8 @@ export function computeTrace(
   expandedIds?: Set<string>,
   lineageEdgeTypes: string[] = []
 ): TraceResult {
-  // Use provided containment types or fallback to defaults
-  const containmentTypes = containmentEdgeTypes.length > 0
-    ? containmentEdgeTypes
-    : ['CONTAINS', 'BELONGS_TO']
+  // Use provided containment types from schema — empty means schema hasn't loaded yet
+  const containmentTypes = containmentEdgeTypes
   const containmentMap = buildContainmentMap(allNodes, allEdges, containmentTypes)
 
   // Normalize lineage edge types for filtering (empty = accept all non-containment)
@@ -787,10 +785,10 @@ export function useLineageExploration(): UseLineageExplorationResult {
   // Side Effect: Fetch data when pagination limit increases
   useEffect(() => {
     const syncPagination = async () => {
-      // Use ontology-provided types, fallback to config if available
+      // Use ontology-provided containment types — empty means schema hasn't loaded yet
       const containmentTypes = containmentEdgeTypes.length > 0
         ? containmentEdgeTypes
-        : (config.containmentEdgeTypes ?? ['CONTAINS', 'BELONGS_TO'])
+        : (config.containmentEdgeTypes ?? [])
 
       for (const [parentId, limit] of Object.entries(pagination)) {
         const parentNode = rawNodes.find(n => n.id === parentId)
@@ -972,10 +970,8 @@ export function useLineageExploration(): UseLineageExplorationResult {
       // Also include any expanded nodes and their children
       // We need to build a containment map to find children
       if (expandedIds.size > 0) {
-        // Use ontology types for containment if available
-        const containmentTypes = containmentEdgeTypes.length > 0
-          ? containmentEdgeTypes
-          : ['CONTAINS', 'BELONGS_TO']
+        // Use ontology types for containment — empty means schema hasn't loaded yet
+        const containmentTypes = containmentEdgeTypes
 
         // Build simple child map
         const childrenMap = new Map<string, string[]>()

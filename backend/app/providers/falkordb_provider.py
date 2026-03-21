@@ -32,7 +32,7 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
     """Build GraphNode from FalkorDB node properties."""
     if not props or "urn" not in props:
         return None
-    entity_type = entity_type_str or props.get("entityType", "container")
+    entity_type = entity_type_str or props.get("entityType", "unknown")
     try:
         return GraphNode(
             urn=props["urn"],
@@ -344,9 +344,12 @@ class FalkorDBProvider(GraphDataProvider):
 
         if include_child_count:
             containment = list(self._get_containment_edge_types())
-            containment_rel_types = "|".join([_sanitize_label(t) for t in containment]) if containment else "CONTAINS"
+            containment_rel_types = "|".join([_sanitize_label(t) for t in containment])
             clauses.append("WITH n SKIP $skip LIMIT $limit")
-            clauses.append(f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)")
+            if containment_rel_types:
+                clauses.append(f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)")
+            else:
+                clauses.append("OPTIONAL MATCH (n)-[]->(child)")
             clauses.append("RETURN n, count(child) as childCount")
         else:
             clauses.append("RETURN n SKIP $skip LIMIT $limit")
@@ -502,7 +505,7 @@ class FalkorDBProvider(GraphDataProvider):
         sort_property: Optional[str] = "displayName",
     ) -> List[GraphNode]:
         await self._ensure_connected()
-        target_edge_types = set(edge_types) if edge_types else {EdgeType.CONTAINS.value}
+        target_edge_types = set(edge_types) if edge_types else set(self._get_containment_edge_types())
         rel_list = list(target_edge_types)
 
         search_where = ""
@@ -567,7 +570,7 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
 
         # --- Step 1: Fetch children with containment edges (returns edge r) ---
-        target_edge_types = set(edge_types) if edge_types else {EdgeType.CONTAINS.value}
+        target_edge_types = set(edge_types) if edge_types else set(self._get_containment_edge_types())
         rel_list = list(target_edge_types)
 
         search_where = ""
@@ -1455,7 +1458,7 @@ class FalkorDBProvider(GraphDataProvider):
                      if parent and child:
                          collected_nodes[child.urn] = child
 
-                         r_type = getattr(r_raw, "relation", None) or getattr(r_raw, "type", None) or "CONTAINS"
+                         r_type = getattr(r_raw, "relation", None) or getattr(r_raw, "type", None) or "UNKNOWN"
                          r_props = getattr(r_raw, "properties", {})
 
                          edge = _edge_from_row(parent.urn, child.urn, r_type, r_props)

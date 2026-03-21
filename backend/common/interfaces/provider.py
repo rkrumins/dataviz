@@ -98,7 +98,7 @@ class GraphDataProvider(ABC):
             edges = await self.get_edges(EdgeQuery(
                 source_urns=all_urns, target_urns=all_urns, limit=len(all_urns) * 10,
             ))
-            containment_types = set(t.upper() for t in (edge_types or ["CONTAINS"]))
+            containment_types = set(t.upper() for t in (edge_types or []))
             lineage_filter = set(t.upper() for t in lineage_edge_types) if lineage_edge_types else None
             for e in edges:
                 if e.edge_type.upper() in containment_types:
