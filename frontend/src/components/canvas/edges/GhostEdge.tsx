@@ -71,11 +71,11 @@ export const GhostEdge = memo(function GhostEdge({
                 markerEnd={markerEnd}
                 style={{
                     stroke: `url(#ghost-grad-${id})`,
-                    strokeWidth: selected ? 3 : 2,
-                    strokeDasharray: '6 6',
+                    strokeWidth: selected ? 2 : 1.25,
+                    strokeDasharray: '4 5',
                     strokeLinecap: 'round',
-                    opacity: 0.6,
-                    filter: selected ? `drop-shadow(0 0 4px ${activeColor})` : undefined,
+                    opacity: 0.5,
+                    filter: selected ? `drop-shadow(0 0 2px ${activeColor}40)` : undefined,
                     transition: 'stroke-width 0.2s, filter 0.2s',
                 }}
             />

@@ -222,13 +222,13 @@ export function LineageFlowOverlay({
         // Base opacity varies by confidence (if available) - increased base for vibrancy
         let edgeOpacity = 0.5 + (edge.confidence || 0.4) * 0.5
 
-        // Base stroke width depends on bundling!
-        let baseStrokeWidth = 1.5
+        // Base stroke width — refined and modern
+        let baseStrokeWidth = 1.2
         if (edge.isBundled) {
-          // Logarithmic scaling for bundle volume
-          baseStrokeWidth = Math.min(2 + Math.log2(edge.edgeCount) * 1.5, 10)
+          // Subtle logarithmic scaling — stays elegant even at high counts
+          baseStrokeWidth = Math.min(1.5 + Math.log2(edge.edgeCount) * 0.5, 3.5)
         } else if (edge.isAggregated) {
-          baseStrokeWidth = 2.5
+          baseStrokeWidth = 1.5
         }
 
         let dynamicStrokeWidth = baseStrokeWidth
@@ -496,49 +496,48 @@ export function LineageFlowOverlay({
               style={{ opacity: groupOpacity, transition: 'opacity 0.25s ease' }}
             >
 
-              {/* BASE GLOW / DROP SHADOW - Thick and highly transparent */}
-              <path
-                d={pathD}
-                style={{
-                  stroke: color,
-                  strokeWidth: dynamicStrokeWidth + (isHighlighted ? 4 : 2),
-                  fill: 'none',
-                  strokeOpacity: isHighlighted ? edgeOpacity * 0.4 : edgeOpacity * 0.15,
-                  strokeLinecap: 'round',
-                  transition: 'all 0.3s ease',
-                }}
-                className="pointer-events-none"
-              />
+              {/* SUBTLE GLOW — only on highlight, thin halo */}
+              {isHighlighted && (
+                <path
+                  d={pathD}
+                  style={{
+                    stroke: color,
+                    strokeWidth: dynamicStrokeWidth + 2,
+                    fill: 'none',
+                    strokeOpacity: edgeOpacity * 0.2,
+                    strokeLinecap: 'round',
+                    transition: 'all 0.3s ease',
+                  }}
+                  className="pointer-events-none"
+                />
+              )}
 
-              {/* CORE LINE - Solid but slightly translucent */}
+              {/* CORE LINE */}
               <path
                 d={pathD}
                 style={{
                   stroke: color,
                   strokeWidth: dynamicStrokeWidth,
                   fill: 'none',
-                  strokeOpacity: isHighlighted ? Math.max(0.6, edgeOpacity * 1.5) : edgeOpacity,
-                  strokeDasharray: isGhost ? '6 6' : 'none',
+                  strokeOpacity: isHighlighted ? Math.min(0.85, edgeOpacity * 1.3) : edgeOpacity * 0.8,
+                  strokeDasharray: isGhost ? '4 4' : 'none',
                   strokeLinecap: 'round',
                   transition: 'all 0.3s ease',
                 }}
                 className="pointer-events-none"
               />
 
-              {/* ANIMATED PARTICLES / FLOW overlay */}
-              {!isGhost && (
+              {/* ANIMATED PARTICLES — only on hover/highlight, minimal */}
+              {!isGhost && isHighlighted && (
                 <path
                   d={pathD}
                   style={{
-                    stroke: color, // Use the vivid path color instead of white
-                    strokeWidth: Math.max(1, dynamicStrokeWidth * 0.5),
+                    stroke: color,
+                    strokeWidth: Math.max(0.75, dynamicStrokeWidth * 0.35),
                     fill: 'none',
-                    strokeOpacity: isHighlighted ? 1 : 0.8,
+                    strokeOpacity: 0.6,
                     strokeLinecap: 'round',
-                    // CSS dasharray: small dash, huge gap -> acts like moving dots!
-                    strokeDasharray: '4 16',
-                    // Add a drop shadow strictly to the particles for a neon pop
-                    filter: `drop-shadow(0 0 3px ${color})`
+                    strokeDasharray: '2 18',
                   }}
                   className="pointer-events-none flow-particles"
                 />
@@ -548,30 +547,29 @@ export function LineageFlowOverlay({
                   d={pathD}
                   style={{
                     stroke: color,
-                    strokeWidth: Math.max(1, dynamicStrokeWidth * 0.4),
+                    strokeWidth: Math.max(0.75, dynamicStrokeWidth * 0.35),
                     fill: 'none',
-                    strokeOpacity: isHighlighted ? 0.8 : 0.4,
+                    strokeOpacity: isHighlighted ? 0.5 : 0.25,
                     strokeLinecap: 'round',
-                    // Slow dash moving
-                    strokeDasharray: '6 12',
+                    strokeDasharray: '4 10',
                   }}
                   className="pointer-events-none flow-particles-ghost"
                 />
               )}
 
-              {/* Bundle Badge Label rendered on the path */}
+              {/* Bundle count — minimal pill */}
               {isBundled && !isGhost && (
                 <g transform={`translate(${(sx + tx) / 2}, ${(sy + ty) / 2})`}>
-                  <rect x="-10" y="-8" width="20" height="16" rx="4" fill="currentColor" opacity="0.15" className="group-hover:opacity-30" />
-                  <text x="0" y="3" fill="currentColor" fontSize="10px" fontWeight="bold" textAnchor="middle" opacity="0.9">
+                  <rect x="-8" y="-6" width="16" height="12" rx="6" fill="currentColor" opacity="0.08" />
+                  <text x="0" y="3" fill="currentColor" fontSize="8px" fontWeight="500" textAnchor="middle" opacity="0.6">
                     {edge.edgeCount}
                   </text>
                 </g>
               )}
 
-              {/* Terminals (Hide for ghosts to signify missing end) */}
+              {/* Source terminal dot */}
               {!isGhost && (
-                <circle cx={sx} cy={sy} r="2.5" fill="currentColor" style={{ opacity: edgeOpacity }} className="group-hover:opacity-80" />
+                <circle cx={sx} cy={sy} r="1.5" fill="currentColor" style={{ opacity: edgeOpacity * 0.7 }} />
               )}
 
               <title>{edge.source} → {edge.target} {isBundled ? `(${edge.edgeCount} bundled logs)` : ''}</title>
