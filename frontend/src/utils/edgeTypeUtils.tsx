@@ -10,7 +10,7 @@
 
 import type { LineageEdge } from '@/store/canvas'
 import type { RelationshipTypeSchema } from '@/types/schema'
-import { normalizeEdgeType } from '@/store/schema'
+import { normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 
 export { normalizeEdgeType }
 import {
@@ -169,7 +169,7 @@ export function createDefaultEdgeTypeDefinition(
     ontologyMetadata?: { edgeTypeMetadata?: Record<string, { description?: string }> }
 ): EdgeTypeDefinition {
     const normalized = edgeType.toUpperCase()
-    const isContainment = containmentEdgeTypes.some(ct => ct.toUpperCase() === normalized)
+    const isContainment = isContainmentEdgeType(normalized, containmentEdgeTypes)
 
     // Try to get description from ontology metadata
     let description = `Edge type: ${formatEdgeTypeLabel(edgeType)}`

@@ -39,7 +39,7 @@ import {
     useInstanceAssignments,
     useAssignmentConflicts
 } from '@/store/referenceModelStore'
-import { useContainmentEdgeTypes, useEntityTypes, useRootEntityTypes, normalizeEdgeType } from '@/store/schema'
+import { useContainmentEdgeTypes, useEntityTypes, useRootEntityTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 
 // ============================================
@@ -314,8 +314,7 @@ export function EntityAssignmentPanel({
 
         // Build containment map using backend-provided types
         const containmentEdges = edges.filter(e => {
-            const edgeType = normalizeEdgeType(e)
-            return containmentEdgeTypes.some(type => type.toUpperCase() === edgeType)
+            return isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
         })
 
         const nodeMap = new Map(nodes.map(n => [n.id, n]))

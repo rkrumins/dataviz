@@ -11,6 +11,7 @@ from backend.app.models.graph import (
     CreateNodeRequest, CreateNodeResult,
     CreateEdgeRequest, UpdateEdgeRequest, EdgeMutationResult,
     BatchCommandRequest, BatchCommandResult, BatchResponse,
+    ChildrenWithEdgesResult,
 )
 from backend.app.services.context_engine import context_engine, ContextEngine
 from backend.app.db.engine import get_db_session
@@ -120,12 +121,34 @@ async def get_node_children(
     urn: str,
     edge_types: Optional[List[str]] = Query(None, alias="edgeTypes"),
     search_query: Optional[str] = Query(None, alias="searchQuery"),
+    sort_property: Optional[str] = Query("displayName", alias="sortProperty", description="Node property to sort by. Pass null to skip sorting."),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Lazy load children nodes."""
-    return await engine.get_children(urn, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset)
+    return await engine.get_children(urn, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property)
+
+
+@router.get("/nodes/{urn}/children-with-edges", response_model=ChildrenWithEdgesResult, response_model_by_alias=True)
+async def get_children_with_edges(
+    urn: str,
+    edge_types: Optional[List[str]] = Query(None, alias="edgeTypes"),
+    lineage_edge_types: Optional[List[str]] = Query(None, alias="lineageEdgeTypes"),
+    search_query: Optional[str] = Query(None, alias="searchQuery"),
+    sort_property: Optional[str] = Query("displayName", alias="sortProperty", description="Node property to sort by. Pass null to skip sorting."),
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+    include_lineage_edges: bool = Query(True, alias="includeLineageEdges"),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Get children with containment and lineage edges in a single round-trip."""
+    return await engine.get_children_with_edges(
+        urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
+        search_query=search_query, limit=limit, offset=offset,
+        include_lineage_edges=include_lineage_edges,
+        sort_property=sort_property,
+    )
 
 
 @router.post("/search", response_model=List[GraphNode], response_model_by_alias=True)
@@ -273,14 +296,18 @@ async def get_edges_between(
     query: InternalEdgeQuery = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Fetch edges where both source and target are in the URN set."""
-    all_edges = await engine.get_edges(EdgeQuery(
-        any_urns=query.urns,
+    """Fetch edges where both source and target are in the URN set.
+
+    Uses source_urns + target_urns AND-semantics in the Cypher query so only
+    edges connecting nodes within the set are returned — no over-fetch or
+    Python post-filter needed.
+    """
+    return await engine.get_edges(EdgeQuery(
+        source_urns=query.urns,
+        target_urns=query.urns,
         edge_types=query.edge_types,
-        limit=query.limit * 2,  # Over-fetch since we'll filter
+        limit=query.limit,
     ))
-    urn_set = set(query.urns)
-    return [e for e in all_edges if e.source_urn in urn_set and e.target_urn in urn_set][:query.limit]
 
 
 @router.post("/edges/query", response_model=List[GraphEdge], response_model_by_alias=True)

@@ -8,6 +8,7 @@ from typing import List, Optional, Dict, Any
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
     LineageResult, EntityType, EdgeType, GraphSchemaStats, OntologyMetadata,
+    ChildrenWithEdgesResult,
 )
 
 
@@ -61,8 +62,62 @@ class GraphDataProvider(ABC):
         search_query: Optional[str] = None,
         offset: int = 0,
         limit: int = 100,
+        sort_property: Optional[str] = "displayName",
     ) -> List[GraphNode]:
         pass
+
+    async def get_children_with_edges(
+        self,
+        parent_urn: str,
+        edge_types: Optional[List[str]] = None,
+        lineage_edge_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 100,
+        include_lineage_edges: bool = True,
+        sort_property: Optional[str] = "displayName",
+    ) -> ChildrenWithEdgesResult:
+        """Get children with containment and optionally lineage edges in one round-trip.
+
+        Default implementation delegates to get_children + get_edges.
+        Providers may override with an optimized single-query implementation.
+        """
+        from ..models.graph import EdgeQuery
+        children = await self.get_children(
+            parent_urn, edge_types=edge_types,
+            search_query=search_query, offset=offset, limit=limit,
+            sort_property=sort_property,
+        )
+        child_urns = [c.urn for c in children]
+        all_urns = [parent_urn] + child_urns
+
+        # Fetch containment edges between parent and children
+        containment_edges: List[GraphEdge] = []
+        lineage_edges: List[GraphEdge] = []
+        if child_urns:
+            edges = await self.get_edges(EdgeQuery(
+                source_urns=all_urns, target_urns=all_urns, limit=len(all_urns) * 10,
+            ))
+            containment_types = set(t.upper() for t in (edge_types or ["CONTAINS"]))
+            lineage_filter = set(t.upper() for t in lineage_edge_types) if lineage_edge_types else None
+            for e in edges:
+                if e.edge_type.upper() in containment_types:
+                    containment_edges.append(e)
+                elif include_lineage_edges:
+                    if lineage_filter is None or e.edge_type.upper() in lineage_filter:
+                        lineage_edges.append(e)
+
+        # We don't know total_children without a count query; approximate
+        has_more = len(children) >= limit
+        total = offset + len(children) + (1 if has_more else 0)
+
+        return ChildrenWithEdgesResult(
+            children=children,
+            containmentEdges=containment_edges,
+            lineageEdges=lineage_edges,
+            totalChildren=total,
+            hasMore=has_more,
+        )
 
     @abstractmethod
     async def get_parent(self, child_urn: str) -> Optional[GraphNode]:

@@ -990,7 +990,9 @@
       "source_types": [
         "dataJob",
         "dashboard",
-        "chart"
+        "chart",
+        "report",
+        "app"
       ],
       "target_types": [
         "dataset",
@@ -1148,6 +1150,36 @@
       "bidirectional": false,
       "show_label": true,
       "label_field": "source_edge_count"
+    },
+    "TRANSFORMS": {
+      "name": "Transforms",
+      "description": "Column-level lineage: source column is transformed into target column.",
+      "category": "flow",
+      "is_containment": false,
+      "is_lineage": true,
+      "direction": "source-to-target",
+      "visual": {
+        "stroke_color": "#14b8a6",
+        "stroke_width": 2,
+        "stroke_style": "solid",
+        "animated": true,
+        "animation_speed": "normal",
+        "arrow_type": "arrow",
+        "curve_type": "bezier"
+      },
+      "source_types": [
+        "dataset",
+        "schemaField",
+        "column"
+      ],
+      "target_types": [
+        "dataset",
+        "schemaField",
+        "column"
+      ],
+      "bidirectional": false,
+      "show_label": false,
+      "label_field": null
     }
   }
 }

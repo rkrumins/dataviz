@@ -160,6 +160,17 @@ class ContainmentResult(BaseModel):
     class Config:
         populate_by_name = True
 
+class ChildrenWithEdgesResult(BaseModel):
+    """Single round-trip result for children + their edges."""
+    children: List[GraphNode]
+    containment_edges: List[GraphEdge] = Field(default_factory=list, alias="containmentEdges")
+    lineage_edges: List[GraphEdge] = Field(default_factory=list, alias="lineageEdges")
+    total_children: int = Field(alias="totalChildren")
+    has_more: bool = Field(alias="hasMore")
+
+    class Config:
+        populate_by_name = True
+
 # ============================================
 # Introspection Models
 # ============================================

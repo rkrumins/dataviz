@@ -6,7 +6,7 @@ from ..models.graph import (
     GraphNode, GraphEdge, LineageResult, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
-    CreateNodeRequest, CreateNodeResult
+    CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult,
 )
 import os
 
@@ -193,8 +193,23 @@ class ContextEngine:
     async def get_schema_stats(self) -> GraphSchemaStats:
         return await self.provider.get_schema_stats()
     
-    async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, search_query: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[GraphNode]:
-        return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset)
+    async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, search_query: Optional[str] = None, limit: int = 100, offset: int = 0, sort_property: Optional[str] = "displayName") -> List[GraphNode]:
+        return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property)
+
+    async def get_children_with_edges(
+        self, urn: str, edge_types: Optional[List[str]] = None,
+        lineage_edge_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
+        limit: int = 100, offset: int = 0,
+        include_lineage_edges: bool = True,
+        sort_property: Optional[str] = "displayName",
+    ) -> ChildrenWithEdgesResult:
+        return await self.provider.get_children_with_edges(
+            urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
+            search_query=search_query, limit=limit, offset=offset,
+            include_lineage_edges=include_lineage_edges,
+            sort_property=sort_property,
+        )
 
     async def get_edges(self, query: EdgeQuery = None) -> List[GraphEdge]:
         if query is None: query = EdgeQuery()

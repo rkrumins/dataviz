@@ -38,7 +38,7 @@ import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig } from 
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
-import { useContainmentEdgeTypes, useEntityTypes } from '@/store/schema'
+import { useContainmentEdgeTypes, useEntityTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -144,11 +144,7 @@ function AssignedEntityItem({
     const childrenIds = useMemo(() => {
         const validEdges = edges.filter(e => {
             if (e.source !== entityId) return false
-            const type = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
-            if (containmentEdgeTypes && containmentEdgeTypes.length > 0) {
-                return containmentEdgeTypes.some(t => t.toUpperCase() === type)
-            }
-            return ['CONTAINS', 'HAS_CHILD', 'HAS_COLUMN', 'HAS_TABLE', 'HAS_SCHEMA', 'HAS_DATASET'].includes(type)
+            return isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
         })
         return [...new Set(validEdges.map(e => e.target))]
     }, [edges, entityId, containmentEdgeTypes])

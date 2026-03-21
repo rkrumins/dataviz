@@ -15,7 +15,8 @@ from ..models.graph import (
     PropertyFilter, TagFilter, TextFilter, FilterOperator,
     EntityTypeSummary, EdgeTypeSummary, TagSummary,
     OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy,
-    AggregatedEdgeResult, AggregatedEdgeInfo
+    AggregatedEdgeResult, AggregatedEdgeInfo,
+    ChildrenWithEdgesResult,
 )
 from .base import GraphDataProvider
 
@@ -498,6 +499,7 @@ class FalkorDBProvider(GraphDataProvider):
         search_query: Optional[str] = None,
         offset: int = 0,
         limit: int = 100,
+        sort_property: Optional[str] = "displayName",
     ) -> List[GraphNode]:
         await self._ensure_connected()
         target_edge_types = set(edge_types) if edge_types else {EdgeType.CONTAINS.value}
@@ -510,12 +512,18 @@ class FalkorDBProvider(GraphDataProvider):
             search_where = "AND (toLower(c.displayName) CONTAINS toLower($searchQuery) OR toLower(c.urn) CONTAINS toLower($searchQuery)) "
             params["searchQuery"] = search_query
 
+        # Build ORDER BY suffix for the WITH clause
+        order_suffix = ""
+        if sort_property:
+            safe_prop = _sanitize_label(sort_property)
+            order_suffix = f" ORDER BY c.{safe_prop}"
+
         if len(rel_list) == 1:
             rel = _sanitize_label(rel_list[0])
             cypher = (
                 f"MATCH (p)-[r:{rel}]->(c) "
                 f"WHERE p.urn = $parent {search_where}"
-                f"WITH c SKIP $skip LIMIT $lim "
+                f"WITH c{order_suffix} SKIP $skip LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
                 f"RETURN c, count(gc) as childCount"
             )
@@ -523,7 +531,7 @@ class FalkorDBProvider(GraphDataProvider):
             cypher = (
                 f"MATCH (p)-[r]->(c) "
                 f"WHERE p.urn = $parent AND type(r) IN $relTypes {search_where}"
-                f"WITH c SKIP $skip LIMIT $lim "
+                f"WITH c{order_suffix} SKIP $skip LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
                 f"RETURN c, count(gc) as childCount"
             )
@@ -542,8 +550,116 @@ class FalkorDBProvider(GraphDataProvider):
                     if n.properties:
                         n.properties['childCount'] = int(child_count)
                 nodes.append(n)
-        nodes.sort(key=lambda x: x.display_name)
         return nodes
+
+    async def get_children_with_edges(
+        self,
+        parent_urn: str,
+        edge_types: Optional[List[str]] = None,
+        lineage_edge_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 100,
+        include_lineage_edges: bool = True,
+        sort_property: Optional[str] = "displayName",
+    ) -> ChildrenWithEdgesResult:
+        """Optimized single-roundtrip: children + containment edges + cross-child lineage edges."""
+        await self._ensure_connected()
+
+        # --- Step 1: Fetch children with containment edges (returns edge r) ---
+        target_edge_types = set(edge_types) if edge_types else {EdgeType.CONTAINS.value}
+        rel_list = list(target_edge_types)
+
+        search_where = ""
+        params: Dict[str, Any] = {"parent": parent_urn, "skip": offset, "lim": limit, "relTypes": rel_list}
+
+        if search_query:
+            search_where = "AND (toLower(c.displayName) CONTAINS toLower($searchQuery) OR toLower(c.urn) CONTAINS toLower($searchQuery)) "
+            params["searchQuery"] = search_query
+
+        # Build ORDER BY suffix for the WITH clause
+        order_suffix = ""
+        if sort_property:
+            safe_prop = _sanitize_label(sort_property)
+            order_suffix = f" ORDER BY c.{safe_prop}"
+
+        # Query returns child node, containment edge properties, and grandchild count
+        if len(rel_list) == 1:
+            rel = _sanitize_label(rel_list[0])
+            cypher = (
+                f"MATCH (p)-[r:{rel}]->(c) "
+                f"WHERE p.urn = $parent {search_where}"
+                f"WITH p, r, c{order_suffix} SKIP $skip LIMIT $lim "
+                f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
+                f"RETURN c, count(gc) as childCount, p.urn as parentUrn, type(r) as relType, properties(r) as rprops"
+            )
+        else:
+            cypher = (
+                f"MATCH (p)-[r]->(c) "
+                f"WHERE p.urn = $parent AND type(r) IN $relTypes {search_where}"
+                f"WITH p, r, c{order_suffix} SKIP $skip LIMIT $lim "
+                f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
+                f"RETURN c, count(gc) as childCount, p.urn as parentUrn, type(r) as relType, properties(r) as rprops"
+            )
+
+        result = await self._graph.ro_query(cypher, params=params)
+
+        children: List[GraphNode] = []
+        containment_edges: List[GraphEdge] = []
+        child_urns: List[str] = []
+
+        for row in (result.result_set or []):
+            n = self._extract_node_from_result(row[0])
+            child_count = row[1]
+            parent_u = row[2]
+            rel_type = row[3]
+            rprops = row[4] or {}
+
+            if n:
+                if child_count is not None:
+                    n.child_count = int(child_count)
+                    if n.properties:
+                        n.properties['childCount'] = int(child_count)
+                children.append(n)
+                child_urns.append(n.urn)
+
+                # Build containment edge from the matched relationship
+                containment_edges.append(_edge_from_row(parent_u, n.urn, rel_type, rprops))
+
+        # --- Step 2: Fetch cross-child lineage edges (optional) ---
+        lineage_edges_list: List[GraphEdge] = []
+        if include_lineage_edges and len(child_urns) >= 2:
+            all_urns = [parent_urn] + child_urns
+            exclude_types = list(target_edge_types) + ["AGGREGATED"]
+
+            if lineage_edge_types:
+                lineage_where = "AND type(lr) IN $lineageTypes"
+                params["lineageTypes"] = lineage_edge_types
+            else:
+                lineage_where = "AND NOT type(lr) IN $excludeTypes"
+                params["excludeTypes"] = exclude_types
+
+            params["allUrns"] = all_urns
+            lineage_cypher = (
+                f"MATCH (a)-[lr]->(b) "
+                f"WHERE a.urn IN $allUrns AND b.urn IN $allUrns {lineage_where} "
+                f"RETURN a.urn, b.urn, type(lr), properties(lr)"
+            )
+
+            lr_result = await self._graph.ro_query(lineage_cypher, params=params)
+            for row in (lr_result.result_set or []):
+                lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}))
+
+        has_more = len(children) >= limit
+        total = offset + len(children) + (1 if has_more else 0)
+
+        return ChildrenWithEdgesResult(
+            children=children,
+            containmentEdges=containment_edges,
+            lineageEdges=lineage_edges_list,
+            totalChildren=total,
+            hasMore=has_more,
+        )
 
     async def get_parent(self, child_urn: str) -> Optional[GraphNode]:
         await self._ensure_connected()

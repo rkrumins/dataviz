@@ -158,8 +158,7 @@ export function ContextViewCanvas({
         const allCurrentEdges = [...edges, ...newCanvasEdges]
         const traceParentMap = new Map<string, string>()
         allCurrentEdges.forEach(e => {
-          const type = String((e.data as any)?.edgeType ?? (e.data as any)?.relationship ?? '').toUpperCase()
-          if (containmentEdgeTypes.some(ct => ct.toUpperCase() === type)) {
+          if (isContainmentEdge(normalizeEdgeType(e))) {
             traceParentMap.set(e.target ?? (e as any).targetUrn, e.source ?? (e as any).sourceUrn)
           }
         })
@@ -206,6 +205,7 @@ export function ContextViewCanvas({
   const {
     aggregatedEdges,
     fetchAggregated,
+    clearCache: clearAggregationCache,
     granularity: lineageGranularity,
     setGranularity: setLineageGranularity,
   } = useAggregatedLineage({ granularity: null })
@@ -297,6 +297,7 @@ export function ContextViewCanvas({
       setExpandedNodes(restored)
       // Reset aggregation cache so stale data doesn't bleed into the new view
       prevAggregationKeyRef.current = ''
+      clearAggregationCache()
     }
     prevViewIdRef.current = currentViewId
   // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -356,6 +356,50 @@ export class MockProvider implements GraphDataProvider {
         return children.slice(offset, offset + limit)
     }
 
+    async getChildrenWithEdges(
+        parentUrn: URN,
+        options?: {
+            edgeTypes?: string[]
+            lineageEdgeTypes?: string[]
+            searchQuery?: string
+            offset?: number
+            limit?: number
+            includeLineageEdges?: boolean
+        }
+    ): Promise<{
+        children: GraphNode[]
+        containmentEdges: GraphEdge[]
+        lineageEdges: GraphEdge[]
+        totalChildren: number
+        hasMore: boolean
+    }> {
+        const children = await this.getChildren(parentUrn, options)
+        const childUrns = new Set(children.map(c => c.urn))
+        const allUrns = new Set([parentUrn, ...childUrns])
+
+        const containmentEdges: GraphEdge[] = []
+        const lineageEdges: GraphEdge[] = []
+
+        for (const edge of this.edges.values()) {
+            if (!allUrns.has(edge.sourceUrn) || !allUrns.has(edge.targetUrn)) continue
+            const edgeType = edge.edgeType.toUpperCase()
+            if (edgeType === 'CONTAINS' || edgeType === 'BELONGS_TO') {
+                containmentEdges.push(edge)
+            } else if (options?.includeLineageEdges !== false) {
+                lineageEdges.push(edge)
+            }
+        }
+
+        const limit = options?.limit ?? 100
+        return {
+            children,
+            containmentEdges,
+            lineageEdges,
+            totalChildren: children.length + (options?.offset ?? 0),
+            hasMore: children.length >= limit,
+        }
+    }
+
     async getParent(childUrn: URN): Promise<GraphNode | null> {
         const parentId = this.parentMap.get(childUrn)
         if (!parentId) return null
