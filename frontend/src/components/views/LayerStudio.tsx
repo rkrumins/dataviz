@@ -298,13 +298,64 @@ export function LayerStudio({
         commit: () => void
     } | null>(null)
 
-    // ── Layer state ─────────────────────────────────────────────────────────────
+    // ── Layer state with undo/redo ───────────────────────────────────────────────
     const layers = formData.layers ?? []
 
+    const undoStackRef = useRef<ViewLayerConfig[][]>([])
+    const redoStackRef = useRef<ViewLayerConfig[][]>([])
+    const isUndoRedoRef = useRef(false)
+
     const handleUpdateLayers = useCallback(
-        (next: ViewLayerConfig[]) => updateFormData({ layers: next }),
-        [updateFormData]
+        (next: ViewLayerConfig[]) => {
+            if (!isUndoRedoRef.current) {
+                undoStackRef.current = [...undoStackRef.current, layers]
+                redoStackRef.current = []
+                // Cap stack size
+                if (undoStackRef.current.length > 50) undoStackRef.current.shift()
+            }
+            updateFormData({ layers: next })
+        },
+        [updateFormData, layers]
     )
+
+    const canUndo = undoStackRef.current.length > 0
+    const canRedo = redoStackRef.current.length > 0
+
+    const handleUndo = useCallback(() => {
+        if (undoStackRef.current.length === 0) return
+        const prev = undoStackRef.current[undoStackRef.current.length - 1]
+        undoStackRef.current = undoStackRef.current.slice(0, -1)
+        redoStackRef.current = [...redoStackRef.current, layers]
+        isUndoRedoRef.current = true
+        updateFormData({ layers: prev })
+        isUndoRedoRef.current = false
+    }, [updateFormData, layers])
+
+    const handleRedo = useCallback(() => {
+        if (redoStackRef.current.length === 0) return
+        const next = redoStackRef.current[redoStackRef.current.length - 1]
+        redoStackRef.current = redoStackRef.current.slice(0, -1)
+        undoStackRef.current = [...undoStackRef.current, layers]
+        isUndoRedoRef.current = true
+        updateFormData({ layers: next })
+        isUndoRedoRef.current = false
+    }, [updateFormData, layers])
+
+    // Keyboard shortcuts for undo/redo
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+                e.preventDefault()
+                if (e.shiftKey) {
+                    handleRedo()
+                } else {
+                    handleUndo()
+                }
+            }
+        }
+        window.addEventListener('keydown', handler)
+        return () => window.removeEventListener('keydown', handler)
+    }, [handleUndo, handleRedo])
 
     // ── Logical nodes ───────────────────────────────────────────────────────────
     const logicalNodes = useLogicalNodes(layers, handleUpdateLayers)
@@ -545,13 +596,13 @@ export function LayerStudio({
             {/* Toolbar */}
             <div className="flex items-center justify-between px-1 pb-3">
                 <div className="flex items-center gap-2">
-                    {/* Undo / Redo */}
+                    {/* Undo / Redo — covers assignments, logical nodes, reordering */}
                     <button
-                        onClick={logicalNodes.undo}
-                        disabled={!logicalNodes.canUndo}
+                        onClick={handleUndo}
+                        disabled={!canUndo}
                         className={cn(
                             'p-1.5 rounded-lg transition-colors text-slate-400',
-                            logicalNodes.canUndo
+                            canUndo
                                 ? 'hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-slate-700 dark:hover:text-slate-200'
                                 : 'opacity-30 cursor-not-allowed'
                         )}
@@ -560,11 +611,11 @@ export function LayerStudio({
                         <Undo2 className="w-4 h-4" />
                     </button>
                     <button
-                        onClick={logicalNodes.redo}
-                        disabled={!logicalNodes.canRedo}
+                        onClick={handleRedo}
+                        disabled={!canRedo}
                         className={cn(
                             'p-1.5 rounded-lg transition-colors text-slate-400',
-                            logicalNodes.canRedo
+                            canRedo
                                 ? 'hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-slate-700 dark:hover:text-slate-200'
                                 : 'opacity-30 cursor-not-allowed'
                         )}

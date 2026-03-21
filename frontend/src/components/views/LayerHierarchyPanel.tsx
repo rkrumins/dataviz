@@ -178,7 +178,7 @@ function AssignedEntityItem({
         <div>
             <div
                 className={cn(
-                    'flex items-center gap-1.5 px-2 py-1 rounded-lg transition-colors cursor-default',
+                    'group/entity flex items-center gap-1.5 px-2 py-1 rounded-lg transition-colors cursor-default',
                     'hover:bg-slate-100 dark:hover:bg-slate-800/50'
                 )}
                 style={{ paddingLeft: `${depth * 16 + 8}px` }}
@@ -213,7 +213,7 @@ function AssignedEntityItem({
                         e.stopPropagation()
                         onUnassign(entityId)
                     }}
-                    className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-slate-400 hover:text-red-500 shrink-0 transition-all"
+                    className="opacity-0 group-hover/entity:opacity-100 p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-slate-400 hover:text-red-500 shrink-0 transition-all"
                     title="Remove assignment"
                 >
                     <X className="w-3 h-3" />
