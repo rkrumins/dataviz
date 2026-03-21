@@ -31,6 +31,29 @@ export interface FlatTreeNode {
   isFailed?: boolean
 }
 
+export type OverflowBadge = {
+  /** Horizontal center of the badge in the gutter (relative to container) */
+  gutterX: number
+  direction: 'up' | 'down'
+  count: number
+  color: string
+}
+
+/** A partial edge drawn from a visible node toward the container boundary,
+ *  indicating an off-screen connection in that direction. */
+export type OverflowEdge = {
+  id: string
+  /** SVG path for the trailing curve */
+  pathD: string
+  color: string
+  direction: 'up' | 'down'
+  /** Unique gradient ID for the fade mask */
+  gradientId: string
+  /** Start Y (visible node) and end Y (container edge) for gradient coords */
+  sy: number
+  ey: number
+}
+
 export type ComputedEdge = {
   id: string
   source: string

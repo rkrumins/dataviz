@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
-import type { ComputedEdge } from './types'
+import type { ComputedEdge, OverflowBadge, OverflowEdge } from './types'
 
 // Global visibility tracker — which layer-node-* elements are currently in the viewport
 const globalVisibleNodes = new Set<string>()
@@ -33,6 +33,10 @@ export function LineageFlowOverlay({
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
+  // Overflow indicators — badges at top/bottom of column gutters for off-screen connections
+  const [overflowBadges, setOverflowBadges] = useState<OverflowBadge[]>([])
+  // Trailing edge stubs — partial curves from visible nodes toward container boundary
+  const [overflowEdges, setOverflowEdges] = useState<OverflowEdge[]>([])
 
   // Viewport tracking for virtualization
   const [viewport, setViewport] = useState({ scrollTop: 0, clientHeight: typeof window !== 'undefined' ? window.innerHeight : 1000 })
@@ -41,11 +45,13 @@ export function LineageFlowOverlay({
   const updateFlowRef = useRef<(() => void) | null>(null)
   const rafIdRef = useRef<number | null>(null)
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null)
+  // Persistent element cache — survives across updateFlow calls, cleared on node changes
+  const elementCacheRef = useRef(new Map<string, HTMLElement>())
 
-  // Serialize expandedNodes Set to array for proper React dependency tracking
-  const expandedNodesArray = useMemo(() => {
-    return Array.from(expandedNodes).sort().join(',')
-  }, [expandedNodes])
+  // Stable fingerprint for expandedNodes — O(1) instead of O(N log N) sort+join.
+  // Size alone is sufficient because React will re-render when the Set reference changes,
+  // and we only need this for effect dependency tracking (not equality).
+  const expandedNodesFingerprint = expandedNodes.size
 
   // Debounced update function using requestAnimationFrame
   const scheduleUpdate = useCallback(() => {
@@ -83,198 +89,221 @@ export function LineageFlowOverlay({
 
     const newComputedEdges: ComputedEdge[] = []
 
-    // Batch DOM reads by collecting all elements first
-    const elementCache = new Map<string, HTMLElement>()
+    // Reuse persistent element cache (cleared on node changes via effect)
+    const elementCache = elementCacheRef.current
 
-    // ONLY compute paths for edges where BOTH nodes are strictly visible on screen!
-    // This fully prevents the tornado of 10,000 edges pointing to clipped items, unlocking ultra fast 60fps scrolling.
-    const activeEdges = edges.filter(edge => {
+    // ── Single-pass edge processing ──────────────────────────────────────
+    // Classifies each edge as active (both visible), overflow (one visible),
+    // or skip (neither visible) — avoiding a second iteration over all edges.
+    const GUTTER_HALF = 24
+    const BADGE_BUCKET = 80
+    const MAX_STUBS_PER_BUCKET = 6
+    const containerH = containerRect.height
+
+    const buckets = new Map<string, { gutterXs: number[], direction: 'up' | 'down', colors: string[], edgeCount: number }>()
+    const trailingEdges: OverflowEdge[] = []
+    const bucketStubCount = new Map<string, number>()
+
+    // Helper: look up or cache a DOM element
+    const getEl = (id: string): HTMLElement | null => {
+      let el = elementCache.get(id) || null
+      if (!el) {
+        el = document.getElementById(id)
+        if (el) elementCache.set(id, el)
+      }
+      return el
+    }
+
+    edges.forEach(edge => {
       const sourceId = `layer-node-${edge.source}`
       const targetId = `layer-node-${edge.target}`
+      const sourceVisible = globalVisibleNodes.has(sourceId)
+      const targetVisible = globalVisibleNodes.has(targetId)
 
-      return globalVisibleNodes.has(sourceId) && globalVisibleNodes.has(targetId)
-    })
+      // ── Active edge: both endpoints visible ───────────────────────────
+      if (sourceVisible && targetVisible) {
+        const sourceEl = getEl(sourceId)
+        const targetEl = getEl(targetId)
 
-    activeEdges.forEach(edge => {
-      const sourceId = `layer-node-${edge.source}`
-      const targetId = `layer-node-${edge.target}`
+        if (sourceEl && targetEl) {
+          const sRect = sourceEl.getBoundingClientRect()
+          const tRect = targetEl.getBoundingClientRect()
 
-      // Cache element lookups
-      let sourceEl: HTMLElement | null = elementCache.get(sourceId) || null
-      if (!sourceEl) {
-        sourceEl = document.getElementById(sourceId)
-        if (sourceEl) elementCache.set(sourceId, sourceEl)
-      }
+          const sx = sRect.right - containerRect.left + 6
+          const sy = sRect.top + sRect.height / 2 - containerRect.top
+          let tx = tRect.left - containerRect.left - 8
+          const ty = tRect.top + tRect.height / 2 - containerRect.top
 
-      let targetEl: HTMLElement | null = elementCache.get(targetId) || null
-      if (!targetEl) {
-        targetEl = document.getElementById(targetId)
-        if (targetEl) elementCache.set(targetId, targetEl)
-      }
+          const minY = Math.min(sy, ty)
+          const maxY = Math.max(sy, ty)
 
-      if (sourceEl && targetEl) {
-        const sRect = sourceEl.getBoundingClientRect()
-        const tRect = targetEl.getBoundingClientRect()
+          let pathD = ''
+          const isSameColumn = Math.abs(sRect.left - tRect.left) < 50
+          const isSelf = edge.source === edge.target
+          const index = edge.groupIndex || 0
 
-        // Relative coordinates — offset from column edges so curves are visible
-        // in the gutter between columns (gap-12 = 48px gap)
-        const sx = sRect.right - containerRect.left + 6
-        const sy = sRect.top + sRect.height / 2 - containerRect.top
-
-        // Target: leave room for the arrowhead
-        let tx = tRect.left - containerRect.left - 8
-        const ty = tRect.top + tRect.height / 2 - containerRect.top
-
-        // We no longer cull here based on window.innerHeight, because the container itself scrolls.
-        // Instead, we calculate local bounding Y coordinates and cull in the render loop (Virtualization).
-        // `sy` and `ty` are relative to the top of the canvas container.
-        const minY = Math.min(sy, ty)
-        const maxY = Math.max(sy, ty)
-
-        // Smart Routing Logic
-        let pathD = ''
-        const isSameColumn = Math.abs(sRect.left - tRect.left) < 50
-        const isSelf = edge.source === edge.target
-
-        // Multi-edge offsetting
-        // If there are multiple edges (groupTotal > 1), we offset the control points vertically
-        // or curve magnitude to separate them.
-        const index = edge.groupIndex || 0
-
-        if (isSameColumn && !isSelf) {
-          // "Bracket" routing: Right -> Right (Cleaner layout)
-          // Use a tighter loop for same-column edges
-          tx = tRect.right - containerRect.left
-
-          const curveDist = 30 + (index * 8)
-          const cp1x = sx + curveDist
-          const cp2x = tx + curveDist
-
-          // Keep Y aligned with source/target for straight horizontal exit/entry
-          const cp1y = sy
-          const cp2y = ty
-
-          pathD = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
-        } else {
-          // Standard Left-to-Right S-Curve (Sigmoid)
-          const dist = Math.abs(tx - sx)
-
-          // Ensure minimum control point spread so short-distance edges
-          // (adjacent columns with ~48px gap) still show a visible curve
-          const minSpread = 24
-          const spread = Math.max(dist * 0.5, minSpread)
-
-          const cp1x = sx + spread
-          const cp2x = tx - spread
-
-          const cp1y = sy
-          const cp2y = ty
-
-          pathD = `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tx} ${ty}`
-        }
-
-        // Theme color priority
-        const primaryType = edge.types && edge.types.length > 0 ? edge.types[0] : (edge.originalType || '')
-        const typeColor = resolveEdgeColor
-          ? resolveEdgeColor(primaryType)
-          : '#3b82f6'
-
-        let color = typeColor
-        // Base opacity — high enough to be clearly visible; confidence modulates it
-        let edgeOpacity = 0.6 + (edge.confidence || 0.4) * 0.4
-
-        // Base stroke width — thick enough to be clearly visible between columns
-        let baseStrokeWidth = 1.8
-        if (edge.isBundled) {
-          // Logarithmic scaling — stays elegant even at high counts
-          baseStrokeWidth = Math.min(2 + Math.log2(edge.edgeCount) * 0.6, 4)
-        } else if (edge.isAggregated) {
-          baseStrokeWidth = 2.2
-        }
-
-        let dynamicStrokeWidth = baseStrokeWidth
-
-        // Determine if this edge is highlighted (click-to-highlight)
-        const isEdgeHighlighted = isHighlightActive && highlightedEdges?.has(edge.id)
-        const isEdgeDimmed = isHighlightActive && !highlightedEdges?.has(edge.id)
-
-        if (isTracing && traceResult) {
-          // TRACE MODE
-          edgeOpacity = edge.isGhost ? 0.4 : 0.8
-          dynamicStrokeWidth = baseStrokeWidth + 1
-          const srcInUpstream = traceResult.upstreamNodes?.has(edge.source)
-          const tgtInUpstream = traceResult.upstreamNodes?.has(edge.target)
-          const srcInDownstream = traceResult.downstreamNodes?.has(edge.source)
-          const tgtInDownstream = traceResult.downstreamNodes?.has(edge.target)
-
-          if (srcInUpstream || tgtInUpstream) {
-            color = '#06b6d4' // cyan
-          } else if (srcInDownstream || tgtInDownstream) {
-            color = '#f59e0b' // amber
-          } else if (!edge.isGhost) {
-            color = '#a78bfa' // purple
-          }
-
-          if (!srcInUpstream && !tgtInUpstream && !srcInDownstream && !tgtInDownstream) {
-            edgeOpacity = edge.isGhost ? 0.05 : 0.1
-            dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
-          }
-        } else {
-          // Normal/highlight mode
-          if (isEdgeHighlighted) {
-            // Full intensity when hovering or clicking a connected node
-            edgeOpacity = 0.9
-            dynamicStrokeWidth = baseStrokeWidth + 1
-          } else if (isEdgeDimmed) {
-            edgeOpacity = edge.isGhost ? 0.05 : 0.1
-            dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
+          if (isSameColumn && !isSelf) {
+            tx = tRect.right - containerRect.left
+            const curveDist = 30 + (index * 8)
+            pathD = `M ${sx} ${sy} C ${sx + curveDist} ${sy}, ${tx + curveDist} ${ty}, ${tx} ${ty}`
           } else {
-            // Resting state: half intensity — edges are present but subtle,
-            // hover/click on a node brings connected edges to full strength
-            edgeOpacity = edgeOpacity * 0.5
-            dynamicStrokeWidth = baseStrokeWidth * 0.75
+            const dist = Math.abs(tx - sx)
+            const spread = Math.max(dist * 0.5, 24)
+            pathD = `M ${sx} ${sy} C ${sx + spread} ${sy}, ${tx - spread} ${ty}, ${tx} ${ty}`
           }
-        }
 
-        // Ghost styling for abstracted/bundled edges
-        if (edge.isGhost) {
-          edgeOpacity = Math.min(0.7, edgeOpacity)
-        }
+          const primaryType = edge.types && edge.types.length > 0 ? edge.types[0] : (edge.originalType || '')
+          const typeColor = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
 
-        // Edge delegation: expanded parents delegate edges to visible children.
-        // isDelegated = fully delegated (all children loaded) → hide entirely
-        // isResidual  = partially loaded → show as faint ghost to hint at unloaded lineage
-        if (edge.isDelegated) {
-          // Skip entirely — children carry these edges now
-          return
-        }
-        if (edge.isResidual) {
-          edgeOpacity = 0.15
-          dynamicStrokeWidth = Math.max(1, baseStrokeWidth * 0.7)
-        }
+          let color = typeColor
+          let edgeOpacity = 0.6 + (edge.confidence || 0.4) * 0.4
 
-        newComputedEdges.push({
-          id: edge.id,
-          source: edge.source,
-          target: edge.target,
-          minY,
-          maxY,
-          pathD,
-          color,
-          dynamicStrokeWidth,
-          edgeOpacity,
-          isGhost: edge.isGhost || false,
-          isBundled: edge.isBundled || false,
-          edgeCount: edge.edgeCount || 0,
-          sx, sy, tx, ty,
-          types: Array.isArray(edge.types) && edge.types.length > 0
-            ? edge.types
-            : edge.originalType ? [edge.originalType] : [],
-          confidence: edge.confidence || 0,
-        })
+          let baseStrokeWidth = 1.8
+          if (edge.isBundled) {
+            baseStrokeWidth = Math.min(2 + Math.log2(edge.edgeCount) * 0.6, 4)
+          } else if (edge.isAggregated) {
+            baseStrokeWidth = 2.2
+          }
+
+          let dynamicStrokeWidth = baseStrokeWidth
+
+          const isEdgeHighlighted = isHighlightActive && highlightedEdges?.has(edge.id)
+          const isEdgeDimmed = isHighlightActive && !highlightedEdges?.has(edge.id)
+
+          if (isTracing && traceResult) {
+            edgeOpacity = edge.isGhost ? 0.4 : 0.8
+            dynamicStrokeWidth = baseStrokeWidth + 1
+            const srcInUpstream = traceResult.upstreamNodes?.has(edge.source)
+            const tgtInUpstream = traceResult.upstreamNodes?.has(edge.target)
+            const srcInDownstream = traceResult.downstreamNodes?.has(edge.source)
+            const tgtInDownstream = traceResult.downstreamNodes?.has(edge.target)
+
+            if (srcInUpstream || tgtInUpstream) {
+              color = '#06b6d4'
+            } else if (srcInDownstream || tgtInDownstream) {
+              color = '#f59e0b'
+            } else if (!edge.isGhost) {
+              color = '#a78bfa'
+            }
+
+            if (!srcInUpstream && !tgtInUpstream && !srcInDownstream && !tgtInDownstream) {
+              edgeOpacity = edge.isGhost ? 0.05 : 0.1
+              dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
+            }
+          } else {
+            if (isEdgeHighlighted) {
+              edgeOpacity = 0.9
+              dynamicStrokeWidth = baseStrokeWidth + 1
+            } else if (isEdgeDimmed) {
+              edgeOpacity = edge.isGhost ? 0.05 : 0.1
+              dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
+            } else {
+              edgeOpacity = edgeOpacity * 0.5
+              dynamicStrokeWidth = baseStrokeWidth * 0.75
+            }
+          }
+
+          if (edge.isGhost) edgeOpacity = Math.min(0.7, edgeOpacity)
+
+          if (edge.isDelegated) return
+          if (edge.isResidual) {
+            edgeOpacity = 0.15
+            dynamicStrokeWidth = Math.max(1, baseStrokeWidth * 0.7)
+          }
+
+          newComputedEdges.push({
+            id: edge.id,
+            source: edge.source,
+            target: edge.target,
+            minY, maxY, pathD, color, dynamicStrokeWidth, edgeOpacity,
+            isGhost: edge.isGhost || false,
+            isBundled: edge.isBundled || false,
+            edgeCount: edge.edgeCount || 0,
+            sx, sy, tx, ty,
+            types: Array.isArray(edge.types) && edge.types.length > 0
+              ? edge.types
+              : edge.originalType ? [edge.originalType] : [],
+            confidence: edge.confidence || 0,
+          })
+        }
+        return
       }
+
+      // ── Overflow edge: exactly one endpoint visible ───────────────────
+      if (sourceVisible === targetVisible) return // neither visible — skip
+
+      const visibleNodeId = sourceVisible ? sourceId : targetId
+      const offscreenNodeId = sourceVisible ? targetId : sourceId
+
+      const visibleEl = getEl(visibleNodeId)
+      if (!visibleEl) return
+
+      const vRect = visibleEl.getBoundingClientRect()
+      const gutterX = sourceVisible
+        ? vRect.right - containerRect.left + GUTTER_HALF
+        : vRect.left - containerRect.left - GUTTER_HALF
+      const sx = sourceVisible
+        ? vRect.right - containerRect.left + 6
+        : vRect.left - containerRect.left - 8
+      const sy = vRect.top + vRect.height / 2 - containerRect.top
+
+      let direction: 'up' | 'down'
+      const offscreenEl = getEl(offscreenNodeId)
+      if (offscreenEl) {
+        const oRect = offscreenEl.getBoundingClientRect()
+        direction = (oRect.top + oRect.height / 2) < (containerRect.top + containerRect.height / 2) ? 'up' : 'down'
+      } else {
+        direction = sy > containerH * 0.5 ? 'up' : 'down'
+      }
+
+      const primaryType = edge.types?.[0] || edge.originalType || ''
+      const color = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
+
+      const bucketKey = `${Math.round(gutterX / BADGE_BUCKET) * BADGE_BUCKET}-${direction}`
+      if (!buckets.has(bucketKey)) {
+        buckets.set(bucketKey, { gutterXs: [], direction, colors: [], edgeCount: 0 })
+      }
+      const bucket = buckets.get(bucketKey)!
+      bucket.gutterXs.push(gutterX)
+      bucket.edgeCount++
+      if (!bucket.colors.includes(color)) bucket.colors.push(color)
+
+      const stubCount = bucketStubCount.get(bucketKey) ?? 0
+      if (stubCount >= MAX_STUBS_PER_BUCKET) return
+      bucketStubCount.set(bucketKey, stubCount + 1)
+
+      const ey = direction === 'up' ? 0 : containerH
+      const ex = gutterX + (stubCount - MAX_STUBS_PER_BUCKET / 2) * 3
+
+      const cp1x = sx + (ex - sx) * 0.4
+      const cp2x = ex
+      const cp2y = sy + (ey - sy) * 0.6
+
+      const pathD = `M ${sx} ${sy} C ${cp1x} ${sy}, ${cp2x} ${cp2y}, ${ex} ${ey}`
+      const safeColor = color.replace(/[^a-zA-Z0-9]/g, '')
+      const gradId = `of-${safeColor}-${direction}`
+
+      trailingEdges.push({
+        id: `overflow-edge-${edge.source}-${edge.target}`,
+        pathD, color, direction, gradientId: gradId,
+        sy, ey,
+      })
     })
+
     setComputedEdges(newComputedEdges)
+
+    const badges: OverflowBadge[] = []
+    buckets.forEach((bucket) => {
+      const avgX = bucket.gutterXs.reduce((a, b) => a + b, 0) / bucket.gutterXs.length
+      badges.push({
+        gutterX: avgX,
+        direction: bucket.direction,
+        count: bucket.edgeCount,
+        color: bucket.colors[0] || '#3b82f6',
+      })
+    })
+    setOverflowBadges(badges)
+    setOverflowEdges(trailingEdges)
   }, [edges, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId])
 
   // Store updateFlow in ref for ResizeObserver access and expose to parent
@@ -396,12 +425,13 @@ export function LineageFlowOverlay({
       visibilityObserver.disconnect()
       observedElements.clear()
       globalVisibleNodes.clear()
+      elementCacheRef.current.clear()
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current)
         rafIdRef.current = null
       }
     }
-  }, [nodes, expandedNodesArray, scheduleUpdate])
+  }, [nodes, expandedNodesFingerprint, scheduleUpdate])
 
   // Attach scroll listener to the parent container for Viewport Edge Virtualization
   useEffect(() => {
@@ -460,7 +490,7 @@ export function LineageFlowOverlay({
         rafIdRef.current = null
       }
     }
-  }, [updateFlow, scheduleUpdate, expandedNodesArray])
+  }, [updateFlow, scheduleUpdate, expandedNodesFingerprint])
 
   // ── 4.2 Hover Preview ────────────────────────────────────────────────────────
   // Pure DOM/CSS — zero React re-renders. Reads document.dataset.hoveredNode set
@@ -492,13 +522,24 @@ export function LineageFlowOverlay({
   }, [])
 
   // VERY FAST Virtualization Filter: Only render edges that intersect the scroll viewport
-  const VIEWPORT_MARGIN = 400 // Load edges slightly before they enter screen
+  const VIEWPORT_MARGIN = 400
   const visibleEdges = computedEdges.filter(edge => {
-    // If edge bottom is above viewport OR edge top is below viewport -> Cull
     if (edge.maxY < viewport.scrollTop - VIEWPORT_MARGIN) return false
     if (edge.minY > viewport.scrollTop + viewport.clientHeight + VIEWPORT_MARGIN) return false
     return true
   })
+
+  // ── Shared SVG defs — one marker per unique color, one gradient per color+direction ──
+  // Avoids creating 500+ <marker> and 200+ <linearGradient> elements per render.
+  const sharedDefs = useMemo(() => {
+    const markerColors = new Set<string>()
+    visibleEdges.forEach(e => { if (!e.isGhost) markerColors.add(e.color) })
+
+    const gradientKeys = new Set<string>()
+    overflowEdges.forEach(e => gradientKeys.add(`${e.color}|${e.direction}`))
+
+    return { markerColors: Array.from(markerColors), gradientKeys: Array.from(gradientKeys) }
+  }, [visibleEdges, overflowEdges])
 
   return (
     <>
@@ -516,15 +557,39 @@ export function LineageFlowOverlay({
                 animation: dashFlow 20s linear infinite;
               }
               .flow-particles-ghost {
-                animation: dashFlow 40s linear infinite; /* flows slower for ghosts */
+                animation: dashFlow 40s linear infinite;
               }
             `}
           </style>
-          {/* Glow filter */}
           <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
             <feGaussianBlur stdDeviation="2" result="blur" />
             <feComposite in="SourceGraphic" in2="blur" operator="over" />
           </filter>
+
+          {/* Shared arrowhead markers — one per unique color */}
+          {sharedDefs.markerColors.map(c => {
+            const safeId = c.replace(/[^a-zA-Z0-9]/g, '')
+            return (
+              <marker key={safeId} id={`arrow-${safeId}`} markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+                <polygon points="0 0.5, 7 3, 0 5.5" fill={c} opacity="0.8" />
+              </marker>
+            )
+          })}
+
+          {/* Shared overflow gradients — one per color+direction */}
+          {sharedDefs.gradientKeys.map(key => {
+            const [c, dir] = key.split('|')
+            const safeId = `of-${c.replace(/[^a-zA-Z0-9]/g, '')}-${dir}`
+            const y1 = dir === 'up' ? '100%' : '0%'
+            const y2 = dir === 'up' ? '0%' : '100%'
+            return (
+              <linearGradient key={safeId} id={safeId} x1="0" x2="0" y1={y1} y2={y2}>
+                <stop offset="0%" stopColor={c} stopOpacity="0.35" />
+                <stop offset="70%" stopColor={c} stopOpacity="0.12" />
+                <stop offset="100%" stopColor={c} stopOpacity="0" />
+              </linearGradient>
+            )
+          })}
         </defs>
         {visibleEdges.map(edge => {
           const isHovered = hoveredEdgeId === edge.id
@@ -578,7 +643,7 @@ export function LineageFlowOverlay({
                   strokeLinecap: 'round',
                   transition: 'all 0.3s ease',
                 }}
-                markerEnd={!isGhost ? `url(#arrowhead-${edge.id})` : undefined}
+                markerEnd={!isGhost ? `url(#arrow-${color.replace(/[^a-zA-Z0-9]/g, '')})` : undefined}
                 className="pointer-events-none"
               />
 
@@ -622,24 +687,6 @@ export function LineageFlowOverlay({
                 </g>
               )}
 
-              {/* Arrowhead marker (per-edge, inherits edge color) */}
-              <defs>
-                <marker
-                  id={`arrowhead-${edge.id}`}
-                  markerWidth="8"
-                  markerHeight="6"
-                  refX="7"
-                  refY="3"
-                  orient="auto"
-                >
-                  <polygon
-                    points="0 0.5, 7 3, 0 5.5"
-                    fill={color}
-                    opacity={isHighlighted ? 0.9 : edgeOpacity * 0.85}
-                  />
-                </marker>
-              </defs>
-
               {/* Source terminal dot */}
               {!isGhost && (
                 <circle cx={sx} cy={sy} r={isHighlighted ? 3 : 2.5} fill={color} style={{ opacity: edgeOpacity * 0.8, transition: 'r 0.2s ease' }} />
@@ -649,7 +696,74 @@ export function LineageFlowOverlay({
             </g>
           )
         })}
+
+        {/* ── Trailing overflow edges — partial S-curves fading toward container edge ── */}
+        {overflowEdges.map(oe => (
+          <path
+            key={oe.id}
+            d={oe.pathD}
+            stroke={`url(#${oe.gradientId})`}
+            strokeWidth={1.4}
+            fill="none"
+            strokeDasharray="6 4"
+            strokeLinecap="round"
+            className="pointer-events-none"
+          />
+        ))}
       </svg>
+
+      {/* ── Overflow indicators — centered in column gutters at top/bottom ── */}
+      {overflowBadges.map((badge, i) => {
+        const isUp = badge.direction === 'up'
+        return (
+          <div
+            key={`overflow-${i}`}
+            className="absolute pointer-events-none"
+            style={{
+              left: badge.gutterX,
+              transform: 'translateX(-50%)',
+              ...(isUp ? { top: 52 } : { bottom: 12 }),
+              zIndex: 20,
+            }}
+          >
+            <div
+              className="flex flex-col items-center gap-0.5"
+              style={{ color: badge.color }}
+            >
+              {/* Chevron */}
+              <svg
+                width="14" height="14" viewBox="0 0 14 14" fill="none"
+                style={isUp ? undefined : { transform: 'rotate(180deg)' }}
+              >
+                <path
+                  d="M3 8.5L7 4.5L11 8.5"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              {/* Count */}
+              <span
+                className="text-[10px] font-semibold tabular-nums leading-none"
+                style={{ opacity: 0.85 }}
+              >
+                {badge.count}
+              </span>
+              {/* Accent line */}
+              <div
+                className="rounded-full"
+                style={{
+                  width: Math.min(24, 8 + badge.count * 3),
+                  height: 2,
+                  backgroundColor: badge.color,
+                  opacity: 0.4,
+                }}
+              />
+            </div>
+          </div>
+        )
+      })}
 
       {/* ── 4.4 Edge Tooltip ───────────────────────────────────────────────────── */}
       {(() => {

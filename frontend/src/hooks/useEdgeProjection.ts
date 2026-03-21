@@ -39,21 +39,15 @@ export interface UseEdgeProjectionOptions {
 // Tree helpers for incremental ancestorMap updates
 // ============================================
 
-function searchSubtree(nodes: HierarchyNode[], id: string): HierarchyNode | undefined {
-  for (const node of nodes) {
-    if (node.id === id) return node
-    const found = searchSubtree(node.children, id)
-    if (found) return found
+/** Build a flat id→node lookup from the full tree. O(N) once, then O(1) per lookup. */
+function buildNodeIndex(nodesByLayer: Map<string, HierarchyNode[]>): Map<string, HierarchyNode> {
+  const index = new Map<string, HierarchyNode>()
+  const visit = (node: HierarchyNode) => {
+    index.set(node.id, node)
+    node.children.forEach(visit)
   }
-  return undefined
-}
-
-function findNodeById(nodesByLayer: Map<string, HierarchyNode[]>, id: string): HierarchyNode | undefined {
-  for (const roots of nodesByLayer.values()) {
-    const found = searchSubtree(roots, id)
-    if (found) return found
-  }
-  return undefined
+  nodesByLayer.forEach(roots => roots.forEach(visit))
+  return index
 }
 
 /** Map a node and all its descendants to `anchor` in the given map. */
@@ -132,6 +126,9 @@ export function useEdgeProjection({
   isContainmentEdge,
   hoveredNodeId,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[] } {
+
+  // ── Flat node index — O(1) lookup replacing O(N) tree search ──────────
+  const nodeIndex = useMemo(() => buildNodeIndex(nodesByLayer), [nodesByLayer])
 
   // ── Incremental ancestorMap state ──────────────────────────────────────
   const ancestorMapRef = useRef<Map<string, string>>(new Map())
@@ -229,7 +226,7 @@ export function useEdgeProjection({
 
     // Collapses first: all descendants → collapsed node
     collapsed.forEach(id => {
-      const node = findNodeById(nodesByLayer, id)
+      const node = nodeIndex.get(id)
       if (node) {
         node.children.forEach(child => collapseSubtreeInMap(child, id, map))
       }
@@ -237,7 +234,7 @@ export function useEdgeProjection({
 
     // Expansions: children become individually visible
     expanded.forEach(id => {
-      const node = findNodeById(nodesByLayer, id)
+      const node = nodeIndex.get(id)
       if (node) {
         expandNodeInMap(node, expandedNodes, map)
       }
@@ -246,13 +243,13 @@ export function useEdgeProjection({
     prevExpandedNodesRef.current = expandedNodes
     ancestorMapRef.current = map
     return map
-  }, [nodesByLayer, expandedNodes, displayFlat])
+  }, [nodesByLayer, expandedNodes, displayFlat, nodeIndex])
 
   // ── Edge projection ────────────────────────────────────────────────────
   //
   // Now depends on the stable `ancestorMap` instead of rebuilding it here.
   // This memo only re-runs when edges or the ancestorMap actually change.
-  const visibleLineageEdges = useMemo(() => {
+  const projectedEdges = useMemo(() => {
     if (!showLineageFlow && !isTracing) return []
 
     const edgeGroups = new Map<string, any[]>()
@@ -315,34 +312,7 @@ export function useEdgeProjection({
         }
       })
 
-    // ── Edge delegation for expanded parents ──────────────────────────────
-    //
-    // When a parent is expanded, its children are visible and carry their own
-    // edges. We suppress the parent's edges to avoid visual duplication.
-    //
-    // Three states:
-    //   1. Expanded + all children loaded → fully delegate (hide parent edges)
-    //   2. Expanded + partially loaded    → show parent edges as residual/ghost
-    //      (indicates lineage to not-yet-loaded children)
-    //   3. Hovering on expanded parent    → temporarily show parent edges at
-    //      full opacity so user can see the parent's full lineage picture
-    //
-    // Build a lookup: expandedNodeId → { isPartiallyLoaded }
-    const expandedParentInfo = new Map<string, { isPartiallyLoaded: boolean }>()
-    expandedNodes.forEach(nodeId => {
-      const node = displayMap.get(nodeId)
-      if (!node) return
-      const totalChildCount = (node.data?.childCount as number) || (node.data?._collapsedChildCount as number) || 0
-      const loadedChildCount = node.children?.length ?? 0
-      // Only consider it expanded-with-children if children are actually loaded
-      if (loadedChildCount > 0) {
-        expandedParentInfo.set(nodeId, {
-          isPartiallyLoaded: totalChildCount > 0 && loadedChildCount < totalChildCount,
-        })
-      }
-    })
-
-    // Finalize: bundle groups into projected edges
+    // Finalize: bundle groups into projected edges (without delegation — applied in separate memo)
     const projected: any[] = []
     edgeGroups.forEach((groupEdges, key) => {
       const distinctTypes = new Set<string>()
@@ -370,30 +340,6 @@ export function useEdgeProjection({
       const edgeCount = groupEdges.length
       const typesArray = Array.from(distinctTypes)
 
-      // Delegation: check if source or target is an expanded parent
-      const sourceExpanded = expandedParentInfo.get(sourceId)
-      const targetExpanded = expandedParentInfo.get(targetId)
-      const isSourceHovered = hoveredNodeId === sourceId
-      const isTargetHovered = hoveredNodeId === targetId
-      const isEndpointHovered = isSourceHovered || isTargetHovered
-
-      let isDelegated = false
-      let isResidual = false
-
-      if (sourceExpanded || targetExpanded) {
-        // At least one endpoint is an expanded parent with loaded children.
-        // Check if ANY endpoint is partially loaded → residual edge
-        const anyPartial = (sourceExpanded?.isPartiallyLoaded) || (targetExpanded?.isPartiallyLoaded)
-
-        if (anyPartial) {
-          // Partially loaded: show as residual ghost (unless hovered)
-          isResidual = !isEndpointHovered
-        } else {
-          // Fully loaded: delegate entirely (unless hovered)
-          isDelegated = !isEndpointHovered
-        }
-      }
-
       projected.push({
         id: `bundle-${key}`,
         source: sourceId,
@@ -404,14 +350,55 @@ export function useEdgeProjection({
         types: typesArray,
         confidence: maxConfidence,
         isAggregated,
-        isDelegated,
-        isResidual,
+        isDelegated: false,
+        isResidual: false,
         data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount }
       })
     })
 
     return projected
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, hoveredNodeId])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes])
 
-  return { lineageEdges, visibleLineageEdges }
+  // ── Edge delegation — separate memo so hoveredNodeId changes are O(E) not O(expensive) ──
+  //
+  // The heavy edge projection above doesn't re-run on hover. This cheap pass
+  // stamps isDelegated/isResidual on the already-projected edges.
+  const visibleLineageEdgesWithDelegation = useMemo(() => {
+    if (projectedEdges.length === 0) return projectedEdges
+
+    // Build expanded parent info
+    const expandedParentInfo = new Map<string, { isPartiallyLoaded: boolean }>()
+    expandedNodes.forEach(nodeId => {
+      const node = displayMap.get(nodeId)
+      if (!node) return
+      const totalChildCount = (node.data?.childCount as number) || (node.data?._collapsedChildCount as number) || 0
+      const loadedChildCount = node.children?.length ?? 0
+      if (loadedChildCount > 0) {
+        expandedParentInfo.set(nodeId, {
+          isPartiallyLoaded: totalChildCount > 0 && loadedChildCount < totalChildCount,
+        })
+      }
+    })
+
+    // If no expanded parents with children, skip the mapping
+    if (expandedParentInfo.size === 0) return projectedEdges
+
+    return projectedEdges.map(edge => {
+      const sourceExpanded = expandedParentInfo.get(edge.source)
+      const targetExpanded = expandedParentInfo.get(edge.target)
+
+      if (!sourceExpanded && !targetExpanded) return edge
+
+      const isEndpointHovered = hoveredNodeId === edge.source || hoveredNodeId === edge.target
+      const anyPartial = sourceExpanded?.isPartiallyLoaded || targetExpanded?.isPartiallyLoaded
+
+      return {
+        ...edge,
+        isDelegated: anyPartial ? false : !isEndpointHovered,
+        isResidual: anyPartial ? !isEndpointHovered : false,
+      }
+    })
+  }, [projectedEdges, expandedNodes, displayMap, hoveredNodeId])
+
+  return { lineageEdges, visibleLineageEdges: visibleLineageEdgesWithDelegation }
 }
