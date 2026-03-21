@@ -59,7 +59,7 @@ import type { ViewLayerConfig, LogicalNodeConfig } from '@/types/schema'
 import { defaultReferenceModelLayers } from './constants'
 import { useLayerAssignment } from '@/hooks/useLayerAssignment'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
-import { useHighlightState, useHoverHighlight } from '@/hooks/useHighlightState'
+import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
 import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay } from './LineageFlowOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
@@ -721,12 +721,16 @@ export function ContextViewCanvas({
     return set
   }, [trace.isTracing, trace.focusId, trace.visibleTraceNodes, parentMap])
 
+  // Hovered node — needed by both edge projection (delegation) and hover highlight
+  const hoveredNodeId = useHoveredNodeId()
+
   // Edge projection: lineageEdges, visibleLineageEdges
   const { visibleLineageEdges } = useEdgeProjection({
     edges, aggregatedEdges, nodesByLayer, expandedNodes,
     displayFlat, displayMap, urnToIdMap,
     showLineageFlow, isTracing: trace.isTracing,
     traceContextSet, isContainmentEdge,
+    hoveredNodeId,
   })
 
   // Highlight state: connected nodes/edges for selected node
@@ -737,6 +741,7 @@ export function ContextViewCanvas({
 
   // Hover highlight: same visual effect on hover (lighter), defers to click-highlight
   const { hoverHighlight, isHoverActive } = useHoverHighlight({
+    hoveredNodeId,
     visibleLineageEdges,
     isTracing: trace.isTracing,
     displayMap, childMap,

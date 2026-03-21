@@ -98,35 +98,15 @@ export function useHighlightState({
 }
 
 // ============================================
-// Hover highlight hook (new — reads dataset.hoveredNode)
+// Standalone hovered-node tracker (reads dataset.hoveredNode via rAF)
+// Can be called independently so the hoveredNodeId is available
+// before useEdgeProjection (which useHoverHighlight depends on).
 // ============================================
 
-export interface UseHoverHighlightOptions {
-  visibleLineageEdges: any[]
-  isTracing: boolean
-  displayMap: Map<string, HierarchyNode>
-  childMap: Map<string, string[]>
-  /** Skip hover highlight when click-highlight is active */
-  isClickHighlightActive: boolean
-}
-
-export interface UseHoverHighlightResult {
-  hoverHighlight: HighlightSet
-  isHoverActive: boolean
-  hoveredNodeId: string | null
-}
-
-export function useHoverHighlight({
-  visibleLineageEdges,
-  isTracing,
-  displayMap,
-  childMap,
-  isClickHighlightActive,
-}: UseHoverHighlightOptions): UseHoverHighlightResult {
+export function useHoveredNodeId(): string | null {
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null)
   const prevRef = useRef<string | null>(null)
 
-  // Poll dataset.hoveredNode via rAF — avoids prop drilling, matches existing pattern
   useEffect(() => {
     let rafId: number
     const tick = () => {
@@ -141,6 +121,36 @@ export function useHoverHighlight({
     return () => cancelAnimationFrame(rafId)
   }, [])
 
+  return hoveredNodeId
+}
+
+// ============================================
+// Hover highlight hook (uses hoveredNodeId from above)
+// ============================================
+
+export interface UseHoverHighlightOptions {
+  hoveredNodeId: string | null
+  visibleLineageEdges: any[]
+  isTracing: boolean
+  displayMap: Map<string, HierarchyNode>
+  childMap: Map<string, string[]>
+  /** Skip hover highlight when click-highlight is active */
+  isClickHighlightActive: boolean
+}
+
+export interface UseHoverHighlightResult {
+  hoverHighlight: HighlightSet
+  isHoverActive: boolean
+}
+
+export function useHoverHighlight({
+  hoveredNodeId,
+  visibleLineageEdges,
+  isTracing,
+  displayMap,
+  childMap,
+  isClickHighlightActive,
+}: UseHoverHighlightOptions): UseHoverHighlightResult {
   const hoverHighlight = useMemo(() => {
     if (isTracing || isClickHighlightActive || !hoveredNodeId) return EMPTY
     return computeConnected(hoveredNodeId, visibleLineageEdges, displayMap, childMap)
@@ -148,5 +158,5 @@ export function useHoverHighlight({
 
   const isHoverActive = hoverHighlight.edges.size > 0
 
-  return { hoverHighlight, isHoverActive, hoveredNodeId }
+  return { hoverHighlight, isHoverActive }
 }

@@ -240,6 +240,18 @@ export function LineageFlowOverlay({
           edgeOpacity = Math.min(0.7, edgeOpacity)
         }
 
+        // Edge delegation: expanded parents delegate edges to visible children.
+        // isDelegated = fully delegated (all children loaded) → hide entirely
+        // isResidual  = partially loaded → show as faint ghost to hint at unloaded lineage
+        if (edge.isDelegated) {
+          // Skip entirely — children carry these edges now
+          return
+        }
+        if (edge.isResidual) {
+          edgeOpacity = 0.15
+          dynamicStrokeWidth = Math.max(1, baseStrokeWidth * 0.7)
+        }
+
         newComputedEdges.push({
           id: edge.id,
           source: edge.source,

@@ -31,6 +31,8 @@ export interface UseEdgeProjectionOptions {
   isTracing: boolean
   traceContextSet: Set<string>
   isContainmentEdge: (edgeType: string) => boolean
+  /** Currently hovered node — expanded parents show edges on hover */
+  hoveredNodeId?: string | null
 }
 
 // ============================================
@@ -128,6 +130,7 @@ export function useEdgeProjection({
   isTracing,
   traceContextSet,
   isContainmentEdge,
+  hoveredNodeId,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[] } {
 
   // ── Incremental ancestorMap state ──────────────────────────────────────
@@ -312,6 +315,33 @@ export function useEdgeProjection({
         }
       })
 
+    // ── Edge delegation for expanded parents ──────────────────────────────
+    //
+    // When a parent is expanded, its children are visible and carry their own
+    // edges. We suppress the parent's edges to avoid visual duplication.
+    //
+    // Three states:
+    //   1. Expanded + all children loaded → fully delegate (hide parent edges)
+    //   2. Expanded + partially loaded    → show parent edges as residual/ghost
+    //      (indicates lineage to not-yet-loaded children)
+    //   3. Hovering on expanded parent    → temporarily show parent edges at
+    //      full opacity so user can see the parent's full lineage picture
+    //
+    // Build a lookup: expandedNodeId → { isPartiallyLoaded }
+    const expandedParentInfo = new Map<string, { isPartiallyLoaded: boolean }>()
+    expandedNodes.forEach(nodeId => {
+      const node = displayMap.get(nodeId)
+      if (!node) return
+      const totalChildCount = (node.data?.childCount as number) || (node.data?._collapsedChildCount as number) || 0
+      const loadedChildCount = node.children?.length ?? 0
+      // Only consider it expanded-with-children if children are actually loaded
+      if (loadedChildCount > 0) {
+        expandedParentInfo.set(nodeId, {
+          isPartiallyLoaded: totalChildCount > 0 && loadedChildCount < totalChildCount,
+        })
+      }
+    })
+
     // Finalize: bundle groups into projected edges
     const projected: any[] = []
     edgeGroups.forEach((groupEdges, key) => {
@@ -340,6 +370,30 @@ export function useEdgeProjection({
       const edgeCount = groupEdges.length
       const typesArray = Array.from(distinctTypes)
 
+      // Delegation: check if source or target is an expanded parent
+      const sourceExpanded = expandedParentInfo.get(sourceId)
+      const targetExpanded = expandedParentInfo.get(targetId)
+      const isSourceHovered = hoveredNodeId === sourceId
+      const isTargetHovered = hoveredNodeId === targetId
+      const isEndpointHovered = isSourceHovered || isTargetHovered
+
+      let isDelegated = false
+      let isResidual = false
+
+      if (sourceExpanded || targetExpanded) {
+        // At least one endpoint is an expanded parent with loaded children.
+        // Check if ANY endpoint is partially loaded → residual edge
+        const anyPartial = (sourceExpanded?.isPartiallyLoaded) || (targetExpanded?.isPartiallyLoaded)
+
+        if (anyPartial) {
+          // Partially loaded: show as residual ghost (unless hovered)
+          isResidual = !isEndpointHovered
+        } else {
+          // Fully loaded: delegate entirely (unless hovered)
+          isDelegated = !isEndpointHovered
+        }
+      }
+
       projected.push({
         id: `bundle-${key}`,
         source: sourceId,
@@ -350,12 +404,14 @@ export function useEdgeProjection({
         types: typesArray,
         confidence: maxConfidence,
         isAggregated,
+        isDelegated,
+        isResidual,
         data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount }
       })
     })
 
     return projected
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, hoveredNodeId])
 
   return { lineageEdges, visibleLineageEdges }
 }
