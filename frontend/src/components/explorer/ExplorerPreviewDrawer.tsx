@@ -5,6 +5,7 @@
  * data source, semantic layer, layout, created/updated dates,
  * last synced, favourite count, and a mini preview for hierarchy/reference.
  */
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -28,6 +29,8 @@ import {
   Box,
   RefreshCw,
   LayoutDashboard,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { workspaceColor } from '@/lib/workspaceColor'
@@ -107,80 +110,145 @@ function HierarchyPreview() {
   )
 }
 
-/** Data-driven reference model layer preview */
+/** Data-driven reference model layer preview with scroll controls */
 function ReferenceLayerPreview({ layers }: { layers: ViewLayerConfig[] }) {
   const sorted = [...layers].sort((a, b) => (a.order ?? a.sequence ?? 0) - (b.order ?? b.sequence ?? 0))
+  const scrollable = sorted.length > 3
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [canScrollLeft, setCanScrollLeft] = useState(false)
+  const [canScrollRight, setCanScrollRight] = useState(false)
 
-  const scrollable = sorted.length > 5
+  const updateScrollState = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    setCanScrollLeft(el.scrollLeft > 2)
+    setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 2)
+  }, [])
+
+  useEffect(() => {
+    updateScrollState()
+    const el = scrollRef.current
+    if (!el) return
+    el.addEventListener('scroll', updateScrollState, { passive: true })
+    const ro = new ResizeObserver(updateScrollState)
+    ro.observe(el)
+    return () => { el.removeEventListener('scroll', updateScrollState); ro.disconnect() }
+  }, [updateScrollState, layers])
+
+  const scroll = useCallback((dir: 'left' | 'right') => {
+    scrollRef.current?.scrollBy({ left: dir === 'left' ? -160 : 160, behavior: 'smooth' })
+  }, [])
 
   return (
-    <div className={cn(
-      'flex gap-2',
-      scrollable && 'overflow-x-auto pb-1.5 scrollbar-none [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]',
-    )}>
-      {sorted.map((layer) => {
-        const color = layer.color ?? '#f43f5e'
-        const entityCount = layer.entityTypes?.length ?? 0
-        return (
-          <div
-            key={layer.id}
-            className={cn(
-              'rounded-lg border overflow-hidden',
-              scrollable ? 'flex-shrink-0 w-[140px]' : 'flex-1 min-w-0',
-            )}
-            style={{ borderColor: `${color}30` }}
-          >
-            {/* Layer header bar */}
+    <div className="relative">
+      {/* Scroll container */}
+      <div
+        ref={scrollRef}
+        className={cn(
+          'flex gap-2',
+          scrollable && 'overflow-x-auto scrollbar-none [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]',
+        )}
+      >
+        {sorted.map((layer) => {
+          const color = layer.color ?? '#f43f5e'
+          const entityCount = layer.entityTypes?.length ?? 0
+          return (
             <div
-              className="px-2.5 py-2 flex items-center gap-1.5"
-              style={{ backgroundColor: `${color}10` }}
+              key={layer.id}
+              className={cn(
+                'rounded-lg border overflow-hidden',
+                scrollable ? 'flex-shrink-0 w-[140px]' : 'flex-1 min-w-0',
+              )}
+              style={{ borderColor: `${color}30` }}
             >
+              {/* Layer header bar */}
               <div
-                className="w-2 h-2 rounded-full shrink-0"
-                style={{ backgroundColor: color }}
-              />
-              <span
-                className="text-[10px] font-bold truncate"
-                style={{ color }}
+                className="px-2.5 py-2 flex items-center gap-1.5"
+                style={{ backgroundColor: `${color}10` }}
               >
-                {layer.name}
-              </span>
+                <div
+                  className="w-2 h-2 rounded-full shrink-0"
+                  style={{ backgroundColor: color }}
+                />
+                <span
+                  className="text-[10px] font-bold truncate"
+                  style={{ color }}
+                >
+                  {layer.name}
+                </span>
+              </div>
+              {/* Layer body */}
+              <div className="px-2.5 py-2 space-y-1.5">
+                {layer.description && (
+                  <p className="text-[9px] text-ink-muted/70 leading-tight line-clamp-2">
+                    {layer.description}
+                  </p>
+                )}
+                {entityCount > 0 ? (
+                  <div className="flex flex-wrap gap-0.5">
+                    {layer.entityTypes.slice(0, 3).map(et => (
+                      <span
+                        key={et}
+                        className="rounded px-1 py-0.5 text-[8px] font-medium truncate max-w-full"
+                        style={{ backgroundColor: `${color}12`, color }}
+                      >
+                        {et}
+                      </span>
+                    ))}
+                    {entityCount > 3 && (
+                      <span
+                        className="rounded px-1 py-0.5 text-[8px] font-medium"
+                        style={{ backgroundColor: `${color}12`, color }}
+                      >
+                        +{entityCount - 3}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-[9px] text-ink-muted/40 italic">No types assigned</span>
+                )}
+              </div>
             </div>
-            {/* Layer body */}
-            <div className="px-2.5 py-2 space-y-1.5">
-              {layer.description && (
-                <p className="text-[9px] text-ink-muted/70 leading-tight line-clamp-2">
-                  {layer.description}
-                </p>
-              )}
-              {/* Entity type pills */}
-              {entityCount > 0 ? (
-                <div className="flex flex-wrap gap-0.5">
-                  {layer.entityTypes.slice(0, 3).map(et => (
-                    <span
-                      key={et}
-                      className="rounded px-1 py-0.5 text-[8px] font-medium truncate max-w-full"
-                      style={{ backgroundColor: `${color}12`, color }}
-                    >
-                      {et}
-                    </span>
-                  ))}
-                  {entityCount > 3 && (
-                    <span
-                      className="rounded px-1 py-0.5 text-[8px] font-medium"
-                      style={{ backgroundColor: `${color}12`, color }}
-                    >
-                      +{entityCount - 3}
-                    </span>
-                  )}
-                </div>
-              ) : (
-                <span className="text-[9px] text-ink-muted/40 italic">No types assigned</span>
-              )}
-            </div>
-          </div>
-        )
-      })}
+          )
+        })}
+      </div>
+
+      {/* Fade edges + arrow buttons */}
+      {scrollable && (
+        <>
+          {/* Left fade + button */}
+          <div
+            className={cn(
+              'absolute left-0 top-0 bottom-0 w-8 bg-gradient-to-r from-black/[0.04] dark:from-white/[0.04] to-transparent pointer-events-none transition-opacity duration-200',
+              canScrollLeft ? 'opacity-100' : 'opacity-0',
+            )}
+          />
+          {canScrollLeft && (
+            <button
+              onClick={() => scroll('left')}
+              className="absolute left-0 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-canvas-elevated border border-glass-border shadow-md flex items-center justify-center text-ink-muted hover:text-ink transition-colors duration-150"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+            </button>
+          )}
+
+          {/* Right fade + button */}
+          <div
+            className={cn(
+              'absolute right-0 top-0 bottom-0 w-8 bg-gradient-to-l from-black/[0.04] dark:from-white/[0.04] to-transparent pointer-events-none transition-opacity duration-200',
+              canScrollRight ? 'opacity-100' : 'opacity-0',
+            )}
+          />
+          {canScrollRight && (
+            <button
+              onClick={() => scroll('right')}
+              className="absolute right-0 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-canvas-elevated border border-glass-border shadow-md flex items-center justify-center text-ink-muted hover:text-ink transition-colors duration-150"
+            >
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </>
+      )}
     </div>
   )
 }
