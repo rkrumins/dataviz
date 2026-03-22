@@ -1,10 +1,11 @@
 import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, Plus, Sparkles, Shield, CheckCircle2, PenLine, Box, GitBranch, Loader2, BookOpen, Database, X, Zap } from 'lucide-react'
+import { Search, Plus, Sparkles, Shield, CheckCircle2, PenLine, Box, GitBranch, Loader2, BookOpen, Database, X, Zap, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { StatusFilter } from '../lib/ontology-types'
+import { useOntologies } from '../hooks/useOntologies'
 
 interface OntologySidebarProps {
   ontologies: OntologyDefinitionResponse[]
@@ -25,6 +26,7 @@ const STATUS_CONFIGS: Record<Exclude<StatusFilter, 'all'>, {
   system: { icon: Shield, color: 'text-indigo-500', activeColor: 'bg-indigo-500/15' },
   published: { icon: CheckCircle2, color: 'text-emerald-500', activeColor: 'bg-emerald-500/15' },
   draft: { icon: PenLine, color: 'text-amber-500', activeColor: 'bg-amber-500/15' },
+  deleted: { icon: Trash2, color: 'text-red-400', activeColor: 'bg-red-500/15' },
 }
 
 const filters: { id: StatusFilter; label: string }[] = [
@@ -32,9 +34,11 @@ const filters: { id: StatusFilter; label: string }[] = [
   { id: 'system', label: 'System' },
   { id: 'published', label: 'Published' },
   { id: 'draft', label: 'Draft' },
+  { id: 'deleted', label: 'Deleted' },
 ]
 
 function getStatusKey(o: OntologyDefinitionResponse): Exclude<StatusFilter, 'all'> {
+  if (o.deletedAt) return 'deleted'
   if (o.isSystem) return 'system'
   if (o.isPublished) return 'published'
   return 'draft'
@@ -61,28 +65,37 @@ export function OntologySidebar({
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
 
+  // Fetch deleted ontologies only when showing the deleted filter
+  const showDeleted = statusFilter === 'deleted'
+  const { data: allWithDeleted = [], isLoading: isLoadingDeleted } = useOntologies(true)
+
+  // Merge: use normal ontologies for non-deleted filters, include deleted for 'deleted' filter
+  const sourceList = showDeleted ? allWithDeleted : ontologies
+
   // The active ontology for the current data source
   const activeOntologyId = activeDataSource?.ontologyId
 
   const filtered = useMemo(() => {
-    let list = ontologies
-    if (statusFilter === 'system') list = list.filter(o => o.isSystem)
-    else if (statusFilter === 'published') list = list.filter(o => o.isPublished && !o.isSystem)
-    else if (statusFilter === 'draft') list = list.filter(o => !o.isPublished && !o.isSystem)
+    let list = sourceList
+    if (statusFilter === 'system') list = list.filter(o => o.isSystem && !o.deletedAt)
+    else if (statusFilter === 'published') list = list.filter(o => o.isPublished && !o.isSystem && !o.deletedAt)
+    else if (statusFilter === 'draft') list = list.filter(o => !o.isPublished && !o.isSystem && !o.deletedAt)
+    else if (statusFilter === 'deleted') list = list.filter(o => !!o.deletedAt)
+    else list = list.filter(o => !o.deletedAt) // 'all' excludes deleted
     if (search) {
       const q = search.toLowerCase()
       list = list.filter(o => o.name.toLowerCase().includes(q) || o.description?.toLowerCase().includes(q))
     }
     return list
-  }, [ontologies, statusFilter, search])
+  }, [sourceList, statusFilter, search])
 
-  // Split: active ontology pinned to top, rest below
+  // Split: active ontology pinned to top, rest below (skip pinning for deleted view)
   const { pinnedOntology, restOntologies } = useMemo(() => {
-    if (!activeOntologyId) return { pinnedOntology: null, restOntologies: filtered }
+    if (!activeOntologyId || showDeleted) return { pinnedOntology: null, restOntologies: filtered }
     const pinned = filtered.find(o => o.id === activeOntologyId) ?? null
     const rest = filtered.filter(o => o.id !== activeOntologyId)
     return { pinnedOntology: pinned, restOntologies: rest }
-  }, [filtered, activeOntologyId])
+  }, [filtered, activeOntologyId, showDeleted])
 
   // Count per status for filter badges
   const counts = useMemo(() => ({
@@ -90,7 +103,10 @@ export function OntologySidebar({
     system: ontologies.filter(o => o.isSystem).length,
     published: ontologies.filter(o => o.isPublished && !o.isSystem).length,
     draft: ontologies.filter(o => !o.isPublished && !o.isSystem).length,
-  }), [ontologies])
+    deleted: allWithDeleted.filter(o => !!o.deletedAt).length,
+  }), [ontologies, allWithDeleted])
+
+  const effectiveLoading = isLoading || (showDeleted && isLoadingDeleted)
 
   // Render a single ontology item
   function renderItem(o: OntologyDefinitionResponse, isPinned = false) {
@@ -101,6 +117,7 @@ export function OntologySidebar({
     const config = STATUS_CONFIGS[statusKey]
     const StatusIcon = config.icon
     const isActive = o.id === activeOntologyId
+    const isDeleted = !!o.deletedAt
     const dsCount = assignmentCountMap.get(o.id) ?? 0
     const desc = truncateDescription(o.description)
 
@@ -110,9 +127,12 @@ export function OntologySidebar({
         onClick={() => navigate(`/schema/${o.id}`)}
         className={cn(
           'w-full text-left rounded-xl p-3 transition-all group relative',
+          isDeleted && 'opacity-60',
           isPinned && 'border border-emerald-500/20 bg-gradient-to-r from-emerald-500/[0.06] to-emerald-500/[0.02] dark:from-emerald-500/[0.10] dark:to-emerald-500/[0.03]',
-          !isPinned && isSelected && 'bg-gradient-to-r from-indigo-500/[0.08] to-violet-500/[0.04] dark:from-indigo-500/[0.12] dark:to-violet-500/[0.06] ring-1 ring-indigo-500/20 shadow-sm',
-          !isPinned && !isSelected && 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
+          !isPinned && !isDeleted && isSelected && 'bg-gradient-to-r from-indigo-500/[0.08] to-violet-500/[0.04] dark:from-indigo-500/[0.12] dark:to-violet-500/[0.06] ring-1 ring-indigo-500/20 shadow-sm',
+          isDeleted && isSelected && 'bg-gradient-to-r from-red-500/[0.06] to-red-500/[0.02] ring-1 ring-red-500/20',
+          !isPinned && !isSelected && !isDeleted && 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
+          isDeleted && !isSelected && 'hover:bg-red-500/[0.03]',
         )}
       >
         {/* Row 1: Icon + Name + badges */}
@@ -120,15 +140,17 @@ export function OntologySidebar({
           {/* Status icon container */}
           <div className={cn(
             'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors',
-            isPinned
-              ? 'bg-emerald-500/15 dark:bg-emerald-500/20'
-              : isSelected
-                ? 'bg-indigo-500/15 dark:bg-indigo-500/20'
-                : 'bg-black/[0.04] dark:bg-white/[0.06] group-hover:bg-black/[0.06] dark:group-hover:bg-white/[0.08]',
+            isDeleted
+              ? 'bg-red-500/10 dark:bg-red-500/15'
+              : isPinned
+                ? 'bg-emerald-500/15 dark:bg-emerald-500/20'
+                : isSelected
+                  ? 'bg-indigo-500/15 dark:bg-indigo-500/20'
+                  : 'bg-black/[0.04] dark:bg-white/[0.06] group-hover:bg-black/[0.06] dark:group-hover:bg-white/[0.08]',
           )}>
             <StatusIcon className={cn(
               'w-3.5 h-3.5',
-              isPinned ? 'text-emerald-500' : isSelected ? 'text-indigo-500' : config.color,
+              isDeleted ? 'text-red-400' : isPinned ? 'text-emerald-500' : isSelected ? 'text-indigo-500' : config.color,
             )} />
           </div>
 
@@ -136,11 +158,18 @@ export function OntologySidebar({
             <div className="flex items-center gap-1.5">
               <span className={cn(
                 'text-[13px] font-semibold truncate',
-                isSelected || isPinned ? 'text-ink' : 'text-ink-secondary group-hover:text-ink',
+                isDeleted && 'line-through text-ink-muted',
+                !isDeleted && (isSelected || isPinned ? 'text-ink' : 'text-ink-secondary group-hover:text-ink'),
               )}>
                 {o.name}
               </span>
-              {isActive && (
+              {isDeleted && (
+                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-red-500/10 text-[8px] font-bold text-red-500 dark:text-red-400 flex-shrink-0 ring-1 ring-red-500/20">
+                  <Trash2 className="w-2 h-2" />
+                  DELETED
+                </span>
+              )}
+              {isActive && !isDeleted && (
                 <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-[8px] font-bold text-emerald-600 dark:text-emerald-400 flex-shrink-0 ring-1 ring-emerald-500/20">
                   <Zap className="w-2 h-2" />
                   ACTIVE
@@ -154,7 +183,7 @@ export function OntologySidebar({
         {desc && (
           <p className={cn(
             'text-[11px] leading-snug mt-1.5 ml-[38px]',
-            isSelected || isPinned ? 'text-ink-muted' : 'text-ink-muted/50',
+            isDeleted ? 'text-ink-muted/40' : isSelected || isPinned ? 'text-ink-muted' : 'text-ink-muted/50',
           )}>
             {desc}
           </p>
@@ -164,27 +193,37 @@ export function OntologySidebar({
         <div className="flex items-center gap-2 mt-1.5 ml-[38px]">
           <span className={cn(
             'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-semibold',
-            o.version > 1
-              ? 'bg-violet-500/10 text-violet-600 dark:text-violet-400'
-              : isSelected || isPinned ? 'text-ink-muted/70' : 'text-ink-muted/50',
+            isDeleted
+              ? 'text-ink-muted/40'
+              : o.version > 1
+                ? 'bg-violet-500/10 text-violet-600 dark:text-violet-400'
+                : isSelected || isPinned ? 'text-ink-muted/70' : 'text-ink-muted/50',
           )}>
             v{o.version}
           </span>
           <span className={cn(
             'inline-flex items-center gap-0.5 text-[10px]',
-            isSelected || isPinned ? 'text-ink-muted' : 'text-ink-muted/50',
+            isDeleted ? 'text-ink-muted/40' : isSelected || isPinned ? 'text-ink-muted' : 'text-ink-muted/50',
           )}>
             <Box className="w-2.5 h-2.5" />
             {entityCount}
           </span>
           <span className={cn(
             'inline-flex items-center gap-0.5 text-[10px]',
-            isSelected || isPinned ? 'text-ink-muted' : 'text-ink-muted/50',
+            isDeleted ? 'text-ink-muted/40' : isSelected || isPinned ? 'text-ink-muted' : 'text-ink-muted/50',
           )}>
             <GitBranch className="w-2.5 h-2.5" />
             {relCount}
           </span>
-          {dsCount > 0 && !isActive && (
+          {isDeleted && o.deletedAt && (
+            <>
+              <span className="text-ink-muted/20">·</span>
+              <span className="text-[10px] text-red-400/60">
+                {new Date(o.deletedAt).toLocaleDateString()}
+              </span>
+            </>
+          )}
+          {!isDeleted && dsCount > 0 && !isActive && (
             <>
               <span className="text-ink-muted/20">·</span>
               <span className="inline-flex items-center gap-0.5 text-[10px] text-ink-muted/50">
@@ -232,7 +271,9 @@ export function OntologySidebar({
               className={cn(
                 'flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md text-[10px] font-semibold transition-all',
                 statusFilter === f.id
-                  ? 'bg-white dark:bg-white/10 text-ink shadow-sm'
+                  ? f.id === 'deleted'
+                    ? 'bg-white dark:bg-white/10 text-red-500 shadow-sm'
+                    : 'bg-white dark:bg-white/10 text-ink shadow-sm'
                   : 'text-ink-muted hover:text-ink-secondary'
               )}
             >
@@ -240,7 +281,9 @@ export function OntologySidebar({
               {counts[f.id] > 0 && (
                 <span className={cn(
                   'text-[9px] font-bold tabular-nums',
-                  statusFilter === f.id ? 'text-indigo-500' : 'text-ink-muted/50',
+                  statusFilter === f.id
+                    ? f.id === 'deleted' ? 'text-red-500' : 'text-indigo-500'
+                    : 'text-ink-muted/50',
                 )}>
                   {counts[f.id]}
                 </span>
@@ -252,20 +295,34 @@ export function OntologySidebar({
 
       {/* Scrollable list */}
       <div className="flex-1 overflow-y-auto px-3 pb-3">
-        {isLoading ? (
+        {effectiveLoading ? (
           <div className="flex items-center justify-center py-16">
             <Loader2 className="w-5 h-5 animate-spin text-ink-muted/40" />
           </div>
         ) : filtered.length === 0 ? (
           <div className="text-center py-16 px-4">
-            <div className="w-12 h-12 mx-auto mb-3 rounded-2xl bg-gradient-to-br from-indigo-500/10 to-violet-500/10 flex items-center justify-center">
-              <BookOpen className="w-5 h-5 text-ink-muted/40" />
+            <div className={cn(
+              'w-12 h-12 mx-auto mb-3 rounded-2xl flex items-center justify-center',
+              showDeleted
+                ? 'bg-gradient-to-br from-red-500/10 to-red-500/5'
+                : 'bg-gradient-to-br from-indigo-500/10 to-violet-500/10',
+            )}>
+              {showDeleted
+                ? <Trash2 className="w-5 h-5 text-ink-muted/40" />
+                : <BookOpen className="w-5 h-5 text-ink-muted/40" />
+              }
             </div>
             <p className="text-xs font-medium text-ink-secondary">
-              {search || statusFilter !== 'all' ? 'No ontologies match' : 'No ontologies yet'}
+              {showDeleted
+                ? 'No deleted ontologies'
+                : search || statusFilter !== 'all' ? 'No ontologies match' : 'No ontologies yet'
+              }
             </p>
             <p className="text-[11px] text-ink-muted/60 mt-1">
-              {search ? 'Try a different search term' : 'Create a new draft to get started'}
+              {showDeleted
+                ? 'Deleted ontologies will appear here'
+                : search ? 'Try a different search term' : 'Create a new draft to get started'
+              }
             </p>
           </div>
         ) : (
@@ -291,6 +348,16 @@ export function OntologySidebar({
                   {statusFilter === 'all' ? 'All' : filters.find(f => f.id === statusFilter)?.label}
                 </span>
                 <div className="flex-1 h-px bg-glass-border/60" />
+              </div>
+            )}
+
+            {/* Deleted section header */}
+            {showDeleted && restOntologies.length > 0 && (
+              <div className="flex items-center gap-1.5 px-1 mb-1.5">
+                <Trash2 className="w-3 h-3 text-red-400" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-red-400">
+                  Deleted Ontologies
+                </span>
               </div>
             )}
 

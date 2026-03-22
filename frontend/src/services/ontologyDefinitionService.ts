@@ -105,9 +105,12 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const ontologyDefinitionService = {
-    list(allVersions = false): Promise<OntologyDefinitionResponse[]> {
-        const url = allVersions ? `${ADMIN_API}?all_versions=true` : ADMIN_API
-        return request<OntologyDefinitionResponse[]>(url)
+    list(allVersions = false, includeDeleted = false): Promise<OntologyDefinitionResponse[]> {
+        const params = new URLSearchParams()
+        if (allVersions) params.set('all_versions', 'true')
+        if (includeDeleted) params.set('include_deleted', 'true')
+        const qs = params.toString()
+        return request<OntologyDefinitionResponse[]>(qs ? `${ADMIN_API}?${qs}` : ADMIN_API)
     },
 
     get(id: string): Promise<OntologyDefinitionResponse> {

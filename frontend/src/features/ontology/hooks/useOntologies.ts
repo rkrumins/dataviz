@@ -10,10 +10,10 @@ export const ONTOLOGY_KEYS = {
   audit: (id: string) => [...ONTOLOGY_KEYS.all, 'audit', id] as const,
 }
 
-export function useOntologies() {
+export function useOntologies(includeDeleted = false) {
   return useQuery({
-    queryKey: ONTOLOGY_KEYS.list(),
-    queryFn: () => ontologyDefinitionService.list(),
+    queryKey: [...ONTOLOGY_KEYS.list(), { includeDeleted }],
+    queryFn: () => ontologyDefinitionService.list(false, includeDeleted),
     staleTime: 30_000,
   })
 }

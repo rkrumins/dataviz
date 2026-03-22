@@ -36,12 +36,13 @@ router = APIRouter()
 @router.get("", response_model=List[OntologyDefinitionResponse])
 async def list_ontologies(
     all_versions: bool = False,
+    include_deleted: bool = Query(False, description="Include soft-deleted ontologies"),
     session: AsyncSession = Depends(get_db_session),
 ):
     """List ontologies. By default returns only the latest version of each."""
     if all_versions:
-        return await ontology_definition_repo.list_ontologies(session)
-    return await ontology_definition_repo.list_latest_ontologies(session)
+        return await ontology_definition_repo.list_ontologies(session, include_deleted=include_deleted)
+    return await ontology_definition_repo.list_latest_ontologies(session, include_deleted=include_deleted)
 
 
 @router.post("", response_model=OntologyDefinitionResponse, status_code=201)

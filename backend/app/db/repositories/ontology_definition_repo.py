@@ -145,7 +145,7 @@ async def list_ontologies(session: AsyncSession, include_deleted: bool = False) 
     return [_to_response(r) for r in result.scalars().all()]
 
 
-async def list_latest_ontologies(session: AsyncSession) -> List[OntologyDefinitionResponse]:
+async def list_latest_ontologies(session: AsyncSession, include_deleted: bool = False) -> List[OntologyDefinitionResponse]:
     """List only the latest version of each ontology schema.
 
     Primary strategy: group by schema_id (populated by backfill migration).
@@ -153,16 +153,16 @@ async def list_latest_ontologies(session: AsyncSession) -> List[OntologyDefiniti
     fall back to name-based grouping (pre-migration compatibility).
     """
     # Try schema_id-based grouping first
-    sub = (
+    sub_q = (
         select(
             OntologyORM.schema_id,
             func.max(OntologyORM.version).label("max_ver"),
         )
         .where(OntologyORM.schema_id != "")
-        .where(OntologyORM.deleted_at.is_(None))
-        .group_by(OntologyORM.schema_id)
-        .subquery()
     )
+    if not include_deleted:
+        sub_q = sub_q.where(OntologyORM.deleted_at.is_(None))
+    sub = sub_q.group_by(OntologyORM.schema_id).subquery()
     result = await session.execute(
         select(OntologyORM)
         .join(
