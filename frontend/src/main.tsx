@@ -24,14 +24,14 @@ const queryClient = new QueryClient({
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <GraphProvider>
-        <div className="h-screen w-screen flex flex-col overflow-hidden">
-          <BackendHealthBanner />
-          <div className="flex-1 overflow-hidden">
+      <div className="h-screen w-screen flex flex-col overflow-hidden">
+        <BackendHealthBanner />
+        <div className="flex-1 overflow-hidden">
+          <GraphProvider>
             <RouterProvider router={router} />
-          </div>
+          </GraphProvider>
         </div>
-      </GraphProvider>
+      </div>
     </QueryClientProvider>
   </React.StrictMode>,
 )

@@ -15,6 +15,7 @@ import { RemoteGraphProvider } from './RemoteGraphProvider'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useConnectionsStore } from '@/store/connections'
 import { useCanvasStore } from '@/store/canvas'
+import { useHealthStore } from '@/store/health'
 
 // MockProvider (+ its 113 kB demo-data.ts) is loaded lazily so it never
 // appears in the initial bundle. It is only fetched when the backend is
@@ -151,6 +152,8 @@ export function GraphProvider({ children }: GraphProviderProps) {
             } catch (err) {
                 if (!cancelled) {
                     setError(err instanceof Error ? err : new Error('Provider connection failed'))
+                    // Feed the health store for faster banner detection
+                    useHealthStore.getState().reportFailure(err)
                 }
             } finally {
                 if (!cancelled) {

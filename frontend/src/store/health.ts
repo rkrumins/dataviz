@@ -29,6 +29,9 @@ interface HealthState {
 const HEALTH_URL = '/api/v1/health'
 const FAILURE_THRESHOLD = 2
 
+/** Guard against overlapping poll() calls. */
+let _polling = false
+
 function classifyError(err: unknown): { reason: HealthReason; detail: string } {
   if (!navigator.onLine) {
     return { reason: 'network-offline', detail: 'Your device appears to be offline.' }
@@ -58,25 +61,46 @@ export const useHealthStore = create<HealthState>()((set, get) => ({
   consecutiveFailures: 0,
 
   poll: async () => {
-    // Fast path: browser says we're offline
-    if (!navigator.onLine) {
-      const failures = get().consecutiveFailures + 1
-      if (failures >= FAILURE_THRESHOLD || get().status === 'unreachable') {
-        set({
-          status: 'unreachable',
-          reason: 'network-offline',
-          detail: 'Your device appears to be offline.',
-          consecutiveFailures: failures,
-          lastCheckedAt: Date.now(),
-        })
-      } else {
-        set({ consecutiveFailures: failures, lastCheckedAt: Date.now() })
-      }
-      return
-    }
+    if (_polling) return
+    _polling = true
 
     try {
+      // Fast path: browser says we're offline
+      if (!navigator.onLine) {
+        const failures = get().consecutiveFailures + 1
+        if (failures >= FAILURE_THRESHOLD || get().status === 'unreachable') {
+          set({
+            status: 'unreachable',
+            reason: 'network-offline',
+            detail: 'Your device appears to be offline.',
+            consecutiveFailures: failures,
+            lastCheckedAt: Date.now(),
+          })
+        } else {
+          set({ consecutiveFailures: failures, lastCheckedAt: Date.now() })
+        }
+        return
+      }
+
       const res = await fetch(HEALTH_URL, { cache: 'no-store' })
+
+      if (!res.ok) {
+        // Health endpoint returned an error status (5xx, etc.)
+        const failures = get().consecutiveFailures + 1
+        if (failures >= FAILURE_THRESHOLD) {
+          set({
+            status: 'unreachable',
+            reason: 'backend-down',
+            detail: `Backend returned HTTP ${res.status}.`,
+            consecutiveFailures: failures,
+            lastCheckedAt: Date.now(),
+          })
+        } else {
+          set({ consecutiveFailures: failures, lastCheckedAt: Date.now() })
+        }
+        return
+      }
+
       const body = await res.json()
       const prevStatus = get().status
 
@@ -136,6 +160,8 @@ export const useHealthStore = create<HealthState>()((set, get) => ({
       } else {
         set({ consecutiveFailures: failures, lastCheckedAt: Date.now() })
       }
+    } finally {
+      _polling = false
     }
   },
 
