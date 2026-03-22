@@ -13,7 +13,7 @@ quadrantChart
     title Risk Assessment Matrix
     x-axis Low Impact --> High Impact
     y-axis Low Likelihood --> High Likelihood
-    quadrant-1 Critical (Fix Now)
+    quadrant-1 Critical - Fix Now
     quadrant-2 Monitor
     quadrant-3 Accept
     quadrant-4 Plan Fix

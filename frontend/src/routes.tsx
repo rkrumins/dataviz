@@ -24,6 +24,11 @@ const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(
 // Auth pages (unauthenticated)
 const LoginPage = lazy(() => import('@/components/auth/LoginPage').then(m => ({ default: m.LoginPage })))
 const SignUpPage = lazy(() => import('@/components/auth/SignUpPage').then(m => ({ default: m.SignUpPage })))
+
+// Docs (public, self-contained layout)
+const DocsPage = lazy(() => import('@/pages/DocsPage').then(m => ({ default: m.DocsPage })))
+const DocsContent = lazy(() => import('@/components/docs/DocsContent').then(m => ({ default: m.DocsContent })))
+const DocsFAQ = lazy(() => import('@/components/docs/DocsFAQ').then(m => ({ default: m.DocsFAQ })))
 const ForgotPasswordPage = lazy(() => import('@/components/auth/ForgotPasswordPage').then(m => ({ default: m.ForgotPasswordPage })))
 const ResetPasswordPage = lazy(() => import('@/components/auth/ResetPasswordPage').then(m => ({ default: m.ResetPasswordPage })))
 
@@ -44,6 +49,16 @@ export const router = createBrowserRouter([
   // Unauthenticated routes
   { path: '/login', element: <Lazy><LoginPage /></Lazy> },
   { path: '/signup', element: <Lazy><SignUpPage /></Lazy> },
+  // Public docs
+  {
+    path: '/docs',
+    element: <Lazy><DocsPage /></Lazy>,
+    children: [
+      { index: true, element: <Navigate to="overview" replace /> },
+      { path: 'faq', element: <Lazy><DocsFAQ /></Lazy> },
+      { path: ':slug', element: <Lazy><DocsContent /></Lazy> },
+    ],
+  },
   { path: '/forgot-password', element: <Lazy><ForgotPasswordPage /></Lazy> },
   { path: '/reset-password', element: <Lazy><ResetPasswordPage /></Lazy> },
 

@@ -14,6 +14,7 @@ import {
   Pin,
   Clock,
   ArrowRight,
+  BookOpen,
 } from 'lucide-react'
 import * as Popover from '@radix-ui/react-popover'
 import { useNavigate } from 'react-router-dom'
@@ -633,6 +634,23 @@ export function SidebarNav() {
           </div>
         </div>
       )}
+
+      {/* Documentation link */}
+      <div className={cn("border-t border-glass-border", sidebarCollapsed ? "px-1.5 py-2" : "px-3 py-2")}>
+        <a
+          href="/docs"
+          target="_blank"
+          rel="noopener noreferrer"
+          className={cn(
+            "flex items-center rounded-lg transition-all duration-150 text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5",
+            sidebarCollapsed ? "justify-center p-2.5" : "gap-2.5 px-3 py-2"
+          )}
+          title="Documentation"
+        >
+          <BookOpen className="w-4 h-4 shrink-0" />
+          {!sidebarCollapsed && <span className="text-xs font-medium">Documentation</span>}
+        </a>
+      </div>
 
       {/* Resize handle (right edge) — only when expanded */}
       {!sidebarCollapsed && (

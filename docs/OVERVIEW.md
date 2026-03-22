@@ -298,7 +298,7 @@ quadrantChart
     title Lineage Platform Landscape
     x-axis Static Visualization --> Interactive Exploration
     y-axis Single Backend --> Multi-Backend
-    quadrant-1 Synodic's Target
+    quadrant-1 Synodic Target
     quadrant-2 Emerging
     quadrant-3 Traditional
     quadrant-4 Specialized

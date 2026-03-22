@@ -171,6 +171,11 @@ export function LoginPage() {
                                 Sign up
                             </Link>
                         </p>
+                        <p className="text-xs text-ink-muted">
+                            <a href="/docs" target="_blank" rel="noopener noreferrer" className="text-accent-lineage/70 hover:text-accent-lineage hover:underline transition-colors">
+                                Documentation
+                            </a>
+                        </p>
                     </div>
                 </div>
 
