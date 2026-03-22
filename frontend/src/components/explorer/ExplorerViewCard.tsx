@@ -22,6 +22,7 @@ import {
   ExternalLink,
   RefreshCw,
   AlertTriangle,
+  Check,
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import { cn } from '@/lib/utils'
@@ -150,6 +151,8 @@ export interface ExplorerViewCardProps {
   onPreview?: () => void
   onDelete?: () => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
+  isSelected?: boolean
+  onToggleSelect?: () => void
 }
 
 function initials(name?: string): string {
@@ -165,6 +168,8 @@ export function ExplorerViewCard({
   onPreview,
   onDelete,
   healthStatus,
+  isSelected,
+  onToggleSelect,
 }: ExplorerViewCardProps) {
   const meta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_META
   const TypeIcon = meta.icon
@@ -189,14 +194,41 @@ export function ExplorerViewCard({
     >
       <div
         className={cn(
-          'relative flex flex-col h-full rounded-2xl border border-glass-border bg-canvas-elevated p-5',
+          'relative flex flex-col h-full rounded-2xl border bg-canvas-elevated p-5',
           'will-change-transform',
           'hover:-translate-y-1 hover:shadow-lg',
           'hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
           'transition-[transform,box-shadow,border-color,background-color] duration-200 ease-out',
+          isSelected
+            ? 'border-accent-lineage shadow-[0_0_0_1px_rgba(var(--accent-lineage-rgb,99,102,241),0.3)]'
+            : 'border-glass-border',
           meta.hoverBorder,
         )}
       >
+        {/* ── Top-left checkbox ── */}
+        {onToggleSelect && (
+          <div
+            className={cn(
+              'absolute top-3 left-3 z-10',
+              !isSelected && 'opacity-0 group-hover:opacity-100',
+            )}
+          >
+            <button
+              type="button"
+              onClick={e => { e.stopPropagation(); onToggleSelect() }}
+              className={cn(
+                'w-5 h-5 rounded-md border-2 flex items-center justify-center',
+                'transition-colors duration-150',
+                isSelected
+                  ? 'bg-accent-lineage border-accent-lineage text-white'
+                  : 'border-ink-muted/40 bg-canvas-elevated hover:border-accent-lineage',
+              )}
+            >
+              {isSelected && <Check className="h-3 w-3" strokeWidth={3} />}
+            </button>
+          </div>
+        )}
+
         {/* ── Top-right actions (hover reveal) ── */}
         <div className="absolute top-3 right-3 flex items-center gap-0.5 rounded-lg bg-canvas-elevated/90 border border-glass-border/50 p-0.5 shadow-sm invisible group-hover:visible z-10">
           <Link

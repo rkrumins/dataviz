@@ -30,7 +30,7 @@ import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDraw
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
-import type { View } from '@/services/viewApiService'
+import { deleteView as deleteViewApi, type View } from '@/services/viewApiService'
 import type { Toast, ToastType } from '@/features/ontology/lib/ontology-types'
 import { ToastNotification } from '@/features/ontology/components/ToastNotification'
 
@@ -150,22 +150,72 @@ export function ExplorerPage() {
     parsed.dataSourceId || parsed.favouritedOnly || parsed.category
   )
 
-  // ─── Keyboard shortcuts ─────────────────────────────────────────────
+  const layout = parsed.layout
+
+  // ─── Keyboard navigation ────────────────────────────────────────────
+
+  const [focusedIndex, setFocusedIndex] = useState(-1)
+  const gridRef = useRef<HTMLDivElement>(null)
+
+  // Reset focus when views change
+  useEffect(() => { setFocusedIndex(-1) }, [views])
+
+  // Scroll focused card into view
+  useEffect(() => {
+    if (focusedIndex < 0 || !gridRef.current) return
+    const child = gridRef.current.children[focusedIndex] as HTMLElement | undefined
+    child?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [focusedIndex])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
+      const tag = (e.target as HTMLElement).tagName
+      const inInput = ['INPUT', 'TEXTAREA'].includes(tag)
+
+      // / → focus search
+      if (e.key === '/' && !inInput) {
         e.preventDefault()
         searchRef.current?.focus()
+        return
       }
-      if (e.key === 'Escape' && document.activeElement === searchRef.current) {
-        setSearchInput('')
-        searchRef.current?.blur()
+      // Escape → clear search / blur / deselect focus
+      if (e.key === 'Escape') {
+        if (document.activeElement === searchRef.current) {
+          setSearchInput('')
+          searchRef.current?.blur()
+        } else {
+          setFocusedIndex(-1)
+        }
+        return
+      }
+
+      // Arrow / Enter / f only when not in an input
+      if (inInput || views.length === 0) return
+
+      const cols = layout === 'list' ? 1
+        : gridRef.current
+          ? Math.round(gridRef.current.offsetWidth / (gridRef.current.firstElementChild as HTMLElement)?.offsetWidth || 1)
+          : 4
+
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+        e.preventDefault()
+        const step = e.key === 'ArrowDown' ? cols : 1
+        setFocusedIndex(prev => Math.min(prev + step, views.length - 1))
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        const step = e.key === 'ArrowUp' ? cols : 1
+        setFocusedIndex(prev => Math.max(prev - step, 0))
+      } else if (e.key === 'Enter' && focusedIndex >= 0 && focusedIndex < views.length) {
+        e.preventDefault()
+        setPreviewView(views[focusedIndex])
+      } else if (e.key === 'f' && focusedIndex >= 0 && focusedIndex < views.length) {
+        e.preventDefault()
+        toggleFavourite(views[focusedIndex].id)
       }
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [])
+  }, [views, focusedIndex, layout, toggleFavourite])
 
   // ─── Infinite scroll ────────────────────────────────────────────────
 
@@ -224,9 +274,22 @@ export function ExplorerPage() {
     showToast('success', `"${deletedName}" has been deleted`)
   }, [deleteView, removeViewFromList, showToast])
 
-  // ─── Render ─────────────────────────────────────────────────────────
+  const handleBulkDelete = useCallback(async () => {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) return
+    const count = ids.length
+    try {
+      await Promise.all(ids.map(id => deleteViewApi(id)))
+      ids.forEach(id => removeViewFromList(id))
+      setSelectedIds(new Set())
+      setPreviewView(prev => prev && ids.includes(prev.id) ? null : prev)
+      showToast('success', `Deleted ${count} view${count !== 1 ? 's' : ''}`)
+    } catch {
+      showToast('error', 'Some views could not be deleted')
+    }
+  }, [selectedIds, removeViewFromList, showToast])
 
-  const layout = parsed.layout
+  // ─── Render ─────────────────────────────────────────────────────────
 
   return (
     <div className="absolute inset-0 overflow-y-auto bg-canvas custom-scrollbar">
@@ -395,11 +458,11 @@ export function ExplorerPage() {
               onClearFilters={clearAllFilters}
             />
           ) : layout === 'grid' ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            <div ref={gridRef} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
               {views.map((v, i) => (
                 <div
                   key={v.id}
-                  className="card-stagger"
+                  className={cn('card-stagger', i === focusedIndex && 'ring-2 ring-accent-lineage/50 rounded-2xl')}
                   style={{ animationDelay: `${Math.min(i * 30, 300)}ms` }}
                 >
                   <ExplorerViewCard
@@ -409,14 +472,21 @@ export function ExplorerPage() {
                     onPreview={() => setPreviewView(v)}
                     onDelete={() => handleDeleteRequest(v)}
                     healthStatus={healthMap.get(v.id)?.status}
+                    isSelected={selectedIds.has(v.id)}
+                    onToggleSelect={() => setSelectedIds(prev => {
+                      const next = new Set(prev)
+                      if (next.has(v.id)) next.delete(v.id)
+                      else next.add(v.id)
+                      return next
+                    })}
                   />
                 </div>
               ))}
             </div>
           ) : (
             <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
-              <div className="grid grid-cols-[minmax(0,2fr)_140px_100px_36px_100px_120px_60px_80px_72px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
-                <span>Name</span><span>Workspace</span><span>Type</span><span>Vis</span><span>Source</span><span>Owner</span><span>Likes</span><span>Updated</span><span></span>
+              <div className="grid grid-cols-[28px_minmax(0,2fr)_140px_100px_36px_100px_120px_60px_80px_72px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
+                <span></span><span>Name</span><span>Workspace</span><span>Type</span><span>Vis</span><span>Source</span><span>Owner</span><span>Likes</span><span>Updated</span><span></span>
               </div>
               {views.map(v => (
                 <ExplorerListRow
@@ -427,6 +497,13 @@ export function ExplorerPage() {
                   onPreview={() => setPreviewView(v)}
                   onDelete={() => handleDeleteRequest(v)}
                   healthStatus={healthMap.get(v.id)?.status}
+                  isSelected={selectedIds.has(v.id)}
+                  onToggleSelect={() => setSelectedIds(prev => {
+                    const next = new Set(prev)
+                    if (next.has(v.id)) next.delete(v.id)
+                    else next.add(v.id)
+                    return next
+                  })}
                 />
               ))}
             </div>
@@ -448,7 +525,7 @@ export function ExplorerPage() {
       />
       <ExplorerBulkActions
         selectedCount={selectedIds.size}
-        onDelete={() => {}}
+        onDelete={handleBulkDelete}
         onChangeVisibility={() => {}}
         onClearSelection={() => setSelectedIds(new Set())}
       />

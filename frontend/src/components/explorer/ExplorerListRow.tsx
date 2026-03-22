@@ -13,6 +13,7 @@ import {
   Database,
   Box,
   ExternalLink,
+  Check,
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import { cn } from '@/lib/utils'
@@ -89,6 +90,8 @@ export interface ExplorerListRowProps {
   onPreview?: () => void
   onDelete?: () => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
+  isSelected?: boolean
+  onToggleSelect?: () => void
 }
 
 /* ------------------------------------------------------------------ */
@@ -100,6 +103,8 @@ export function ExplorerListRow({
   onToggleFavourite,
   onShare,
   onPreview,
+  isSelected,
+  onToggleSelect,
 }: ExplorerListRowProps) {
   const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE_META
   const TypeIcon = typeMeta.icon
@@ -116,12 +121,32 @@ export function ExplorerListRow({
     >
       <div
         className={cn(
-          'grid grid-cols-[minmax(0,2fr)_140px_100px_36px_100px_120px_60px_80px_72px] items-center gap-3',
+          'grid items-center gap-3',
+          onToggleSelect
+            ? 'grid-cols-[28px_minmax(0,2fr)_140px_100px_36px_100px_120px_60px_80px_72px]'
+            : 'grid-cols-[minmax(0,2fr)_140px_100px_36px_100px_120px_60px_80px_72px]',
           'rounded-xl px-3 py-2.5',
           'hover:bg-black/5 dark:hover:bg-white/5',
+          isSelected && 'bg-accent-lineage/[0.04]',
           'transition-colors duration-150',
         )}
       >
+        {/* ── Checkbox ── */}
+        {onToggleSelect && (
+          <button
+            type="button"
+            onClick={e => { e.stopPropagation(); onToggleSelect() }}
+            className={cn(
+              'w-5 h-5 rounded-md border flex items-center justify-center transition-all duration-150',
+              isSelected
+                ? 'bg-accent-lineage border-accent-lineage text-white'
+                : 'border-glass-border text-transparent hover:border-accent-lineage/50',
+            )}
+          >
+            <Check className="h-3 w-3" strokeWidth={3} />
+          </button>
+        )}
+
         {/* ── Name + colored icon container ── */}
         <div className="flex items-center gap-3 overflow-hidden">
           <div
