@@ -114,11 +114,11 @@ export function RegistryWorkspaces() {
             id: 'data-source', title: 'Data Source', icon: Database, validate: () => true,
             content: (
                 <div className="space-y-4">
-                    <p className="text-xs text-ink-muted mb-4">You can connect an initial data product to this workspace now, or do it later.</p>
+                    <p className="text-xs text-ink-muted mb-4">You can connect an initial data source to this workspace now, or do it later.</p>
                     <div>
                         <label className="block text-sm font-medium text-ink mb-1.5">Catalog Item</label>
                         <select value={wizCatalogItemId} onChange={e => setWizCatalogItemId(e.target.value)} className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"><option value="">Skip for now...</option>{unboundCatalogs.map(c => <option key={c.id} value={c.id}>{c.name} ({c.sourceIdentifier})</option>)}</select>
-                        <p className="mt-1.5 text-xs text-ink-muted">Only unallocated data products are shown</p>
+                        <p className="mt-1.5 text-xs text-ink-muted">Only unallocated data sources are shown</p>
                     </div>
                     <div><label className="block text-sm font-medium text-ink mb-1.5">Label</label><input value={wizDsLabel} onChange={e => setWizDsLabel(e.target.value)} placeholder="e.g. Main Graph, Analytics DB" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" /></div>
                 </div>
@@ -148,7 +148,7 @@ export function RegistryWorkspaces() {
             <div className="flex items-center justify-between">
                 <div>
                     <h2 className="text-xl font-bold text-ink">Workspaces</h2>
-                    <p className="text-sm text-ink-muted mt-1">Tenant environments subscribed to data assets.</p>
+                    <p className="text-sm text-ink-muted mt-1">Tenant environments subscribed to data sources.</p>
                 </div>
                 <button onClick={() => { resetWizard(); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors">
                     <Plus className="w-4 h-4" /> Create Workspace

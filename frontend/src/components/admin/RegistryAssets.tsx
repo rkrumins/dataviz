@@ -813,7 +813,7 @@ export function RegistryAssets() {
                                     <Loader2 className="w-8 h-8 animate-spin" />
                                     <div className="text-center">
                                         <p className="font-semibold text-sm">Scanning Provider</p>
-                                        <p className="text-xs opacity-70 mt-1">Discovering physical data assets...</p>
+                                        <p className="text-xs opacity-70 mt-1">Discovering physical data sources...</p>
                                     </div>
                                 </div>
                             ) : assetsError ? (
@@ -858,7 +858,7 @@ export function RegistryAssets() {
                                 disabled={assetsLoading || selected.size === 0}
                                 className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-black tracking-wide bg-indigo-500 text-white hover:bg-indigo-600 shadow-lg shadow-indigo-500/20 transition-all active:scale-95 disabled:opacity-50 disabled:active:scale-100 disabled:shadow-none"
                             >
-                                <Zap className="w-4 h-4" /> Onboard Assets ({selected.size})
+                                <Zap className="w-4 h-4" /> Onboard Sources ({selected.size})
                             </button>
                         </div>
                     </>

@@ -136,7 +136,7 @@ export function DeleteProviderDialog({
                                             className="flex items-center gap-1.5 text-xs font-semibold text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300"
                                         >
                                             <ChevronDown className={cn("w-3 h-3 transition-transform", expandedSections.catalog && "rotate-180")} />
-                                            {impact.catalogItems.length} Enterprise Catalog Data Product{impact.catalogItems.length !== 1 ? 's' : ''}
+                                            {impact.catalogItems.length} Enterprise Catalog Data Source{impact.catalogItems.length !== 1 ? 's' : ''}
                                         </button>
                                         {expandedSections.catalog && (
                                             <ul className="mt-1 ml-5 space-y-0.5">

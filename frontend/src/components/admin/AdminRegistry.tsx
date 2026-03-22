@@ -62,9 +62,9 @@ export function AdminRegistry() {
         },
         {
             id: 'assets',
-            label: 'Data Assets',
+            label: 'Data Sources',
             icon: Layers,
-            desc: 'Register and configure catalog assets',
+            desc: 'Register and configure data sources',
         },
         {
             id: 'workspaces',

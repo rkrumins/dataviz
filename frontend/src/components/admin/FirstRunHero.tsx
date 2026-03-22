@@ -19,7 +19,7 @@ const STAGES = [
     },
     {
         icon: Layers,
-        title: 'Register Data Products',
+        title: 'Register Data Sources',
         description: 'Discover and catalog physical graphs',
         accent: 'bg-violet-500/10 text-violet-500',
     },
@@ -67,7 +67,7 @@ export function FirstRunHero({ onGetStarted }: FirstRunHeroProps) {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.5, delay: 0.1 }}
             >
-                Connect your graph databases, register data products, and configure
+                Connect your graph databases, register data sources, and configure
                 semantic layers — all in one guided flow.
             </motion.p>
 

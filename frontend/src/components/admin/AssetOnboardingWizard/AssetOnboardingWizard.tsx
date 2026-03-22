@@ -309,7 +309,7 @@ export function AssetOnboardingWizard({
                             <div>
                                 <h2 className="text-lg font-bold text-ink">Asset Onboarding</h2>
                                 <p className="text-sm text-ink-muted mt-0.5">
-                                    {catalogItems.length} data product{catalogItems.length !== 1 ? 's' : ''} from {provider.name}
+                                    {catalogItems.length} data source{catalogItems.length !== 1 ? 's' : ''} from {provider.name}
                                 </p>
                             </div>
                         </div>

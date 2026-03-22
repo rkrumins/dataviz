@@ -73,11 +73,11 @@ function ReviewPhase({
         <div className="space-y-6">
             {/* Summary card */}
             <div className="glass-panel rounded-2xl divide-y divide-glass-border overflow-hidden">
-                {/* Data Products */}
+                {/* Data Sources */}
                 <div className="p-5 space-y-3">
                     <div className="flex items-center gap-2">
                         <Package className="w-4 h-4 text-indigo-400" />
-                        <span className="text-sm font-semibold text-ink">Data Products</span>
+                        <span className="text-sm font-semibold text-ink">Data Sources</span>
                     </div>
                     <div className="space-y-2">
                         {catalogItems.map(item => (
@@ -252,7 +252,7 @@ function SuccessPhase({
         {
             key: 'configure-more',
             label: 'Configure More Sources',
-            description: 'Onboard additional data products',
+            description: 'Onboard additional data sources',
             icon: Settings,
             accent: 'slate',
         },
