@@ -144,8 +144,8 @@ async def delete_catalog_item(
 ):
     """Delete a catalog item. Rejects if workspaces are still subscribed unless force=true."""
     from backend.app.db.models import WorkspaceDataSourceORM
-    from sqlalchemy import select
-    
+    from sqlalchemy import select, delete as sa_delete
+
     if not force:
         # Check for active subscriptions
         result = await session.execute(
@@ -158,6 +158,12 @@ async def delete_catalog_item(
                 status_code=409,
                 detail="Cannot delete catalog item: one or more workspaces still subscribe to it. Use force=true to override.",
             )
+    else:
+        # Force mode: de-allocate from all workspaces first
+        await session.execute(
+            sa_delete(WorkspaceDataSourceORM)
+            .where(WorkspaceDataSourceORM.catalog_item_id == item_id)
+        )
 
     deleted = await catalog_repo.delete_catalog_item(session, item_id)
     if not deleted:
