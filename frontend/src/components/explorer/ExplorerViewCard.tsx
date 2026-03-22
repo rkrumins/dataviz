@@ -10,7 +10,6 @@
 import { Link } from 'react-router-dom'
 import {
   Heart,
-  Link2,
   Network,
   GitBranch,
   Layout,
@@ -220,13 +219,6 @@ export function ExplorerViewCard({
           >
             <Heart className="h-3.5 w-3.5" fill={view.isFavourited ? 'currentColor' : 'none'} />
           </button>
-          <button
-            type="button"
-            onClick={e => { e.stopPropagation(); onShare() }}
-            className="rounded-lg p-1.5 text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08] transition-colors duration-150"
-          >
-            <Link2 className="h-3.5 w-3.5" />
-          </button>
           <ViewCardOverflowMenu
             viewId={view.id}
             viewName={view.name}
@@ -292,7 +284,7 @@ export function ExplorerViewCard({
               {view.description}
             </p>
           ) : (
-            <p className="text-xs text-ink-muted/30 italic">No description</p>
+            <div />
           )}
         </div>
 
@@ -331,8 +323,18 @@ export function ExplorerViewCard({
         {/* Spacer */}
         <div className="flex-1" />
 
-        {/* ── 8. Footer (clean — just creator + stats) ── */}
+        {/* ── 8. Footer ── */}
         <div className="flex items-center gap-2 border-t border-glass-border/50 pt-3 mt-1">
+          {/* Favourite — left */}
+          <span className={cn(
+            'inline-flex items-center gap-1 text-[11px] font-medium',
+            view.isFavourited ? 'text-red-500' : 'text-ink-muted',
+          )}>
+            <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
+            {view.favouriteCount}
+          </span>
+
+          {/* Creator — middle */}
           {view.createdBy && (
             <div className="flex items-center gap-1.5 min-w-0">
               <div
@@ -347,19 +349,12 @@ export function ExplorerViewCard({
             </div>
           )}
 
-          <span className={cn(
-            'inline-flex items-center gap-1 text-[11px] font-medium ml-auto',
-            view.isFavourited ? 'text-red-500' : 'text-ink-muted',
-          )}>
-            <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
-            {view.favouriteCount}
-          </span>
-
+          {/* Sync indicator — right */}
           {(() => {
             const ageDays = (Date.now() - new Date(view.updatedAt).getTime()) / (1000 * 60 * 60 * 24)
             const syncColor = ageDays <= 7 ? 'text-emerald-500' : ageDays <= 30 ? 'text-amber-500' : 'text-red-500'
             return (
-              <span className={cn('inline-flex items-center gap-1 text-[10px] font-medium', syncColor)}>
+              <span className={cn('inline-flex items-center gap-1 text-[10px] font-medium ml-auto', syncColor)}>
                 <RefreshCw className="h-2.5 w-2.5" />
                 {timeAgo(view.updatedAt)}
               </span>
