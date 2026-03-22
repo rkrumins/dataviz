@@ -302,6 +302,8 @@ async def init_db() -> None:
             "ALTER TABLE ontologies ADD COLUMN updated_by TEXT",
             # Announcements: replace is_dismissible with snooze_duration_minutes
             "ALTER TABLE announcements ADD COLUMN snooze_duration_minutes INTEGER NOT NULL DEFAULT 0",
+            # Soft-delete for views
+            "ALTER TABLE views ADD COLUMN deleted_at TEXT",
         ]
         for stmt in migrations:
             try:

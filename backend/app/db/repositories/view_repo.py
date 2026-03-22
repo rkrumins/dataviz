@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import ViewORM, ViewFavouriteORM, WorkspaceORM, ContextModelORM
@@ -101,6 +101,7 @@ def _to_response(
         isFavourited=is_favourited,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
+        deletedAt=getattr(row, 'deleted_at', None),
     )
 
 
@@ -211,6 +212,32 @@ async def update_view(
 async def delete_view(
     session: AsyncSession, view_id: str
 ) -> bool:
+    """Soft-delete a view by setting deleted_at timestamp."""
+    now = datetime.now(timezone.utc).isoformat()
+    result = await session.execute(
+        update(ViewORM)
+        .where(ViewORM.id == view_id, ViewORM.deleted_at.is_(None))
+        .values(deleted_at=now)
+    )
+    return result.rowcount > 0
+
+
+async def restore_view(
+    session: AsyncSession, view_id: str
+) -> bool:
+    """Restore a soft-deleted view by clearing deleted_at."""
+    result = await session.execute(
+        update(ViewORM)
+        .where(ViewORM.id == view_id, ViewORM.deleted_at.isnot(None))
+        .values(deleted_at=None)
+    )
+    return result.rowcount > 0
+
+
+async def permanently_delete_view(
+    session: AsyncSession, view_id: str
+) -> bool:
+    """Hard-delete a view from the database (irreversible)."""
     result = await session.execute(
         delete(ViewORM).where(ViewORM.id == view_id)
     )
@@ -234,8 +261,16 @@ async def list_views_filtered(
     offset: int = 0,
     user_id: Optional[str] = None,
     favourited_only: bool = False,
+    include_deleted: bool = False,
+    deleted_only: bool = False,
 ) -> List[ViewResponse]:
     query = select(ViewORM)
+
+    # Soft-delete filtering
+    if deleted_only:
+        query = query.where(ViewORM.deleted_at.isnot(None))
+    elif not include_deleted:
+        query = query.where(ViewORM.deleted_at.is_(None))
 
     # When favourited_only is True, inner-join on the favourites table so only
     # views the requesting user has bookmarked are returned.
@@ -297,6 +332,7 @@ async def list_popular_views(
         select(ViewORM, fav_count_sq.c.fav_count)
         .outerjoin(fav_count_sq, ViewORM.id == fav_count_sq.c.view_id)
         .where(ViewORM.visibility == "enterprise")
+        .where(ViewORM.deleted_at.is_(None))
         .order_by(func.coalesce(fav_count_sq.c.fav_count, 0).desc())
         .limit(limit)
     )
@@ -328,6 +364,7 @@ async def list_views_for_context_model(
     query = (
         select(ViewORM)
         .where(ViewORM.context_model_id == context_model_id)
+        .where(ViewORM.deleted_at.is_(None))
         .order_by(ViewORM.updated_at.desc())
     )
     result = await session.execute(query)

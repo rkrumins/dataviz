@@ -23,6 +23,7 @@ import {
   ChevronDown,
   Check,
   Database,
+  Trash2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -55,6 +56,7 @@ const CATEGORIES = [
   { key: 'recently-added', label: 'Recent', icon: Clock },
   { key: 'shared-with-me', label: 'Shared', icon: Share2 },
   { key: 'needs-attention', label: 'Attention', icon: AlertTriangle },
+  { key: 'deleted', label: 'Deleted', icon: Trash2 },
 ] as const
 
 const VISIBILITY_OPTIONS = [

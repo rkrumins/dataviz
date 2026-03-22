@@ -23,6 +23,8 @@ import {
   RefreshCw,
   AlertTriangle,
   Check,
+  RotateCcw,
+  Trash2,
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import { cn } from '@/lib/utils'
@@ -150,6 +152,7 @@ export interface ExplorerViewCardProps {
   onShare: () => void
   onPreview?: () => void
   onDelete?: () => void
+  onRestore?: () => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
   isSelected?: boolean
   onToggleSelect?: () => void
@@ -167,10 +170,12 @@ export function ExplorerViewCard({
   onShare,
   onPreview,
   onDelete,
+  onRestore,
   healthStatus,
   isSelected,
   onToggleSelect,
 }: ExplorerViewCardProps) {
+  const isDeleted = !!view.deletedAt
   const meta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_META
   const TypeIcon = meta.icon
   const vis = VISIBILITY_META[view.visibility] ?? VISIBILITY_META.private
@@ -201,8 +206,11 @@ export function ExplorerViewCard({
           'transition-[transform,box-shadow,border-color,background-color] duration-200 ease-out',
           isSelected
             ? 'border-accent-lineage shadow-[0_0_0_1px_rgba(var(--accent-lineage-rgb,99,102,241),0.3)]'
-            : 'border-glass-border',
-          meta.hoverBorder,
+            : isDeleted
+              ? 'border-red-500/20'
+              : 'border-glass-border',
+          !isDeleted && meta.hoverBorder,
+          isDeleted && 'opacity-60',
         )}
       >
         {/* ── Top-left checkbox ── */}
@@ -231,6 +239,18 @@ export function ExplorerViewCard({
 
         {/* ── Top-right actions (hover reveal) ── */}
         <div className="absolute top-3 right-3 flex items-center gap-0.5 rounded-lg bg-canvas-elevated/90 border border-glass-border/50 p-0.5 shadow-sm invisible group-hover:visible z-10">
+          {isDeleted && onRestore ? (
+            <button
+              type="button"
+              onClick={e => { e.stopPropagation(); onRestore() }}
+              className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors duration-150 flex items-center gap-1.5"
+              title="Restore view"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              Restore
+            </button>
+          ) : (
+            <>
           <Link
             to={`/views/${view.id}`}
             onClick={e => e.stopPropagation()}
@@ -258,6 +278,8 @@ export function ExplorerViewCard({
             onDelete={() => onDelete?.()}
             onShare={onShare}
           />
+            </>
+          )}
         </div>
 
         {/* ── 1. Header: icon + type + name ── */}
@@ -305,6 +327,12 @@ export function ExplorerViewCard({
             >
               <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
               {healthStatus === 'broken' ? 'Source deleted' : healthStatus === 'warning' ? 'Warning' : 'Stale'}
+            </span>
+          )}
+          {isDeleted && (
+            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border border-red-500/20 bg-red-500/8 text-red-500">
+              <Trash2 className="h-2.5 w-2.5 shrink-0" />
+              Deleted
             </span>
           )}
         </div>

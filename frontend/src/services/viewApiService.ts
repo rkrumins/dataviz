@@ -31,6 +31,7 @@ export interface View {
     isFavourited: boolean
     createdAt: string
     updatedAt: string
+    deletedAt?: string | null
 }
 
 export interface ViewCreateRequest {
@@ -68,6 +69,10 @@ export interface ViewListParams {
     offset?: number
     /** Return only views the current user has bookmarked/favourited. */
     favouritedOnly?: boolean
+    /** Include soft-deleted views in the results. */
+    includeDeleted?: boolean
+    /** Return only soft-deleted views. */
+    deletedOnly?: boolean
 }
 
 // ============================================
@@ -103,6 +108,8 @@ export async function listViews(params?: ViewListParams): Promise<View[]> {
     if (params?.limit) sp.set('limit', String(params.limit))
     if (params?.offset) sp.set('offset', String(params.offset))
     if (params?.favouritedOnly) sp.set('favouritedOnly', 'true')
+    if (params?.includeDeleted) sp.set('includeDeleted', 'true')
+    if (params?.deletedOnly) sp.set('deletedOnly', 'true')
     const qs = sp.toString()
     return apiFetch<View[]>(`/api/v1/views/${qs ? `?${qs}` : ''}`)
 }
@@ -133,9 +140,14 @@ export async function updateView(viewId: string, data: ViewUpdateRequest): Promi
     })
 }
 
-/** Delete a view */
+/** Soft-delete a view (sets deletedAt, does not remove from DB) */
 export async function deleteView(viewId: string): Promise<void> {
     return apiFetch<void>(`/api/v1/views/${viewId}`, { method: 'DELETE' })
+}
+
+/** Restore a soft-deleted view */
+export async function restoreView(viewId: string): Promise<View> {
+    return apiFetch<View>(`/api/v1/views/${viewId}/restore`, { method: 'POST' })
 }
 
 /** Change the visibility of a view */

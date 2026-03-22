@@ -104,6 +104,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
   const stableVisibility = filters.visibility
   const stableDataSourceId = filters.dataSourceId
   const stableFavouritedOnly = filters.favouritedOnly
+  const stableCategory = filters.category
   const stableLimit = filters.limit
 
   useEffect(() => {
@@ -118,6 +119,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
           search: debouncedSearch || undefined,
           visibility: stableVisibility || undefined,
           favouritedOnly: stableFavouritedOnly || undefined,
+          deletedOnly: stableCategory === 'deleted' || undefined,
         }
 
         // Single workspace filter can be sent to API; multi-workspace is client-side
@@ -154,7 +156,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
 
     fetchViews()
     return () => { cancelled = true }
-  }, [debouncedSearch, stableVisibility, workspaceIdsKey, stableDataSourceId, stableFavouritedOnly, stableLimit, refetchKey])
+  }, [debouncedSearch, stableVisibility, workspaceIdsKey, stableDataSourceId, stableFavouritedOnly, stableCategory, stableLimit, refetchKey])
 
   // ─── Client-side filtering + sorting ────────────────────────────────
 

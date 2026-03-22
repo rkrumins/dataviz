@@ -595,6 +595,7 @@ class ViewResponse(BaseModel):
     is_favourited: bool = Field(False, alias="isFavourited")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+    deleted_at: Optional[str] = Field(None, alias="deletedAt")
 
     class Config:
         populate_by_name = True

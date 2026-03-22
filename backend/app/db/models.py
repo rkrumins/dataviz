@@ -580,6 +580,7 @@ class ViewORM(Base):
     is_pinned = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    deleted_at = Column(Text, nullable=True, default=None)
 
     # Relationships
     context_model = relationship("ContextModelORM", backref="views")
@@ -591,6 +592,7 @@ class ViewORM(Base):
         Index("idx_view_context_model", "context_model_id"),
         Index("idx_view_visibility", "visibility"),
         Index("idx_view_data_source", "data_source_id"),
+        Index("idx_view_deleted_at", "deleted_at"),
     )
 
     def __repr__(self) -> str:

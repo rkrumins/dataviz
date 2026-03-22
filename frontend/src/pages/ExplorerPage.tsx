@@ -31,7 +31,7 @@ import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
-import { updateViewVisibility, type View } from '@/services/viewApiService'
+import { updateViewVisibility, restoreView as restoreViewApi, type View } from '@/services/viewApiService'
 import type { Toast, ToastType } from '@/features/ontology/lib/ontology-types'
 import { ToastNotification } from '@/features/ontology/components/ToastNotification'
 
@@ -304,6 +304,16 @@ export function ExplorerPage() {
     }
   }, [selectedIds, showToast, refetch])
 
+  const handleRestore = useCallback(async (view: View) => {
+    try {
+      await restoreViewApi(view.id)
+      refetch()
+      showToast('success', `"${view.name}" has been restored`)
+    } catch {
+      showToast('error', `Failed to restore "${view.name}"`)
+    }
+  }, [refetch, showToast])
+
   // ─── Render ─────────────────────────────────────────────────────────
 
   return (
@@ -434,6 +444,7 @@ export function ExplorerPage() {
                     onShare={() => handleShare(v)}
                     onPreview={() => setPreviewView(v)}
                     onDelete={() => handleDeleteRequest(v)}
+                    onRestore={() => handleRestore(v)}
                     healthStatus={healthMap.get(v.id)?.status}
                   />
                 </div>
@@ -486,6 +497,7 @@ export function ExplorerPage() {
                     onShare={() => handleShare(v)}
                     onPreview={() => setPreviewView(v)}
                     onDelete={() => handleDeleteRequest(v)}
+                    onRestore={() => handleRestore(v)}
                     healthStatus={healthMap.get(v.id)?.status}
                     isSelected={selectedIds.has(v.id)}
                     onToggleSelect={() => setSelectedIds(prev => {
