@@ -32,14 +32,14 @@ custom_graph.json
 *.log
 test_result*.log
 
-# Documentation / planning (not needed in image)
-*.md
-!backend/requirements.txt
-docs/
+# Documentation / planning (not needed in backend images)
 PLAN.md
 SPEC.md
 refactor_plan*.md
 trace_challenge.md
+README.md
+CLAUDE.md
+QUICKSTART.md
 
 # Test files at repo root
 test_*.py
@@ -50,6 +50,9 @@ demo_graph_with_lineage.json
 awfully_slow_aggregate_payload.json
 analysis_results.md.resolved
 implementation_plan.md.resolved
+
+# Quickstart data (needed by Dockerfile.viz-quickstart)
+!data/quickstart/
 
 # Environment files (secrets — never bake into images)
 .env
