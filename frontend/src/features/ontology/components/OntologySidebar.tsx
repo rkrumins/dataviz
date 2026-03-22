@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { Search, Plus, Sparkles, Shield, CheckCircle2, PenLine, Lock, Box, GitBranch, Loader2, BookOpen, Database, X, Zap, Trash2, LayoutGrid, Link2, Unlink, PanelLeftClose, PanelLeftOpen, Info, ChevronDown, ChevronUp } from 'lucide-react'
+import { Search, Plus, Sparkles, Shield, CheckCircle2, PenLine, Lock, Box, GitBranch, Loader2, BookOpen, Database, X, Trash2, LayoutGrid, Link2, Unlink, PanelLeftClose, PanelLeftOpen, Info, ChevronDown, ChevronUp } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceResponse, WorkspaceResponse } from '@/services/workspaceService'
@@ -307,8 +307,8 @@ export function OntologySidebar({
               )}
               {isActive && !isDeleted && (
                 <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-[8px] font-bold text-emerald-600 dark:text-emerald-400 flex-shrink-0 ring-1 ring-emerald-500/20">
-                  <Zap className="w-2 h-2" />
-                  ACTIVE
+                  <Link2 className="w-2 h-2" />
+                  ASSIGNED
                 </span>
               )}
               {matchPercent !== null && matchPercent > 0 && (
@@ -507,8 +507,8 @@ export function OntologySidebar({
                   </span>
                   {isActive && (
                     <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-[9px] font-bold text-emerald-600 dark:text-emerald-400 ring-1 ring-emerald-500/20">
-                      <Zap className="w-2.5 h-2.5" />
-                      ACTIVE
+                      <Link2 className="w-2.5 h-2.5" />
+                      ASSIGNED
                     </span>
                   )}
                 </div>
@@ -735,9 +735,9 @@ export function OntologySidebar({
             {pinnedOntology && (
               <div className="mb-2">
                 <div className="flex items-center gap-1.5 px-1 mb-1.5">
-                  <Zap className="w-3 h-3 text-emerald-500" />
+                  <Link2 className="w-3 h-3 text-emerald-500" />
                   <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
-                    Active
+                    Assigned
                   </span>
                 </div>
                 {renderItem(pinnedOntology, true)}
@@ -860,9 +860,9 @@ export function OntologySidebar({
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2.5">
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 text-[10px] font-bold text-emerald-600 ring-1 ring-emerald-500/20">
-                    <Zap className="w-3 h-3" />ACTIVE
+                    <Link2 className="w-3 h-3" />ASSIGNED
                   </span>
-                  <span className="text-xs text-ink-muted">Assigned to selected data source</span>
+                  <span className="text-xs text-ink-muted">Linked to selected data source</span>
                 </div>
                 <div className="flex items-center gap-2.5">
                   <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-500/10 text-[10px] font-bold text-emerald-600 ring-1 ring-emerald-500/20">
