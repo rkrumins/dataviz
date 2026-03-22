@@ -3,7 +3,7 @@
  * lifecycle actions: Delete, Change Visibility, Share.
  */
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { MoreHorizontal, Trash2, Share2, Globe, Users, Lock, Eye } from 'lucide-react'
+import { MoreHorizontal, Pencil, Trash2, Share2, Globe, Users, Lock, Eye } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { updateViewVisibility } from '@/services/viewApiService'
 
@@ -11,6 +11,8 @@ interface ViewCardOverflowMenuProps {
   viewId: string
   viewName: string
   visibility: 'private' | 'workspace' | 'enterprise'
+  onEdit?: () => void
+  editDisabled?: boolean
   onDelete: () => void
   onShare: () => void
   onVisibilityChange?: (visibility: 'private' | 'workspace' | 'enterprise') => void
@@ -20,6 +22,8 @@ export function ViewCardOverflowMenu({
   viewId,
   viewName: _viewName,
   visibility,
+  onEdit,
+  editDisabled,
   onDelete,
   onShare,
   onVisibilityChange,
@@ -78,6 +82,27 @@ export function ViewCardOverflowMenu({
         >
           {!visibilitySubmenu ? (
             <>
+              {onEdit && (
+                editDisabled ? (
+                  <span
+                    className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted/40 cursor-not-allowed rounded-xl mx-0.5"
+                    style={{ width: 'calc(100% - 4px)' }}
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                    <span className="flex-1 text-left">Edit</span>
+                    <span className="text-[10px] text-ink-muted/50 font-normal">Switch workspace</span>
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => { onEdit(); setIsOpen(false) }}
+                    className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-all rounded-xl mx-0.5"
+                    style={{ width: 'calc(100% - 4px)' }}
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                    <span className="flex-1 text-left">Edit</span>
+                  </button>
+                )
+              )}
               <button
                 onClick={() => { onShare(); setIsOpen(false) }}
                 className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-all rounded-xl mx-0.5"

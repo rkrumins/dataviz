@@ -13,6 +13,7 @@ import {
   Database,
   Box,
   ExternalLink,
+  Pencil,
   Check,
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
@@ -88,6 +89,8 @@ export interface ExplorerListRowProps {
   onToggleFavourite: () => void
   onShare: () => void
   onPreview?: () => void
+  onEdit?: () => void
+  editDisabled?: boolean
   onDelete?: () => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
   isSelected?: boolean
@@ -103,6 +106,8 @@ export function ExplorerListRow({
   onToggleFavourite,
   onShare,
   onPreview,
+  onEdit,
+  editDisabled,
   isSelected,
   onToggleSelect,
 }: ExplorerListRowProps) {
@@ -230,6 +235,27 @@ export function ExplorerListRow({
           >
             <ExternalLink className="h-3.5 w-3.5" />
           </Link>
+          {onEdit && (
+            editDisabled ? (
+              <span
+                className="relative rounded-lg p-1.5 text-ink-muted/40 cursor-not-allowed group/edit"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+                <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-max max-w-[200px] rounded-lg bg-slate-900 dark:bg-slate-700 px-3 py-2 text-[11px] text-white leading-snug opacity-0 group-hover/edit:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
+                  Switch to this view's workspace to edit
+                </span>
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={e => { e.stopPropagation(); onEdit() }}
+                className="rounded-lg p-1.5 text-ink-muted hover:text-accent-lineage hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
+                title="Edit view"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
+            )
+          )}
           <button
             type="button"
             onClick={(e) => {

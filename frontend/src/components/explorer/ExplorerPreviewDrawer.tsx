@@ -21,6 +21,7 @@ import {
   Calendar,
   User,
   ExternalLink,
+  Pencil,
   Network,
   GitBranch,
   Layout,
@@ -48,6 +49,8 @@ interface ExplorerPreviewDrawerProps {
   onClose: () => void
   onToggleFavourite: () => void
   onShare: () => void
+  onEdit?: () => void
+  editDisabled?: boolean
   onDelete?: () => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
 }
@@ -312,6 +315,8 @@ export function ExplorerPreviewDrawer({
   onClose,
   onToggleFavourite,
   onShare,
+  onEdit,
+  editDisabled,
   onDelete,
   healthStatus,
 }: ExplorerPreviewDrawerProps) {
@@ -622,11 +627,12 @@ export function ExplorerPreviewDrawer({
             </div>
 
             {/* ── Footer actions ── */}
-            <div className="flex items-center gap-3 px-6 py-5 border-t border-glass-border/50">
+            <div className="px-6 py-5 border-t border-glass-border/50 space-y-3">
+              {/* Primary action — full width */}
               <Link
                 to={`/views/${view.id}`}
                 className={cn(
-                  'flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3',
+                  'w-full inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3',
                   'bg-gradient-to-r from-accent-lineage to-violet-600 text-white text-sm font-semibold',
                   'shadow-lg shadow-accent-lineage/25',
                   'hover:shadow-xl hover:-translate-y-0.5',
@@ -636,33 +642,67 @@ export function ExplorerPreviewDrawer({
                 <ExternalLink className="h-4 w-4" />
                 Open Full View
               </Link>
-              <button
-                onClick={onShare}
-                className={cn(
-                  'inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3',
-                  'border border-glass-border text-sm font-medium text-ink-muted',
-                  'bg-black/[0.02] dark:bg-white/[0.02]',
-                  'hover:text-ink hover:border-glass-border/80 transition-colors duration-200',
+              {/* Secondary actions row */}
+              <div className="flex items-center gap-2">
+                {onEdit && (
+                  editDisabled ? (
+                    <span
+                      className={cn(
+                        'relative flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2.5',
+                        'border border-glass-border/50 text-sm font-medium',
+                        'text-ink-muted/40 cursor-not-allowed group/edit',
+                      )}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                      Edit
+                      <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-max max-w-[220px] rounded-lg bg-slate-900 dark:bg-slate-700 px-3 py-2 text-[11px] text-white leading-snug opacity-0 group-hover/edit:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
+                        Switch to this view's workspace to edit
+                      </span>
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => onEdit()}
+                      className={cn(
+                        'flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2.5',
+                        'border border-glass-border text-sm font-medium text-ink-muted',
+                        'bg-black/[0.02] dark:bg-white/[0.02]',
+                        'hover:text-accent-lineage hover:border-accent-lineage/30 transition-colors duration-200',
+                      )}
+                      title="Edit view"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                      Edit
+                    </button>
+                  )
                 )}
-              >
-                <Share2 className="h-4 w-4" />
-                Share
-              </button>
-              {onDelete && (
                 <button
-                  onClick={onDelete}
+                  onClick={onShare}
                   className={cn(
-                    'inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3',
-                    'border border-red-200 dark:border-red-500/20 text-sm font-medium',
-                    'text-red-500 bg-red-50/50 dark:bg-red-500/[0.06]',
-                    'hover:bg-red-100 dark:hover:bg-red-500/15 hover:border-red-300 dark:hover:border-red-500/30 transition-colors duration-200',
+                    'flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2.5',
+                    'border border-glass-border text-sm font-medium text-ink-muted',
+                    'bg-black/[0.02] dark:bg-white/[0.02]',
+                    'hover:text-ink hover:border-glass-border/80 transition-colors duration-200',
                   )}
-                  title="Delete view"
                 >
-                  <Trash2 className="h-4 w-4" />
-                  Delete
+                  <Share2 className="h-3.5 w-3.5" />
+                  Share
                 </button>
-              )}
+                {onDelete && (
+                  <button
+                    onClick={onDelete}
+                    className={cn(
+                      'flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2.5',
+                      'border border-red-200 dark:border-red-500/20 text-sm font-medium',
+                      'text-red-500 bg-red-50/50 dark:bg-red-500/[0.06]',
+                      'hover:bg-red-100 dark:hover:bg-red-500/15 hover:border-red-300 dark:hover:border-red-500/30 transition-colors duration-200',
+                    )}
+                    title="Delete view"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Delete
+                  </button>
+                )}
+              </div>
             </div>
           </motion.aside>
         </>

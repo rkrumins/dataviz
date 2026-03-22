@@ -33,6 +33,7 @@ import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { updateViewVisibility, restoreView as restoreViewApi, type View } from '@/services/viewApiService'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
+import { useWorkspacesStore } from '@/store/workspaces'
 import type { Toast, ToastType } from '@/features/ontology/lib/ontology-types'
 import { ToastNotification } from '@/features/ontology/components/ToastNotification'
 
@@ -72,6 +73,7 @@ export function ExplorerPage() {
   const parsed = parseSearchParams(searchParams)
   const currentUser = useAuthStore(s => s.user)
   const { openViewEditor } = useViewEditorModal()
+  const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
 
   const [searchInput, setSearchInput] = useState(parsed.search)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -340,12 +342,16 @@ export function ExplorerPage() {
             </div>
             <button
               onClick={() => openViewEditor()}
+              disabled={!activeWorkspaceId}
               className={cn(
                 'inline-flex items-center gap-2 rounded-xl px-4 py-2.5',
-                'bg-gradient-to-r from-accent-lineage to-violet-600 text-white text-sm font-semibold',
-                'shadow-lg shadow-accent-lineage/20',
-                'hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200',
+                'text-sm font-semibold',
+                activeWorkspaceId
+                  ? 'bg-gradient-to-r from-accent-lineage to-violet-600 text-white shadow-lg shadow-accent-lineage/20 hover:shadow-xl hover:-translate-y-0.5'
+                  : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
+                'transition-all duration-200',
               )}
+              title={activeWorkspaceId ? 'Create a new view in this workspace' : 'Select a workspace first'}
             >
               <Plus className="w-4 h-4" />
               New View
@@ -461,6 +467,8 @@ export function ExplorerPage() {
                     onToggleFavourite={() => toggleFavourite(v.id)}
                     onShare={() => handleShare(v)}
                     onPreview={() => setPreviewView(v)}
+                    onEdit={() => openViewEditor(v.id)}
+                    editDisabled={v.workspaceId !== activeWorkspaceId}
                     onDelete={() => handleDeleteRequest(v)}
                     onRestore={() => handleRestore(v)}
                     onPermanentDelete={() => handlePermanentDeleteRequest(v)}
@@ -516,6 +524,8 @@ export function ExplorerPage() {
                     onToggleFavourite={() => toggleFavourite(v.id)}
                     onShare={() => handleShare(v)}
                     onPreview={() => setPreviewView(v)}
+                    onEdit={() => openViewEditor(v.id)}
+                    editDisabled={v.workspaceId !== activeWorkspaceId}
                     onDelete={() => handleDeleteRequest(v)}
                     onRestore={() => handleRestore(v)}
                     onPermanentDelete={() => handlePermanentDeleteRequest(v)}
@@ -543,6 +553,8 @@ export function ExplorerPage() {
                   onToggleFavourite={() => toggleFavourite(v.id)}
                   onShare={() => handleShare(v)}
                   onPreview={() => setPreviewView(v)}
+                  onEdit={() => openViewEditor(v.id)}
+                  editDisabled={v.workspaceId !== activeWorkspaceId}
                   onDelete={() => handleDeleteRequest(v)}
                   healthStatus={healthMap.get(v.id)?.status}
                   isSelected={selectedIds.has(v.id)}
@@ -568,6 +580,8 @@ export function ExplorerPage() {
         onClose={() => setPreviewView(null)}
         onToggleFavourite={() => previewView && toggleFavourite(previewView.id)}
         onShare={() => previewView && handleShareDialog(previewView)}
+        onEdit={previewView ? () => { setPreviewView(null); openViewEditor(previewView.id) } : undefined}
+        editDisabled={previewView?.workspaceId !== activeWorkspaceId}
         onDelete={() => previewView && handleDeleteRequest(previewView)}
         healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
       />
