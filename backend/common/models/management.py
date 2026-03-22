@@ -353,6 +353,10 @@ class OntologyMatchResult(BaseModel):
     jaccard_score: float = Field(alias="jaccardScore")
     covered_entity_types: List[str] = Field(default_factory=list, alias="coveredEntityTypes")
     uncovered_entity_types: List[str] = Field(default_factory=list, alias="uncoveredEntityTypes")
+    covered_relationship_types: List[str] = Field(default_factory=list, alias="coveredRelationshipTypes")
+    uncovered_relationship_types: List[str] = Field(default_factory=list, alias="uncoveredRelationshipTypes")
+    total_entity_types: int = Field(0, alias="totalEntityTypes")
+    total_relationship_types: int = Field(0, alias="totalRelationshipTypes")
 
     class Config:
         populate_by_name = True

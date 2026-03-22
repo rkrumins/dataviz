@@ -39,6 +39,10 @@ export interface OntologyMatchResult {
     jaccardScore: number
     coveredEntityTypes: string[]
     uncoveredEntityTypes: string[]
+    coveredRelationshipTypes: string[]
+    uncoveredRelationshipTypes: string[]
+    totalEntityTypes: number
+    totalRelationshipTypes: number
 }
 
 export interface OntologySuggestResponse {

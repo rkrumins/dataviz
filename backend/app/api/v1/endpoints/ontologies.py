@@ -510,6 +510,10 @@ async def suggest_ontology(
                     jaccardScore=round(jaccard, 3),
                     coveredEntityTypes=sorted(graph_entity_ids & ont_entity_ids),
                     uncoveredEntityTypes=sorted(graph_entity_ids - ont_entity_ids),
+                    coveredRelationshipTypes=sorted(graph_rel_ids & ont_rel_ids),
+                    uncoveredRelationshipTypes=sorted(graph_rel_ids - ont_rel_ids),
+                    totalEntityTypes=len(ont_entity_ids),
+                    totalRelationshipTypes=len(ont_rel_ids),
                 ))
 
         matches.sort(key=lambda m: m.jaccard_score, reverse=True)

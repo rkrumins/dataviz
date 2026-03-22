@@ -1245,6 +1245,8 @@ export function OntologySchemaPage() {
         <SuggestConfirmDialog
           dataSourceLabel={activeDataSource?.label || activeDataSource?.id || null}
           ontologies={ontologies}
+          currentOntologyId={activeDataSource?.ontologyId ?? null}
+          assignmentCountMap={assignmentCountMap}
           onAnalyze={handleAnalyzeGraph}
           onUseExisting={handleSuggestUseExisting}
           onCloneExisting={handleSuggestCloneExisting}
