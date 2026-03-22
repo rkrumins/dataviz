@@ -130,6 +130,7 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete, dataSour
     const { clearAssignments, setLayers } = useReferenceModelStore()
     const visibleViews = useSchemaStore(s => s.visibleViews)
     const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
+    const activeDataSourceId = useWorkspacesStore(s => s.activeDataSourceId)
 
     // Current step
     const [currentStep, setCurrentStep] = useState<WizardStep>('basics')
@@ -280,6 +281,7 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete, dataSour
                     visibleRelationshipTypes: formData.visibleRelationshipTypes,
                     fieldFilters,
                     workspaceId: activeWorkspaceId ?? '',
+                    dataSourceId: activeDataSourceId ?? undefined,
                     contextModelId: linkedContextModelId ?? undefined,
                     visibility: formData.visibility,
                     tags: formData.tags.length > 0 ? formData.tags : undefined,

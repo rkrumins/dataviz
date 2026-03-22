@@ -185,6 +185,7 @@ export function viewToViewConfig(view: View): ViewConfiguration {
         icon: cfg.icon ?? 'Layout',
         scopeKey,
         workspaceId: view.workspaceId,
+        dataSourceId: view.dataSourceId ?? null,
         workspaceName: view.workspaceName,
         isFavourited: view.isFavourited,
         content: cfg.content ?? {

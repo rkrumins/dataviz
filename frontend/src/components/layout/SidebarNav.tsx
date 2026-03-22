@@ -27,9 +27,9 @@ import { useNavigationStore, type NavigationTab } from '@/store/navigation'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
-import { useWorkspacesStore } from '@/store/workspaces'
 
 import { useViewEditorModal } from './AppLayout'
+import { switchToViewScope, parseDataSourceId } from '@/utils/viewNavigation'
 import { useWorkspaces } from '@/hooks/useWorkspaces'
 import { useBookmarkedViews } from '@/hooks/useBookmarkedViews'
 import { useRecentViews } from '@/hooks/useRecentViews'
@@ -371,7 +371,7 @@ function EnvironmentSwitcher({
 interface WorkspaceViewsListProps {
   activeViewId: string | null
   bookmarkedIds: Set<string>
-  onOpenView: (viewId: string) => void
+  onOpenView: (viewId: string, workspaceId?: string, dataSourceId?: string) => void
   onCreateView: () => void
   onEditView: (viewId: string) => void
   onBookmark: (viewId: string) => void
@@ -408,8 +408,8 @@ function WorkspaceViewsList({ activeViewId, bookmarkedIds, onOpenView, onCreateV
             key={view.id}
             role="button"
             tabIndex={0}
-            onClick={() => onOpenView(view.id)}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenView(view.id) } }}
+            onClick={() => onOpenView(view.id, view.workspaceId, view.dataSourceId ?? parseDataSourceId(view.scopeKey))}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenView(view.id, view.workspaceId, view.dataSourceId ?? parseDataSourceId(view.scopeKey)) } }}
             className={cn(
               "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left group transition-colors duration-150 cursor-pointer",
               isActive
@@ -677,10 +677,8 @@ export function SidebarNav() {
   const handleCreateView = () => openViewEditor()
   const handleEditView = (viewId: string) => openViewEditor(viewId)
 
-  const handleOpenView = (viewId: string, viewWorkspaceId?: string) => {
-    if (viewWorkspaceId && viewWorkspaceId !== activeWorkspaceId) {
-      useWorkspacesStore.getState().setActiveWorkspace(viewWorkspaceId)
-    }
+  const handleOpenView = (viewId: string, viewWorkspaceId?: string, viewDataSourceId?: string) => {
+    switchToViewScope(viewWorkspaceId, viewDataSourceId)
     setActiveView(viewId)
     navigate(`/views/${viewId}`)
   }
@@ -776,7 +774,7 @@ export function SidebarNav() {
                       view={view}
                       isActive={view.id === activeViewId}
                       isCrossWorkspace={view.workspaceId !== activeWorkspaceId}
-                      onClick={() => handleOpenView(view.id, view.workspaceId)}
+                      onClick={() => handleOpenView(view.id, view.workspaceId, view.dataSourceId)}
                       onRemoveBookmark={() => toggleBookmark(view.id, true)}
                     />
                   ))}
@@ -797,7 +795,7 @@ export function SidebarNav() {
                       entry={entry}
                       isActive={entry.viewId === activeViewId}
                       isBookmarked={bookmarkedIds.has(entry.viewId)}
-                      onClick={() => handleOpenView(entry.viewId, entry.workspaceId)}
+                      onClick={() => handleOpenView(entry.viewId, entry.workspaceId, entry.dataSourceId)}
                       onBookmark={() => toggleBookmark(entry.viewId, false)}
                     />
                   ))}

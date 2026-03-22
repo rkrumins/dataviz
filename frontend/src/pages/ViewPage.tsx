@@ -14,11 +14,11 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { CanvasRouter } from '@/components/canvas/CanvasRouter'
-import { useWorkspacesStore } from '@/store/workspaces'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { getView, viewToViewConfig } from '@/services/viewApiService'
 import { useRecentViews } from '@/hooks/useRecentViews'
+import { switchToViewScope, parseDataSourceId } from '@/utils/viewNavigation'
 
 export function ViewPage() {
   const { viewId } = useParams<{ viewId: string }>()
@@ -26,7 +26,6 @@ export function ViewPage() {
   const [fetching, setFetching] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const { setActiveWorkspace } = useWorkspacesStore()
   const { setActiveView } = useSchemaStore()
   const { setViewport } = useCanvasStore()
   const { recordVisit } = useRecentViews()
@@ -42,9 +41,9 @@ export function ViewPage() {
     // 1. Check schema store (local cache) — synchronous, no loading state needed
     const localView = useSchemaStore.getState().schema?.views.find(v => v.id === viewId)
     if (localView) {
-      if (localView.workspaceId && localView.workspaceId !== useWorkspacesStore.getState().activeWorkspaceId) {
-        setActiveWorkspace(localView.workspaceId)
-      }
+      // Prefer explicit dataSourceId field; fall back to parsing scopeKey for legacy views
+      const localDsId = localView.dataSourceId ?? parseDataSourceId(localView.scopeKey)
+      switchToViewScope(localView.workspaceId, localDsId ?? undefined)
       setActiveView(viewId)
       recordVisit({
         viewId: localView.id,
@@ -52,6 +51,7 @@ export function ViewPage() {
         viewType: localView.layout?.type ?? 'graph',
         workspaceId: localView.workspaceId,
         workspaceName: localView.workspaceName,
+        dataSourceId: localDsId ?? undefined,
       })
       return
     }
@@ -62,9 +62,7 @@ export function ViewPage() {
       try {
         const data = await getView(viewId)
 
-        if (data.workspaceId && data.workspaceId !== useWorkspacesStore.getState().activeWorkspaceId) {
-          setActiveWorkspace(data.workspaceId)
-        }
+        switchToViewScope(data.workspaceId, data.dataSourceId)
 
         const viewConfig = viewToViewConfig(data)
         useSchemaStore.getState().addOrUpdateView(viewConfig)
@@ -75,6 +73,7 @@ export function ViewPage() {
           viewType: viewConfig.layout?.type ?? 'graph',
           workspaceId: viewConfig.workspaceId,
           workspaceName: viewConfig.workspaceName,
+          dataSourceId: data.dataSourceId,
         })
 
         if (data.config?.viewport) {

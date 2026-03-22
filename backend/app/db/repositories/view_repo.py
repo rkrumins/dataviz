@@ -131,6 +131,10 @@ async def create_view(
     session: AsyncSession,
     req: ViewCreateRequest,
 ) -> ViewResponse:
+    logger.info(
+        "create_view: name=%s workspace_id=%s data_source_id=%s",
+        req.name, req.workspace_id, req.data_source_id,
+    )
     row = ViewORM(
         name=req.name,
         description=req.description,

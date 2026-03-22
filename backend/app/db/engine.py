@@ -343,6 +343,56 @@ async def init_db() -> None:
         except Exception:
             pass
 
+    # ── Schema migrations tracking table ──────────────────────────────
+    # Ensures destructive one-time migrations only run once, even across
+    # server restarts. Each migration is identified by a unique key.
+    async with engine.begin() as conn:
+        if DATABASE_URL.startswith("sqlite"):
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS schema_migrations "
+                    "(key TEXT NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL)"
+                )
+            )
+
+    # ── One-time: undo bad data_source_id backfill ───────────────────
+    # A prior migration incorrectly guessed data_source_id for legacy views.
+    # Reset to NULL so these views use the active datasource (pre-fix behavior).
+    # This MUST only run once — subsequent runs would wipe legitimately-set
+    # data_source_id values on views targeting the primary datasource.
+    async with engine.begin() as conn:
+        try:
+            result = await conn.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT 1 FROM schema_migrations WHERE key = 'undo_bad_ds_backfill'"
+                )
+            )
+            if result.scalar() is None:
+                await conn.execute(
+                    __import__("sqlalchemy").text(
+                        """
+                        UPDATE views
+                        SET data_source_id = NULL
+                        WHERE data_source_id IS NOT NULL
+                          AND data_source_id = (
+                              SELECT ds.id FROM workspace_data_sources ds
+                              WHERE ds.workspace_id = views.workspace_id
+                              ORDER BY ds.is_primary DESC, ds.created_at ASC
+                              LIMIT 1
+                          )
+                        """
+                    )
+                )
+                await conn.execute(
+                    __import__("sqlalchemy").text(
+                        "INSERT INTO schema_migrations (key, applied_at) "
+                        "VALUES ('undo_bad_ds_backfill', datetime('now'))"
+                    )
+                )
+                logger.info("Migration applied: undo_bad_ds_backfill")
+        except Exception:
+            pass
+
     logger.info("Management DB initialised at %s", DATABASE_URL)
 
 
