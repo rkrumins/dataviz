@@ -13,7 +13,7 @@
  */
 import { useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { useSchemaStore } from '@/store/schema'
 import { defaultWorkspaceSchema } from '@/lib/default-schema'
 import type { GraphSchema } from '@/providers/GraphDataProvider'
@@ -35,13 +35,17 @@ async function fetchGraphSchema(provider: ReturnType<typeof useGraphProvider>): 
  */
 export function useGraphSchema() {
   const provider = useGraphProvider()
+  const { workspaceId, dataSourceId } = useGraphProviderContext()
   // Read actions once — they are stable references (Zustand guarantees this)
   const loadFromBackend = useSchemaStore(s => s.loadFromBackend)
   const loadSchema = useSchemaStore(s => s.loadSchema)
   const queryClient = useQueryClient()
 
   const query = useQuery({
-    queryKey: [...GRAPH_SCHEMA_QUERY_KEY, provider],
+    // Include workspaceId + dataSourceId explicitly so workspace A's schema
+    // is never served for workspace B (even if the provider object reference
+    // hasn't changed yet due to React batching).
+    queryKey: [...GRAPH_SCHEMA_QUERY_KEY, workspaceId, dataSourceId, provider],
     queryFn: () => fetchGraphSchema(provider),
     staleTime: 5 * 60 * 1000,   // 5 minutes — matches backend _ONTOLOGY_CACHE_TTL
     gcTime: 10 * 60 * 1000,     // 10 minutes garbage collection

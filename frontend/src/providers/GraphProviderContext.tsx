@@ -37,6 +37,10 @@ export interface GraphProviderContextValueExtended extends GraphProviderContextV
     setWorkspaceId: (id: string | null) => void
     dataSourceId: string | null
     setDataSourceId: (id: string | null) => void
+    /** True once the provider has been created AND background connectivity check has resolved (success or fail). */
+    providerReady: boolean
+    /** Monotonically increasing counter — increments each time a new provider instance is created. */
+    providerVersion: number
     /** @deprecated Use workspaceId — kept for backward compat */
     connectionId: string | null
     /** @deprecated Use setWorkspaceId — kept for backward compat */
@@ -69,6 +73,8 @@ export function GraphProvider({ children }: GraphProviderProps) {
     const [isLoading, setIsLoading] = useState(true)
     const [error, setError] = useState<Error | null>(null)
     const [currentProvider, setCurrentProvider] = useState<GraphDataProvider | null>(null)
+    const [providerReady, setProviderReady] = useState(false)
+    const [providerVersion, setProviderVersion] = useState(0)
 
     // Track previous IDs so we only rebuild the provider when it changes
     const prevWorkspaceId = useRef<string | null | undefined>(undefined)
@@ -120,7 +126,9 @@ export function GraphProvider({ children }: GraphProviderProps) {
             // Set the provider IMMEDIATELY — don't block on getStats().
             // This ensures navigation works instantly when switching workspaces.
             if (!cancelled) {
+                setProviderReady(false)
                 setCurrentProvider(p)
+                setProviderVersion(v => v + 1)
                 setIsLoading(false)
             }
 
@@ -131,6 +139,10 @@ export function GraphProvider({ children }: GraphProviderProps) {
             } catch (err) {
                 if (!cancelled) {
                     setError(err instanceof Error ? err : new Error('Provider connection failed'))
+                }
+            } finally {
+                if (!cancelled) {
+                    setProviderReady(true)
                 }
             }
         }
@@ -157,6 +169,8 @@ export function GraphProvider({ children }: GraphProviderProps) {
         setWorkspaceId: setActiveWorkspace,
         dataSourceId: activeDataSourceId,
         setDataSourceId: setActiveDataSource,
+        providerReady,
+        providerVersion,
         connectionId: activeConnectionId,
         setConnectionId: setActiveConnection,
     }
@@ -205,6 +219,8 @@ export function useGraphProviderContext(): GraphProviderContextValueExtended {
             setWorkspaceId: () => {},
             dataSourceId: null,
             setDataSourceId: () => {},
+            providerReady: true,
+            providerVersion: 0,
             connectionId: null,
             setConnectionId: () => {},
         }

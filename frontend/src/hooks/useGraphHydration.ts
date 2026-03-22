@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
-import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import {
     useContainmentEdgeTypes,
     useLineageEdgeTypes,
@@ -124,6 +124,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const enableHydration = options?.hydrate ?? false
 
     const provider = useGraphProvider()
+    const { workspaceId: ctxWorkspaceId, dataSourceId: ctxDataSourceId } = useGraphProviderContext()
     const containmentEdgeTypes = useContainmentEdgeTypes()
     const lineageEdgeTypes = useLineageEdgeTypes()
     const rootEntityTypes = useRootEntityTypes()
@@ -168,10 +169,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         const layoutType = activeView?.layout.type ?? 'graph'
         const isReferenceView = layoutType === 'reference' || layoutType === 'layered-lineage'
 
-        // Key on both provider AND view ID so switching views triggers re-hydration.
-        // Without the view ID, switching from a hierarchy view to a different hierarchy
-        // view wouldn't reload data because the provider hasn't changed.
-        const initKey = `${String(provider)}:${activeView?.id ?? 'default'}:${layoutType}`
+        // Key on workspace, datasource, AND view ID so switching any dimension
+        // triggers re-hydration. String(provider) is always "[object Object]"
+        // so we use the actual IDs for a reliable change signal.
+        const initKey = `${ctxWorkspaceId ?? ''}:${ctxDataSourceId ?? ''}:${activeView?.id ?? 'default'}:${layoutType}`
 
         if (initializedKeyRef.current === initKey) return
         initializedKeyRef.current = initKey
