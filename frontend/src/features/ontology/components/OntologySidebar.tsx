@@ -1,4 +1,5 @@
-import { useState, useMemo, useCallback, useRef } from 'react'
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { Search, Plus, Sparkles, Shield, CheckCircle2, PenLine, Lock, Box, GitBranch, Loader2, BookOpen, Database, X, Zap, Trash2, LayoutGrid, Link2, Unlink, PanelLeftClose, PanelLeftOpen, Info, ChevronDown, ChevronUp } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -73,6 +74,39 @@ const MAX_WIDTH = 480
 const DEFAULT_WIDTH = 320
 const COLLAPSED_WIDTH = 52
 
+/** Portal-based tooltip that escapes overflow:hidden/auto containers */
+function CollapsedTooltip({
+  anchorRef,
+  visible,
+  children,
+}: {
+  anchorRef: React.RefObject<HTMLElement | null>
+  visible: boolean
+  children: React.ReactNode
+}) {
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+
+  useEffect(() => {
+    if (!visible || !anchorRef.current) { setPos(null); return }
+    const rect = anchorRef.current.getBoundingClientRect()
+    setPos({
+      top: rect.top + rect.height / 2,
+      left: rect.right + 8,
+    })
+  }, [visible, anchorRef])
+
+  if (!visible || !pos) return null
+  return createPortal(
+    <div
+      className="fixed z-[9999] pointer-events-none animate-in fade-in duration-150"
+      style={{ top: pos.top, left: pos.left, transform: 'translateY(-50%)' }}
+    >
+      {children}
+    </div>,
+    document.body,
+  )
+}
+
 export function OntologySidebar({
   ontologies,
   selectedOntologyId,
@@ -90,6 +124,8 @@ export function OntologySidebar({
   const [usageFilter, setUsageFilter] = useState<UsageFilterOption>('all')
   const [collapsed, setCollapsed] = useState(false)
   const [legendOpen, setLegendOpen] = useState(false)
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
+  const hoveredRef = useRef<HTMLButtonElement | null>(null)
   const [width, setWidth] = useState(DEFAULT_WIDTH)
   const resizing = useRef(false)
   const startX = useRef(0)
@@ -374,140 +410,62 @@ export function OntologySidebar({
 
   // ── Collapsed state ─────────────────────────────────────────────
   if (collapsed) {
+    // Find the hovered ontology for the portal tooltip
+    const hoveredOntology = hoveredId ? filtered.find(o => o.id === hoveredId) ?? null : null
+
     return (
       <div
-        className="flex-shrink-0 flex flex-col border-r border-glass-border bg-canvas-elevated/40 h-full relative overflow-visible"
+        className="flex-shrink-0 flex flex-col border-r border-glass-border bg-canvas-elevated/40 h-full relative"
         style={{ width: COLLAPSED_WIDTH }}
       >
         {/* Expand button */}
         <div className="p-2 pt-4">
           <button
             onClick={() => setCollapsed(false)}
-            className="w-full flex items-center justify-center p-2 rounded-lg hover:bg-black/[0.04] dark:hover:bg-white/[0.04] text-ink-muted hover:text-ink transition-colors group/expand"
+            className="w-full flex items-center justify-center p-2 rounded-lg hover:bg-black/[0.04] dark:hover:bg-white/[0.04] text-ink-muted hover:text-ink transition-colors"
+            title="Expand sidebar"
           >
             <PanelLeftOpen className="w-4 h-4" />
-            {/* Tooltip for expand */}
-            <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 z-[60] pointer-events-none opacity-0 group-hover/expand:opacity-100 transition-opacity duration-150 delay-200">
-              <div className="bg-canvas-elevated border border-glass-border rounded-lg shadow-lg px-2.5 py-1.5 whitespace-nowrap">
-                <span className="text-[11px] font-medium text-ink">Expand sidebar</span>
-              </div>
-            </div>
           </button>
         </div>
 
-        {/* Collapsed icon list — overflow-visible so tooltips aren't clipped */}
-        <div className="flex-1 overflow-y-auto overflow-x-visible px-1.5 pb-2 space-y-0.5">
+        {/* Collapsed icon list */}
+        <div className="flex-1 overflow-y-auto px-1.5 pb-2 space-y-0.5">
           {filtered.slice(0, 30).map(o => {
             const isSelected = o.id === selectedOntologyId
             const isActive = o.id === activeOntologyId
             const statusKey = getStatusKey(o)
             const config = STATUS_CONFIGS[statusKey]
             const StatusIcon = o.deletedAt ? Trash2 : config.icon
-            const dsCount = assignmentCountMap.get(o.id) ?? 0
             return (
-              <div key={o.id} className="relative group/tip">
-                <button
-                  onClick={() => navigate(`/schema/${o.id}`)}
-                  className={cn(
-                    'w-full flex items-center justify-center p-2 rounded-lg transition-all relative',
-                    isSelected
-                      ? 'bg-indigo-500/15 ring-1 ring-indigo-500/20 shadow-sm'
-                      : isActive
-                        ? 'bg-emerald-500/10 ring-1 ring-emerald-500/20'
-                        : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
-                  )}
-                >
-                  {/* Selected indicator bar */}
-                  {isSelected && (
-                    <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-4 rounded-r-full bg-indigo-500" />
-                  )}
-                  {/* Active indicator dot */}
-                  {isActive && !isSelected && (
-                    <div className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                  )}
-                  <StatusIcon className={cn(
-                    'w-4 h-4',
-                    o.deletedAt ? 'text-red-400' : isSelected ? 'text-indigo-500' : isActive ? 'text-emerald-500' : config.color,
-                  )} />
-                </button>
-
-                {/* Rich tooltip on hover — positioned outside sidebar, with delay */}
-                <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 z-[60] pointer-events-none opacity-0 group-hover/tip:opacity-100 transition-opacity duration-150 delay-300">
-                  <div className="bg-canvas-elevated border border-glass-border rounded-xl shadow-xl px-4 py-3 min-w-[220px] max-w-[300px]">
-                    {/* Name + version */}
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-ink">{o.name}</span>
-                      <span className={cn(
-                        'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold font-mono border',
-                        o.isPublished || o.isSystem
-                          ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/15'
-                          : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/15',
-                      )}>
-                        {o.isPublished || o.isSystem ? <Lock className="w-2.5 h-2.5" /> : <PenLine className="w-2.5 h-2.5" />}
-                        v{o.version}
-                      </span>
-                    </div>
-
-                    {/* Description */}
-                    {o.description && (
-                      <p className="text-xs text-ink-muted mt-1.5 leading-relaxed whitespace-normal line-clamp-2">
-                        {o.description}
-                      </p>
-                    )}
-
-                    {/* Status + stats row */}
-                    <div className="flex items-center gap-2.5 mt-2 text-[11px] text-ink-muted">
-                      <span className={cn(
-                        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-medium capitalize',
-                        o.deletedAt
-                          ? 'bg-red-500/10 text-red-500'
-                          : statusKey === 'system'
-                            ? 'bg-indigo-500/10 text-indigo-500'
-                            : statusKey === 'published'
-                              ? 'bg-emerald-500/10 text-emerald-500'
-                              : 'bg-amber-500/10 text-amber-500',
-                      )}>
-                        <StatusIcon className="w-3 h-3" />
-                        {o.deletedAt ? 'Deleted' : statusKey}
-                      </span>
-                      <span className="inline-flex items-center gap-0.5">
-                        <Box className="w-3 h-3" />
-                        {Object.keys(o.entityTypeDefinitions ?? {}).length}
-                      </span>
-                      <span className="inline-flex items-center gap-0.5">
-                        <GitBranch className="w-3 h-3" />
-                        {Object.keys(o.relationshipTypeDefinitions ?? {}).length}
-                      </span>
-                    </div>
-
-                    {/* Usage + active indicators */}
-                    <div className="flex items-center gap-2.5 mt-1.5 text-[11px]">
-                      {dsCount > 0 ? (
-                        <span className="text-emerald-600 dark:text-emerald-400 font-medium inline-flex items-center gap-1">
-                          <Link2 className="w-3 h-3" />
-                          {dsCount} data source{dsCount !== 1 ? 's' : ''}
-                        </span>
-                      ) : (
-                        <span className="text-ink-muted/50 font-medium inline-flex items-center gap-1">
-                          <Unlink className="w-3 h-3" />
-                          Unassigned
-                        </span>
-                      )}
-                      {isActive && (
-                        <span className="text-emerald-500 font-bold inline-flex items-center gap-1">
-                          <Zap className="w-3 h-3" />
-                          Active
-                        </span>
-                      )}
-                      {isSelected && (
-                        <span className="text-indigo-500 font-bold">
-                          Currently viewing
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <button
+                key={o.id}
+                ref={hoveredId === o.id ? hoveredRef : undefined}
+                onClick={() => navigate(`/schema/${o.id}`)}
+                onMouseEnter={(e) => { hoveredRef.current = e.currentTarget; setHoveredId(o.id) }}
+                onMouseLeave={() => setHoveredId(null)}
+                className={cn(
+                  'w-full flex items-center justify-center p-2 rounded-lg transition-all relative',
+                  isSelected
+                    ? 'bg-indigo-500/15 ring-1 ring-indigo-500/20 shadow-sm'
+                    : isActive
+                      ? 'bg-emerald-500/10 ring-1 ring-emerald-500/20'
+                      : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
+                )}
+              >
+                {/* Selected indicator bar */}
+                {isSelected && (
+                  <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-4 rounded-r-full bg-indigo-500" />
+                )}
+                {/* Active indicator dot */}
+                {isActive && !isSelected && (
+                  <div className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                )}
+                <StatusIcon className={cn(
+                  'w-4 h-4',
+                  o.deletedAt ? 'text-red-400' : isSelected ? 'text-indigo-500' : isActive ? 'text-emerald-500' : config.color,
+                )} />
+              </button>
             )
           })}
         </div>
@@ -516,16 +474,103 @@ export function OntologySidebar({
         <div className="border-t border-glass-border/60 p-1.5 space-y-1">
           <button
             onClick={onCreateDraft}
-            className="w-full flex items-center justify-center p-2 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition-colors group/newdraft relative"
+            className="w-full flex items-center justify-center p-2 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition-colors"
+            title="New Draft"
           >
             <Plus className="w-4 h-4" />
-            <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 z-[60] pointer-events-none opacity-0 group-hover/newdraft:opacity-100 transition-opacity duration-150 delay-200">
-              <div className="bg-canvas-elevated border border-glass-border rounded-lg shadow-lg px-2.5 py-1.5 whitespace-nowrap">
-                <span className="text-[11px] font-medium text-ink">New Draft</span>
-              </div>
-            </div>
           </button>
         </div>
+
+        {/* Portal tooltip — renders at document.body so it's never clipped */}
+        {hoveredOntology && (() => {
+          const o = hoveredOntology
+          const isSelected = o.id === selectedOntologyId
+          const isActive = o.id === activeOntologyId
+          const statusKey = getStatusKey(o)
+          const config = STATUS_CONFIGS[statusKey]
+          const StatusIcon = o.deletedAt ? Trash2 : config.icon
+          const dsCount = assignmentCountMap.get(o.id) ?? 0
+          return (
+            <CollapsedTooltip anchorRef={hoveredRef} visible>
+              <div className="bg-canvas-elevated border border-glass-border rounded-xl shadow-xl px-4 py-3 min-w-[240px] max-w-[320px]">
+                {/* Name + version */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-semibold text-ink">{o.name}</span>
+                  <span className={cn(
+                    'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold font-mono border',
+                    o.isPublished || o.isSystem
+                      ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/15'
+                      : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/15',
+                  )}>
+                    {o.isPublished || o.isSystem ? <Lock className="w-2.5 h-2.5" /> : <PenLine className="w-2.5 h-2.5" />}
+                    v{o.version}
+                  </span>
+                  {isActive && (
+                    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-[9px] font-bold text-emerald-600 dark:text-emerald-400 ring-1 ring-emerald-500/20">
+                      <Zap className="w-2.5 h-2.5" />
+                      ACTIVE
+                    </span>
+                  )}
+                </div>
+
+                {/* Description */}
+                {o.description && (
+                  <p className="text-xs text-ink-muted mt-1.5 leading-relaxed whitespace-normal line-clamp-3">
+                    {o.description}
+                  </p>
+                )}
+
+                {/* Divider */}
+                <div className="h-px bg-glass-border/60 my-2" />
+
+                {/* Status + stats row */}
+                <div className="flex items-center gap-3 text-[11px] text-ink-muted">
+                  <span className={cn(
+                    'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-medium capitalize',
+                    o.deletedAt
+                      ? 'bg-red-500/10 text-red-500'
+                      : statusKey === 'system'
+                        ? 'bg-indigo-500/10 text-indigo-500'
+                        : statusKey === 'published'
+                          ? 'bg-emerald-500/10 text-emerald-500'
+                          : 'bg-amber-500/10 text-amber-500',
+                  )}>
+                    <StatusIcon className="w-3 h-3" />
+                    {o.deletedAt ? 'Deleted' : statusKey}
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <Box className="w-3 h-3" />
+                    {Object.keys(o.entityTypeDefinitions ?? {}).length} entities
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <GitBranch className="w-3 h-3" />
+                    {Object.keys(o.relationshipTypeDefinitions ?? {}).length} rels
+                  </span>
+                </div>
+
+                {/* Usage row */}
+                <div className="flex items-center gap-3 mt-1.5 text-[11px]">
+                  {dsCount > 0 ? (
+                    <span className="text-emerald-600 dark:text-emerald-400 font-medium inline-flex items-center gap-1">
+                      <Link2 className="w-3 h-3" />
+                      {dsCount} data source{dsCount !== 1 ? 's' : ''}
+                    </span>
+                  ) : (
+                    <span className="text-ink-muted/50 font-medium inline-flex items-center gap-1">
+                      <Unlink className="w-3 h-3" />
+                      Unassigned
+                    </span>
+                  )}
+                  {isSelected && (
+                    <span className="text-indigo-500 font-bold inline-flex items-center gap-1">
+                      Currently viewing
+                    </span>
+                  )}
+                </div>
+              </div>
+            </CollapsedTooltip>
+          )
+        })()}
       </div>
     )
   }
