@@ -22,11 +22,13 @@ import {
   Box,
   ExternalLink,
   RefreshCw,
+  AlertTriangle,
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import { cn } from '@/lib/utils'
 import { workspaceColor } from '@/lib/workspaceColor'
 import { timeAgo } from '@/lib/timeAgo'
+import { ViewCardOverflowMenu } from '@/components/explorer/ViewCardOverflowMenu'
 
 // ─── View type themes ───────────────────────────────────────────
 const VIEW_TYPE_META: Record<
@@ -72,16 +74,34 @@ const DEFAULT_META = {
   hoverBorder: 'group-hover:border-indigo-500/30',
 }
 
+// Deterministic tag colors from a curated palette
+const TAG_COLORS = [
+  { bg: 'bg-blue-500/10', text: 'text-blue-600 dark:text-blue-400', border: 'border-blue-500/20' },
+  { bg: 'bg-violet-500/10', text: 'text-violet-600 dark:text-violet-400', border: 'border-violet-500/20' },
+  { bg: 'bg-emerald-500/10', text: 'text-emerald-600 dark:text-emerald-400', border: 'border-emerald-500/20' },
+  { bg: 'bg-amber-500/10', text: 'text-amber-600 dark:text-amber-400', border: 'border-amber-500/20' },
+  { bg: 'bg-rose-500/10', text: 'text-rose-600 dark:text-rose-400', border: 'border-rose-500/20' },
+  { bg: 'bg-cyan-500/10', text: 'text-cyan-600 dark:text-cyan-400', border: 'border-cyan-500/20' },
+  { bg: 'bg-indigo-500/10', text: 'text-indigo-600 dark:text-indigo-400', border: 'border-indigo-500/20' },
+  { bg: 'bg-teal-500/10', text: 'text-teal-600 dark:text-teal-400', border: 'border-teal-500/20' },
+]
+
+function tagColor(tag: string) {
+  let hash = 0
+  for (let i = 0; i < tag.length; i++) hash = ((hash << 5) - hash + tag.charCodeAt(i)) | 0
+  return TAG_COLORS[Math.abs(hash) % TAG_COLORS.length]
+}
+
 const VISIBILITY_META: Record<string, { icon: React.ElementType; label: string }> = {
   enterprise: { icon: Globe, label: 'Enterprise' },
   workspace: { icon: Users, label: 'Workspace' },
   private: { icon: Lock, label: 'Private' },
 }
 
-const HEALTH_DOT: Record<string, string> = {
-  warning: 'bg-amber-400',
-  broken: 'bg-red-500',
-  stale: 'bg-amber-400/60',
+const HEALTH_INDICATOR: Record<string, { color: string; tooltip: string }> = {
+  warning: { color: 'text-amber-500', tooltip: 'Data source may have changed' },
+  broken: { color: 'text-red-500', tooltip: 'Data source has been deleted' },
+  stale: { color: 'text-amber-400/70', tooltip: 'View has not been updated recently' },
 }
 
 // ─── Mini preview illustrations ─────────────────────────────────
@@ -144,6 +164,7 @@ export function ExplorerViewCard({
   onToggleFavourite,
   onShare,
   onPreview,
+  onDelete,
   healthStatus,
 }: ExplorerViewCardProps) {
   const meta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_META
@@ -154,7 +175,7 @@ export function ExplorerViewCard({
   const tags = view.tags ?? []
   const visibleTags = tags.slice(0, 3)
   const overflowCount = tags.length - visibleTags.length
-  const healthDot = healthStatus ? HEALTH_DOT[healthStatus] : null
+  const healthInfo = healthStatus ? HEALTH_INDICATOR[healthStatus] : null
   const hasPreview = view.viewType === 'hierarchy' || view.viewType === 'reference'
   const showContextModel = view.contextModelName
     && view.contextModelName.toLowerCase() !== view.name.toLowerCase()
@@ -206,12 +227,14 @@ export function ExplorerViewCard({
           >
             <Link2 className="h-3.5 w-3.5" />
           </button>
+          <ViewCardOverflowMenu
+            viewId={view.id}
+            viewName={view.name}
+            visibility={view.visibility}
+            onDelete={() => onDelete?.()}
+            onShare={onShare}
+          />
         </div>
-
-        {/* Health dot */}
-        {healthDot && (
-          <span className={cn('absolute right-4 top-4 h-2 w-2 rounded-full group-hover:hidden', healthDot)} />
-        )}
 
         {/* ── 1. Header: icon + type + name ── */}
         <div className="flex items-center gap-3 mb-3 pr-6">
@@ -246,6 +269,20 @@ export function ExplorerViewCard({
               {view.contextModelName}
             </span>
           )}
+          {healthInfo && (
+            <span
+              className={cn(
+                'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border',
+                healthStatus === 'broken'
+                  ? 'border-red-500/20 bg-red-500/8 text-red-500'
+                  : 'border-amber-500/20 bg-amber-500/8 text-amber-600 dark:text-amber-400',
+              )}
+              title={healthInfo.tooltip}
+            >
+              <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
+              {healthStatus === 'broken' ? 'Source deleted' : healthStatus === 'warning' ? 'Warning' : 'Stale'}
+            </span>
+          )}
         </div>
 
         {/* ── 4. Description (fixed 2-line height) ── */}
@@ -274,26 +311,21 @@ export function ExplorerViewCard({
         <div className="mb-3 min-h-[20px]">
           {tags.length > 0 && (
             <div className="flex flex-wrap gap-1">
-              {visibleTags.map(tag => (
-                <span key={tag} className="rounded-full bg-black/[0.04] dark:bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium text-ink-muted">
-                  {tag}
-                </span>
-              ))}
+              {visibleTags.map(tag => {
+                const tc = tagColor(tag)
+                return (
+                  <span key={tag} className={cn('rounded-full border px-2 py-0.5 text-[10px] font-medium', tc.bg, tc.text, tc.border)}>
+                    {tag}
+                  </span>
+                )
+              })}
               {overflowCount > 0 && (
-                <span className="rounded-full bg-black/[0.04] dark:bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium text-ink-muted">
+                <span className="rounded-full bg-black/[0.06] dark:bg-white/[0.08] px-2 py-0.5 text-[10px] font-medium text-ink-muted">
                   +{overflowCount}
                 </span>
               )}
             </div>
           )}
-        </div>
-
-        {/* ── 7. Last synced ── */}
-        <div className="flex items-center gap-1 mb-2">
-          <RefreshCw className="h-2.5 w-2.5 text-ink-muted/50" />
-          <span className="text-[10px] text-ink-muted/50">
-            Synced {timeAgo(view.updatedAt)}
-          </span>
         </div>
 
         {/* Spacer */}
@@ -315,12 +347,24 @@ export function ExplorerViewCard({
             </div>
           )}
 
-          <span className="inline-flex items-center gap-1 text-[11px] text-ink-muted ml-auto">
+          <span className={cn(
+            'inline-flex items-center gap-1 text-[11px] font-medium ml-auto',
+            view.isFavourited ? 'text-red-500' : 'text-ink-muted',
+          )}>
             <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
             {view.favouriteCount}
           </span>
 
-          <span className="text-[10px] text-ink-muted/70">{timeAgo(view.updatedAt)}</span>
+          {(() => {
+            const ageDays = (Date.now() - new Date(view.updatedAt).getTime()) / (1000 * 60 * 60 * 24)
+            const syncColor = ageDays <= 7 ? 'text-emerald-500' : ageDays <= 30 ? 'text-amber-500' : 'text-red-500'
+            return (
+              <span className={cn('inline-flex items-center gap-1 text-[10px] font-medium', syncColor)}>
+                <RefreshCw className="h-2.5 w-2.5" />
+                {timeAgo(view.updatedAt)}
+              </span>
+            )
+          })()}
         </div>
       </div>
     </div>

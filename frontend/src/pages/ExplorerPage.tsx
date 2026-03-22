@@ -127,7 +127,7 @@ export function ExplorerPage() {
     offset: 0,
   }
 
-  const { views, totalCount, popularViews, isLoading, toggleFavourite, loadMore, hasMore } = useExplorerViews(filters)
+  const { views, totalCount, popularViews, isLoading, toggleFavourite, removeView: removeViewFromList, loadMore, hasMore } = useExplorerViews(filters)
   const healthMap = useViewHealth(views)
   const pinnedViews = useMemo(() => views.filter(v => v.isPinned), [views])
 
@@ -188,6 +188,27 @@ export function ExplorerPage() {
   const handleDeleteRequest = useCallback((view: View) => {
     setDeleteView({ id: view.id, name: view.name, favouriteCount: view.favouriteCount })
   }, [])
+
+  const handleDeleted = useCallback(() => {
+    if (!deleteView) return
+    const deletedName = deleteView.name
+    const deletedId = deleteView.id
+    // Close dialog
+    setDeleteView(null)
+    // Close preview drawer if it was showing this view
+    setPreviewView(prev => prev?.id === deletedId ? null : prev)
+    // Remove from list optimistically
+    removeViewFromList(deletedId)
+    // Deselect if it was selected
+    setSelectedIds(prev => {
+      if (!prev.has(deletedId)) return prev
+      const next = new Set(prev)
+      next.delete(deletedId)
+      return next
+    })
+    // Toast
+    showToast('success', `"${deletedName}" has been deleted`)
+  }, [deleteView, removeViewFromList, showToast])
 
   // ─── Render ─────────────────────────────────────────────────────────
 
@@ -407,6 +428,8 @@ export function ExplorerPage() {
         onClose={() => setPreviewView(null)}
         onToggleFavourite={() => previewView && toggleFavourite(previewView.id)}
         onShare={() => previewView && handleShareDialog(previewView)}
+        onDelete={() => previewView && handleDeleteRequest(previewView)}
+        healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
       />
       <ExplorerBulkActions
         selectedCount={selectedIds.size}
@@ -418,7 +441,7 @@ export function ExplorerPage() {
         <ShareViewDialog viewId={shareView.id} viewName={shareView.name} currentVisibility={shareView.visibility} isOpen={true} onClose={() => setShareView(null)} />
       )}
       {deleteView && (
-        <DeleteViewDialog viewId={deleteView.id} viewName={deleteView.name} favouriteCount={deleteView.favouriteCount} isOpen={true} onClose={() => setDeleteView(null)} onDeleted={() => setDeleteView(null)} />
+        <DeleteViewDialog viewId={deleteView.id} viewName={deleteView.name} favouriteCount={deleteView.favouriteCount} isOpen={true} onClose={() => setDeleteView(null)} onDeleted={handleDeleted} />
       )}
 
       {/* ── Toast ── */}

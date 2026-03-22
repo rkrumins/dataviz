@@ -69,6 +69,7 @@ export interface UseExplorerViewsResult {
   isLoading: boolean
   error: string | null
   toggleFavourite: (viewId: string) => void
+  removeView: (viewId: string) => void
   loadMore: () => void
   hasMore: boolean
 }
@@ -218,6 +219,13 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     })
   }, [allViews])
 
+  // ─── Remove view (optimistic, after delete) ────────────────────────
+
+  const removeView = useCallback((viewId: string) => {
+    setAllViews(prev => prev.filter(v => v.id !== viewId))
+    setPopularViews(prev => prev.filter(v => v.id !== viewId))
+  }, [])
+
   // ─── Load more (infinite scroll) ───────────────────────────────────
 
   const loadMore = useCallback(() => {
@@ -231,6 +239,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     isLoading,
     error,
     toggleFavourite,
+    removeView,
     loadMore,
     hasMore,
   }

@@ -62,7 +62,7 @@ export function ViewCardOverflowMenu({
     <div ref={menuRef} className="relative">
       <button
         onClick={e => { e.preventDefault(); e.stopPropagation(); setIsOpen(!isOpen) }}
-        className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-all opacity-0 group-hover:opacity-100"
+        className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
       >
         <MoreHorizontal className="w-4 h-4 text-ink-muted" />
       </button>
@@ -71,7 +71,7 @@ export function ViewCardOverflowMenu({
         <div
           className={cn(
             'absolute right-0 top-full mt-1 w-52 py-1 z-50',
-            'bg-canvas/98 backdrop-blur-2xl rounded-2xl shadow-2xl',
+            'bg-white dark:bg-slate-900 rounded-2xl shadow-2xl',
             'border border-glass-border',
           )}
           onClick={e => { e.preventDefault(); e.stopPropagation() }}

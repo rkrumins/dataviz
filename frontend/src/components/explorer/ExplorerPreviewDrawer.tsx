@@ -13,6 +13,7 @@ import {
   X,
   Heart,
   Share2,
+  Trash2,
   Tag,
   Lock,
   Users,
@@ -31,6 +32,7 @@ import {
   LayoutDashboard,
   ChevronLeft,
   ChevronRight,
+  AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { workspaceColor } from '@/lib/workspaceColor'
@@ -46,6 +48,8 @@ interface ExplorerPreviewDrawerProps {
   onClose: () => void
   onToggleFavourite: () => void
   onShare: () => void
+  onDelete?: () => void
+  healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
 }
 
 // ─── Constants ──────────────────────────────────────────────────
@@ -308,6 +312,8 @@ export function ExplorerPreviewDrawer({
   onClose,
   onToggleFavourite,
   onShare,
+  onDelete,
+  healthStatus,
 }: ExplorerPreviewDrawerProps) {
   const content = (
     <AnimatePresence>
@@ -360,6 +366,41 @@ export function ExplorerPreviewDrawer({
                 <X className="h-5 w-5" />
               </button>
             </div>
+
+            {/* ── Health warning banner ── */}
+            {healthStatus && healthStatus !== 'healthy' && (
+              <div className={cn(
+                'mx-6 mt-4 rounded-xl border px-4 py-3 flex items-start gap-3',
+                healthStatus === 'broken'
+                  ? 'bg-red-50 dark:bg-red-500/[0.08] border-red-200 dark:border-red-500/20'
+                  : 'bg-amber-50 dark:bg-amber-500/[0.08] border-amber-200 dark:border-amber-500/20',
+              )}>
+                <AlertTriangle className={cn(
+                  'h-4 w-4 shrink-0 mt-0.5',
+                  healthStatus === 'broken' ? 'text-red-500' : 'text-amber-500',
+                )} />
+                <div>
+                  <p className={cn(
+                    'text-sm font-semibold',
+                    healthStatus === 'broken' ? 'text-red-700 dark:text-red-400' : 'text-amber-700 dark:text-amber-400',
+                  )}>
+                    {healthStatus === 'broken' && 'Data source has been deleted'}
+                    {healthStatus === 'warning' && 'Data source may have changed'}
+                    {healthStatus === 'stale' && 'View has not been updated recently'}
+                  </p>
+                  <p className={cn(
+                    'text-xs mt-0.5',
+                    healthStatus === 'broken' ? 'text-red-600/70 dark:text-red-400/70' : 'text-amber-600/70 dark:text-amber-400/70',
+                  )}>
+                    {healthStatus === 'broken'
+                      ? 'This view may not load correctly. Consider deleting it.'
+                      : healthStatus === 'warning'
+                        ? 'The underlying data source configuration has changed.'
+                        : 'This view has not been synced in over 90 days.'}
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* ── Body ── */}
             <div className="flex-1 px-6 py-5 space-y-5">
@@ -607,6 +648,21 @@ export function ExplorerPreviewDrawer({
                 <Share2 className="h-4 w-4" />
                 Share
               </button>
+              {onDelete && (
+                <button
+                  onClick={onDelete}
+                  className={cn(
+                    'inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3',
+                    'border border-red-200 dark:border-red-500/20 text-sm font-medium',
+                    'text-red-500 bg-red-50/50 dark:bg-red-500/[0.06]',
+                    'hover:bg-red-100 dark:hover:bg-red-500/15 hover:border-red-300 dark:hover:border-red-500/30 transition-colors duration-200',
+                  )}
+                  title="Delete view"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete
+                </button>
+              )}
             </div>
           </motion.aside>
         </>

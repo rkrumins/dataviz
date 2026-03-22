@@ -1,10 +1,11 @@
 /**
  * DeleteViewDialog — Enterprise-grade delete confirmation with type-to-confirm.
- * Pattern reused from DeleteConfirmDialog in the ontology feature.
+ * Renders via portal so it layers correctly above drawers and other overlays.
  */
 import { useState, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, AlertTriangle, Heart } from 'lucide-react'
+import { X, Trash2, Heart, AlertCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { deleteView } from '@/services/viewApiService'
 
@@ -55,51 +56,59 @@ export function DeleteViewDialog({
 
   if (!isOpen) return null
 
-  return (
+  const dialog = (
     <AnimatePresence>
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+        className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         onClick={handleClose}
       >
         <motion.div
-          initial={{ scale: 0.95, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          exit={{ scale: 0.95, opacity: 0 }}
+          initial={{ scale: 0.95, opacity: 0, y: 8 }}
+          animate={{ scale: 1, opacity: 1, y: 0 }}
+          exit={{ scale: 0.95, opacity: 0, y: 8 }}
+          transition={{ type: 'spring', damping: 25, stiffness: 350 }}
           onClick={e => e.stopPropagation()}
-          className="w-full max-w-md bg-canvas/98 backdrop-blur-2xl rounded-2xl shadow-2xl border border-glass-border overflow-hidden"
+          className="w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl shadow-2xl shadow-black/20 overflow-hidden"
         >
-          {/* Header */}
-          <div className="flex items-center gap-3 px-6 py-5 border-b border-glass-border/50">
-            <div className="w-10 h-10 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center justify-center">
-              <AlertTriangle className="w-5 h-5 text-red-500" />
+          {/* Header — red accent strip */}
+          <div className="relative">
+            <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-red-500 to-rose-500" />
+            <div className="flex items-center gap-3.5 px-6 pt-6 pb-4">
+              <div className="w-11 h-11 rounded-xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 flex items-center justify-center">
+                <Trash2 className="w-5 h-5 text-red-500" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Delete View</h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400 truncate">{viewName}</p>
+              </div>
+              <button
+                onClick={handleClose}
+                className="p-2 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors duration-150"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
-            <div className="flex-1 min-w-0">
-              <h3 className="text-lg font-bold text-ink">Delete View</h3>
-              <p className="text-sm text-ink-muted truncate">{viewName}</p>
-            </div>
-            <button
-              onClick={handleClose}
-              className="p-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 transition-all"
-            >
-              <X className="w-5 h-5 text-ink-muted" />
-            </button>
           </div>
 
           {/* Body */}
-          <div className="px-6 py-5 space-y-4">
-            <p className="text-sm text-ink-muted leading-relaxed">
-              This will permanently delete the view <strong className="text-ink font-semibold">{viewName}</strong>.
-              This action cannot be undone.
-            </p>
+          <div className="px-6 pb-5 space-y-4">
+            {/* Warning box */}
+            <div className="rounded-xl bg-red-50 dark:bg-red-500/[0.08] border border-red-200 dark:border-red-500/20 px-4 py-3.5">
+              <p className="text-sm text-red-800 dark:text-red-300 leading-relaxed">
+                This will <strong className="font-semibold">permanently delete</strong> the view{' '}
+                <strong className="font-semibold">"{viewName}"</strong>.
+                This action cannot be undone.
+              </p>
+            </div>
 
             {/* Impact warning */}
             {favouriteCount > 0 && (
-              <div className="flex items-center gap-2.5 px-4 py-3 rounded-xl bg-amber-500/10 border border-amber-500/20">
-                <Heart className="w-4 h-4 text-amber-500 shrink-0" />
-                <span className="text-xs font-medium text-amber-600 dark:text-amber-400">
+              <div className="flex items-center gap-2.5 px-4 py-3 rounded-xl bg-amber-50 dark:bg-amber-500/[0.08] border border-amber-200 dark:border-amber-500/20">
+                <Heart className="w-4 h-4 text-amber-500 shrink-0" fill="currentColor" />
+                <span className="text-xs font-medium text-amber-700 dark:text-amber-400">
                   This view has {favouriteCount} favourite{favouriteCount !== 1 ? 's' : ''} across the organization
                 </span>
               </div>
@@ -107,8 +116,8 @@ export function DeleteViewDialog({
 
             {/* Type to confirm */}
             <div>
-              <label className="block text-sm font-medium text-ink-muted mb-2">
-                Type <strong className="text-ink font-semibold">{viewName}</strong> to confirm
+              <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
+                Type <code className="px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 text-xs font-mono font-bold">{viewName}</code> to confirm
               </label>
               <input
                 type="text"
@@ -116,29 +125,33 @@ export function DeleteViewDialog({
                 onChange={e => setConfirmText(e.target.value)}
                 placeholder={viewName}
                 className={cn(
-                  'w-full px-4 py-2.5 rounded-xl border text-sm text-ink font-medium',
-                  'bg-black/[0.03] dark:bg-white/[0.03]',
-                  'placeholder:text-ink-muted/40',
+                  'w-full px-4 py-3 rounded-xl border text-sm font-medium',
+                  'bg-slate-50 dark:bg-slate-800/50 text-slate-900 dark:text-white',
+                  'placeholder:text-slate-300 dark:placeholder:text-slate-600',
                   'outline-none transition-all duration-200',
-                  confirmText === viewName
-                    ? 'border-red-500/50 focus:border-red-500'
-                    : 'border-glass-border focus:border-glass-border/80'
+                  canDelete
+                    ? 'border-red-400 dark:border-red-500/50 ring-2 ring-red-100 dark:ring-red-500/10'
+                    : 'border-slate-200 dark:border-slate-700 focus:border-slate-400 dark:focus:border-slate-500 focus:ring-2 focus:ring-slate-100 dark:focus:ring-slate-500/10'
                 )}
                 autoFocus
+                onKeyDown={e => { if (e.key === 'Enter' && canDelete) handleDelete() }}
               />
             </div>
 
             {error && (
-              <p className="text-xs font-medium text-red-500">{error}</p>
+              <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20">
+                <AlertCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                <p className="text-xs font-medium text-red-600 dark:text-red-400">{error}</p>
+              </div>
             )}
           </div>
 
           {/* Footer */}
-          <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-glass-border/50">
+          <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30">
             <button
               onClick={handleClose}
               disabled={deleting}
-              className="px-4 py-2.5 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-all"
+              className="px-4 py-2.5 rounded-xl text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors duration-150"
             >
               Cancel
             </button>
@@ -148,15 +161,31 @@ export function DeleteViewDialog({
               className={cn(
                 'px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200',
                 canDelete && !deleting
-                  ? 'bg-red-500 text-white hover:bg-red-600 shadow-lg shadow-red-500/25 hover:shadow-xl hover:-translate-y-0.5'
-                  : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed'
+                  ? 'bg-red-500 text-white hover:bg-red-600 shadow-lg shadow-red-500/25 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0'
+                  : 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed'
               )}
             >
-              {deleting ? 'Deleting...' : 'Delete View'}
+              {deleting ? (
+                <span className="flex items-center gap-2">
+                  <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Deleting...
+                </span>
+              ) : (
+                <span className="flex items-center gap-2">
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Delete View
+                </span>
+              )}
             </button>
           </div>
         </motion.div>
       </motion.div>
     </AnimatePresence>
   )
+
+  // Render via portal to layer correctly above drawers and other overlays
+  return createPortal(dialog, document.body)
 }
