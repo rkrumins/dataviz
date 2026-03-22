@@ -83,6 +83,7 @@ export function AssetOnboardingWizard({
     const [currentStep, setCurrentStep] = useState<WizardStep>('workspace')
     const [previousSteps, setPreviousSteps] = useState<WizardStep[]>([])
     const [isSubmitting, setIsSubmitting] = useState(false)
+    const [submitError, setSubmitError] = useState<string | null>(null)
     const [wizardPhase, setWizardPhase] = useState<'steps' | 'success'>('steps')
 
     // Track created workspace/ds IDs for success screen navigation
@@ -98,6 +99,7 @@ export function AssetOnboardingWizard({
             setCurrentStep('workspace')
             setPreviousSteps([])
             setIsSubmitting(false)
+            setSubmitError(null)
             setWizardPhase('steps')
             setCreatedContext(null)
             setFormData({
@@ -254,7 +256,10 @@ export function AssetOnboardingWizard({
             setWizardPhase('success')
         } catch (err) {
             console.error('Onboarding failed:', err)
-            // Stay on review step — user can retry
+            const message = err instanceof Error ? err.message : 'Unknown error'
+            // Extract detail from JSON error body if present
+            const detailMatch = message.match(/\{"detail":"(.+?)"\}/)
+            setSubmitError(detailMatch ? detailMatch[1] : message)
         } finally {
             setIsSubmitting(false)
         }
@@ -413,6 +418,19 @@ export function AssetOnboardingWizard({
                             </motion.div>
                         </AnimatePresence>
                     </div>
+
+                    {/* Error banner */}
+                    {submitError && wizardPhase === 'steps' && (
+                        <div className="mx-6 mb-2 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400 flex items-center justify-between">
+                            <span>{submitError}</span>
+                            <button
+                                onClick={() => setSubmitError(null)}
+                                className="ml-3 text-red-400 hover:text-red-600 dark:hover:text-red-300"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+                    )}
 
                     {/* Footer — hidden during success phase */}
                     {wizardPhase === 'steps' && (

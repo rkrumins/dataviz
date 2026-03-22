@@ -137,11 +137,27 @@ export const workspaceService = {
         return request<DataSourceResponse[]>(`${ADMIN_API}/${wsId}/data-sources`)
     },
 
-    addDataSource(wsId: string, req: DataSourceCreateRequest): Promise<DataSourceResponse> {
-        return request<DataSourceResponse>(`${ADMIN_API}/${wsId}/data-sources`, {
+    async addDataSource(wsId: string, req: DataSourceCreateRequest): Promise<DataSourceResponse> {
+        const url = `${ADMIN_API}/${wsId}/data-sources`
+        const res = await fetch(url, {
             method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(req),
         })
+        if (res.status === 409) {
+            // Data source already exists — return the existing one
+            const existing = await this.listDataSources(wsId)
+            const match = existing.find(
+                ds => ds.catalogItemId === req.catalogItemId
+                    || (ds.providerId === req.providerId && ds.graphName === req.graphName)
+            )
+            if (match) return match
+        }
+        if (!res.ok) {
+            const text = await res.text()
+            throw new Error(`Workspace API ${res.status}: ${text || res.statusText}`)
+        }
+        return res.json()
     },
 
     updateDataSource(wsId: string, dsId: string, req: DataSourceUpdateRequest): Promise<DataSourceResponse> {

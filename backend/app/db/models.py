@@ -531,6 +531,13 @@ class ContextModelORM(Base):
     instance_assignments = Column(Text, nullable=False, default="{}") # JSON: entityId→assignment
     scope_edge_config = Column(Text, nullable=True)                  # JSON: ScopeEdgeConfig
     is_active = Column(Boolean, nullable=False, default=True)
+    # Columns added during context-model → view unification
+    view_type = Column(Text, nullable=True)                            # graph | table | lineage | ...
+    config = Column(Text, nullable=True)                               # JSON: full ViewConfiguration
+    visibility = Column(Text, nullable=False, default="private")       # private | workspace | public
+    created_by = Column(Text, nullable=True)
+    tags = Column(Text, nullable=True)                                 # JSON array
+    is_pinned = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -840,4 +847,15 @@ class OutboxEventORM(Base):
 
     def __repr__(self) -> str:
         return f"<OutboxEvent id={self.id!r} type={self.event_type!r}>"
+
+
+# ------------------------------------------------------------------ #
+# schema_migrations  (tracks one-time data-fix migrations)            #
+# ------------------------------------------------------------------ #
+
+class SchemaMigrationORM(Base):
+    __tablename__ = "schema_migrations"
+
+    key = Column(Text, primary_key=True)
+    applied_at = Column(Text, nullable=False, default=_now)
 

@@ -124,30 +124,42 @@ async def create_data_source(
     req: DataSourceCreateRequest,
     make_primary: bool = False,
 ) -> DataSourceResponse:
-    from .catalog_repo import get_catalog_item_orm
-    cat = await get_catalog_item_orm(session, req.catalog_item_id)
-    if not cat:
-        raise ValueError(f"Catalog Item '{req.catalog_item_id}' not found")
+    if req.catalog_item_id:
+        # Catalog-based: resolve provider and graph from the catalog entry
+        from .catalog_repo import get_catalog_item_orm
+        cat = await get_catalog_item_orm(session, req.catalog_item_id)
+        if not cat:
+            raise ValueError(f"Catalog Item '{req.catalog_item_id}' not found")
 
-    # 1:1 constraint: a catalog item can only belong to one workspace
-    existing = await session.execute(
-        select(WorkspaceDataSourceORM.workspace_id)
-        .where(WorkspaceDataSourceORM.catalog_item_id == req.catalog_item_id)
-        .limit(1)
-    )
-    bound = existing.scalar_one_or_none()
-    if bound:
-        raise ValueError(
-            f"Catalog item '{req.catalog_item_id}' is already allocated to workspace '{bound}'"
+        # 1:1 constraint: a catalog item can only belong to one workspace
+        existing = await session.execute(
+            select(WorkspaceDataSourceORM.workspace_id)
+            .where(WorkspaceDataSourceORM.catalog_item_id == req.catalog_item_id)
+            .limit(1)
         )
+        bound = existing.scalar_one_or_none()
+        if bound:
+            raise ValueError(
+                f"Catalog item '{req.catalog_item_id}' is already allocated to workspace '{bound}'"
+            )
+        provider_id = cat.provider_id
+        graph_name = cat.source_identifier
+        label = req.label or cat.name or cat.source_identifier
+    elif req.provider_id:
+        # Direct provider+graph: used by bootstrap and direct API calls
+        provider_id = req.provider_id
+        graph_name = req.graph_name
+        label = req.label or req.graph_name or "default"
+    else:
+        raise ValueError("DataSource requires either catalogItemId or providerId")
 
     row = WorkspaceDataSourceORM(
         workspace_id=workspace_id,
         catalog_item_id=req.catalog_item_id,
-        provider_id=cat.provider_id,
-        graph_name=cat.source_identifier,
+        provider_id=provider_id,
+        graph_name=graph_name,
         ontology_id=req.ontology_id,
-        label=req.label or cat.name or cat.source_identifier,
+        label=label,
         is_primary=make_primary,
         is_active=True,
         extra_config=json.dumps(req.extra_config) if req.extra_config else None,

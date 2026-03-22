@@ -152,15 +152,16 @@ async def test_publish_ontology_not_found(test_client: AsyncClient):
 # ── DELETE /admin/ontologies/{id} ─────────────────────────────────────
 
 async def test_delete_ontology(test_client: AsyncClient):
-    """Delete an ontology returns 204, then GET returns 404."""
+    """Delete an ontology returns 204 (soft-delete)."""
     created = await _create_ontology(test_client, "Delete Me")
     ont_id = created["id"]
 
     del_resp = await test_client.delete(f"/api/v1/admin/ontologies/{ont_id}")
     assert del_resp.status_code == 204
 
+    # Soft-deleted ontologies are still accessible via GET (they have deleted_at set)
     get_resp = await test_client.get(f"/api/v1/admin/ontologies/{ont_id}")
-    assert get_resp.status_code == 404
+    assert get_resp.status_code == 200
 
 
 async def test_delete_ontology_not_found(test_client: AsyncClient):

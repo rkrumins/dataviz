@@ -135,18 +135,29 @@ async def create_workspace(
     # Create data source rows
     from .catalog_repo import get_catalog_item_orm
     for i, ds_req in enumerate(req.data_sources):
-        # Resolve provider and graph name from catalog item
-        cat = await get_catalog_item_orm(session, ds_req.catalog_item_id)
-        if not cat:
-            raise ValueError(f"Catalog Item '{ds_req.catalog_item_id}' not found")
+        if ds_req.catalog_item_id:
+            # Catalog-based: resolve provider and graph name from catalog item
+            cat = await get_catalog_item_orm(session, ds_req.catalog_item_id)
+            if not cat:
+                raise ValueError(f"Catalog Item '{ds_req.catalog_item_id}' not found")
+            provider_id = cat.provider_id
+            graph_name = cat.source_identifier
+            label = ds_req.label or cat.name or cat.source_identifier
+        elif ds_req.provider_id:
+            # Direct provider+graph: used by bootstrap and direct API calls
+            provider_id = ds_req.provider_id
+            graph_name = ds_req.graph_name
+            label = ds_req.label or ds_req.graph_name or "default"
+        else:
+            raise ValueError("DataSource requires either catalogItemId or providerId")
 
         ds = WorkspaceDataSourceORM(
             workspace_id=ws.id,
             catalog_item_id=ds_req.catalog_item_id,
-            provider_id=cat.provider_id,
-            graph_name=cat.source_identifier,
+            provider_id=provider_id,
+            graph_name=graph_name,
             ontology_id=ds_req.ontology_id,
-            label=ds_req.label or cat.name or cat.source_identifier,
+            label=label,
             is_primary=(i == 0),  # first data source is primary by default
             is_active=True,
         )

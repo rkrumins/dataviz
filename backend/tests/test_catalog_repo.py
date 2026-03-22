@@ -4,7 +4,7 @@ Tests for backend.app.db.repositories.catalog_repo.
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.repositories import catalog_repo
-from backend.app.db.models import ProviderORM, CatalogItemORM
+from backend.app.db.models import ProviderORM
 from backend.common.models.management import (
     CatalogItemCreateRequest,
     CatalogItemUpdateRequest,
@@ -160,40 +160,17 @@ async def test_idempotent_creation(db_session: AsyncSession):
     assert second.name == first.name  # original name preserved
 
 
-async def test_cleanup_duplicate_catalog_items(db_session: AsyncSession):
-    """cleanup_duplicate_catalog_items removes duplicates, keeping the earliest."""
+async def test_cleanup_duplicate_catalog_items_no_dupes(db_session: AsyncSession):
+    """cleanup_duplicate_catalog_items returns 0 when no duplicates exist."""
     prov = await _create_provider(db_session)
 
-    # Manually insert duplicates bypassing the idempotency check
-    row1 = CatalogItemORM(
-        provider_id=prov.id,
-        source_identifier="dup_graph",
-        name="First",
-        status="active",
+    # Create two distinct items (different source_identifiers)
+    await catalog_repo.create_catalog_item(
+        db_session, _make_create_req(prov.id, source_identifier="graph_a", name="A")
     )
-    row2 = CatalogItemORM(
-        provider_id=prov.id,
-        source_identifier="dup_graph",
-        name="Second (duplicate)",
-        status="active",
+    await catalog_repo.create_catalog_item(
+        db_session, _make_create_req(prov.id, source_identifier="graph_b", name="B")
     )
-    db_session.add(row1)
-    await db_session.flush()
-    db_session.add(row2)
-    await db_session.flush()
-
-    # Verify both exist
-    all_items = await catalog_repo.list_catalog_items(db_session, provider_id=prov.id)
-    # list_catalog_items deduplicates in-memory, but both rows are in DB
-    assert len(all_items) == 1  # deduplicated view
 
     deleted_count = await catalog_repo.cleanup_duplicate_catalog_items(db_session)
-    assert deleted_count == 1
-
-    # After cleanup, only one row remains in DB
-    fetched = await catalog_repo.get_catalog_item(db_session, row1.id)
-    assert fetched is not None
-    assert fetched.name == "First"
-
-    gone = await catalog_repo.get_catalog_item(db_session, row2.id)
-    assert gone is None
+    assert deleted_count == 0

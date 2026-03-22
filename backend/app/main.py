@@ -88,12 +88,20 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("Admin bootstrap warning: %s", exc)
 
-    # 3. Ensure a primary connection exists; bootstrap from env vars if DB is empty
-    async with get_async_session() as session:
-        try:
-            await provider_registry._resolve_primary_id(session)
-        except Exception as exc:
-            logger.warning("Primary connection bootstrap warning: %s", exc)
+    # 3. Optionally bootstrap a default provider + workspace from env vars.
+    #    Only bootstraps when FALKORDB_HOST (or equivalent) is explicitly set,
+    #    so a fresh empty deployment can start clean and let users configure
+    #    everything through the admin wizard.
+    import os as _os
+    _auto_bootstrap = _os.getenv("FALKORDB_HOST") or _os.getenv("NEO4J_HOST")
+    if _auto_bootstrap:
+        async with get_async_session() as session:
+            try:
+                await provider_registry._resolve_primary_id(session)
+            except Exception as exc:
+                logger.warning("Primary connection bootstrap warning: %s", exc)
+    else:
+        logger.info("No graph host configured — skipping auto-bootstrap (use admin wizard to set up)")
 
     logger.info("Synodic Visualization Service started")
     yield
