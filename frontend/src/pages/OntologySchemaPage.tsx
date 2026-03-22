@@ -130,6 +130,7 @@ export function OntologySchemaPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [importData, setImportData] = useState<Record<string, unknown> | null>(null)
   const [showSuggestDialog, setShowSuggestDialog] = useState(false)
+  const suggestResponseRef = useRef<import('@/services/ontologyDefinitionService').OntologySuggestResponse | null>(null)
 
   // ── Edit mode + working copies ──────────────────────────────────
   const [isEditing, setIsEditing] = useState(false)
@@ -455,14 +456,47 @@ export function OntologySchemaPage() {
   }
 
   function handleSuggestOntology() {
+    suggestResponseRef.current = null
     setShowSuggestDialog(true)
   }
 
-  async function handleConfirmSuggest() {
+  /** Phase 2: analyze the graph, return matches + counts for the dialog to display. */
+  async function handleAnalyzeGraph() {
+    const stats = await provider.getSchemaStats()
+    const response = await ontologyDefinitionService.suggest(stats as unknown as Record<string, unknown>)
+    suggestResponseRef.current = response
+    return {
+      matches: response.matchingOntologies,
+      suggestedEntityCount: Object.keys(response.suggested.entityTypeDefinitions ?? {}).length,
+      suggestedRelCount: Object.keys(response.suggested.relationshipTypeDefinitions ?? {}).length,
+    }
+  }
+
+  /** User chose "Use This" on an existing match. */
+  function handleSuggestUseExisting(ontologyId: string) {
+    setShowSuggestDialog(false)
+    navigate(`/schema/${ontologyId}`)
+    showToast('success', 'Navigated to the matching semantic layer')
+  }
+
+  /** User chose "Clone & Extend" on an existing match. */
+  async function handleSuggestCloneExisting(ontologyId: string) {
+    setShowSuggestDialog(false)
+    try {
+      const cloned = await mutations.clone.mutateAsync(ontologyId)
+      navigate(`/schema/${cloned.id}?tab=entities`)
+      showToast('success', 'Cloned — now editing a new draft')
+    } catch (err: unknown) {
+      showToast('error', `Clone failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    }
+  }
+
+  /** User chose "Create New Draft" (skip recommendations). */
+  async function handleSuggestCreateDraft() {
+    const response = suggestResponseRef.current
+    if (!response) return
     setIsSuggesting(true)
     try {
-      const stats = await provider.getSchemaStats()
-      const response = await ontologyDefinitionService.suggest(stats as unknown as Record<string, unknown>)
       const created = await ontologyDefinitionService.create({
         ...response.suggested,
         name: `Suggested Semantic Layer (${new Date().toLocaleDateString()})`,
@@ -471,7 +505,7 @@ export function OntologySchemaPage() {
       navigate(`/schema/${created.id}?tab=entities`)
       showToast('info', 'Draft created from graph — review types and publish when ready')
     } catch (err: unknown) {
-      showToast('error', `Suggest failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      showToast('error', `Failed to create draft: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
       setIsSuggesting(false)
     }
@@ -1206,13 +1240,17 @@ export function OntologySchemaPage() {
         />
       )}
 
-      {/* Suggest from Graph Confirmation */}
+      {/* Suggest from Graph */}
       {showSuggestDialog && (
         <SuggestConfirmDialog
           dataSourceLabel={activeDataSource?.label || activeDataSource?.id || null}
-          isLoading={isSuggesting}
-          onConfirm={handleConfirmSuggest}
+          ontologies={ontologies}
+          onAnalyze={handleAnalyzeGraph}
+          onUseExisting={handleSuggestUseExisting}
+          onCloneExisting={handleSuggestCloneExisting}
+          onCreateDraft={handleSuggestCreateDraft}
           onClose={() => { if (!isSuggesting) setShowSuggestDialog(false) }}
+          isCreating={isSuggesting}
         />
       )}
 
