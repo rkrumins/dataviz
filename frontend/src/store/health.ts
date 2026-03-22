@@ -29,9 +29,6 @@ interface HealthState {
 const HEALTH_URL = '/api/v1/health'
 const FAILURE_THRESHOLD = 2
 
-/** Guard against overlapping poll() calls. */
-let _polling = false
-
 function classifyError(err: unknown): { reason: HealthReason; detail: string } {
   if (!navigator.onLine) {
     return { reason: 'network-offline', detail: 'Your device appears to be offline.' }
@@ -53,6 +50,30 @@ function classifyError(err: unknown): { reason: HealthReason; detail: string } {
   return { reason: 'backend-down', detail: 'An unexpected error occurred.' }
 }
 
+function applyFailure(
+  get: () => HealthState,
+  set: (s: Partial<HealthState>) => void,
+  reason: HealthReason,
+  detail: string,
+) {
+  const failures = get().consecutiveFailures + 1
+  const shouldSurface = failures >= FAILURE_THRESHOLD
+    || reason === 'network-offline'
+    || get().status === 'unreachable' // already showing — keep it
+
+  if (shouldSurface) {
+    set({
+      status: 'unreachable',
+      reason,
+      detail,
+      consecutiveFailures: failures,
+      lastCheckedAt: Date.now(),
+    })
+  } else {
+    set({ consecutiveFailures: failures, lastCheckedAt: Date.now() })
+  }
+}
+
 export const useHealthStore = create<HealthState>()((set, get) => ({
   status: 'healthy',
   reason: 'none',
@@ -61,43 +82,17 @@ export const useHealthStore = create<HealthState>()((set, get) => ({
   consecutiveFailures: 0,
 
   poll: async () => {
-    if (_polling) return
-    _polling = true
+    // Fast path: browser says we're offline
+    if (!navigator.onLine) {
+      applyFailure(get, set, 'network-offline', 'Your device appears to be offline.')
+      return
+    }
 
     try {
-      // Fast path: browser says we're offline
-      if (!navigator.onLine) {
-        const failures = get().consecutiveFailures + 1
-        if (failures >= FAILURE_THRESHOLD || get().status === 'unreachable') {
-          set({
-            status: 'unreachable',
-            reason: 'network-offline',
-            detail: 'Your device appears to be offline.',
-            consecutiveFailures: failures,
-            lastCheckedAt: Date.now(),
-          })
-        } else {
-          set({ consecutiveFailures: failures, lastCheckedAt: Date.now() })
-        }
-        return
-      }
-
       const res = await fetch(HEALTH_URL, { cache: 'no-store' })
 
       if (!res.ok) {
-        // Health endpoint returned an error status (5xx, etc.)
-        const failures = get().consecutiveFailures + 1
-        if (failures >= FAILURE_THRESHOLD) {
-          set({
-            status: 'unreachable',
-            reason: 'backend-down',
-            detail: `Backend returned HTTP ${res.status}.`,
-            consecutiveFailures: failures,
-            lastCheckedAt: Date.now(),
-          })
-        } else {
-          set({ consecutiveFailures: failures, lastCheckedAt: Date.now() })
-        }
+        applyFailure(get, set, 'backend-down', `Backend returned HTTP ${res.status}.`)
         return
       }
 
@@ -146,40 +141,14 @@ export const useHealthStore = create<HealthState>()((set, get) => ({
         }
       }
     } catch (err) {
-      const failures = get().consecutiveFailures + 1
       const classified = classifyError(err)
-
-      if (failures >= FAILURE_THRESHOLD) {
-        set({
-          status: 'unreachable',
-          reason: classified.reason,
-          detail: classified.detail,
-          consecutiveFailures: failures,
-          lastCheckedAt: Date.now(),
-        })
-      } else {
-        set({ consecutiveFailures: failures, lastCheckedAt: Date.now() })
-      }
-    } finally {
-      _polling = false
+      applyFailure(get, set, classified.reason, classified.detail)
     }
   },
 
   reportFailure: (err: unknown) => {
     const classified = classifyError(err)
-    const failures = get().consecutiveFailures + 1
-
-    // Immediate for offline, threshold for other failures
-    if (classified.reason === 'network-offline' || failures >= FAILURE_THRESHOLD) {
-      set({
-        status: 'unreachable',
-        reason: classified.reason,
-        detail: classified.detail,
-        consecutiveFailures: failures,
-      })
-    } else {
-      set({ consecutiveFailures: failures })
-    }
+    applyFailure(get, set, classified.reason, classified.detail)
   },
 
   clearRecovery: () => {

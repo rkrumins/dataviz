@@ -90,7 +90,6 @@ export function BackendHealthBanner() {
   const status = useHealthStore((s) => s.status)
   const reason = useHealthStore((s) => s.reason)
   const detail = useHealthStore((s) => s.detail)
-  const consecutiveFailures = useHealthStore((s) => s.consecutiveFailures)
 
   const [tabVisible, setTabVisible] = useState(() => document.visibilityState === 'visible')
 
@@ -100,6 +99,7 @@ export function BackendHealthBanner() {
   const clearRecoveryRef = useRef(useHealthStore.getState().clearRecovery)
 
   const recoveryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // Stable poll callback
   const doPoll = useCallback(() => pollRef.current(), [])
@@ -111,17 +111,40 @@ export function BackendHealthBanner() {
     return () => document.removeEventListener('visibilitychange', onVisibilityChange)
   }, [])
 
-  // Adaptive health polling — pauses when tab is hidden
+  // Adaptive health polling with self-adjusting setTimeout chain.
+  // Dependencies are only `tabVisible` and `status` — NOT consecutiveFailures,
+  // which would cause a re-render → re-run → immediate poll loop.
+  // Backoff is read from the store imperatively inside each scheduled callback.
   useEffect(() => {
     if (!tabVisible) return // don't poll background tabs
 
-    doPoll() // immediate check when tab becomes visible or status changes
+    let cancelled = false
 
-    const isHealthy = status === 'healthy' || status === 'recovered'
-    const ms = isHealthy ? POLL_HEALTHY_MS : getUnhealthyInterval(consecutiveFailures)
-    const id = setInterval(doPoll, ms)
-    return () => clearInterval(id)
-  }, [doPoll, status, consecutiveFailures, tabVisible])
+    const scheduleNext = async () => {
+      if (cancelled) return
+
+      await doPoll()
+      if (cancelled) return
+
+      // Read fresh state AFTER the poll to pick the right interval
+      const { status: currentStatus, consecutiveFailures: failures } = useHealthStore.getState()
+      const isHealthy = currentStatus === 'healthy' || currentStatus === 'recovered'
+      const ms = isHealthy ? POLL_HEALTHY_MS : getUnhealthyInterval(failures)
+
+      intervalRef.current = setTimeout(scheduleNext, ms)
+    }
+
+    // Kick off immediately
+    scheduleNext()
+
+    return () => {
+      cancelled = true
+      if (intervalRef.current) {
+        clearTimeout(intervalRef.current)
+        intervalRef.current = null
+      }
+    }
+  }, [doPoll, status, tabVisible])
 
   // Browser online/offline events
   useEffect(() => {
