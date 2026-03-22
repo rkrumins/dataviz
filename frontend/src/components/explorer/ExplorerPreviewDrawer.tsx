@@ -33,6 +33,7 @@ import { cn } from '@/lib/utils'
 import { workspaceColor } from '@/lib/workspaceColor'
 import { timeAgo } from '@/lib/timeAgo'
 import type { View } from '@/services/viewApiService'
+import type { ViewLayerConfig } from '@/types/schema'
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -106,23 +107,99 @@ function HierarchyPreview() {
   )
 }
 
-function ReferencePreview() {
+/** Data-driven reference model layer preview */
+function ReferenceLayerPreview({ layers }: { layers: ViewLayerConfig[] }) {
+  const sorted = [...layers].sort((a, b) => (a.order ?? a.sequence ?? 0) - (b.order ?? b.sequence ?? 0))
+
+  const scrollable = sorted.length > 5
+
+  return (
+    <div className={cn(
+      'flex gap-2',
+      scrollable && 'overflow-x-auto pb-1.5 scrollbar-none [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]',
+    )}>
+      {sorted.map((layer) => {
+        const color = layer.color ?? '#f43f5e'
+        const entityCount = layer.entityTypes?.length ?? 0
+        return (
+          <div
+            key={layer.id}
+            className={cn(
+              'rounded-lg border overflow-hidden',
+              scrollable ? 'flex-shrink-0 w-[140px]' : 'flex-1 min-w-0',
+            )}
+            style={{ borderColor: `${color}30` }}
+          >
+            {/* Layer header bar */}
+            <div
+              className="px-2.5 py-2 flex items-center gap-1.5"
+              style={{ backgroundColor: `${color}10` }}
+            >
+              <div
+                className="w-2 h-2 rounded-full shrink-0"
+                style={{ backgroundColor: color }}
+              />
+              <span
+                className="text-[10px] font-bold truncate"
+                style={{ color }}
+              >
+                {layer.name}
+              </span>
+            </div>
+            {/* Layer body */}
+            <div className="px-2.5 py-2 space-y-1.5">
+              {layer.description && (
+                <p className="text-[9px] text-ink-muted/70 leading-tight line-clamp-2">
+                  {layer.description}
+                </p>
+              )}
+              {/* Entity type pills */}
+              {entityCount > 0 ? (
+                <div className="flex flex-wrap gap-0.5">
+                  {layer.entityTypes.slice(0, 3).map(et => (
+                    <span
+                      key={et}
+                      className="rounded px-1 py-0.5 text-[8px] font-medium truncate max-w-full"
+                      style={{ backgroundColor: `${color}12`, color }}
+                    >
+                      {et}
+                    </span>
+                  ))}
+                  {entityCount > 3 && (
+                    <span
+                      className="rounded px-1 py-0.5 text-[8px] font-medium"
+                      style={{ backgroundColor: `${color}12`, color }}
+                    >
+                      +{entityCount - 3}
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <span className="text-[9px] text-ink-muted/40 italic">No types assigned</span>
+              )}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/** Fallback static SVG when no layers configured */
+function ReferencePreviewFallback() {
   return (
     <svg viewBox="0 0 280 100" className="w-full h-24 text-rose-500/25">
-      {/* Grid of reference model cards */}
       {[0, 1, 2, 3].map(col => (
         <g key={`r1-${col}`}>
           <rect x={8 + col * 70} y={8} width={60} height={36} rx="4" fill="currentColor" opacity={1 - col * 0.15} />
           <line x1={14 + col * 70} y1={18} x2={56 + col * 70} y2={18} stroke="white" strokeWidth="1.5" opacity="0.4" />
           <line x1={14 + col * 70} y1={24} x2={46 + col * 70} y2={24} stroke="white" strokeWidth="1" opacity="0.25" />
-          <line x1={14 + col * 70} y1={30} x2={52 + col * 70} y2={30} stroke="white" strokeWidth="1" opacity="0.15" />
         </g>
       ))}
       {[0, 1, 2].map(col => (
         <g key={`r2-${col}`}>
           <rect x={8 + col * 70} y={52} width={60} height={36} rx="4" fill="currentColor" opacity={0.7 - col * 0.15} />
           <line x1={14 + col * 70} y1={62} x2={56 + col * 70} y2={62} stroke="white" strokeWidth="1.5" opacity="0.4" />
-          <line x1={14 + col * 70} y1={68} x2={46 + col * 70} y2={68} stroke="white" strokeWidth="1" opacity="0.25" />
         </g>
       ))}
     </svg>
@@ -243,15 +320,36 @@ export function ExplorerPreviewDrawer({
                 })()}
               </div>
 
-              {/* Mini preview for hierarchy / reference */}
-              {(view.viewType === 'hierarchy' || view.viewType === 'reference') && (
+              {/* Mini preview for hierarchy */}
+              {view.viewType === 'hierarchy' && (
                 <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-3 overflow-hidden">
                   <span className="text-[10px] uppercase tracking-widest font-bold text-ink-muted block mb-2">
                     Preview
                   </span>
-                  {view.viewType === 'hierarchy' ? <HierarchyPreview /> : <ReferencePreview />}
+                  <HierarchyPreview />
                 </div>
               )}
+
+              {/* Reference model layers — data-driven */}
+              {view.viewType === 'reference' && (() => {
+                const layers: ViewLayerConfig[] = view.config?.layout?.referenceLayout?.layers ?? []
+                return (
+                  <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-3 overflow-hidden">
+                    <span className="text-[10px] uppercase tracking-widest font-bold text-ink-muted block mb-2">
+                      Reference Model Layers
+                      {layers.length > 0 && (
+                        <span className="ml-1.5 text-ink-muted/50 normal-case tracking-normal">
+                          ({layers.length})
+                        </span>
+                      )}
+                    </span>
+                    {layers.length > 0
+                      ? <ReferenceLayerPreview layers={layers} />
+                      : <ReferencePreviewFallback />
+                    }
+                  </div>
+                )
+              })()}
 
               {/* Description */}
               <div>
