@@ -218,6 +218,7 @@ async def count_data_sources(
     result = await session.execute(
         select(func.count()).where(
             WorkspaceDataSourceORM.workspace_id == workspace_id,
+            WorkspaceDataSourceORM.is_active == True,  # noqa: E712
         )
     )
     return result.scalar() or 0

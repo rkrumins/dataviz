@@ -245,34 +245,7 @@ async def init_db() -> None:
         except Exception:
             pass
 
-    # ── 5. Seed 'announcementsEnabled' feature definition if missing ──
-    async with engine.begin() as conn:
-        try:
-            result = await conn.execute(
-                sa_text("SELECT 1 FROM feature_definitions WHERE key = :key"),
-                {"key": "announcementsEnabled"},
-            )
-            if result.scalar() is None:
-                await conn.execute(
-                    sa_text(
-                        "INSERT INTO feature_definitions "
-                        "(key, name, description, category_id, type, default_value, "
-                        "user_overridable, sort_order, deprecated, implemented, admin_hint) "
-                        "VALUES (:key, :name, :desc, :cat, :type, :default, false, 0, false, true, :hint)"
-                    ),
-                    {
-                        "key": "announcementsEnabled",
-                        "name": "Announcements",
-                        "desc": "Show global announcement banners to all users. When disabled, banners are hidden even if active announcements exist.",
-                        "cat": "notifications",
-                        "type": "boolean",
-                        "default": _json.dumps(True),
-                        "hint": "Toggle off to instantly hide all announcement banners without deactivating individual announcements.",
-                    },
-                )
-                logger.info("Seed: announcementsEnabled feature definition inserted")
-        except Exception:
-            pass
+    # ── 5. (Removed) announcementsEnabled seed — now handled by seed_feature_registry()
 
     # ── 6. One-time: undo bad data_source_id backfill ─────────────────
     # A prior migration incorrectly guessed data_source_id for legacy views.

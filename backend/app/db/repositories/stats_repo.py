@@ -4,7 +4,6 @@ from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.dialects.sqlite import insert as sqlite_upsert # Assume sqlite for now, but better use standard means or generic merge
 
 from ..models import DataSourceStatsORM
 
@@ -38,6 +37,7 @@ async def upsert_data_source_stats(
         existing.ontology_metadata = ontology_metadata
         existing.graph_schema = graph_schema
         existing.updated_at = datetime.now(timezone.utc).isoformat()
+        await session.flush()
         return existing
         
     # Create new
@@ -52,4 +52,5 @@ async def upsert_data_source_stats(
         graph_schema=graph_schema
     )
     session.add(new_stats)
+    await session.flush()
     return new_stats
