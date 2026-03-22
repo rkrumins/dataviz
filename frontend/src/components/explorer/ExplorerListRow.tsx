@@ -10,6 +10,9 @@ import {
   Globe,
   Users,
   Lock,
+  Database,
+  Box,
+  ExternalLink,
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import { cn } from '@/lib/utils'
@@ -22,34 +25,39 @@ import { timeAgo } from '@/lib/timeAgo'
 
 const VIEW_TYPE_META: Record<
   string,
-  { icon: React.ElementType; bg: string; border: string; text: string }
+  { icon: React.ElementType; label: string; bg: string; border: string; text: string }
 > = {
   graph: {
     icon: Network,
+    label: 'Graph',
     bg: 'bg-indigo-500/10',
     border: 'border-indigo-500/20',
     text: 'text-indigo-500',
   },
   hierarchy: {
     icon: GitBranch,
+    label: 'Hierarchy',
     bg: 'bg-violet-500/10',
     border: 'border-violet-500/20',
     text: 'text-violet-500',
   },
   table: {
     icon: Table2,
+    label: 'Table',
     bg: 'bg-emerald-500/10',
     border: 'border-emerald-500/20',
     text: 'text-emerald-500',
   },
   'layered-lineage': {
     icon: Layers,
+    label: 'Lineage',
     bg: 'bg-amber-500/10',
     border: 'border-amber-500/20',
     text: 'text-amber-500',
   },
   reference: {
     icon: Layout,
+    label: 'Reference',
     bg: 'bg-rose-500/10',
     border: 'border-rose-500/20',
     text: 'text-rose-500',
@@ -58,6 +66,7 @@ const VIEW_TYPE_META: Record<
 
 const DEFAULT_TYPE_META = {
   icon: Layout,
+  label: 'View',
   bg: 'bg-indigo-500/10',
   border: 'border-indigo-500/20',
   text: 'text-indigo-500',
@@ -67,14 +76,6 @@ const VISIBILITY_ICON: Record<string, React.ElementType> = {
   enterprise: Globe,
   workspace: Users,
   private: Lock,
-}
-
-const VIEW_TYPE_LABEL: Record<string, string> = {
-  graph: 'Graph',
-  hierarchy: 'Hierarchy',
-  reference: 'Reference',
-  table: 'Table',
-  'layered-lineage': 'Lineage',
 }
 
 /* ------------------------------------------------------------------ */
@@ -98,6 +99,7 @@ export function ExplorerListRow({
   view,
   onToggleFavourite,
   onShare,
+  onPreview,
 }: ExplorerListRowProps) {
   const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE_META
   const TypeIcon = typeMeta.icon
@@ -105,10 +107,16 @@ export function ExplorerListRow({
   const wsColor = workspaceColor(view.workspaceId)
 
   return (
-    <Link to={`/views/${view.id}`} className="block group">
+    <div
+      className="block group cursor-pointer"
+      onClick={() => onPreview?.()}
+      role="button"
+      tabIndex={0}
+      onKeyDown={e => { if (e.key === 'Enter') onPreview?.() }}
+    >
       <div
         className={cn(
-          'grid grid-cols-[minmax(0,2fr)_140px_100px_36px_120px_60px_80px_72px] items-center gap-3',
+          'grid grid-cols-[minmax(0,2fr)_140px_100px_36px_100px_120px_60px_80px_72px] items-center gap-3',
           'rounded-xl px-3 py-2.5',
           'hover:bg-black/5 dark:hover:bg-white/5',
           'transition-colors duration-150',
@@ -126,9 +134,17 @@ export function ExplorerListRow({
           >
             <TypeIcon className="h-3.5 w-3.5" />
           </div>
-          <span className="truncate text-sm font-medium text-ink">
-            {view.name}
-          </span>
+          <div className="min-w-0">
+            <span className="truncate text-sm font-medium text-ink block">
+              {view.name}
+            </span>
+            {view.contextModelName && (
+              <span className="flex items-center gap-1 text-[10px] text-ink-muted truncate">
+                <Box className="h-2.5 w-2.5 shrink-0" />
+                {view.contextModelName}
+              </span>
+            )}
+          </div>
         </div>
 
         {/* ── Workspace pill ── */}
@@ -145,11 +161,23 @@ export function ExplorerListRow({
 
         {/* ── Type label ── */}
         <span className="text-xs text-ink-muted">
-          {VIEW_TYPE_LABEL[view.viewType] ?? view.viewType}
+          {typeMeta.label}
         </span>
 
         {/* ── Visibility icon ── */}
         <VisIcon className="h-3.5 w-3.5 text-ink-muted" />
+
+        {/* ── Data source ── */}
+        <span className="inline-flex items-center gap-1 text-[10px] text-ink-muted truncate">
+          {view.dataSourceId ? (
+            <>
+              <Database className="h-2.5 w-2.5 shrink-0" />
+              <span className="truncate">{view.dataSourceId}</span>
+            </>
+          ) : (
+            '--'
+          )}
+        </span>
 
         {/* ── Owner ── */}
         <span className="truncate text-xs text-ink-muted">
@@ -158,7 +186,7 @@ export function ExplorerListRow({
 
         {/* ── Favourite count ── */}
         <span className="inline-flex items-center gap-1 text-xs text-ink-muted">
-          <Heart className="h-3 w-3" />
+          <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
           {view.favouriteCount}
         </span>
 
@@ -169,10 +197,17 @@ export function ExplorerListRow({
 
         {/* ── Actions ── */}
         <div className="flex items-center gap-0.5">
+          <Link
+            to={`/views/${view.id}`}
+            onClick={e => e.stopPropagation()}
+            className="rounded-lg p-1.5 text-ink-muted transition-colors duration-150 hover:text-accent-lineage hover:bg-black/5 dark:hover:bg-white/5"
+            title="Open view"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </Link>
           <button
             type="button"
             onClick={(e) => {
-              e.preventDefault()
               e.stopPropagation()
               onToggleFavourite()
             }}
@@ -192,7 +227,6 @@ export function ExplorerListRow({
           <button
             type="button"
             onClick={(e) => {
-              e.preventDefault()
               e.stopPropagation()
               onShare()
             }}
@@ -202,6 +236,6 @@ export function ExplorerListRow({
           </button>
         </div>
       </div>
-    </Link>
+    </div>
   )
 }

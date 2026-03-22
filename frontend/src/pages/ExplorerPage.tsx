@@ -284,7 +284,7 @@ export function ExplorerPage() {
 
         {/* ── Featured / Pinned ────────────────────────────────── */}
         {!hasActiveFilters && pinnedViews.length > 0 && (
-          <ExplorerHero views={pinnedViews} onToggleFavourite={toggleFavourite} />
+          <ExplorerHero views={pinnedViews} onToggleFavourite={toggleFavourite} onPreview={setPreviewView} />
         )}
 
         {/* ── Recently Viewed ──────────────────────────────────── */}
@@ -367,8 +367,8 @@ export function ExplorerPage() {
             </div>
           ) : (
             <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
-              <div className="grid grid-cols-[1fr_140px_100px_36px_120px_60px_80px_72px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
-                <span>Name</span><span>Workspace</span><span>Type</span><span>Vis</span><span>Owner</span><span>Likes</span><span>Updated</span><span></span>
+              <div className="grid grid-cols-[minmax(0,2fr)_140px_100px_36px_100px_120px_60px_80px_72px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
+                <span>Name</span><span>Workspace</span><span>Type</span><span>Vis</span><span>Source</span><span>Owner</span><span>Likes</span><span>Updated</span><span></span>
               </div>
               {views.map(v => (
                 <ExplorerListRow

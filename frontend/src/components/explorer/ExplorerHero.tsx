@@ -5,7 +5,6 @@
  * and polished micro-interactions.
  */
 
-import { Link } from 'react-router-dom'
 import {
     Star,
     Tag,
@@ -24,6 +23,7 @@ import type { View } from '@/services/viewApiService'
 interface ExplorerHeroProps {
     views: View[] // pre-filtered to isPinned
     onToggleFavourite: (viewId: string) => void
+    onPreview?: (view: View) => void
 }
 
 // ─── View-type mappings ─────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ const FALLBACK_COLOR = {
 }
 
 // ─── Component ──────────────────────────────────────────────────────────────
-export function ExplorerHero({ views, onToggleFavourite }: ExplorerHeroProps) {
+export function ExplorerHero({ views, onToggleFavourite, onPreview }: ExplorerHeroProps) {
     if (views.length === 0) return null
 
     const featured = views.slice(0, 3)
@@ -95,14 +95,18 @@ export function ExplorerHero({ views, onToggleFavourite }: ExplorerHeroProps) {
                     const TypeIcon = VIEW_TYPE_ICONS[view.viewType] ?? Network
 
                     return (
-                        <Link
+                        <div
                             key={view.id}
-                            to={`/views/${view.id}`}
                             className={cn(
-                                'glass-panel rounded-2xl border border-glass-border p-5 overflow-hidden group',
-                                'hover:-translate-y-1 hover:shadow-xl transition-all duration-300',
+                                'glass-panel rounded-2xl border border-glass-border p-5 overflow-hidden group cursor-pointer',
+                                'hover:-translate-y-1 hover:shadow-xl',
+                                'transition-[transform,box-shadow,border-color] duration-200 ease-out',
                                 'relative flex flex-col min-h-[200px]',
                             )}
+                            onClick={() => onPreview?.(view)}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={e => { if (e.key === 'Enter') onPreview?.(view) }}
                         >
                             {/* Gradient hover overlay */}
                             <div
@@ -196,7 +200,7 @@ export function ExplorerHero({ views, onToggleFavourite }: ExplorerHeroProps) {
                                     </button>
                                 </div>
                             </div>
-                        </Link>
+                        </div>
                     )
                 })}
             </div>
