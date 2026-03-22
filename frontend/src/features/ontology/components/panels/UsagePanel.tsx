@@ -153,7 +153,7 @@ export function UsagePanel({ ontology }: UsagePanelProps) {
             </div>
             <p className="text-sm font-medium text-ink-secondary">Not assigned to any data sources</p>
             <p className="text-xs text-ink-muted mt-1 max-w-xs mx-auto">
-              Assign this ontology to a data source from the context banner at the top of the page, or from the workspace settings.
+              Assign this semantic layer to a data source from the workspace settings in Administration.
             </p>
           </div>
         ) : (

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Search, Plus, Sparkles, Shield, CheckCircle2, PenLine, Box, GitBranch, Loader2, BookOpen, Database, X, Zap, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
-import type { DataSourceResponse } from '@/services/workspaceService'
+import type { DataSourceResponse, WorkspaceResponse } from '@/services/workspaceService'
 import type { StatusFilter } from '../lib/ontology-types'
 import { useOntologies } from '../hooks/useOntologies'
 
@@ -12,6 +12,7 @@ interface OntologySidebarProps {
   selectedOntologyId: string | undefined
   activeDataSource: DataSourceResponse | null
   assignmentCountMap: Map<string, number>
+  workspaces: WorkspaceResponse[]
   isLoading: boolean
   isSuggesting: boolean
   onCreateDraft: () => void
@@ -54,6 +55,7 @@ export function OntologySidebar({
   selectedOntologyId,
   activeDataSource,
   assignmentCountMap,
+  workspaces,
   isLoading,
   isSuggesting,
   onCreateDraft,
@@ -62,6 +64,21 @@ export function OntologySidebar({
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+
+  // Reverse map: ontologyId → workspace names that use it
+  const ontologyWorkspaceMap = useMemo(() => {
+    const map = new Map<string, string[]>()
+    for (const ws of workspaces) {
+      for (const ds of ws.dataSources ?? []) {
+        if (ds.ontologyId) {
+          const names = map.get(ds.ontologyId) ?? []
+          if (!names.includes(ws.name)) names.push(ws.name)
+          map.set(ds.ontologyId, names)
+        }
+      }
+    }
+    return map
+  }, [workspaces])
 
   // Fetch deleted ontologies only when showing the deleted filter
   const showDeleted = statusFilter === 'deleted'
@@ -118,6 +135,7 @@ export function OntologySidebar({
     const isActive = o.id === activeOntologyId
     const dsCount = assignmentCountMap.get(o.id) ?? 0
     const desc = truncateDescription(o.description)
+    const wsNames = ontologyWorkspaceMap.get(o.id) ?? []
 
     return (
       <button
@@ -231,6 +249,23 @@ export function OntologySidebar({
             </>
           )}
         </div>
+
+        {/* Row 4: Workspace chips */}
+        {!isDeleted && wsNames.length > 0 && (
+          <div className="flex items-center gap-1 mt-1.5 ml-[38px] flex-wrap">
+            {wsNames.slice(0, 3).map(name => (
+              <span
+                key={name}
+                className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-black/[0.04] dark:bg-white/[0.06] text-[9px] font-medium text-ink-muted"
+              >
+                {name}
+              </span>
+            ))}
+            {wsNames.length > 3 && (
+              <span className="text-[9px] text-ink-muted/50">+{wsNames.length - 3}</span>
+            )}
+          </div>
+        )}
       </button>
     )
   }
@@ -396,7 +431,8 @@ export function OntologySidebar({
         </button>
         <button
           onClick={onSuggest}
-          disabled={isSuggesting}
+          disabled={isSuggesting || !activeDataSource}
+          title={!activeDataSource ? 'Select a data source from the environment switcher first' : undefined}
           className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-medium border border-glass-border/60 hover:border-indigo-400/40 hover:bg-indigo-500/[0.04] text-ink-secondary hover:text-indigo-600 dark:hover:text-indigo-400 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {isSuggesting

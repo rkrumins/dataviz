@@ -1,34 +1,158 @@
+import { useState, useEffect } from 'react'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { GraphSchemaStats } from '@/providers/GraphDataProvider'
+import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
+import { useWorkspacesStore } from '@/store/workspaces'
+import { fetchSchemaStats } from '../../lib/ontology-utils'
 import { formatCount } from '../../lib/ontology-parsers'
 import type { CoverageState } from '../../lib/ontology-types'
 
 // ---------------------------------------------------------------------------
-// CoveragePanel — gap analysis (renamed from CoverageTab)
+// CoveragePanel — self-contained gap analysis with data source context
 // ---------------------------------------------------------------------------
 
 export function CoveragePanel({
-  coverage,
-  graphStats,
+  ontologyId,
+  workspaceId,
+  dataSourceId,
   isLocked,
   onDefineEntity,
   onDefineRel,
 }: {
-  coverage: CoverageState | null
-  graphStats: GraphSchemaStats | null
+  ontologyId: string
+  workspaceId: string | null
+  dataSourceId: string | null
   isLocked: boolean
   onDefineEntity: (typeId: string) => void
   onDefineRel: (typeId: string) => void
 }) {
-  if (!graphStats) {
+  const workspaces = useWorkspacesStore(s => s.workspaces)
+
+  // Optional data source override — lets user compare against a different data source
+  const [overrideWsId, setOverrideWsId] = useState<string | null>(null)
+  const [overrideDsId, setOverrideDsId] = useState<string | null>(null)
+  const [showPicker, setShowPicker] = useState(false)
+
+  const effectiveWsId = overrideWsId ?? workspaceId
+  const effectiveDsId = overrideDsId ?? dataSourceId
+
+  // Find active workspace/data source names for display
+  const activeWs = workspaces.find(w => w.id === effectiveWsId)
+  const activeDs = activeWs?.dataSources?.find(ds => ds.id === effectiveDsId)
+
+  // Self-contained data fetching
+  const [graphStats, setGraphStats] = useState<GraphSchemaStats | null>(null)
+  const [coverage, setCoverage] = useState<CoverageState | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!effectiveWsId || !effectiveDsId || !ontologyId) {
+      setGraphStats(null)
+      setCoverage(null)
+      return
+    }
+
+    let cancelled = false
+    setIsLoading(true)
+    setError(null)
+
+    ;(async () => {
+      try {
+        const stats = await fetchSchemaStats(effectiveWsId, effectiveDsId)
+        if (cancelled) return
+        setGraphStats(stats)
+
+        const c = await ontologyDefinitionService.coverage(
+          ontologyId,
+          stats as unknown as Record<string, unknown>,
+        )
+        if (cancelled) return
+        setCoverage({
+          uncoveredEntityTypes: c.uncoveredEntityTypes,
+          uncoveredRelationshipTypes: c.uncoveredRelationshipTypes,
+          coveragePercent: c.coveragePercent,
+        })
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to load coverage')
+          setGraphStats(null)
+          setCoverage(null)
+        }
+      } finally {
+        if (!cancelled) setIsLoading(false)
+      }
+    })()
+
+    return () => { cancelled = true }
+  }, [effectiveWsId, effectiveDsId, ontologyId])
+
+  // ── No data source selected ──────────────────────────────────────
+  if (!effectiveWsId || !effectiveDsId) {
     return (
-      <div className="text-center py-16 text-ink-muted">
-        <LucideIcons.Loader2 className="w-6 h-6 mx-auto mb-3 animate-spin opacity-50" />
-        <p className="text-sm">Loading graph data...</p>
+      <div>
+        <div className="text-center py-16">
+          <div className="relative mx-auto mb-5 w-16 h-16 flex items-center justify-center">
+            <div className="absolute inset-0 rounded-full bg-gradient-to-br from-indigo-500/10 to-purple-500/10" />
+            <LucideIcons.BarChart3 className="w-8 h-8 relative z-10 text-indigo-400 opacity-60" />
+          </div>
+          <p className="text-sm font-semibold text-ink-secondary mb-1">No data source selected</p>
+          <p className="text-xs text-ink-muted max-w-sm mx-auto mb-6">
+            Select a data source from the environment switcher to see how well this semantic layer covers your graph.
+          </p>
+
+          {/* Quick-pick from available data sources */}
+          {workspaces.length > 0 && (
+            <div className="max-w-md mx-auto">
+              <p className="text-[10px] font-bold text-ink-muted uppercase tracking-wider mb-3">Or pick a data source to analyze</p>
+              <div className="space-y-1 text-left">
+                {workspaces.flatMap(ws =>
+                  (ws.dataSources ?? []).map(ds => (
+                    <button
+                      key={`${ws.id}-${ds.id}`}
+                      onClick={() => {
+                        setOverrideWsId(ws.id)
+                        setOverrideDsId(ds.id)
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-left hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                    >
+                      <LucideIcons.Database className="w-3.5 h-3.5 text-ink-muted flex-shrink-0" />
+                      <span className="font-medium text-ink">{ds.label || ds.id}</span>
+                      <span className="text-ink-muted">in {ws.name}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     )
   }
+
+  // ── Loading state ────────────────────────────────────────────────
+  if (isLoading) {
+    return (
+      <div className="text-center py-16 text-ink-muted">
+        <LucideIcons.Loader2 className="w-6 h-6 mx-auto mb-3 animate-spin opacity-50" />
+        <p className="text-sm">Analyzing coverage against {activeDs?.label || 'data source'}...</p>
+      </div>
+    )
+  }
+
+  // ── Error state ──────────────────────────────────────────────────
+  if (error) {
+    return (
+      <div className="text-center py-16">
+        <LucideIcons.AlertTriangle className="w-6 h-6 mx-auto mb-3 text-red-400 opacity-60" />
+        <p className="text-sm text-red-600 dark:text-red-400 mb-1">Coverage analysis failed</p>
+        <p className="text-xs text-ink-muted">{error}</p>
+      </div>
+    )
+  }
+
+  if (!graphStats) return null
 
   const uncoveredEntities = coverage?.uncoveredEntityTypes ?? []
   const uncoveredRels = coverage?.uncoveredRelationshipTypes ?? []
@@ -45,6 +169,59 @@ export function CoveragePanel({
 
   return (
     <div>
+      {/* Data source context bar */}
+      <div className="flex items-center justify-between mb-4 px-1">
+        <div className="flex items-center gap-2 text-xs text-ink-muted">
+          <LucideIcons.Database className="w-3.5 h-3.5" />
+          <span>Analyzing coverage against</span>
+          <span className="font-semibold text-ink">{activeDs?.label || effectiveDsId}</span>
+          {activeWs && <span className="text-ink-muted">in {activeWs.name}</span>}
+        </div>
+        <button
+          onClick={() => setShowPicker(!showPicker)}
+          className="text-xs text-indigo-500 hover:text-indigo-600 font-medium transition-colors"
+        >
+          {showPicker ? 'Hide' : 'Change'}
+        </button>
+      </div>
+
+      {/* Data source picker (collapsed by default) */}
+      {showPicker && (
+        <div className="mb-6 p-3 rounded-xl border border-glass-border bg-canvas-elevated/50">
+          <p className="text-[10px] font-bold text-ink-muted uppercase tracking-wider mb-2">Select a different data source</p>
+          <div className="space-y-1 max-h-48 overflow-y-auto">
+            {workspaces.map(ws => (
+              <div key={ws.id}>
+                <p className="text-[10px] font-bold text-ink-muted uppercase tracking-wider px-2 py-1">{ws.name}</p>
+                {(ws.dataSources ?? []).map(ds => {
+                  const isActive = ws.id === effectiveWsId && ds.id === effectiveDsId
+                  return (
+                    <button
+                      key={ds.id}
+                      onClick={() => {
+                        setOverrideWsId(ws.id)
+                        setOverrideDsId(ds.id)
+                        setShowPicker(false)
+                      }}
+                      className={cn(
+                        'w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs text-left transition-colors',
+                        isActive
+                          ? 'bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 dark:text-indigo-400'
+                          : 'hover:bg-black/5 dark:hover:bg-white/5',
+                      )}
+                    >
+                      <LucideIcons.Database className="w-3 h-3 flex-shrink-0" />
+                      <span className="font-medium">{ds.label || ds.id}</span>
+                      {isActive && <LucideIcons.Check className="w-3 h-3 ml-auto" />}
+                    </button>
+                  )
+                })}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Coverage summary with prominent progress ring */}
       {percent !== null && (
         <div className={cn(
@@ -57,7 +234,6 @@ export function CoveragePanel({
             {/* Thick progress ring */}
             <div className="relative w-24 h-24 flex-shrink-0">
               <svg className="w-24 h-24 -rotate-90" viewBox="0 0 100 100">
-                {/* Background circle */}
                 <circle
                   cx="50" cy="50" r="42"
                   fill="none"
@@ -65,7 +241,6 @@ export function CoveragePanel({
                   strokeWidth="10"
                   className="text-black/5 dark:text-white/5"
                 />
-                {/* Progress arc */}
                 <circle
                   cx="50" cy="50" r="42"
                   fill="none"
@@ -106,7 +281,6 @@ export function CoveragePanel({
                 {totalCovered} of {totalInGraph} types in your graph are covered by this ontology
               </p>
 
-              {/* Mini breakdown */}
               <div className="flex items-center gap-4 text-xs text-ink-muted">
                 <div className="flex items-center gap-1.5">
                   <LucideIcons.Box className="w-3.5 h-3.5" />
@@ -120,7 +294,6 @@ export function CoveragePanel({
             </div>
           </div>
 
-          {/* Progress bar underneath */}
           <div className="w-full bg-black/5 dark:bg-white/5 rounded-full h-2.5 mt-5">
             <div
               className={cn(

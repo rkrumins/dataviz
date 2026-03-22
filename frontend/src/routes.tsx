@@ -56,6 +56,13 @@ export const router = createBrowserRouter([
       { path: 'dashboard', element: <Lazy><Dashboard /></Lazy> },
       // CanvasLayout gates these routes behind a schema fetch so the heavy
       // ontology data only loads when the user navigates to a canvas section.
+      // Schema/Semantic Layer pages — independent of workspace context.
+      // They manage global ontology resources and read data source context
+      // from URL search params (?workspaceId=X&dataSourceId=Y).
+      { path: 'schema', element: <Lazy><OntologySchemaPage /></Lazy> },
+      { path: 'schema/:ontologyId', element: <Lazy><OntologySchemaPage /></Lazy> },
+      // CanvasLayout gates these routes behind a schema fetch so the heavy
+      // ontology data only loads when the user navigates to a canvas section.
       {
         element: <CanvasLayout />,
         children: [
@@ -64,8 +71,6 @@ export const router = createBrowserRouter([
           { path: 'views/:viewId', element: <Lazy><ViewPage /></Lazy> },
           { path: 'workspaces/:workspaceId', element: <Lazy><WorkspaceView /></Lazy> },
           { path: 'workspaces/:workspaceId/views', element: <Lazy><WorkspaceViewsManager /></Lazy> },
-          { path: 'schema', element: <Lazy><OntologySchemaPage /></Lazy> },
-          { path: 'schema/:ontologyId', element: <Lazy><OntologySchemaPage /></Lazy> },
         ],
       },
       {
