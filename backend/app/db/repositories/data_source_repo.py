@@ -141,7 +141,7 @@ async def create_data_source(
         provider_id=cat.provider_id,
         graph_name=cat.source_identifier,
         ontology_id=req.ontology_id,
-        label=req.label,
+        label=req.label or cat.name or cat.source_identifier,
         is_primary=make_primary,
         is_active=True,
         extra_config=json.dumps(req.extra_config) if req.extra_config else None,

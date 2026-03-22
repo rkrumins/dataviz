@@ -140,7 +140,7 @@ async def create_workspace(
             provider_id=cat.provider_id,
             graph_name=cat.source_identifier,
             ontology_id=ds_req.ontology_id,
-            label=ds_req.label,
+            label=ds_req.label or cat.name or cat.source_identifier,
             is_primary=(i == 0),  # first data source is primary by default
             is_active=True,
         )

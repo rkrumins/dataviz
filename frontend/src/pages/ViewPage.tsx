@@ -35,16 +35,23 @@ export function ViewPage() {
   // ─── Error state ────────────────────────────────────────────────────
   if (status === 'error') {
     return (
-      <div className="absolute inset-0 flex items-center justify-center bg-canvas">
-        <div className="flex flex-col items-center gap-4 max-w-md text-center">
-          <div className="text-6xl text-ink-faint">404</div>
-          <h2 className="text-xl font-semibold text-ink-primary">View not found</h2>
-          <p className="text-sm text-ink-secondary">
+      <div className="absolute inset-0 flex items-center justify-center bg-canvas/80 backdrop-blur-sm">
+        <div className="flex flex-col items-center gap-4 max-w-md text-center px-6">
+          <div className="w-14 h-14 rounded-2xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 flex items-center justify-center">
+            <AlertTriangle className="w-7 h-7 text-red-500" />
+          </div>
+          <h2 className="text-xl font-bold text-ink">View Cannot Load</h2>
+          <p className="text-sm text-ink-muted leading-relaxed">
             {error ?? "The view you're looking for doesn't exist or you don't have access to it."}
           </p>
-          <Link to="/explorer" className="text-sm text-accent-lineage hover:underline">
-            Back to Explorer
-          </Link>
+          <div className="flex items-center gap-3 mt-2">
+            <Link
+              to="/explorer"
+              className="inline-flex items-center gap-2 rounded-xl px-5 py-2.5 bg-gradient-to-r from-accent-lineage to-violet-600 text-white text-sm font-semibold shadow-lg shadow-accent-lineage/25 hover:shadow-xl hover:-translate-y-0.5 transition-[transform,box-shadow] duration-200"
+            >
+              Back to Explorer
+            </Link>
+          </div>
         </div>
       </div>
     )

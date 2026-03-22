@@ -1,17 +1,16 @@
 /**
- * SemanticStep — Ontology assignment in the onboarding wizard.
+ * SemanticStep — Per-source ontology assignment in the onboarding wizard.
  *
- * Ontologies are shared, reusable semantic layers that can span across
- * different sources, workspaces, and providers. This step therefore uses
- * a PRIMARY ontology selector at the top that applies to ALL items being
- * onboarded, with optional per-item overrides and per-item coverage heatmaps.
+ * Each data source gets its own ontology since graph schemas can differ.
+ * Coverage analysis warns when a selected ontology doesn't fully cover
+ * the graph's entity/relationship types (mirrors OntologySchemaPage CoveragePanel).
  */
 import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { BookOpen, Sparkles, Check, X, Loader2, ChevronDown, Info, Settings2 } from 'lucide-react'
+import { BookOpen, Sparkles, Check, X, Loader2, ChevronDown, AlertTriangle, Info } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
-import type { OntologyDefinitionResponse, OntologyMatchResult } from '@/services/ontologyDefinitionService'
+import type { OntologyDefinitionResponse, OntologyMatchResult, OntologyCoverageResponse } from '@/services/ontologyDefinitionService'
 import { providerService } from '@/services/providerService'
 import type { CatalogItemResponse } from '@/services/catalogService'
 import type { OnboardingFormData } from '../AssetOnboardingWizard'
@@ -27,6 +26,27 @@ interface SuggestionState {
     loading: boolean
     error: string | null
     result: OntologyMatchResult | null
+}
+
+interface CoverageWarning {
+    loading: boolean
+    data: OntologyCoverageResponse | null
+    error: string | null
+}
+
+/** Convert PhysicalGraphStatsResponse → GraphSchemaStats (suggest endpoint format) */
+function transformStatsForSuggest(raw: any): Record<string, unknown> {
+    return {
+        totalNodes: raw.nodeCount ?? 0,
+        totalEdges: raw.edgeCount ?? 0,
+        entityTypeStats: Object.entries(raw.entityTypeCounts ?? {}).map(
+            ([name, count]) => ({ id: name, name, count: count as number, sampleNames: [] })
+        ),
+        edgeTypeStats: Object.entries(raw.edgeTypeCounts ?? {}).map(
+            ([name, count]) => ({ id: name, name, count: count as number, sourceTypes: [], targetTypes: [] })
+        ),
+        tagStats: [],
+    }
 }
 
 function coverageTextClass(pct: number): string {
@@ -50,24 +70,17 @@ export function SemanticStep({
     const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
     const [loadingOntologies, setLoadingOntologies] = useState(true)
     const [suggestions, setSuggestions] = useState<Record<string, SuggestionState>>({})
-    const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set())
-    const [perItemOverrides, setPerItemOverrides] = useState<Set<string>>(new Set())
+    const [coverageWarnings, setCoverageWarnings] = useState<Record<string, CoverageWarning>>({})
+    const [expandedItems, setExpandedItems] = useState<Set<string>>(() => new Set(catalogItems.map(c => c.id)))
+    // Cache raw stats per item so we can re-check coverage when ontology changes
+    const [cachedStats, setCachedStats] = useState<Record<string, Record<string, unknown>>>({})
 
-    // The "primary" ontology is derived from the first item's selection
-    // (all non-overridden items share this value)
-    const primaryOntologyId = (() => {
-        const firstItem = catalogItems[0]
-        if (!firstItem) return ''
-        return formData.ontologySelections[firstItem.id]?.ontologyId ?? ''
-    })()
-
-    // Load published ontologies on mount
+    // Load ontologies on mount — show all (published first, then drafts)
     useEffect(() => {
         let cancelled = false
         setLoadingOntologies(true)
         ontologyDefinitionService.list().then(all => {
             if (cancelled) return
-            // Show all ontologies (published + drafts) — sorted: published first
             setOntologies(all.sort((a, b) => (b.isPublished ? 1 : 0) - (a.isPublished ? 1 : 0)))
             setLoadingOntologies(false)
         }).catch(() => {
@@ -76,36 +89,48 @@ export function SemanticStep({
         return () => { cancelled = true }
     }, [])
 
-    // Apply primary ontology to all non-overridden items
-    const applyPrimaryOntology = useCallback((ontologyId: string) => {
-        const updated: OnboardingFormData['ontologySelections'] = { ...formData.ontologySelections }
-        for (const item of catalogItems) {
-            if (!perItemOverrides.has(item.id)) {
-                updated[item.id] = {
-                    ...updated[item.id],
-                    ontologyId,
-                    // Clear coverage when primary changes — user can re-run suggest
-                    coverageStats: null,
-                    suggestedOntology: null,
-                }
-            }
-        }
-        updateFormData({ ontologySelections: updated })
-    }, [catalogItems, formData.ontologySelections, perItemOverrides, updateFormData])
-
-    const updateItemOntology = useCallback((itemId: string, ontologyId: string) => {
+    const updateOntologySelection = useCallback((itemId: string, updates: Partial<OnboardingFormData['ontologySelections'][string]>) => {
         updateFormData({
             ontologySelections: {
                 ...formData.ontologySelections,
                 [itemId]: {
                     ...formData.ontologySelections[itemId],
-                    ontologyId,
-                    coverageStats: null,
-                    suggestedOntology: null,
+                    ...updates,
                 },
             },
         })
     }, [formData.ontologySelections, updateFormData])
+
+    // Check coverage when ontology selection changes (if we have cached stats)
+    const checkCoverage = useCallback(async (itemId: string, ontologyId: string) => {
+        const stats = cachedStats[itemId]
+        if (!stats || !ontologyId) {
+            setCoverageWarnings(prev => ({ ...prev, [itemId]: { loading: false, data: null, error: null } }))
+            return
+        }
+        setCoverageWarnings(prev => ({ ...prev, [itemId]: { loading: true, data: null, error: null } }))
+        try {
+            const c = await ontologyDefinitionService.coverage(ontologyId, stats)
+            setCoverageWarnings(prev => ({ ...prev, [itemId]: { loading: false, data: c, error: null } }))
+        } catch (err) {
+            setCoverageWarnings(prev => ({
+                ...prev,
+                [itemId]: { loading: false, data: null, error: err instanceof Error ? err.message : 'Coverage check failed' },
+            }))
+        }
+    }, [cachedStats])
+
+    const handleOntologyChange = useCallback((itemId: string, ontologyId: string) => {
+        updateOntologySelection(itemId, {
+            ontologyId,
+            coverageStats: null,
+            suggestedOntology: null,
+        })
+        // Re-check coverage if we have stats cached
+        if (cachedStats[itemId] && ontologyId) {
+            checkCoverage(itemId, ontologyId)
+        }
+    }, [updateOntologySelection, cachedStats, checkCoverage])
 
     const handleSuggest = async (item: CatalogItemResponse) => {
         setSuggestions(prev => ({
@@ -115,8 +140,13 @@ export function SemanticStep({
 
         try {
             const assetName = item.sourceIdentifier || item.name
-            const graphStats = await providerService.getAssetStats(providerId, assetName)
-            const suggestion = await ontologyDefinitionService.suggest(graphStats)
+            const rawStats = await providerService.getAssetStats(providerId, assetName)
+            const transformedStats = transformStatsForSuggest(rawStats)
+
+            // Cache for future coverage checks
+            setCachedStats(prev => ({ ...prev, [item.id]: transformedStats }))
+
+            const suggestion = await ontologyDefinitionService.suggest(transformedStats)
 
             const bestMatch = suggestion.matchingOntologies.length > 0
                 ? suggestion.matchingOntologies.reduce((a, b) => a.jaccardScore > b.jaccardScore ? a : b)
@@ -127,19 +157,17 @@ export function SemanticStep({
                 [item.id]: { loading: false, error: null, result: bestMatch },
             }))
 
-            updateFormData({
-                ontologySelections: {
-                    ...formData.ontologySelections,
-                    [item.id]: {
-                        ...formData.ontologySelections[item.id],
-                        suggestedOntology: suggestion,
-                        coverageStats: bestMatch,
-                        ontologyId: bestMatch?.ontologyId ?? formData.ontologySelections[item.id]?.ontologyId ?? '',
-                    },
-                },
+            updateOntologySelection(item.id, {
+                suggestedOntology: suggestion,
+                coverageStats: bestMatch,
+                ontologyId: bestMatch?.ontologyId ?? formData.ontologySelections[item.id]?.ontologyId ?? '',
             })
 
-            // Auto-expand item to show coverage heatmap
+            // If we got a match, also run coverage check
+            if (bestMatch?.ontologyId) {
+                checkCoverage(item.id, bestMatch.ontologyId)
+            }
+
             setExpandedItems(prev => new Set(prev).add(item.id))
         } catch (err) {
             setSuggestions(prev => ({
@@ -170,22 +198,6 @@ export function SemanticStep({
         })
     }
 
-    const toggleOverride = (itemId: string) => {
-        setPerItemOverrides(prev => {
-            const next = new Set(prev)
-            if (next.has(itemId)) {
-                next.delete(itemId)
-                // Reset to primary ontology
-                updateItemOntology(itemId, primaryOntologyId)
-            } else {
-                next.add(itemId)
-            }
-            return next
-        })
-    }
-
-    const selectedOntology = ontologies.find(o => o.id === primaryOntologyId)
-
     return (
         <div className="space-y-6">
             {/* Header */}
@@ -196,8 +208,8 @@ export function SemanticStep({
                 <div>
                     <h3 className="text-lg font-semibold text-ink">Configure Semantic Layer</h3>
                     <p className="text-sm text-ink-muted mt-0.5">
-                        Select a shared ontology for your data sources. Ontologies define entity types
-                        and relationships that power contextual views, search, and lineage traversal.
+                        Assign an ontology to each data source. Graph schemas can differ across sources,
+                        so each gets its own semantic layer configuration.
                     </p>
                 </div>
             </div>
@@ -211,84 +223,24 @@ export function SemanticStep({
             >
                 <Info className="w-4 h-4 text-indigo-400 mt-0.5 flex-shrink-0" />
                 <p className="text-sm text-ink-secondary leading-relaxed">
-                    Ontologies are shared semantic layers that span across sources, workspaces, and providers.
-                    Selecting one here applies it to all data sources being onboarded. You can override
-                    individual items if their schema differs significantly.
+                    Use <strong>Analyze Coverage</strong> to auto-detect the best ontology for each source.
+                    If an ontology doesn't fully cover the graph schema, you'll see a coverage warning
+                    with the uncovered types listed.
                 </p>
             </motion.div>
 
-            {/* ── Primary Ontology Selector ── */}
-            <motion.div
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.1 }}
-                className="glass-panel rounded-xl border border-glass-border p-5 space-y-3"
-            >
-                <label className="block text-xs font-bold text-ink-muted uppercase tracking-wider">
-                    Ontology for All Sources
-                </label>
-                <select
-                    value={primaryOntologyId}
-                    onChange={(e) => applyPrimaryOntology(e.target.value)}
-                    disabled={loadingOntologies}
-                    className={cn(
-                        'w-full rounded-lg border border-glass-border bg-transparent px-3 py-2.5',
-                        'text-sm text-ink placeholder:text-ink-secondary',
-                        'focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/40',
-                        'disabled:opacity-50',
-                    )}
-                >
-                    <option value="">
-                        {loadingOntologies ? 'Loading ontologies...' : 'Select an ontology...'}
-                    </option>
-                    {ontologies.map(o => (
-                        <option key={o.id} value={o.id}>
-                            {o.name} (v{o.version}){o.isPublished ? '' : ' — Draft'}
-                        </option>
-                    ))}
-                </select>
-
-                {/* Selected ontology details */}
-                {selectedOntology && (
-                    <motion.div
-                        initial={{ opacity: 0, height: 0 }}
-                        animate={{ opacity: 1, height: 'auto' }}
-                        className="flex items-center gap-3 pt-1"
-                    >
-                        <div className="flex items-center gap-1.5 text-emerald-400">
-                            <Check className="w-3.5 h-3.5" />
-                            <span className="text-xs font-medium">{selectedOntology.name}</span>
-                        </div>
-                        <span className="text-[10px] text-ink-muted">
-                            v{selectedOntology.version} &middot; {selectedOntology.scope}
-                        </span>
-                        {selectedOntology.description && (
-                            <span className="text-[10px] text-ink-muted truncate max-w-[200px]">
-                                &mdash; {selectedOntology.description}
-                            </span>
-                        )}
-                    </motion.div>
-                )}
-            </motion.div>
-
-            {/* ── Per-Item Coverage & Overrides ── */}
-            <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-ink-muted uppercase tracking-wider">
-                        Per-Source Coverage
-                    </span>
-                    <span className="text-[10px] text-ink-muted">
-                        {catalogItems.length} source{catalogItems.length !== 1 ? 's' : ''}
-                    </span>
-                </div>
-
+            {/* Per-source ontology cards */}
+            <div className="space-y-4">
                 {catalogItems.map((item, index) => {
                     const selection = formData.ontologySelections[item.id]
                     const suggestion = suggestions[item.id]
+                    const coverageW = coverageWarnings[item.id]
                     const coverage = selection?.coverageStats as OntologyMatchResult | null
-                    const isOverridden = perItemOverrides.has(item.id)
                     const isExpanded = expandedItems.has(item.id)
 
+                    const itemOntologyId = selection?.ontologyId ?? ''
+
+                    // Coverage from suggestion (auto-suggest) or from manual coverage check
                     const totalTypes = coverage
                         ? coverage.totalEntityTypes + coverage.totalRelationshipTypes
                         : 0
@@ -297,18 +249,19 @@ export function SemanticStep({
                         : 0
                     const coveragePct = totalTypes > 0 ? Math.round((coveredTypes / totalTypes) * 100) : 0
 
-                    const itemOntologyId = selection?.ontologyId ?? ''
-                    const itemOntology = ontologies.find(o => o.id === itemOntologyId)
+                    // Coverage warning from manual ontology selection
+                    const hasWarning = coverageW?.data && coverageW.data.coveragePercent < 100
+                    const warningData = coverageW?.data
 
                     return (
                         <motion.div
                             key={item.id}
                             initial={{ opacity: 0, y: 12 }}
                             animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: 0.15 + index * 0.05 }}
-                            className="glass-panel rounded-xl p-4 space-y-3"
+                            transition={{ delay: index * 0.05 }}
+                            className="glass-panel rounded-xl p-5 space-y-4"
                         >
-                            {/* Item header row */}
+                            {/* Item header */}
                             <div className="flex items-center justify-between">
                                 <button
                                     type="button"
@@ -325,26 +278,13 @@ export function SemanticStep({
                                 </button>
 
                                 <div className="flex items-center gap-2 shrink-0 ml-2">
-                                    {/* Coverage badge (if analysed) */}
-                                    {coverage && (
-                                        <span className={cn(
-                                            'text-xs font-bold',
-                                            coverageTextClass(coveragePct),
-                                        )}>
-                                            {coveragePct}%
-                                        </span>
-                                    )}
-
-                                    {/* Ontology status */}
                                     {itemOntologyId ? (
-                                        <div className="flex items-center gap-1 text-emerald-400">
+                                        <div className="flex items-center gap-1.5 text-emerald-400">
                                             <Check className="w-3.5 h-3.5" />
-                                            <span className="text-[10px] font-medium">
-                                                {isOverridden ? itemOntology?.name || 'Custom' : 'Inherited'}
-                                            </span>
+                                            <span className="text-xs font-medium">Configured</span>
                                         </div>
                                     ) : (
-                                        <span className="text-[10px] font-medium text-amber-400">Pending</span>
+                                        <span className="text-xs font-medium text-amber-400">Pending</span>
                                     )}
                                 </div>
                             </div>
@@ -357,52 +297,38 @@ export function SemanticStep({
                                         animate={{ opacity: 1, height: 'auto' }}
                                         exit={{ opacity: 0, height: 0 }}
                                         transition={{ duration: 0.2 }}
-                                        className="space-y-3 overflow-hidden"
+                                        className="space-y-4 overflow-hidden"
                                     >
-                                        {/* Override toggle + per-item selector */}
+                                        {/* Ontology selector + suggest button */}
                                         <div className="flex items-center gap-3">
-                                            <button
-                                                type="button"
-                                                onClick={() => toggleOverride(item.id)}
+                                            <select
+                                                value={itemOntologyId}
+                                                onChange={(e) => handleOntologyChange(item.id, e.target.value)}
+                                                disabled={loadingOntologies}
                                                 className={cn(
-                                                    'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all',
-                                                    'border',
-                                                    isOverridden
-                                                        ? 'border-amber-500/30 bg-amber-500/10 text-amber-400'
-                                                        : 'border-glass-border text-ink-muted hover:border-indigo-500/20 hover:text-ink-secondary',
+                                                    'flex-1 rounded-lg border border-glass-border bg-transparent px-3 py-2',
+                                                    'text-sm text-ink placeholder:text-ink-secondary',
+                                                    'focus:outline-none focus:ring-1 focus:ring-indigo-500/50',
+                                                    'disabled:opacity-50',
                                                 )}
                                             >
-                                                <Settings2 className="w-3 h-3" />
-                                                {isOverridden ? 'Using Override' : 'Override Ontology'}
-                                            </button>
+                                                <option value="">
+                                                    {loadingOntologies ? 'Loading ontologies...' : 'Select an ontology...'}
+                                                </option>
+                                                {ontologies.map(o => (
+                                                    <option key={o.id} value={o.id}>
+                                                        {o.name} (v{o.version}){o.isPublished ? '' : ' — Draft'}
+                                                    </option>
+                                                ))}
+                                            </select>
 
-                                            {isOverridden && (
-                                                <select
-                                                    value={itemOntologyId}
-                                                    onChange={(e) => updateItemOntology(item.id, e.target.value)}
-                                                    className={cn(
-                                                        'flex-1 rounded-lg border border-glass-border bg-transparent px-3 py-1.5',
-                                                        'text-sm text-ink',
-                                                        'focus:outline-none focus:ring-1 focus:ring-indigo-500/50',
-                                                    )}
-                                                >
-                                                    <option value="">Select ontology...</option>
-                                                    {ontologies.map(o => (
-                                                        <option key={o.id} value={o.id}>
-                                                            {o.name} (v{o.version})
-                                                        </option>
-                                                    ))}
-                                                </select>
-                                            )}
-
-                                            {/* Auto-suggest button */}
                                             <button
                                                 type="button"
                                                 onClick={() => handleSuggest(item)}
                                                 disabled={suggestion?.loading}
                                                 className={cn(
-                                                    'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium',
-                                                    'border border-glass-border',
+                                                    'flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium',
+                                                    'border border-glass-border whitespace-nowrap',
                                                     'hover:bg-indigo-500/10 hover:border-indigo-500/30 hover:text-indigo-400',
                                                     'transition-colors duration-150',
                                                     'disabled:opacity-50 disabled:cursor-not-allowed',
@@ -412,9 +338,9 @@ export function SemanticStep({
                                                 )}
                                             >
                                                 {suggestion?.loading ? (
-                                                    <><Loader2 className="w-3 h-3 animate-spin" /> Analyzing...</>
+                                                    <><Loader2 className="w-4 h-4 animate-spin" /> Analyzing...</>
                                                 ) : (
-                                                    <><Sparkles className="w-3 h-3" /> Analyze Coverage</>
+                                                    <><Sparkles className="w-4 h-4" /> Analyze Coverage</>
                                                 )}
                                             </button>
                                         </div>
@@ -427,14 +353,68 @@ export function SemanticStep({
                                             </div>
                                         )}
 
-                                        {/* Coverage Heatmap */}
+                                        {/* Coverage warning from manual ontology selection */}
+                                        {coverageW?.loading && (
+                                            <div className="flex items-center gap-2 text-sm text-ink-muted">
+                                                <Loader2 className="w-4 h-4 animate-spin" />
+                                                <span>Checking coverage...</span>
+                                            </div>
+                                        )}
+                                        {hasWarning && warningData && (
+                                            <motion.div
+                                                initial={{ opacity: 0, y: 4 }}
+                                                animate={{ opacity: 1, y: 0 }}
+                                                className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 space-y-2"
+                                            >
+                                                <div className="flex items-center gap-2">
+                                                    <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                                                    <span className="text-sm font-medium text-amber-400">
+                                                        Coverage: {Math.round(warningData.coveragePercent)}% — {warningData.uncoveredEntityTypes.length + warningData.uncoveredRelationshipTypes.length} type{warningData.uncoveredEntityTypes.length + warningData.uncoveredRelationshipTypes.length !== 1 ? 's' : ''} not covered
+                                                    </span>
+                                                </div>
+                                                <p className="text-xs text-ink-muted">
+                                                    This ontology does not define all types found in the graph.
+                                                    Uncovered types won't appear in contextual views or lineage traversal.
+                                                </p>
+                                                {warningData.uncoveredEntityTypes.length > 0 && (
+                                                    <div className="flex flex-wrap gap-1.5 pt-1">
+                                                        {warningData.uncoveredEntityTypes.map(t => (
+                                                            <span key={t} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20">
+                                                                <X className="w-3 h-3" />{t}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                {warningData.uncoveredRelationshipTypes.length > 0 && (
+                                                    <div className="flex flex-wrap gap-1.5">
+                                                        {warningData.uncoveredRelationshipTypes.map(t => (
+                                                            <span key={t} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20">
+                                                                <X className="w-3 h-3" />{t}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </motion.div>
+                                        )}
+                                        {coverageW?.data && coverageW.data.coveragePercent >= 100 && (
+                                            <div className="flex items-center gap-2 text-sm text-emerald-400">
+                                                <Check className="w-4 h-4" />
+                                                <span>Full coverage — all graph types are defined in this ontology</span>
+                                            </div>
+                                        )}
+
+                                        {/* Coverage Heatmap from auto-suggest */}
                                         {coverage && (
-                                            <div className="space-y-3 pt-1">
+                                            <motion.div
+                                                initial={{ opacity: 0, height: 0 }}
+                                                animate={{ opacity: 1, height: 'auto' }}
+                                                className="space-y-3 pt-1"
+                                            >
                                                 {/* Coverage bar */}
                                                 <div className="space-y-1.5">
                                                     <div className="flex items-center justify-between">
                                                         <span className="text-xs font-medium text-ink-muted">
-                                                            Schema Coverage
+                                                            Best Match Coverage
                                                         </span>
                                                         <span className={cn(
                                                             'text-xs font-bold',
@@ -467,8 +447,7 @@ export function SemanticStep({
                                                                 transition={{ delay: i * 0.02 }}
                                                                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
                                                             >
-                                                                <Check className="w-3 h-3" />
-                                                                {t}
+                                                                <Check className="w-3 h-3" />{t}
                                                             </motion.span>
                                                         ))}
                                                         {coverage.uncoveredEntityTypes.map((t, i) => (
@@ -479,8 +458,7 @@ export function SemanticStep({
                                                                 transition={{ delay: (coverage.coveredEntityTypes.length + i) * 0.02 }}
                                                                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20"
                                                             >
-                                                                <X className="w-3 h-3" />
-                                                                {t}
+                                                                <X className="w-3 h-3" />{t}
                                                             </motion.span>
                                                         ))}
                                                     </div>
@@ -500,8 +478,7 @@ export function SemanticStep({
                                                                 transition={{ delay: i * 0.02 }}
                                                                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
                                                             >
-                                                                <Check className="w-3 h-3" />
-                                                                {t}
+                                                                <Check className="w-3 h-3" />{t}
                                                             </motion.span>
                                                         ))}
                                                         {coverage.uncoveredRelationshipTypes.map((t, i) => (
@@ -512,13 +489,12 @@ export function SemanticStep({
                                                                 transition={{ delay: (coverage.coveredRelationshipTypes.length + i) * 0.02 }}
                                                                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20"
                                                             >
-                                                                <X className="w-3 h-3" />
-                                                                {t}
+                                                                <X className="w-3 h-3" />{t}
                                                             </motion.span>
                                                         ))}
                                                     </div>
                                                 </div>
-                                            </div>
+                                            </motion.div>
                                         )}
                                     </motion.div>
                                 )}

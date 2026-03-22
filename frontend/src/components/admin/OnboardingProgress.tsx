@@ -83,7 +83,6 @@ export function OnboardingProgress({
           <div className="flex items-center">
             {stages.map((stage, i) => {
               const isDone = doneFlags[i]
-              const _Icon = stage.icon
               const lineComplete = i < stages.length - 1 && doneFlags[i] && doneFlags[i + 1]
 
               return (

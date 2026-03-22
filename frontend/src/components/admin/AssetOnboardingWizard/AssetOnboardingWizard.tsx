@@ -214,6 +214,7 @@ export function AssetOnboardingWizard({
                         dataSources: group.items.map((c, i) => ({
                             catalogItemId: c.id,
                             ontologyId: formData.ontologySelections[group.placeholderIds[i]]?.ontologyId || undefined,
+                            label: c.name || c.sourceIdentifier || undefined,
                         })),
                     })
                     wsId = ws.id
@@ -235,6 +236,7 @@ export function AssetOnboardingWizard({
                         const ds = await workspaceService.addDataSource(wsId, {
                             catalogItemId: c.id,
                             ontologyId: formData.ontologySelections[placeholderId]?.ontologyId || undefined,
+                            label: c.name || c.sourceIdentifier || undefined,
                         })
                         if (!firstWsId) {
                             firstWsId = wsId

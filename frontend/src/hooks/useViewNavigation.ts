@@ -15,6 +15,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
+import { useWorkspacesStore } from '@/store/workspaces'
 import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { useGraphSchema } from '@/hooks/useGraphSchema'
 import { useRecentViews } from '@/hooks/useRecentViews'
@@ -122,7 +123,17 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
 
       if (cancelledRef.current) return
 
-      // 2. Switch scope if needed
+      // 2. Validate workspace exists before switching scope
+      if (targetWsId) {
+        const wsExists = useWorkspacesStore.getState().workspaces.some(w => w.id === targetWsId)
+        if (!wsExists) {
+          setStatus('error')
+          setError('The workspace for this view no longer exists.')
+          return
+        }
+      }
+
+      // 3. Switch scope if needed
       const switchResult = switchToViewScope(targetWsId, targetDsId)
       pendingSwitchRef.current = switchResult
       switchProviderVersionRef.current = providerVersion
