@@ -48,7 +48,7 @@ const mainNavItems: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'explore', label: 'Explore', icon: Network },
   { id: 'lenses', label: 'Context Lenses', icon: Layers },
-  { id: 'schema', label: 'Ontologies', icon: Layers },
+  { id: 'schema', label: 'Semantic Layers', icon: Layers },
   { id: 'admin' as any, label: 'Administration', icon: Settings },
 ]
 

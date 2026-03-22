@@ -100,7 +100,7 @@ export function OverviewPanel({
                 </p>
               ) : (
                 <p className="text-sm text-ink-muted/60 italic">
-                  No description provided. Add one in Settings to document this ontology's purpose.
+                  No description provided. Add one in Settings to document this semantic layer's purpose.
                 </p>
               )}
 
@@ -153,7 +153,7 @@ export function OverviewPanel({
           </span>
           {ontology.isSystem && (
             <span className="text-[10px] text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/30 px-2 py-0.5 rounded-md font-semibold">
-              System Ontology
+              System
             </span>
           )}
           {ontology.isPublished && (
@@ -282,7 +282,7 @@ export function OverviewPanel({
             <h3 className="text-sm font-bold text-amber-800 dark:text-amber-300">Uncovered Graph Types</h3>
           </div>
           <p className="text-xs text-amber-700/80 dark:text-amber-400/70 mb-3">
-            These types exist in your graph but are not defined in this ontology. Define them for full coverage.
+            These types exist in your graph but are not defined in this semantic layer. Define them for full coverage.
           </p>
           <div className="flex flex-wrap gap-1.5">
             {coverage.uncoveredEntityTypes.map(t => (

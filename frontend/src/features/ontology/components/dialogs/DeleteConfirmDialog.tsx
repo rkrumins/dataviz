@@ -59,7 +59,7 @@ export function DeleteConfirmDialog({
               <AlertTriangle className="w-5 h-5 text-red-500" />
             </div>
             <div className="min-w-0 flex-1">
-              <h3 className="text-base font-bold text-ink">Delete Ontology</h3>
+              <h3 className="text-base font-bold text-ink">Delete Semantic Layer</h3>
               <p className="text-sm text-ink-muted mt-1">
                 You are about to delete <span className="font-semibold text-ink">"{ontology.name}"</span> (v{ontology.version}).
                 You can undo this action briefly after deletion.
@@ -71,12 +71,12 @@ export function DeleteConfirmDialog({
         {/* Blockers */}
         {blocked && (
           <div className="mx-6 mb-4 rounded-xl border border-red-200 dark:border-red-800/50 bg-red-50/50 dark:bg-red-950/20 p-4">
-            <p className="text-xs font-semibold text-red-700 dark:text-red-400 mb-2">Cannot delete this ontology:</p>
+            <p className="text-xs font-semibold text-red-700 dark:text-red-400 mb-2">Cannot delete this semantic layer:</p>
             <ul className="space-y-1.5">
               {ontology.isSystem && (
                 <li className="flex items-center gap-2 text-xs text-red-600 dark:text-red-400">
                   <div className="w-1 h-1 rounded-full bg-red-500" />
-                  System ontologies cannot be deleted
+                  System semantic layers cannot be deleted
                 </li>
               )}
               {assignmentCount > 0 && (
@@ -128,7 +128,7 @@ export function DeleteConfirmDialog({
             )}
           >
             <Trash2 className="w-3.5 h-3.5" />
-            {isDeleting ? 'Deleting...' : 'Delete Ontology'}
+            {isDeleting ? 'Deleting...' : 'Delete Semantic Layer'}
           </button>
         </div>
       </div>

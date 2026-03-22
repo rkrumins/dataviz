@@ -8,7 +8,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useBlocker } from 'react-router'
-import { Lock, PenLine, Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, Copy, ShieldCheck, Upload, X, Clock, Save, CircleDot, LayoutDashboard, Download } from 'lucide-react'
+import { Lock, PenLine, Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, Copy, ShieldCheck, Upload, X, Clock, Save, CircleDot, LayoutDashboard, Download, Trash2, RotateCcw } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { EntityTypeEditor } from '@/components/schema/EntityTypeEditor'
 import { RelationshipTypeEditor } from '@/components/schema/RelationshipTypeEditor'
@@ -134,7 +134,8 @@ export function OntologySchemaPage() {
   const [workingLineage, setWorkingLineage] = useState<string[] | null>(null)
 
   // ── Derived ────────────────────────────────────────────────────────
-  const isImmutable = !selectedOntology || selectedOntology.isSystem || selectedOntology.isPublished
+  const isDeleted = !!selectedOntology?.deletedAt
+  const isImmutable = !selectedOntology || selectedOntology.isSystem || selectedOntology.isPublished || isDeleted
   const isLocked = isImmutable || !isEditing
 
   // Use working copies when editing, otherwise server data
@@ -330,7 +331,7 @@ export function OntologySchemaPage() {
       await loadWorkspaces()
       invalidateSchema()
       if (assignId) navigate(`/schema/${assignId}`)
-      showToast('success', assignId ? 'Ontology assigned to data source' : 'Ontology assignment cleared')
+      showToast('success', assignId ? 'Semantic layer assigned to data source' : 'Semantic layer assignment cleared')
     } catch (err: unknown) {
       showToast('error', `Assignment failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
@@ -340,7 +341,7 @@ export function OntologySchemaPage() {
 
   function handleSaveEntityType(entityType: EntityTypeSchema) {
     if (!selectedOntology || !workingEntityDefs) return
-    if (isLocked) { showToast('warning', 'Clone this ontology to make edits'); return }
+    if (isLocked) { showToast('warning', 'Clone this semantic layer to make edits'); return }
 
     const currentDefs = { ...(workingEntityDefs as Record<string, Record<string, unknown>>) }
 
@@ -401,7 +402,7 @@ export function OntologySchemaPage() {
 
   function handleSaveRelType(relType: RelTypeWithClassifications) {
     if (!selectedOntology || !workingRelDefs) return
-    if (isLocked) { showToast('warning', 'Clone this ontology to make edits'); return }
+    if (isLocked) { showToast('warning', 'Clone this semantic layer to make edits'); return }
 
     const relId = relType.id.toUpperCase()
     const updatedRelDefs = {
@@ -450,7 +451,7 @@ export function OntologySchemaPage() {
 
   async function handleSuggestOntology() {
     if (!window.confirm(
-      'Generate ontology definitions from your graph\'s current types?\n\n' +
+      'Generate semantic layer definitions from your graph\'s current types?\n\n' +
       'This creates a new draft containing ONLY the entity and relationship ' +
       'types that exist in your active data source.',
     )) return
@@ -460,7 +461,7 @@ export function OntologySchemaPage() {
       const response = await ontologyDefinitionService.suggest(stats as unknown as Record<string, unknown>)
       const created = await ontologyDefinitionService.create({
         ...response.suggested,
-        name: `Suggested Ontology (${new Date().toLocaleDateString()})`,
+        name: `Suggested Semantic Layer (${new Date().toLocaleDateString()})`,
       })
       navigate(`/schema/${created.id}?tab=entities`)
       showToast('info', 'Draft created from graph — review types and publish when ready')
@@ -487,7 +488,7 @@ export function OntologySchemaPage() {
     try {
       const result = await mutations.validate.mutateAsync(selectedOntology.id)
       setValidationResult(result)
-      if (result.isValid) showToast('success', 'Ontology is valid')
+      if (result.isValid) showToast('success', 'Semantic layer is valid')
     } catch (err: unknown) {
       showToast('error', `Validation failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
@@ -545,7 +546,7 @@ export function OntologySchemaPage() {
         req: { name: updates.name, description: updates.description || undefined, evolutionPolicy: updates.evolutionPolicy },
       })
       setEditDetailsTarget(null)
-      showToast('success', 'Ontology details saved')
+      showToast('success', 'Details saved')
     } catch (err: unknown) {
       showToast('error', `Failed to save: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
@@ -600,12 +601,23 @@ export function OntologySchemaPage() {
             navigate(`/schema/${deletedId}`)
             showToast('success', `"${deletedName}" restored`)
           } catch {
-            showToast('error', 'Failed to restore ontology')
+            showToast('error', 'Failed to restore')
           }
         },
       })
     } catch (err: unknown) {
       showToast('error', `Failed to delete: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    }
+  }
+
+  async function handleRestore() {
+    if (!selectedOntology) return
+    try {
+      await ontologyDefinitionService.restore(selectedOntology.id)
+      mutations.invalidateAll()
+      showToast('success', `"${selectedOntology.name}" restored`)
+    } catch (err: unknown) {
+      showToast('error', `Failed to restore: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
   }
 
@@ -693,6 +705,28 @@ export function OntologySchemaPage() {
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
           {selectedOntology ? (
             <>
+              {/* Deleted banner */}
+              {isDeleted && (
+                <div className="flex-shrink-0 mx-8 mt-4 mb-0 flex items-center gap-3 px-4 py-3 rounded-xl bg-red-500/8 border border-red-500/20">
+                  <Trash2 className="w-5 h-5 text-red-500 flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-red-600 dark:text-red-400">This semantic layer has been deleted</p>
+                    <p className="text-xs text-red-500/70 mt-0.5">
+                      {selectedOntology?.deletedAt && `Deleted on ${new Date(selectedOntology.deletedAt).toLocaleDateString()}`}
+                      {selectedOntology?.deletedBy && ` by ${selectedOntology.deletedBy}`}
+                      . It is read-only and hidden from active lists.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleRestore}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors shadow-sm shadow-red-500/20 flex-shrink-0"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Restore
+                  </button>
+                </div>
+              )}
+
               {/* Detail header — clean AdminRegistry style */}
               <div className="flex-shrink-0 px-8 pt-6 pb-0">
                 {/* Top row: name + status + toolbar */}
@@ -1057,7 +1091,7 @@ export function OntologySchemaPage() {
                       <div className="absolute inset-0 rounded-full bg-gradient-to-br from-indigo-500/10 to-purple-500/10" />
                       <BookOpen className="w-8 h-8 relative z-10 text-indigo-400 opacity-60" />
                     </div>
-                    <p className="text-sm font-semibold text-ink-secondary">No ontology selected</p>
+                    <p className="text-sm font-semibold text-ink-secondary">No semantic layer selected</p>
                     <p className="text-xs mt-1.5 text-ink-muted">
                       Select one from the sidebar or create a new draft.
                     </p>

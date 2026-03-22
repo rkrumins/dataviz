@@ -230,7 +230,7 @@ export function EntityTypesPanel({
                 : <LucideIcons.AlertCircle className="w-3.5 h-3.5" />}
               <span className="font-medium">
                 {validationResult.isValid
-                  ? 'Ontology is valid'
+                  ? 'Semantic layer is valid'
                   : `${validationResult.issues.filter(i => i.severity === 'error').length} error(s) found`}
               </span>
             </div>
@@ -325,7 +325,7 @@ export function EntityTypesPanel({
               </div>
               <div className="text-left">
                 <p className="text-sm font-semibold text-ink-muted group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">Add Entity Type</p>
-                <p className="text-[11px] text-ink-muted/60">Define a new node type for your ontology</p>
+                <p className="text-[11px] text-ink-muted/60">Define a new node type for your semantic layer</p>
               </div>
             </button>
           )}

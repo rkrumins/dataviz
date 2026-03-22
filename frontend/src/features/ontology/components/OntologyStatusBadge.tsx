@@ -1,4 +1,4 @@
-import { Shield, CheckCircle2, PenLine } from 'lucide-react'
+import { Shield, CheckCircle2, PenLine, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 
@@ -14,6 +14,18 @@ export function OntologyStatusBadge({
     : 'text-[10px] px-2 py-0.5 gap-1'
   const iconSize = size === 'xs' ? 'w-2.5 h-2.5' : 'w-3 h-3'
 
+  if (ontology.deletedAt) {
+    return (
+      <span className={cn(
+        'inline-flex items-center rounded-full font-bold border',
+        'bg-red-500/10 text-red-500 dark:text-red-400 border-red-500/20',
+        base,
+      )}>
+        <Trash2 className={iconSize} />
+        deleted
+      </span>
+    )
+  }
   if (ontology.isSystem) {
     return (
       <span className={cn(

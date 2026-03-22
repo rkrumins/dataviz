@@ -157,7 +157,7 @@ export function OntologyContextBanner({
               <a href="/admin/registry?tab=workspaces" className="text-indigo-500 hover:text-indigo-600 font-medium hover:underline transition-colors">
                 Registry
               </a>
-              {' '}to manage ontologies and assign them to data sources.
+              {' '}to manage semantic layers and assign them to data sources.
             </p>
           </div>
         </div>
@@ -222,7 +222,7 @@ export function OntologyContextBanner({
                     onClick={() => initiateAssign(selectedOntology.id, selectedOntology.name)}
                     disabled={isAssigning}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-semibold bg-amber-500 text-white hover:bg-amber-600 transition-all shadow-sm shadow-amber-500/20 disabled:opacity-50"
-                    title="Re-assign this data source to the ontology you're currently viewing"
+                    title="Re-assign this data source to the semantic layer you're currently viewing"
                   >
                     {isAssigning ? <Loader2 className="w-3 h-3 animate-spin" /> : <AlertTriangle className="w-3 h-3" />}
                     Re-assign to Current
@@ -242,7 +242,7 @@ export function OntologyContextBanner({
                 )}
               >
                 {isAssigning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Layers className="w-3.5 h-3.5" />}
-                Assign Ontology
+                Assign Semantic Layer
               </button>
             ) : null}
 
@@ -254,10 +254,10 @@ export function OntologyContextBanner({
                   <div className="flex items-center justify-between mb-3">
                     <div>
                       <h3 className="text-sm font-bold text-ink">
-                        {assignedOntology ? 'Change Ontology Assignment' : 'Assign Ontology'}
+                        {assignedOntology ? 'Change Assignment' : 'Assign Semantic Layer'}
                       </h3>
                       <p className="text-[11px] text-ink-muted mt-0.5">
-                        Select an ontology for <span className="font-medium text-ink-secondary">{dataSource.label || 'this data source'}</span>
+                        Select a semantic layer for <span className="font-medium text-ink-secondary">{dataSource.label || 'this data source'}</span>
                       </p>
                     </div>
                     <button
@@ -273,7 +273,7 @@ export function OntologyContextBanner({
                     <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-50/80 dark:bg-amber-950/20 border border-amber-200/40 dark:border-amber-800/30 mb-3">
                       <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
                       <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                        Changing the ontology may affect views built on this data source. You'll be asked to confirm before the change is applied.
+                        Changing the semantic layer may affect views built on this data source. You'll be asked to confirm before the change is applied.
                       </p>
                     </div>
                   )}
@@ -285,7 +285,7 @@ export function OntologyContextBanner({
                       type="text"
                       value={search}
                       onChange={e => setSearch(e.target.value)}
-                      placeholder="Search ontologies..."
+                      placeholder="Search semantic layers..."
                       className="w-full pl-9 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/20 transition-all"
                     />
                   </div>
@@ -307,7 +307,7 @@ export function OntologyContextBanner({
                       <X className="w-4 h-4 text-ink-muted" />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-ink">No ontology</div>
+                      <div className="text-sm font-medium text-ink">No semantic layer</div>
                       <div className="text-[11px] text-ink-muted mt-0.5">Use system defaults — views cannot be created</div>
                     </div>
                     {!dataSource.ontologyId && (
@@ -388,7 +388,7 @@ export function OntologyContextBanner({
                   {filteredOntologies.length === 0 && (
                     <div className="px-4 py-8 text-center">
                       <Search className="w-5 h-5 text-ink-muted/40 mx-auto mb-2" />
-                      <p className="text-sm text-ink-muted">No ontologies match "{search}"</p>
+                      <p className="text-sm text-ink-muted">No semantic layers match "{search}"</p>
                     </div>
                   )}
                 </div>
@@ -400,7 +400,7 @@ export function OntologyContextBanner({
                     className="flex items-center gap-1.5 text-[11px] font-medium text-indigo-500 hover:text-indigo-600 transition-colors"
                   >
                     <ExternalLink className="w-3 h-3" />
-                    Manage ontologies in the editor
+                    Manage semantic layers
                   </a>
                 </div>
               </div>
@@ -414,8 +414,8 @@ export function OntologyContextBanner({
             <div className="flex items-center gap-2.5">
               <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
               <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                <span className="font-semibold">No ontology assigned.</span>{' '}
-                An ontology must be assigned to this data source before you can create views.
+                <span className="font-semibold">No semantic layer assigned.</span>{' '}
+                A semantic layer must be assigned to this data source before you can create views.
               </p>
             </div>
           </div>
@@ -443,9 +443,9 @@ export function OntologyContextBanner({
                   <AlertTriangle className="w-5 h-5 text-amber-500" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <h3 className="text-base font-bold text-ink">Confirm Ontology Change</h3>
+                  <h3 className="text-base font-bold text-ink">Confirm Assignment Change</h3>
                   <p className="text-sm text-ink-muted mt-1">
-                    You are changing the ontology on{' '}
+                    You are changing the semantic layer on{' '}
                     <span className="font-semibold text-ink">{dataSource?.label || 'this data source'}</span>{' '}
                     from <span className="font-semibold text-ink">{assignedOntology?.name}</span>{' '}
                     to <span className="font-semibold text-ink">{confirmTarget.ontologyName}</span>.

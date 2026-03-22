@@ -13,7 +13,7 @@ export function CreateOntologyDialog({
   onClose,
   onCreate,
 }: CreateOntologyDialogProps) {
-  const [name, setName] = useState('New Ontology')
+  const [name, setName] = useState('New Semantic Layer')
   const [mode, setMode] = useState<'empty' | 'graph'>(hasGraphContext ? 'graph' : 'empty')
 
   return (
@@ -28,7 +28,7 @@ export function CreateOntologyDialog({
                 <PenLine className="w-5 h-5 text-indigo-500" />
               </div>
               <div>
-                <h3 className="text-lg font-bold text-ink">Create New Ontology</h3>
+                <h3 className="text-lg font-bold text-ink">Create Semantic Layer</h3>
                 <p className="text-[11px] text-ink-muted mt-0.5">Define how your graph data is structured and displayed</p>
               </div>
             </div>
@@ -41,7 +41,7 @@ export function CreateOntologyDialog({
         <div className="px-6 py-5">
           {/* Name input */}
           <div className="mb-5">
-            <label className="block text-xs font-medium text-ink-secondary mb-1.5">Ontology Name</label>
+            <label className="block text-xs font-medium text-ink-secondary mb-1.5">Name</label>
             <input
               value={name}
               onChange={e => setName(e.target.value)}
@@ -109,7 +109,7 @@ export function CreateOntologyDialog({
             Cancel
           </button>
           <button
-            onClick={() => onCreate(name.trim() || 'New Ontology', mode === 'graph')}
+            onClick={() => onCreate(name.trim() || 'New Semantic Layer', mode === 'graph')}
             disabled={!name.trim()}
             className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors disabled:opacity-50 shadow-sm"
           >

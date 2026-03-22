@@ -75,7 +75,7 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
             <div className="px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink-muted font-mono select-all">
               {ontology.schemaId || ontology.id}
             </div>
-            <p className="text-[11px] text-ink-muted mt-1">Stable identifier shared across all versions of this ontology</p>
+            <p className="text-[11px] text-ink-muted mt-1">Stable identifier shared across all versions of this semantic layer</p>
           </div>
 
           {/* Name */}
@@ -92,7 +92,7 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
                 value={name}
                 onChange={e => setName(e.target.value)}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-all"
-                placeholder="Ontology name..."
+                placeholder="Semantic layer name..."
               />
             )}
           </div>
@@ -110,7 +110,7 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
                 onChange={e => setDescription(e.target.value)}
                 rows={3}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-all resize-none"
-                placeholder="Describe the purpose and scope of this ontology..."
+                placeholder="Describe the purpose and scope of this semantic layer..."
               />
             )}
           </div>
@@ -133,7 +133,7 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
           <RotateCcw className="w-4 h-4 text-indigo-500" />
           Evolution Policy
         </h3>
-        <p className="text-[11px] text-ink-muted mb-4">Controls what happens when this ontology is published with breaking changes.</p>
+        <p className="text-[11px] text-ink-muted mb-4">Controls what happens when this semantic layer is published with breaking changes.</p>
 
         <div className="space-y-2">
           {policyOptions.map(opt => {
@@ -193,11 +193,11 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
             Danger Zone
           </h3>
           <p className="text-xs text-ink-muted mb-4 leading-relaxed">
-            Deleting this ontology will remove it from all listings.
+            Deleting this semantic layer will remove it from all listings.
             {' '}You can recover it shortly after deletion via the undo action.
             {assignmentCount > 0 && (
               <span className="block mt-1 text-red-600/80 dark:text-red-400/80">
-                This ontology is assigned to {assignmentCount} data source(s) — unassign them first.
+                This semantic layer is assigned to {assignmentCount} data source(s) — unassign them first.
               </span>
             )}
           </p>
@@ -207,7 +207,7 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
             className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed text-red-600 border border-red-200 dark:border-red-800 hover:bg-red-50 dark:hover:bg-red-950/30"
           >
             <Trash2 className="w-3.5 h-3.5" />
-            Delete Ontology
+            Delete Semantic Layer
           </button>
         </div>
       )}

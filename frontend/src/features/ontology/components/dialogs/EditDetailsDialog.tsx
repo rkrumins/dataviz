@@ -66,7 +66,7 @@ export function EditDetailsDialog({
                 <Settings className="w-5 h-5 text-indigo-500" />
               </div>
               <div>
-                <h3 className="text-lg font-bold text-ink">Edit Ontology Details</h3>
+                <h3 className="text-lg font-bold text-ink">Edit Details</h3>
                 <p className="text-[11px] text-ink-muted mt-0.5 flex items-center gap-1.5">
                   v{ontology.version} <span className="opacity-30">|</span> <OntologyStatusBadge ontology={ontology} size="xs" />
                 </p>
@@ -87,7 +87,7 @@ export function EditDetailsDialog({
               value={name}
               onChange={e => setName(e.target.value)}
               className="w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-all"
-              placeholder="Ontology name..."
+              placeholder="Semantic layer name..."
             />
           </div>
 
@@ -99,7 +99,7 @@ export function EditDetailsDialog({
               onChange={e => setDescription(e.target.value)}
               rows={3}
               className="w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-all resize-none"
-              placeholder="Describe the purpose and scope of this ontology..."
+              placeholder="Describe the purpose and scope of this semantic layer..."
             />
           </div>
 

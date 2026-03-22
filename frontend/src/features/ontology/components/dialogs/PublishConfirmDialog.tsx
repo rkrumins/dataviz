@@ -86,8 +86,8 @@ export function PublishConfirmDialog({
                 This action is permanent
               </p>
               <p className="text-xs text-amber-700/80 dark:text-amber-400/70 mt-1 leading-relaxed">
-                Once published, this ontology version becomes <strong>immutable</strong> — you will not be able to edit, rename, or modify it. All assigned data sources will immediately use this version.
-                To make further changes, you will need to <strong>clone</strong> this ontology first.
+                Once published, this version becomes <strong>immutable</strong> — you will not be able to edit, rename, or modify it. All assigned data sources will immediately use this version.
+                To make further changes, you will need to <strong>clone</strong> it first.
               </p>
             </div>
           </div>
