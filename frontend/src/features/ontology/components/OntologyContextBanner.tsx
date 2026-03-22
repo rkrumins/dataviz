@@ -2,6 +2,10 @@
  * OntologyContextBanner — shows the active workspace/data source context
  * and the ontology assignment status.
  *
+ * Layout (top → bottom):
+ *   Row 1: [ENVIRONMENT]  Workspace > Data Source picker  |  [ASSIGNED LAYER]  badge + actions
+ *   Row 2 (conditional): Mismatch warning OR no-assignment warning
+ *
  * Uses Radix Popover for dropdowns (portal-rendered, never clipped).
  */
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
@@ -24,6 +28,8 @@ import {
   Eye,
   FileText,
   Check,
+  ArrowRightLeft,
+  Lock,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -112,7 +118,8 @@ export function OntologyContextBanner({
     ? ontologies.find(o => o.id === dataSource.ontologyId) ?? null
     : null
 
-  const isViewingDifferent = selectedOntology && selectedOntology.id !== (assignedOntology?.id ?? null)
+  const isViewingAssigned = selectedOntology && assignedOntology && selectedOntology.id === assignedOntology.id
+  const isViewingDifferent = selectedOntology && assignedOntology && selectedOntology.id !== assignedOntology.id
 
   // Focus assign search when picker opens
   useEffect(() => {
@@ -165,61 +172,35 @@ export function OntologyContextBanner({
     setConfirmText('')
   }
 
-  return (
-    <div className="mb-4">
-      <div className="rounded-2xl border border-glass-border bg-canvas-elevated/60 backdrop-blur-sm">
-        {/* Main row */}
-        <div className="flex items-center justify-between gap-4 px-5 py-3">
-          {/* Left: environment context */}
-          <div className="flex items-center gap-2 min-w-0">
-            {workspace ? (
-              <>
-                {/* Workspace name */}
-                <div className="flex items-center gap-1.5 min-w-0 flex-shrink-0">
-                  <div className="w-6 h-6 rounded-md bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200/40 dark:border-indigo-800/40 flex items-center justify-center flex-shrink-0">
-                    <Layers className="w-3 h-3 text-indigo-500" />
-                  </div>
-                  <span className="text-sm font-semibold text-ink truncate">{workspace.name}</span>
-                </div>
+  // ── No environment selected ─────────────────────────────────────
+  if (!workspace || !dataSource) {
+    return (
+      <div className="mb-4">
+        <div className="rounded-2xl border border-dashed border-glass-border bg-canvas-elevated/30">
+          <div className="flex items-center gap-3 px-5 py-3.5">
+            <div className="w-8 h-8 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border flex items-center justify-center flex-shrink-0">
+              <Database className="w-4 h-4 text-ink-muted/50" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-ink-secondary">No environment selected</p>
+              <p className="text-[11px] text-ink-muted mt-0.5">Select a data source to evaluate coverage, view graph stats, and use the Suggest feature.</p>
+            </div>
 
-                <ChevronRight className="w-3 h-3 text-ink-muted/40 flex-shrink-0" />
-              </>
-            ) : (
-              <div className="flex items-center gap-1.5 min-w-0 flex-shrink-0">
-                <div className="w-6 h-6 rounded-md bg-black/[0.04] dark:bg-white/[0.06] border border-glass-border flex items-center justify-center flex-shrink-0">
-                  <Database className="w-3 h-3 text-ink-muted" />
-                </div>
-              </div>
-            )}
-
-            {/* Environment switcher — Radix Popover */}
             <Popover.Root open={envOpen} onOpenChange={(open) => { setEnvOpen(open); if (!open) setEnvSearch('') }}>
               <Popover.Trigger asChild>
-                <button className="flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors">
-                  <Database className="w-3.5 h-3.5 text-ink-muted/60 flex-shrink-0" />
-                  <span className="text-sm text-ink-secondary truncate max-w-[200px]">
-                    {dataSource ? (dataSource.label || 'Data Source') : 'Select environment'}
-                  </span>
-                  <ChevronDown className={cn(
-                    'w-3 h-3 text-ink-muted/40 flex-shrink-0 transition-transform',
-                    envOpen && 'rotate-180',
-                  )} />
-                  {ontologyDataSources.length > 1 && (
-                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-500 flex-shrink-0">
-                      {ontologyDataSources.length}
-                    </span>
-                  )}
+                <button className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-glass-border hover:border-indigo-300 hover:bg-indigo-500/[0.06] text-ink-secondary hover:text-indigo-600 transition-all">
+                  <Database className="w-3.5 h-3.5" />
+                  Select Environment
+                  <ChevronDown className={cn('w-3 h-3 text-ink-muted/40 transition-transform', envOpen && 'rotate-180')} />
                 </button>
               </Popover.Trigger>
-
               <Popover.Portal>
                 <Popover.Content
                   side="bottom"
-                  align="start"
+                  align="end"
                   sideOffset={6}
                   className="w-[380px] bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl shadow-black/15 dark:shadow-black/40 z-50 overflow-hidden animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2"
                 >
-                  {/* Search */}
                   <div className="p-3 border-b border-glass-border">
                     <div className="relative">
                       <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted" />
@@ -233,14 +214,13 @@ export function OntologyContextBanner({
                       />
                     </div>
                   </div>
-
                   <EnvironmentList
                     envSearch={envSearch}
                     ontologyDataSources={ontologyDataSources}
                     allDataSources={allDataSources}
                     selectedOntologyId={selectedOntologyId}
-                    activeWorkspaceId={workspace?.id ?? null}
-                    activeDataSourceId={dataSource?.id ?? null}
+                    activeWorkspaceId={null}
+                    activeDataSourceId={null}
                     onSelect={(wsId, dsId) => {
                       onSwitchEnvironment(wsId, dsId)
                       setEnvOpen(false)
@@ -249,32 +229,115 @@ export function OntologyContextBanner({
                 </Popover.Content>
               </Popover.Portal>
             </Popover.Root>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
+  // ── Environment selected ────────────────────────────────────────
+  // Key on dataSource.id to trigger a subtle re-render animation on switch
+  return (
+    <div className="mb-4">
+      <div
+        key={dataSource.id}
+        className="rounded-2xl border border-glass-border bg-canvas-elevated/60 backdrop-blur-sm animate-in fade-in duration-300"
+      >
+        {/* Main row — two labeled sections, equal height */}
+        <div className="flex items-stretch divide-x divide-glass-border/60">
+
+          {/* ── Left: Environment ── */}
+          <div className="flex-1 min-w-0 px-5 py-3 flex flex-col justify-center">
+            <div className="text-[10px] font-bold text-ink-muted/60 uppercase tracking-widest mb-1.5">Environment</div>
+            <div className="flex items-center gap-2 min-w-0">
+              {/* Workspace */}
+              <div className="flex items-center gap-1.5 min-w-0 flex-shrink-0">
+                <div className="w-6 h-6 rounded-md bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200/40 dark:border-indigo-800/40 flex items-center justify-center flex-shrink-0">
+                  <Layers className="w-3 h-3 text-indigo-500" />
+                </div>
+                <span className="text-sm font-semibold text-ink truncate">{workspace.name}</span>
+              </div>
+
+              <ChevronRight className="w-3 h-3 text-ink-muted/40 flex-shrink-0" />
+
+              {/* Data source switcher */}
+              <Popover.Root open={envOpen} onOpenChange={(open) => { setEnvOpen(open); if (!open) setEnvSearch('') }}>
+                <Popover.Trigger asChild>
+                  <button className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors min-w-0">
+                    <Database className="w-3.5 h-3.5 text-indigo-500/70 flex-shrink-0" />
+                    <span className="text-sm font-medium text-ink truncate max-w-[200px]">
+                      {dataSource.label || 'Data Source'}
+                    </span>
+                    <ChevronDown className={cn(
+                      'w-3 h-3 text-ink-muted/40 flex-shrink-0 transition-transform',
+                      envOpen && 'rotate-180',
+                    )} />
+                    {ontologyDataSources.length > 1 && (
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-500 flex-shrink-0">
+                        {ontologyDataSources.length}
+                      </span>
+                    )}
+                  </button>
+                </Popover.Trigger>
+
+                <Popover.Portal>
+                  <Popover.Content
+                    side="bottom"
+                    align="start"
+                    sideOffset={6}
+                    className="w-[380px] bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl shadow-black/15 dark:shadow-black/40 z-50 overflow-hidden animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2"
+                  >
+                    <div className="p-3 border-b border-glass-border">
+                      <div className="relative">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted" />
+                        <input
+                          type="text"
+                          value={envSearch}
+                          onChange={e => setEnvSearch(e.target.value)}
+                          placeholder="Search environments..."
+                          autoFocus
+                          className="w-full pl-9 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-all"
+                        />
+                      </div>
+                    </div>
+
+                    <EnvironmentList
+                      envSearch={envSearch}
+                      ontologyDataSources={ontologyDataSources}
+                      allDataSources={allDataSources}
+                      selectedOntologyId={selectedOntologyId}
+                      activeWorkspaceId={workspace.id}
+                      activeDataSourceId={dataSource.id}
+                      onSelect={(wsId, dsId) => {
+                        onSwitchEnvironment(wsId, dsId)
+                        setEnvOpen(false)
+                      }}
+                    />
+                  </Popover.Content>
+                </Popover.Portal>
+              </Popover.Root>
+            </div>
           </div>
 
-          {/* Right: ontology assignment area */}
-          {dataSource && (
-            <div className="flex items-center gap-2 flex-shrink-0">
+          {/* ── Right: Assigned Layer ── */}
+          <div className="flex-shrink-0 px-5 py-3 flex flex-col justify-center">
+            <div className="text-[10px] font-bold text-ink-muted/60 uppercase tracking-widest mb-1.5">Assigned Layer</div>
+            <div className="flex items-center gap-2">
               {assignedOntology ? (
-                <div className="flex items-center gap-2">
-                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-50/80 dark:bg-emerald-950/20 border border-emerald-200/50 dark:border-emerald-800/40">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
-                    <span className="text-xs font-semibold text-ink">{assignedOntology.name}</span>
-                    <span className="text-[10px] text-ink-muted font-mono">v{assignedOntology.version}</span>
-                    <OntologyStatusBadge ontology={assignedOntology} size="xs" />
-                  </div>
-
-                  {isViewingDifferent && selectedOntology && (
-                    <button
-                      onClick={() => initiateAssign(selectedOntology.id, selectedOntology.name)}
-                      disabled={isAssigning}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-semibold bg-amber-500 text-white hover:bg-amber-600 transition-all shadow-sm shadow-amber-500/20 disabled:opacity-50"
-                      title="Re-assign this data source to the semantic layer you're currently viewing"
-                    >
-                      {isAssigning ? <Loader2 className="w-3 h-3 animate-spin" /> : <AlertTriangle className="w-3 h-3" />}
-                      Re-assign to Current
-                    </button>
-                  )}
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-50/80 dark:bg-emerald-950/20 border border-emerald-200/50 dark:border-emerald-800/40">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
+                  <span className="text-xs font-semibold text-ink">{assignedOntology.name}</span>
+                  <span className={cn(
+                    'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold font-mono border',
+                    assignedOntology.isPublished || assignedOntology.isSystem
+                      ? 'bg-emerald-100/60 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 border-emerald-200/40 dark:border-emerald-800/30'
+                      : 'bg-amber-100/60 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 border-amber-200/40 dark:border-amber-800/30',
+                  )}>
+                    {assignedOntology.isPublished || assignedOntology.isSystem
+                      ? <Lock className="w-2.5 h-2.5" />
+                      : <PenLine className="w-2.5 h-2.5" />}
+                    v{assignedOntology.version}
+                  </span>
                 </div>
               ) : (
                 /* Not assigned: ontology assignment picker */
@@ -420,17 +483,54 @@ export function OntologyContextBanner({
                 </Popover.Root>
               )}
             </div>
-          )}
+          </div>
         </div>
 
-        {/* Warning bar: no ontology assigned */}
-        {!assignedOntology && dataSource && (
+        {/* ── Status row: mismatch / no assignment / in-sync ── */}
+
+        {/* Mismatch: viewing ontology X but data source uses ontology Y */}
+        {isViewingDifferent && selectedOntology && (
+          <div className="px-5 py-2.5 border-t border-amber-200/40 dark:border-amber-800/30 bg-gradient-to-r from-amber-50/60 to-orange-50/30 dark:from-amber-950/15 dark:to-orange-950/10 rounded-b-2xl">
+            <div className="flex items-center gap-3">
+              <ArrowRightLeft className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
+              <p className="text-[11px] text-amber-700 dark:text-amber-400 flex-1">
+                <span className="font-semibold">Viewing &ldquo;{selectedOntology.name}&rdquo;</span>
+                {' '}but this data source uses{' '}
+                <span className="font-semibold">&ldquo;{assignedOntology!.name}&rdquo;</span>.
+                {' '}Coverage and graph stats reflect the selected environment, not this layer.
+              </p>
+              <button
+                onClick={() => initiateAssign(selectedOntology.id, selectedOntology.name)}
+                disabled={isAssigning}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-amber-500 text-white hover:bg-amber-600 transition-all shadow-sm shadow-amber-500/20 disabled:opacity-50 flex-shrink-0"
+              >
+                {isAssigning ? <Loader2 className="w-3 h-3 animate-spin" /> : <ArrowRightLeft className="w-3 h-3" />}
+                Re-assign
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* No ontology assigned at all */}
+        {!assignedOntology && (
           <div className="px-5 py-2.5 border-t border-amber-200/40 dark:border-amber-800/30 bg-gradient-to-r from-amber-50/60 to-orange-50/30 dark:from-amber-950/15 dark:to-orange-950/10 rounded-b-2xl">
             <div className="flex items-center gap-2.5">
               <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
               <p className="text-[11px] text-amber-700 dark:text-amber-400">
                 <span className="font-semibold">No semantic layer assigned.</span>{' '}
                 A semantic layer must be assigned to this data source before you can create views.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* In sync: viewing the same ontology that's assigned */}
+        {isViewingAssigned && (
+          <div className="px-5 py-2 border-t border-emerald-200/30 dark:border-emerald-800/20 bg-emerald-50/30 dark:bg-emerald-950/10 rounded-b-2xl">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />
+              <p className="text-[11px] text-emerald-700 dark:text-emerald-400">
+                This layer is assigned to the selected data source. Coverage and graph stats reflect live data.
               </p>
             </div>
           </div>

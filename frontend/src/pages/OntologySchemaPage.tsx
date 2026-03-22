@@ -808,9 +808,8 @@ export function OntologySchemaPage() {
 
       {/* Main layout: Sidebar + Detail */}
       <div className="flex-1 min-h-0 flex">
-        {/* Sidebar */}
-        <div className="flex-shrink-0 overflow-hidden">
-          <OntologySidebar
+        {/* Sidebar — self-sizes via internal width state */}
+        <OntologySidebar
             ontologies={ontologies}
             selectedOntologyId={ontologyId}
             activeDataSource={activeDataSource}
@@ -821,7 +820,6 @@ export function OntologySchemaPage() {
             onCreateDraft={() => setShowCreateDialog(true)}
             onSuggest={handleSuggestOntology}
           />
-        </div>
 
         {/* Detail pane */}
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
@@ -856,13 +854,18 @@ export function OntologySchemaPage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-3">
                       <h1 className="text-2xl font-bold tracking-tight text-ink truncate">{selectedOntology.name}</h1>
-                      <span className="text-xs text-ink-muted font-mono flex-shrink-0">v{selectedOntology.version}</span>
+                      <span className={cn(
+                        'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold font-mono flex-shrink-0 border',
+                        selectedOntology.isPublished || selectedOntology.isSystem
+                          ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/40'
+                          : 'bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border-amber-200/50 dark:border-amber-800/40',
+                      )}>
+                        {selectedOntology.isPublished || selectedOntology.isSystem
+                          ? <Lock className="w-3 h-3" />
+                          : <PenLine className="w-3 h-3" />}
+                        v{selectedOntology.version}
+                      </span>
                       <OntologyStatusBadge ontology={selectedOntology} />
-                      {isImmutable
-                        ? <Lock className="w-3.5 h-3.5 text-ink-muted flex-shrink-0" />
-                        : isEditing
-                          ? <PenLine className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
-                          : <Lock className="w-3.5 h-3.5 text-ink-muted/40 flex-shrink-0" />}
                       {hasPendingChanges && (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/10 text-[10px] font-bold text-amber-600 dark:text-amber-400 ring-1 ring-amber-500/20 animate-pulse">
                           <CircleDot className="w-2.5 h-2.5" />
