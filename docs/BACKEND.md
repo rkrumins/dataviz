@@ -71,6 +71,8 @@ sequenceDiagram
 | `/api/v1/admin/catalog` | GET, POST | List/create catalog items |
 | `/api/v1/admin/catalog/{id}` | GET, PUT, DELETE | Catalog item CRUD |
 | `/api/v1/admin/catalog/{id}/impact` | GET | Blast-radius analysis before deletion |
+| `/api/v1/admin/catalog/cleanup` | POST | Deduplicate catalog items by (provider_id, source_identifier), keeps earliest |
+| `/api/v1/admin/catalog/bindings` | GET | List catalog items enriched with workspace binding info |
 | `/api/v1/admin/workspaces` | GET, POST | List/create workspaces |
 | `/api/v1/admin/workspaces/{ws_id}` | GET, PUT, DELETE | Workspace CRUD |
 | `/api/v1/admin/workspaces/{ws_id}/set-default` | POST | Set as default workspace |
@@ -92,6 +94,10 @@ sequenceDiagram
 | `/api/v1/admin/ontologies/{id}/coverage` | POST | Analyze against graph schema stats |
 | `/api/v1/admin/ontologies/suggest` | POST | Auto-generate from graph introspection |
 | `/api/v1/admin/ontologies/{id}/assignments` | GET | List workspaces using this ontology |
+| `/api/v1/admin/ontologies/{id}/export` | GET | Export full ontology definition as downloadable JSON |
+| `/api/v1/admin/ontologies/import` | POST | Import ontology from exported JSON, creating a new draft |
+| `/api/v1/admin/ontologies/{id}/import` | POST | Import into existing ontology (draft: in-place update; published: new version) |
+| `/api/v1/admin/ontologies/{id}/audit` | GET | Audit trail for ontology (all versions, paginated, filterable by action) |
 
 ### Graph Operations (Workspace-Scoped)
 
@@ -164,6 +170,32 @@ graph LR
 | `/api/v1/views/{id}/favourite` | POST | Toggle favourite |
 | `/api/v1/views/popular` | GET | Most-favourited views |
 | `/api/v1/admin/features` | GET, PATCH | Feature flag management (optimistic concurrency) |
+
+### Announcements
+
+| Endpoint | Method | Auth | Purpose |
+|----------|--------|------|---------|
+| `/api/v1/announcements` | GET | Public | Active announcements for banner display (respects feature flag) |
+| `/api/v1/announcements/config` | GET | Public | Global banner config (polling interval, default snooze) |
+| `/api/v1/admin/announcements` | GET | Admin | List all announcements (active and inactive) |
+| `/api/v1/admin/announcements` | POST | Admin | Create announcement (validates banner_type, snooze duration) |
+| `/api/v1/admin/announcements/{id}` | PATCH | Admin | Update announcement |
+| `/api/v1/admin/announcements/{id}` | DELETE | Admin | Delete announcement |
+| `/api/v1/admin/announcements/config` | GET | Admin | Read global announcement config |
+| `/api/v1/admin/announcements/config` | PUT | Admin | Update global announcement config |
+
+### Error Responses
+
+All endpoints use a consistent error response format:
+
+| Status Code | Meaning | Example Causes |
+|-------------|---------|----------------|
+| 400 | Bad Request | Validation failures (e.g. invalid banner_type, negative snooze duration) |
+| 401 | Unauthorized | Missing or invalid JWT token |
+| 403 | Forbidden | Insufficient role (e.g. non-admin accessing admin endpoints, pending user login) |
+| 404 | Not Found | Resource does not exist (provider, ontology, catalog item, announcement) |
+| 409 | Conflict | Duplicate resource, optimistic concurrency failure, deletion blocked by references, publishing blocked by evolution policy |
+| 422 | Unprocessable Entity | Semantic validation error (e.g. malformed ontology import JSON) |
 
 ---
 
@@ -465,7 +497,8 @@ All database operations are abstracted into repositories under `backend/app/db/r
 | `view_repo` | views, view_favourites | CRUD, favourite toggle, popularity |
 | `user_repo` | users, user_roles, user_approvals | CRUD, role assignment, approval workflow |
 | `connection_repo` | graph_connections | **Legacy** CRUD, credential encryption |
-| `catalog_repo` | catalog_items | CRUD, permission filtering |
+| `catalog_repo` | catalog_items | CRUD, dedup cleanup, bindings query, impact analysis |
+| `announcement_repo` | announcements, announcement_config | CRUD, config management |
 | `context_model_repo` | context_models | CRUD, template instantiation |
 | `assignment_repo` | assignment_rule_sets | CRUD, default selection |
 | `feature_flags_repo` | feature_flags, feature_definitions | Read/write with optimistic concurrency |

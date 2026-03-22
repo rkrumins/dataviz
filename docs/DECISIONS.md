@@ -356,11 +356,162 @@ graph LR
 
 ---
 
+## ADR-013: CatalogItem Abstraction Layer
+
+**Status:** Accepted
+**Date:** 2026 Q1
+**Context:** WorkspaceDataSource directly referenced providers, making it hard to manage physical assets as governed data products. There was no permission control at the asset level -- any workspace could bind to any provider graph if it knew the graph name.
+
+**Decision:** Introduce a `CatalogItem` entity between Provider and DataSource. CatalogItems abstract physical provider graphs into managed products with `(provider_id, source_identifier)` uniqueness.
+
+```mermaid
+graph LR
+    Provider["Provider<br/>(Infrastructure)"]
+    Catalog["CatalogItem<br/>(Managed Asset)"]
+    DS["DataSource<br/>(Workspace Binding)"]
+
+    Provider --> Catalog
+    Catalog --> DS
+
+    style Catalog fill:#312e81,stroke:#6366f1,color:#e2e8f0
+```
+
+| Field | Purpose |
+|-------|---------|
+| `source_identifier` | Physical graph name on the provider |
+| `permitted_workspaces` | JSON list of workspace IDs; `["*"]` = all |
+| `status` | `active` / `archived` / `deprecated` lifecycle |
+
+**Reasoning:**
+- Physical assets need governance boundaries independent of workspace bindings
+- Permission control (`permitted_workspaces`) gates which workspaces can consume an asset
+- Impact analysis before deletion: cascading deletes on `provider_id` FK propagate cleanly
+- Unique constraint on `(provider_id, source_identifier)` prevents duplicate registrations
+
+**Trade-offs:**
+- (+) Permission-controlled asset access at the catalog level
+- (+) Impact analysis before deletion (which workspaces are affected?)
+- (+) Clean governance boundaries between infrastructure and consumption
+- (-) Additional entity and joins in queries
+- (-) Migration complexity for existing data sources without catalog items
+- (-) `catalog_item_id` on DataSource is nullable during transition period
+
+**Alternatives considered:**
+- Adding permission fields directly to WorkspaceDataSource -- doesn't solve the shared-asset problem
+- Provider-level permissions only -- too coarse, can't control per-graph access
+
+---
+
+## ADR-014: Asset Onboarding Wizard
+
+**Status:** Accepted
+**Date:** 2026 Q1
+**Context:** Setting up providers, catalog items, workspaces, data sources, and ontologies required navigating multiple admin screens with no guidance on correct ordering. New admins frequently misconfigured data sources or skipped ontology assignment entirely.
+
+**Decision:** 4-step guided wizard triggered after catalog item registration:
+
+| Step | Name | Purpose |
+|------|------|---------|
+| 1 | Workspace Allocation | Assign each catalog item to a workspace (existing or new) |
+| 2 | Aggregation Strategy | Choose projection mode (`in_source` or `dedicated`) |
+| 3 | Semantic Layer | Select or auto-suggest ontology per data source |
+| 4 | Review & Confirm | Summary of all bindings before committing |
+
+**Reasoning:**
+- Mirrors the existing `ViewWizard` architecture: centralized `formData`, `canProceed` via `useMemo`, spring animations, `AnimatePresence` step transitions, `previousSteps` stack
+- Reduces time-to-first-value by guiding admins through the correct ordering
+- Each step validates before allowing progression (e.g., workspace must be selected before aggregation)
+- Ontology auto-suggestion via coverage stats reduces guesswork
+
+**Trade-offs:**
+- (+) Reduces time-to-first-value for new admins
+- (+) Enforces correct setup ordering
+- (+) Consistent UX pattern with existing ViewWizard
+- (-) Power users may find the wizard slower than direct admin panel configuration
+- (-) Additional frontend component complexity (4 step sub-components)
+- (-) Wizard state management adds to bundle size
+
+**Alternatives considered:**
+- Documentation-only approach -- doesn't prevent misconfiguration
+- Single-page form -- too overwhelming with all options visible simultaneously
+
+---
+
+## ADR-015: Projection Modes (in_source vs dedicated)
+
+**Status:** Accepted
+**Date:** 2026 Q1
+**Context:** Aggregated lineage edges (`AGGREGATED` type) materialized in the source graph polluted the original data, making it difficult to distinguish provider data from computed artifacts.
+
+**Decision:** Two projection modes on WorkspaceDataSource:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `in_source` | Aggregated edges written to source graph (default) | Simple setups, single-consumer graphs |
+| `dedicated` | Separate projection graph per data source | Multi-consumer graphs, source data integrity required |
+
+**Reasoning:**
+- `in_source` is simpler and sufficient for most single-workspace-per-graph setups
+- `dedicated` mode stores the projection graph name in `dedicated_graph_name` column
+- Mode is set per-data-source, allowing mixed strategies within a workspace
+- `None` (null) inherits from provider-level default, avoiding repetitive configuration
+
+**Trade-offs:**
+- (+) Preserves source data integrity when needed
+- (+) Per-data-source granularity allows mixed strategies
+- (+) Default `in_source` keeps simple cases simple
+- (-) `dedicated` mode requires additional graph management and storage
+- (-) Two code paths for edge materialization
+- (-) Cleanup of dedicated graphs on data source deletion
+
+**Alternatives considered:**
+- Global projection mode per workspace -- too coarse when workspace has mixed needs
+- Always-separate projection -- unnecessary overhead for simple setups
+
+---
+
+## ADR-016: Ontology Audit Trail
+
+**Status:** Accepted
+**Date:** 2026 Q1
+**Context:** No visibility into who changed ontology definitions, when, or why. Debugging ontology-related issues required git blame on the management DB or manual inspection of backup snapshots.
+
+**Decision:** Immutable `ontology_audit_log` table recording all lifecycle events with actor, version, summary, and JSON changes diff.
+
+| Column | Purpose |
+|--------|---------|
+| `action` | One of: `created`, `updated`, `published`, `deleted`, `restored`, `cloned` |
+| `actor` | User who performed the action |
+| `version` | Ontology version at time of action |
+| `summary` | Human-readable description |
+| `changes` | JSON diff of added/removed types and changed fields |
+
+**Reasoning:**
+- Immutable rows (insert-only) ensure audit integrity
+- `schema_id` groups events across ontology versions for cross-version queries
+- `CheckConstraint` on `action` enforces valid event types at the database level
+- Composite index on `(actor, action, created_at)` supports compliance queries
+- Separate indexes on `ontology_id` and `schema_id` for fast per-ontology and per-schema lookups
+
+**Trade-offs:**
+- (+) Full audit trail for compliance and debugging
+- (+) Immutable rows prevent tampering
+- (+) Rich indexing for fast queries
+- (-) Storage grows with every ontology edit (no retention policy yet)
+- (-) JSON `changes` column stored as TEXT (no native JSONB queries in SQLite)
+- (-) No automated alerting on audit events (future enhancement)
+
+**Alternatives considered:**
+- Application-level logging only -- not queryable, no structured diff
+- Database triggers -- less portable across SQLite/PostgreSQL
+
+---
+
 ## Decision Summary
 
 | # | Decision | Status | Risk Level |
 |---|----------|--------|------------|
-| 001 | Three-entity model | Accepted | Low |
+| 001 | Three-entity model (evolved to four with CatalogItem — see ADR-013) | Accepted | Low |
 | 002 | Dual FastAPI services | Accepted | Medium |
 | 003 | Ontology-driven edge classification | Accepted | Low |
 | 004 | Immutable published ontologies | Accepted | Low |
@@ -372,3 +523,7 @@ graph LR
 | 010 | ELK layout in Web Worker | Accepted | Low |
 | 011 | Workspace-scoped API paths | Accepted | Low |
 | 012 | Transactional outbox | Accepted | Low |
+| 013 | CatalogItem abstraction layer | Accepted | Medium (migration) |
+| 014 | Asset onboarding wizard | Accepted | Low |
+| 015 | Projection modes (in_source/dedicated) | Accepted | Medium (complexity) |
+| 016 | Ontology audit trail | Accepted | Low |

@@ -66,7 +66,22 @@ Open http://localhost:3080 and sign in with the default admin account:
 
 > Change these credentials after first login. They can be customised via `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `docker-compose.yml`.
 
-### 5. Seed demo graph data (optional)
+### 5. Next Steps After Login
+
+You're logged in. Here's what to do next:
+
+1. **If this is a fresh platform** (no providers registered): the **FirstRunHero** onboarding screen will guide you through initial setup automatically — register a provider, discover schemas, catalog assets, and create your first workspace.
+
+2. **To set up manually**: Navigate to **Admin → Unified Registry**:
+   - **Connections tab** — register a graph database provider (FalkorDB, Neo4j, or DataHub)
+   - **Assets tab** — discover and register catalog items from your provider
+   - **Workspaces tab** — create workspaces and bind catalog items with ontologies
+
+3. **To explore with demo data**: seed the graph database first (see next section), then open the **Explorer** to trace lineage.
+
+> For a full walkthrough of the admin setup journey, see [OVERVIEW.md — For Platform Admins](OVERVIEW.md).
+
+### 6. Seed demo graph data (optional)
 
 By default the graph database starts empty. To populate it with realistic enterprise data:
 
@@ -98,7 +113,7 @@ Customise seeding via environment variables in `docker-compose.yml` under the `s
 | `SEED_DEPTH` | `2` | Transformation layer depth (higher = richer lineage) |
 | `SEED_FORCE` | *(unset)* | Set to `true` to re-seed even if data exists |
 
-### 6. Common Docker commands
+### 7. Common Docker commands
 
 ```bash
 # Start in background (detached)
@@ -342,8 +357,24 @@ All environment variables with their defaults. Set these in `.env`, `docker-comp
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CREDENTIAL_ENCRYPTION_KEY` | *(none)* | Fernet key for encrypting provider credentials at rest |
+| `CREDENTIAL_ENCRYPTION_KEY` | *(none)* | Fernet key for encrypting provider credentials at rest. **Required in production.** |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated allowed CORS origins |
+
+---
+
+## Production Environment Checklist
+
+Before deploying to production, ensure these **mandatory** settings are configured:
+
+| Requirement | Why | How |
+|-------------|-----|-----|
+| **PostgreSQL database** | SQLite cannot handle concurrent writes or multi-worker deployments | Set `MANAGEMENT_DB_URL=postgresql+asyncpg://user:pass@host:5432/synodic` |
+| **Credential encryption key** | Without it, provider credentials (passwords, API tokens) are stored in **plaintext** | Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` → set as `CREDENTIAL_ENCRYPTION_KEY` |
+| **Change admin password** | Default bootstrap password is `changeme` / `admin123` | Set `ADMIN_PASSWORD` env var to a strong password, or change via the admin UI after first login |
+| **Specific CORS origins** | Default includes `*` on Graph Service, allowing any origin | Set `CORS_ALLOWED_ORIGINS` to your actual frontend domain(s) |
+| **JWT secret key** | Auto-generated key changes on restart, invalidating all tokens | Set a stable `JWT_SECRET_KEY` value |
+
+> See [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) for a full security risk assessment.
 
 ---
 

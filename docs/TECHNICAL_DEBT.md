@@ -1,5 +1,7 @@
 # Technical Debt & Risk Assessment
 
+> **Audience:** Developers and architects assessing risk. New users should start with [OVERVIEW.md](OVERVIEW.md) and [SETUP.md](SETUP.md).
+
 This document provides a critical analysis of the Synodic platform, identifying technical debt, security concerns, scalability issues, and prioritized recommendations.
 
 ---
@@ -21,12 +23,15 @@ quadrantChart
     Default admin password: [0.7, 0.8]
     No CI/CD: [0.5, 0.85]
     Dual code paths: [0.55, 0.6]
-    Missing edges on load: [0.3, 0.85]
+    Missing edges on load: [0.15, 0.35]
     Singleton cache scaling: [0.6, 0.4]
     No Alembic migrations: [0.7, 0.35]
     Sparse test coverage: [0.5, 0.7]
     CORS wildcard: [0.45, 0.5]
     Ontology cache TTL: [0.4, 0.3]
+    Outbox consumer missing: [0.65, 0.55]
+    Inline migration growth: [0.6, 0.45]
+    Per-worker cache isolation: [0.55, 0.35]
 ```
 
 ---
@@ -264,16 +269,19 @@ No end-to-end tests verify critical flows:
 
 ## 5. Frontend Issues
 
-### 5.1 Missing Edges on Initial Load (HIGH)
+### 5.1 Missing Edges on Initial Load — RESOLVED
 
-**Files:** `frontend/src/components/canvas/CanvasRouter.tsx`
+**Status:** ~~HIGH~~ → **Resolved** (2026 Q1)
 
-`CanvasRouter` loads nodes but explicitly sets edges to `[]`. Edges only appear after manual user actions (trace, expand). This breaks:
-- Deep-linked URLs (nodes visible, no edges)
-- Page refresh (loses all edges)
-- Wizard-to-canvas transitions
+**Files:** `frontend/src/hooks/useGraphHydration.ts` (28KB)
 
-**Recommendation:** Already documented in `refactor_plan.md`. Priority: implement `useGraphHydration` hook.
+The `useGraphHydration` hook has been implemented and provides:
+- `toCanvasNode()` / `toCanvasEdge()` — backend-to-canvas type conversion
+- `computeViewScopedRoots()` — root entity type calculation
+- Hydration phase tracking: `idle → roots → edges → children → complete`
+- Automatic loading of roots + edges on mount/view change
+
+**Remaining edge cases:** Verify the hook is fully wired into all canvas entry points (CanvasRouter, view wizard transitions). Deep-link hydration should be tested end-to-end.
 
 ### 5.2 No Error Boundaries (MEDIUM)
 
@@ -296,10 +304,10 @@ Trace operations wait for backend response before updating UI. Perceived latency
 | No rate limiting on graph queries | Medium | Apply slowapi limits (100 req/min/user) |
 | No pagination max limit | Low | Cap at 500-1000, fail if response > 10MB |
 | Error handling swallows startup failures | Medium | Re-raise critical seed failures |
-| No structured logging | Medium | Replace print-style logs with structured JSON (e.g. structlog) |
-| No health check endpoints | Medium | Add `/health` and `/ready` for orchestrators |
+| ~~No structured logging~~ | ~~Medium~~ | **Resolved:** `StructuredLoggingMiddleware` now provides JSON access logs + `X-Process-Time` header |
+| ~~No health check endpoints~~ | ~~Medium~~ | **Resolved:** `/health` endpoint exists on both Viz Service and Graph Service |
 | Stats poller has no graceful shutdown | Low | Add signal handlers for SIGTERM/SIGINT |
-| Outbox events consumer not implemented | Medium | Events written but never consumed -- dead letter risk |
+| **Outbox events consumer not implemented** | **HIGH** | Events written but never consumed — dead letter risk. **Blocks microservice extraction** (see ADR-012). `outbox_events` accumulate with `processed = false` indefinitely. Write-side works; consumer process needed. |
 
 ### 6.1 Cross-Service Concerns (Phase 2 Findings)
 
@@ -309,6 +317,8 @@ Trace operations wait for backend response before updating UI. Perceived latency
 | **Outbox consumer missing** | Medium | `outbox_events` table accepts writes (e.g., `user.created`) but no consumer process exists. Events accumulate with `processed = false` forever. |
 | **Provider location split** | Low | FalkorDB and Mock providers live in `backend/app/providers/`, while Neo4j and DataHub live in `backend/graph/adapters/`. This split is functional but undocumented and may confuse contributors. |
 | **Feature flag hot-reload** | Low | Feature flags are fetched from DB per request. No caching or change-notification mechanism -- acceptable at current scale but will need attention with increased traffic. |
+| **Growing inline migrations** | Medium | 15+ `ALTER TABLE` statements in `init_db()` with exceptions silently caught. No ordering, no version tracking, no rollback. Each new schema change adds another raw SQL statement. Risk of partial application and silent failures increases linearly. |
+| **Per-worker ProviderRegistry cache isolation** | Medium | Each Uvicorn worker has its own `ProviderRegistry` singleton. With N workers = N separate connection pools. Config changes (eviction, provider updates) in one worker are invisible to others. Silent coherence issue at scale; fine for single-worker dev. Future: Redis-backed shared cache. |
 
 ---
 
@@ -333,11 +343,14 @@ gantt
         Implement Alembic migrations      :p3a, 2026-04-01, 5d
         Legacy path deprecation plan      :p3b, 2026-04-01, 2d
         Legacy connection migration tool  :p3c, 2026-04-03, 3d
+    section Phase 3b: Event Infrastructure
+        Implement outbox consumer         :crit, p3d, 2026-04-03, 5d
+        Redis-backed provider cache       :p3e, 2026-04-08, 5d
     section Phase 4: UX & Performance
-        Implement useGraphHydration       :p4a, 2026-04-08, 5d
-        Add error boundaries              :p4b, 2026-04-08, 2d
-        Increase ontology cache TTL       :p4c, 2026-04-10, 1d
-        Add monitoring metrics            :p4d, 2026-04-10, 3d
+        Verify useGraphHydration wiring   :p4a, 2026-04-14, 2d
+        Add error boundaries              :p4b, 2026-04-14, 2d
+        Increase ontology cache TTL       :p4c, 2026-04-16, 1d
+        Add monitoring metrics            :p4d, 2026-04-16, 3d
 ```
 
 ### Phase 1: Security & Stability (Week 1-2)
@@ -368,11 +381,18 @@ gantt
 | **P2** | Legacy path deprecation plan | Low | Clarifies migration timeline |
 | **P2** | Legacy connection migration tool | Medium | Unblocks legacy removal |
 
+### Phase 3b: Event Infrastructure (Week 5-6, parallel)
+
+| Priority | Item | Effort | Impact |
+|----------|------|--------|--------|
+| **P1** | Implement outbox consumer | Medium | Unblocks microservice extraction; prevents dead-letter accumulation |
+| **P2** | Redis-backed ProviderRegistry cache | Medium | Solves per-worker cache isolation for multi-worker deployments |
+
 ### Phase 4: UX & Performance (Week 7-8)
 
 | Priority | Item | Effort | Impact |
 |----------|------|--------|--------|
-| **P2** | useGraphHydration (fix missing edges) | Medium | Major UX improvement |
+| **P2** | ~~useGraphHydration~~ Verify hook wiring in all canvas entry points | Low | Confirm fix for deep-link hydration |
 | **P2** | Error boundaries | Low | Graceful error recovery |
 | **P3** | Increase ontology cache TTL | Low | Reduces DB queries |
 | **P3** | Add monitoring (Prometheus) | Medium | Production observability |
@@ -384,10 +404,11 @@ gantt
 | Category | Critical | High | Medium | Low |
 |----------|----------|------|--------|-----|
 | **Security** | 2 (JWT, SQLite) | 2 (encryption, admin pwd) | 2 (CORS, CSP) | - |
-| **Architecture** | - | 2 (dual paths, no migrations) | 3 (singleton cache, ontology TTL, provider split) | - |
+| **Architecture** | - | 2 (dual paths, no migrations) | 4 (singleton cache, ontology TTL, provider split, inline migration growth) | - |
 | **Testing** | - | 2 (sparse coverage, no CI) | 1 (no integration tests) | - |
-| **Frontend** | - | 1 (missing edges) | 1 (no error boundaries) | 1 (no optimistic updates) |
-| **Infrastructure** | - | - | 5 (no monitoring, no rate limits, no health checks, no structured logging, outbox consumer) | 3 (no API docs, no pagination cap, poller shutdown) |
+| **Frontend** | - | ~~1 (missing edges)~~ resolved | 1 (no error boundaries) | 1 (no optimistic updates) |
+| **Infrastructure** | - | 1 (outbox consumer) | 3 (no monitoring, no rate limits, per-worker cache isolation) | 3 (no API docs, no pagination cap, poller shutdown) |
+| **Resolved** | - | - | - | ~~health checks~~, ~~structured logging~~, ~~missing edges~~ |
 
 **Highest priority blockers for production deployment:**
 1. Force credential encryption (prevent plaintext leaks)

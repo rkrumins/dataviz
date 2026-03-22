@@ -282,6 +282,7 @@ graph TB
 | `providerService` | `services/providerService.ts` | `/api/v1/admin/providers` |
 | `adminUserService` | `services/adminUserService.ts` | `/api/v1/admin/users` |
 | `featuresService` | `services/featuresService.ts` | `/api/v1/admin/features` |
+| `announcementService` | `services/announcementService.ts` | `/api/v1/announcements`, `/api/v1/admin/announcements` |
 
 ### Graph Provider
 
@@ -454,10 +455,57 @@ graph TB
 | Component | Location | Purpose |
 |-----------|----------|---------|
 | `AdminFeatures/` | `components/admin/AdminFeatures/` | 6 files for feature toggle management |
-| `AdminRegistry` | `components/admin/AdminRegistry.tsx` | Tab-based registry UI |
+| `AdminRegistry` | `components/admin/AdminRegistry.tsx` | Tab-based registry UI. Shows `FirstRunHero` when `providers.length === 0`, `OnboardingProgress` bar when partially configured. Three tabs: Connections (providers), Assets (catalog items), Workspaces |
 | `RegistryWorkspaces` | `components/admin/RegistryWorkspaces.tsx` | Workspace CRUD operations |
-| `RegistryConnections` | `components/admin/RegistryConnections.tsx` | Legacy connection management |
+| `RegistryConnections` | `components/admin/RegistryConnections.tsx` | Provider cards with health status (colored dot + latency in ms). Actions: Test connection, Discover Sources, Edit, Delete. Schema mapping for Neo4j/external DBs (discovery + mapping form) |
 | `RegistryAssets` | `components/admin/RegistryAssets.tsx` | Provider asset management |
+| `AssetOnboardingWizard` | `components/admin/AssetOnboardingWizard/` | 4-step wizard: workspace allocation, aggregation strategy, semantic layer, review. Centralized formData, canProceed via useMemo, spring animations |
+| `FirstRunHero` | `components/admin/FirstRunHero.tsx` | Full-page hero for empty platforms (no providers), shows 4-stage progress |
+| `OnboardingProgress` | `components/admin/OnboardingProgress.tsx` | 4-stage progress tracker, dismissable, persists to localStorage |
+| `AdminAnnouncements` | `components/admin/AdminAnnouncements/` | Announcement management UI (CRUD + config) |
+| `AdminWizard` | `components/admin/AdminWizard.tsx` | Generic multi-step wizard shell with step validation and animated transitions |
+| `DeleteProviderDialog` | `components/admin/DeleteProviderDialog.tsx` | Provider deletion with impact analysis warning |
+
+---
+
+## 9a. Platform Onboarding
+
+When a platform has no registered providers, the admin sees the **FirstRunHero** -- a full-page onboarding experience that guides them through initial setup. Once the first provider is registered, the **OnboardingProgress** bar replaces the hero, tracking the remaining stages until the platform is fully configured.
+
+### Onboarding Stages
+
+1. **FirstRunHero** -- Full-page hero shown when `providers.length === 0`. Displays 4 stages: Register Provider, Register Data Sources, Create Workspace, Configure Semantics.
+2. **AdminWizard** -- Provider registration wizard. Multi-step form with type selection, credentials, and connection testing.
+3. **Schema Discovery** -- Provider introspection to discover available graphs/schemas. Triggered via the "Discover Sources" action on a provider card.
+4. **Catalog Registration** -- Register discovered assets as `CatalogItem` entries in the platform catalog.
+5. **AssetOnboardingWizard** -- 4-step guided wizard:
+   - **Step 1: Workspace Allocation** -- Assign catalog items to new or existing workspaces
+   - **Step 2: Aggregation Strategy** -- Choose `in_source` vs `dedicated` projection mode
+   - **Step 3: Semantic Layer** -- Select ontology per catalog item
+   - **Step 4: Review & Confirm** -- Summary of all selections and submit
+6. **OnboardingProgress** -- Persistent progress tracker (4 stages, dismissable, localStorage-backed). Shown in `AdminRegistry` header once at least one provider exists but setup is incomplete.
+
+### Onboarding Flow
+
+```mermaid
+graph LR
+    A[FirstRunHero] --> B[AdminWizard<br/>Register Provider]
+    B --> C[Discover Schema]
+    C --> D[Register<br/>Catalog Items]
+    D --> E[AssetOnboardingWizard]
+    E --> F[Step 1: Workspace<br/>Allocation]
+    F --> G[Step 2: Aggregation<br/>Strategy]
+    G --> H[Step 3: Semantic<br/>Layer]
+    H --> I[Step 4: Review<br/>& Confirm]
+    I --> J[Platform Ready]
+```
+
+### Key Implementation Details
+
+- **FirstRunHero** renders when `AdminRegistry` detects `providers.length === 0` after the initial fetch.
+- **OnboardingProgress** receives counts (`providerCount`, `catalogItemCount`, `workspaceCount`, `hasOntology`) and highlights the next incomplete stage.
+- **AssetOnboardingWizard** mirrors the `ViewWizard` architecture: centralized `OnboardingFormData` state, `canProceed` guard via `useMemo`, `AnimatePresence` step transitions, and a `previousSteps` stack for back-navigation.
+- The wizard is triggered from `RegistryAssets` after catalog items are registered from a provider's discovered schemas.
 
 ---
 
@@ -527,7 +575,7 @@ Beyond the key hooks listed in Section 6, the codebase includes:
 | `useWorkspaces` | Load & manage workspace list with auto-selection |
 | `useDataSourceSchema` | Load ontology for active data source |
 | `useGraphSchema` | Low-level graph API schema introspection |
-| `useGraphHydration` | Populate canvas from API responses |
+| `useGraphHydration` | Converts backend GraphNode/GraphEdge to canvas types. Tracks hydration phases: idle, roots, edges, children, complete. Provides `toCanvasNode()`, `toCanvasEdge()`, `computeViewScopedRoots()` |
 | `useLogicalNodes` | Manage layer-to-node mappings (CRUD) |
 | `useLayerAssignment` | Handle entity-to-layer assignment logic |
 | `useHighlightState` | Track highlighted/traced/dimmed nodes |
@@ -539,6 +587,7 @@ Beyond the key hooks listed in Section 6, the codebase includes:
 | `useKeyboardShortcuts` | Custom shortcuts registration |
 | `useAdminFeatures` | Admin feature flag management |
 | `useConnections` | Legacy connection management (deprecated) |
+| `useWorkspaceContext` | Composition layer (not a store): reads from workspacesStore + schemaStore, provides workspace, dataSource, views (filtered by scope), bookmarks, recentViews. Actions: `switchWorkspace()`, `switchDataSource()`, `openView()` |
 
 ### Workspace Scoping Detail
 
@@ -589,6 +638,15 @@ frontend/src/
 ├── routes.tsx                  # React Router config, lazy loading, Suspense
 ├── components/
 │   ├── admin/                  # Admin panel, workspace management
+│   │   ├── AssetOnboardingWizard/
+│   │   │   ├── AssetOnboardingWizard.tsx
+│   │   │   ├── steps/
+│   │   │   │   ├── WorkspaceStep.tsx
+│   │   │   │   ├── AggregationStep.tsx
+│   │   │   │   ├── SemanticStep.tsx
+│   │   │   │   └── ReviewStep.tsx
+│   │   │   └── index.ts
+│   │   ├── AdminAnnouncements/
 │   ├── auth/                   # LoginPage, SignUpPage, ResetPasswordPage
 │   ├── canvas/                 # Graph visualization
 │   │   ├── LineageCanvas.tsx   # Main lineage view (~950 lines)

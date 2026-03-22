@@ -66,13 +66,15 @@ graph TB
 
 ---
 
-## Three-Entity Model
+## Core Entity Model (Four Entities)
 
-The core architectural concept is the **Provider + Ontology + Workspace** triad, bound together by `WorkspaceDataSource`:
+The core architectural concept is the **Provider + CatalogItem + Ontology + Workspace** quartet, bound together by `WorkspaceDataSource`:
 
 ```mermaid
 erDiagram
     Provider ||--o{ WorkspaceDataSource : "hosts"
+    Provider ||--o{ CatalogItem : "registered assets"
+    CatalogItem ||--o| WorkspaceDataSource : "consumed by"
     Ontology ||--o{ WorkspaceDataSource : "defines semantics"
     Workspace ||--o{ WorkspaceDataSource : "contains"
     WorkspaceDataSource ||--o| CatalogItem : "references"
@@ -126,7 +128,11 @@ erDiagram
         text provider_id FK
         text source_identifier
         text name
+        text description
         json permitted_workspaces
+        text status
+        datetime created_at
+        datetime updated_at
     }
 
     View {
@@ -144,16 +150,39 @@ erDiagram
         json layers_config
         bool is_template
     }
+
+    ontology_audit_log {
+        text id PK
+        text ontology_id FK
+        text action
+        text changed_by
+        json diff
+        datetime created_at
+    }
+
+    announcements {
+        text id PK
+        text title
+        text message
+        text type "info | warning | critical"
+        bool is_active
+        datetime starts_at
+        datetime expires_at
+        datetime created_at
+    }
 ```
 
-### Why Three Entities?
+### Why Four Entities?
 
 | Entity | Responsibility | Reusability |
 |--------|---------------|-------------|
 | **Provider** | Infrastructure connection (host, port, credentials) | Shared across workspaces |
+| **CatalogItem** | Data product abstraction | Abstracts physical provider graphs into governed data products with permission control and impact analysis |
 | **Ontology** | Semantic schema (entity types, relationship types, hierarchy) | Versioned, reusable, immutable when published |
 | **Workspace** | Operational context (team project, environment) | Contains data sources, views, context models |
 | **DataSource** | Binding of Provider + Graph + Ontology within a Workspace | Unique per (workspace, provider, graph_name) |
+
+> See [DECISIONS.md ADR-001](DECISIONS.md#adr-001) for the rationale behind this design.
 
 ---
 
@@ -167,10 +196,11 @@ The primary backend service handling all authenticated, stateful operations.
 graph LR
     subgraph Routes["API Routes (/api/v1)"]
         AuthR["/auth/*<br/>login, signup, reset"]
-        AdminR["/admin/*<br/>providers, workspaces,<br/>ontologies, features"]
+        AdminR["/admin/*<br/>providers, workspaces,<br/>ontologies, features,<br/>catalog, announcements,<br/>context-model-templates"]
         GraphR["/{ws_id}/graph/*<br/>trace, nodes, edges"]
         ViewR["/views/*<br/>CRUD, favourites"]
         AssetR["/{ws_id}/assets/*<br/>rule-sets"]
+        CMR["/{ws_id}/context-models"]
     end
 
     subgraph Services["Business Logic"]
@@ -182,7 +212,7 @@ graph LR
 
     subgraph Data["Data Access"]
         PR2[ProviderRegistry]
-        RepoLayer["Repositories<br/>(workspace, provider,<br/>ontology, view, user)"]
+        RepoLayer["Repositories<br/>(workspace, provider,<br/>ontology, view, user,<br/>catalog, data_source,<br/>announcement)"]
         DB2[(Management DB)]
     end
 
@@ -198,6 +228,7 @@ graph LR
     GraphR --> CE2
     ViewR --> RepoLayer
     AssetR --> Services
+    CMR --> Services
 
     CE2 --> PR2
     CE2 --> OntSvc
@@ -223,6 +254,8 @@ A stateless companion service for **pre-registration** provider testing. It acce
 - List supported provider types and capabilities
 - Test connectivity to graph databases before registration
 - Enumerate available graphs/databases on a provider
+
+> See [DECISIONS.md ADR-002](DECISIONS.md#adr-002) for why services are separated.
 
 ---
 
@@ -267,6 +300,8 @@ sequenceDiagram
     CE-->>EP: Enriched LineageResult
     EP-->>FE: JSON Response
 ```
+
+> See [DECISIONS.md ADR-005](DECISIONS.md#adr-005) for caching strategy rationale.
 
 ---
 
@@ -319,6 +354,17 @@ graph TB
 | **Headers** | CSP, HSTS, X-Frame-Options | Applied via middleware to all responses |
 | **Rate Limiting** | slowapi | 5/min signup, 10/min login, 30/60s feature updates |
 | **CORS** | Configurable origins | `CORS_ALLOWED_ORIGINS` env var |
+
+### Production Security Notes
+
+- **JWT Storage**: Currently stored in `localStorage` (XSS risk). Planned migration to HttpOnly cookies with CSRF protection.
+- **Credential Encryption**: Optional in development (`CREDENTIAL_ENCRYPTION_KEY` not set falls back to plaintext). **REQUIRED in production** — generate a key via `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+- **Default Admin Password**: Bootstrap uses `"changeme"` — must be changed immediately in production.
+
+### Scalability Considerations
+
+- **ProviderRegistry per-worker isolation**: Each Uvicorn worker gets its own `ProviderRegistry` instance. Config changes in one worker are not visible to others. Future: Redis-backed shared cache.
+- **SQLite limitation**: SQLite is for development only. **Production MUST use PostgreSQL** (`MANAGEMENT_DB_URL=postgresql://...`). SQLite has no concurrent write support.
 
 ---
 
@@ -412,13 +458,16 @@ synodic/
 │   ├── common/                       # Shared kernel
 │   │   ├── interfaces/provider.py    # GraphDataProvider ABC
 │   │   └── models/                   # Pydantic DTOs (graph, management, auth)
-│   └── graph/                        # Graph Service (port 8001)
-│       ├── main.py                   # Stateless FastAPI app
-│       └── api/v1/endpoints/         # Provider discovery routes
+│   ├── graph/                        # Graph Service (port 8001)
+│   │   ├── main.py                   # Stateless FastAPI app
+│   │   └── api/v1/endpoints/         # Provider discovery routes
+│   └── stats_service/                # Stats polling background service
 ├── frontend/
 │   ├── src/
 │   │   ├── components/               # React components by feature
 │   │   │   ├── admin/                # Admin panels
+│   │   │   │   ├── AssetOnboardingWizard/  # 4-step asset onboarding wizard
+│   │   │   │   └── AdminAnnouncements/     # Announcement management UI
 │   │   │   ├── auth/                 # Login, signup, reset
 │   │   │   ├── canvas/               # Graph visualization canvases
 │   │   │   ├── layout/               # AppLayout, TopBar, SidebarNav
@@ -430,6 +479,8 @@ synodic/
 │   │   ├── pages/                    # Route page components
 │   │   ├── providers/                # GraphProviderContext
 │   │   ├── services/                 # API client modules
+│   │   │   ├── catalogService.ts     # Catalog API client
+│   │   │   └── announcementService.ts # Announcement API client
 │   │   ├── store/                    # Zustand state stores
 │   │   ├── styles/                   # Global CSS, Tailwind config
 │   │   └── workers/                  # Web Workers (ELK layout)

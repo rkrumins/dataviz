@@ -17,6 +17,7 @@ erDiagram
     providers ||--o{ workspace_data_sources : "hosts"
     providers ||--o{ catalog_items : "catalogs"
     ontologies ||--o{ workspace_data_sources : "defines"
+    ontologies ||--o{ ontology_audit_log : "audit trail"
     workspaces ||--o{ workspace_data_sources : "contains"
     workspaces ||--o{ views : "scopes"
     workspaces ||--o{ context_models : "scopes"
@@ -233,6 +234,41 @@ erDiagram
         text payload "JSON"
         bool processed "default false"
         text created_at
+    }
+
+    announcements {
+        text id PK "ann_*"
+        text title
+        text message
+        text banner_type "info|warning|success"
+        bool is_active
+        int snooze_duration_minutes
+        text cta_text
+        text cta_url
+        text created_by
+        text updated_by
+        datetime created_at
+        datetime updated_at
+    }
+
+    announcement_config {
+        int id PK "single-row, id=1"
+        int poll_interval_seconds
+        int default_snooze_minutes
+        text updated_by
+        datetime updated_at
+    }
+
+    ontology_audit_log {
+        text id PK "oal_*"
+        text ontology_id FK
+        text schema_id "groups versions"
+        text action "created|updated|published|deleted|restored|cloned"
+        text actor
+        int version
+        text summary
+        json changes
+        datetime created_at
     }
 ```
 
@@ -637,6 +673,8 @@ All tables use text UUIDs with semantic prefixes:
 - `usr_*` -- Users
 - `view_*` -- Views
 - `cat_*` -- Catalog Items
+- `ann_*` -- Announcements
+- `oal_*` -- Ontology Audit Log
 - `conn_*` -- Legacy Connections
 
 ### Foreign Keys & Cascades
@@ -661,6 +699,7 @@ All tables use text UUIDs with semantic prefixes:
 | `users.email` | Unique emails |
 | `user_roles(user_id, role_name)` | No duplicate roles |
 | `view_favourites(view_id, user_id)` | One favourite per user per view |
+| `catalog_items(provider_id, source_identifier)` | One catalog entry per source per provider |
 
 ### Single-Row Table Enforcement
 
@@ -669,3 +708,4 @@ All tables use text UUIDs with semantic prefixes:
 | `feature_flags` | `id = 1` always |
 | `feature_registry_meta` | Single row by convention |
 | `management_db_config` | `id = 1` always |
+| `announcement_config` | `id = 1` always |

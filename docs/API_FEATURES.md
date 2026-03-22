@@ -213,6 +213,22 @@ Same shape as GET. 404 if key not found.
 
 ---
 
+## Notable Feature Flags
+
+The following feature flags are seeded at startup via `backend/app/db/seed_feature_registry.py`:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `editModeEnabled` | boolean | `true` | Enable inline node editing on the canvas |
+| `traceEnabled` | boolean | `true` | Enable lineage trace operations |
+| `signupEnabled` | boolean | `false` | Allow self-service user registration |
+| `announcementsEnabled` | boolean | `true` | Show global announcement banners. When disabled, banners are hidden even if active announcements exist. Toggle off to instantly hide all banners without deactivating individual announcements. |
+| `allowedViewModes` | string[] | `["graph", "hierarchy", "reference", "layered-lineage"]` | Available canvas view modes |
+
+> The `announcementsEnabled` flag gates the public `/api/v1/announcements` endpoint — when `false`, the endpoint returns an empty list regardless of active announcements in the database.
+
+---
+
 ## Backend data sources and migrations
 
 - **Schema and categories**: `feature_definitions` (each has `implemented` for per-feature "not yet wired" badge), `feature_categories` (seeded at startup from `backend/app/db/seed_feature_registry.py`). Definitions support full CRUD via API.

@@ -6,6 +6,52 @@
 
 Synodic is a **workspace-centric data lineage and governance platform** that transforms how organizations explore, understand, and govern their data relationships. It provides an interactive graph visualization experience over heterogeneous data backends, unified by a flexible semantic layer (ontology system).
 
+---
+
+## Key Terms
+
+| Term | Definition |
+|------|-----------|
+| **Provider** | Infrastructure connection to a graph database (FalkorDB, Neo4j, DataHub). Stores host, port, credentials, TLS settings. |
+| **Ontology** | Versioned semantic schema defining entity types (e.g., Dataset, SchemaField) and relationship types (e.g., CONTAINS, TRANSFORMS). Formerly called "Blueprint". |
+| **Workspace** | Operational context for a team or project. Contains data sources, views, and context models. Provides isolation between teams. |
+| **CatalogItem** | Governed data product abstraction. Represents a discovered or registered graph/schema from a Provider, with permission control. Bridges Providers and DataSources. |
+| **DataSource** | Binding of a Provider + CatalogItem + Ontology within a Workspace. The unit of data access. |
+| **View** | Saved graph exploration with layout, filters, and visibility scoping (enterprise/team/personal). |
+| **Context Model** | Layer configuration for organizing complex graphs. Defines how entities are grouped and displayed. |
+| **Projection Mode** | How aggregated lineage edges are stored. `in_source` writes them in the original graph; `dedicated` creates a separate projection graph to preserve source data integrity. |
+| **Granularity** | Level of detail in lineage visualization. Can be aggregated (domain → table) or fine-grained (column-level). |
+| **Containment Hierarchy** | Parent-child relationships between entities (e.g., Domain contains Dataset contains SchemaField). |
+| **Three-Layer Ontology Resolution** | How ontologies are assembled: system defaults + workspace-assigned definitions + provider-introspected types. Cached for 5 minutes. |
+
+---
+
+## Reading Guide
+
+**New Platform Admin:**
+1. This document (vision & capabilities)
+2. [SETUP.md](SETUP.md) -- get the platform running
+3. [ARCHITECTURE.md](ARCHITECTURE.md) -- understand core concepts
+4. [BACKEND.md](BACKEND.md) -- Admin Infrastructure section
+
+**Data Engineer:**
+1. Steps 1--4 above
+2. [FRONTEND.md](FRONTEND.md) -- graph exploration & canvas
+3. Return to this doc -- "For Data Engineers" workflows
+
+**Developer:**
+1. [ARCHITECTURE.md](ARCHITECTURE.md) -- system design
+2. [BACKEND.md](BACKEND.md) -- full API reference
+3. [FRONTEND.md](FRONTEND.md) -- component architecture
+4. [DECISIONS.md](DECISIONS.md) -- architectural trade-offs
+5. [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) -- known risks
+
+**Deep Dive:**
+- [DATA_ARCHITECTURE.md](DATA_ARCHITECTURE.md) -- all schema details
+- [API_FEATURES.md](API_FEATURES.md) -- feature flag contract
+
+---
+
 ```mermaid
 mindmap
   root((Synodic))
@@ -19,6 +65,18 @@ mindmap
       Evolution policies
       Impact analysis
       Schema drift detection
+      Audit Trail (OntologyAuditLog)
+      Source Mappings
+      Drift Detection
+    Data Catalog
+      CatalogItems
+      Workspace Bindings
+      Impact Analysis
+    Guided Onboarding
+      First-Run Hero
+      Setup Wizard
+      Progress Tracker
+      Asset Onboarding
     Multi-Backend
       FalkorDB (primary)
       Neo4j (enterprise)
@@ -85,23 +143,26 @@ graph LR
 
 ```mermaid
 graph LR
-    A["Connect Provider<br/>(FalkorDB, Neo4j)"] --> B["Assign Ontology<br/>(entity types, hierarchy)"]
-    B --> C["Create Workspace<br/>(team/project context)"]
-    C --> D["Explore Lineage<br/>(trace, filter, aggregate)"]
-    D --> E["Save Views<br/>(share with team)"]
+    A["Connect Provider<br/>(FalkorDB, Neo4j)"] --> B["Discover & Catalog<br/>(assets, schemas)"]
+    B --> C["Assign Ontology<br/>(entity types, hierarchy)"]
+    C --> D["Create Workspace<br/>(team/project context)"]
+    D --> E["Explore Lineage<br/>(trace, filter, aggregate)"]
+    E --> F["Save Views<br/>(share with team)"]
 
     style A fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style B fill:#312e81,stroke:#6366f1,color:#e2e8f0
-    style C fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
-    style D fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
-    style E fill:#1e293b,stroke:#8b5cf6,color:#e2e8f0
+    style B fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
+    style C fill:#312e81,stroke:#6366f1,color:#e2e8f0
+    style D fill:#1a2e35,stroke:#14b8a6,color:#e2e8f0
+    style E fill:#2d1f0e,stroke:#f59e0b,color:#e2e8f0
+    style F fill:#1e293b,stroke:#8b5cf6,color:#e2e8f0
 ```
 
 1. **Connect** a graph database (FalkorDB, Neo4j, or DataHub) via the admin panel
-2. **Define or assign** an ontology that describes the entity types and relationships in the graph
-3. **Create a workspace** that binds the provider, ontology, and graph name into an operational context
-4. **Explore** the graph interactively: trace upstream/downstream lineage, zoom between granularity levels (column -> table -> domain), filter by edge type
-5. **Save and share** views with the team, with visibility scoping (private, team, enterprise)
+2. **Discover & catalog** available graphs and schemas from the connected provider
+3. **Define or assign** an ontology that describes the entity types and relationships in the graph
+4. **Create a workspace** that binds the provider, catalog items, and ontology into an operational context
+5. **Explore** the graph interactively: trace upstream/downstream lineage, zoom between granularity levels (column -> table -> domain), filter by edge type
+6. **Save and share** views with the team, with visibility scoping (private, team, enterprise)
 
 ### For Business Stakeholders
 
@@ -113,11 +174,16 @@ graph LR
 
 ### For Platform Admins
 
-1. **Manage providers** -- register, test connectivity, discover schemas
-2. **Manage ontologies** -- create, version, publish (immutable once published), assess impact
-3. **Manage workspaces** -- create team contexts, assign data sources, set defaults
-4. **Manage users** -- approve signups, assign roles (admin/user/viewer)
-5. **Manage feature flags** -- toggle experimental features, set experimental notices
+1. **Register Provider** -- connect to your graph database (FalkorDB, Neo4j, DataHub)
+2. **Discover Schema** -- introspect provider to discover available graphs and schemas
+3. **Register Catalog Items** -- promote discovered assets into governed data products
+4. **Onboard Assets** -- guided 4-step wizard (workspace allocation, aggregation, semantics, review)
+5. **Configure Ontology** -- define or customize entity and relationship types
+6. **Create Workspace** -- bind providers, catalog items, and ontologies into team contexts
+7. **Manage users** -- approve signups, assign roles (admin/user/viewer)
+8. **Manage feature flags** -- toggle experimental features, set experimental notices
+
+> **Note:** If this is a fresh platform with no providers, the **FirstRunHero** will guide you through this flow automatically.
 
 ---
 
@@ -208,6 +274,20 @@ Organize complex graphs into meaningful layers. The Layer Studio provides a thre
 - **Data source scoping:** Views are scoped to `{workspaceId}/{dataSourceId}` -- no cross-tenant data leaks
 - **Role-based access:** Admin, user, viewer roles with JWT-based enforcement
 - **Provider sharing:** One infrastructure provider serves multiple workspaces without credential duplication
+
+### 6. Enterprise Data Catalog
+
+- **CatalogItem abstraction** between Provider and DataSource -- governed data product layer
+- **Permission-controlled asset access** -- admins register and approve catalog items before workspace binding
+- **Impact analysis before deletion** -- understand downstream effects before removing catalog items
+- **Workspace binding management** -- track which workspaces consume which catalog items
+
+### 7. Guided Onboarding
+
+- **FirstRunHero** for empty platforms -- detects no providers and launches guided setup
+- **OnboardingProgress tracker** -- step-by-step progress through platform configuration
+- **AssetOnboardingWizard** for streamlined setup -- 4-step guided flow (workspace allocation, aggregation, semantics, review)
+- **Reduces time-to-first-value** for new admins -- from manual multi-step configuration to guided flow
 
 ---
 
@@ -328,7 +408,7 @@ The platform has a solid architectural foundation with the core capabilities bui
 timeline
     title Synodic Development Phases
     section Completed
-        Core Architecture : Three-entity model (Provider + Ontology + Workspace)
+        Core Architecture : Four-entity model (Provider + CatalogItem + Ontology + Workspace)
                           : Pluggable provider system (FalkorDB, Neo4j, DataHub, Mock)
                           : Workspace-centric API with legacy backward compatibility
         Lineage Engine    : Multi-directional trace (upstream/downstream/both)
@@ -352,6 +432,12 @@ timeline
                           : Workspace and data source management
                           : Ontology management with versioning
                           : Feature flag administration
+        Data Catalog      : CatalogItem abstraction (Provider → CatalogItem → DataSource)
+                          : Permission-controlled asset registration
+                          : Impact analysis before deletion
+        Guided Onboarding : FirstRunHero for empty platforms
+                          : OnboardingProgress tracker
+                          : AssetOnboardingWizard (4-step flow)
     section In Progress
         Data Integrations : Additional provider adapters
                           : Schema drift detection
@@ -427,7 +513,7 @@ timeline
 
 ### Strengths
 
-- **Architecture is right:** The three-entity model, provider abstraction, and ontology system are well-designed for the target use cases
+- **Architecture is right:** The four-entity model (Provider + CatalogItem + Ontology + Workspace), provider abstraction, and ontology system are well-designed for the target use cases
 - **Ontology system is powerful:** Versioning, impact analysis, and three-layer resolution provide genuine schema governance
 - **Frontend is ambitious:** Canvas-first exploration with persona toggle and Layer Studio positions this ahead of static lineage tools
 - **Multi-tenant from day one:** Workspace isolation is architectural, not bolted on
@@ -438,15 +524,15 @@ timeline
 - **Testing coverage is minimal:** ~10 backend tests, ~3 frontend tests; critical paths (auth, provider registry) lack coverage
 - **Observability is absent:** No metrics, no structured alerting, startup failures silenced
 - **Legacy migration incomplete:** Dual code paths (connection + workspace) add complexity and confusion
-- **Frontend hydration gap:** Missing edges on initial load breaks deep-linking and page refresh
+- **Frontend hydration gap:** ~~Missing edges on initial load~~ — `useGraphHydration` hook implemented (verify full wiring across all canvas entry points)
 
 ### Honest State
 
 | Dimension | Rating | Notes |
 |-----------|--------|-------|
-| Architecture | Strong | Three-entity model, provider abstraction, workspace isolation |
+| Architecture | Strong | Four-entity model, provider abstraction, workspace isolation, catalog governance |
 | Ontology System | Strong | Versioning, impact analysis, drift detection |
-| Frontend UX | Promising | Canvas, persona, Layer Studio -- but edges bug blocks adoption |
+| Frontend UX | Promising | Canvas, persona, Layer Studio, guided onboarding |
 | Backend API | Solid | 50+ endpoints, clear REST patterns |
 | Security | Needs Work | JWT in localStorage, optional encryption, weak defaults |
 | Testing | Weak | Minimal coverage, no CI/CD |
