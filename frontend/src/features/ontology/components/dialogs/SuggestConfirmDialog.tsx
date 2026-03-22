@@ -585,16 +585,26 @@ export function SuggestConfirmDialog({
             </div>
           )}
 
+          {/* "Create from Graph" selection summary */}
+          {phase === 'recommendations' && selectedId === '__create_from_graph__' && (
+            <div className="px-6 pt-3 pb-0">
+              <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-indigo-50/40 dark:bg-indigo-950/15 border border-indigo-500/15">
+                <Sparkles className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" />
+                <span className="text-[11px] text-ink-secondary">
+                  Selected: <span className="font-semibold text-ink">Create from Physical Graph</span>
+                  <span className="text-ink-muted ml-1">
+                    — {graphCounts.entities} entity type{graphCounts.entities !== 1 ? 's' : ''}, {graphCounts.rels} relationship{graphCounts.rels !== 1 ? 's' : ''}
+                  </span>
+                </span>
+              </div>
+            </div>
+          )}
+
           <div className="flex items-center justify-between gap-3 px-6 py-4">
             <div>
-              {phase === 'recommendations' && sortedMatches.length > 0 && !selectedId && (
+              {phase === 'recommendations' && !selectedId && (
                 <p className="text-[11px] text-ink-muted">
-                  Select a layer above, or create a new draft
-                </p>
-              )}
-              {phase === 'recommendations' && sortedMatches.length > 0 && selectedId && (
-                <p className="text-[11px] text-ink-muted">
-                  Or generate a fresh draft instead
+                  Select an option above to continue
                 </p>
               )}
             </div>
@@ -633,26 +643,8 @@ export function SuggestConfirmDialog({
 
               {phase === 'recommendations' && (
                 <>
-                  {/* Create New Draft — secondary when selection exists, primary otherwise */}
-                  <button
-                    onClick={onCreateDraft}
-                    disabled={isCreating}
-                    className={cn(
-                      'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all',
-                      selectedId
-                        ? 'border border-glass-border text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5'
-                        : sortedMatches.length > 0
-                          ? 'border border-glass-border text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5'
-                          : 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:from-indigo-600 hover:to-purple-600 shadow-sm shadow-indigo-500/25',
-                      isCreating && 'opacity-60',
-                    )}
-                  >
-                    {isCreating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                    {isCreating ? 'Creating...' : 'New Draft'}
-                  </button>
-
-                  {/* Clone & Extend — only when something is selected */}
-                  {selectedId && (
+                  {/* Clone & Extend — only when an existing layer is selected */}
+                  {selectedId && selectedId !== '__create_from_graph__' && (
                     <button
                       onClick={() => onCloneExisting(selectedId)}
                       disabled={isCreating}
@@ -663,8 +655,22 @@ export function SuggestConfirmDialog({
                     </button>
                   )}
 
-                  {/* Use Selected — primary action when something is selected */}
-                  {selectedId && (
+                  {/* Primary confirm — changes label based on selection */}
+                  {selectedId === '__create_from_graph__' ? (
+                    <button
+                      onClick={onCreateDraft}
+                      disabled={isCreating}
+                      className={cn(
+                        'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm',
+                        'bg-gradient-to-r from-indigo-500 to-purple-500 text-white',
+                        'hover:from-indigo-600 hover:to-purple-600 shadow-indigo-500/25',
+                        isCreating && 'opacity-60',
+                      )}
+                    >
+                      {isCreating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                      {isCreating ? 'Creating...' : 'Create from Graph'}
+                    </button>
+                  ) : selectedId ? (
                     <button
                       onClick={() => onUseExisting(selectedId)}
                       disabled={isCreating}
@@ -678,7 +684,7 @@ export function SuggestConfirmDialog({
                       <ArrowRight className="w-4 h-4" />
                       Use Selected
                     </button>
-                  )}
+                  ) : null}
                 </>
               )}
             </div>
