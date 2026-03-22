@@ -13,7 +13,7 @@ interface FirstRunHeroProps {
 const STAGES = [
     {
         icon: Server,
-        title: 'Connect Infrastructure',
+        title: 'Register Provider',
         description: 'Link your FalkorDB, Neo4j or DataHub instance',
         accent: 'bg-indigo-500/10 text-indigo-500',
     },

@@ -49,6 +49,14 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
                     {provider.host && <div className="flex items-center gap-1.5"><Globe className="w-3 h-3" /><span className="font-mono">{provider.host}:{provider.port || '—'}</span></div>}
                     {provider.tlsEnabled && <div className="flex items-center gap-1 text-emerald-500"><Shield className="w-3 h-3" /><span>TLS</span></div>}
                 </div>
+                {health.status === 'unhealthy' && health.error && (
+                    <div className="mb-4 p-3 rounded-xl bg-red-500/5 border border-red-500/15 text-sm text-red-600 dark:text-red-400 leading-relaxed">
+                        <div className="flex items-start gap-2">
+                            <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                            <span>{health.error}</span>
+                        </div>
+                    </div>
+                )}
                 <div className="flex items-center gap-2">
                     <button onClick={onTest} disabled={health.status === 'checking'} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-ink-secondary hover:text-ink transition-colors disabled:opacity-50">
                         {health.status === 'checking' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />} Test
@@ -137,7 +145,7 @@ export function RegistryConnections() {
             const result = await providerService.test(id)
             setHealthMap(prev => ({ ...prev, [id]: { status: result.success ? 'healthy' : 'unhealthy', latencyMs: result.latencyMs, error: result.error } }))
         } catch {
-            setHealthMap(prev => ({ ...prev, [id]: { status: 'unhealthy', error: 'Connection test failed' } }))
+            setHealthMap(prev => ({ ...prev, [id]: { status: 'unhealthy', error: 'Provider health check failed' } }))
         }
     }
 
@@ -264,11 +272,11 @@ export function RegistryConnections() {
             ),
         },
         {
-            id: 'connection', title: 'Connection Details', icon: Globe, validate: () => wizName && !wizNameDuplicate ? true : !wizName ? 'Please enter a name for this provider.' : 'A provider with this name already exists.',
+            id: 'connection', title: 'Provider Details', icon: Globe, validate: () => wizName && !wizNameDuplicate ? true : !wizName ? 'Please enter a name for this provider.' : 'A provider with this name already exists.',
             content: (
                 <div className="space-y-4">
                     <div>
-                        <label className="block text-sm font-medium text-ink mb-1.5">Connection Name *</label>
+                        <label className="block text-sm font-medium text-ink mb-1.5">Provider Name *</label>
                         <input value={wizName} onChange={e => setWizName(e.target.value)} placeholder="e.g. Production Data Warehouse" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
                         {wizNameDuplicate && (
                             <p className="mt-1.5 text-xs text-amber-500 flex items-center gap-1">
@@ -460,7 +468,7 @@ export function RegistryConnections() {
             content: (
                 <div className="space-y-4">
                     <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-5">
-                        <h4 className="text-sm font-bold text-ink mb-3">Connection Summary</h4>
+                        <h4 className="text-sm font-bold text-ink mb-3">Provider Summary</h4>
                         <dl className="grid grid-cols-2 gap-3 text-sm">
                             <div><dt className="text-ink-muted">Type</dt><dd className="font-semibold text-ink mt-0.5">{getProviderConfig(wizType).label}</dd></div>
                             <div><dt className="text-ink-muted">Name</dt><dd className="font-semibold text-ink mt-0.5">{wizName || '—'}</dd></div>
@@ -488,11 +496,11 @@ export function RegistryConnections() {
             {/* Header / Actions */}
             <div className="flex items-center justify-between">
                 <div>
-                    <h2 className="text-xl font-bold text-ink">Physical Connections</h2>
-                    <p className="text-sm text-ink-muted mt-1">Manage database clusters and catalog availability.</p>
+                    <h2 className="text-xl font-bold text-ink">Providers</h2>
+                    <p className="text-sm text-ink-muted mt-1">Manage database providers and catalog availability.</p>
                 </div>
                 <button onClick={() => { resetWizard(); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-semibold transition-colors">
-                    <Plus className="w-4 h-4" /> Register Connection
+                    <Plus className="w-4 h-4" /> Register Provider
                 </button>
             </div>
 
@@ -519,8 +527,8 @@ export function RegistryConnections() {
             ) : providers.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed border-glass-border rounded-2xl">
                     <Server className="w-12 h-12 text-ink-muted mb-4" />
-                    <h3 className="text-lg font-bold text-ink mb-1">No connections</h3>
-                    <p className="text-sm text-ink-muted">Connect your first database to begin.</p>
+                    <h3 className="text-lg font-bold text-ink mb-1">No providers</h3>
+                    <p className="text-sm text-ink-muted">Register your first database provider to begin.</p>
                 </div>
             ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -530,7 +538,7 @@ export function RegistryConnections() {
                 </div>
             )}
 
-            <AdminWizard title={editingProvider ? `Edit ${editingProvider.name}` : 'Register Connection'} steps={wizardSteps} isOpen={showWizard} onClose={() => { setShowWizard(false); setEditingProvider(null); resetWizard() }} onComplete={editingProvider ? handleEditComplete : handleWizardComplete} isSubmitting={wizSubmitting} completionLabel={editingProvider ? 'Save Changes' : 'Connect'} />
+            <AdminWizard title={editingProvider ? `Edit ${editingProvider.name}` : 'Register Provider'} steps={wizardSteps} isOpen={showWizard} onClose={() => { setShowWizard(false); setEditingProvider(null); resetWizard() }} onComplete={editingProvider ? handleEditComplete : handleWizardComplete} isSubmitting={wizSubmitting} completionLabel={editingProvider ? 'Save Changes' : 'Connect'} />
 
             <DeleteProviderDialog
                 provider={deleteTarget}

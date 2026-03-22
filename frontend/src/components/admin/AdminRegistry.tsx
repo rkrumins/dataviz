@@ -56,7 +56,7 @@ export function AdminRegistry() {
     const tabs = [
         {
             id: 'connections',
-            label: 'Data Connections',
+            label: 'Providers',
             icon: Server,
             desc: 'Manage provider credentials and health',
         },
