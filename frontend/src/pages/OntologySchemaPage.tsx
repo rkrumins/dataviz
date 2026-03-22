@@ -92,34 +92,46 @@ export function OntologySchemaPage() {
   const setActiveDataSource = useWorkspacesStore(s => s.setActiveDataSource)
   const loadWorkspaces = useWorkspacesStore(s => s.loadWorkspaces)
 
-  // ── URL params → data source context (navigation state) ──────────
-  const urlWorkspaceId = searchParams.get('workspaceId')
-  const urlDataSourceId = searchParams.get('dataSourceId')
+  // ── URL ↔ Zustand bidirectional sync ────────────────────────────
+  // Guard ref prevents the two effects from ping-ponging each other.
+  const syncSourceRef = useRef<'url' | 'zustand' | null>(null)
 
-  // Sync URL params into Zustand on mount (e.g. from AdminWorkspaceDetail links)
+  // URL → Zustand (on mount or when URL params change via external navigation)
   useEffect(() => {
-    if (urlWorkspaceId && urlWorkspaceId !== activeWorkspaceId) {
-      setActiveWorkspace(urlWorkspaceId)
+    if (syncSourceRef.current === 'zustand') {
+      syncSourceRef.current = null
+      return
     }
-    if (urlDataSourceId && urlDataSourceId !== activeDataSourceId) {
-      setActiveDataSource(urlDataSourceId)
+    const urlWs = searchParams.get('workspaceId')
+    const urlDs = searchParams.get('dataSourceId')
+    if (urlWs && urlWs !== activeWorkspaceId) {
+      syncSourceRef.current = 'url'
+      setActiveWorkspace(urlWs)
+    }
+    if (urlDs && urlDs !== activeDataSourceId) {
+      syncSourceRef.current = 'url'
+      setActiveDataSource(urlDs)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlWorkspaceId, urlDataSourceId])
+  }, [searchParams])
 
-  // Sync Zustand changes back to URL (e.g. from EnvironmentSwitcher)
+  // Zustand → URL (when user switches via EnvironmentSwitcher)
   useEffect(() => {
-    if (activeWorkspaceId) {
-      const currentWs = searchParams.get('workspaceId')
-      const currentDs = searchParams.get('dataSourceId')
-      if (currentWs !== activeWorkspaceId || (activeDataSourceId && currentDs !== activeDataSourceId)) {
-        setSearchParams(prev => {
-          prev.set('workspaceId', activeWorkspaceId)
-          if (activeDataSourceId) prev.set('dataSourceId', activeDataSourceId)
-          else prev.delete('dataSourceId')
-          return prev
-        }, { replace: true })
-      }
+    if (syncSourceRef.current === 'url') {
+      syncSourceRef.current = null
+      return
+    }
+    if (!activeWorkspaceId) return
+    const currentWs = searchParams.get('workspaceId')
+    const currentDs = searchParams.get('dataSourceId')
+    if (currentWs !== activeWorkspaceId || (activeDataSourceId && currentDs !== activeDataSourceId)) {
+      syncSourceRef.current = 'zustand'
+      setSearchParams(prev => {
+        prev.set('workspaceId', activeWorkspaceId)
+        if (activeDataSourceId) prev.set('dataSourceId', activeDataSourceId)
+        else prev.delete('dataSourceId')
+        return prev
+      }, { replace: true })
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWorkspaceId, activeDataSourceId])
@@ -362,7 +374,7 @@ export function OntologySchemaPage() {
     setIsAssigning(true)
     try {
       await workspaceService.updateDataSource(activeWorkspace.id, activeDataSource.id, {
-        ontologyId: assignId,
+        ontologyId: assignId ?? '',
       })
       await loadWorkspaces()
       if (assignId) navigate(schemaUrl(assignId))
@@ -788,7 +800,6 @@ export function OntologySchemaPage() {
           selectedOntologyId={selectedOntology?.id ?? null}
           ontologies={ontologies}
           selectedOntology={selectedOntology ?? null}
-          graphStats={null}
           isAssigning={isAssigning}
           onAssign={handleAssignOntology}
           onSwitchEnvironment={handleSwitchEnvironment}
@@ -862,6 +873,23 @@ export function OntologySchemaPage() {
                     <p className="text-sm text-ink-muted mt-1 max-w-2xl">
                       {selectedOntology.description || `${Object.keys(selectedOntology.entityTypeDefinitions ?? {}).length} entity types · ${Object.keys(selectedOntology.relationshipTypeDefinitions ?? {}).length} relationships`}
                     </p>
+                    {/* Metadata row */}
+                    <div className="flex items-center gap-4 mt-2 flex-wrap text-[11px] text-ink-muted">
+                      <span>Created {new Date(selectedOntology.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}{selectedOntology.createdBy ? ` by ${selectedOntology.createdBy}` : ''}</span>
+                      <span className="opacity-30">·</span>
+                      <span>Updated {new Date(selectedOntology.updatedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}{selectedOntology.updatedBy ? ` by ${selectedOntology.updatedBy}` : ''}</span>
+                      {selectedOntology.publishedAt && (
+                        <>
+                          <span className="opacity-30">·</span>
+                          <span className="text-emerald-600 dark:text-emerald-400">
+                            Published {new Date(selectedOntology.publishedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
+                            {selectedOntology.publishedBy ? ` by ${selectedOntology.publishedBy}` : ''}
+                          </span>
+                        </>
+                      )}
+                      <span className="opacity-30">·</span>
+                      <span>{selectedOntology.scope}</span>
+                    </div>
                   </div>
 
                   {/* Action toolbar */}
@@ -1021,12 +1049,10 @@ export function OntologySchemaPage() {
                       {activeTab === 'overview' && (
                         <OverviewPanel
                           ontology={selectedOntology}
-                          graphStats={null}
-                          coverage={null}
+                          workspaceId={activeWorkspaceId}
+                          dataSourceId={activeDataSourceId}
                           assignmentCount={assignmentCountMap.get(selectedOntology.id) ?? 0}
                           onNavigateTab={(tab) => setTab(tab)}
-                          onExport={handleExport}
-                          onImport={() => fileInputRef.current?.click()}
                         />
                       )}
 
@@ -1111,7 +1137,7 @@ export function OntologySchemaPage() {
                       )}
 
                       {activeTab === 'usage' && (
-                        <UsagePanel ontology={selectedOntology} />
+                        <UsagePanel ontology={selectedOntology} workspaces={workspaces} ontologies={ontologies} />
                       )}
 
                       {activeTab === 'history' && (

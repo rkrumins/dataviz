@@ -64,6 +64,7 @@ export function OntologySidebar({
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [assignmentFilter, setAssignmentFilter] = useState<'all' | 'in-use' | 'unassigned'>('all')
 
   // Reverse map: ontologyId → workspace names that use it
   const ontologyWorkspaceMap = useMemo(() => {
@@ -97,12 +98,15 @@ export function OntologySidebar({
     else if (statusFilter === 'draft') list = list.filter(o => !o.isPublished && !o.isSystem && !o.deletedAt)
     else if (statusFilter === 'deleted') list = list.filter(o => !!o.deletedAt)
     else list = list.filter(o => !o.deletedAt) // 'all' excludes deleted
+    // Assignment filter
+    if (assignmentFilter === 'in-use') list = list.filter(o => (assignmentCountMap.get(o.id) ?? 0) > 0)
+    else if (assignmentFilter === 'unassigned') list = list.filter(o => (assignmentCountMap.get(o.id) ?? 0) === 0)
     if (search) {
       const q = search.toLowerCase()
       list = list.filter(o => o.name.toLowerCase().includes(q) || o.description?.toLowerCase().includes(q))
     }
     return list
-  }, [sourceList, statusFilter, search])
+  }, [sourceList, statusFilter, assignmentFilter, assignmentCountMap, search])
 
   // Split: active ontology pinned to top, rest below (skip pinning for deleted view)
   const { pinnedOntology, restOntologies } = useMemo(() => {
@@ -113,13 +117,18 @@ export function OntologySidebar({
   }, [filtered, activeOntologyId, showDeleted])
 
   // Count per status for filter badges
-  const counts = useMemo(() => ({
-    all: ontologies.length,
-    system: ontologies.filter(o => o.isSystem).length,
-    published: ontologies.filter(o => o.isPublished && !o.isSystem).length,
-    draft: ontologies.filter(o => !o.isPublished && !o.isSystem).length,
-    deleted: allWithDeleted.filter(o => !!o.deletedAt).length,
-  }), [ontologies, allWithDeleted])
+  const counts = useMemo(() => {
+    const inUse = ontologies.filter(o => (assignmentCountMap.get(o.id) ?? 0) > 0).length
+    return {
+      all: ontologies.length,
+      system: ontologies.filter(o => o.isSystem).length,
+      published: ontologies.filter(o => o.isPublished && !o.isSystem).length,
+      draft: ontologies.filter(o => !o.isPublished && !o.isSystem).length,
+      deleted: allWithDeleted.filter(o => !!o.deletedAt).length,
+      inUse,
+      unassigned: ontologies.length - inUse,
+    }
+  }, [ontologies, allWithDeleted, assignmentCountMap])
 
   const effectiveLoading = isLoading || (showDeleted && isLoadingDeleted)
 
@@ -317,6 +326,34 @@ export function OntologySidebar({
                   {counts[f.id]}
                 </span>
               )}
+            </button>
+          ))}
+        </div>
+
+        {/* Assignment filter chips */}
+        <div className="flex items-center gap-1 mt-1.5">
+          {([
+            { id: 'all' as const, label: 'All', count: counts.all },
+            { id: 'in-use' as const, label: 'In Use', count: counts.inUse },
+            { id: 'unassigned' as const, label: 'Unassigned', count: counts.unassigned },
+          ] as const).map(f => (
+            <button
+              key={f.id}
+              onClick={() => setAssignmentFilter(f.id)}
+              className={cn(
+                'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all',
+                assignmentFilter === f.id
+                  ? 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400'
+                  : 'text-ink-muted/60 hover:text-ink-muted hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
+              )}
+            >
+              {f.label}
+              <span className={cn(
+                'text-[9px] font-bold tabular-nums',
+                assignmentFilter === f.id ? 'text-indigo-500' : 'text-ink-muted/40',
+              )}>
+                {f.count}
+              </span>
             </button>
           ))}
         </div>

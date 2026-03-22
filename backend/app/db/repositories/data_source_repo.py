@@ -149,7 +149,8 @@ async def update_data_source(
         return None
 
     if req.ontology_id is not None:
-        row.ontology_id = req.ontology_id
+        # Allow clearing with empty string → None
+        row.ontology_id = req.ontology_id if req.ontology_id else None
     if req.label is not None:
         row.label = req.label
     if req.is_active is not None:

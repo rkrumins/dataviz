@@ -29,9 +29,7 @@ import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
 import { listViews, type View } from '@/services/viewApiService'
-import type { GraphSchemaStats } from '@/providers/GraphDataProvider'
 import { OntologyStatusBadge } from './OntologyStatusBadge'
-import { formatCount } from '../lib/ontology-parsers'
 
 interface ImpactedView {
   id: string
@@ -46,7 +44,6 @@ interface OntologyContextBannerProps {
   selectedOntologyId: string | null
   ontologies: OntologyDefinitionResponse[]
   selectedOntology: OntologyDefinitionResponse | null
-  graphStats: GraphSchemaStats | null
   isAssigning: boolean
   onAssign: (ontologyId: string | undefined) => void
   onSwitchEnvironment: (workspaceId: string, dataSourceId: string) => void
@@ -59,7 +56,6 @@ export function OntologyContextBanner({
   selectedOntologyId,
   ontologies,
   selectedOntology,
-  graphStats,
   isAssigning,
   onAssign,
   onSwitchEnvironment,
@@ -254,19 +250,6 @@ export function OntologyContextBanner({
               </Popover.Portal>
             </Popover.Root>
 
-            {/* Graph stats pill */}
-            {graphStats && (
-              <>
-                <div className="w-px h-4 bg-glass-border/60 flex-shrink-0 mx-1" />
-                <div className="flex items-center gap-2 text-[10px] text-ink-muted font-mono tracking-wide flex-shrink-0">
-                  <span>{graphStats.entityTypeStats.length} types</span>
-                  <span className="opacity-30">·</span>
-                  <span>{formatCount(graphStats.totalNodes)} nodes</span>
-                  <span className="opacity-30">·</span>
-                  <span>{formatCount(graphStats.totalEdges)} edges</span>
-                </div>
-              </>
-            )}
           </div>
 
           {/* Right: ontology assignment area */}
