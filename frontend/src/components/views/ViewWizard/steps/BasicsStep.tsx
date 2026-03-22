@@ -20,8 +20,10 @@ import {
     Users,
     Globe,
     X,
-    Plus
+    Plus,
+    AlertTriangle
 } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
 import type { WizardFormData } from '../ViewWizard'
@@ -84,7 +86,10 @@ const VISIBILITY_OPTIONS = [
 export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) {
     const [showSuggestions, setShowSuggestions] = useState(false)
     const [tagInput, setTagInput] = useState('')
+    const navigate = useNavigate()
     const activeWorkspace = useWorkspacesStore(s => s.getActiveWorkspace())
+    const activeDataSource = useWorkspacesStore(s => s.getActiveDataSource())
+    const missingOntology = !activeDataSource?.ontologyId
 
     const handleAddTag = useCallback(() => {
         const tag = tagInput.trim()
@@ -102,9 +107,9 @@ export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) 
         <div className="max-w-xl mx-auto space-y-8">
             {/* Introduction */}
             <motion.div
-                initial={{ opacity: 0, y: 10 }}
+                initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.1 }}
+                transition={{ delay: 0 * 0.03, duration: 0.15, ease: 'easeOut' }}
                 className="text-center"
             >
                 <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 text-sm font-medium mb-4">
@@ -119,11 +124,37 @@ export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) 
                 </p>
             </motion.div>
 
+            {/* Ontology Warning */}
+            {missingOntology && (
+                <motion.div
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.5 * 0.03, duration: 0.15, ease: 'easeOut' }}
+                    className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 flex items-start gap-3"
+                >
+                    <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                    <div className="flex-1">
+                        <p className="text-sm font-medium text-amber-400">Semantic layer not configured</p>
+                        <p className="text-xs text-ink-muted mt-1 leading-relaxed">
+                            This data source has no ontology assigned. Views created without a semantic
+                            layer may have limited entity types and relationship filtering.
+                        </p>
+                        <button
+                            type="button"
+                            onClick={() => navigate(`/admin/registry?tab=workspaces${activeWorkspace ? `&ws=${activeWorkspace.id}` : ''}`)}
+                            className="mt-2 text-xs font-medium text-amber-400 hover:text-amber-300 transition-colors"
+                        >
+                            Configure Ontology &rarr;
+                        </button>
+                    </div>
+                </motion.div>
+            )}
+
             {/* Name Input */}
             <motion.div
-                initial={{ opacity: 0, y: 10 }}
+                initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.2 }}
+                transition={{ delay: 1 * 0.03, duration: 0.15, ease: 'easeOut' }}
                 className="space-y-2"
             >
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300">
@@ -173,9 +204,9 @@ export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) 
 
             {/* Description */}
             <motion.div
-                initial={{ opacity: 0, y: 10 }}
+                initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.3 }}
+                transition={{ delay: 2 * 0.03, duration: 0.15, ease: 'easeOut' }}
                 className="space-y-2"
             >
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300">
@@ -192,9 +223,9 @@ export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) 
 
             {/* Icon Selection */}
             <motion.div
-                initial={{ opacity: 0, y: 10 }}
+                initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.4 }}
+                transition={{ delay: 3 * 0.03, duration: 0.15, ease: 'easeOut' }}
                 className="space-y-3"
             >
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300">
@@ -221,9 +252,9 @@ export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) 
 
             {/* Visibility Selector */}
             <motion.div
-                initial={{ opacity: 0, y: 10 }}
+                initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.5 }}
+                transition={{ delay: 4 * 0.03, duration: 0.15, ease: 'easeOut' }}
                 className="space-y-3"
             >
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300">
@@ -251,9 +282,9 @@ export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) 
 
             {/* Tags Input */}
             <motion.div
-                initial={{ opacity: 0, y: 10 }}
+                initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.6 }}
+                transition={{ delay: 5 * 0.03, duration: 0.15, ease: 'easeOut' }}
                 className="space-y-2"
             >
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300">
@@ -310,9 +341,9 @@ export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) 
             {/* Workspace Badge */}
             {activeWorkspace && (
                 <motion.div
-                    initial={{ opacity: 0, y: 10 }}
+                    initial={{ opacity: 0, y: 4 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.7 }}
+                    transition={{ delay: 6 * 0.03, duration: 0.15, ease: 'easeOut' }}
                     className="flex items-center gap-3 px-4 py-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700"
                 >
                     <Database className="w-4 h-4 text-slate-400" />

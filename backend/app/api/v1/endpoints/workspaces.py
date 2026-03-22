@@ -142,7 +142,10 @@ async def add_data_source(
         raise HTTPException(status_code=404, detail=f"Catalog Item '{req.catalog_item_id}' not found")
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
         raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
-    return await data_source_repo.create_data_source(session, workspace_id, req)
+    try:
+        return await data_source_repo.create_data_source(session, workspace_id, req)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.put("/{workspace_id}/data-sources/{ds_id}", response_model=DataSourceResponse)

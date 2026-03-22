@@ -55,6 +55,13 @@ interface PreferencesState {
   pinView: (viewId: string) => void
   unpinView: (viewId: string) => void
   reorderPins: (viewIds: string[]) => void
+
+  // Onboarding
+  onboardingCompletedSteps: string[]
+  onboardingDismissedAt: string | null
+  completeOnboardingStep: (step: string) => void
+  dismissOnboarding: () => void
+  resetOnboarding: () => void
 }
 
 const DEFAULT_SHORTCUTS: ShortcutConfig[] = [
@@ -125,6 +132,16 @@ export const usePreferencesStore = create<PreferencesState>()(
         pinnedViewIds: state.pinnedViewIds.filter(id => id !== viewId),
       })),
       reorderPins: (viewIds) => set({ pinnedViewIds: viewIds }),
+
+      // Onboarding
+      onboardingCompletedSteps: [],
+      onboardingDismissedAt: null,
+      completeOnboardingStep: (step) => set((state) => {
+        if (state.onboardingCompletedSteps.includes(step)) return state
+        return { onboardingCompletedSteps: [...state.onboardingCompletedSteps, step] }
+      }),
+      dismissOnboarding: () => set({ onboardingDismissedAt: new Date().toISOString() }),
+      resetOnboarding: () => set({ onboardingCompletedSteps: [], onboardingDismissedAt: null }),
     }),
     {
       name: 'nexus-preferences',

@@ -497,6 +497,7 @@ class WorkspaceDataSourceORM(Base):
 
     __table_args__ = (
         UniqueConstraint("workspace_id", "provider_id", "graph_name", name="uq_ds_ws_prov_graph"),
+        UniqueConstraint("catalog_item_id", name="uq_ds_catalog_item"),
         Index("idx_ds_workspace", "workspace_id"),
         Index("idx_ds_provider", "provider_id"),
         Index("idx_ds_catalog_item", "catalog_item_id"),
@@ -682,6 +683,7 @@ class CatalogItemORM(Base):
     provider = relationship("ProviderORM", back_populates="catalog_items")
 
     __table_args__ = (
+        UniqueConstraint("provider_id", "source_identifier", name="uq_catalog_provider_source"),
         Index("idx_catalog_provider", "provider_id"),
         Index("idx_catalog_status", "status"),
     )

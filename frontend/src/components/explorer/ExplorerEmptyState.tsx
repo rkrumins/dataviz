@@ -3,8 +3,9 @@
  * either because a search/filter returned nothing or the user has no views yet.
  */
 
-import { Compass, SearchX, FilterX, Plus, LayoutGrid } from 'lucide-react'
+import { Compass, SearchX, FilterX, Plus, LayoutGrid, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useWorkspacesStore } from '@/store/workspaces'
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -42,6 +43,10 @@ export function ExplorerEmptyState({
 }: ExplorerEmptyStateProps) {
   /* ── No views exist yet ── */
   if (type === 'no-views') {
+    const activeWorkspace = useWorkspacesStore.getState().getActiveWorkspace()
+    const activeDataSource = useWorkspacesStore.getState().getActiveDataSource()
+    const hasOntology = !!activeDataSource?.ontologyId
+
     return (
       <div className="flex flex-col items-center justify-center py-24 text-center">
         {/* Large icon with subtle glow */}
@@ -60,11 +65,25 @@ export function ExplorerEmptyState({
           No views yet
         </h3>
 
-        <p className="text-ink-muted text-sm max-w-md mb-8 leading-relaxed">
-          Create your first view from a workspace to start exploring your
-          data graph. Views let you save, share, and collaborate on custom
-          perspectives.
-        </p>
+        {/* Ontology-ready contextual message */}
+        {hasOntology && activeWorkspace ? (
+          <div className="mb-8 max-w-md space-y-2">
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 text-emerald-400 text-xs font-medium">
+              <Check className="w-3.5 h-3.5" />
+              Workspace &ldquo;{activeWorkspace.name}&rdquo; is ready with semantic layer configured
+            </div>
+            <p className="text-ink-muted text-sm leading-relaxed">
+              Create your first view to start exploring your data graph.
+              Views let you save, share, and collaborate on custom perspectives.
+            </p>
+          </div>
+        ) : (
+          <p className="text-ink-muted text-sm max-w-md mb-8 leading-relaxed">
+            Create your first view from a workspace to start exploring your
+            data graph. Views let you save, share, and collaborate on custom
+            perspectives.
+          </p>
+        )}
 
         {/* CTA button */}
         <button

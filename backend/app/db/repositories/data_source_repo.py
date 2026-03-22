@@ -123,6 +123,18 @@ async def create_data_source(
     if not cat:
         raise ValueError(f"Catalog Item '{req.catalog_item_id}' not found")
 
+    # 1:1 constraint: a catalog item can only belong to one workspace
+    existing = await session.execute(
+        select(WorkspaceDataSourceORM.workspace_id)
+        .where(WorkspaceDataSourceORM.catalog_item_id == req.catalog_item_id)
+        .limit(1)
+    )
+    bound = existing.scalar_one_or_none()
+    if bound:
+        raise ValueError(
+            f"Catalog item '{req.catalog_item_id}' is already allocated to workspace '{bound}'"
+        )
+
     row = WorkspaceDataSourceORM(
         workspace_id=workspace_id,
         catalog_item_id=req.catalog_item_id,

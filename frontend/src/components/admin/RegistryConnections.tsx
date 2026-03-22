@@ -2,13 +2,14 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
     Server, Plus, RefreshCw, Wifi, WifiOff, Edit2, Trash2, Zap,
-    Shield, Globe, ChevronDown, ChevronUp, Loader2, BookOpen, Scan, ArrowRight
+    Shield, Globe, ChevronDown, ChevronUp, Loader2, BookOpen, Scan, ArrowRight, AlertTriangle
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService, type ProviderResponse, type ProviderCreateRequest, type ProviderUpdateRequest, type ProviderImpactResponse, type SchemaDiscoveryResult } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { AdminWizard, type WizardStep } from './AdminWizard'
+import { DeleteProviderDialog } from './DeleteProviderDialog'
 import { Neo4jLogo, FalkorDBLogo, DataHubLogo, MockLogo } from './ProviderLogos'
 
 const PROVIDER_TYPES = [
@@ -97,6 +98,10 @@ export function RegistryConnections() {
     const [deleteTarget, setDeleteTarget] = useState<ProviderResponse | null>(null)
     const [deleteImpact, setDeleteImpact] = useState<ProviderImpactResponse | null>(null)
     const [loadingImpact, setLoadingImpact] = useState(false)
+
+    const wizNameDuplicate = providers.some(p =>
+        p.name.toLowerCase() === wizName.trim().toLowerCase() && p.id !== editingProvider?.id
+    )
 
     // Schema mapping state (Neo4j / external DBs)
     const [schemaDiscovery, setSchemaDiscovery] = useState<SchemaDiscoveryResult | null>(null)
@@ -199,8 +204,13 @@ export function RegistryConnections() {
             resetWizard()
             loadProviders()
 
-            // Auto-navigate to assets tab for immediate discovery
-            navigate(`/admin/registry?tab=assets&provider=${newlyCreated.id}`)
+            // Health gate: test connection before navigating
+            const health = await providerService.test(newlyCreated.id)
+            setHealthMap(prev => ({ ...prev, [newlyCreated.id]: { status: health.success ? 'healthy' : 'unhealthy', latencyMs: health.latencyMs, error: health.error } }))
+
+            if (health.success) {
+                navigate(`/admin/registry?tab=assets&provider=${newlyCreated.id}&onboarding=true`)
+            }
         } catch (err) { console.error('Failed to create provider', err) }
         finally { setWizSubmitting(false) }
     }
@@ -256,10 +266,19 @@ export function RegistryConnections() {
             ),
         },
         {
-            id: 'connection', title: 'Connection Details', icon: Globe, validate: () => wizName ? true : 'Please enter a name for this provider.',
+            id: 'connection', title: 'Connection Details', icon: Globe, validate: () => wizName && !wizNameDuplicate ? true : !wizName ? 'Please enter a name for this provider.' : 'A provider with this name already exists.',
             content: (
                 <div className="space-y-4">
-                    <div><label className="block text-sm font-medium text-ink mb-1.5">Connection Name *</label><input value={wizName} onChange={e => setWizName(e.target.value)} placeholder="e.g. Production Data Warehouse" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" /></div>
+                    <div>
+                        <label className="block text-sm font-medium text-ink mb-1.5">Connection Name *</label>
+                        <input value={wizName} onChange={e => setWizName(e.target.value)} placeholder="e.g. Production Data Warehouse" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
+                        {wizNameDuplicate && (
+                            <p className="mt-1.5 text-xs text-amber-500 flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3" />
+                                A provider named "{wizName.trim()}" already exists
+                            </p>
+                        )}
+                    </div>
                     <div className="grid grid-cols-3 gap-3">
                         <div className="col-span-2"><label className="block text-sm font-medium text-ink mb-1.5">Host</label><input value={wizHost} onChange={e => setWizHost(e.target.value)} placeholder="localhost" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50" /></div>
                         <div><label className="block text-sm font-medium text-ink mb-1.5">Port</label><input type="number" value={wizPort} onChange={e => setWizPort(Number(e.target.value))} className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50" /></div>
@@ -515,40 +534,14 @@ export function RegistryConnections() {
 
             <AdminWizard title={editingProvider ? `Edit ${editingProvider.name}` : 'Register Connection'} steps={wizardSteps} isOpen={showWizard} onClose={() => { setShowWizard(false); setEditingProvider(null); resetWizard() }} onComplete={editingProvider ? handleEditComplete : handleWizardComplete} isSubmitting={wizSubmitting} completionLabel={editingProvider ? 'Save Changes' : 'Connect'} />
 
-            {deleteTarget && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center">
-                    <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => { setDeleteTarget(null); setDeleteImpact(null); }} />
-                    <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
-                        <div className="flex items-center gap-3 mb-4"><div className="w-10 h-10 rounded-xl bg-red-500/10 flex items-center justify-center"><Trash2 className="w-5 h-5 text-red-500" /></div><h3 className="text-lg font-bold text-ink">Delete Connection</h3></div>
-
-                        <p className="text-sm text-ink-secondary mb-4">Are you sure you want to delete <strong>{deleteTarget.name}</strong>?</p>
-
-                        {loadingImpact ? (
-                            <div className="flex justify-center py-4"><Loader2 className="w-5 h-5 animate-spin text-ink-muted" /></div>
-                        ) : deleteImpact ? (
-                            <div className="mb-6 p-4 rounded-xl border border-red-500/20 bg-red-500/5 text-sm">
-                                <h4 className="font-semibold text-red-500 mb-2 flex items-center gap-2">< Zap className="w-4 h-4" /> Blast Radius Warning</h4>
-                                <p className="text-red-400 mb-3 text-xs leading-relaxed">
-                                    Deleting this infrastructure will cause a cascading deletion of the following dependent assets across the entire Enterprise:
-                                </p>
-                                <ul className="space-y-1 text-xs text-red-500 font-medium">
-                                    <li>• {deleteImpact.catalogItems.length} Enterprise Catalog Data Products</li>
-                                    <li>• {deleteImpact.workspaces.length} Subscribing Workspaces</li>
-                                    <li>• {deleteImpact.views.length} Downstream Semantic Views</li>
-                                </ul>
-                                {(deleteImpact.catalogItems.length > 0 || deleteImpact.workspaces.length > 0 || deleteImpact.views.length > 0) && (
-                                    <p className="mt-3 text-red-400 text-[11px] uppercase tracking-wider font-bold">This action cannot be undone.</p>
-                                )}
-                            </div>
-                        ) : null}
-
-                        <div className="flex justify-end gap-3">
-                            <button onClick={() => { setDeleteTarget(null); setDeleteImpact(null); }} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5">Cancel</button>
-                            <button onClick={deleteProvider} disabled={loadingImpact} className="px-4 py-2 rounded-xl text-sm font-semibold bg-red-500 text-white hover:bg-red-600 disabled:opacity-50 transition-colors">Confirm Deletion</button>
-                        </div>
-                    </div>
-                </div>
-            )}
+            <DeleteProviderDialog
+                provider={deleteTarget}
+                impact={deleteImpact}
+                loadingImpact={loadingImpact}
+                isOpen={!!deleteTarget}
+                onClose={() => { setDeleteTarget(null); setDeleteImpact(null) }}
+                onConfirm={deleteProvider}
+            />
 
         </div>
     )
