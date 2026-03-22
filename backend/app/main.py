@@ -36,14 +36,24 @@ async def lifespan(_app: FastAPI):
     async with get_async_session() as session:
         await seed_templates(session)
 
-    # 2a. Seed feature categories, definitions, and registry meta (idempotent — skips if already present)
+    # 2a. Seed feature system — each seed gets its own session so a failure
+    #      in one (e.g. multi-worker IntegrityError) doesn't roll back the others.
+    from .db.seed_feature_registry import seed_feature_registry, seed_feature_flags, seed_feature_registry_meta  # noqa: E402
     try:
-        from .db.seed_feature_registry import seed_feature_registry, seed_feature_registry_meta
         async with get_async_session() as session:
             await seed_feature_registry(session)
-            await seed_feature_registry_meta(session)
     except Exception as exc:
         logger.warning("Feature registry seed warning: %s", exc)
+    try:
+        async with get_async_session() as session:
+            await seed_feature_flags(session)
+    except Exception as exc:
+        logger.warning("Feature flags seed warning: %s", exc)
+    try:
+        async with get_async_session() as session:
+            await seed_feature_registry_meta(session)
+    except Exception as exc:
+        logger.warning("Feature registry meta seed warning: %s", exc)
 
     # 2b. Seed system default ontology (idempotent — merge-not-overwrite strategy)
     try:
