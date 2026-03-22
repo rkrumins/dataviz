@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/store/auth'
 import { useExplorerViews, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
 import { useViewHealth } from '@/hooks/useViewHealth'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
@@ -67,6 +68,7 @@ function parseSearchParams(params: URLSearchParams) {
 export function ExplorerPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const parsed = parseSearchParams(searchParams)
+  const currentUser = useAuthStore(s => s.user)
 
   const [searchInput, setSearchInput] = useState(parsed.search)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -121,14 +123,26 @@ export function ExplorerPage() {
     workspaceIds: parsed.workspaceIds,
     dataSourceId: parsed.dataSourceId,
     sort: parsed.sort,
-    favouritedOnly: parsed.favouritedOnly || parsed.category === 'favourites',
+    favouritedOnly: parsed.favouritedOnly || parsed.category === 'my-favourites',
     category: parsed.category,
+    currentUserName: currentUser?.displayName ?? currentUser?.email ?? null,
     limit: PAGE_SIZE,
     offset: 0,
   }
 
-  const { views, totalCount, popularViews, isLoading, toggleFavourite, removeView: removeViewFromList, loadMore, hasMore } = useExplorerViews(filters)
-  const healthMap = useViewHealth(views)
+  const { views: allFilteredViews, totalCount: rawTotalCount, popularViews, isLoading, toggleFavourite, removeView: removeViewFromList, loadMore, hasMore } = useExplorerViews(filters)
+  const healthMap = useViewHealth(allFilteredViews)
+
+  // Apply needs-attention filter after health map is computed
+  const views = useMemo(() => {
+    if (parsed.category !== 'needs-attention') return allFilteredViews
+    return allFilteredViews.filter(v => {
+      const h = healthMap.get(v.id)
+      return h && h.status !== 'healthy'
+    })
+  }, [allFilteredViews, healthMap, parsed.category])
+  const totalCount = parsed.category === 'needs-attention' ? views.length : rawTotalCount
+
   const pinnedViews = useMemo(() => views.filter(v => v.isPinned), [views])
 
   const hasActiveFilters = !!(
@@ -377,6 +391,7 @@ export function ExplorerPage() {
               type={totalCount === 0 && !hasActiveFilters ? 'no-views' : 'no-results'}
               searchTerm={parsed.search}
               hasFilters={hasActiveFilters}
+              activeCategory={parsed.category}
               onClearFilters={clearAllFilters}
             />
           ) : layout === 'grid' ? (

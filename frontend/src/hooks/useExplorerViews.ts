@@ -57,7 +57,8 @@ export interface ExplorerFilters {
   dataSourceId: string | null
   sort: SortOption
   favouritedOnly: boolean
-  category: string | null           // 'my-views' | 'recent' | 'shared' | null
+  category: string | null           // 'my-views' | 'my-favourites' | 'recently-added' | 'shared-with-me' | 'needs-attention' | null
+  currentUserName: string | null    // For 'my-views' category filtering
   limit: number
   offset: number
 }
@@ -164,14 +165,18 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
       result = result.filter(v => wsSet.has(v.workspaceId))
     }
 
-    // Category filters
-    if (filters.category === 'recent') {
+    // Category filters (client-side — API doesn't support these)
+    if (filters.category === 'my-views' && filters.currentUserName) {
+      const userName = filters.currentUserName.toLowerCase()
+      result = result.filter(v => v.createdBy?.toLowerCase() === userName)
+    } else if (filters.category === 'recently-added') {
       const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
       result = result.filter(v => new Date(v.createdAt).getTime() > sevenDaysAgo)
-    } else if (filters.category === 'shared') {
+    } else if (filters.category === 'shared-with-me') {
       result = result.filter(v => v.visibility === 'workspace' || v.visibility === 'enterprise')
     }
-    // 'my-views' and 'favourites' categories are handled by the API params
+    // 'my-favourites' is handled via favouritedOnly API param
+    // 'needs-attention' is handled downstream via useViewHealth
 
     // Sort
     result = sortViews(result, filters.sort)

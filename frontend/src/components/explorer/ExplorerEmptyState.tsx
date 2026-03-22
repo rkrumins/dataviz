@@ -15,6 +15,7 @@ interface ExplorerEmptyStateProps {
   type: 'no-results' | 'no-views'
   searchTerm?: string
   hasFilters?: boolean
+  activeCategory?: string | null
   onClearFilters?: () => void
 }
 
@@ -22,10 +23,19 @@ interface ExplorerEmptyStateProps {
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
 
+const CATEGORY_HINTS: Record<string, string> = {
+  'my-views': "You haven't created any views yet. Save a view from a workspace to see it here.",
+  'my-favourites': "You haven't favourited any views yet. Click the heart on any view to add it to your favourites.",
+  'recently-added': 'No views have been created in the last 7 days.',
+  'shared-with-me': 'No views have been shared at workspace or enterprise level.',
+  'needs-attention': 'All views are healthy — no broken or stale views found.',
+}
+
 export function ExplorerEmptyState({
   type,
   searchTerm,
   hasFilters,
+  activeCategory,
   onClearFilters,
 }: ExplorerEmptyStateProps) {
   /* ── No views exist yet ── */
@@ -100,15 +110,22 @@ export function ExplorerEmptyState({
           </p>
         )}
 
+        {/* Category-specific hint */}
+        {activeCategory && CATEGORY_HINTS[activeCategory] && (
+          <p className="text-sm text-ink-muted leading-relaxed">
+            {CATEGORY_HINTS[activeCategory]}
+          </p>
+        )}
+
         {/* Contextual suggestions */}
-        {hasFilters && (
+        {!activeCategory && hasFilters && (
           <div className="flex items-center gap-2.5 text-sm text-ink-muted">
             <FilterX className="h-4 w-4 shrink-0" />
             <span>Try removing some filters to broaden results</span>
           </div>
         )}
 
-        {!searchTerm && !hasFilters && (
+        {!searchTerm && !hasFilters && !activeCategory && (
           <div className="flex items-center gap-2.5 text-sm text-ink-muted">
             <LayoutGrid className="h-4 w-4 shrink-0" />
             <span>Browse all available views to find what you need</span>
