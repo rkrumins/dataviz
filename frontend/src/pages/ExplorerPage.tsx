@@ -13,6 +13,7 @@ import { useSearchParams } from 'react-router-dom'
 import {
   Compass, Search, LayoutGrid, List, X, TrendingUp,
 } from 'lucide-react'
+import { AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import { useExplorerViews, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
 import { useViewHealth } from '@/hooks/useViewHealth'
@@ -29,6 +30,8 @@ import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import type { View } from '@/services/viewApiService'
+import type { Toast, ToastType } from '@/features/ontology/lib/ontology-types'
+import { ToastNotification } from '@/features/ontology/components/ToastNotification'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -165,9 +168,18 @@ export function ExplorerPage() {
 
   // ─── Handlers ───────────────────────────────────────────────────────
 
+  const [toast, setToast] = useState<Toast | null>(null)
+  const toastIdRef = useRef(0)
+
+  const showToast = useCallback((type: ToastType, message: string) => {
+    setToast({ type, message, id: ++toastIdRef.current })
+  }, [])
+
   const handleShare = useCallback((view: View) => {
     navigator.clipboard.writeText(`${window.location.origin}/views/${view.id}`)
-  }, [])
+      .then(() => showToast('success', `Link copied for "${view.name}"`))
+      .catch(() => showToast('error', 'Failed to copy link'))
+  }, [showToast])
 
   const handleShareDialog = useCallback((view: View) => {
     setShareView({ id: view.id, name: view.name, visibility: view.visibility })
@@ -408,6 +420,11 @@ export function ExplorerPage() {
       {deleteView && (
         <DeleteViewDialog viewId={deleteView.id} viewName={deleteView.name} favouriteCount={deleteView.favouriteCount} isOpen={true} onClose={() => setDeleteView(null)} onDeleted={() => setDeleteView(null)} />
       )}
+
+      {/* ── Toast ── */}
+      <AnimatePresence>
+        {toast && <ToastNotification key={toast.id} toast={toast} onDismiss={() => setToast(null)} />}
+      </AnimatePresence>
     </div>
   )
 }

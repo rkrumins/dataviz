@@ -19,7 +19,6 @@ import {
   Globe,
   Users,
   Lock,
-  Database,
   Box,
   ExternalLink,
   RefreshCw,
@@ -179,7 +178,7 @@ export function ExplorerViewCard({
         )}
       >
         {/* ── Top-right actions (hover reveal) ── */}
-        <div className="absolute top-3 right-3 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-10">
+        <div className="absolute top-3 right-3 flex items-center gap-0.5 rounded-lg bg-canvas-elevated/90 border border-glass-border/50 p-0.5 shadow-sm invisible group-hover:visible z-10">
           <Link
             to={`/views/${view.id}`}
             onClick={e => e.stopPropagation()}
@@ -229,7 +228,7 @@ export function ExplorerViewCard({
           </div>
         </div>
 
-        {/* ── 2. Badges: workspace + visibility + data source (fixed height) ── */}
+        {/* ── 2. Badges: workspace + visibility + semantic layer ── */}
         <div className="flex flex-wrap items-center gap-1.5 mb-3 min-h-[22px]">
           <span className={cn(
             'inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold leading-none',
@@ -241,23 +240,11 @@ export function ExplorerViewCard({
             <VisIcon className="h-2.5 w-2.5" />
             {vis.label}
           </span>
-          {view.dataSourceId && (
-            <span className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium">
-              <Database className="h-2.5 w-2.5" />
-              <span className="truncate max-w-[80px]">{view.dataSourceId}</span>
-            </span>
-          )}
-        </div>
-
-        {/* ── 3. Context model (fixed height — empty if same as name) ── */}
-        <div className="mb-2 min-h-[18px]">
           {showContextModel && (
-            <div className="flex items-center gap-1.5">
-              <Box className="h-3 w-3 text-ink-muted shrink-0" />
-              <span className="text-[11px] font-medium text-ink-muted truncate">
-                {view.contextModelName}
-              </span>
-            </div>
+            <span className="inline-flex items-center gap-1 rounded-full border border-cyan-500/20 bg-cyan-500/8 px-2 py-0.5 text-[10px] font-medium text-cyan-600 dark:text-cyan-400 leading-none truncate max-w-[140px]">
+              <Box className="h-2.5 w-2.5 shrink-0" />
+              {view.contextModelName}
+            </span>
           )}
         </div>
 
