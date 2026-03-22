@@ -29,8 +29,9 @@ import { ExplorerCardSkeleton, ExplorerListRowSkeleton } from '@/components/expl
 import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDrawer'
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
+import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
-import { deleteView as deleteViewApi, type View } from '@/services/viewApiService'
+import { updateViewVisibility, type View } from '@/services/viewApiService'
 import type { Toast, ToastType } from '@/features/ontology/lib/ontology-types'
 import { ToastNotification } from '@/features/ontology/components/ToastNotification'
 
@@ -78,6 +79,7 @@ export function ExplorerPage() {
   const [shareView, setShareView] = useState<{ id: string; name: string; visibility: 'private' | 'workspace' | 'enterprise' } | null>(null)
   const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number } | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [showBulkDelete, setShowBulkDelete] = useState(false)
 
   // ─── URL param setters ──────────────────────────────────────────────
 
@@ -130,7 +132,7 @@ export function ExplorerPage() {
     offset: 0,
   }
 
-  const { views: allFilteredViews, totalCount: rawTotalCount, popularViews, isLoading, toggleFavourite, removeView: removeViewFromList, loadMore, hasMore } = useExplorerViews(filters)
+  const { views: allFilteredViews, totalCount: rawTotalCount, popularViews, isLoading, toggleFavourite, removeView: removeViewFromList, refetch, loadMore, hasMore } = useExplorerViews(filters)
   const healthMap = useViewHealth(allFilteredViews)
 
   // Apply needs-attention filter after health map is computed
@@ -274,20 +276,33 @@ export function ExplorerPage() {
     showToast('success', `"${deletedName}" has been deleted`)
   }, [deleteView, removeViewFromList, showToast])
 
-  const handleBulkDelete = useCallback(async () => {
+  const handleBulkDelete = useCallback(() => {
+    if (selectedIds.size === 0) return
+    setShowBulkDelete(true)
+  }, [selectedIds])
+
+  const handleBulkDeleted = useCallback(() => {
+    const ids = Array.from(selectedIds)
+    ids.forEach(id => removeViewFromList(id))
+    setPreviewView(prev => prev && ids.includes(prev.id) ? null : prev)
+    setSelectedIds(new Set())
+    setShowBulkDelete(false)
+    showToast('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
+  }, [selectedIds, removeViewFromList, showToast])
+
+  const handleBulkVisibility = useCallback(async (visibility: 'private' | 'workspace' | 'enterprise') => {
     const ids = Array.from(selectedIds)
     if (ids.length === 0) return
     const count = ids.length
     try {
-      await Promise.all(ids.map(id => deleteViewApi(id)))
-      ids.forEach(id => removeViewFromList(id))
+      await Promise.all(ids.map(id => updateViewVisibility(id, visibility)))
       setSelectedIds(new Set())
-      setPreviewView(prev => prev && ids.includes(prev.id) ? null : prev)
-      showToast('success', `Deleted ${count} view${count !== 1 ? 's' : ''}`)
+      refetch()
+      showToast('success', `Updated visibility to "${visibility}" for ${count} view${count !== 1 ? 's' : ''}`)
     } catch {
-      showToast('error', 'Some views could not be deleted')
+      showToast('error', 'Some views could not be updated')
     }
-  }, [selectedIds, removeViewFromList, showToast])
+  }, [selectedIds, showToast, refetch])
 
   // ─── Render ─────────────────────────────────────────────────────────
 
@@ -526,7 +541,7 @@ export function ExplorerPage() {
       <ExplorerBulkActions
         selectedCount={selectedIds.size}
         onDelete={handleBulkDelete}
-        onChangeVisibility={() => {}}
+        onChangeVisibility={handleBulkVisibility}
         onClearSelection={() => setSelectedIds(new Set())}
       />
       {shareView && (
@@ -535,6 +550,12 @@ export function ExplorerPage() {
       {deleteView && (
         <DeleteViewDialog viewId={deleteView.id} viewName={deleteView.name} favouriteCount={deleteView.favouriteCount} isOpen={true} onClose={() => setDeleteView(null)} onDeleted={handleDeleted} />
       )}
+      <BulkDeleteDialog
+        viewIds={Array.from(selectedIds)}
+        isOpen={showBulkDelete}
+        onClose={() => setShowBulkDelete(false)}
+        onDeleted={handleBulkDeleted}
+      />
 
       {/* ── Toast ── */}
       <AnimatePresence>

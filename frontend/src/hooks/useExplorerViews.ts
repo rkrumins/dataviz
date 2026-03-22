@@ -71,6 +71,7 @@ export interface UseExplorerViewsResult {
   error: string | null
   toggleFavourite: (viewId: string) => void
   removeView: (viewId: string) => void
+  refetch: () => void
   loadMore: () => void
   hasMore: boolean
 }
@@ -83,6 +84,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [displayCount, setDisplayCount] = useState(filters.limit)
+  const [refetchKey, setRefetchKey] = useState(0)
 
   // Debounce search — only make API call after 300ms of no typing
   const [debouncedSearch, setDebouncedSearch] = useState(filters.search)
@@ -152,7 +154,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
 
     fetchViews()
     return () => { cancelled = true }
-  }, [debouncedSearch, stableVisibility, workspaceIdsKey, stableDataSourceId, stableFavouritedOnly, stableLimit])
+  }, [debouncedSearch, stableVisibility, workspaceIdsKey, stableDataSourceId, stableFavouritedOnly, stableLimit, refetchKey])
 
   // ─── Client-side filtering + sorting ────────────────────────────────
 
@@ -231,6 +233,12 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     setPopularViews(prev => prev.filter(v => v.id !== viewId))
   }, [])
 
+  // ─── Refetch (trigger full reload from API) ────────────────────────
+
+  const refetch = useCallback(() => {
+    setRefetchKey(k => k + 1)
+  }, [])
+
   // ─── Load more (infinite scroll) ───────────────────────────────────
 
   const loadMore = useCallback(() => {
@@ -245,6 +253,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     error,
     toggleFavourite,
     removeView,
+    refetch,
     loadMore,
     hasMore,
   }
