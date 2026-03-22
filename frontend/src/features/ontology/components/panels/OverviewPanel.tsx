@@ -15,6 +15,7 @@ import {
   Users,
   FileText,
   Download,
+  Upload,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -30,6 +31,7 @@ interface OverviewPanelProps {
   assignmentCount: number
   onNavigateTab: (tab: string) => void
   onExport: () => void
+  onImport?: () => void
 }
 
 function StatCard({ icon: Icon, label, value, accent, onClick }: {
@@ -68,6 +70,7 @@ export function OverviewPanel({
   assignmentCount,
   onNavigateTab,
   onExport,
+  onImport,
 }: OverviewPanelProps) {
   const entityCount = Object.keys(ontology.entityTypeDefinitions ?? {}).length
   const relCount = Object.keys(ontology.relationshipTypeDefinitions ?? {}).length
@@ -134,14 +137,25 @@ export function OverviewPanel({
               </div>
             </div>
 
-            {/* Export button */}
-            <button
-              onClick={onExport}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-ink-secondary border border-glass-border hover:border-indigo-300 hover:bg-indigo-50/50 dark:hover:bg-indigo-950/20 hover:text-indigo-600 transition-all flex-shrink-0"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Export JSON
-            </button>
+            {/* Export / Import buttons */}
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <button
+                onClick={onExport}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-ink-secondary border border-glass-border hover:border-indigo-300 hover:bg-indigo-50/50 dark:hover:bg-indigo-950/20 hover:text-indigo-600 transition-all"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Export
+              </button>
+              {onImport && (
+                <button
+                  onClick={onImport}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-ink-secondary border border-glass-border hover:border-indigo-300 hover:bg-indigo-50/50 dark:hover:bg-indigo-950/20 hover:text-indigo-600 transition-all"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  Import
+                </button>
+              )}
+            </div>
           </div>
         </div>
 

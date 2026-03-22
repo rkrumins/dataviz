@@ -78,7 +78,7 @@ export interface OntologyAuditEntry {
     id: string
     ontologyId: string
     schemaId: string
-    action: 'created' | 'updated' | 'published' | 'deleted' | 'restored' | 'cloned'
+    action: 'created' | 'updated' | 'published' | 'deleted' | 'restored' | 'cloned' | 'imported'
     actor: string | null
     version: number | null
     summary: string | null
@@ -89,6 +89,19 @@ export interface OntologyAuditEntry {
         removedRelationshipTypes?: string[]
     } | null
     createdAt: string
+}
+
+/** Result of an import operation. */
+export interface OntologyImportResponse {
+    ontology: OntologyDefinitionResponse
+    status: 'created' | 'updated' | 'new_version' | 'no_changes'
+    summary: string
+    changes: {
+        addedEntityTypes?: string[]
+        removedEntityTypes?: string[]
+        addedRelationshipTypes?: string[]
+        removedRelationshipTypes?: string[]
+    } | null
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -197,6 +210,28 @@ export const ontologyDefinitionService = {
      */
     impact(id: string): Promise<OntologyImpactResponse> {
         return request<OntologyImpactResponse>(`${ADMIN_API}/${id}/impact`)
+    },
+
+    /**
+     * Import a semantic layer from exported JSON as a new draft.
+     */
+    importNew(data: Record<string, unknown>): Promise<OntologyImportResponse> {
+        return request<OntologyImportResponse>(`${ADMIN_API}/import`, {
+            method: 'POST',
+            body: JSON.stringify(data),
+        })
+    },
+
+    /**
+     * Import a semantic layer from exported JSON into an existing ontology.
+     * - Draft target → in-place update (same version)
+     * - Published target → creates new draft version
+     */
+    importInto(id: string, data: Record<string, unknown>): Promise<OntologyImportResponse> {
+        return request<OntologyImportResponse>(`${ADMIN_API}/${id}/import`, {
+            method: 'POST',
+            body: JSON.stringify(data),
+        })
     },
 }
 

@@ -5,7 +5,7 @@ Supports versioning: published ontologies are immutable; updates create new vers
 import json
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from sqlalchemy import select, delete, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,8 @@ from backend.common.models.management import (
     OntologyUpdateRequest,
     OntologyDefinitionResponse,
     OntologyAuditEntry,
+    OntologyImportRequest,
+    OntologyImportResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -524,5 +526,261 @@ async def get_assignments(session: AsyncSession, ontology_id: str) -> list:
         }
         for r in rows.all()
     ]
+
+
+# ------------------------------------------------------------------ #
+# Import                                                               #
+# ------------------------------------------------------------------ #
+
+def _deep_equal(a: Any, b: Any) -> bool:
+    """Deep-compare two JSON-serializable values (dicts, lists, scalars)."""
+    if type(a) != type(b):
+        return False
+    if isinstance(a, dict):
+        if a.keys() != b.keys():
+            return False
+        return all(_deep_equal(a[k], b[k]) for k in a)
+    if isinstance(a, list):
+        if len(a) != len(b):
+            return False
+        return all(_deep_equal(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def _compute_import_diff(
+    current_row: OntologyORM,
+    req: OntologyImportRequest,
+) -> dict:
+    """
+    Compare the imported payload against the current ontology state.
+    Returns a dict with:
+      - changed: bool — whether anything is different
+      - type_diff: added/removed entity and relationship types
+      - field_changes: list of field names that differ
+    """
+    field_changes: list[str] = []
+
+    # Compare each semantic field
+    cur_entities = json.loads(current_row.entity_type_definitions or "{}")
+    cur_rels = json.loads(current_row.relationship_type_definitions or "{}")
+    cur_containment = json.loads(current_row.containment_edge_types or "[]")
+    cur_lineage = json.loads(current_row.lineage_edge_types or "[]")
+    cur_edge_meta = json.loads(current_row.edge_type_metadata or "{}")
+    cur_hierarchy = json.loads(current_row.entity_type_hierarchy or "{}")
+    cur_roots = json.loads(current_row.root_entity_types or "[]")
+
+    if not _deep_equal(cur_entities, req.entity_type_definitions):
+        field_changes.append("entityTypeDefinitions")
+    if not _deep_equal(cur_rels, req.relationship_type_definitions):
+        field_changes.append("relationshipTypeDefinitions")
+    if not _deep_equal(cur_containment, req.containment_edge_types):
+        field_changes.append("containmentEdgeTypes")
+    if not _deep_equal(cur_lineage, req.lineage_edge_types):
+        field_changes.append("lineageEdgeTypes")
+    if not _deep_equal(cur_edge_meta, req.edge_type_metadata):
+        field_changes.append("edgeTypeMetadata")
+    if not _deep_equal(cur_hierarchy, req.entity_type_hierarchy):
+        field_changes.append("entityTypeHierarchy")
+    if not _deep_equal(cur_roots, req.root_entity_types):
+        field_changes.append("rootEntityTypes")
+
+    # Metadata changes (name, description, evolution_policy)
+    if current_row.name != req.name:
+        field_changes.append("name")
+    cur_desc = getattr(current_row, "description", None) or ""
+    if cur_desc != (req.description or ""):
+        field_changes.append("description")
+    cur_policy = getattr(current_row, "evolution_policy", "reject") or "reject"
+    if cur_policy != req.evolution_policy:
+        field_changes.append("evolutionPolicy")
+
+    # Type-level diff for audit
+    type_diff = _compute_type_diff(
+        set(cur_entities.keys()), set(req.entity_type_definitions.keys()),
+        set(cur_rels.keys()), set(req.relationship_type_definitions.keys()),
+    )
+
+    return {
+        "changed": len(field_changes) > 0,
+        "type_diff": type_diff,
+        "field_changes": field_changes,
+    }
+
+
+def _apply_import_fields(row: OntologyORM, req: OntologyImportRequest) -> None:
+    """Write all semantic fields from an import request onto an ORM row."""
+    row.name = req.name
+    row.description = req.description
+    row.evolution_policy = req.evolution_policy
+    row.entity_type_definitions = json.dumps(req.entity_type_definitions)
+    row.relationship_type_definitions = json.dumps(req.relationship_type_definitions)
+    row.containment_edge_types = json.dumps(req.containment_edge_types)
+    row.lineage_edge_types = json.dumps(req.lineage_edge_types)
+    row.edge_type_metadata = json.dumps(req.edge_type_metadata)
+    row.entity_type_hierarchy = json.dumps(req.entity_type_hierarchy)
+    row.root_entity_types = json.dumps(req.root_entity_types)
+
+
+async def import_ontology(
+    session: AsyncSession,
+    req: OntologyImportRequest,
+    target_id: Optional[str] = None,
+) -> OntologyImportResponse:
+    """
+    Import a semantic layer from exported JSON.
+
+    Behavior depends on target and current state:
+    - No target_id → create a new draft from the import data.
+    - Target is draft → update in-place, record audit (same version).
+    - Target is published/system → create a new draft version with imported data.
+    - Target is deleted → reject.
+    - No changes detected → return early with status="no_changes".
+    """
+    # ── Create new ontology (no target) ──────────────────────────────
+    if target_id is None:
+        create_req = OntologyCreateRequest(
+            name=req.name,
+            description=req.description,
+            evolution_policy=req.evolution_policy,
+            containment_edge_types=req.containment_edge_types,
+            lineage_edge_types=req.lineage_edge_types,
+            edge_type_metadata=req.edge_type_metadata,
+            entity_type_hierarchy=req.entity_type_hierarchy,
+            root_entity_types=req.root_entity_types,
+            entity_type_definitions=req.entity_type_definitions,
+            relationship_type_definitions=req.relationship_type_definitions,
+        )
+        created = await create_ontology(session, create_req)
+        # Override the default "created" audit with a more specific "imported" entry
+        await _record_audit(
+            session,
+            (await get_ontology_orm(session, created.id)),  # type: ignore[arg-type]
+            "imported",
+            summary=(
+                f"Imported as new draft with "
+                f"{len(req.entity_type_definitions)} entity types, "
+                f"{len(req.relationship_type_definitions)} relationships"
+            ),
+        )
+        return OntologyImportResponse(
+            ontology=created,
+            status="created",
+            summary=(
+                f"Created new semantic layer \"{req.name}\" with "
+                f"{len(req.entity_type_definitions)} entity types, "
+                f"{len(req.relationship_type_definitions)} relationships"
+            ),
+        )
+
+    # ── Import into existing ontology ────────────────────────────────
+    row = await get_ontology_orm(session, target_id)
+    if not row:
+        raise ValueError(f"Ontology '{target_id}' not found")
+
+    if row.deleted_at:
+        raise ValueError("Cannot import into a deleted semantic layer. Restore it first.")
+
+    if row.is_system:
+        raise ValueError("Cannot import into a system semantic layer. Clone it first.")
+
+    # Diff detection
+    diff = _compute_import_diff(row, req)
+
+    if not diff["changed"]:
+        return OntologyImportResponse(
+            ontology=_to_response(row),
+            status="no_changes",
+            summary="No changes detected — the imported data matches the current state exactly.",
+        )
+
+    # Build human-readable summary
+    parts: list[str] = []
+    td = diff["type_diff"]
+    if td.get("addedEntityTypes"):
+        parts.append(f"Added {len(td['addedEntityTypes'])} entity type(s)")
+    if td.get("removedEntityTypes"):
+        parts.append(f"Removed {len(td['removedEntityTypes'])} entity type(s)")
+    if td.get("addedRelationshipTypes"):
+        parts.append(f"Added {len(td['addedRelationshipTypes'])} relationship(s)")
+    if td.get("removedRelationshipTypes"):
+        parts.append(f"Removed {len(td['removedRelationshipTypes'])} relationship(s)")
+    # Non-type field changes
+    non_type_fields = [f for f in diff["field_changes"] if f not in (
+        "entityTypeDefinitions", "relationshipTypeDefinitions",
+    )]
+    if non_type_fields and not parts:
+        parts.append(f"Updated {', '.join(non_type_fields)}")
+    elif non_type_fields:
+        parts.append(f"also updated {', '.join(non_type_fields)}")
+    if not parts:
+        parts.append("Updated type definitions (content changes within existing types)")
+
+    summary_text = "; ".join(parts)
+
+    # ── Draft → in-place update (same version) ──────────────────────
+    if not row.is_published:
+        _apply_import_fields(row, req)
+        row.revision = (getattr(row, "revision", 0) or 0) + 1
+        row.updated_at = datetime.now(timezone.utc).isoformat()
+        await session.flush()
+
+        await _record_audit(
+            session, row, "imported",
+            summary=f"Imported into draft v{row.version}: {summary_text}",
+            changes=diff["type_diff"],
+        )
+        return OntologyImportResponse(
+            ontology=_to_response(row),
+            status="updated",
+            summary=f"Updated draft v{row.version}: {summary_text}",
+            changes=diff["type_diff"],
+        )
+
+    # ── Published → create new draft version ─────────────────────────
+    schema_id = row.schema_id or row.id
+    result = await session.execute(
+        select(func.max(OntologyORM.version)).where(
+            OntologyORM.schema_id == schema_id
+        )
+    )
+    max_version = result.scalar() or 0
+
+    new_row = OntologyORM(
+        schema_id=schema_id,
+        name=req.name,
+        description=req.description,
+        version=max_version + 1,
+        evolution_policy=req.evolution_policy,
+        entity_type_definitions=json.dumps(req.entity_type_definitions),
+        relationship_type_definitions=json.dumps(req.relationship_type_definitions),
+        containment_edge_types=json.dumps(req.containment_edge_types),
+        lineage_edge_types=json.dumps(req.lineage_edge_types),
+        edge_type_metadata=json.dumps(req.edge_type_metadata),
+        entity_type_hierarchy=json.dumps(req.entity_type_hierarchy),
+        root_entity_types=json.dumps(req.root_entity_types),
+        is_published=False,
+        is_system=False,
+        scope=row.scope or "universal",
+    )
+    session.add(new_row)
+    await session.flush()
+
+    await _record_audit(
+        session, new_row, "imported",
+        summary=(
+            f"Imported as new draft v{new_row.version} "
+            f"(from published v{row.version}): {summary_text}"
+        ),
+        changes=diff["type_diff"],
+    )
+    return OntologyImportResponse(
+        ontology=_to_response(new_row),
+        status="new_version",
+        summary=(
+            f"Created draft v{new_row.version} from import "
+            f"(published v{row.version} is immutable): {summary_text}"
+        ),
+        changes=diff["type_diff"],
+    )
 
 

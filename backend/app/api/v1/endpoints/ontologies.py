@@ -27,6 +27,8 @@ from backend.common.models.management import (
     OntologyValidationIssue,
     OntologyValidationResponse,
     OntologyAuditEntry,
+    OntologyImportRequest,
+    OntologyImportResponse,
 )
 from backend.common.models.graph import GraphSchemaStats
 
@@ -411,6 +413,43 @@ async def get_ontology_audit_log(
     return await ontology_definition_repo.get_audit_log(
         session, schema_id, action=action, limit=limit, offset=offset,
     )
+
+
+@router.post("/import", response_model=OntologyImportResponse, status_code=200)
+async def import_ontology_new(
+    req: OntologyImportRequest = Body(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Import a semantic layer from exported JSON, creating a new draft.
+    Validates the JSON structure against the export format.
+    """
+    try:
+        return await ontology_definition_repo.import_ontology(session, req, target_id=None)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@router.post("/{ontology_id}/import", response_model=OntologyImportResponse, status_code=200)
+async def import_ontology_into(
+    ontology_id: str = Path(...),
+    req: OntologyImportRequest = Body(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Import a semantic layer from exported JSON into an existing ontology.
+
+    Behavior:
+    - Draft target → updates in-place (same version), records audit trail.
+    - Published target → creates a new draft version with the imported changes.
+    - Deleted target → rejected (restore first).
+    - System target → rejected (clone first).
+    - No changes detected → returns status="no_changes" without modification.
+    """
+    try:
+        return await ontology_definition_repo.import_ontology(session, req, target_id=ontology_id)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 @router.post("/suggest", response_model=OntologySuggestResponse, status_code=200)

@@ -231,6 +231,48 @@ class OntologyUpdateRequest(BaseModel):
         populate_by_name = True
 
 
+class OntologyImportRequest(BaseModel):
+    """
+    Validated import payload — mirrors the export JSON format exactly.
+    All semantic fields are required so we can detect what changed.
+    Metadata fields (id, timestamps, status flags) are accepted but ignored on import.
+    """
+    # Metadata (accepted from export JSON, ignored during import)
+    id: Optional[str] = None
+    version: Optional[int] = None
+    scope: Optional[str] = None
+    is_published: Optional[bool] = Field(None, alias="isPublished")
+    is_system: Optional[bool] = Field(None, alias="isSystem")
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    updated_at: Optional[str] = Field(None, alias="updatedAt")
+
+    # Required semantic content
+    name: str
+    description: Optional[str] = None
+    evolution_policy: str = Field("reject", alias="evolutionPolicy")
+    entity_type_definitions: Dict[str, Any] = Field(default_factory=dict, alias="entityTypeDefinitions")
+    relationship_type_definitions: Dict[str, Any] = Field(default_factory=dict, alias="relationshipTypeDefinitions")
+    containment_edge_types: List[str] = Field(default_factory=list, alias="containmentEdgeTypes")
+    lineage_edge_types: List[str] = Field(default_factory=list, alias="lineageEdgeTypes")
+    edge_type_metadata: Dict[str, Any] = Field(default_factory=dict, alias="edgeTypeMetadata")
+    entity_type_hierarchy: Dict[str, Any] = Field(default_factory=dict, alias="entityTypeHierarchy")
+    root_entity_types: List[str] = Field(default_factory=list, alias="rootEntityTypes")
+
+    class Config:
+        populate_by_name = True
+
+
+class OntologyImportResponse(BaseModel):
+    """Result of an import operation."""
+    ontology: "OntologyDefinitionResponse"
+    status: str  # "created" | "updated" | "new_version" | "no_changes"
+    summary: str
+    changes: Optional[Dict[str, Any]] = None  # type diff if applicable
+
+    class Config:
+        populate_by_name = True
+
+
 class OntologyDefinitionResponse(BaseModel):
     id: str
     name: str

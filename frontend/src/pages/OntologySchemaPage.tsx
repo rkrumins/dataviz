@@ -51,8 +51,9 @@ import { SettingsPanel } from '@/features/ontology/components/panels/SettingsPan
 import { DeleteConfirmDialog } from '@/features/ontology/components/dialogs/DeleteConfirmDialog'
 import { UnsavedChangesDialog } from '@/features/ontology/components/dialogs/UnsavedChangesDialog'
 import { PublishConfirmDialog } from '@/features/ontology/components/dialogs/PublishConfirmDialog'
+import { ImportDialog } from '@/features/ontology/components/dialogs/ImportDialog'
 import { OverviewPanel } from '@/features/ontology/components/panels/OverviewPanel'
-import type { OntologyImpactResponse } from '@/services/ontologyDefinitionService'
+import type { OntologyImpactResponse, OntologyImportResponse } from '@/services/ontologyDefinitionService'
 
 // ---------------------------------------------------------------------------
 // Tab configuration
@@ -125,6 +126,8 @@ export function OntologySchemaPage() {
     issues: Array<{ severity: string; message: string }>
   } | null>(null)
   const toastIdRef = useRef(0)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [importData, setImportData] = useState<Record<string, unknown> | null>(null)
 
   // ── Edit mode + working copies ──────────────────────────────────
   const [isEditing, setIsEditing] = useState(false)
@@ -538,6 +541,43 @@ export function OntologySchemaPage() {
     }
   }
 
+  function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    // Reset input so the same file can be re-selected
+    e.target.value = ''
+
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      try {
+        const parsed = JSON.parse(event.target?.result as string)
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          showToast('error', 'Invalid file: expected a JSON object')
+          return
+        }
+        setImportData(parsed)
+      } catch {
+        showToast('error', 'Invalid file: could not parse JSON')
+      }
+    }
+    reader.onerror = () => showToast('error', 'Failed to read file')
+    reader.readAsText(file)
+  }
+
+  function handleImportSuccess(result: OntologyImportResponse) {
+    setImportData(null)
+    mutations.invalidateAll()
+    if (result.ontology?.id) {
+      navigate(`/schema/${result.ontology.id}`)
+    }
+    const messages: Record<string, string> = {
+      created: `Imported as new semantic layer "${result.ontology.name}"`,
+      updated: `Updated draft with imported changes`,
+      new_version: `Created new draft v${result.ontology.version} from import`,
+    }
+    showToast('success', messages[result.status] || result.summary)
+  }
+
   async function handleSaveOntologyDetails(updates: { name: string; description: string; evolutionPolicy: string }) {
     if (!selectedOntology) return
     try {
@@ -772,6 +812,13 @@ export function OntologySchemaPage() {
                       Export
                     </button>
                     <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-glass-border-hover hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-secondary transition-all"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      Import
+                    </button>
+                    <button
                       onClick={handleClone}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-indigo-300 hover:bg-indigo-500/[0.06] text-ink-secondary hover:text-indigo-600 transition-all"
                     >
@@ -908,6 +955,7 @@ export function OntologySchemaPage() {
                           assignmentCount={assignmentCountMap.get(selectedOntology.id) ?? 0}
                           onNavigateTab={(tab) => setSearchParams({ tab })}
                           onExport={handleExport}
+                          onImport={() => fileInputRef.current?.click()}
                         />
                       )}
 
@@ -1155,6 +1203,27 @@ export function OntologySchemaPage() {
           onCancel={() => blocker.reset()}
         />
       )}
+
+      {/* Import Dialog */}
+      {importData && (
+        <ImportDialog
+          importData={importData}
+          currentOntology={selectedOntology ?? null}
+          onClose={() => setImportData(null)}
+          onImportNew={ontologyDefinitionService.importNew}
+          onImportInto={ontologyDefinitionService.importInto}
+          onSuccess={handleImportSuccess}
+        />
+      )}
+
+      {/* Hidden file input for import */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json,application/json"
+        className="hidden"
+        onChange={handleImportFile}
+      />
 
       {/* Toast */}
       <AnimatePresence>
