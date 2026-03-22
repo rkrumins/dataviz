@@ -76,6 +76,14 @@ export function GraphProvider({ children }: GraphProviderProps) {
     const [providerReady, setProviderReady] = useState(false)
     const [providerVersion, setProviderVersion] = useState(0)
 
+    // Track the workspace/datasource the CURRENT provider was built for.
+    // This prevents a mismatch render where Zustand has updated to workspace B
+    // but currentProvider still points to workspace A. By keeping these in local
+    // state (updated atomically with the provider), consumers always see
+    // consistent (workspaceId, provider) pairs — no stale schema fetches.
+    const [providerWorkspaceId, setProviderWorkspaceId] = useState<string | null>(null)
+    const [providerDataSourceId, setProviderDataSourceId] = useState<string | null>(null)
+
     // Track previous IDs so we only rebuild the provider when it changes
     const prevWorkspaceId = useRef<string | null | undefined>(undefined)
     const prevDataSourceId = useRef<string | null | undefined>(undefined)
@@ -125,9 +133,13 @@ export function GraphProvider({ children }: GraphProviderProps) {
 
             // Set the provider IMMEDIATELY — don't block on getStats().
             // This ensures navigation works instantly when switching workspaces.
+            // Update providerWorkspaceId/providerDataSourceId atomically with the
+            // provider so consumers never see a mismatch between IDs and provider.
             if (!cancelled) {
                 setProviderReady(false)
                 setCurrentProvider(p)
+                setProviderWorkspaceId(activeWorkspaceId)
+                setProviderDataSourceId(activeDataSourceId)
                 setProviderVersion(v => v + 1)
                 setIsLoading(false)
             }
@@ -165,9 +177,12 @@ export function GraphProvider({ children }: GraphProviderProps) {
         provider: currentProvider!,
         isLoading,
         error,
-        workspaceId: activeWorkspaceId,
+        // Use provider-tracked IDs (not Zustand's activeWorkspaceId) so
+        // consumers never see a mismatch between workspace IDs and the provider.
+        // Zustand may update ahead of the provider rebuild; these stay in sync.
+        workspaceId: providerWorkspaceId,
         setWorkspaceId: setActiveWorkspace,
-        dataSourceId: activeDataSourceId,
+        dataSourceId: providerDataSourceId,
         setDataSourceId: setActiveDataSource,
         providerReady,
         providerVersion,

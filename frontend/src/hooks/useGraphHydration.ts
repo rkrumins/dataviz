@@ -124,7 +124,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const enableHydration = options?.hydrate ?? false
 
     const provider = useGraphProvider()
-    const { workspaceId: ctxWorkspaceId, dataSourceId: ctxDataSourceId } = useGraphProviderContext()
+    const { workspaceId: ctxWorkspaceId, dataSourceId: ctxDataSourceId, providerVersion } = useGraphProviderContext()
     const containmentEdgeTypes = useContainmentEdgeTypes()
     const lineageEdgeTypes = useLineageEdgeTypes()
     const rootEntityTypes = useRootEntityTypes()
@@ -169,10 +169,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         const layoutType = activeView?.layout.type ?? 'graph'
         const isReferenceView = layoutType === 'reference' || layoutType === 'layered-lineage'
 
-        // Key on workspace, datasource, AND view ID so switching any dimension
-        // triggers re-hydration. String(provider) is always "[object Object]"
-        // so we use the actual IDs for a reliable change signal.
-        const initKey = `${ctxWorkspaceId ?? ''}:${ctxDataSourceId ?? ''}:${activeView?.id ?? 'default'}:${layoutType}`
+        // Key on workspace, datasource, view ID, AND providerVersion so switching
+        // any dimension triggers re-hydration. providerVersion ensures we re-hydrate
+        // even if workspace/datasource IDs haven't changed (e.g. provider reconnect).
+        const initKey = `${ctxWorkspaceId ?? ''}:${ctxDataSourceId ?? ''}:${activeView?.id ?? 'default'}:${layoutType}:${providerVersion}`
 
         if (initializedKeyRef.current === initKey) return
         initializedKeyRef.current = initKey
@@ -404,7 +404,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         hydrate()
         return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enableHydration, provider, activeView?.id, activeView?.layout.type, rootEntityTypes, schemaEntityTypes, isSchemaLoading])
+    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootEntityTypes, schemaEntityTypes, isSchemaLoading])
 
     // ─── loadChildren ───────────────────────────────────────────────────
 

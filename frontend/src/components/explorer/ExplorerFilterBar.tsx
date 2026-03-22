@@ -18,7 +18,6 @@ import {
   Users,
   Globe,
   Lock,
-  Heart,
   X,
   ChevronDown,
   Check,
@@ -52,7 +51,7 @@ interface ExplorerFilterBarProps {
 const CATEGORIES = [
   { key: null, label: 'All', icon: Layers },
   { key: 'my-views', label: 'My Views', icon: LayoutGrid },
-  { key: 'my-favourites', label: 'Favourites', icon: Star },
+  { key: 'my-favourites', label: 'Favorites', icon: Star },
   { key: 'recently-added', label: 'Recent', icon: Clock },
   { key: 'shared-with-me', label: 'Shared', icon: Share2 },
   { key: 'needs-attention', label: 'Attention', icon: AlertTriangle },
@@ -133,7 +132,7 @@ export function ExplorerFilterBar({
       chips.push({ key: 'ds', label: ds?.label ?? dataSourceId })
     }
     if (favouritedOnly) {
-      chips.push({ key: 'fav', label: 'Favourites' })
+      chips.push({ key: 'fav', label: 'Favorites' })
     }
     return chips
   }, [visibility, workspaceIds, dataSourceId, favouritedOnly, workspaces, availableDataSources])
@@ -333,7 +332,7 @@ export function ExplorerFilterBar({
           )}
         </div>
 
-        {/* Favourites toggle */}
+        {/* Favorites toggle */}
         <button
           onClick={() => onFavouritedOnlyChange(!favouritedOnly)}
           className={cn(
@@ -344,8 +343,8 @@ export function ExplorerFilterBar({
               : 'text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
           )}
         >
-          <Heart className={cn('h-3.5 w-3.5', favouritedOnly && 'fill-current')} />
-          Liked
+          <Star className={cn('h-3.5 w-3.5', favouritedOnly && 'fill-current')} />
+          Favorites
         </button>
       </div>
 

@@ -4,45 +4,32 @@ import {
   LayoutDashboard,
   Network,
   Layers,
-  History,
-  Plus,
   ChevronsUpDown,
   Check,
   Settings,
   Database,
   Search,
-  Bookmark,
-  ExternalLink,
-  GitBranch,
-  AlignLeft,
-  List,
-  LayoutGrid,
-  Clock,
   PanelLeftClose,
   PanelLeftOpen,
+  Pin,
+  Clock,
+  ArrowRight,
 } from 'lucide-react'
 import * as Popover from '@radix-ui/react-popover'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { useNavigationStore, type NavigationTab } from '@/store/navigation'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
-import { useSchemaStore } from '@/store/schema'
-
-import { useViewEditorModal } from './AppLayout'
-import { switchToViewScope, parseDataSourceId } from '@/utils/viewNavigation'
 import { useWorkspaces } from '@/hooks/useWorkspaces'
-import { useBookmarkedViews } from '@/hooks/useBookmarkedViews'
-import { useRecentViews } from '@/hooks/useRecentViews'
+import { useWorkspaceContext } from '@/hooks/useWorkspaceContext'
 import { cn } from '@/lib/utils'
-import type { View } from '@/services/viewApiService'
-import type { RecentViewEntry } from '@/hooks/useRecentViews'
-import * as LucideIcons from 'lucide-react'
+import { DynamicIcon, layoutTypeIcon, viewTypeColor } from '@/lib/viewUtils'
 
 // ── Sidebar sizing constants ────────────────────────────────────────
 const MIN_WIDTH = 220
 const MAX_WIDTH = 400
-const DEFAULT_WIDTH = 256 // matches old w-64
-const COLLAPSED_WIDTH = 56  // matches old w-16
+const DEFAULT_WIDTH = 256
+const COLLAPSED_WIDTH = 56
 
 interface NavItem {
   id: NavigationTab
@@ -51,7 +38,7 @@ interface NavItem {
   badge?: number
 }
 
-const mainNavItems: NavItem[] = [
+const baseNavItems: Omit<NavItem, 'badge'>[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'explore', label: 'Explore', icon: Network },
   { id: 'lenses', label: 'Context Lenses', icon: Layers },
@@ -59,7 +46,7 @@ const mainNavItems: NavItem[] = [
   { id: 'admin', label: 'Administration', icon: Settings },
 ]
 
-// ── Workspace Avatar Colors ─────────────────────────────────────────
+// ── Workspace Avatar Colors (sidebar gradient variant) ──────────────
 const WS_COLORS = [
   'from-indigo-500 to-violet-500',
   'from-emerald-500 to-teal-500',
@@ -69,37 +56,6 @@ const WS_COLORS = [
   'from-fuchsia-500 to-purple-500',
 ]
 function wsColor(index: number) { return WS_COLORS[index % WS_COLORS.length] }
-
-// Maps layout type → Lucide icon name
-function layoutTypeIcon(viewType: string): string {
-  const map: Record<string, string> = {
-    graph: 'Network',
-    hierarchy: 'GitBranch',
-    tree: 'GitBranch',
-    reference: 'Layers',
-    'layered-lineage': 'AlignLeft',
-    list: 'List',
-    grid: 'LayoutGrid',
-    timeline: 'Clock',
-  }
-  return map[viewType] ?? 'Layout'
-}
-
-function DynamicIcon({ name, className }: { name: string; className?: string }) {
-  const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string }>>)[name]
-  if (!IconComponent) return <LucideIcons.Layout className={className} />
-  return <IconComponent className={className} />
-}
-
-function formatRelativeTime(isoString: string): string {
-  const diff = Date.now() - new Date(isoString).getTime()
-  const mins = Math.floor(diff / 60_000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
-  const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `${hrs}h ago`
-  return `${Math.floor(hrs / 24)}d ago`
-}
 
 // ── Portal-based tooltip (escapes overflow:hidden) ──────────────────
 function CollapsedTooltip({
@@ -144,11 +100,14 @@ function EnvironmentSwitcher({
   onManageWorkspaces,
   collapsed,
   onToggleSidebar,
+  viewCountsByWorkspace,
+  viewCountsByScope,
 }: {
   onManageWorkspaces: () => void,
-  onManageConnections: () => void,
   collapsed: boolean,
   onToggleSidebar: () => void,
+  viewCountsByWorkspace: Map<string, number>,
+  viewCountsByScope: Map<string, number>,
 }) {
   const navigate = useNavigate()
   const {
@@ -185,7 +144,7 @@ function EnvironmentSwitcher({
     setActiveDataSource(dsId)
     setIsOpen(false)
     setSearch('')
-    navigate('/dashboard')
+    navigate(`/explorer?workspace=${encodeURIComponent(wsId)}`)
   }
 
   if (collapsed) {
@@ -213,7 +172,6 @@ function EnvironmentSwitcher({
           {activeWorkspace ? activeWorkspace.name.charAt(0).toUpperCase() : '?'}
         </button>
 
-        {/* Hover tooltip with full workspace + data source details */}
         <CollapsedTooltip anchorRef={wsButtonRef} visible={wsHovered && !isOpen}>
           <div className="flex items-center gap-2.5">
             <div className={cn(
@@ -276,7 +234,7 @@ function EnvironmentSwitcher({
                   type="text"
                   value={search}
                   onChange={e => setSearch(e.target.value)}
-                  placeholder="Search environments..."
+                  placeholder="Search workspaces..."
                   autoFocus
                   className="w-full bg-transparent pl-8 pr-3 py-1.5 text-sm text-ink focus:outline-none placeholder:text-ink-muted"
                 />
@@ -286,6 +244,7 @@ function EnvironmentSwitcher({
             <div className="max-h-[50vh] overflow-y-auto custom-scrollbar p-2 space-y-3">
               {filteredWorkspaces.map((ws, i) => {
                 const isWsActive = ws.id === activeWorkspaceId
+                const wsViewCount = viewCountsByWorkspace.get(ws.id) ?? 0
                 return (
                   <div key={ws.id}>
                     <div className="px-2 pb-1.5 flex items-center gap-2">
@@ -296,11 +255,18 @@ function EnvironmentSwitcher({
                         {ws.name.charAt(0).toUpperCase()}
                       </div>
                       <span className="text-xs font-bold text-ink tracking-wide truncate">{ws.name}</span>
+                      {wsViewCount > 0 && (
+                        <span className="text-2xs text-ink-muted ml-auto">
+                          {wsViewCount} view{wsViewCount !== 1 ? 's' : ''}
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex flex-col gap-0.5 ml-2 border-l-2 border-glass-border pl-1.5">
                       {ws.dataSources && ws.dataSources.map(ds => {
                         const isSelected = isWsActive && ds.id === activeDataSourceId
+                        const scopeKey = `${ws.id}/${ds.id}`
+                        const dsViewCount = viewCountsByScope.get(scopeKey) ?? 0
                         return (
                           <button
                             key={ds.id}
@@ -315,6 +281,9 @@ function EnvironmentSwitcher({
                             <div className="flex items-center gap-2 min-w-0">
                               <Database className={cn("w-3.5 h-3.5 shrink-0", isSelected ? "text-indigo-500" : "text-ink-muted group-hover:text-ink")} />
                               <span className="text-sm font-medium truncate">{ds.label || 'Data Source'}</span>
+                              {dsViewCount > 0 && (
+                                <span className="text-2xs text-ink-muted">{dsViewCount}</span>
+                              )}
                             </div>
                             {isSelected && <Check className="w-4 h-4 text-indigo-500 shrink-0 ml-2" />}
                           </button>
@@ -334,7 +303,7 @@ function EnvironmentSwitcher({
               })}
               {filteredWorkspaces.length === 0 && (
                 <div className="px-3 py-4 text-center text-xs text-ink-muted">
-                  {search ? 'No environments match your search' : 'No workspaces available'}
+                  {search ? 'No workspaces match your search' : 'No workspaces available'}
                 </div>
               )}
             </div>
@@ -344,7 +313,7 @@ function EnvironmentSwitcher({
                 onClick={() => { onManageWorkspaces(); setIsOpen(false) }}
                 className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
               >
-                <span className="flex items-center gap-1.5"><Settings className="w-3.5 h-3.5" /> Manage Environments</span>
+                <span className="flex items-center gap-1.5"><Settings className="w-3.5 h-3.5" /> Manage Workspaces</span>
                 <span className="font-mono px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 text-[9px]">⌘K</span>
               </button>
             </div>
@@ -352,7 +321,6 @@ function EnvironmentSwitcher({
         </Popover.Portal>
         </Popover.Root>
 
-        {/* Collapse toggle — integrated into workspace row */}
         <button
           onClick={onToggleSidebar}
           className="shrink-0 p-2 rounded-xl text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
@@ -366,209 +334,136 @@ function EnvironmentSwitcher({
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Workspace Views List
+// Sidebar Quick Access — Pinned + Recent sections
 // ─────────────────────────────────────────────────────────────────────
-interface WorkspaceViewsListProps {
-  activeViewId: string | null
-  bookmarkedIds: Set<string>
-  onOpenView: (viewId: string, workspaceId?: string, dataSourceId?: string) => void
-  onCreateView: () => void
-  onEditView: (viewId: string) => void
-  onBookmark: (viewId: string) => void
-}
 
-function WorkspaceViewsList({ activeViewId, bookmarkedIds, onOpenView, onCreateView, onEditView, onBookmark }: WorkspaceViewsListProps) {
-  useSchemaStore((s) => s.activeScopeKey)
-  const visibleViews = useSchemaStore((s) => s.visibleViews)
-  const views = visibleViews()
+function SidebarQuickAccess({
+  onOpenView,
+}: {
+  onOpenView: (viewId: string, wsId?: string, dsId?: string) => void
+}) {
+  const navigate = useNavigate()
+  const { pinnedViewIds, unpinView } = usePreferencesStore()
+  const { recentViews, allViews, activeViewId } = useWorkspaceContext()
 
-  if (views.length === 0) {
+  // Resolve pinned view IDs to view data (filter out deleted views)
+  const pinnedViews = pinnedViewIds
+    .map(id => allViews.find(v => v.id === id))
+    .filter((v): v is NonNullable<typeof v> => v != null)
+
+  // Recent views that aren't already pinned, max 3
+  const pinnedSet = new Set(pinnedViewIds)
+  const recentNonPinned = recentViews
+    .filter(r => !pinnedSet.has(r.viewId))
+    .slice(0, 3)
+
+  const hasContent = pinnedViews.length > 0 || recentNonPinned.length > 0
+
+  if (!hasContent) {
     return (
-      <div className="px-3 py-2 mb-1">
-        <p className="text-xs text-ink-muted leading-relaxed">
-          No views in this workspace yet.{' '}
+      <div className="px-3 mt-4">
+        <p className="text-[11px] text-ink-muted px-2 leading-relaxed">
+          Pin views for quick access. Open any view and click the pin icon, or browse the{' '}
           <button
-            onClick={onCreateView}
+            onClick={() => navigate('/explorer')}
             className="text-accent-lineage hover:underline"
           >
-            Create one
-          </button>
+            Explorer
+          </button>.
         </p>
       </div>
     )
   }
 
   return (
-    <div className="space-y-0.5 mb-1">
-      {views.map(view => {
-        const isActive = view.id === activeViewId
-        const isBookmarked = bookmarkedIds.has(view.id)
-        return (
-          <div
-            key={view.id}
-            role="button"
-            tabIndex={0}
-            onClick={() => onOpenView(view.id, view.workspaceId, view.dataSourceId ?? parseDataSourceId(view.scopeKey))}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenView(view.id, view.workspaceId, view.dataSourceId ?? parseDataSourceId(view.scopeKey)) } }}
-            className={cn(
-              "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left group transition-colors duration-150 cursor-pointer",
-              isActive
-                ? "bg-accent-lineage/10 text-accent-lineage"
-                : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
-            )}
-          >
-            <DynamicIcon
-              name={view.icon || layoutTypeIcon(view.layout?.type ?? 'graph')}
-              className={cn("w-4 h-4 shrink-0", isActive ? "text-accent-lineage" : "text-ink-muted")}
-            />
-            <span className="text-sm font-medium truncate flex-1">{view.name}</span>
-            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-              {!isBookmarked && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); onBookmark(view.id) }}
-                  className="p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
-                  title="Bookmark"
-                >
-                  <Bookmark className="w-3 h-3 text-ink-muted" />
-                </button>
-              )}
-              <button
-                onClick={(e) => { e.stopPropagation(); onEditView(view.id) }}
-                className="p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
-                title="Edit view"
-              >
-                <Settings className="w-3 h-3 text-ink-muted" />
-              </button>
-            </div>
+    <div className="px-3 mt-4 space-y-3">
+      {/* Pinned section */}
+      {pinnedViews.length > 0 && (
+        <div>
+          <h3 className="px-2 mb-1 text-[10px] font-bold uppercase tracking-wider text-ink-muted flex items-center gap-1.5">
+            <Pin className="w-3 h-3" />
+            Pinned
+          </h3>
+          <div className="space-y-0.5">
+            {pinnedViews.map(view => {
+              const isActive = view.id === activeViewId
+              const iconName = layoutTypeIcon(view.layout?.type ?? 'graph')
+              const colorClass = viewTypeColor(view.layout?.type ?? 'graph')
+              return (
+                <div key={view.id} className="group flex items-center">
+                  <button
+                    onClick={() => onOpenView(view.id, view.workspaceId, view.dataSourceId ?? undefined)}
+                    className={cn(
+                      "flex-1 min-w-0 flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left transition-colors text-sm",
+                      isActive
+                        ? "bg-accent-lineage/10 text-accent-lineage"
+                        : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
+                    )}
+                  >
+                    <DynamicIcon
+                      name={iconName}
+                      className={cn("w-3.5 h-3.5 shrink-0", isActive ? "text-accent-lineage" : colorClass)}
+                    />
+                    <span className="truncate">{view.name}</span>
+                  </button>
+                  <button
+                    onClick={() => unpinView(view.id)}
+                    className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-all shrink-0"
+                    title="Unpin"
+                  >
+                    <Pin className="w-3 h-3 text-ink-muted" />
+                  </button>
+                </div>
+              )
+            })}
           </div>
-        )
-      })}
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Bookmark Item
-// ─────────────────────────────────────────────────────────────────────
-interface BookmarkItemProps {
-  view: View
-  isActive: boolean
-  isCrossWorkspace: boolean
-  onClick: () => void
-  onRemoveBookmark: () => void
-}
-
-function BookmarkItem({ view, isActive, isCrossWorkspace, onClick, onRemoveBookmark }: BookmarkItemProps) {
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={onClick}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
-      className={cn(
-        "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left group transition-colors duration-150 cursor-pointer",
-        isActive
-          ? "bg-accent-lineage/10 text-accent-lineage"
-          : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
+        </div>
       )}
-    >
-      <DynamicIcon
-        name={view.config?.icon || layoutTypeIcon(view.viewType)}
-        className={cn("w-4 h-4 shrink-0", isActive ? "text-accent-lineage" : "text-ink-muted")}
-      />
-      <div className="flex flex-col min-w-0 flex-1">
-        <span className="text-sm font-medium truncate">{view.name}</span>
-        {isCrossWorkspace && view.workspaceName && (
-          <span className="text-[10px] text-ink-muted truncate leading-tight mt-0.5">
-            {view.workspaceName}
-          </span>
-        )}
-      </div>
-      <button
-        onClick={(e) => { e.stopPropagation(); onRemoveBookmark() }}
-        className="opacity-0 group-hover:opacity-100 p-1 rounded transition-all hover:bg-black/10 dark:hover:bg-white/10 shrink-0"
-        title="Remove bookmark"
-      >
-        <Bookmark className={cn(
-          "w-3.5 h-3.5",
-          isActive ? "text-accent-lineage fill-accent-lineage" : "text-ink-muted fill-current"
-        )} />
-      </button>
-    </div>
-  )
-}
 
-// ─────────────────────────────────────────────────────────────────────
-// Bookmarks skeleton / empty state
-// ─────────────────────────────────────────────────────────────────────
-function BookmarksSkeleton() {
-  return (
-    <div className="space-y-1 px-3 py-1">
-      {[1, 2, 3].map(i => (
-        <div
-          key={i}
-          className="h-8 rounded-lg bg-black/5 dark:bg-white/5 animate-pulse"
-          style={{ opacity: 1 - (i - 1) * 0.25 }}
-        />
-      ))}
-    </div>
-  )
-}
-
-function BookmarksEmptyState() {
-  return (
-    <div className="px-3 py-3">
-      <p className="text-xs text-ink-muted leading-relaxed">
-        Bookmark views from the{' '}
-        <Link to="/explorer" className="text-accent-lineage hover:underline">
-          Explorer
-        </Link>
-        {' '}for quick access.
-      </p>
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Recent view item
-// ─────────────────────────────────────────────────────────────────────
-interface RecentItemProps {
-  entry: RecentViewEntry
-  isActive: boolean
-  isBookmarked: boolean
-  onClick: () => void
-  onBookmark: () => void
-}
-
-function RecentItem({ entry, isActive, isBookmarked, onClick, onBookmark }: RecentItemProps) {
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={onClick}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
-      className={cn(
-        "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left group transition-colors duration-150 cursor-pointer",
-        isActive
-          ? "bg-accent-lineage/10 text-accent-lineage"
-          : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
+      {/* Recent section */}
+      {recentNonPinned.length > 0 && (
+        <div>
+          <h3 className="px-2 mb-1 text-[10px] font-bold uppercase tracking-wider text-ink-muted flex items-center gap-1.5">
+            <Clock className="w-3 h-3" />
+            Recent
+          </h3>
+          <div className="space-y-0.5">
+            {recentNonPinned.map(entry => {
+              const isActive = entry.viewId === activeViewId
+              const iconName = layoutTypeIcon(entry.viewType)
+              const colorClass = viewTypeColor(entry.viewType)
+              return (
+                <button
+                  key={entry.viewId}
+                  onClick={() => onOpenView(entry.viewId, entry.workspaceId, entry.dataSourceId)}
+                  className={cn(
+                    "w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left transition-colors text-sm",
+                    isActive
+                      ? "bg-accent-lineage/10 text-accent-lineage"
+                      : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
+                  )}
+                >
+                  <DynamicIcon
+                    name={iconName}
+                    className={cn("w-3.5 h-3.5 shrink-0", isActive ? "text-accent-lineage" : colorClass)}
+                  />
+                  <span className="truncate">{entry.viewName}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
       )}
-    >
-      <History className="w-4 h-4 shrink-0 text-ink-muted" />
-      <span className="text-sm truncate flex-1">{entry.viewName}</span>
-      <div className="flex items-center gap-1 shrink-0">
-        {!isBookmarked && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onBookmark() }}
-            className="opacity-0 group-hover:opacity-100 p-1 rounded transition-all hover:bg-black/10 dark:hover:bg-white/10"
-            title="Add to bookmarks"
-          >
-            <Bookmark className="w-3 h-3 text-ink-muted" />
-          </button>
-        )}
-        <span className="text-[10px] text-ink-muted opacity-0 group-hover:opacity-100 transition-opacity">
-          {formatRelativeTime(entry.visitedAt)}
-        </span>
+
+      {/* See all link */}
+      <div className="px-2">
+        <button
+          onClick={() => navigate('/explorer')}
+          className="text-2xs text-ink-muted hover:text-accent-lineage transition-colors flex items-center gap-1"
+        >
+          Browse all views
+          <ArrowRight className="w-2.5 h-2.5" />
+        </button>
       </div>
     </div>
   )
@@ -602,7 +497,6 @@ function NavButton({ item, collapsed, active, onClick, onHoverStart, onHoverEnd 
           : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
       )}
     >
-      {/* Active indicator bar when collapsed */}
       {active && collapsed && (
         <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full bg-accent-lineage" />
       )}
@@ -610,8 +504,8 @@ function NavButton({ item, collapsed, active, onClick, onHoverStart, onHoverEnd 
       {!collapsed && (
         <>
           <span className="flex-1 text-left text-sm font-medium">{item.label}</span>
-          {item.badge && (
-            <span className="px-1.5 py-0.5 text-2xs font-medium bg-accent-lineage/20 text-accent-lineage rounded">
+          {item.badge != null && item.badge > 0 && (
+            <span className="px-1.5 py-0.5 text-2xs font-medium bg-accent-lineage/10 text-accent-lineage rounded">
               {item.badge}
             </span>
           )}
@@ -629,16 +523,9 @@ export function SidebarNav() {
   const { activeTab } = useNavigationStore()
   const { sidebarCollapsed, toggleSidebar } = usePreferencesStore()
   const activeLensId = useCanvasStore((s) => s.activeLensId)
-  const { openViewEditor } = useViewEditorModal()
   const { activeWorkspaceId } = useWorkspaces()
 
-  const activeViewId = useSchemaStore((s) => s.activeViewId)
-  const setActiveView = useSchemaStore((s) => s.setActiveView)
-
-  const { bookmarks, isLoading: isLoadingBookmarks, toggleBookmark } = useBookmarkedViews()
-  const { recent } = useRecentViews()
-
-  const bookmarkedIds = new Set(bookmarks.map(b => b.id))
+  const { viewCount, viewCountsByWorkspace, viewCountsByScope, openView } = useWorkspaceContext()
 
   // ── Resize state ──────────────────────────────────────────────────
   const [width, setWidth] = useState(DEFAULT_WIDTH)
@@ -674,13 +561,8 @@ export function SidebarNav() {
   const [hoveredNavId, setHoveredNavId] = useState<string | null>(null)
   const hoveredNavRef = useRef<HTMLButtonElement | null>(null)
 
-  const handleCreateView = () => openViewEditor()
-  const handleEditView = (viewId: string) => openViewEditor(viewId)
-
   const handleOpenView = (viewId: string, viewWorkspaceId?: string, viewDataSourceId?: string) => {
-    switchToViewScope(viewWorkspaceId, viewDataSourceId)
-    setActiveView(viewId)
-    navigate(`/views/${viewId}`)
+    openView(viewId, viewWorkspaceId, viewDataSourceId)
   }
 
   const handleNavClick = (tabId: NavigationTab) => {
@@ -692,6 +574,12 @@ export function SidebarNav() {
       case 'admin': navigate('/admin/overview'); break
     }
   }
+
+  // Populate nav item badges
+  const mainNavItems: NavItem[] = baseNavItems.map((item) => ({
+    ...item,
+    badge: item.id === 'explore' ? viewCount : undefined,
+  }))
 
   const hoveredNavItem = hoveredNavId ? mainNavItems.find(i => i.id === hoveredNavId) : null
 
@@ -705,8 +593,9 @@ export function SidebarNav() {
         <EnvironmentSwitcher
           collapsed={sidebarCollapsed}
           onManageWorkspaces={() => navigate('/admin/registry?tab=workspaces')}
-          onManageConnections={() => navigate('/admin/registry?tab=connections')}
           onToggleSidebar={toggleSidebar}
+          viewCountsByWorkspace={viewCountsByWorkspace}
+          viewCountsByScope={viewCountsByScope}
         />
 
         {/* Primary nav items */}
@@ -724,103 +613,11 @@ export function SidebarNav() {
           ))}
         </div>
 
-        {/* ── VIEWS section (expanded only) ── */}
+        {/* Pinned + Recent quick access (expanded sidebar only) */}
         {!sidebarCollapsed && (
-          <div className="pt-4">
-            <div className="flex items-center justify-between px-3 py-1 mb-1">
-              <span className="text-xs font-medium text-ink-muted uppercase tracking-wider">Views</span>
-              <button
-                onClick={handleCreateView}
-                className="p-1 rounded hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                title="Create new view"
-              >
-                <Plus className="w-3 h-3 text-ink-muted" />
-              </button>
-            </div>
-
-            <WorkspaceViewsList
-              activeViewId={activeViewId}
-              bookmarkedIds={bookmarkedIds}
-              onOpenView={handleOpenView}
-              onCreateView={handleCreateView}
-              onEditView={handleEditView}
-              onBookmark={(viewId) => toggleBookmark(viewId, false)}
-            />
-
-            {/* Bookmarks */}
-            <div className="mt-3">
-              <div className="flex items-center justify-between px-3 py-1">
-                <span className="text-xs font-medium text-ink-muted uppercase tracking-wider">
-                  Bookmarks{bookmarks.length > 0 ? ` (${bookmarks.length})` : ''}
-                </span>
-                <Link
-                  to="/explorer"
-                  className="flex items-center gap-1 text-[10px] text-ink-muted hover:text-ink-secondary transition-colors"
-                  title="Browse all views in Explorer"
-                >
-                  Explorer <ExternalLink className="w-2.5 h-2.5" />
-                </Link>
-              </div>
-
-              {isLoadingBookmarks ? (
-                <BookmarksSkeleton />
-              ) : bookmarks.length === 0 ? (
-                <BookmarksEmptyState />
-              ) : (
-                <div className="space-y-0.5">
-                  {bookmarks.map(view => (
-                    <BookmarkItem
-                      key={view.id}
-                      view={view}
-                      isActive={view.id === activeViewId}
-                      isCrossWorkspace={view.workspaceId !== activeWorkspaceId}
-                      onClick={() => handleOpenView(view.id, view.workspaceId, view.dataSourceId)}
-                      onRemoveBookmark={() => toggleBookmark(view.id, true)}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Recent */}
-            {recent.length > 0 && (
-              <div className="mt-3">
-                <div className="px-3 py-1">
-                  <span className="text-xs font-medium text-ink-muted uppercase tracking-wider">Recent</span>
-                </div>
-                <div className="space-y-0.5">
-                  {recent.map(entry => (
-                    <RecentItem
-                      key={entry.viewId}
-                      entry={entry}
-                      isActive={entry.viewId === activeViewId}
-                      isBookmarked={bookmarkedIds.has(entry.viewId)}
-                      onClick={() => handleOpenView(entry.viewId, entry.workspaceId, entry.dataSourceId)}
-                      onBookmark={() => toggleBookmark(entry.viewId, false)}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Collapsed: bookmark count badge */}
-        {sidebarCollapsed && (
-          <div className="px-1.5 py-2 flex justify-center mt-2">
-            <button
-              title={bookmarks.length > 0 ? `${bookmarks.length} bookmark${bookmarks.length !== 1 ? 's' : ''}` : 'No bookmarks yet — browse Explorer'}
-              onClick={() => navigate('/explorer')}
-              className="relative w-9 h-9 rounded-lg flex items-center justify-center text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-            >
-              <Bookmark className="w-5 h-5" />
-              {bookmarks.length > 0 && (
-                <span className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-accent-lineage text-[9px] text-white flex items-center justify-center font-bold leading-none">
-                  {bookmarks.length > 9 ? '9+' : bookmarks.length}
-                </span>
-              )}
-            </button>
-          </div>
+          <SidebarQuickAccess
+            onOpenView={handleOpenView}
+          />
         )}
       </nav>
 
@@ -857,7 +654,3 @@ export function SidebarNav() {
     </aside>
   )
 }
-
-// Keep unused icon imports referenced to avoid tree-shaking warnings
-// (GitBranch, AlignLeft, List, LayoutGrid, Clock are used via layoutTypeIcon + DynamicIcon)
-void [GitBranch, AlignLeft, List, LayoutGrid, Clock, History]

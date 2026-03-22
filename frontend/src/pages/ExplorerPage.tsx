@@ -11,7 +11,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
-  Compass, Search, LayoutGrid, List, X, TrendingUp,
+  Compass, Search, LayoutGrid, List, X, TrendingUp, Plus,
 } from 'lucide-react'
 import { AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
@@ -32,6 +32,7 @@ import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { updateViewVisibility, restoreView as restoreViewApi, type View } from '@/services/viewApiService'
+import { useViewEditorModal } from '@/components/layout/AppLayout'
 import type { Toast, ToastType } from '@/features/ontology/lib/ontology-types'
 import { ToastNotification } from '@/features/ontology/components/ToastNotification'
 
@@ -70,6 +71,7 @@ export function ExplorerPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const parsed = parseSearchParams(searchParams)
   const currentUser = useAuthStore(s => s.user)
+  const { openViewEditor } = useViewEditorModal()
 
   const [searchInput, setSearchInput] = useState(parsed.search)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -332,10 +334,22 @@ export function ExplorerPage() {
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-accent-lineage to-violet-600 flex items-center justify-center shadow-lg shadow-accent-lineage/20">
               <Compass className="w-5 h-5 text-white" />
             </div>
-            <div>
+            <div className="flex-1">
               <h1 className="text-xl font-bold text-ink leading-tight">Explorer</h1>
               <p className="text-[11px] text-ink-muted">Discover views across workspaces</p>
             </div>
+            <button
+              onClick={() => openViewEditor()}
+              className={cn(
+                'inline-flex items-center gap-2 rounded-xl px-4 py-2.5',
+                'bg-gradient-to-r from-accent-lineage to-violet-600 text-white text-sm font-semibold',
+                'shadow-lg shadow-accent-lineage/20',
+                'hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200',
+              )}
+            >
+              <Plus className="w-4 h-4" />
+              New View
+            </button>
           </div>
         </header>
 
@@ -487,6 +501,7 @@ export function ExplorerPage() {
               hasFilters={hasActiveFilters}
               activeCategory={parsed.category}
               onClearFilters={clearAllFilters}
+              onCreateView={() => openViewEditor()}
             />
           ) : layout === 'grid' ? (
             <div ref={gridRef} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">

@@ -3,8 +3,7 @@
  * either because a search/filter returned nothing or the user has no views yet.
  */
 
-import { Link } from 'react-router-dom'
-import { Compass, SearchX, FilterX, Sparkles, LayoutGrid } from 'lucide-react'
+import { Compass, SearchX, FilterX, Plus, LayoutGrid } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /* ------------------------------------------------------------------ */
@@ -17,6 +16,7 @@ interface ExplorerEmptyStateProps {
   hasFilters?: boolean
   activeCategory?: string | null
   onClearFilters?: () => void
+  onCreateView?: () => void
 }
 
 /* ------------------------------------------------------------------ */
@@ -25,7 +25,7 @@ interface ExplorerEmptyStateProps {
 
 const CATEGORY_HINTS: Record<string, string> = {
   'my-views': "You haven't created any views yet. Save a view from a workspace to see it here.",
-  'my-favourites': "You haven't favourited any views yet. Click the heart on any view to add it to your favourites.",
+  'my-favourites': "You haven't favorited any views yet. Click the star on any view to add it to your favorites.",
   'recently-added': 'No views have been created in the last 7 days.',
   'shared-with-me': 'No views have been shared at workspace or enterprise level.',
   'needs-attention': 'All views are healthy — no broken or stale views found.',
@@ -38,6 +38,7 @@ export function ExplorerEmptyState({
   hasFilters,
   activeCategory,
   onClearFilters,
+  onCreateView,
 }: ExplorerEmptyStateProps) {
   /* ── No views exist yet ── */
   if (type === 'no-views') {
@@ -66,8 +67,8 @@ export function ExplorerEmptyState({
         </p>
 
         {/* CTA button */}
-        <Link
-          to="/admin/registry"
+        <button
+          onClick={onCreateView}
           className={cn(
             'inline-flex items-center gap-2 rounded-xl px-6 py-3',
             'bg-gradient-to-r from-accent-lineage to-violet-600 text-white text-sm font-semibold',
@@ -75,9 +76,9 @@ export function ExplorerEmptyState({
             'hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200',
           )}
         >
-          <Sparkles className="h-4 w-4" />
-          Go to Workspace Management
-        </Link>
+          <Plus className="h-4 w-4" />
+          Create Your First View
+        </button>
       </div>
     )
   }
