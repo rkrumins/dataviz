@@ -10,6 +10,7 @@
 import { useEffect, useState, createContext, useContext } from 'react'
 import { Outlet, Navigate } from 'react-router-dom'
 import { TopBar } from './TopBar'
+import { GlobalAnnouncementBanner } from './GlobalAnnouncementBanner'
 import { SidebarNav } from './SidebarNav'
 import { CommandPalette } from './CommandPalette'
 import { ViewWizard } from '@/components/views/ViewWizard'
@@ -101,6 +102,7 @@ export function AppLayout() {
   return (
     <ViewEditorContext.Provider value={{ openViewEditor, closeViewEditor }}>
       <div className="h-screen w-screen flex flex-col overflow-hidden bg-canvas">
+        <GlobalAnnouncementBanner />
         <TopBar onOpenCommandPalette={() => setCommandPaletteOpen(true)} />
 
         <div className="flex-1 flex overflow-hidden">

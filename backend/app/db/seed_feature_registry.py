@@ -166,6 +166,21 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "deprecated": False,
         "implemented": False,
     },
+    {
+        "key": "announcementsEnabled",
+        "name": "Announcements",
+        "description": "Show global announcement banners to all users. When disabled, banners are hidden even if active announcements exist.",
+        "category_id": "notifications",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "user_overridable": False,
+        "options": None,
+        "help_url": None,
+        "admin_hint": "Toggle off to instantly hide all announcement banners without deactivating individual announcements.",
+        "sort_order": 0,
+        "deprecated": False,
+        "implemented": True,
+    },
 ]
 
 

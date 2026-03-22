@@ -18,6 +18,7 @@ const AdminRegistry = lazy(() => import('@/components/admin/AdminRegistry').then
 const AdminFeatures = lazy(() => import('@/components/admin/AdminFeatures/index').then(m => ({ default: m.AdminFeatures })))
 const AdminWorkspaceDetail = lazy(() => import('@/components/admin/AdminWorkspaceDetail').then(m => ({ default: m.AdminWorkspaceDetail })))
 const AdminUsers = lazy(() => import('@/components/admin/AdminUsers').then(m => ({ default: m.AdminUsers })))
+const AdminAnnouncements = lazy(() => import('@/components/admin/AdminAnnouncements/index').then(m => ({ default: m.AdminAnnouncements })))
 const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 
 // Auth pages (unauthenticated)
@@ -76,6 +77,7 @@ export const router = createBrowserRouter([
           { path: 'registry', element: <Lazy><AdminRegistry /></Lazy> },
           { path: 'features', element: <Lazy><AdminFeatures /></Lazy> },
           { path: 'users', element: <Lazy><AdminUsers /></Lazy> },
+          { path: 'announcements', element: <Lazy><AdminAnnouncements /></Lazy> },
           { path: 'registry/workspaces/:wsId', element: <Lazy><AdminWorkspaceDetail /></Lazy> },
         ],
       },

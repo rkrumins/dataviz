@@ -585,6 +585,72 @@ class PhysicalGraphStatsResponse(BaseModel):
     edgeTypeCounts: Dict[str, int] = {}
 
 
+# ============================================
+# Announcement Models (global banners)
+# ============================================
+
+class AnnouncementCreateRequest(BaseModel):
+    title: str
+    message: str
+    banner_type: str = Field(default="info", alias="bannerType")
+    is_active: bool = Field(default=True, alias="isActive")
+    snooze_duration_minutes: int = Field(default=0, alias="snoozeDurationMinutes")  # 0 = no snooze
+    cta_text: Optional[str] = Field(None, alias="ctaText")
+    cta_url: Optional[str] = Field(None, alias="ctaUrl")
+
+    class Config:
+        populate_by_name = True
+
+
+class AnnouncementUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    message: Optional[str] = None
+    banner_type: Optional[str] = Field(None, alias="bannerType")
+    is_active: Optional[bool] = Field(None, alias="isActive")
+    snooze_duration_minutes: Optional[int] = Field(None, alias="snoozeDurationMinutes")
+    cta_text: Optional[str] = Field(None, alias="ctaText")
+    cta_url: Optional[str] = Field(None, alias="ctaUrl")
+
+    class Config:
+        populate_by_name = True
+
+
+class AnnouncementResponse(BaseModel):
+    id: str
+    title: str
+    message: str
+    banner_type: str = Field(alias="bannerType")
+    is_active: bool = Field(alias="isActive")
+    snooze_duration_minutes: int = Field(0, alias="snoozeDurationMinutes")
+    cta_text: Optional[str] = Field(None, alias="ctaText")
+    cta_url: Optional[str] = Field(None, alias="ctaUrl")
+    created_by: Optional[str] = Field(None, alias="createdBy")
+    updated_by: Optional[str] = Field(None, alias="updatedBy")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class AnnouncementConfigUpdateRequest(BaseModel):
+    poll_interval_seconds: Optional[int] = Field(None, alias="pollIntervalSeconds")
+    default_snooze_minutes: Optional[int] = Field(None, alias="defaultSnoozeMinutes")
+
+    class Config:
+        populate_by_name = True
+
+
+class AnnouncementConfigResponse(BaseModel):
+    poll_interval_seconds: int = Field(15, alias="pollIntervalSeconds")
+    default_snooze_minutes: int = Field(30, alias="defaultSnoozeMinutes")
+    updated_by: Optional[str] = Field(None, alias="updatedBy")
+    updated_at: Optional[str] = Field(None, alias="updatedAt")
+
+    class Config:
+        populate_by_name = True
+
+
 class AssetListResponse(BaseModel):
     """List of raw asset identifiers (graph names, database names, topics…) on a provider."""
     assets: List[str] = []

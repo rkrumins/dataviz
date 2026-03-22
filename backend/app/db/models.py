@@ -772,6 +772,55 @@ class UserApprovalORM(Base):
 # outbox_events  (transactional outbox for domain events)              #
 # ------------------------------------------------------------------ #
 
+class AnnouncementORM(Base):
+    __tablename__ = "announcements"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ann_{uuid.uuid4().hex[:12]}")
+    title = Column(Text, nullable=False)
+    message = Column(Text, nullable=False)
+    banner_type = Column(Text, nullable=False, default="info")        # info | warning | success
+    is_active = Column(Boolean, nullable=False, default=True)
+    snooze_duration_minutes = Column(Integer, nullable=False, default=0)  # 0 = no snooze allowed
+    cta_text = Column(Text, nullable=True)                            # call-to-action button label
+    cta_url = Column(Text, nullable=True)                             # call-to-action URL
+    created_by = Column(Text, nullable=True)                          # admin user_id who created
+    updated_by = Column(Text, nullable=True)                          # admin user_id who last updated
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        Index("idx_announcements_is_active", "is_active"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Announcement id={self.id!r} title={self.title!r} active={self.is_active}>"
+
+
+# ------------------------------------------------------------------ #
+# announcement_config  (single-row global settings for the banner)     #
+# ------------------------------------------------------------------ #
+
+class AnnouncementConfigORM(Base):
+    __tablename__ = "announcement_config"
+
+    id = Column(Integer, primary_key=True, default=1)
+    poll_interval_seconds = Column(Integer, nullable=False, default=15)        # how often users poll for updates
+    default_snooze_minutes = Column(Integer, nullable=False, default=30)       # default snooze duration for new announcements
+    updated_by = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="single_row_announcement_config"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnnouncementConfig poll={self.poll_interval_seconds}s snooze={self.default_snooze_minutes}m>"
+
+
+# ------------------------------------------------------------------ #
+# outbox_events  (transactional outbox for domain events)              #
+# ------------------------------------------------------------------ #
+
 class OutboxEventORM(Base):
     __tablename__ = "outbox_events"
 

@@ -199,6 +199,66 @@ async def init_db() -> None:
             )
             logger.info("Migration: users, user_roles, user_approvals, outbox_events ensured")
 
+    # ── Create announcements table if missing ────────────────────────────
+    async with engine.begin() as conn:
+        if DATABASE_URL.startswith("sqlite"):
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS announcements "
+                    "(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, message TEXT NOT NULL, "
+                    "banner_type TEXT NOT NULL DEFAULT 'info', is_active INTEGER NOT NULL DEFAULT 1, "
+                    "snooze_duration_minutes INTEGER NOT NULL DEFAULT 0, cta_text TEXT, cta_url TEXT, "
+                    "created_by TEXT, updated_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+                )
+            )
+            logger.info("Migration: announcements table ensured")
+
+    # ── Create announcement_config table if missing ────────────────────
+    async with engine.begin() as conn:
+        if DATABASE_URL.startswith("sqlite"):
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE TABLE IF NOT EXISTS announcement_config "
+                    "(id INTEGER PRIMARY KEY CHECK (id = 1), "
+                    "poll_interval_seconds INTEGER NOT NULL DEFAULT 15, "
+                    "default_snooze_minutes INTEGER NOT NULL DEFAULT 30, "
+                    "updated_by TEXT, updated_at TEXT NOT NULL DEFAULT '')"
+                )
+            )
+            # Seed single row if empty
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "INSERT OR IGNORE INTO announcement_config (id, poll_interval_seconds, default_snooze_minutes, updated_at) "
+                    "VALUES (1, 15, 30, datetime('now'))"
+                )
+            )
+            logger.info("Migration: announcement_config table ensured")
+
+    # ── Seed 'announcementsEnabled' feature definition if missing ──────
+    async with engine.begin() as conn:
+        try:
+            import json as _json
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "INSERT OR IGNORE INTO feature_definitions "
+                    "(key, name, description, category_id, type, default_value, "
+                    "user_overridable, sort_order, deprecated, implemented, admin_hint) "
+                    "VALUES (:key, :name, :desc, :cat, :type, :default, 0, 0, 0, 1, :hint)"
+                ),
+                {
+                    "key": "announcementsEnabled",
+                    "name": "Announcements",
+                    "desc": "Show global announcement banners to all users. When disabled, banners are hidden even if active announcements exist.",
+                    "cat": "notifications",
+                    "type": "boolean",
+                    "default": _json.dumps(True),
+                    "hint": "Toggle off to instantly hide all announcement banners without deactivating individual announcements.",
+                },
+            )
+            logger.info("Migration: announcementsEnabled feature definition ensured")
+        except Exception:
+            pass
+
     # ── Inline schema migrations ──────────────────────────────────────
     # SQLAlchemy create_all only creates NEW tables, not new columns on
     # existing tables.  We run safe ALTER TABLE statements here.
@@ -240,6 +300,8 @@ async def init_db() -> None:
             "ALTER TABLE ontologies ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE ontologies ADD COLUMN created_by TEXT",
             "ALTER TABLE ontologies ADD COLUMN updated_by TEXT",
+            # Announcements: replace is_dismissible with snooze_duration_minutes
+            "ALTER TABLE announcements ADD COLUMN snooze_duration_minutes INTEGER NOT NULL DEFAULT 0",
         ]
         for stmt in migrations:
             try:
