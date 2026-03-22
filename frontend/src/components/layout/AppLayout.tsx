@@ -102,7 +102,7 @@ export function AppLayout() {
 
   return (
     <ViewEditorContext.Provider value={{ openViewEditor, closeViewEditor }}>
-      <div className="h-screen w-screen flex flex-col overflow-hidden bg-canvas">
+      <div className="h-full w-full flex flex-col overflow-hidden bg-canvas">
         <GlobalAnnouncementBanner />
         <TopBar onOpenCommandPalette={() => setCommandPaletteOpen(true)} />
 

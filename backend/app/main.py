@@ -164,6 +164,7 @@ app.include_router(api_router, prefix="/api/v1")
 # ------------------------------------------------------------------ #
 
 @app.get("/health", tags=["health"])
+@app.get("/api/v1/health", tags=["health"], include_in_schema=False)
 async def health_check():
     """
     Enhanced health check — returns management DB + primary provider status.
