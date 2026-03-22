@@ -140,9 +140,10 @@ export async function updateView(viewId: string, data: ViewUpdateRequest): Promi
     })
 }
 
-/** Soft-delete a view (sets deletedAt, does not remove from DB) */
-export async function deleteView(viewId: string): Promise<void> {
-    return apiFetch<void>(`/api/v1/views/${viewId}`, { method: 'DELETE' })
+/** Delete a view. Soft-deletes by default; pass permanent=true to remove from DB. */
+export async function deleteView(viewId: string, permanent = false): Promise<void> {
+    const qs = permanent ? '?permanent=true' : ''
+    return apiFetch<void>(`/api/v1/views/${viewId}${qs}`, { method: 'DELETE' })
 }
 
 /** Restore a soft-deleted view */

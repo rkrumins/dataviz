@@ -77,7 +77,7 @@ export function ExplorerPage() {
 
   const [previewView, setPreviewView] = useState<View | null>(null)
   const [shareView, setShareView] = useState<{ id: string; name: string; visibility: 'private' | 'workspace' | 'enterprise' } | null>(null)
-  const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number } | null>(null)
+  const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number; permanent?: boolean } | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showBulkDelete, setShowBulkDelete] = useState(false)
 
@@ -253,6 +253,10 @@ export function ExplorerPage() {
 
   const handleDeleteRequest = useCallback((view: View) => {
     setDeleteView({ id: view.id, name: view.name, favouriteCount: view.favouriteCount })
+  }, [])
+
+  const handlePermanentDeleteRequest = useCallback((view: View) => {
+    setDeleteView({ id: view.id, name: view.name, favouriteCount: view.favouriteCount, permanent: true })
   }, [])
 
   const handleDeleted = useCallback(() => {
@@ -445,6 +449,7 @@ export function ExplorerPage() {
                     onPreview={() => setPreviewView(v)}
                     onDelete={() => handleDeleteRequest(v)}
                     onRestore={() => handleRestore(v)}
+                    onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                     healthStatus={healthMap.get(v.id)?.status}
                   />
                 </div>
@@ -498,6 +503,7 @@ export function ExplorerPage() {
                     onPreview={() => setPreviewView(v)}
                     onDelete={() => handleDeleteRequest(v)}
                     onRestore={() => handleRestore(v)}
+                    onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                     healthStatus={healthMap.get(v.id)?.status}
                     isSelected={selectedIds.has(v.id)}
                     onToggleSelect={() => setSelectedIds(prev => {
@@ -560,13 +566,14 @@ export function ExplorerPage() {
         <ShareViewDialog viewId={shareView.id} viewName={shareView.name} currentVisibility={shareView.visibility} isOpen={true} onClose={() => setShareView(null)} />
       )}
       {deleteView && (
-        <DeleteViewDialog viewId={deleteView.id} viewName={deleteView.name} favouriteCount={deleteView.favouriteCount} isOpen={true} onClose={() => setDeleteView(null)} onDeleted={handleDeleted} />
+        <DeleteViewDialog viewId={deleteView.id} viewName={deleteView.name} favouriteCount={deleteView.favouriteCount} isOpen={true} onClose={() => setDeleteView(null)} onDeleted={handleDeleted} permanent={deleteView.permanent} />
       )}
       <BulkDeleteDialog
         viewIds={Array.from(selectedIds)}
         isOpen={showBulkDelete}
         onClose={() => setShowBulkDelete(false)}
         onDeleted={handleBulkDeleted}
+        permanent={parsed.category === 'deleted'}
       />
 
       {/* ── Toast ── */}

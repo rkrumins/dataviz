@@ -14,6 +14,8 @@ interface BulkDeleteDialogProps {
   isOpen: boolean
   onClose: () => void
   onDeleted: () => void
+  /** When true, permanently removes from DB instead of soft-delete. */
+  permanent?: boolean
 }
 
 export function BulkDeleteDialog({
@@ -21,6 +23,7 @@ export function BulkDeleteDialog({
   isOpen,
   onClose,
   onDeleted,
+  permanent,
 }: BulkDeleteDialogProps) {
   const [confirmText, setConfirmText] = useState('')
   const [deleting, setDeleting] = useState(false)
@@ -35,7 +38,7 @@ export function BulkDeleteDialog({
     setDeleting(true)
     setError(null)
     try {
-      await Promise.all(viewIds.map(id => deleteView(id)))
+      await Promise.all(viewIds.map(id => deleteView(id, !!permanent)))
       onDeleted()
       onClose()
     } catch (err) {
@@ -79,8 +82,8 @@ export function BulkDeleteDialog({
                 <Trash2 className="w-5 h-5 text-red-500" />
               </div>
               <div className="flex-1 min-w-0">
-                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Delete {count} View{count !== 1 ? 's' : ''}</h3>
-                <p className="text-sm text-slate-500 dark:text-slate-400">This action cannot be undone</p>
+                <h3 className="text-lg font-bold text-slate-900 dark:text-white">{permanent ? 'Permanently Delete' : 'Delete'} {count} View{count !== 1 ? 's' : ''}</h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400">{permanent ? 'This action is irreversible' : 'You can restore them later from the Deleted tab'}</p>
               </div>
               <button
                 onClick={handleClose}
@@ -96,8 +99,11 @@ export function BulkDeleteDialog({
             {/* Warning box */}
             <div className="rounded-xl bg-red-50 dark:bg-red-500/[0.08] border border-red-200 dark:border-red-500/20 px-4 py-3.5">
               <p className="text-sm text-red-800 dark:text-red-300 leading-relaxed">
-                This will <strong className="font-semibold">permanently delete {count} view{count !== 1 ? 's' : ''}</strong>.
-                All favourites and sharing settings for these views will be lost.
+                {permanent ? (
+                  <>This will <strong className="font-semibold">permanently remove {count} view{count !== 1 ? 's' : ''}</strong> from the database. This cannot be undone.</>
+                ) : (
+                  <>This will delete <strong className="font-semibold">{count} view{count !== 1 ? 's' : ''}</strong>. You can restore them later from the Deleted tab.</>
+                )}
               </p>
             </div>
 

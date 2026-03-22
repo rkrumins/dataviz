@@ -114,10 +114,14 @@ async def update_view(
 @router.delete("/{view_id}", status_code=204)
 async def delete_view(
     view_id: str = Path(...),
+    permanent: bool = Query(False),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Soft-delete a view (sets deleted_at, does not remove from DB)."""
-    deleted = await view_repo.delete_view(session, view_id)
+    """Delete a view. Soft-deletes by default; pass ?permanent=true to remove from DB."""
+    if permanent:
+        deleted = await view_repo.permanently_delete_view(session, view_id)
+    else:
+        deleted = await view_repo.delete_view(session, view_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
 

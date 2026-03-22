@@ -16,6 +16,8 @@ interface DeleteViewDialogProps {
   isOpen: boolean
   onClose: () => void
   onDeleted: () => void
+  /** When true, permanently removes from DB instead of soft-delete. */
+  permanent?: boolean
 }
 
 export function DeleteViewDialog({
@@ -25,6 +27,7 @@ export function DeleteViewDialog({
   isOpen,
   onClose,
   onDeleted,
+  permanent,
 }: DeleteViewDialogProps) {
   const [confirmText, setConfirmText] = useState('')
   const [deleting, setDeleting] = useState(false)
@@ -37,7 +40,7 @@ export function DeleteViewDialog({
     setDeleting(true)
     setError(null)
     try {
-      await deleteView(viewId)
+      await deleteView(viewId, !!permanent)
       onDeleted()
       onClose()
     } catch (err) {
@@ -81,7 +84,7 @@ export function DeleteViewDialog({
                 <Trash2 className="w-5 h-5 text-red-500" />
               </div>
               <div className="flex-1 min-w-0">
-                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Delete View</h3>
+                <h3 className="text-lg font-bold text-slate-900 dark:text-white">{permanent ? 'Permanently Delete View' : 'Delete View'}</h3>
                 <p className="text-sm text-slate-500 dark:text-slate-400 truncate">{viewName}</p>
               </div>
               <button
@@ -98,9 +101,15 @@ export function DeleteViewDialog({
             {/* Warning box */}
             <div className="rounded-xl bg-red-50 dark:bg-red-500/[0.08] border border-red-200 dark:border-red-500/20 px-4 py-3.5">
               <p className="text-sm text-red-800 dark:text-red-300 leading-relaxed">
-                This will <strong className="font-semibold">permanently delete</strong> the view{' '}
-                <strong className="font-semibold">"{viewName}"</strong>.
-                This action cannot be undone.
+                {permanent ? (
+                  <>This will <strong className="font-semibold">permanently remove</strong> the view{' '}
+                  <strong className="font-semibold">"{viewName}"</strong> from the database.
+                  This action is <strong className="font-semibold">irreversible</strong> — the view cannot be restored.</>
+                ) : (
+                  <>This will delete the view{' '}
+                  <strong className="font-semibold">"{viewName}"</strong>.
+                  You can restore it later from the Deleted tab.</>
+                )}
               </p>
             </div>
 

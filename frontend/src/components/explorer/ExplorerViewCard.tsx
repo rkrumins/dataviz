@@ -153,6 +153,7 @@ export interface ExplorerViewCardProps {
   onPreview?: () => void
   onDelete?: () => void
   onRestore?: () => void
+  onPermanentDelete?: () => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
   isSelected?: boolean
   onToggleSelect?: () => void
@@ -171,6 +172,7 @@ export function ExplorerViewCard({
   onPreview,
   onDelete,
   onRestore,
+  onPermanentDelete,
   healthStatus,
   isSelected,
   onToggleSelect,
@@ -239,16 +241,31 @@ export function ExplorerViewCard({
 
         {/* ── Top-right actions (hover reveal) ── */}
         <div className="absolute top-3 right-3 flex items-center gap-0.5 rounded-lg bg-canvas-elevated/90 border border-glass-border/50 p-0.5 shadow-sm invisible group-hover:visible z-10">
-          {isDeleted && onRestore ? (
-            <button
-              type="button"
-              onClick={e => { e.stopPropagation(); onRestore() }}
-              className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors duration-150 flex items-center gap-1.5"
-              title="Restore view"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              Restore
-            </button>
+          {isDeleted ? (
+            <>
+              {onRestore && (
+                <button
+                  type="button"
+                  onClick={e => { e.stopPropagation(); onRestore() }}
+                  className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors duration-150 flex items-center gap-1.5"
+                  title="Restore view"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Restore
+                </button>
+              )}
+              {onPermanentDelete && (
+                <button
+                  type="button"
+                  onClick={e => { e.stopPropagation(); onPermanentDelete() }}
+                  className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-red-500 hover:bg-red-500/10 transition-colors duration-150 flex items-center gap-1.5"
+                  title="Permanently delete"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Delete
+                </button>
+              )}
+            </>
           ) : (
             <>
           <Link
