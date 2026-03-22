@@ -20,7 +20,6 @@ import { useSchemaStore } from '@/store/schema'
 import { listViews, viewToViewConfig } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useRouteSync } from '@/hooks/useRouteSync'
-import { cn } from '@/lib/utils'
 
 // Context for View Editor Modal
 interface ViewEditorContextType {
@@ -40,7 +39,7 @@ export function useViewEditorModal() {
 
 export function AppLayout() {
   const { isAuthenticated } = useAuthStore()
-  const { theme, sidebarCollapsed } = usePreferencesStore()
+  const { theme } = usePreferencesStore()
 
   // View editor state
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
@@ -62,8 +61,10 @@ export function AppLayout() {
   // Load views from the API into the schema store cache.
   // Fetches ALL accessible views (no workspace filter) so that cross-workspace
   // links in the sidebar and deep-linked URLs resolve without a page refresh.
-  // Re-runs when activeWorkspaceId changes so newly created views are picked up.
+  // Re-runs when activeWorkspaceId or activeDataSourceId changes so newly
+  // created views and data-source-scoped views are picked up.
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
+  const activeDataSourceId = useWorkspacesStore(s => s.activeDataSourceId)
   useEffect(() => {
     if (!isAuthenticated) return
 
@@ -78,7 +79,7 @@ export function AppLayout() {
       }
     }
     loadViews()
-  }, [isAuthenticated, activeWorkspaceId])
+  }, [isAuthenticated, activeWorkspaceId, activeDataSourceId])
 
   // Apply theme
   useEffect(() => {
@@ -109,10 +110,7 @@ export function AppLayout() {
           <SidebarNav />
 
           <main
-            className={cn(
-              "flex-1 relative overflow-hidden transition-all duration-300",
-              sidebarCollapsed ? "ml-16" : "ml-64"
-            )}
+            className="flex-1 relative overflow-hidden transition-all duration-300"
           >
             <Outlet />
           </main>

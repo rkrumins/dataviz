@@ -87,7 +87,7 @@ export function AdminAnnouncements() {
   const [toast, setToast] = useState<{ message: string; variant: 'success' | 'error' } | null>(null)
 
   // Global config state
-  const [config, setConfig] = useState<AnnouncementConfigResponse | null>(null)
+  const [, setConfig] = useState<AnnouncementConfigResponse | null>(null)
   const [configOpen, setConfigOpen] = useState(false)
   const [configPoll, setConfigPoll] = useState(15)
   const [configSnooze, setConfigSnooze] = useState(30)
