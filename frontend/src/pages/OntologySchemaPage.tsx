@@ -52,6 +52,7 @@ import { DeleteConfirmDialog } from '@/features/ontology/components/dialogs/Dele
 import { UnsavedChangesDialog } from '@/features/ontology/components/dialogs/UnsavedChangesDialog'
 import { PublishConfirmDialog } from '@/features/ontology/components/dialogs/PublishConfirmDialog'
 import { ImportDialog } from '@/features/ontology/components/dialogs/ImportDialog'
+import { SuggestConfirmDialog } from '@/features/ontology/components/dialogs/SuggestConfirmDialog'
 import { OverviewPanel } from '@/features/ontology/components/panels/OverviewPanel'
 import type { OntologyImpactResponse, OntologyImportResponse } from '@/services/ontologyDefinitionService'
 
@@ -128,6 +129,7 @@ export function OntologySchemaPage() {
   const toastIdRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [importData, setImportData] = useState<Record<string, unknown> | null>(null)
+  const [showSuggestDialog, setShowSuggestDialog] = useState(false)
 
   // ── Edit mode + working copies ──────────────────────────────────
   const [isEditing, setIsEditing] = useState(false)
@@ -452,12 +454,11 @@ export function OntologySchemaPage() {
     showToast('info', `"${name}" removed — save to persist`)
   }
 
-  async function handleSuggestOntology() {
-    if (!window.confirm(
-      'Generate semantic layer definitions from your graph\'s current types?\n\n' +
-      'This creates a new draft containing ONLY the entity and relationship ' +
-      'types that exist in your active data source.',
-    )) return
+  function handleSuggestOntology() {
+    setShowSuggestDialog(true)
+  }
+
+  async function handleConfirmSuggest() {
     setIsSuggesting(true)
     try {
       const stats = await provider.getSchemaStats()
@@ -466,6 +467,7 @@ export function OntologySchemaPage() {
         ...response.suggested,
         name: `Suggested Semantic Layer (${new Date().toLocaleDateString()})`,
       })
+      setShowSuggestDialog(false)
       navigate(`/schema/${created.id}?tab=entities`)
       showToast('info', 'Draft created from graph — review types and publish when ready')
     } catch (err: unknown) {
@@ -1201,6 +1203,16 @@ export function OntologySchemaPage() {
             blocker.proceed()
           }}
           onCancel={() => blocker.reset()}
+        />
+      )}
+
+      {/* Suggest from Graph Confirmation */}
+      {showSuggestDialog && (
+        <SuggestConfirmDialog
+          dataSourceLabel={activeDataSource?.label || activeDataSource?.id || null}
+          isLoading={isSuggesting}
+          onConfirm={handleConfirmSuggest}
+          onClose={() => { if (!isSuggesting) setShowSuggestDialog(false) }}
         />
       )}
 
