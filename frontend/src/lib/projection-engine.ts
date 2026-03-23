@@ -49,9 +49,16 @@ export function isFinerThan(
   targetTypeId: string,
   entityTypes: EntityTypeLevel[],
 ): boolean {
-  const nodeLevel = entityTypes.find((e) => e.id === nodeTypeId)?.hierarchy.level ?? 9999
-  const targetLevel = entityTypes.find((e) => e.id === targetTypeId)?.hierarchy.level ?? 0
-  return nodeLevel > targetLevel
+  // If entity types haven't loaded yet, don't filter anything
+  if (entityTypes.length === 0) return false
+
+  const nodeEntry = entityTypes.find((e) => e.id === nodeTypeId)
+  const targetEntry = entityTypes.find((e) => e.id === targetTypeId)
+
+  // If either type is unknown, don't treat the node as finer (keep it visible)
+  if (!nodeEntry || !targetEntry) return false
+
+  return nodeEntry.hierarchy.level > targetEntry.hierarchy.level
 }
 
 export interface ViewProjectionConfig {

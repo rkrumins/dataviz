@@ -532,13 +532,18 @@ export function projectToGranularity(
 
   // Filter nodes at or coarser than the target granularity type.
   // When targetTypeId is null (finest detail), show all nodes.
-  const filteredNodes =
-    targetTypeId === null
-      ? [...nodes]
-      : nodes.filter((node) => {
-          const nodeType = node.data?.type as string
-          return !isFinerThan(nodeType, targetTypeId, entityTypes)
-        })
+  // When entityTypes haven't loaded or targetTypeId isn't in entityTypes, skip filtering.
+  const shouldFilter =
+    targetTypeId !== null &&
+    entityTypes.length > 0 &&
+    entityTypes.some((e) => e.id === targetTypeId)
+
+  const filteredNodes = !shouldFilter
+    ? [...nodes]
+    : nodes.filter((node) => {
+        const nodeType = node.data?.type as string
+        return !isFinerThan(nodeType, targetTypeId!, entityTypes)
+      })
 
   const visibleNodes: Node[] = []
   const visibleNodeIds = new Set<string>()
@@ -950,6 +955,19 @@ export function useLineageExploration(): UseLineageExplorationResult {
       return {
         visibleNodes: [],
         visibleEdges: [],
+        aggregatedEdges: new Map(),
+        upstreamCount: 0,
+        downstreamCount: 0,
+      }
+    }
+
+    // If schema entity types haven't loaded yet, skip projection and return raw nodes/edges.
+    // Without entity type hierarchy info, projectToGranularity can't correctly build
+    // containment maps or aggregate edges, which may result in nodes being dropped.
+    if (schemaEntityTypes.length === 0) {
+      return {
+        visibleNodes: rawNodes,
+        visibleEdges: rawEdges,
         aggregatedEdges: new Map(),
         upstreamCount: 0,
         downstreamCount: 0,
