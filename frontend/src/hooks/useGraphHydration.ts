@@ -167,7 +167,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         if (isSchemaLoading) return
 
         const layoutType = activeView?.layout.type ?? 'graph'
-        const isReferenceView = layoutType === 'reference' || layoutType === 'layered-lineage'
+        const isReferenceView = layoutType === 'reference'
 
         // Key on workspace, datasource, view ID, AND providerVersion so switching
         // any dimension triggers re-hydration. providerVersion ensures we re-hydrate
