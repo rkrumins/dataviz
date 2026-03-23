@@ -11,7 +11,7 @@ from typing import List, Optional
 from sqlalchemy import select, delete, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import ViewORM, ViewFavouriteORM, WorkspaceORM, ContextModelORM
+from ..models import ViewORM, ViewFavouriteORM, WorkspaceORM, ContextModelORM, WorkspaceDataSourceORM
 from backend.common.models.management import (
     ViewCreateRequest,
     ViewUpdateRequest,
@@ -47,6 +47,17 @@ async def _get_context_model_name(
     return result.scalar_one_or_none()
 
 
+async def _get_data_source_name(
+    session: AsyncSession, data_source_id: Optional[str]
+) -> Optional[str]:
+    if not data_source_id:
+        return None
+    result = await session.execute(
+        select(WorkspaceDataSourceORM.label).where(WorkspaceDataSourceORM.id == data_source_id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def _get_favourite_count(
     session: AsyncSession, view_id: str
 ) -> int:
@@ -78,6 +89,7 @@ def _to_response(
     row: ViewORM,
     *,
     workspace_name: Optional[str] = None,
+    data_source_name: Optional[str] = None,
     context_model_name: Optional[str] = None,
     favourite_count: int = 0,
     is_favourited: bool = False,
@@ -91,6 +103,7 @@ def _to_response(
         workspaceId=row.workspace_id,
         workspaceName=workspace_name,
         dataSourceId=row.data_source_id,
+        dataSourceName=data_source_name,
         viewType=row.view_type or "graph",
         config=json.loads(row.config or "{}"),
         visibility=row.visibility or "private",
@@ -110,14 +123,16 @@ async def _to_enriched_response(
     row: ViewORM,
     user_id: Optional[str] = None,
 ) -> ViewResponse:
-    """Build a ViewResponse enriched with workspace name, CM name, and favourite info."""
+    """Build a ViewResponse enriched with workspace name, data source name, CM name, and favourite info."""
     ws_name = await _get_workspace_name(session, row.workspace_id)
+    ds_name = await _get_data_source_name(session, row.data_source_id)
     cm_name = await _get_context_model_name(session, row.context_model_id)
     fav_count = await _get_favourite_count(session, row.id)
     fav = await _is_favourited(session, row.id, user_id)
     return _to_response(
         row,
         workspace_name=ws_name,
+        data_source_name=ds_name,
         context_model_name=cm_name,
         favourite_count=fav_count,
         is_favourited=fav,
@@ -343,11 +358,13 @@ async def list_popular_views(
         row = row_tuple[0]
         fav_count = row_tuple[1] or 0
         ws_name = await _get_workspace_name(session, row.workspace_id)
+        ds_name = await _get_data_source_name(session, row.data_source_id)
         cm_name = await _get_context_model_name(session, row.context_model_id)
         is_fav = await _is_favourited(session, row.id, user_id)
         responses.append(_to_response(
             row,
             workspace_name=ws_name,
+            data_source_name=ds_name,
             context_model_name=cm_name,
             favourite_count=fav_count,
             is_favourited=is_fav,

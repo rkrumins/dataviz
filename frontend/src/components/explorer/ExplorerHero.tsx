@@ -16,8 +16,8 @@ import {
     LayoutGrid,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { workspaceColor } from '@/lib/workspaceColor'
 import type { View } from '@/services/viewApiService'
+import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 
 // ─── Interface ──────────────────────────────────────────────────────────────
 interface ExplorerHeroProps {
@@ -90,7 +90,6 @@ export function ExplorerHero({ views, onToggleFavourite, onPreview }: ExplorerHe
             {/* Grid: 1 col mobile, 2 md, 3 lg */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {featured.map((view) => {
-                    const wsColor = workspaceColor(view.workspaceId)
                     const typeColor = VIEW_TYPE_COLORS[view.viewType] ?? FALLBACK_COLOR
                     const TypeIcon = VIEW_TYPE_ICONS[view.viewType] ?? Network
 
@@ -129,19 +128,14 @@ export function ExplorerHero({ views, onToggleFavourite, onPreview }: ExplorerHe
                                         <TypeIcon className="w-4.5 h-4.5" />
                                     </div>
 
-                                    <div className="flex items-center gap-2 min-w-0">
-                                        {view.workspaceName && (
-                                            <span
-                                                className={cn(
-                                                    'inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border truncate',
-                                                    wsColor.bg,
-                                                    wsColor.text,
-                                                    wsColor.border,
-                                                )}
-                                            >
-                                                {view.workspaceName}
-                                            </span>
-                                        )}
+                                    <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                                        <ViewScopeBadge
+                                            workspaceId={view.workspaceId}
+                                            workspaceName={view.workspaceName}
+                                            dataSourceId={view.dataSourceId}
+                                            dataSourceName={view.dataSourceName}
+                                            size="md"
+                                        />
                                         <span className="inline-flex items-center rounded-full bg-black/5 dark:bg-white/5 border border-glass-border px-2 py-0.5 text-[11px] font-medium text-ink-muted">
                                             {VIEW_TYPE_LABELS[view.viewType] ?? view.viewType}
                                         </span>

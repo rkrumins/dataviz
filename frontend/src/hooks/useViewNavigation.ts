@@ -148,6 +148,11 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
         setStatus('ready')
 
         if (viewConfig) {
+          const ds = targetDsId
+            ? useWorkspacesStore.getState().workspaces
+                .flatMap(w => w.dataSources ?? [])
+                .find(d => d.id === targetDsId)
+            : undefined
           recordVisit({
             viewId: viewConfig.id,
             viewName: viewConfig.name,
@@ -155,6 +160,7 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
             workspaceId: viewConfig.workspaceId,
             workspaceName: viewConfig.workspaceName,
             dataSourceId: targetDsId,
+            dataSourceName: ds?.label || ds?.catalogItemId || undefined,
           })
         }
       }
@@ -193,13 +199,20 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
 
       const viewConfig = useSchemaStore.getState().schema?.views.find(v => v.id === viewId)
       if (viewConfig) {
+        const dsId = viewConfig.dataSourceId ?? parseDataSourceId(viewConfig.scopeKey) ?? undefined
+        const ds = dsId
+          ? useWorkspacesStore.getState().workspaces
+              .flatMap(w => w.dataSources ?? [])
+              .find(d => d.id === dsId)
+          : undefined
         recordVisit({
           viewId: viewConfig.id,
           viewName: viewConfig.name,
           viewType: viewConfig.layout?.type ?? 'graph',
           workspaceId: viewConfig.workspaceId,
           workspaceName: viewConfig.workspaceName,
-          dataSourceId: viewConfig.dataSourceId ?? parseDataSourceId(viewConfig.scopeKey) ?? undefined,
+          dataSourceId: dsId,
+          dataSourceName: ds?.label || ds?.catalogItemId || undefined,
         })
       }
     }

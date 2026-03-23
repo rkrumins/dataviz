@@ -36,9 +36,9 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { workspaceColor } from '@/lib/workspaceColor'
 import { timeAgo } from '@/lib/timeAgo'
 import type { View } from '@/services/viewApiService'
+import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import type { ViewLayerConfig } from '@/types/schema'
 
 // ─── Types ──────────────────────────────────────────────────────
@@ -411,17 +411,13 @@ export function ExplorerPreviewDrawer({
             <div className="flex-1 px-6 py-5 space-y-5">
               {/* Workspace + Visibility badges */}
               <div className="flex items-center gap-2 flex-wrap">
-                {(() => {
-                  const wsColor = workspaceColor(view.workspaceId)
-                  return (
-                    <span className={cn(
-                      'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold border',
-                      wsColor.bg, wsColor.text, wsColor.border,
-                    )}>
-                      {view.workspaceName ?? view.workspaceId}
-                    </span>
-                  )
-                })()}
+                <ViewScopeBadge
+                  workspaceId={view.workspaceId}
+                  workspaceName={view.workspaceName}
+                  dataSourceId={view.dataSourceId}
+                  dataSourceName={view.dataSourceName}
+                  size="md"
+                />
                 {(() => {
                   const vis = VISIBILITY_META[view.visibility] ?? VISIBILITY_META.private
                   const VisIcon = vis.icon
@@ -551,7 +547,7 @@ export function ExplorerPreviewDrawer({
                     <DetailRow
                       icon={Database}
                       label="Data Source"
-                      value={view.dataSourceId}
+                      value={view.dataSourceName ?? view.dataSourceId}
                     />
                   )}
 

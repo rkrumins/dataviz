@@ -585,6 +585,7 @@ class ViewResponse(BaseModel):
     workspace_id: str = Field(alias="workspaceId")
     workspace_name: Optional[str] = Field(None, alias="workspaceName")
     data_source_id: Optional[str] = Field(None, alias="dataSourceId")
+    data_source_name: Optional[str] = Field(None, alias="dataSourceName")
     view_type: str = Field(alias="viewType")
     config: Dict[str, Any] = Field(default_factory=dict)
     visibility: str = "private"

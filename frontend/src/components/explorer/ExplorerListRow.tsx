@@ -10,7 +10,6 @@ import {
   Globe,
   Users,
   Lock,
-  Database,
   Box,
   ExternalLink,
   Pencil,
@@ -18,8 +17,8 @@ import {
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import { cn } from '@/lib/utils'
-import { workspaceColor } from '@/lib/workspaceColor'
 import { timeAgo } from '@/lib/timeAgo'
+import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 
 /* ------------------------------------------------------------------ */
 /*  View type icon + themed color mapping                              */
@@ -114,7 +113,6 @@ export function ExplorerListRow({
   const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE_META
   const TypeIcon = typeMeta.icon
   const VisIcon = VISIBILITY_ICON[view.visibility] ?? Lock
-  const wsColor = workspaceColor(view.workspaceId)
 
   return (
     <div
@@ -177,17 +175,15 @@ export function ExplorerListRow({
           </div>
         </div>
 
-        {/* ── Workspace pill ── */}
-        <span
-          className={cn(
-            'inline-flex w-fit items-center truncate rounded-full border px-2.5 py-0.5 text-[11px] font-medium leading-none',
-            wsColor.bg,
-            wsColor.text,
-            wsColor.border,
-          )}
-        >
-          {view.workspaceName ?? view.workspaceId}
-        </span>
+        {/* ── Workspace + Data source pills ── */}
+        <div className="inline-flex items-center gap-1.5">
+          <ViewScopeBadge
+            workspaceId={view.workspaceId}
+            workspaceName={view.workspaceName}
+            dataSourceId={view.dataSourceId}
+            dataSourceName={view.dataSourceName}
+          />
+        </div>
 
         {/* ── Type label ── */}
         <span className="text-xs text-ink-muted">
@@ -196,18 +192,6 @@ export function ExplorerListRow({
 
         {/* ── Visibility icon ── */}
         <VisIcon className="h-3.5 w-3.5 text-ink-muted" />
-
-        {/* ── Data source ── */}
-        <span className="inline-flex items-center gap-1 text-[10px] text-ink-muted truncate">
-          {view.dataSourceId ? (
-            <>
-              <Database className="h-2.5 w-2.5 shrink-0" />
-              <span className="truncate">{view.dataSourceId}</span>
-            </>
-          ) : (
-            '--'
-          )}
-        </span>
 
         {/* ── Owner ── */}
         <span className="truncate text-xs text-ink-muted">

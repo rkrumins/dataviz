@@ -21,6 +21,7 @@ export interface View {
     workspaceId: string
     workspaceName?: string
     dataSourceId?: string
+    dataSourceName?: string
     viewType: string
     config: Record<string, any>    // Full ViewConfiguration shape
     visibility: 'private' | 'workspace' | 'enterprise'

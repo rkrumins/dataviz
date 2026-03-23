@@ -29,9 +29,9 @@ import {
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import { cn } from '@/lib/utils'
-import { workspaceColor } from '@/lib/workspaceColor'
 import { timeAgo } from '@/lib/timeAgo'
 import { ViewCardOverflowMenu } from '@/components/explorer/ViewCardOverflowMenu'
+import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 
 // ─── View type themes ───────────────────────────────────────────
 const VIEW_TYPE_META: Record<
@@ -188,7 +188,6 @@ export function ExplorerViewCard({
   const TypeIcon = meta.icon
   const vis = VISIBILITY_META[view.visibility] ?? VISIBILITY_META.private
   const VisIcon = vis.icon
-  const wsColor = workspaceColor(view.workspaceId)
   const tags = view.tags ?? []
   const visibleTags = tags.slice(0, 3)
   const overflowCount = tags.length - visibleTags.length
@@ -346,12 +345,12 @@ export function ExplorerViewCard({
 
         {/* ── 2. Badges: workspace + visibility + semantic layer ── */}
         <div className="flex flex-wrap items-center gap-1.5 mb-3 min-h-[22px]">
-          <span className={cn(
-            'inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold leading-none',
-            wsColor.bg, wsColor.text, wsColor.border,
-          )}>
-            {view.workspaceName ?? view.workspaceId}
-          </span>
+          <ViewScopeBadge
+            workspaceId={view.workspaceId}
+            workspaceName={view.workspaceName}
+            dataSourceId={view.dataSourceId}
+            dataSourceName={view.dataSourceName}
+          />
           <span className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium">
             <VisIcon className="h-2.5 w-2.5" />
             {vis.label}

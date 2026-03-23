@@ -17,6 +17,7 @@ export interface RecentViewEntry {
   workspaceName?: string
   /** Datasource the view belongs to — used to switch context on click. */
   dataSourceId?: string
+  dataSourceName?: string
   visitedAt: string  // ISO 8601 timestamp
 }
 

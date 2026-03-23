@@ -338,21 +338,37 @@ export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) 
                 </p>
             </motion.div>
 
-            {/* Workspace Badge */}
+            {/* Workspace & Data Source — shown as a single paired context badge */}
             {activeWorkspace && (
                 <motion.div
                     initial={{ opacity: 0, y: 4 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: 6 * 0.03, duration: 0.15, ease: 'easeOut' }}
-                    className="flex items-center gap-3 px-4 py-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700"
+                    className="flex items-center gap-4 px-4 py-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700"
                 >
-                    <Database className="w-4 h-4 text-slate-400" />
-                    <div className="flex-1">
-                        <p className="text-xs text-slate-400 uppercase tracking-wide font-medium">Workspace</p>
-                        <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
-                            {activeWorkspace.name}
-                        </p>
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <Box className="w-4 h-4 text-slate-400 shrink-0" />
+                        <div className="min-w-0">
+                            <p className="text-xs text-slate-400 uppercase tracking-wide font-medium">Workspace</p>
+                            <p className="text-sm font-medium text-slate-700 dark:text-slate-300 truncate">
+                                {activeWorkspace.name}
+                            </p>
+                        </div>
                     </div>
+                    {activeDataSource && (
+                        <>
+                            <div className="w-px h-8 bg-slate-200 dark:bg-slate-700 shrink-0" />
+                            <div className="flex items-center gap-3 flex-1 min-w-0">
+                                <Database className="w-4 h-4 text-emerald-400 shrink-0" />
+                                <div className="min-w-0">
+                                    <p className="text-xs text-slate-400 uppercase tracking-wide font-medium">Data Source</p>
+                                    <p className="text-sm font-medium text-slate-700 dark:text-slate-300 truncate">
+                                        {activeDataSource.label || activeDataSource.catalogItemId || 'Data Source'}
+                                    </p>
+                                </div>
+                            </div>
+                        </>
+                    )}
                 </motion.div>
             )}
 

@@ -15,8 +15,8 @@ import {
     LayoutGrid,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { workspaceColor } from '@/lib/workspaceColor'
 import { timeAgo } from '@/lib/timeAgo'
+import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { useRecentViews } from '@/hooks/useRecentViews'
 
 // ─── View-type mappings ─────────────────────────────────────────────────────
@@ -89,10 +89,6 @@ export function ExplorerRecentStrip() {
                 {recentViews.map((entry) => {
                     const Icon = VIEW_TYPE_ICONS[entry.viewType] ?? Network
                     const typeColor = VIEW_TYPE_COLORS[entry.viewType] ?? FALLBACK_COLOR
-                    const wsColor = entry.workspaceId
-                        ? workspaceColor(entry.workspaceId)
-                        : null
-
                     return (
                         <Link
                             key={entry.viewId}
@@ -129,19 +125,15 @@ export function ExplorerRecentStrip() {
                                     {entry.viewName}
                                 </h3>
 
-                                {/* Workspace pill + timestamp */}
+                                {/* Workspace + data source pills + timestamp */}
                                 <div className="flex items-center gap-2 flex-wrap">
-                                    {entry.workspaceName && wsColor && (
-                                        <span
-                                            className={cn(
-                                                'inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium border truncate max-w-[140px]',
-                                                wsColor.bg,
-                                                wsColor.text,
-                                                wsColor.border,
-                                            )}
-                                        >
-                                            {entry.workspaceName}
-                                        </span>
+                                    {entry.workspaceId && (
+                                        <ViewScopeBadge
+                                            workspaceId={entry.workspaceId}
+                                            workspaceName={entry.workspaceName}
+                                            dataSourceId={entry.dataSourceId}
+                                            dataSourceName={entry.dataSourceName}
+                                        />
                                     )}
                                     <span className="text-ink-muted text-[11px]">
                                         Visited {timeAgo(entry.visitedAt)}
