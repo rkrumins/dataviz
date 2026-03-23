@@ -791,6 +791,7 @@ class AnnouncementORM(Base):
     message = Column(Text, nullable=False)
     banner_type = Column(Text, nullable=False, default="info")        # info | warning | success
     is_active = Column(Boolean, nullable=False, default=True)
+    is_dismissible = Column(Boolean, nullable=False, default=True)        # legacy; kept for DB compat
     snooze_duration_minutes = Column(Integer, nullable=False, default=0)  # 0 = no snooze allowed
     cta_text = Column(Text, nullable=True)                            # call-to-action button label
     cta_url = Column(Text, nullable=True)                             # call-to-action URL

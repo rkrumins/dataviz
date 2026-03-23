@@ -2,6 +2,7 @@
 Admin Provider endpoints — CRUD for physical database server registrations.
 Providers are pure infrastructure: host/port/credentials, no graph or ontology.
 """
+import asyncio
 from typing import List
 from fastapi import APIRouter, Body, Depends, HTTPException, Path
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -115,9 +116,11 @@ async def test_provider(
             None, prov_row.tls_enabled, creds,
         )
         t0 = time.monotonic()
-        await instance.get_stats()
+        await asyncio.wait_for(instance.get_stats(), timeout=10)
         latency = (time.monotonic() - t0) * 1000
         return ConnectionTestResult(success=True, latencyMs=round(latency, 1))
+    except asyncio.TimeoutError:
+        return ConnectionTestResult(success=False, error="Connection timed out after 10s")
     except Exception as exc:
         return ConnectionTestResult(success=False, error=str(exc))
 
@@ -138,8 +141,10 @@ async def list_assets(
             prov_row.provider_type, prov_row.host, prov_row.port,
             None, prov_row.tls_enabled, creds,
         )
-        graphs = await instance.list_graphs()
+        graphs = await asyncio.wait_for(instance.list_graphs(), timeout=10)
         return AssetListResponse(assets=graphs)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Provider timed out while listing assets")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -162,13 +167,15 @@ async def get_asset_stats(
             prov_row.provider_type, prov_row.host, prov_row.port,
             asset_name, prov_row.tls_enabled, creds,
         )
-        raw = await instance.get_stats()
+        raw = await asyncio.wait_for(instance.get_stats(), timeout=10)
         return PhysicalGraphStatsResponse(
             nodeCount=raw.get("node_count", raw.get("nodeCount", 0)),
             edgeCount=raw.get("edge_count", raw.get("edgeCount", 0)),
             entityTypeCounts=raw.get("entity_type_counts", raw.get("entityTypeCounts", {})),
             edgeTypeCounts=raw.get("edge_type_counts", raw.get("edgeTypeCounts", {})),
         )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Provider timed out while fetching asset stats")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -190,8 +197,10 @@ async def discover_schema(
             prov_row.provider_type, prov_row.host, prov_row.port,
             asset_name, prov_row.tls_enabled, creds,
         )
-        schema = await instance.discover_schema()
+        schema = await asyncio.wait_for(instance.discover_schema(), timeout=15)
         return schema
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Provider timed out while discovering schema")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
