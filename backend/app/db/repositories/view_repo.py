@@ -165,7 +165,7 @@ async def create_view(
     )
     session.add(row)
     await session.flush()
-    return _to_response(row)
+    return await _to_enriched_response(session, row)
 
 
 async def get_view(
@@ -175,7 +175,9 @@ async def get_view(
         select(ViewORM).where(ViewORM.id == view_id)
     )
     row = result.scalar_one_or_none()
-    return _to_response(row) if row else None
+    if not row:
+        return None
+    return await _to_enriched_response(session, row)
 
 
 async def get_view_enriched(
@@ -221,7 +223,7 @@ async def update_view(
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
-    return _to_response(row)
+    return await _to_enriched_response(session, row)
 
 
 async def delete_view(
