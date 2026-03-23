@@ -1,0 +1,60 @@
+# Version control
+.git
+.gitignore
+
+# IDE / Editor
+.idea
+.cursor
+.claude
+.vscode
+*.swp
+*.swo
+
+# Python
+.venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+*.egg-info
+
+# Node
+frontend/node_modules
+frontend/.cache
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local dev artifacts
+nexus_core.db
+custom_graph.json
+*.log
+test_result*.log
+
+# Documentation / planning (not needed in backend images)
+PLAN.md
+SPEC.md
+refactor_plan*.md
+trace_challenge.md
+README.md
+CLAUDE.md
+QUICKSTART.md
+
+# Test files at repo root
+test_*.py
+test_*.log
+
+# Large demo data (seeded at runtime instead)
+demo_graph_with_lineage.json
+awfully_slow_aggregate_payload.json
+analysis_results.md.resolved
+implementation_plan.md.resolved
+
+# Quickstart data (needed by Dockerfile.viz-quickstart)
+!data/quickstart/
+
+# Environment files (secrets — never bake into images)
+.env
+.env.local
+.env.production

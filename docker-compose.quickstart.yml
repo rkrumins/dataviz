@@ -1,0 +1,98 @@
+# ══════════════════════════════════════════════════════════════════════
+# Synodic — Quickstart (pre-populated, zero-config)
+# ══════════════════════════════════════════════════════════════════════
+#
+#   docker compose -f docker-compose.quickstart.yml up --build
+#
+# Comes with sample data already loaded:
+#   - FalkorDB: ~1996 nodes, ~6065 edges (nexus_lineage graph)
+#   - Management DB: pre-configured workspace, provider, ontology, admin user
+#
+# Default credentials:
+#   Email:    admin@synodic.local
+#   Password: admin123
+#
+# Access:
+#   Frontend:  http://localhost:3080
+#   Viz API:   http://localhost:8000/docs
+#   Graph API: http://localhost:8001/docs
+#   FalkorDB:  http://localhost:3000 (browser UI)
+# ══════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── FalkorDB with pre-loaded graph data ─────────────────────────────
+  falkordb:
+    build:
+      context: ./data/quickstart
+      dockerfile: Dockerfile.falkordb
+    ports:
+      - "6379:6379"
+      - "3000:3000"
+    environment:
+      FALKORDB_ARGS: THREAD_COUNT 4
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Visualization Service (SQLite, no PostgreSQL needed) ────────────
+  viz-service:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.viz-quickstart
+    ports:
+      - "8000:8000"
+    environment:
+      # Points to the baked-in SQLite DB (no PostgreSQL dependency)
+      MANAGEMENT_DB_URL: "sqlite+aiosqlite:////app/data/nexus_core.db"
+
+      # Graph provider
+      GRAPH_PROVIDER: falkordb
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      FALKORDB_GRAPH_NAME: nexus_lineage
+
+      # Auth
+      JWT_SECRET_KEY: quickstart-demo-key
+      JWT_ALGORITHM: HS256
+      JWT_EXPIRY_MINUTES: "60"
+      ADMIN_EMAIL: admin@synodic.local
+      ADMIN_PASSWORD: admin123
+
+      # CORS — allow the frontend container + local dev
+      CORS_ALLOWED_ORIGINS: http://localhost:3080,http://localhost:5173,http://localhost:3000
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Graph Service ───────────────────────────────────────────────────
+  graph-service:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.graph
+    ports:
+      - "8001:8001"
+    environment:
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Frontend (Nginx + React SPA) ────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "3080:80"
+    depends_on:
+      viz-service:
+        condition: service_healthy
+      graph-service:
+        condition: service_healthy
+    restart: unless-stopped
