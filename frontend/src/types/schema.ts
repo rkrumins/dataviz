@@ -166,6 +166,8 @@ export interface ViewConfiguration {
 
   /** Workspace this view belongs to (populated from API, absent for locally-created views). */
   workspaceId?: string;
+  /** Datasource this view is scoped to. NULL/undefined = workspace-level (visible for all datasources). */
+  dataSourceId?: string | null;
   /** Display name of the workspace (enriched from API). */
   workspaceName?: string;
   /** Whether the current user has bookmarked/favourited this view. */
@@ -335,7 +337,7 @@ export interface AssignmentConflict {
   conflictingEntityId: string;
 
   /** Type of conflict */
-  type: 'parent_assigned' | 'child_assigned' | 'circular';
+  type: 'parent_assigned' | 'child_assigned' | 'circular' | 'containment_locked';
 
   /** Human-readable message */
   message: string;

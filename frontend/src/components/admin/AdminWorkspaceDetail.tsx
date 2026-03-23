@@ -248,7 +248,7 @@ export function AdminWorkspaceDetail() {
     const addDsSteps: WizardStep[] = [
         {
             id: 'source',
-            title: 'Select Data Product',
+            title: 'Select Data Source',
             icon: Database,
             validate: () => addDsCatalogId ? true : 'Please select a catalog item.',
             content: (
@@ -257,7 +257,7 @@ export function AdminWorkspaceDetail() {
                         <label className="block text-sm font-medium text-ink mb-1.5">Enterprise Catalog Item *</label>
                         <select value={addDsCatalogId} onChange={e => setAddDsCatalogId(e.target.value)}
                             className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50">
-                            <option value="">Select a data product...</option>
+                            <option value="">Select a data source...</option>
                             {allowedCatalogItems.map(c => <option key={c.id} value={c.id}>{c.name} ({c.sourceIdentifier})</option>)}
                         </select>
                         {allowedCatalogItems.length === 0 && (

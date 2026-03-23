@@ -38,7 +38,7 @@ import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig } from 
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
-import { useContainmentEdgeTypes, useEntityTypes } from '@/store/schema'
+import { useContainmentEdgeTypes, useEntityTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -144,11 +144,7 @@ function AssignedEntityItem({
     const childrenIds = useMemo(() => {
         const validEdges = edges.filter(e => {
             if (e.source !== entityId) return false
-            const type = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
-            if (containmentEdgeTypes && containmentEdgeTypes.length > 0) {
-                return containmentEdgeTypes.some(t => t.toUpperCase() === type)
-            }
-            return ['CONTAINS', 'HAS_CHILD', 'HAS_COLUMN', 'HAS_TABLE', 'HAS_SCHEMA', 'HAS_DATASET'].includes(type)
+            return isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
         })
         return [...new Set(validEdges.map(e => e.target))]
     }, [edges, entityId, containmentEdgeTypes])
@@ -182,7 +178,7 @@ function AssignedEntityItem({
         <div>
             <div
                 className={cn(
-                    'flex items-center gap-1.5 px-2 py-1 rounded-lg transition-colors cursor-default',
+                    'group/entity flex items-center gap-1.5 px-2 py-1 rounded-lg transition-colors cursor-default',
                     'hover:bg-slate-100 dark:hover:bg-slate-800/50'
                 )}
                 style={{ paddingLeft: `${depth * 16 + 8}px` }}
@@ -217,7 +213,7 @@ function AssignedEntityItem({
                         e.stopPropagation()
                         onUnassign(entityId)
                     }}
-                    className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-slate-400 hover:text-red-500 shrink-0 transition-all"
+                    className="opacity-0 group-hover/entity:opacity-100 p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-slate-400 hover:text-red-500 shrink-0 transition-all"
                     title="Remove assignment"
                 >
                     <X className="w-3 h-3" />

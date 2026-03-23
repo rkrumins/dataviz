@@ -184,7 +184,7 @@ class ViewServiceImpl {
     /**
      * Duplicate a view.
      */
-    async duplicateView(id: string, workspaceId: string): Promise<ViewServiceResult<ViewConfiguration>> {
+    async duplicateView(id: string, workspaceId: string, dataSourceId?: string): Promise<ViewServiceResult<ViewConfiguration>> {
         try {
             const getResult = await this.getView(id)
             if (!getResult.success || !getResult.data) {
@@ -201,6 +201,7 @@ class ViewServiceImpl {
                 visibleEntityTypes: sourceView.content.visibleEntityTypes,
                 visibleRelationshipTypes: sourceView.content.visibleRelationshipTypes,
                 workspaceId,
+                dataSourceId,
             })
         } catch (error) {
             return { success: false, error: (error as Error).message }

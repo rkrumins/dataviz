@@ -323,8 +323,9 @@ class MockGraphProvider(GraphDataProvider):
         config_containment = os.getenv('CONTAINMENT_EDGE_TYPES', '').strip()
         if config_containment:
             return {t.strip().upper() for t in config_containment.split(',') if t.strip()}
-        # Default fallback — only used when no ontology config is provided
-        return {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value, EdgeType.PRODUCES.value}
+        # Default fallback — only used when no ontology config is provided.
+        # NOTE: PRODUCES is a lineage edge type, not containment.
+        return {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value}
 
     async def _traverse(
         self, 

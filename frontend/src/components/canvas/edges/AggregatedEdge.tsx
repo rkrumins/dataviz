@@ -72,16 +72,16 @@ export const AggregatedEdge = memo(function AggregatedEdge({
 
   return (
     <>
-      {/* Trace Glow Layer */}
+      {/* Trace Glow Layer — subtle */}
       {isTraced && !isDimmed && (
         <path
           d={edgePath}
           fill="none"
           stroke={traceColor}
-          strokeWidth={12}
-          strokeOpacity={0.25}
+          strokeWidth={5}
+          strokeOpacity={0.12}
           style={{
-            filter: 'blur(4px)',
+            filter: 'blur(2px)',
           }}
         />
       )}
@@ -93,26 +93,26 @@ export const AggregatedEdge = memo(function AggregatedEdge({
         style={{
           ...(style as React.CSSProperties),
           stroke: isDimmed ? '#9ca3af' : isTraced ? traceColor : edgeColor,
-          strokeWidth: isDimmed ? 1 : isTraced ? 3 : selected ? 3 : 2,
-          strokeDasharray: '8 4',
-          opacity: isDimmed ? 0.2 : isHovered ? 1 : 0.7,
-          filter: isTraced && !isDimmed ? `drop-shadow(0 0 6px ${traceColor})` : undefined,
+          strokeWidth: isDimmed ? 0.75 : isTraced ? 2 : selected ? 2 : 1.5,
+          strokeDasharray: '6 4',
+          opacity: isDimmed ? 0.15 : isHovered ? 0.9 : 0.6,
+          filter: isTraced && !isDimmed ? `drop-shadow(0 0 2px ${traceColor}40)` : undefined,
         }}
         interactionWidth={20}
         className="transition-all duration-200"
       />
 
-      {/* Animated Flow Particles */}
-      {!isDimmed && (
+      {/* Animated Flow Particles — only on interaction */}
+      {!isDimmed && (isHovered || selected || isTraced) && (
         <path
           d={edgePath}
           fill="none"
           stroke={isTraced ? traceColor : edgeColor}
-          strokeWidth={isTraced ? 3 : 2}
-          strokeDasharray="1 10"
+          strokeWidth={1}
+          strokeDasharray="1 12"
           className="animate-[flow_2s_linear_infinite]"
           style={{
-            opacity: 0.8,
+            opacity: 0.5,
             strokeLinecap: 'round',
           }}
         />
@@ -143,18 +143,18 @@ export const AggregatedEdge = memo(function AggregatedEdge({
           {/* Badge */}
           <div
             className={cn(
-              "flex items-center gap-1 px-2 py-1 rounded-full",
-              "text-2xs font-medium transition-all duration-200",
+              "flex items-center gap-0.5 px-1.5 py-px rounded-full",
+              "text-[9px] font-medium transition-all duration-200 leading-tight",
               "cursor-pointer",
-              isDimmed && "opacity-20 grayscale",
+              isDimmed && "opacity-15 grayscale",
               isTraced && !isDimmed
-                ? "bg-purple-500 text-white shadow-lg ring-2 ring-purple-300"
+                ? "bg-purple-500/80 text-white ring-1 ring-purple-300/50"
                 : selected || isHovered
-                  ? "bg-amber-500 text-white shadow-lg scale-110"
-                  : "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
+                  ? "bg-amber-500/90 text-white scale-105"
+                  : "bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400 border border-amber-200/50 dark:border-amber-800/30"
             )}
           >
-            <Layers className="w-3 h-3" />
+            <Layers className="w-2.5 h-2.5" />
             <span>{sourceCount}</span>
           </div>
 

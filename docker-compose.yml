@@ -1,22 +1,157 @@
-# FalkorDB for local graph persistence
-# Run: docker compose up -d falkordb
-# Then: GRAPH_PROVIDER=falkordb uvicorn backend.app.main:app --port 8001 --reload
+# ══════════════════════════════════════════════════════════════════════
+# Synodic — Full-Stack Docker Compose
+# ══════════════════════════════════════════════════════════════════════
+#
+# Quick start (full platform):
+#   docker compose up --build
+#
+# Just infrastructure (for local dev with uvicorn):
+#   docker compose up falkordb postgres
+#
+# With demo data seeding:
+#   docker compose --profile seed up --build
+#
+# Tear down (keep data):
+#   docker compose down
+#
+# Tear down + delete all data:
+#   docker compose down -v
+# ══════════════════════════════════════════════════════════════════════
 
 services:
+
+  # ── FalkorDB (Graph Database) — pre-loaded with sample data ───────
   falkordb:
-    image: falkordb/falkordb:latest
+    build:
+      context: ./data/quickstart
+      dockerfile: Dockerfile.falkordb
     ports:
       - "6379:6379"
-      - "3000:3000"
+      - "3000:3000"       # FalkorDB Browser UI
     environment:
-      - FALKORDB_ARGS=THREAD_COUNT 4
+      FALKORDB_ARGS: THREAD_COUNT 4
     volumes:
       - falkordb_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
+
+  # ── PostgreSQL (Management Database) ──────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: synodic
+      POSTGRES_PASSWORD: synodic
+      POSTGRES_DB: synodic
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synodic"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Visualization Service (Port 8000) ─────────────────────────────
+  # Primary backend: auth, workspaces, graph queries, ontology, views.
+  # On first boot it auto-creates DB tables, seeds templates, and
+  # bootstraps an admin user + default provider/workspace from env.
+  viz-service:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.viz
+    ports:
+      - "8000:8000"
+    environment:
+      # Graph provider bootstrap (used if management DB is empty)
+      GRAPH_PROVIDER: falkordb
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      FALKORDB_GRAPH_NAME: nexus_lineage
+
+      # Management database
+      MANAGEMENT_DB_URL: postgresql+asyncpg://synodic:synodic@postgres:5432/synodic
+
+      # Auth — change these in production!
+      JWT_SECRET_KEY: change-me-in-production
+      JWT_ALGORITHM: HS256
+      JWT_EXPIRY_MINUTES: "60"
+      ADMIN_EMAIL: admin@synodic.local
+      ADMIN_PASSWORD: admin123
+
+      # Credential encryption (omit for plaintext in dev)
+      # CREDENTIAL_ENCRYPTION_KEY: ""
+
+      # CORS — allow the frontend container + local dev
+      CORS_ALLOWED_ORIGINS: http://localhost:3080,http://localhost:5173,http://localhost:3000
+    depends_on:
+      falkordb:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Graph Service (Port 8001) ─────────────────────────────────────
+  # Stateless: provider discovery & connectivity testing.
+  # No DB access — takes connection params in request body.
+  graph-service:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.graph
+    ports:
+      - "8001:8001"
+    environment:
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Frontend (Nginx + React SPA) ──────────────────────────────────
+  # Serves the built React app and reverse-proxies /api/* and /graph/*
+  # to the backend services.
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "3080:80"
+    depends_on:
+      - viz-service
+      - graph-service
+    restart: unless-stopped
+
+  # ── Demo Data Seeder (one-shot, opt-in) ───────────────────────────
+  # Only runs when the "seed" profile is active:
+  #   docker compose --profile seed up --build
+  #
+  # Generates enterprise demo scenarios (finance, ecommerce) and loads
+  # them into FalkorDB. Skips if data already exists (use SEED_FORCE=true
+  # to re-seed).
+  seed:
+    profiles: ["seed"]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.viz
+    entrypoint: ["python", "-m", "backend.scripts.docker_seed"]
+    environment:
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      FALKORDB_GRAPH_NAME: nexus_lineage
+      SEED_SCENARIOS: finance,ecommerce       # finance | hr | marketing | ecommerce | all
+      SEED_SCALE: "1"                         # 1 = ~1k nodes per scenario
+      SEED_BREADTH: "1"                       # parallel system chains
+      SEED_DEPTH: "1"                         # transformation layers
+      # SEED_FORCE: "true"                    # uncomment to re-seed on every run
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    restart: "no"
 
 volumes:
   falkordb_data:
+  postgres_data:

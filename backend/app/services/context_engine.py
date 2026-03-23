@@ -6,7 +6,7 @@ from ..models.graph import (
     GraphNode, GraphEdge, LineageResult, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
-    CreateNodeRequest, CreateNodeResult
+    CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult,
 )
 import os
 
@@ -55,6 +55,8 @@ class ContextEngine:
         # Single ontology cache slot (resolved form, includes flat projection fields).
         self._resolved_ontology_cache: Optional[Any] = None
         self._resolved_ontology_cache_ts: float = 0.0
+        # Lock to prevent concurrent ontology resolution (race condition on first request)
+        self._ontology_resolve_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ #
     # Workspace-aware factory (new)                                        #
@@ -127,6 +129,9 @@ class ContextEngine:
         """
         Single ontology resolution entry point with TTL caching.
         Returns ResolvedOntology for all callers.
+
+        Guarded by an async lock to prevent concurrent resolution when
+        multiple requests arrive before the cache is populated.
         """
         now = time.monotonic()
         if (
@@ -135,47 +140,68 @@ class ContextEngine:
         ):
             return self._resolved_ontology_cache
 
-        introspected = await self.provider.get_ontology_metadata()
-        introspected_entity_ids = list(introspected.entity_type_hierarchy.keys()) if introspected else None
-        introspected_rel_ids = list(introspected.edge_type_metadata.keys()) if introspected else None
+        async with self._ontology_resolve_lock:
+            # Double-check after acquiring the lock (another coroutine may have resolved while we waited)
+            now = time.monotonic()
+            if (
+                self._resolved_ontology_cache is not None
+                and (now - self._resolved_ontology_cache_ts) < self._ONTOLOGY_CACHE_TTL
+            ):
+                return self._resolved_ontology_cache
 
-        if self._ontology_service and self._workspace_id:
+            # Provider introspection — graceful degradation if provider is unreachable
+            introspected = None
             try:
-                resolved = await self._ontology_service.resolve(
-                    workspace_id=self._workspace_id,
-                    data_source_id=self._data_source_id,
-                    introspected_entity_ids=introspected_entity_ids,
-                    introspected_rel_ids=introspected_rel_ids,
-                )
-                # Push resolved containment types to the provider so subsequent
-                # queries (childCount, hierarchy) use the correct edge set.
-                if hasattr(self.provider, 'set_containment_edge_types') and resolved.containment_edge_types:
-                    self.provider.set_containment_edge_types(resolved.containment_edge_types)
-                # Ensure indices exist for all ontology-defined entity types.
-                if hasattr(self.provider, 'ensure_indices') and resolved.entity_type_definitions:
-                    try:
-                        await self.provider.ensure_indices(list(resolved.entity_type_definitions.keys()))
-                    except Exception:
-                        pass  # best-effort, don't block resolution
-                self._resolved_ontology_cache = resolved
-                self._resolved_ontology_cache_ts = time.monotonic()
-                return resolved
+                introspected = await self.provider.get_ontology_metadata()
             except Exception as exc:
-                logger.warning("OntologyService.resolve() failed, falling back to introspection: %s", exc)
+                logger.warning(
+                    "Provider introspection failed (get_ontology_metadata): %s — "
+                    "proceeding with empty introspection data. Containment/lineage "
+                    "classification will rely solely on system defaults or DB overrides.",
+                    exc,
+                )
 
-        # Legacy/no-service fallback: still cache as a ResolvedOntology-shaped object.
-        from ..ontology.models import ResolvedOntology
+            introspected_entity_ids = list(introspected.entity_type_hierarchy.keys()) if introspected else None
+            introspected_rel_ids = list(introspected.edge_type_metadata.keys()) if introspected else None
 
-        fallback = ResolvedOntology(
-            containment_edge_types=introspected.containment_edge_types if introspected else [],
-            lineage_edge_types=introspected.lineage_edge_types if introspected else [],
-            edge_type_metadata=introspected.edge_type_metadata if introspected else {},
-            entity_type_hierarchy=introspected.entity_type_hierarchy if introspected else {},
-            root_entity_types=introspected.root_entity_types if introspected else [],
-        )
-        self._resolved_ontology_cache = fallback
-        self._resolved_ontology_cache_ts = time.monotonic()
-        return fallback
+            if self._ontology_service and self._workspace_id:
+                try:
+                    resolved = await self._ontology_service.resolve(
+                        workspace_id=self._workspace_id,
+                        data_source_id=self._data_source_id,
+                        introspected_entity_ids=introspected_entity_ids,
+                        introspected_rel_ids=introspected_rel_ids,
+                    )
+                    # Push resolved containment types to the provider so subsequent
+                    # queries (childCount, hierarchy) use the correct edge set.
+                    # Always push — even an empty list is meaningful (= no containment).
+                    if hasattr(self.provider, 'set_containment_edge_types'):
+                        self.provider.set_containment_edge_types(resolved.containment_edge_types)
+                    # Ensure indices exist for all ontology-defined entity types.
+                    if hasattr(self.provider, 'ensure_indices') and resolved.entity_type_definitions:
+                        try:
+                            await self.provider.ensure_indices(list(resolved.entity_type_definitions.keys()))
+                        except Exception:
+                            pass  # best-effort, don't block resolution
+                    self._resolved_ontology_cache = resolved
+                    self._resolved_ontology_cache_ts = time.monotonic()
+                    return resolved
+                except Exception as exc:
+                    logger.warning("OntologyService.resolve() failed, falling back to introspection: %s", exc)
+
+            # Legacy/no-service fallback: still cache as a ResolvedOntology-shaped object.
+            from ..ontology.models import ResolvedOntology
+
+            fallback = ResolvedOntology(
+                containment_edge_types=introspected.containment_edge_types if introspected else [],
+                lineage_edge_types=introspected.lineage_edge_types if introspected else [],
+                edge_type_metadata=introspected.edge_type_metadata if introspected else {},
+                entity_type_hierarchy=introspected.entity_type_hierarchy if introspected else {},
+                root_entity_types=introspected.root_entity_types if introspected else [],
+            )
+            self._resolved_ontology_cache = fallback
+            self._resolved_ontology_cache_ts = time.monotonic()
+            return fallback
 
     async def _get_resolved_ontology(self):
         """Return the cached ResolvedOntology, refreshing via _resolve_ontology() if needed."""
@@ -193,8 +219,53 @@ class ContextEngine:
     async def get_schema_stats(self) -> GraphSchemaStats:
         return await self.provider.get_schema_stats()
     
-    async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, search_query: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[GraphNode]:
-        return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset)
+    async def _ensure_containment_edge_types(self, edge_types: Optional[List[str]]) -> List[str]:
+        """If caller did not supply explicit edge_types, resolve from ontology.
+
+        Returns a concrete list (possibly empty). An empty list means the ontology
+        explicitly defines no containment types — callers should treat this as
+        'no containment hierarchy' rather than falling back to hardcoded defaults.
+        """
+        if edge_types is not None:
+            return edge_types
+        resolved = await self._resolve_ontology()
+        if resolved and resolved.containment_edge_types:
+            return list(resolved.containment_edge_types)
+        if resolved is not None:
+            # Ontology resolved successfully but has no containment types — this is
+            # a valid (empty hierarchy) state, not an error. Return empty list so
+            # downstream queries correctly return no children rather than using
+            # provider hardcoded fallbacks.
+            logger.warning(
+                "Ontology resolved with empty containment_edge_types. "
+                "Hierarchy queries will return no results."
+            )
+            return []
+        return []  # No ontology at all — graceful empty
+
+    async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, search_query: Optional[str] = None, limit: int = 100, offset: int = 0, sort_property: Optional[str] = "displayName") -> List[GraphNode]:
+        edge_types = await self._ensure_containment_edge_types(edge_types)
+        return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property)
+
+    async def get_children_with_edges(
+        self, urn: str, edge_types: Optional[List[str]] = None,
+        lineage_edge_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
+        limit: int = 100, offset: int = 0,
+        include_lineage_edges: bool = True,
+        sort_property: Optional[str] = "displayName",
+    ) -> ChildrenWithEdgesResult:
+        edge_types = await self._ensure_containment_edge_types(edge_types)
+        if not lineage_edge_types:
+            resolved = await self._resolve_ontology()
+            if resolved and resolved.lineage_edge_types:
+                lineage_edge_types = list(resolved.lineage_edge_types)
+        return await self.provider.get_children_with_edges(
+            urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
+            search_query=search_query, limit=limit, offset=offset,
+            include_lineage_edges=include_lineage_edges,
+            sort_property=sort_property,
+        )
 
     async def get_edges(self, query: EdgeQuery = None) -> List[GraphEdge]:
         if query is None: query = EdgeQuery()
@@ -261,8 +332,8 @@ class ContextEngine:
         """
         # Load ontology metadata once — merges DB overrides + introspection
         ontology = await self.get_ontology_metadata()
-        containment_types = {t.upper() for t in ontology.containment_edge_types}
-        all_lineage_types = {t.upper() for t in ontology.lineage_edge_types}
+        containment_types = {t.upper() for t in ontology.containment_edge_types} if ontology.containment_edge_types else set()
+        all_lineage_types = {t.upper() for t in ontology.lineage_edge_types} if ontology.lineage_edge_types else set()
         
         # Apply optional lineage type filter (user can select subset via TraceOptions)
         if lineage_edge_types:

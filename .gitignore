@@ -136,6 +136,13 @@ celerybeat.pid
 *.aof
 *.pid
 
+# Large data files
+backend/data/demo_graph_with_lineage.json
+
+# Quickstart sample data (committed to repo)
+!data/quickstart/falkordb/dump.rdb
+!data/quickstart/nexus_core.db
+
 # RabbitMQ
 mnesia/
 rabbitmq/

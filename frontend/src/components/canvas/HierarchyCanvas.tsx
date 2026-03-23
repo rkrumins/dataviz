@@ -13,7 +13,7 @@ import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useSchemaStore, useContainmentEdgeTypes, useLineageEdgeTypes, isContainmentEdgeType, useRelationshipTypes } from '@/store/schema'
+import { useSchemaStore, useContainmentEdgeTypes, useLineageEdgeTypes, isContainmentEdgeType, normalizeEdgeType, useRelationshipTypes } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 
@@ -63,7 +63,13 @@ function countDescendants(node: HierarchyNode): { total: number; byType: Record<
 }
 
 export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
-  const { nodes, edges, selectNode, selectedNodeIds, addNodes, addEdges } = useCanvasStore()
+  // Use individual selectors to avoid re-rendering on unrelated store changes
+  const nodes = useCanvasStore(s => s.nodes)
+  const edges = useCanvasStore(s => s.edges)
+  const selectNode = useCanvasStore(s => s.selectNode)
+  const selectedNodeIds = useCanvasStore(s => s.selectedNodeIds)
+  const addNodes = useCanvasStore(s => s.addNodes)
+  const addEdges = useCanvasStore(s => s.addEdges)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const schema = useSchemaStore((s) => s.schema)
   const containmentEdgeTypes = useContainmentEdgeTypes()
@@ -143,8 +149,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         const allCurrentEdges = [...edges, ...newCanvasEdges]
         const traceParentMap = new Map<string, string>()
         allCurrentEdges.forEach(e => {
-          const type = String((e.data as any)?.edgeType ?? (e.data as any)?.relationship ?? '').toUpperCase()
-          if (containmentEdgeTypes.some(ct => ct.toUpperCase() === type)) {
+          if (isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) {
             traceParentMap.set(e.target ?? (e as any).targetUrn, e.source ?? (e as any).sourceUrn)
           }
         })
@@ -175,8 +180,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     // Build parent map from edges
     const parentMap = new Map<string, string>()
     edges.forEach(e => {
-      const edgeType = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
-      if (containmentEdgeTypes.some(type => type.toUpperCase() === edgeType)) {
+      if (isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) {
         parentMap.set(e.target, e.source)
       }
     })
@@ -225,41 +229,31 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const hierarchyTree = useMemo(() => {
     if (!nodes.length) return []
 
-    // DEBUG: Inspect containment types and edges
-    console.log('[Hierarchy] Rebuilding tree with:', {
-      nodeCount: nodes.length,
-      edgeCount: edges.length,
-      containmentEdgeTypes
-    })
+    // Find containment edges using ontology-driven types
+    const containmentEdges = edges.filter((e) =>
+      isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
+    )
 
-    // Find containment edges using backend-provided types
-    // Use containmentEdgeTypes directly to avoid function dependency issues
-    const containmentEdges = edges.filter((e) => {
-      const edgeType = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
-      const isMatch = containmentEdgeTypes.some(type => type.toUpperCase() === edgeType)
-      return isMatch
-    })
-
-    console.log('[Hierarchy] Identified containment edges:', containmentEdges.length, containmentEdges.slice(0, 3))
-
-    // Build tree from containment edges
+    // Build tree from containment edges (Set-based dedup prevents duplicate children)
     const nodeMap = new Map(nodes.map((n) => [n.id, n]))
-    const childMap = new Map<string, string[]>()
+    const childSets = new Map<string, Set<string>>()
     const hasParent = new Set<string>()
 
     containmentEdges.forEach((edge) => {
-      const children = childMap.get(edge.source) ?? []
-      children.push(edge.target)
-      childMap.set(edge.source, children)
+      // Guard: skip edges with empty source/target
+      if (!edge.source || !edge.target) return
+      if (!childSets.has(edge.source)) childSets.set(edge.source, new Set())
+      childSets.get(edge.source)!.add(edge.target)
       hasParent.add(edge.target)
     })
 
-    // Find root nodes (no parent in containment hierarchy)
-    const rootNodes = nodes.filter((n) =>
-      !hasParent.has(n.id) && n.data.type !== 'ghost'
-    )
+    const childMap = new Map<string, string[]>()
+    childSets.forEach((children, parent) => childMap.set(parent, Array.from(children)))
 
-    console.log('[Hierarchy] Root nodes found:', rootNodes.length, rootNodes.map(n => n.id))
+    // Find root nodes (no parent in containment hierarchy, must have a valid id)
+    const rootNodes = nodes.filter((n) =>
+      n.id && !hasParent.has(n.id) && n.data.type !== 'ghost'
+    )
 
     const buildTree = (nodeId: string, depth: number): HierarchyNode | null => {
       const node = nodeMap.get(nodeId)
@@ -298,9 +292,11 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   }, [hierarchyTree])
 
   // Search functionality
+  // Guard: only update searchResults when the value actually changes to prevent
+  // infinite re-render loops (setSearchResults([]) creates a new reference each time).
   useEffect(() => {
     if (!searchQuery.trim()) {
-      setSearchResults([])
+      setSearchResults(prev => prev.length === 0 ? prev : [])
       return
     }
 
@@ -802,9 +798,9 @@ function HierarchyContainer({
           {/* Tags */}
           {node.data.classifications && Array.isArray(node.data.classifications) && (
             <div className="flex items-center gap-1">
-              {(node.data.classifications as string[]).slice(0, 2).map((tag) => (
+              {(node.data.classifications as string[]).filter(Boolean).slice(0, 2).map((tag, idx) => (
                 <span
-                  key={tag}
+                  key={`${tag}-${idx}`}
                   className="px-1.5 py-0.5 rounded text-2xs font-medium"
                   style={{ backgroundColor: `${visual?.color ?? '#6b7280'}15`, color: visual?.color ?? '#6b7280' }}
                 >

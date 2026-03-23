@@ -502,8 +502,32 @@ export interface GraphDataProvider {
             searchQuery?: string
             offset?: number
             limit?: number
+            sortProperty?: string | null // Node property to sort by (default: displayName, null = no sort)
         }
     ): Promise<GraphNode[]>
+
+    /**
+     * Get children with containment and lineage edges in a single round-trip.
+     * Eliminates the need for separate getChildren + getEdgesBetween calls.
+     */
+    getChildrenWithEdges(
+        parentUrn: URN,
+        options?: {
+            edgeTypes?: string[]
+            lineageEdgeTypes?: string[]
+            searchQuery?: string
+            offset?: number
+            limit?: number
+            includeLineageEdges?: boolean
+            sortProperty?: string | null // Node property to sort by (default: displayName, null = no sort)
+        }
+    ): Promise<{
+        children: GraphNode[]
+        containmentEdges: GraphEdge[]
+        lineageEdges: GraphEdge[]
+        totalChildren: number
+        hasMore: boolean
+    }>
 
     /**
      * Get parent of a node (inverse of CONTAINS)

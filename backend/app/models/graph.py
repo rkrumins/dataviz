@@ -40,13 +40,14 @@ from backend.common.models.graph import (
     BatchCommandRequest,
     BatchCommandResult,
     BatchResponse,
+    ChildrenWithEdgesResult,
 )
 
 __all__ = [
     "EntityType", "EdgeType", "Granularity", "FilterOperator",
     "GraphNode", "GraphEdge",
     "PropertyFilter", "TagFilter", "TextFilter", "NodeQuery", "EdgeQuery",
-    "LineageResult", "ContainmentResult",
+    "LineageResult", "ContainmentResult", "ChildrenWithEdgesResult",
     "EntityTypeSummary", "EdgeTypeSummary", "TagSummary", "GraphSchemaStats",
     "EdgeTypeMetadata", "EntityTypeHierarchy", "OntologyMetadata",
     "FieldSchema", "EntityVisualSchema", "EntityHierarchySchema",

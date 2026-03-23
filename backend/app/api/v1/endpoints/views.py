@@ -51,6 +51,8 @@ async def list_views(
     limit: int = Query(50, le=200),
     offset: int = Query(0),
     favourited_only: bool = Query(False, alias="favouritedOnly"),
+    include_deleted: bool = Query(False, alias="includeDeleted"),
+    deleted_only: bool = Query(False, alias="deletedOnly"),
     user=Depends(get_optional_user),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -67,6 +69,8 @@ async def list_views(
         offset=offset,
         user_id=_user_id(user),
         favourited_only=favourited_only,
+        include_deleted=include_deleted,
+        deleted_only=deleted_only,
     )
 
 
@@ -110,12 +114,30 @@ async def update_view(
 @router.delete("/{view_id}", status_code=204)
 async def delete_view(
     view_id: str = Path(...),
+    permanent: bool = Query(False),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Delete a view."""
-    deleted = await view_repo.delete_view(session, view_id)
+    """Delete a view. Soft-deletes by default; pass ?permanent=true to remove from DB."""
+    if permanent:
+        deleted = await view_repo.permanently_delete_view(session, view_id)
+    else:
+        deleted = await view_repo.delete_view(session, view_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
+
+@router.post("/{view_id}/restore", response_model=ViewResponse)
+async def restore_view(
+    view_id: str = Path(...),
+    user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Restore a soft-deleted view."""
+    restored = await view_repo.restore_view(session, view_id)
+    if not restored:
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found or not deleted")
+    view = await view_repo.get_view_enriched(session, view_id, user_id=_user_id(user))
+    return view
 
 
 @router.put("/{view_id}/visibility", response_model=ViewResponse)

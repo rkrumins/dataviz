@@ -2,6 +2,9 @@
 Admin Features endpoints — GET/PATCH for global feature flags and UI copy; CRUD for definitions.
 Schema and categories from DB (feature_definitions, feature_categories); values in feature_flags;
 experimental notice from feature_registry_meta.
+
+Public endpoint:
+    GET /api/v1/features/values — read-only flag values (no auth, no schema/categories overhead)
 """
 import json
 import time
@@ -20,6 +23,7 @@ from backend.app.config.features import (
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import feature_flags_repo, feature_registry_repo
 from backend.app.db.repositories.feature_flags_repo import ConcurrencyConflictError
+from backend.app.services.feature_flags import feature_flags as _flag_service
 
 router = APIRouter()
 
@@ -207,6 +211,9 @@ async def patch_features(
             },
         )
 
+    # Bust cached flag values so subsequent reads see the new state immediately
+    _flag_service.invalidate()
+
     meta = None
     if experimental_notice_body is not None and isinstance(experimental_notice_body, dict):
         if any(k in experimental_notice_body for k in ("enabled", "title", "message")):
@@ -378,4 +385,5 @@ async def deprecate_definition(
     if not ok:
         raise HTTPException(status_code=404, detail={"detail": f"Feature not found: {key}", "code": "NOT_FOUND"})
     await feature_flags_repo.remove_keys_from_config(session, {key})
+    _flag_service.invalidate()
     return await _full_response(session)

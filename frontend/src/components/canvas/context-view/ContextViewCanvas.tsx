@@ -26,7 +26,7 @@ import {
   useRelationshipTypes,
   useEntityTypes,
 } from '@/store/schema'
-import { useCanvasStore } from '@/store/canvas'
+import { useCanvasStore, useCanvasVersion } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useGraphProvider } from '@/providers'
@@ -59,7 +59,7 @@ import type { ViewLayerConfig, LogicalNodeConfig } from '@/types/schema'
 import { defaultReferenceModelLayers } from './constants'
 import { useLayerAssignment } from '@/hooks/useLayerAssignment'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
-import { useHighlightState } from '@/hooks/useHighlightState'
+import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
 import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay } from './LineageFlowOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
@@ -158,8 +158,7 @@ export function ContextViewCanvas({
         const allCurrentEdges = [...edges, ...newCanvasEdges]
         const traceParentMap = new Map<string, string>()
         allCurrentEdges.forEach(e => {
-          const type = String((e.data as any)?.edgeType ?? (e.data as any)?.relationship ?? '').toUpperCase()
-          if (containmentEdgeTypes.some(ct => ct.toUpperCase() === type)) {
+          if (isContainmentEdge(normalizeEdgeType(e))) {
             traceParentMap.set(e.target ?? (e as any).targetUrn, e.source ?? (e as any).sourceUrn)
           }
         })
@@ -206,6 +205,7 @@ export function ContextViewCanvas({
   const {
     aggregatedEdges,
     fetchAggregated,
+    clearCache: clearAggregationCache,
     granularity: lineageGranularity,
     setGranularity: setLineageGranularity,
   } = useAggregatedLineage({ granularity: null })
@@ -278,8 +278,44 @@ export function ContextViewCanvas({
   const [creationParentId, setCreationParentId] = useState<string | null>(null)
   const [creationLayerId, setCreationLayerId] = useState<string | null>(null)
 
+  // Assignment warning state (shown when user tries to assign child to different layer)
+  const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
+  const assignmentWarningTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const handleAssignToLayer = useCallback((entityId: string, layerId: string) => {
+    const result = assignEntityToLayer(entityId, layerId)
+    if (!result.success && result.conflict?.type === 'containment_locked') {
+      setAssignmentWarning(result.conflict.message)
+      // Auto-dismiss after 5 seconds
+      if (assignmentWarningTimer.current) clearTimeout(assignmentWarningTimer.current)
+      assignmentWarningTimer.current = setTimeout(() => setAssignmentWarning(null), 5000)
+    }
+  }, [assignEntityToLayer])
+
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
+
+  // Per-view expanded state: save/restore on view switch to prevent stale data
+  const expandedByViewRef = useRef<Map<string, Set<string>>>(new Map())
+  const prevViewIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    const currentViewId = activeView?.id ?? null
+    // Save current expanded state for the previous view
+    if (prevViewIdRef.current && prevViewIdRef.current !== currentViewId) {
+      expandedByViewRef.current.set(prevViewIdRef.current, new Set(expandedNodes))
+    }
+    // Restore or reset for the new view
+    if (currentViewId !== prevViewIdRef.current) {
+      const restored = expandedByViewRef.current.get(currentViewId ?? '') ?? new Set<string>()
+      setExpandedNodes(restored)
+      // Reset aggregation cache so stale data doesn't bleed into the new view
+      prevAggregationKeyRef.current = ''
+      clearAggregationCache()
+    }
+    prevViewIdRef.current = currentViewId
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView?.id])
 
   // Edit Mode State (unified with LineageCanvas)
   const [isPaletteOpen, setPaletteOpen] = useState(false)
@@ -418,45 +454,63 @@ export function ContextViewCanvas({
     [activeLayers]
   )
 
-  // Stable fingerprint: only changes when the actual node/edge set changes.
-  // Phase 5.2: samples first, middle, and last IDs — detects insertions anywhere
-  // in the array (not just at the ends) while remaining O(1).
-  const nodeEdgeFingerprint = useMemo(() => {
-    const n = nodes.length
-    const e = edges.length
-    if (n === 0 && e === 0) return 'empty'
-    const nMid = Math.floor(n / 2)
-    const eMid = Math.floor(e / 2)
-    return [
-      n,
-      nodes[0]?.id ?? '',
-      nodes[nMid]?.id ?? '',
-      nodes[n - 1]?.id ?? '',
-      e,
-      edges[0]?.id ?? '',
-      edges[eMid]?.id ?? '',
-      edges[e - 1]?.id ?? '',
-    ].join(':')
-  }, [nodes, edges])
+  // Monotonic version counter — replaces brittle fingerprint sampling.
+  // Incremented automatically by canvas store middleware on every node/edge mutation.
+  const canvasVersion = useCanvasVersion()
+  const nodeEdgeFingerprint = `${activeView?.id ?? ''}:${canvasVersion}`
 
-  // Build generic hierarchy tree from nodes and containment edges
-  // We keep this to visualize structure, but layer assignment is calculated independently
+  // Build generic hierarchy tree from nodes and containment edges.
+  // Incremental: only processes new edges when addGraph appends (the common path).
+  // Full rebuild when edges shrink (removeEdges/setGraph) or containmentEdgeTypes change.
+  const prevEdgeLenRef = useRef(0)
+  const prevContainmentTypesRef = useRef(containmentEdgeTypes)
+  const childSetsRef = useRef(new Map<string, Set<string>>())
+  const parentMapRef = useRef(new Map<string, string>())
+  const childMapRef = useRef(new Map<string, string[]>())
+
   const { nodeMap, childMap, parentMap } = useMemo(() => {
     const nMap = new Map(nodes.map((n) => [n.id, n]))
+
+    const typesChanged = prevContainmentTypesRef.current !== containmentEdgeTypes
+    const edgesShrank = edges.length < prevEdgeLenRef.current
+    const needsFullRebuild = typesChanged || edgesShrank
+
+    let cSets: Map<string, Set<string>>
+    let pMap: Map<string, string>
+
+    if (needsFullRebuild) {
+      // Full rebuild
+      cSets = new Map<string, Set<string>>()
+      pMap = new Map<string, string>()
+      edges.filter((e) => isContainmentEdge(normalizeEdgeType(e))).forEach((edge) => {
+        if (!cSets.has(edge.source)) cSets.set(edge.source, new Set())
+        cSets.get(edge.source)!.add(edge.target)
+        pMap.set(edge.target, edge.source)
+      })
+    } else {
+      // Incremental: reuse previous maps, only process new edges
+      cSets = childSetsRef.current
+      pMap = parentMapRef.current
+      const startIdx = prevEdgeLenRef.current
+      for (let i = startIdx; i < edges.length; i++) {
+        const edge = edges[i]
+        if (!isContainmentEdge(normalizeEdgeType(edge))) continue
+        if (!cSets.has(edge.source)) cSets.set(edge.source, new Set())
+        cSets.get(edge.source)!.add(edge.target)
+        pMap.set(edge.target, edge.source)
+      }
+    }
+
+    // Convert Sets to arrays for downstream consumers
     const cMap = new Map<string, string[]>()
-    const pMap = new Map<string, string>()
+    cSets.forEach((children, parent) => cMap.set(parent, Array.from(children)))
 
-    // Containment logic - use containmentEdgeTypes directly
-    const containmentEdges = edges.filter((e) => {
-      const edgeType = normalizeEdgeType(e)
-      return containmentEdgeTypes.some(type => type.toUpperCase() === edgeType)
-    })
-
-    containmentEdges.forEach((edge) => {
-      if (!cMap.has(edge.source)) cMap.set(edge.source, [])
-      cMap.get(edge.source)!.push(edge.target)
-      pMap.set(edge.target, edge.source)
-    })
+    // Update refs for next incremental pass
+    prevEdgeLenRef.current = edges.length
+    prevContainmentTypesRef.current = containmentEdgeTypes
+    childSetsRef.current = cSets
+    parentMapRef.current = pMap
+    childMapRef.current = cMap
 
     return { nodeMap: nMap, childMap: cMap, parentMap: pMap }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -717,19 +771,37 @@ export function ContextViewCanvas({
     return set
   }, [trace.isTracing, trace.focusId, trace.visibleTraceNodes, parentMap])
 
+  // Hovered node — needed by both edge projection (delegation) and hover highlight
+  const hoveredNodeId = useHoveredNodeId()
+
   // Edge projection: lineageEdges, visibleLineageEdges
   const { visibleLineageEdges } = useEdgeProjection({
     edges, aggregatedEdges, nodesByLayer, expandedNodes,
     displayFlat, displayMap, urnToIdMap,
     showLineageFlow, isTracing: trace.isTracing,
     traceContextSet, isContainmentEdge,
+    hoveredNodeId,
   })
 
   // Highlight state: connected nodes/edges for selected node
-  const { highlightState, isHighlightActive } = useHighlightState({
+  const { highlightState, isHighlightActive: isClickHighlightActive } = useHighlightState({
     selectedNodeId, visibleLineageEdges,
     isTracing: trace.isTracing, displayMap, childMap,
   })
+
+  // Hover highlight: same visual effect on hover (lighter), defers to click-highlight
+  const { hoverHighlight, isHoverActive } = useHoverHighlight({
+    hoveredNodeId,
+    visibleLineageEdges,
+    isTracing: trace.isTracing,
+    displayMap, childMap,
+    isClickHighlightActive,
+  })
+
+  // Merge: click takes priority, hover used when no click selection
+  const isHighlightActive = isClickHighlightActive || isHoverActive
+  const mergedHighlightNodes = isClickHighlightActive ? highlightState.nodes : hoverHighlight.nodes
+  const mergedHighlightEdges = isClickHighlightActive ? highlightState.edges : hoverHighlight.edges
 
   const clearSelection = useCanvasStore((s) => s.clearSelection)
 
@@ -790,6 +862,26 @@ export function ContextViewCanvas({
       />
 
       <div className="flex-1 w-full h-full relative overflow-hidden bg-canvas flex flex-col">
+        {/* Warning: missing ontology configuration */}
+        {schema && containmentEdgeTypes.length === 0 && edges.length > 0 && (
+          <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 text-xs flex items-center gap-2 z-20">
+            <span className="font-medium">No containment types configured.</span>
+            <span className="text-amber-600 dark:text-amber-500">Hierarchy is disabled — all nodes appear flat. Configure your ontology to enable parent-child nesting.</span>
+          </div>
+        )}
+        {/* Warning: containment inheritance violation attempt */}
+        {assignmentWarning && (
+          <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-xs flex items-center gap-2 z-20">
+            <span className="font-medium">Assignment blocked.</span>
+            <span className="text-red-600 dark:text-red-500">{assignmentWarning}</span>
+            <button
+              className="ml-auto text-red-400 hover:text-red-600 dark:hover:text-red-300"
+              onClick={() => setAssignmentWarning(null)}
+            >
+              &times;
+            </button>
+          </div>
+        )}
         {/* Edge Panel */}
         <AnimatePresence>
           {isEdgePanelOpen && (
@@ -850,13 +942,13 @@ export function ContextViewCanvas({
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={trace.isTracing}
               traceResult={trace.result}
-              highlightedEdges={highlightState.edges}
+              highlightedEdges={mergedHighlightEdges}
               isHighlightActive={isHighlightActive}
               resolveEdgeColor={resolveEdgeColor}
             />
           )}
 
-          <div className="flex h-full min-h-0 relative z-10 divide-x divide-glass-border">
+          <div className="flex h-full min-h-0 relative z-10 gap-12">
             {sortedLayers.map((layer) => (
               <LayerColumn
                 key={layer.id}
@@ -879,8 +971,9 @@ export function ContextViewCanvas({
                 traceFocusId={trace.focusId}
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
-                highlightedNodes={highlightState.nodes}
+                highlightedNodes={mergedHighlightNodes}
                 isHighlightActive={isHighlightActive}
+                isHoverHighlight={isHoverActive && !isClickHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
                 onLoadMore={loadChildren}
                 onSearchChildren={searchChildren}
@@ -888,7 +981,7 @@ export function ContextViewCanvas({
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
                 onScroll={handleLayerScroll}
-                onAssignToLayer={(entityId) => assignEntityToLayer(entityId, layer.id)}
+                onAssignToLayer={(entityId) => handleAssignToLayer(entityId, layer.id)}
               />
             ))}
           </div>

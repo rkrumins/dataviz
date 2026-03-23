@@ -36,14 +36,24 @@ async def lifespan(_app: FastAPI):
     async with get_async_session() as session:
         await seed_templates(session)
 
-    # 2a. Seed feature categories, definitions, and registry meta (idempotent — skips if already present)
+    # 2a. Seed feature system — each seed gets its own session so a failure
+    #      in one (e.g. multi-worker IntegrityError) doesn't roll back the others.
+    from .db.seed_feature_registry import seed_feature_registry, seed_feature_flags, seed_feature_registry_meta  # noqa: E402
     try:
-        from .db.seed_feature_registry import seed_feature_registry, seed_feature_registry_meta
         async with get_async_session() as session:
             await seed_feature_registry(session)
-            await seed_feature_registry_meta(session)
     except Exception as exc:
         logger.warning("Feature registry seed warning: %s", exc)
+    try:
+        async with get_async_session() as session:
+            await seed_feature_flags(session)
+    except Exception as exc:
+        logger.warning("Feature flags seed warning: %s", exc)
+    try:
+        async with get_async_session() as session:
+            await seed_feature_registry_meta(session)
+    except Exception as exc:
+        logger.warning("Feature registry meta seed warning: %s", exc)
 
     # 2b. Seed system default ontology (idempotent — merge-not-overwrite strategy)
     try:
@@ -88,12 +98,20 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("Admin bootstrap warning: %s", exc)
 
-    # 3. Ensure a primary connection exists; bootstrap from env vars if DB is empty
-    async with get_async_session() as session:
-        try:
-            await provider_registry._resolve_primary_id(session)
-        except Exception as exc:
-            logger.warning("Primary connection bootstrap warning: %s", exc)
+    # 3. Optionally bootstrap a default provider + workspace from env vars.
+    #    Only bootstraps when FALKORDB_HOST (or equivalent) is explicitly set,
+    #    so a fresh empty deployment can start clean and let users configure
+    #    everything through the admin wizard.
+    import os as _os
+    _auto_bootstrap = _os.getenv("FALKORDB_HOST") or _os.getenv("NEO4J_HOST")
+    if _auto_bootstrap:
+        async with get_async_session() as session:
+            try:
+                await provider_registry._resolve_primary_id(session)
+            except Exception as exc:
+                logger.warning("Primary connection bootstrap warning: %s", exc)
+    else:
+        logger.info("No graph host configured — skipping auto-bootstrap (use admin wizard to set up)")
 
     logger.info("Synodic Visualization Service started")
     yield
@@ -164,6 +182,7 @@ app.include_router(api_router, prefix="/api/v1")
 # ------------------------------------------------------------------ #
 
 @app.get("/health", tags=["health"])
+@app.get("/api/v1/health", tags=["health"], include_in_schema=False)
 async def health_check():
     """
     Enhanced health check — returns management DB + primary provider status.

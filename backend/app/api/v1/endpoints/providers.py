@@ -172,3 +172,26 @@ async def get_asset_stats(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
+
+@router.post("/{provider_id}/discover-schema")
+async def discover_schema(
+    provider_id: str = Path(...),
+    asset_name: str = Body(None, embed=True),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Introspect an asset's schema to discover labels, property keys, and suggest a mapping."""
+    prov_row = await provider_repo.get_provider_orm(session, provider_id)
+    if not prov_row:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+
+    try:
+        creds = await provider_repo.get_credentials(session, provider_id)
+        instance = provider_registry._create_provider_instance(
+            prov_row.provider_type, prov_row.host, prov_row.port,
+            asset_name, prov_row.tls_enabled, creds,
+        )
+        schema = await instance.discover_schema()
+        return schema
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+

@@ -81,6 +81,21 @@
       "sortOrder": 3,
       "deprecated": false,
       "implemented": false
+    },
+    {
+      "key": "announcementsEnabled",
+      "name": "Announcements",
+      "description": "Show global announcement banners to all users. When disabled, banners are hidden even if active announcements exist.",
+      "category": "notifications",
+      "type": "boolean",
+      "default": true,
+      "userOverridable": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Toggle off to instantly hide all announcement banners without deactivating individual announcements.",
+      "sortOrder": 0,
+      "deprecated": false,
+      "implemented": true
     }
   ],
   "categories": [
@@ -214,7 +229,8 @@
       "layered-lineage"
     ],
     "signupEnabled": false,
-    "traceEnabled": true
+    "traceEnabled": true,
+    "announcementsEnabled": true
   },
   "experimentalNotice": {
     "title": "Early access",

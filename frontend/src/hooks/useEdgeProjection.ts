@@ -31,55 +31,60 @@ export interface UseEdgeProjectionOptions {
   isTracing: boolean
   traceContextSet: Set<string>
   isContainmentEdge: (edgeType: string) => boolean
+  /** Currently hovered node — expanded parents show edges on hover */
+  hoveredNodeId?: string | null
 }
 
 // ============================================
 // Tree helpers for incremental ancestorMap updates
 // ============================================
 
-function searchSubtree(nodes: HierarchyNode[], id: string): HierarchyNode | undefined {
-  for (const node of nodes) {
-    if (node.id === id) return node
-    const found = searchSubtree(node.children, id)
-    if (found) return found
+/** Build a flat id→node lookup from the full tree. O(N) once, then O(1) per lookup. */
+function buildNodeIndex(nodesByLayer: Map<string, HierarchyNode[]>): Map<string, HierarchyNode> {
+  const index = new Map<string, HierarchyNode>()
+  const stack: HierarchyNode[] = []
+  nodesByLayer.forEach(roots => { for (let i = roots.length - 1; i >= 0; i--) stack.push(roots[i]) })
+  while (stack.length > 0) {
+    const node = stack.pop()!
+    index.set(node.id, node)
+    for (let i = node.children.length - 1; i >= 0; i--) stack.push(node.children[i])
   }
-  return undefined
+  return index
 }
 
-function findNodeById(nodesByLayer: Map<string, HierarchyNode[]>, id: string): HierarchyNode | undefined {
-  for (const roots of nodesByLayer.values()) {
-    const found = searchSubtree(roots, id)
-    if (found) return found
+/** Map a node and all its descendants to `anchor` in the given map. Iterative. */
+function collapseSubtreeInMap(root: HierarchyNode, anchor: string, map: Map<string, string>) {
+  const stack: HierarchyNode[] = [root]
+  while (stack.length > 0) {
+    const node = stack.pop()!
+    if (node.urn) map.set(node.urn, anchor)
+    map.set(node.id, anchor)
+    for (let i = node.children.length - 1; i >= 0; i--) stack.push(node.children[i])
   }
-  return undefined
-}
-
-/** Map a node and all its descendants to `anchor` in the given map. */
-function collapseSubtreeInMap(node: HierarchyNode, anchor: string, map: Map<string, string>) {
-  if (node.urn) map.set(node.urn, anchor)
-  map.set(node.id, anchor)
-  node.children.forEach(c => collapseSubtreeInMap(c, anchor, map))
 }
 
 /**
  * When `node` is expanded, each direct child becomes visible and maps to
- * itself. If a child is already expanded, recurse so its children also
- * map correctly. If a child is collapsed, all its descendants roll up to it.
+ * itself. If a child is already expanded, process its children too.
+ * If a child is collapsed, all its descendants roll up to it. Iterative.
  */
 function expandNodeInMap(node: HierarchyNode, expandedNodes: Set<string>, map: Map<string, string>) {
-  node.children.forEach(child => {
-    if (child.urn) map.set(child.urn, child.id)
-    map.set(child.id, child.id)
-    if (expandedNodes.has(child.id)) {
-      expandNodeInMap(child, expandedNodes, map)
-    } else {
-      // Ensure all of this collapsed child's descendants roll up to it
-      child.children.forEach(gc => collapseSubtreeInMap(gc, child.id, map))
+  const stack: HierarchyNode[] = [node]
+  while (stack.length > 0) {
+    const current = stack.pop()!
+    for (const child of current.children) {
+      if (child.urn) map.set(child.urn, child.id)
+      map.set(child.id, child.id)
+      if (expandedNodes.has(child.id)) {
+        stack.push(child)
+      } else {
+        for (const gc of child.children) collapseSubtreeInMap(gc, child.id, map)
+      }
     }
-  })
+  }
 }
 
-/** Full O(N) build. Called on initial load and whenever nodesByLayer changes. */
+/** Full O(N) build. Called on initial load and whenever nodesByLayer changes. Iterative. */
 function buildFullAncestorMap(
   nodesByLayer: Map<string, HierarchyNode[]>,
   expandedNodes: Set<string>,
@@ -87,21 +92,26 @@ function buildFullAncestorMap(
 ): Map<string, string> {
   const map = new Map<string, string>()
 
-  const processNode = (node: HierarchyNode, currentVisibleAnchor: string) => {
-    if (node.urn) map.set(node.urn, currentVisibleAnchor)
-    map.set(node.id, currentVisibleAnchor)
+  const stack: Array<{ node: HierarchyNode; anchor: string }> = []
+  nodesByLayer.forEach(roots => {
+    for (let i = roots.length - 1; i >= 0; i--) stack.push({ node: roots[i], anchor: roots[i].id })
+  })
 
-    let childAnchor = currentVisibleAnchor
-    if (node.id === currentVisibleAnchor) {
+  while (stack.length > 0) {
+    const { node, anchor } = stack.pop()!
+    if (node.urn) map.set(node.urn, anchor)
+    map.set(node.id, anchor)
+
+    let childAnchor = anchor
+    if (node.id === anchor) {
       childAnchor = expandedNodes.has(node.id) ? 'USE_CHILD_ID' : node.id
     }
 
-    node.children?.forEach(child => {
-      processNode(child, childAnchor === 'USE_CHILD_ID' ? child.id : childAnchor)
-    })
+    for (let i = node.children.length - 1; i >= 0; i--) {
+      const child = node.children[i]
+      stack.push({ node: child, anchor: childAnchor === 'USE_CHILD_ID' ? child.id : childAnchor })
+    }
   }
-
-  nodesByLayer.forEach(roots => roots.forEach(root => processNode(root, root.id)))
 
   // Safety pass: visible nodes always map to themselves
   displayFlat.forEach(node => {
@@ -128,7 +138,11 @@ export function useEdgeProjection({
   isTracing,
   traceContextSet,
   isContainmentEdge,
+  hoveredNodeId,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[] } {
+
+  // ── Flat node index — O(1) lookup replacing O(N) tree search ──────────
+  const nodeIndex = useMemo(() => buildNodeIndex(nodesByLayer), [nodesByLayer])
 
   // ── Incremental ancestorMap state ──────────────────────────────────────
   const ancestorMapRef = useRef<Map<string, string>>(new Map())
@@ -172,10 +186,14 @@ export function useEdgeProjection({
           }
         })))
 
-    // 3. Trace / Regular Edges (only when tracing)
+    // 3. Regular canvas edges — included when lineage flow is enabled OR tracing.
+    // Performance guard: only include edges where at least one endpoint is in displayMap.
     let regularEdges: any[] = []
-    if (isTracing) {
-      regularEdges = edges.filter(edge => !isContainmentEdge(normalizeEdgeType(edge)))
+    if (showLineageFlow || isTracing) {
+      regularEdges = edges.filter(edge => {
+        if (isContainmentEdge(normalizeEdgeType(edge))) return false
+        return displayMap.has(edge.source) || displayMap.has(edge.target)
+      })
     }
 
     return [...aggEdges, ...expandedDetailedEdges, ...regularEdges]
@@ -222,7 +240,7 @@ export function useEdgeProjection({
 
     // Collapses first: all descendants → collapsed node
     collapsed.forEach(id => {
-      const node = findNodeById(nodesByLayer, id)
+      const node = nodeIndex.get(id)
       if (node) {
         node.children.forEach(child => collapseSubtreeInMap(child, id, map))
       }
@@ -230,7 +248,7 @@ export function useEdgeProjection({
 
     // Expansions: children become individually visible
     expanded.forEach(id => {
-      const node = findNodeById(nodesByLayer, id)
+      const node = nodeIndex.get(id)
       if (node) {
         expandNodeInMap(node, expandedNodes, map)
       }
@@ -239,13 +257,13 @@ export function useEdgeProjection({
     prevExpandedNodesRef.current = expandedNodes
     ancestorMapRef.current = map
     return map
-  }, [nodesByLayer, expandedNodes, displayFlat])
+  }, [nodesByLayer, expandedNodes, displayFlat, nodeIndex])
 
   // ── Edge projection ────────────────────────────────────────────────────
   //
   // Now depends on the stable `ancestorMap` instead of rebuilding it here.
   // This memo only re-runs when edges or the ancestorMap actually change.
-  const visibleLineageEdges = useMemo(() => {
+  const projectedEdges = useMemo(() => {
     if (!showLineageFlow && !isTracing) return []
 
     const edgeGroups = new Map<string, any[]>()
@@ -308,7 +326,7 @@ export function useEdgeProjection({
         }
       })
 
-    // Finalize: bundle groups into projected edges
+    // Finalize: bundle groups into projected edges (without delegation — applied in separate memo)
     const projected: any[] = []
     edgeGroups.forEach((groupEdges, key) => {
       const distinctTypes = new Set<string>()
@@ -346,12 +364,55 @@ export function useEdgeProjection({
         types: typesArray,
         confidence: maxConfidence,
         isAggregated,
+        isDelegated: false,
+        isResidual: false,
         data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount }
       })
     })
 
     return projected
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes])
 
-  return { lineageEdges, visibleLineageEdges }
+  // ── Edge delegation — separate memo so hoveredNodeId changes are O(E) not O(expensive) ──
+  //
+  // The heavy edge projection above doesn't re-run on hover. This cheap pass
+  // stamps isDelegated/isResidual on the already-projected edges.
+  const visibleLineageEdgesWithDelegation = useMemo(() => {
+    if (projectedEdges.length === 0) return projectedEdges
+
+    // Build expanded parent info
+    const expandedParentInfo = new Map<string, { isPartiallyLoaded: boolean }>()
+    expandedNodes.forEach(nodeId => {
+      const node = displayMap.get(nodeId)
+      if (!node) return
+      const totalChildCount = (node.data?.childCount as number) || (node.data?._collapsedChildCount as number) || 0
+      const loadedChildCount = node.children?.length ?? 0
+      if (loadedChildCount > 0) {
+        expandedParentInfo.set(nodeId, {
+          isPartiallyLoaded: totalChildCount > 0 && loadedChildCount < totalChildCount,
+        })
+      }
+    })
+
+    // If no expanded parents with children, skip the mapping
+    if (expandedParentInfo.size === 0) return projectedEdges
+
+    return projectedEdges.map(edge => {
+      const sourceExpanded = expandedParentInfo.get(edge.source)
+      const targetExpanded = expandedParentInfo.get(edge.target)
+
+      if (!sourceExpanded && !targetExpanded) return edge
+
+      const isEndpointHovered = hoveredNodeId === edge.source || hoveredNodeId === edge.target
+      const anyPartial = sourceExpanded?.isPartiallyLoaded || targetExpanded?.isPartiallyLoaded
+
+      return {
+        ...edge,
+        isDelegated: anyPartial ? false : !isEndpointHovered,
+        isResidual: anyPartial ? !isEndpointHovered : false,
+      }
+    })
+  }, [projectedEdges, expandedNodes, displayMap, hoveredNodeId])
+
+  return { lineageEdges, visibleLineageEdges: visibleLineageEdgesWithDelegation }
 }

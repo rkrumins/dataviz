@@ -4,12 +4,14 @@
  * Features:
  * - Collapsible with vertical text
  * - Breadcrumb navigation for focused subtrees
- * - Flat tree rendering with expand/collapse
+ * - Virtualized flat tree rendering with expand/collapse (scales to 1000+ items)
  * - Inline search and load-more support
+ * - Keyboard navigation (arrow keys, home/end, enter)
  */
 
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
@@ -17,7 +19,6 @@ import { useSchemaStore } from '@/store/schema'
 import type { ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode } from './types'
 import { FlatTreeItem } from './FlatTreeItem'
-import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
 
 interface LayerColumnProps {
@@ -38,6 +39,7 @@ interface LayerColumnProps {
   traceContextSet: Set<string>
   highlightedNodes?: Set<string>
   isHighlightActive?: boolean
+  isHoverHighlight?: boolean
   onAnimationComplete?: () => void
   onLoadMore?: (parentId: string) => void
   onSearchChildren?: (parentId: string, query: string) => void
@@ -46,6 +48,15 @@ interface LayerColumnProps {
   failedNodes?: Set<string>
   onScroll?: () => void
   onAssignToLayer?: (entityId: string) => void
+}
+
+// Stable key for each flat tree item (used by virtualizer for measurement cache stability)
+function getItemKey(item: FlatTreeNode, _index: number): string {
+  if (item.isSkeleton) return `skeleton-${item.node.id}-${item.skeletonIndex}`
+  if (item.isSearchBox) return `search-${item.node.id}`
+  if (item.isLoadMore) return `loadmore-${item.node.id}`
+  if (item.isFailed) return `error-${item.node.id}`
+  return item.node.id
 }
 
 export const LayerColumn = React.memo(function LayerColumn({
@@ -66,6 +77,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   traceContextSet,
   highlightedNodes,
   isHighlightActive = false,
+  isHoverHighlight = false,
   onAnimationComplete: _onAnimationComplete,
   onLoadMore,
   onSearchChildren,
@@ -111,96 +123,110 @@ export const LayerColumn = React.memo(function LayerColumn({
   const flatTree = useMemo(() => {
     const result: FlatTreeNode[] = []
 
-    // If focused on a specific node, only show that subtree
-    const rootNodes = localFocusId
-      ? nodes.flatMap(function findNode(n: HierarchyNode): HierarchyNode[] {
-        if (n.id === localFocusId) return [n]
-        return n.children.flatMap(findNode)
-      })
-      : nodes
-
-    const traverse = (
-      node: HierarchyNode,
-      depth: number,
-      isLast: boolean,
-      parentIsLast: boolean[]
-    ) => {
-      result.push({ node, depth, isLast, parentIsLast: [...parentIsLast] })
-
-      // Only traverse children if expanded
-      if (expandedNodes.has(node.id) && (node.children.length > 0 || (node.data.childCount as number || 0) > 0)) {
-        const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || node.children.length
-        const isNodeLoading = loadingNodes?.has(node.id) ?? false
-
-        // Push the inline search box item ONLY if active
-        if (activeSearchNodes.has(node.id)) {
-          result.push({
-            node,
-            depth: depth + 1,
-            isLast: node.children.length === 0 && !isNodeLoading,
-            parentIsLast: [...parentIsLast, isLast],
-            isSearchBox: true
-          })
-        }
-
-        // Show error row if the last fetch for this node failed
-        const isNodeFailed = (failedNodes?.has(node.id) ?? false) && !isNodeLoading && node.children.length === 0
-        if (isNodeFailed) {
-          result.push({
-            node,
-            depth: depth + 1,
-            isLast: true,
-            parentIsLast: [...parentIsLast, isLast],
-            isFailed: true,
-          })
-        }
-
-        // Show skeleton placeholders while children are being loaded
-        else if (isNodeLoading && node.children.length === 0) {
-          const skeletonCount = Math.min(childCount || 3, 4)
-          for (let i = 0; i < skeletonCount; i++) {
-            result.push({
-              node,
-              depth: depth + 1,
-              isLast: i === skeletonCount - 1,
-              parentIsLast: [...parentIsLast, isLast],
-              isSkeleton: true,
-              skeletonIndex: i,
-            })
-          }
-        } else {
-          // Render all existing children dynamically since the server-side search directly controls the contents of `node.children`
-          const displayChildren = node.children
-          const activeQuery = childSearchQueries[node.id]?.trim().toLowerCase()
-
-          const hasMore = node.children.length < childCount && !activeQuery // Disable load more if actively searching
-
-          displayChildren.forEach((child, idx) => {
-            traverse(
-              child,
-              depth + 1,
-              idx === displayChildren.length - 1 && !hasMore,
-              [...parentIsLast, isLast]
-            )
-          })
-
-          if (hasMore) {
-            result.push({
-              node,
-              depth: depth + 1,
-              isLast: true,
-              parentIsLast: [...parentIsLast, isLast],
-              isLoadMore: true,
-              loadMoreCount: childCount - node.children.length
-            })
-          }
-        }
+    // Iterative findNode — prevents stack overflow on deep hierarchies
+    let rootNodes = nodes
+    if (localFocusId) {
+      const findStack = [...nodes]
+      rootNodes = []
+      while (findStack.length > 0) {
+        const n = findStack.pop()!
+        if (n.id === localFocusId) { rootNodes = [n]; break }
+        for (let i = n.children.length - 1; i >= 0; i--) findStack.push(n.children[i])
       }
     }
 
-    rootNodes.forEach((node, idx) => {
-      traverse(node, 0, idx === rootNodes.length - 1, [])
-    })
+    // Iterative flat-tree builder using explicit stack
+    type FrameItem =
+      | { kind: 'node'; node: HierarchyNode; depth: number; isLast: boolean; parentIsLast: boolean[] }
+      | { kind: 'loadMore'; parent: HierarchyNode; depth: number; parentIsLast: boolean[]; count: number }
+
+    const stack: FrameItem[] = []
+    // Push root nodes in reverse so first root is processed first
+    for (let i = rootNodes.length - 1; i >= 0; i--) {
+      stack.push({ kind: 'node', node: rootNodes[i], depth: 0, isLast: i === rootNodes.length - 1, parentIsLast: [] })
+    }
+
+    while (stack.length > 0) {
+      const frame = stack.pop()!
+
+      if (frame.kind === 'loadMore') {
+        result.push({
+          node: frame.parent,
+          depth: frame.depth,
+          isLast: true,
+          parentIsLast: frame.parentIsLast,
+          isLoadMore: true,
+          loadMoreCount: frame.count,
+        })
+        continue
+      }
+
+      const { node, depth, isLast, parentIsLast } = frame
+      result.push({ node, depth, isLast, parentIsLast: [...parentIsLast] })
+
+      // Only expand children if node is expanded
+      if (!expandedNodes.has(node.id) || (node.children.length === 0 && !((node.data.childCount as number) || 0))) continue
+
+      const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || node.children.length
+      const isNodeLoading = loadingNodes?.has(node.id) ?? false
+      const childParentIsLast = [...parentIsLast, isLast]
+
+      // Inline search box
+      if (activeSearchNodes.has(node.id)) {
+        result.push({
+          node,
+          depth: depth + 1,
+          isLast: node.children.length === 0 && !isNodeLoading,
+          parentIsLast: childParentIsLast,
+          isSearchBox: true,
+        })
+      }
+
+      // Error row
+      const isNodeFailed = (failedNodes?.has(node.id) ?? false) && !isNodeLoading && node.children.length === 0
+      if (isNodeFailed) {
+        result.push({
+          node,
+          depth: depth + 1,
+          isLast: true,
+          parentIsLast: childParentIsLast,
+          isFailed: true,
+        })
+      }
+      // Skeleton placeholders
+      else if (isNodeLoading && node.children.length === 0) {
+        const skeletonCount = Math.min(childCount || 3, 4)
+        for (let i = 0; i < skeletonCount; i++) {
+          result.push({
+            node,
+            depth: depth + 1,
+            isLast: i === skeletonCount - 1,
+            parentIsLast: childParentIsLast,
+            isSkeleton: true,
+            skeletonIndex: i,
+          })
+        }
+      } else {
+        // Push children onto stack in reverse order (+ optional loadMore at bottom)
+        const displayChildren = node.children
+        const activeQuery = childSearchQueries[node.id]?.trim().toLowerCase()
+        const hasMore = node.children.length < childCount && !activeQuery
+
+        if (hasMore) {
+          stack.push({ kind: 'loadMore', parent: node, depth: depth + 1, parentIsLast: childParentIsLast, count: childCount - node.children.length })
+        }
+
+        for (let i = displayChildren.length - 1; i >= 0; i--) {
+          stack.push({
+            kind: 'node',
+            node: displayChildren[i],
+            depth: depth + 1,
+            isLast: i === displayChildren.length - 1 && !hasMore,
+            parentIsLast: childParentIsLast,
+          })
+        }
+      }
+    }
 
     return result
   }, [nodes, expandedNodes, localFocusId, activeSearchNodes, childSearchQueries, loadingNodes, failedNodes])
@@ -260,19 +286,94 @@ export const LayerColumn = React.memo(function LayerColumn({
     [flatTree]
   )
 
+  // O(1) lookup: node ID → navigable index
+  const navigableIndexMap = useMemo(() => {
+    const map = new Map<string, number>()
+    navigableItems.forEach((item, idx) => map.set(item.node.id, idx))
+    return map
+  }, [navigableItems])
+
+  // O(1) lookup: node ID → flatTree index (for virtualizer.scrollToIndex)
+  const nodeToFlatIndexMap = useMemo(() => {
+    const map = new Map<string, number>()
+    flatTree.forEach((item, idx) => {
+      if (!item.isSkeleton && !item.isSearchBox && !item.isFailed && !item.isLoadMore) {
+        map.set(item.node.id, idx)
+      }
+    })
+    return map
+  }, [flatTree])
+
+  // ── Animation batching: track which items are newly appeared (cap at 20) ──
+  const prevFlatTreeKeysRef = useRef<Set<string>>(new Set())
+  const newItemKeys = useMemo(() => {
+    const currentKeys = new Set(flatTree.map((item, idx) => getItemKey(item, idx)))
+    const prevKeys = prevFlatTreeKeysRef.current
+    const newKeys = new Set<string>()
+    for (const key of currentKeys) {
+      if (!prevKeys.has(key)) {
+        newKeys.add(key)
+        if (newKeys.size >= 20) break // Cap animation batch for perf
+      }
+    }
+    prevFlatTreeKeysRef.current = currentKeys
+    return newKeys
+  }, [flatTree])
+
+  // Track tree structure changes — enable glide transition briefly after expand/collapse,
+  // but NOT during scroll (which also updates translateY on virtual items).
+  const isGlidingRef = useRef(false)
+  const glideTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => {
+    isGlidingRef.current = true
+    clearTimeout(glideTimerRef.current)
+    glideTimerRef.current = setTimeout(() => { isGlidingRef.current = false }, 300)
+    return () => clearTimeout(glideTimerRef.current)
+  }, [flatTree.length])
+
   // Reset focus when tree content changes
   useEffect(() => {
     setFocusIndex(-1)
   }, [nodes, localFocusId])
 
-  // Auto-scroll focused row into view.
-  // Use getElementById — querySelector rejects IDs containing ":" (URN format).
+  // ── Virtualizer ───────────────────────────────────────────────────────────
+  const virtualizer = useVirtualizer({
+    count: flatTree.length,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: (index) => {
+      const item = flatTree[index]
+      if (item.isSearchBox) return 40
+      if (item.isSkeleton) return 44
+      if (item.isFailed) return 40
+      if (item.isLoadMore) return 40
+      return item.depth === 0 ? 52 : 44
+    },
+    overscan: 15,
+    getItemKey: (index) => getItemKey(flatTree[index], index),
+  })
+
+  // Auto-scroll keyboard-focused row into view via virtualizer
   const focusedNodeId = navigableItems[focusIndex]?.node.id ?? null
   useEffect(() => {
     if (!focusedNodeId) return
-    const el = document.getElementById(`layer-node-${focusedNodeId}`)
-    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-  }, [focusedNodeId])
+    const flatIndex = nodeToFlatIndexMap.get(focusedNodeId)
+    if (flatIndex !== undefined) {
+      virtualizer.scrollToIndex(flatIndex, { align: 'auto', behavior: 'smooth' })
+    }
+  }, [focusedNodeId, nodeToFlatIndexMap, virtualizer])
+
+  // Auto-scroll trace focus node into view (replaces FlatTreeItem's scrollIntoView)
+  useEffect(() => {
+    if (!traceFocusId) return
+    const flatIndex = nodeToFlatIndexMap.get(traceFocusId)
+    if (flatIndex !== undefined) {
+      // Small delay to let the tree settle after expand
+      const timer = setTimeout(() => {
+        virtualizer.scrollToIndex(flatIndex, { align: 'center', behavior: 'smooth' })
+      }, 100)
+      return () => clearTimeout(timer)
+    }
+  }, [traceFocusId, nodeToFlatIndexMap, virtualizer])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     const count = navigableItems.length
@@ -517,7 +618,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         )}
       </div>
 
-      {/* Flat Tree Content - Hidden when collapsed */}
+      {/* Flat Tree Content - Virtualized, hidden when collapsed */}
       {!isCollapsed && (
         <div
           ref={scrollContainerRef}
@@ -548,145 +649,205 @@ export const LayerColumn = React.memo(function LayerColumn({
               <p className="text-xs text-ink-muted/40 mt-1">Click + to add entities</p>
             </motion.div>
           ) : (
-            <div className="py-2 px-1">
-              <AnimatePresence initial={false}>
-              {flatTree.map((item, index) => {
+            <div
+              className="py-2 px-1 w-full"
+              style={{
+                height: `${virtualizer.getTotalSize()}px`,
+                position: 'relative',
+              }}
+            >
+              {virtualizer.getVirtualItems().map((virtualRow) => {
+                const item = flatTree[virtualRow.index]
+                const itemKey = getItemKey(item, virtualRow.index)
+                const isNew = newItemKeys.has(itemKey)
+
+                // Shared absolute positioning for the measured container
+                // Glide transition only during expand/collapse (not scroll)
+                const virtualStyle: React.CSSProperties = {
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${virtualRow.start}px)`,
+                  ...(isGlidingRef.current && !isNew && {
+                    transition: 'transform 0.15s ease-out',
+                  }),
+                }
+
+                // Inner animation wrapper style — applied INSIDE the measured div
+                // so scale/opacity don't affect virtualizer measurements
+                const animStyle: React.CSSProperties | undefined = isNew ? {
+                  animation: `flatTreeSlideIn 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94) backwards`,
+                  animationDelay: `${Math.min(virtualRow.index * 0.02, 0.3)}s`,
+                  transformOrigin: 'left center',
+                } : undefined
+
                 // Error row — shown when loadChildren failed
                 if (item.isFailed) {
                   const indentWidth = item.depth * 16
                   return (
-                    <motion.div
-                      key={`error-${item.node.id}`}
-                      initial={{ opacity: 0, x: -8 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: -8 }}
-                      transition={{ duration: 0.2 }}
-                      className="flex items-center gap-2 mx-1 rounded-xl px-3 py-2 cursor-pointer group/error"
-                      style={{ paddingLeft: 12 + indentWidth }}
-                      onClick={() => onLoadMore && onLoadMore(item.node.id)}
+                    <div
+                      key={itemKey}
+                      data-index={virtualRow.index}
+                      ref={virtualizer.measureElement}
+                      style={virtualStyle}
                     >
-                      <div className="w-6 h-6 flex-shrink-0 flex items-center justify-center">
-                        <LucideIcons.AlertCircle className="w-3.5 h-3.5 text-red-400/70" />
+                      <div
+                        style={animStyle}
+                        className="flex items-center gap-2 mx-1 rounded-xl px-3 py-2 cursor-pointer group/error"
+                        onClick={() => onLoadMore && onLoadMore(item.node.id)}
+                      >
+                        <div style={{ paddingLeft: 12 + indentWidth }} className="flex items-center gap-2">
+                          <div className="w-6 h-6 flex-shrink-0 flex items-center justify-center">
+                            <LucideIcons.AlertCircle className="w-3.5 h-3.5 text-red-400/70" />
+                          </div>
+                          <span className="text-xs text-red-400/70 group-hover/error:text-red-400 transition-colors">
+                            Failed to load — click to retry
+                          </span>
+                        </div>
                       </div>
-                      <span className="text-xs text-red-400/70 group-hover/error:text-red-400 transition-colors">
-                        Failed to load — click to retry
-                      </span>
-                    </motion.div>
+                    </div>
                   )
                 }
 
                 // Skeleton loading placeholder
                 if (item.isSkeleton) {
                   const indentWidth = item.depth * 16
+                  const skeletonAnimStyle: React.CSSProperties | undefined = isNew ? {
+                    animation: `flatTreeSkeletonGrow 0.22s cubic-bezier(0.25, 0.46, 0.45, 0.94) backwards`,
+                    animationDelay: `${(item.skeletonIndex ?? 0) * 0.06}s`,
+                    transformOrigin: 'left top',
+                    overflow: 'hidden',
+                  } : undefined
                   return (
-                    <motion.div
-                      key={`skeleton-${item.node.id}-${item.skeletonIndex}`}
-                      initial={{ opacity: 0, x: -16, height: 0 }}
-                      animate={{ opacity: 1, x: 0, height: 44 }}
-                      exit={{ opacity: 0, x: -8, height: 0 }}
-                      transition={{
-                        duration: 0.35,
-                        delay: (item.skeletonIndex ?? 0) * 0.06,
-                        ease: [0.25, 0.46, 0.45, 0.94],
-                        height: { duration: 0.25, delay: (item.skeletonIndex ?? 0) * 0.06 },
-                      }}
-                      className="flex items-center gap-2 mx-1 rounded-xl overflow-hidden"
-                      style={{ paddingLeft: 12 + indentWidth }}
+                    <div
+                      key={itemKey}
+                      data-index={virtualRow.index}
+                      ref={virtualizer.measureElement}
+                      style={virtualStyle}
                     >
-                      {/* Skeleton chevron area */}
-                      <div className="w-6 h-6 flex-shrink-0" />
-                      {/* Skeleton icon */}
-                      <div
-                        className="w-7 h-7 rounded-xl flex-shrink-0 animate-pulse"
-                        style={{ backgroundColor: `${layer.color}15` }}
-                      />
-                      {/* Skeleton text lines */}
-                      <div className="flex-1 min-w-0 flex flex-col gap-1.5 py-2">
-                        <motion.div
-                          className="h-3.5 rounded-lg animate-pulse"
-                          style={{ backgroundColor: `${layer.color}12`, width: `${55 + ((item.skeletonIndex ?? 0) * 13) % 35}%` }}
-                        />
-                        <div
-                          className="h-2.5 rounded-md animate-pulse w-16"
-                          style={{ backgroundColor: `${layer.color}08` }}
-                        />
+                      <div style={skeletonAnimStyle} className="mx-1 rounded-xl overflow-hidden">
+                        <div style={{ paddingLeft: 12 + indentWidth }} className="flex items-center gap-2 w-full py-2">
+                          {/* Skeleton chevron area */}
+                          <div className="w-6 h-6 flex-shrink-0" />
+                          {/* Skeleton icon */}
+                          <div
+                            className="w-7 h-7 rounded-xl flex-shrink-0 animate-pulse"
+                            style={{ backgroundColor: `${layer.color}15` }}
+                          />
+                          {/* Skeleton text lines */}
+                          <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+                            <div
+                              className="h-3.5 rounded-lg animate-pulse"
+                              style={{ backgroundColor: `${layer.color}12`, width: `${55 + ((item.skeletonIndex ?? 0) * 13) % 35}%` }}
+                            />
+                            <div
+                              className="h-2.5 rounded-md animate-pulse w-16"
+                              style={{ backgroundColor: `${layer.color}08` }}
+                            />
+                          </div>
+                        </div>
                       </div>
-                    </motion.div>
+                    </div>
                   )
                 }
 
                 if (item.isSearchBox) {
                   return (
-                    <SearchBoxItem
-                      key={`search-${item.node.id}`}
-                      parentId={item.node.id}
-                      depth={item.depth}
-                      parentIsLast={item.parentIsLast}
-                      value={childSearchQueries[item.node.id] || ''}
-                      onChange={(val) => {
-                        setChildSearchQueries(prev => ({ ...prev, [item.node.id]: val }))
-                        if (val.trim()) {
-                          onSearchChildren && onSearchChildren(item.node.id, val)
-                        } else {
-                          // If search is cleared, refetch the original children
-                          onLoadMore && onLoadMore(item.node.id)
-                        }
-                      }}
-                      isLoading={isLoadingChildren}
-                      layer={layer}
-                    />
+                    <div
+                      key={itemKey}
+                      data-index={virtualRow.index}
+                      ref={virtualizer.measureElement}
+                      style={virtualStyle}
+                    >
+                      <div style={isNew ? {
+                        animation: `flatTreeFadeIn 0.15s cubic-bezier(0.25, 0.46, 0.45, 0.94) backwards`,
+                      } : undefined}>
+                        <SearchBoxItem
+                          parentId={item.node.id}
+                          depth={item.depth}
+                          parentIsLast={item.parentIsLast}
+                          value={childSearchQueries[item.node.id] || ''}
+                          onChange={(val) => {
+                            setChildSearchQueries(prev => ({ ...prev, [item.node.id]: val }))
+                            if (val.trim()) {
+                              onSearchChildren && onSearchChildren(item.node.id, val)
+                            } else {
+                              // If search is cleared, refetch the original children
+                              onLoadMore && onLoadMore(item.node.id)
+                            }
+                          }}
+                          isLoading={isLoadingChildren}
+                          layer={layer}
+                        />
+                      </div>
+                    </div>
                   )
                 }
 
                 if (item.isLoadMore) {
                   return (
-                    <AutoLoadSentinel
-                      key={`load-more-${item.node.id}`}
-                      nodeId={item.node.id}
-                      depth={item.depth}
-                      parentIsLast={item.parentIsLast}
-                      remainingCount={item.loadMoreCount!}
-                      onLoadMore={() => onLoadMore && onLoadMore(item.node.id)}
-                      isLoading={loadingNodes?.has(item.node.id) ?? false}
-                      layerColor={layer.color ?? '#6b7280'}
-                    />
+                    <div
+                      key={itemKey}
+                      data-index={virtualRow.index}
+                      ref={virtualizer.measureElement}
+                      style={virtualStyle}
+                    >
+                      <AutoLoadSentinel
+                        nodeId={item.node.id}
+                        depth={item.depth}
+                        parentIsLast={item.parentIsLast}
+                        remainingCount={item.loadMoreCount!}
+                        onLoadMore={() => onLoadMore && onLoadMore(item.node.id)}
+                        isLoading={loadingNodes?.has(item.node.id) ?? false}
+                        layerColor={layer.color ?? '#6b7280'}
+                      />
+                    </div>
                   )
                 }
 
+                // Regular FlatTreeItem — animation wrapper inside measured container
                 const { node, depth, isLast, parentIsLast } = item
-                const navIdx = navigableItems.findIndex(ni => ni.node.id === node.id)
+                const navIdx = navigableIndexMap.get(node.id) ?? -1
                 return (
-                  <FlatTreeItem
-                    key={node.id}
-                    node={node}
-                    depth={depth}
-                    isLast={isLast}
-                    parentIsLast={parentIsLast}
-                    layer={layer}
-                    schema={schema}
-                    isSelected={selectedNodeId === node.id}
-                    isExpanded={expandedNodes.has(node.id)}
-                    isLoading={loadingNodes?.has(node.id) ?? false}
-                    isSearchResult={searchResults.includes(node.id)}
-                    isTraceActive={traceFocusId !== null}
-                    isHighlighted={traceContextSet.has(node.id)}
-                    isFocusNode={traceFocusId === node.id}
-                    isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
-                    isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
-                    isFocused={focusIndex >= 0 && navIdx === focusIndex}
-                    onSelect={onSelect}
-                    onToggle={onToggle}
-                    onContextMenu={onContextMenu}
-                    onDoubleClick={onDoubleClick}
-                    onAddChild={onAddChild}
-                    onFocus={handleFocus}
-                    onToggleSearch={toggleSearchNode}
-                    isSearchVisible={activeSearchNodes.has(node.id)}
-                    animationDelay={index * 0.03}
-                  />
+                  <div
+                    key={itemKey}
+                    data-index={virtualRow.index}
+                    ref={virtualizer.measureElement}
+                    style={virtualStyle}
+                  >
+                    <div style={animStyle}>
+                      <FlatTreeItem
+                        node={node}
+                        depth={depth}
+                        isLast={isLast}
+                        parentIsLast={parentIsLast}
+                        layer={layer}
+                        schema={schema}
+                        isSelected={selectedNodeId === node.id}
+                        isExpanded={expandedNodes.has(node.id)}
+                        isLoading={loadingNodes?.has(node.id) ?? false}
+                        isSearchResult={searchResults.includes(node.id)}
+                        isTraceActive={traceFocusId !== null}
+                        isHighlighted={traceContextSet.has(node.id)}
+                        isFocusNode={traceFocusId === node.id}
+                        isClickHighlighted={isHighlightActive && !isHoverHighlight && (highlightedNodes?.has(node.id) ?? false)}
+                        isHoverHighlighted={isHighlightActive && isHoverHighlight && (highlightedNodes?.has(node.id) ?? false)}
+                        isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
+                        isFocused={focusIndex >= 0 && navIdx === focusIndex}
+                        onSelect={onSelect}
+                        onToggle={onToggle}
+                        onContextMenu={onContextMenu}
+                        onDoubleClick={onDoubleClick}
+                        onAddChild={onAddChild}
+                        onFocus={handleFocus}
+                        onToggleSearch={toggleSearchNode}
+                        isSearchVisible={activeSearchNodes.has(node.id)}
+                      />
+                    </div>
+                  </div>
                 )
               })}
-              </AnimatePresence>
             </div>
           )}
 
@@ -708,7 +869,7 @@ export const LayerColumn = React.memo(function LayerColumn({
 function AutoLoadSentinel({
   nodeId,
   depth,
-  parentIsLast,
+  parentIsLast: _parentIsLast,
   remainingCount,
   onLoadMore,
   isLoading,

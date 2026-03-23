@@ -16,6 +16,7 @@ import { cn } from '@/lib/utils'
 import { useCanvasStore, type LineageEdge as CanvasLineageEdge } from '@/store/canvas'
 import { useLineageExploration } from '@/hooks/useLineageExploration'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
+import { useContainmentEdgeTypes, isContainmentEdgeType } from '@/store/schema'
 import { useGraphProvider } from '@/providers'
 import { resolveLayerAssignment, type LayerAssignmentRule, type GraphNode } from '@/providers'
 import { EdgeDetailPanel } from '../panels/EdgeDetailPanel'
@@ -122,6 +123,9 @@ export function LayeredLineageCanvas({
     const [showLineageFlow, setShowLineageFlow] = useState(initialShowLineageFlow)
     const [searchQuery, setSearchQuery] = useState('')
 
+    // Schema-driven containment types
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+
     // Edge detail panel
     const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
     const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
@@ -181,15 +185,16 @@ export function LayeredLineageCanvas({
         return grouped
     }, [nodes, sortedLayers, layerRules])
 
-    // Get lineage edges for visualization
+    // Get lineage edges for visualization (exclude containment edges from schema)
     const lineageEdges = useMemo(() => {
         if (!showLineageFlow) return []
 
         return edges.filter(edge => {
-            const edgeType = edge.data?.edgeType || edge.data?.relationship
-            return edgeType !== 'contains' && edgeType !== 'CONTAINS'
+            const edgeType = (edge.data?.edgeType || edge.data?.relationship || '') as string
+            // Use schema-driven containment types instead of hardcoded strings
+            return !isContainmentEdgeType(edgeType, containmentEdgeTypes)
         })
-    }, [edges, showLineageFlow])
+    }, [edges, showLineageFlow, containmentEdgeTypes])
 
     // Search filter
     const filteredNodesByLayer = useMemo(() => {

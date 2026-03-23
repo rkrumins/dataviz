@@ -1,26 +1,70 @@
+import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Server, Database, Layers } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { providerService } from '@/services/providerService'
+import { catalogService } from '@/services/catalogService'
+import { workspaceService } from '@/services/workspaceService'
 import { RegistryConnections } from './RegistryConnections'
 import { RegistryWorkspaces } from './RegistryWorkspaces'
 import { RegistryAssets } from './RegistryAssets'
+import { FirstRunHero } from './FirstRunHero'
+import { OnboardingProgress } from './OnboardingProgress'
 
 export function AdminRegistry() {
     const [searchParams, setSearchParams] = useSearchParams()
     const activeTab = searchParams.get('tab') || 'connections'
 
+    // Lightweight counts for FirstRunHero + OnboardingProgress
+    const [counts, setCounts] = useState({ providers: -1, catalogs: 0, workspaces: 0, hasOntology: false })
+
+    useEffect(() => {
+        let cancelled = false
+        Promise.all([
+            providerService.list(),
+            catalogService.list(),
+            workspaceService.list(),
+        ]).then(([providers, catalogs, workspaces]) => {
+            if (cancelled) return
+            const hasOntology = workspaces.some(ws =>
+                ws.dataSources?.some(ds => !!ds.ontologyId)
+            )
+            setCounts({
+                providers: providers.length,
+                catalogs: catalogs.length,
+                workspaces: workspaces.length,
+                hasOntology,
+            })
+        }).catch(() => {
+            if (!cancelled) setCounts(prev => ({ ...prev, providers: 0 }))
+        })
+        return () => { cancelled = true }
+    }, [activeTab]) // refetch when tab changes (user may have created entities)
+
+    // Show FirstRunHero when no providers exist (and loading is done)
+    if (counts.providers === 0) {
+        return (
+            <FirstRunHero
+                onGetStarted={() => setSearchParams({ tab: 'connections' })}
+            />
+        )
+    }
+
+    // Still loading initial counts
+    if (counts.providers === -1) return null
+
     const tabs = [
         {
             id: 'connections',
-            label: 'Data Connections',
+            label: 'Providers',
             icon: Server,
             desc: 'Manage provider credentials and health',
         },
         {
             id: 'assets',
-            label: 'Data Assets',
+            label: 'Data Sources',
             icon: Layers,
-            desc: 'Register and configure catalog assets',
+            desc: 'Register and configure data sources',
         },
         {
             id: 'workspaces',
@@ -39,6 +83,15 @@ export function AdminRegistry() {
                     Manage the enterprise data topology — register physical connections, configure catalog assets, and allocate them to workspace domains.
                 </p>
             </div>
+
+            {/* Onboarding Progress */}
+            <OnboardingProgress
+                providerCount={counts.providers}
+                catalogItemCount={counts.catalogs}
+                workspaceCount={counts.workspaces}
+                hasOntology={counts.hasOntology}
+                onStageClick={(tab) => setSearchParams({ tab })}
+            />
 
             {/* Tabs */}
             <div className="flex items-center gap-1 border-b border-glass-border mb-8 shrink-0">

@@ -5,7 +5,7 @@
  */
 import { useEffect } from 'react'
 import { useLocation } from 'react-router-dom'
-import { useNavigationStore } from '@/store/navigation'
+import { useNavigationStore, type NavigationTab } from '@/store/navigation'
 
 export function useRouteSync() {
   const location = useLocation()
@@ -14,16 +14,18 @@ export function useRouteSync() {
 
   useEffect(() => {
     const path = location.pathname
-    let nextTab: 'dashboard' | 'explore' | 'schema' | null = null
+    let nextTab: NavigationTab | null = null
 
     if (path.startsWith('/dashboard')) {
       nextTab = 'dashboard'
-    } else if (path.startsWith('/views')) {
+    } else if (path.startsWith('/views') || path.startsWith('/explorer')) {
       nextTab = 'explore'
     } else if (path.startsWith('/workspaces')) {
-      nextTab = 'explore'
+      nextTab = 'lenses'
     } else if (path.startsWith('/schema')) {
       nextTab = 'schema'
+    } else if (path.startsWith('/admin')) {
+      nextTab = 'admin'
     }
 
     // Guard against no-op store writes (important for preventing update loops

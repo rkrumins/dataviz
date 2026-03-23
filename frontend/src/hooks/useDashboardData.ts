@@ -171,6 +171,14 @@ export function useDashboardData() {
         [visibleViews]
     )
 
+    // Dashboard tier: determines layout and which sections render
+    const dashboardTier = useMemo(() => {
+        if (!workspaces || workspaces.length === 0) return 'new' as const
+        if (workspaces.length <= 1 && recentViews.length <= 2) return 'beginner' as const
+        if (workspaces.length >= 5 || recentViews.length >= 10) return 'power' as const
+        return 'active' as const
+    }, [workspaces, recentViews.length])
+
     return {
         stats,
         dataSourceStats,
@@ -179,9 +187,13 @@ export function useDashboardData() {
         popularViews,
         templates,
         ontologies,
+        dashboardTier,
         /** @deprecated Use ontologies */
         blueprints: ontologies,
         isLoading: isLoadingWorkspaces || isLoadingTemplates || isLoadingOntologies,
+        isLoadingWorkspaces,
+        isLoadingTemplates,
+        isLoadingOntologies,
         error
     }
 }

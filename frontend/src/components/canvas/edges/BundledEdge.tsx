@@ -51,8 +51,8 @@ export const BundledEdge = memo(function BundledEdge({
     const isTraced = data?.isTraced ?? false
     const isDimmed = data?.isDimmed ?? false
 
-    // Base stroke width scales gracefully with edge block length
-    const strokeWidth = Math.min(2 + Math.log2(edgeCount) * 1.5, 12)
+    // Refined stroke width — thin and elegant, scales subtly with volume
+    const strokeWidth = Math.min(1.5 + Math.log2(edgeCount) * 0.6, 4.5)
 
     // Calculate sleek Bezier path
     const [edgePath, labelX, labelY] = getBezierPath({
@@ -114,47 +114,48 @@ export const BundledEdge = memo(function BundledEdge({
                 onMouseLeave={() => setIsHovered(false)}
             />
 
-            {/* Trace glow */}
+            {/* Trace glow — subtle */}
             {isTraced && !isDimmed && (
                 <path
                     d={edgePath}
                     fill="none"
                     stroke={traceColor}
-                    strokeWidth={strokeWidth + 8}
-                    strokeOpacity={0.3}
-                    style={{ filter: 'blur(4px)' }}
+                    strokeWidth={strokeWidth + 3}
+                    strokeOpacity={0.15}
+                    style={{ filter: 'blur(3px)' }}
                 />
             )}
 
-            {/* Main sleek path */}
+            {/* Main path */}
             <BaseEdge
                 id={id}
                 path={edgePath}
                 markerEnd={markerEnd}
                 style={{
                     stroke: isDimmed ? '#9ca3af' : isTraced ? traceColor : `url(#${gradientId})`,
-                    strokeWidth: isDimmed ? Math.max(1, strokeWidth - 2) : selected ? strokeWidth + 2 : strokeWidth,
-                    strokeOpacity: isDimmed ? 0.2 : 0.9,
+                    strokeWidth: isDimmed ? Math.max(1, strokeWidth * 0.7) : selected ? strokeWidth + 0.5 : strokeWidth,
+                    strokeOpacity: isDimmed ? 0.15 : 0.85,
                     filter: isDimmed
                         ? 'grayscale(1)'
                         : isTraced
-                            ? `drop-shadow(0 0 6px ${traceColor})`
+                            ? `drop-shadow(0 0 3px ${traceColor})`
                             : selected || isHovered
-                                ? `drop-shadow(0 0 8px ${edgeColor})`
+                                ? `drop-shadow(0 0 4px ${edgeColor}40)`
                                 : undefined,
                     transition: 'stroke-width 0.2s cubic-bezier(0.4, 0, 0.2, 1), filter 0.2s',
                 }}
                 className={cn("transition-all duration-300", (selected || isHovered) ? "z-50" : "z-0")}
             />
 
-            {/* Animated Flow Overlay */}
+            {/* Animated Flow Overlay — only on interaction */}
             {animated && !isDimmed && (isHovered || selected || isTraced) && (
                 <path
                     d={edgePath}
                     fill="none"
                     stroke={`url(#bundle-flow-${id})`}
-                    strokeWidth={strokeWidth * 0.5}
-                    className="pointer-events-none drop-shadow-sm"
+                    strokeWidth={Math.max(1, strokeWidth * 0.4)}
+                    strokeOpacity={0.5}
+                    className="pointer-events-none"
                 />
             )}
 
@@ -171,13 +172,13 @@ export const BundledEdge = memo(function BundledEdge({
                     onMouseLeave={() => setIsHovered(false)}
                 >
                     <div className={cn(
-                        "flex items-center gap-1 px-2 py-0.5 rounded-full border shadow-sm backdrop-blur-md",
-                        "text-2xs font-semibold cursor-pointer",
+                        "flex items-center gap-0.5 px-1.5 py-px rounded-full border backdrop-blur-md",
+                        "text-[9px] font-medium cursor-pointer leading-tight",
                         isTraced
-                            ? "bg-purple-500/90 text-white border-purple-400"
-                            : "bg-white/80 dark:bg-canvas-elevated/80 text-ink border-glass-border"
+                            ? "bg-purple-500/80 text-white border-purple-400/50"
+                            : "bg-white/70 dark:bg-canvas-elevated/70 text-ink-secondary border-glass-border/50"
                     )}>
-                        <Layers className={cn("w-3 h-3", isTraced ? "text-purple-200" : "text-amber-500")} />
+                        <Layers className={cn("w-2.5 h-2.5", isTraced ? "text-purple-200" : "text-ink-muted")} />
                         <span>{edgeCount}</span>
                     </div>
 

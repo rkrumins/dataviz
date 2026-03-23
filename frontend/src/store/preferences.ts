@@ -49,6 +49,19 @@ interface PreferencesState {
   autoLOD: boolean
   setAutoLOD: (enabled: boolean) => void
   toggleAutoLOD: () => void
+
+  // Pinned views (sidebar quick access)
+  pinnedViewIds: string[]
+  pinView: (viewId: string) => void
+  unpinView: (viewId: string) => void
+  reorderPins: (viewIds: string[]) => void
+
+  // Onboarding
+  onboardingCompletedSteps: string[]
+  onboardingDismissedAt: string | null
+  completeOnboardingStep: (step: string) => void
+  dismissOnboarding: () => void
+  resetOnboarding: () => void
 }
 
 const DEFAULT_SHORTCUTS: ShortcutConfig[] = [
@@ -107,6 +120,28 @@ export const usePreferencesStore = create<PreferencesState>()(
       autoLOD: false, // Off by default - user can enable
       setAutoLOD: (autoLOD) => set({ autoLOD }),
       toggleAutoLOD: () => set((state) => ({ autoLOD: !state.autoLOD })),
+
+      // Pinned views
+      pinnedViewIds: [],
+      pinView: (viewId) => set((state) => {
+        if (state.pinnedViewIds.includes(viewId)) return state
+        if (state.pinnedViewIds.length >= 10) return state
+        return { pinnedViewIds: [...state.pinnedViewIds, viewId] }
+      }),
+      unpinView: (viewId) => set((state) => ({
+        pinnedViewIds: state.pinnedViewIds.filter(id => id !== viewId),
+      })),
+      reorderPins: (viewIds) => set({ pinnedViewIds: viewIds }),
+
+      // Onboarding
+      onboardingCompletedSteps: [],
+      onboardingDismissedAt: null,
+      completeOnboardingStep: (step) => set((state) => {
+        if (state.onboardingCompletedSteps.includes(step)) return state
+        return { onboardingCompletedSteps: [...state.onboardingCompletedSteps, step] }
+      }),
+      dismissOnboarding: () => set({ onboardingDismissedAt: new Date().toISOString() }),
+      resetOnboarding: () => set({ onboardingCompletedSteps: [], onboardingDismissedAt: null }),
     }),
     {
       name: 'nexus-preferences',

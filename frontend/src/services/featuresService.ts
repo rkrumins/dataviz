@@ -88,6 +88,7 @@ const FAILSAFE_VALUES: Record<string, unknown> = {
   editModeEnabled: true,
   traceEnabled: true,
   allowedViewModes: ['graph', 'hierarchy', 'reference', 'layered-lineage'],
+  announcementsEnabled: true,
 }
 
 function buildFailsafeResponse(): FeaturesResponse {

@@ -304,8 +304,16 @@ class OntologyORM(Base):
     # deprecate — mark removed types as deprecated; continue to serve them.
     # migrate  — automatically rename/remap types per a migration manifest.
     evolution_policy = Column(Text, nullable=False, default="reject")   # reject | deprecate | migrate
+    schema_id = Column(Text, nullable=False, default="")               # stable identifier grouping all versions
+    revision = Column(Integer, nullable=False, default=0)              # optimistic locking counter
+    created_by = Column(Text, nullable=True, default=None)             # who created this version
+    updated_by = Column(Text, nullable=True, default=None)             # last modifier
+    published_by = Column(Text, nullable=True, default=None)           # who published this version
+    published_at = Column(Text, nullable=True, default=None)           # when published
+    deleted_by = Column(Text, nullable=True, default=None)             # who soft-deleted
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    deleted_at = Column(Text, nullable=True, default=None)             # soft delete timestamp
 
     # Relationships
     data_sources = relationship(
@@ -315,10 +323,49 @@ class OntologyORM(Base):
     __table_args__ = (
         Index("idx_ontologies_name_version", "name", "version"),
         Index("idx_ontologies_is_system", "is_system"),
+        Index("idx_ontologies_schema_id", "schema_id"),
+        Index("idx_ontologies_deleted", "deleted_at"),
     )
 
     def __repr__(self) -> str:
         return f"<Ontology id={self.id!r} name={self.name!r} v{self.version}>"
+
+
+# ------------------------------------------------------------------ #
+# ontology_audit_log — immutable trail of ontology lifecycle events    #
+# ------------------------------------------------------------------ #
+
+class OntologyAuditLogORM(Base):
+    """
+    Immutable audit trail for ontology lifecycle events.
+    Each row captures a single action (create, update, publish, delete, restore, clone)
+    along with who performed it and a summary of what changed.
+    """
+    __tablename__ = "ontology_audit_log"
+
+    id = Column(Text, primary_key=True, default=lambda: f"oal_{uuid.uuid4().hex[:12]}")
+    ontology_id = Column(Text, nullable=False, index=True)
+    schema_id = Column(Text, nullable=False, index=True)           # groups events across versions
+    action = Column(Text, nullable=False)                           # created | updated | published | deleted | restored | cloned
+    actor = Column(Text, nullable=True)                             # user who performed the action
+    version = Column(Integer, nullable=True)                        # ontology version at time of action
+    summary = Column(Text, nullable=True)                           # human-readable summary
+    changes = Column(Text, nullable=True, default=None)             # JSON: detailed diff (added/removed types, changed fields)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_oal_ontology", "ontology_id"),
+        Index("idx_oal_schema", "schema_id"),
+        Index("idx_oal_created", "created_at"),
+        Index("idx_oal_actor_action", "actor", "action", "created_at"),
+        CheckConstraint(
+            "action IN ('created', 'updated', 'published', 'deleted', 'restored', 'cloned')",
+            name="ck_oal_action_enum",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OntologyAuditLog id={self.id!r} action={self.action!r} ontology={self.ontology_id!r}>"
 
 
 # ------------------------------------------------------------------ #
@@ -433,6 +480,7 @@ class WorkspaceDataSourceORM(Base):
     projection_mode = Column(Text, nullable=True)  # None = inherit from provider, "in_source" | "dedicated"
     dedicated_graph_name = Column(Text, nullable=True)  # graph name when projection_mode == "dedicated"
     access_level = Column(Text, nullable=True, default="read")  # read | write | admin
+    extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -449,6 +497,7 @@ class WorkspaceDataSourceORM(Base):
 
     __table_args__ = (
         UniqueConstraint("workspace_id", "provider_id", "graph_name", name="uq_ds_ws_prov_graph"),
+        UniqueConstraint("catalog_item_id", name="uq_ds_catalog_item"),
         Index("idx_ds_workspace", "workspace_id"),
         Index("idx_ds_provider", "provider_id"),
         Index("idx_ds_catalog_item", "catalog_item_id"),
@@ -482,6 +531,13 @@ class ContextModelORM(Base):
     instance_assignments = Column(Text, nullable=False, default="{}") # JSON: entityId→assignment
     scope_edge_config = Column(Text, nullable=True)                  # JSON: ScopeEdgeConfig
     is_active = Column(Boolean, nullable=False, default=True)
+    # Columns added during context-model → view unification
+    view_type = Column(Text, nullable=True)                            # graph | table | lineage | ...
+    config = Column(Text, nullable=True)                               # JSON: full ViewConfiguration
+    visibility = Column(Text, nullable=False, default="private")       # private | workspace | public
+    created_by = Column(Text, nullable=True)
+    tags = Column(Text, nullable=True)                                 # JSON array
+    is_pinned = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -532,6 +588,7 @@ class ViewORM(Base):
     is_pinned = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    deleted_at = Column(Text, nullable=True, default=None)
 
     # Relationships
     context_model = relationship("ContextModelORM", backref="views")
@@ -543,6 +600,7 @@ class ViewORM(Base):
         Index("idx_view_context_model", "context_model_id"),
         Index("idx_view_visibility", "visibility"),
         Index("idx_view_data_source", "data_source_id"),
+        Index("idx_view_deleted_at", "deleted_at"),
     )
 
     def __repr__(self) -> str:
@@ -632,6 +690,7 @@ class CatalogItemORM(Base):
     provider = relationship("ProviderORM", back_populates="catalog_items")
 
     __table_args__ = (
+        UniqueConstraint("provider_id", "source_identifier", name="uq_catalog_provider_source"),
         Index("idx_catalog_provider", "provider_id"),
         Index("idx_catalog_status", "status"),
     )
@@ -724,6 +783,55 @@ class UserApprovalORM(Base):
 # outbox_events  (transactional outbox for domain events)              #
 # ------------------------------------------------------------------ #
 
+class AnnouncementORM(Base):
+    __tablename__ = "announcements"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ann_{uuid.uuid4().hex[:12]}")
+    title = Column(Text, nullable=False)
+    message = Column(Text, nullable=False)
+    banner_type = Column(Text, nullable=False, default="info")        # info | warning | success
+    is_active = Column(Boolean, nullable=False, default=True)
+    snooze_duration_minutes = Column(Integer, nullable=False, default=0)  # 0 = no snooze allowed
+    cta_text = Column(Text, nullable=True)                            # call-to-action button label
+    cta_url = Column(Text, nullable=True)                             # call-to-action URL
+    created_by = Column(Text, nullable=True)                          # admin user_id who created
+    updated_by = Column(Text, nullable=True)                          # admin user_id who last updated
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        Index("idx_announcements_is_active", "is_active"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Announcement id={self.id!r} title={self.title!r} active={self.is_active}>"
+
+
+# ------------------------------------------------------------------ #
+# announcement_config  (single-row global settings for the banner)     #
+# ------------------------------------------------------------------ #
+
+class AnnouncementConfigORM(Base):
+    __tablename__ = "announcement_config"
+
+    id = Column(Integer, primary_key=True, default=1)
+    poll_interval_seconds = Column(Integer, nullable=False, default=15)        # how often users poll for updates
+    default_snooze_minutes = Column(Integer, nullable=False, default=30)       # default snooze duration for new announcements
+    updated_by = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="single_row_announcement_config"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnnouncementConfig poll={self.poll_interval_seconds}s snooze={self.default_snooze_minutes}m>"
+
+
+# ------------------------------------------------------------------ #
+# outbox_events  (transactional outbox for domain events)              #
+# ------------------------------------------------------------------ #
+
 class OutboxEventORM(Base):
     __tablename__ = "outbox_events"
 
@@ -739,4 +847,15 @@ class OutboxEventORM(Base):
 
     def __repr__(self) -> str:
         return f"<OutboxEvent id={self.id!r} type={self.event_type!r}>"
+
+
+# ------------------------------------------------------------------ #
+# schema_migrations  (tracks one-time data-fix migrations)            #
+# ------------------------------------------------------------------ #
+
+class SchemaMigrationORM(Base):
+    __tablename__ = "schema_migrations"
+
+    key = Column(Text, primary_key=True)
+    applied_at = Column(Text, nullable=False, default=_now)
 

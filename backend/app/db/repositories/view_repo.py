@@ -8,10 +8,10 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import ViewORM, ViewFavouriteORM, WorkspaceORM, ContextModelORM
+from ..models import ViewORM, ViewFavouriteORM, WorkspaceORM, ContextModelORM, WorkspaceDataSourceORM
 from backend.common.models.management import (
     ViewCreateRequest,
     ViewUpdateRequest,
@@ -47,6 +47,17 @@ async def _get_context_model_name(
     return result.scalar_one_or_none()
 
 
+async def _get_data_source_name(
+    session: AsyncSession, data_source_id: Optional[str]
+) -> Optional[str]:
+    if not data_source_id:
+        return None
+    result = await session.execute(
+        select(WorkspaceDataSourceORM.label).where(WorkspaceDataSourceORM.id == data_source_id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def _get_favourite_count(
     session: AsyncSession, view_id: str
 ) -> int:
@@ -78,6 +89,7 @@ def _to_response(
     row: ViewORM,
     *,
     workspace_name: Optional[str] = None,
+    data_source_name: Optional[str] = None,
     context_model_name: Optional[str] = None,
     favourite_count: int = 0,
     is_favourited: bool = False,
@@ -91,6 +103,7 @@ def _to_response(
         workspaceId=row.workspace_id,
         workspaceName=workspace_name,
         dataSourceId=row.data_source_id,
+        dataSourceName=data_source_name,
         viewType=row.view_type or "graph",
         config=json.loads(row.config or "{}"),
         visibility=row.visibility or "private",
@@ -101,6 +114,7 @@ def _to_response(
         isFavourited=is_favourited,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
+        deletedAt=getattr(row, 'deleted_at', None),
     )
 
 
@@ -109,14 +123,16 @@ async def _to_enriched_response(
     row: ViewORM,
     user_id: Optional[str] = None,
 ) -> ViewResponse:
-    """Build a ViewResponse enriched with workspace name, CM name, and favourite info."""
+    """Build a ViewResponse enriched with workspace name, data source name, CM name, and favourite info."""
     ws_name = await _get_workspace_name(session, row.workspace_id)
+    ds_name = await _get_data_source_name(session, row.data_source_id)
     cm_name = await _get_context_model_name(session, row.context_model_id)
     fav_count = await _get_favourite_count(session, row.id)
     fav = await _is_favourited(session, row.id, user_id)
     return _to_response(
         row,
         workspace_name=ws_name,
+        data_source_name=ds_name,
         context_model_name=cm_name,
         favourite_count=fav_count,
         is_favourited=fav,
@@ -131,6 +147,10 @@ async def create_view(
     session: AsyncSession,
     req: ViewCreateRequest,
 ) -> ViewResponse:
+    logger.info(
+        "create_view: name=%s workspace_id=%s data_source_id=%s",
+        req.name, req.workspace_id, req.data_source_id,
+    )
     row = ViewORM(
         name=req.name,
         description=req.description,
@@ -145,7 +165,7 @@ async def create_view(
     )
     session.add(row)
     await session.flush()
-    return _to_response(row)
+    return await _to_enriched_response(session, row)
 
 
 async def get_view(
@@ -155,7 +175,9 @@ async def get_view(
         select(ViewORM).where(ViewORM.id == view_id)
     )
     row = result.scalar_one_or_none()
-    return _to_response(row) if row else None
+    if not row:
+        return None
+    return await _to_enriched_response(session, row)
 
 
 async def get_view_enriched(
@@ -201,12 +223,38 @@ async def update_view(
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
-    return _to_response(row)
+    return await _to_enriched_response(session, row)
 
 
 async def delete_view(
     session: AsyncSession, view_id: str
 ) -> bool:
+    """Soft-delete a view by setting deleted_at timestamp."""
+    now = datetime.now(timezone.utc).isoformat()
+    result = await session.execute(
+        update(ViewORM)
+        .where(ViewORM.id == view_id, ViewORM.deleted_at.is_(None))
+        .values(deleted_at=now)
+    )
+    return result.rowcount > 0
+
+
+async def restore_view(
+    session: AsyncSession, view_id: str
+) -> bool:
+    """Restore a soft-deleted view by clearing deleted_at."""
+    result = await session.execute(
+        update(ViewORM)
+        .where(ViewORM.id == view_id, ViewORM.deleted_at.isnot(None))
+        .values(deleted_at=None)
+    )
+    return result.rowcount > 0
+
+
+async def permanently_delete_view(
+    session: AsyncSession, view_id: str
+) -> bool:
+    """Hard-delete a view from the database (irreversible)."""
     result = await session.execute(
         delete(ViewORM).where(ViewORM.id == view_id)
     )
@@ -230,8 +278,16 @@ async def list_views_filtered(
     offset: int = 0,
     user_id: Optional[str] = None,
     favourited_only: bool = False,
+    include_deleted: bool = False,
+    deleted_only: bool = False,
 ) -> List[ViewResponse]:
     query = select(ViewORM)
+
+    # Soft-delete filtering
+    if deleted_only:
+        query = query.where(ViewORM.deleted_at.isnot(None))
+    elif not include_deleted:
+        query = query.where(ViewORM.deleted_at.is_(None))
 
     # When favourited_only is True, inner-join on the favourites table so only
     # views the requesting user has bookmarked are returned.
@@ -293,6 +349,7 @@ async def list_popular_views(
         select(ViewORM, fav_count_sq.c.fav_count)
         .outerjoin(fav_count_sq, ViewORM.id == fav_count_sq.c.view_id)
         .where(ViewORM.visibility == "enterprise")
+        .where(ViewORM.deleted_at.is_(None))
         .order_by(func.coalesce(fav_count_sq.c.fav_count, 0).desc())
         .limit(limit)
     )
@@ -303,11 +360,13 @@ async def list_popular_views(
         row = row_tuple[0]
         fav_count = row_tuple[1] or 0
         ws_name = await _get_workspace_name(session, row.workspace_id)
+        ds_name = await _get_data_source_name(session, row.data_source_id)
         cm_name = await _get_context_model_name(session, row.context_model_id)
         is_fav = await _is_favourited(session, row.id, user_id)
         responses.append(_to_response(
             row,
             workspace_name=ws_name,
+            data_source_name=ds_name,
             context_model_name=cm_name,
             favourite_count=fav_count,
             is_favourited=is_fav,
@@ -324,6 +383,7 @@ async def list_views_for_context_model(
     query = (
         select(ViewORM)
         .where(ViewORM.context_model_id == context_model_id)
+        .where(ViewORM.deleted_at.is_(None))
         .order_by(ViewORM.updated_at.desc())
     )
     result = await session.execute(query)

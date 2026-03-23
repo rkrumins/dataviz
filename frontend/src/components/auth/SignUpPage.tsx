@@ -324,12 +324,17 @@ export function SignUpPage() {
                                 </button>
 
                                 {/* Sign In Link */}
-                                <div className="text-center pt-2">
+                                <div className="text-center pt-2 space-y-2">
                                     <p className="text-xs text-ink-muted">
                                         Already have an account?{' '}
                                         <Link to="/login" className="text-accent-lineage font-semibold hover:underline">
                                             Sign in
                                         </Link>
+                                    </p>
+                                    <p className="text-xs text-ink-muted">
+                                        <a href="/docs" target="_blank" rel="noopener noreferrer" className="text-accent-lineage/70 hover:text-accent-lineage hover:underline transition-colors">
+                                            Documentation
+                                        </a>
                                     </p>
                                 </div>
                             </form>

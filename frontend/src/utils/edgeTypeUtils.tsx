@@ -10,19 +10,11 @@
 
 import type { LineageEdge } from '@/store/canvas'
 import type { RelationshipTypeSchema } from '@/types/schema'
-import { normalizeEdgeType } from '@/store/schema'
+import { normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 
 export { normalizeEdgeType }
 import {
     GitBranch,
-    ArrowRight,
-    Sparkles,
-    Box,
-    Layers,
-    Workflow,
-    Package,
-    Database,
-    Table2,
 } from 'lucide-react'
 import React from 'react'
 
@@ -79,27 +71,12 @@ function formatEdgeTypeLabel(type: string): string {
 
 /**
  * Get default color for edge type
- * Uses a hash-based color generation for consistency
+ * Uses a hash-based color generation for consistency.
+ * Schema-provided colors are preferred (handled by callers via getEdgeTypeDefinition).
+ * This function is only called when the schema has no definition for the type.
  */
 function getDefaultColor(type: string): string {
-    // Color mapping for common types
-    const colorMap: Record<string, string> = {
-        'PRODUCES': '#22c55e',      // green-500
-        'CONSUMES': '#3b82f6',      // blue-500
-        'TRANSFORMS': '#f59e0b',    // amber-500
-        'CONTAINS': '#8b5cf6',      // purple-500
-        'BELONGS_TO': '#94a3b8',    // slate-400
-        'DERIVES_FROM': '#a855f7',  // purple-400
-        'LINEAGE': '#06b6d4',       // cyan-500
-        'AGGREGATED': '#f59e0b',    // amber-500
-        'TAGGED_WITH': '#6366f1',   // indigo-500
-        'RELATED_TO': '#6b7280',    // gray-500
-    }
-
     const normalized = type.toUpperCase()
-    if (colorMap[normalized]) {
-        return colorMap[normalized]
-    }
 
     // Generate a consistent color from the type string
     let hash = 0
@@ -113,37 +90,25 @@ function getDefaultColor(type: string): string {
 }
 
 /**
- * Get default icon for edge type
+ * Get default icon for edge type.
+ * Schema-provided icons are preferred (handled by callers via getEdgeTypeDefinition).
+ * This function is only called when the schema has no definition for the type,
+ * so it returns a single generic icon rather than type-specific hardcoded maps.
  */
-function getDefaultIcon(type: string): React.ReactNode {
-    const normalized = type.toUpperCase()
-
-    const iconMap: Record<string, React.ReactNode> = {
-        'PRODUCES': <ArrowRight className="w-3.5 h-3.5" />,
-        'CONSUMES': <ArrowRight className="w-3.5 h-3.5 rotate-180" />,
-        'TRANSFORMS': <Sparkles className="w-3.5 h-3.5" />,
-        'CONTAINS': <Box className="w-3.5 h-3.5" />,
-        'BELONGS_TO': <Box className="w-3.5 h-3.5" />,
-        'DERIVES_FROM': <GitBranch className="w-3.5 h-3.5" />,
-        'LINEAGE': <GitBranch className="w-3.5 h-3.5" />,
-        'AGGREGATED': <Layers className="w-3.5 h-3.5" />,
-        'TAGGED_WITH': <Workflow className="w-3.5 h-3.5" />,
-        'RELATED_TO': <GitBranch className="w-3.5 h-3.5" />,
-    }
-
-    return iconMap[normalized] || <GitBranch className="w-3.5 h-3.5" />
+function getDefaultIcon(_type: string): React.ReactNode {
+    return <GitBranch className="w-3.5 h-3.5" />
 }
 
 /**
  * Determine if edge type should be animated by default
  */
-function getDefaultAnimated(type: string, isContainment: boolean): boolean {
+function getDefaultAnimated(_type: string, isContainment: boolean): boolean {
     // Containment edges are typically not animated
     if (isContainment) return false
 
-    // Lineage edges are typically animated
-    const lineageTypes = ['PRODUCES', 'CONSUMES', 'TRANSFORMS', 'DERIVES_FROM', 'LINEAGE']
-    return lineageTypes.includes(type.toUpperCase())
+    // Non-containment edges are animated by default (lineage/flow edges).
+    // The schema definition overrides this when available.
+    return true
 }
 
 /**
@@ -169,7 +134,7 @@ export function createDefaultEdgeTypeDefinition(
     ontologyMetadata?: { edgeTypeMetadata?: Record<string, { description?: string }> }
 ): EdgeTypeDefinition {
     const normalized = edgeType.toUpperCase()
-    const isContainment = containmentEdgeTypes.some(ct => ct.toUpperCase() === normalized)
+    const isContainment = isContainmentEdgeType(normalized, containmentEdgeTypes)
 
     // Try to get description from ontology metadata
     let description = `Edge type: ${formatEdgeTypeLabel(edgeType)}`

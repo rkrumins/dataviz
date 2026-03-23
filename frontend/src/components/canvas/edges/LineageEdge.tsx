@@ -108,11 +108,11 @@ export const LineageEdge = memo(function LineageEdge({
     switch (highlightMode) {
       case 'glow':
         return {
-          filter: `drop-shadow(0 0 8px ${highlightColor}) drop-shadow(0 0 12px ${highlightColor})`,
+          filter: `drop-shadow(0 0 3px ${highlightColor}60)`,
         }
       case 'bold':
         return {
-          strokeWidth: 4,
+          strokeWidth: 2.5,
         }
       case 'pulse':
         return {
@@ -131,8 +131,8 @@ export const LineageEdge = memo(function LineageEdge({
       {isHighlighted && highlightMode === 'pulse' && (
         <style>{`
           @keyframes pulse {
-            0%, 100% { opacity: 1; stroke-width: 3; }
-            50% { opacity: 0.6; stroke-width: 5; }
+            0%, 100% { opacity: 1; stroke-width: 2; }
+            50% { opacity: 0.5; stroke-width: 3; }
           }
         `}</style>
       )}
@@ -189,30 +189,30 @@ export const LineageEdge = memo(function LineageEdge({
         className="cursor-pointer"
       />
 
-      {/* Highlight glow layer (behind main edge) */}
+      {/* Highlight glow layer — subtle */}
       {isHighlighted && highlightMode === 'glow' && (
         <path
           d={edgePath}
           fill="none"
           stroke={highlightColor}
-          strokeWidth={8}
-          strokeOpacity={0.3}
+          strokeWidth={4}
+          strokeOpacity={0.15}
           style={{
-            filter: `blur(4px)`,
+            filter: 'blur(2px)',
           }}
         />
       )}
 
-      {/* Trace glow layer (when traced) */}
+      {/* Trace glow layer — subtle */}
       {isTraced && !isDimmed && (
         <path
           d={edgePath}
           fill="none"
           stroke="#c084fc"
-          strokeWidth={10}
-          strokeOpacity={0.25}
+          strokeWidth={4}
+          strokeOpacity={0.12}
           style={{
-            filter: 'blur(4px)',
+            filter: 'blur(2px)',
           }}
         />
       )}
@@ -230,27 +230,28 @@ export const LineageEdge = memo(function LineageEdge({
               : isHighlighted
                 ? `url(#${highlightGradientId})`
                 : `url(#${gradientId})`,
-          strokeWidth: isDimmed ? 1 : selected ? 3 : isTraced ? 3 : (isHighlighted && highlightMode === 'bold' ? 4 : 2),
-          strokeOpacity: isDimmed ? 0.2 : 1,
+          strokeWidth: isDimmed ? 0.75 : selected ? 2 : isTraced ? 2 : (isHighlighted && highlightMode === 'bold' ? 2.5 : 1.5),
+          strokeOpacity: isDimmed ? 0.15 : 0.85,
           filter: isDimmed
             ? 'grayscale(1)'
             : isTraced
-              ? 'drop-shadow(0 0 6px #c084fc)'
+              ? 'drop-shadow(0 0 2px #c084fc40)'
               : selected
-                ? `drop-shadow(0 0 6px ${edgeColor})`
+                ? `drop-shadow(0 0 3px ${edgeColor}40)`
                 : undefined,
           transition: 'stroke-width 0.15s, filter 0.15s, stroke-opacity 0.15s',
           ...highlightStyles,
         }}
       />
 
-      {/* Animated Flow Layer */}
-      {animated && !isDimmed && (
+      {/* Animated Flow Layer — only on interaction */}
+      {animated && !isDimmed && (selected || isHighlighted || isTraced) && (
         <path
           d={edgePath}
           fill="none"
           stroke={`url(#flow-pattern-${id})`}
-          strokeWidth={isTraced ? 5 : 4}
+          strokeWidth={isTraced ? 2.5 : 2}
+          strokeOpacity={0.5}
           style={{
             pointerEvents: 'none',
           }}
@@ -268,8 +269,8 @@ export const LineageEdge = memo(function LineageEdge({
               top: sourceY + (targetY - sourceY) * 0.15,
             }}
           >
-            <div className="w-4 h-4 rounded-full bg-amber-500 flex items-center justify-center animate-pulse">
-              <span className="text-white text-2xs">★</span>
+            <div className="w-3 h-3 rounded-full bg-amber-500/80 flex items-center justify-center animate-pulse">
+              <span className="text-white text-[7px]">★</span>
             </div>
           </div>
         </EdgeLabelRenderer>

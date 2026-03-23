@@ -18,6 +18,7 @@ export interface ProviderCreateRequest {
         token?: string
     }
     tlsEnabled?: boolean
+    extraConfig?: Record<string, any>
     permittedWorkspaces?: string[]
 }
 
@@ -32,6 +33,7 @@ export interface ProviderUpdateRequest {
     }
     tlsEnabled?: boolean
     isActive?: boolean
+    extraConfig?: Record<string, any>
     permittedWorkspaces?: string[]
 }
 
@@ -68,9 +70,52 @@ export interface ProviderResponse {
     port?: number
     tlsEnabled: boolean
     isActive: boolean
+    extraConfig?: Record<string, any>
     permittedWorkspaces: string[]
     createdAt: string
     updatedAt: string
+}
+
+export interface SchemaDiscoveryResult {
+    labels: string[]
+    relationshipTypes: string[]
+    labelDetails: Record<string, {
+        count: number
+        propertyKeys: string[]
+        samples: Record<string, any>[]
+    }>
+    suggestedMapping?: Record<string, any>
+}
+
+/**
+ * Parse a raw backend error into a user-friendly message.
+ * Handles common connection errors from Redis/FalkorDB/Neo4j drivers.
+ */
+function friendlyError(raw: string): string {
+    // Try to extract the "detail" field from JSON responses
+    let detail = raw
+    try {
+        const parsed = JSON.parse(raw)
+        if (parsed.detail) detail = typeof parsed.detail === 'string' ? parsed.detail : JSON.stringify(parsed.detail)
+    } catch { /* not JSON, use raw */ }
+
+    const lower = detail.toLowerCase()
+
+    if (lower.includes('connection refused'))
+        return `Connection refused — the server at the configured host/port is not reachable. Verify the address and that the database is running.`
+    if (lower.includes('timed out') || lower.includes('timeout'))
+        return `Connection timed out — the server did not respond. Check that the host is accessible from this network and firewalls allow the connection.`
+    if (lower.includes('name or service not known') || lower.includes('nodename nor servname') || lower.includes('getaddrinfo'))
+        return `Host not found — the configured hostname could not be resolved. Check for typos in the address.`
+    if (lower.includes('authentication') || lower.includes('auth') || lower.includes('wrong password') || lower.includes('invalid credentials'))
+        return `Authentication failed — the server rejected the provided credentials. Verify your username and password.`
+    if (lower.includes('ssl') || lower.includes('tls') || lower.includes('certificate'))
+        return `TLS/SSL error — could not establish a secure connection. Check that TLS settings match the server configuration.`
+    if (lower.includes('connection reset') || lower.includes('broken pipe'))
+        return `Connection was reset by the server. This may indicate a protocol mismatch or that TLS is required but not enabled.`
+
+    // Fallback: return cleaned detail without the JSON wrapper
+    return detail
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -80,7 +125,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     })
     if (!res.ok) {
         const text = await res.text()
-        throw new Error(`Provider API ${res.status}: ${text || res.statusText}`)
+        throw new Error(friendlyError(text || res.statusText))
     }
     if (res.status === 204) return undefined as T
     return res.json()
@@ -113,11 +158,16 @@ export const providerService = {
         return request<void>(`${ADMIN_API}/${id}`, { method: 'DELETE' })
     },
 
-    test(id: string): Promise<ConnectionTestResult> {
-        return request<ConnectionTestResult>(
+    async test(id: string): Promise<ConnectionTestResult> {
+        const result = await request<ConnectionTestResult>(
             `${ADMIN_API}/${id}/test`,
             { method: 'POST' },
         )
+        // Clean up raw driver errors in the response
+        if (!result.success && result.error) {
+            result.error = friendlyError(result.error)
+        }
+        return result
     },
 
     getImpact(id: string): Promise<ProviderImpactResponse> {
@@ -130,5 +180,12 @@ export const providerService = {
 
     getAssetStats(providerId: string, assetName: string): Promise<any> {
         return request<any>(`${ADMIN_API}/${providerId}/assets/${assetName}/stats`)
+    },
+
+    discoverSchema(providerId: string, assetName?: string): Promise<SchemaDiscoveryResult> {
+        return request<SchemaDiscoveryResult>(
+            `${ADMIN_API}/${providerId}/discover-schema`,
+            { method: 'POST', body: JSON.stringify({ assetName: assetName || null }) },
+        )
     },
 }

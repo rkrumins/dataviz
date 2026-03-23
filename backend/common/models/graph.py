@@ -31,6 +31,8 @@ class EdgeType(str, Enum):
     TAGGED_WITH = 'TAGGED_WITH'
     RELATED_TO = 'RELATED_TO'
     AGGREGATED = 'AGGREGATED'
+    DEPENDS_ON = 'DEPENDS_ON'
+    DEFINED_BY = 'DEFINED_BY'
 
 class Granularity(str, Enum):
     """
@@ -154,6 +156,17 @@ class ContainmentResult(BaseModel):
     parent: Optional[GraphNode]
     children: List[GraphNode]
     has_nested_children: bool = Field(alias="hasNestedChildren")
+
+    class Config:
+        populate_by_name = True
+
+class ChildrenWithEdgesResult(BaseModel):
+    """Single round-trip result for children + their edges."""
+    children: List[GraphNode]
+    containment_edges: List[GraphEdge] = Field(default_factory=list, alias="containmentEdges")
+    lineage_edges: List[GraphEdge] = Field(default_factory=list, alias="lineageEdges")
+    total_children: int = Field(alias="totalChildren")
+    has_more: bool = Field(alias="hasMore")
 
     class Config:
         populate_by_name = True

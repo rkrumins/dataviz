@@ -24,7 +24,7 @@ import {
   computeAllNodeCounts,
   isFinerThan,
 } from '@/lib/projection-engine'
-import { useSchemaEntityTypes, useContainmentEdgeTypes, normalizeEdgeType, useIsContainmentEdge } from '@/store/schema'
+import { useSchemaEntityTypes, useContainmentEdgeTypes, isContainmentEdgeType } from '@/store/schema'
 
 // ============================================
 // EXPLORATION STORE
@@ -298,10 +298,8 @@ export function computeTrace(
   expandedIds?: Set<string>,
   lineageEdgeTypes: string[] = []
 ): TraceResult {
-  // Use provided containment types or fallback to defaults
-  const containmentTypes = containmentEdgeTypes.length > 0
-    ? containmentEdgeTypes
-    : ['CONTAINS', 'BELONGS_TO']
+  // Use provided containment types from schema — empty means schema hasn't loaded yet
+  const containmentTypes = containmentEdgeTypes
   const containmentMap = buildContainmentMap(allNodes, allEdges, containmentTypes)
 
   // Normalize lineage edge types for filtering (empty = accept all non-containment)
@@ -329,7 +327,7 @@ export function computeTrace(
   allEdges.forEach((edge) => {
     const rel = String(edge.data?.relationship ?? edge.data?.edgeType ?? '').toUpperCase()
     // Skip containment edges for lineage trace
-    if (containmentTypes.some(type => type.toUpperCase() === rel)) {
+    if (isContainmentEdgeType(rel, containmentTypes)) {
       return
     }
 
@@ -526,10 +524,11 @@ export function projectToGranularity(
   focusId: string | null = null,
   tracePath: Set<string> = new Set(),
   entityTypes: Array<{ id: string; hierarchy: { level: number } }> = [],
+  containmentEdgeTypes: string[] = [],
 ): { nodes: Node[]; edges: Edge[]; aggregatedEdges: Map<string, { sourceCount: number; confidence: number }> } {
   const targetTypeId = _LEGACY_GRAN_TO_TYPE_ID[targetGranularity] ?? null
 
-  const containmentMap = buildContainmentMap(nodes, edges, ['contains', 'has_schema', 'has_dataset', 'has_column'])
+  const containmentMap = buildContainmentMap(nodes, edges, containmentEdgeTypes)
 
   // Filter nodes at or coarser than the target granularity type.
   // When targetTypeId is null (finest detail), show all nodes.
@@ -666,7 +665,7 @@ export function projectToGranularity(
   })
 
   // Compute all node counts (direct children, total descendants, breakdown by type)
-  const allNodeCounts = computeAllNodeCounts(nodes, edges)
+  const allNodeCounts = computeAllNodeCounts(nodes, edges, containmentEdgeTypes)
 
   // Add child counts to visible nodes
   const nodesWithCounts = visibleNodes.map((node) => {
@@ -755,7 +754,6 @@ import { useGraphHydration } from '@/hooks/useGraphHydration'
 
 export function useLineageExploration(): UseLineageExplorationResult {
   const containmentEdgeTypes = useContainmentEdgeTypes()
-  const isContainmentEdge = useIsContainmentEdge()
   const schemaEntityTypes = useSchemaEntityTypes()
   const provider = useGraphProvider()
   const {
@@ -772,7 +770,6 @@ export function useLineageExploration(): UseLineageExplorationResult {
     toggleExpanded,
     expandAll,
     collapseAll,
-    setHighlightedPath,
     toggleIncludeChildLineage,
     resetToDefault,
     loadMoreNodes,
@@ -788,10 +785,10 @@ export function useLineageExploration(): UseLineageExplorationResult {
   // Side Effect: Fetch data when pagination limit increases
   useEffect(() => {
     const syncPagination = async () => {
-      // Use ontology-provided types, fallback to config if available
+      // Use ontology-provided containment types — empty means schema hasn't loaded yet
       const containmentTypes = containmentEdgeTypes.length > 0
         ? containmentEdgeTypes
-        : (config.containmentEdgeTypes ?? ['CONTAINS', 'BELONGS_TO'])
+        : (config.containmentEdgeTypes ?? [])
 
       for (const [parentId, limit] of Object.entries(pagination)) {
         const parentNode = rawNodes.find(n => n.id === parentId)
@@ -973,16 +970,14 @@ export function useLineageExploration(): UseLineageExplorationResult {
       // Also include any expanded nodes and their children
       // We need to build a containment map to find children
       if (expandedIds.size > 0) {
-        // Use ontology types for containment if available
-        const containmentTypes = containmentEdgeTypes.length > 0
-          ? containmentEdgeTypes
-          : ['CONTAINS', 'BELONGS_TO']
+        // Use ontology types for containment — empty means schema hasn't loaded yet
+        const containmentTypes = containmentEdgeTypes
 
         // Build simple child map
         const childrenMap = new Map<string, string[]>()
         rawEdges.forEach(e => {
           const type = e.data?.relationship || e.data?.edgeType || ''
-          if (containmentTypes.some(t => t.toLowerCase() === type.toLowerCase())) {
+          if (isContainmentEdgeType(type, containmentTypes)) {
             if (!childrenMap.has(e.source)) childrenMap.set(e.source, [])
             childrenMap.get(e.source)!.push(e.target)
           }
@@ -1031,6 +1026,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
       focusEntityId,
       highlightedPath,
       schemaEntityTypes,
+      containmentEdgeTypes,
     )
 
     return {
@@ -1051,7 +1047,10 @@ export function useLineageExploration(): UseLineageExplorationResult {
     config.aggregation.inheritFromChildren,
     pagination,
     focusEntityId,
-    setHighlightedPath,
+    highlightedPath,
+    expandedIds,
+    containmentEdgeTypes,
+    schemaEntityTypes,
   ])
 
   return {

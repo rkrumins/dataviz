@@ -22,8 +22,13 @@ from backend.common.models.management import (
     OntologyUpdateRequest,
     OntologyDefinitionResponse,
     OntologyCoverageResponse,
+    OntologyMatchResult,
+    OntologySuggestResponse,
     OntologyValidationIssue,
     OntologyValidationResponse,
+    OntologyAuditEntry,
+    OntologyImportRequest,
+    OntologyImportResponse,
 )
 from backend.common.models.graph import GraphSchemaStats
 
@@ -33,12 +38,13 @@ router = APIRouter()
 @router.get("", response_model=List[OntologyDefinitionResponse])
 async def list_ontologies(
     all_versions: bool = False,
+    include_deleted: bool = Query(False, description="Include soft-deleted ontologies"),
     session: AsyncSession = Depends(get_db_session),
 ):
     """List ontologies. By default returns only the latest version of each."""
     if all_versions:
-        return await ontology_definition_repo.list_ontologies(session)
-    return await ontology_definition_repo.list_latest_ontologies(session)
+        return await ontology_definition_repo.list_ontologies(session, include_deleted=include_deleted)
+    return await ontology_definition_repo.list_latest_ontologies(session, include_deleted=include_deleted)
 
 
 @router.post("", response_model=OntologyDefinitionResponse, status_code=201)
@@ -48,6 +54,19 @@ async def create_ontology(
 ):
     """Create a new ontology (starts at version 1, unpublished)."""
     return await ontology_definition_repo.create_ontology(session, req)
+
+
+@router.get("/{ontology_id}/versions", response_model=List[OntologyDefinitionResponse])
+async def list_ontology_versions(
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """List all versions of an ontology (grouped by schema_id)."""
+    orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
+    if not orm:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    schema_id = getattr(orm, 'schema_id', None) or orm.id
+    return await ontology_definition_repo.list_versions_by_schema(session, schema_id)
 
 
 @router.get("/{ontology_id}", response_model=OntologyDefinitionResponse)
@@ -60,6 +79,51 @@ async def get_ontology(
     if not ontology:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
     return ontology
+
+
+@router.get("/{ontology_id}/export")
+async def export_ontology(
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Export a full ontology definition as a downloadable JSON file.
+    Returns the complete definition including entity types, relationship types,
+    hierarchy, containment, lineage, and all metadata.
+    """
+    import json as _json
+    from fastapi.responses import Response
+
+    orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
+    if not orm:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+
+    export_data = {
+        "id": orm.id,
+        "name": orm.name,
+        "description": orm.description,
+        "version": orm.version,
+        "scope": orm.scope or "universal",
+        "evolutionPolicy": getattr(orm, "evolution_policy", "reject") or "reject",
+        "isPublished": orm.is_published,
+        "isSystem": orm.is_system,
+        "createdAt": str(orm.created_at) if orm.created_at else None,
+        "updatedAt": str(orm.updated_at) if orm.updated_at else None,
+        "entityTypeDefinitions": _json.loads(orm.entity_type_definitions or "{}"),
+        "relationshipTypeDefinitions": _json.loads(orm.relationship_type_definitions or "{}"),
+        "containmentEdgeTypes": _json.loads(orm.containment_edge_types or "[]"),
+        "lineageEdgeTypes": _json.loads(orm.lineage_edge_types or "[]"),
+        "edgeTypeMetadata": _json.loads(orm.edge_type_metadata or "{}"),
+        "entityTypeHierarchy": _json.loads(orm.entity_type_hierarchy or "{}"),
+        "rootEntityTypes": _json.loads(orm.root_entity_types or "[]"),
+    }
+
+    filename = f"{orm.name.replace(' ', '_')}_v{orm.version}.json"
+    return Response(
+        content=_json.dumps(export_data, indent=2, default=str),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.put("/{ontology_id}", response_model=OntologyDefinitionResponse)
@@ -98,6 +162,18 @@ async def delete_ontology(
             detail="Cannot delete ontology: one or more data sources still reference it.",
         )
     await ontology_definition_repo.delete_ontology(session, ontology_id)
+
+
+@router.post("/{ontology_id}/restore", response_model=OntologyDefinitionResponse)
+async def restore_ontology(
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Restore a soft-deleted ontology."""
+    restored = await ontology_definition_repo.restore_ontology(session, ontology_id)
+    if not restored:
+        raise HTTPException(status_code=404, detail=f"No deleted ontology '{ontology_id}' found to restore")
+    return restored
 
 
 @router.post("/{ontology_id}/publish", response_model=OntologyDefinitionResponse)
@@ -241,12 +317,13 @@ async def get_ontology_impact(
     if draft_row.is_published:
         raise HTTPException(status_code=409, detail="Ontology is already published.")
 
-    # Find the latest published version of the same ontology name
+    # Find the latest published version of the same ontology (by schema_id)
     from sqlalchemy import select
     from backend.app.db.models import OntologyORM
+    schema_id = getattr(draft_row, 'schema_id', None) or draft_row.id
     result = await session.execute(
         select(OntologyORM)
-        .where(OntologyORM.name == draft_row.name)
+        .where(OntologyORM.schema_id == schema_id)
         .where(OntologyORM.is_published == True)  # noqa: E712
         .order_by(OntologyORM.version.desc())
         .limit(1)
@@ -316,7 +393,66 @@ async def get_ontology_assignments(
     return await ontology_definition_repo.get_assignments(session, ontology_id)
 
 
-@router.post("/suggest", response_model=OntologyCreateRequest, status_code=200)
+@router.get("/{ontology_id}/audit", response_model=List[OntologyAuditEntry])
+async def get_ontology_audit_log(
+    ontology_id: str = Path(...),
+    action: Optional[str] = Query(None, description="Filter by action type (created, updated, published, deleted, restored, cloned)"),
+    limit: int = Query(100, ge=1, le=500, description="Max results per page"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Return the audit trail for an ontology (all versions sharing the same schema_id).
+    Includes create, update, publish, delete, restore, and clone events with
+    change diffs and actor information. Paginated, newest first.
+    """
+    orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
+    if not orm:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    schema_id = getattr(orm, "schema_id", None) or orm.id
+    return await ontology_definition_repo.get_audit_log(
+        session, schema_id, action=action, limit=limit, offset=offset,
+    )
+
+
+@router.post("/import", response_model=OntologyImportResponse, status_code=200)
+async def import_ontology_new(
+    req: OntologyImportRequest = Body(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Import a semantic layer from exported JSON, creating a new draft.
+    Validates the JSON structure against the export format.
+    """
+    try:
+        return await ontology_definition_repo.import_ontology(session, req, target_id=None)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@router.post("/{ontology_id}/import", response_model=OntologyImportResponse, status_code=200)
+async def import_ontology_into(
+    ontology_id: str = Path(...),
+    req: OntologyImportRequest = Body(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Import a semantic layer from exported JSON into an existing ontology.
+
+    Behavior:
+    - Draft target → updates in-place (same version), records audit trail.
+    - Published target → creates a new draft version with the imported changes.
+    - Deleted target → rejected (restore first).
+    - System target → rejected (clone first).
+    - No changes detected → returns status="no_changes" without modification.
+    """
+    try:
+        return await ontology_definition_repo.import_ontology(session, req, target_id=ontology_id)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@router.post("/suggest", response_model=OntologySuggestResponse, status_code=200)
 async def suggest_ontology(
     stats: GraphSchemaStats = Body(...),
     base_ontology_id: Optional[str] = None,
@@ -325,7 +461,8 @@ async def suggest_ontology(
     """
     Suggest an ontology definition from graph schema stats.
     If base_ontology_id is provided, extends that ontology with new types found in the graph.
-    The result is a draft OntologyCreateRequest — call POST /admin/ontologies to save it.
+    The result includes a draft OntologyCreateRequest and matching existing ontologies.
+    Call POST /admin/ontologies to save the suggestion.
     """
     from backend.app.registry.provider_registry import provider_registry
 
@@ -342,8 +479,46 @@ async def suggest_ontology(
         rootEntityTypes=[],
     )
 
-    return await svc.suggest_from_introspection(
+    suggestion = await svc.suggest_from_introspection(
         introspected_stats=stats,
         introspected_ontology=introspected,
         base_ontology_id=base_ontology_id,
+    )
+
+    # Find matching existing ontologies
+    graph_entity_ids = {s.id for s in stats.entity_type_stats}
+    graph_rel_ids = {s.id.upper() for s in stats.edge_type_stats}
+    graph_types = graph_entity_ids | graph_rel_ids
+
+    matches = []
+    if graph_types:
+        all_ontologies = await ontology_definition_repo.list_latest_ontologies(session)
+        for ont in all_ontologies:
+            ont_entity_ids = set((ont.entity_type_definitions or {}).keys())
+            ont_rel_ids = set((ont.relationship_type_definitions or {}).keys())
+            ont_types = ont_entity_ids | ont_rel_ids
+
+            intersection = graph_types & ont_types
+            union = graph_types | ont_types
+            jaccard = len(intersection) / len(union) if union else 0.0
+
+            if jaccard > 0.1:
+                matches.append(OntologyMatchResult(
+                    ontologyId=ont.id,
+                    ontologyName=ont.name,
+                    version=ont.version,
+                    jaccardScore=round(jaccard, 3),
+                    coveredEntityTypes=sorted(graph_entity_ids & ont_entity_ids),
+                    uncoveredEntityTypes=sorted(graph_entity_ids - ont_entity_ids),
+                    coveredRelationshipTypes=sorted(graph_rel_ids & ont_rel_ids),
+                    uncoveredRelationshipTypes=sorted(graph_rel_ids - ont_rel_ids),
+                    totalEntityTypes=len(ont_entity_ids),
+                    totalRelationshipTypes=len(ont_rel_ids),
+                ))
+
+        matches.sort(key=lambda m: m.jaccard_score, reverse=True)
+
+    return OntologySuggestResponse(
+        suggested=suggestion,
+        matchingOntologies=matches[:5],
     )
