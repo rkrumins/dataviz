@@ -1,0 +1,23 @@
+# ── Synodic Demo Data Seeder ──────────────────────────────────────────
+# One-shot container that generates enterprise graph data and loads it
+# into FalkorDB. Waits for FalkorDB, checks if data exists, then seeds.
+#
+# Usage via docker-compose:
+#   docker compose --profile seed up --build
+# ──────────────────────────────────────────────────────────────────────
+FROM python:3.13-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY backend/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY backend/ /app/backend/
+
+# The seed script uses sys.path.insert to find project root,
+# so we run it directly as a script (not via python -m).
+ENTRYPOINT ["python", "/app/backend/scripts/docker_seed.py"]

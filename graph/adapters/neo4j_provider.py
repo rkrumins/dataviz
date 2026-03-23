@@ -1,0 +1,1820 @@
+"""
+Neo4j Bolt adapter for GraphDataProvider.
+
+Production-grade implementation connecting to any Neo4j database via the
+official async driver.  A configurable SchemaMapping layer translates
+foreign property names (e.g. ``uuid``, ``title``) to Synodic's canonical
+model (``urn``, ``displayName``).
+
+Key design decisions
+--------------------
+* ``execute_read`` / ``execute_write`` with **async** work functions for
+  automatic transient-error retry (Neo4j 5.x async driver requirement).
+* In-memory ``_TTLCache`` and LRU ``_URNLabelCache`` (no Redis requirement).
+* Optional Redis for ancestor-chain caching when ``extra_config.redisUrl``
+  is set; falls back to Cypher on-the-fly when absent.
+* Batched BFS for ``get_trace_lineage`` — one Cypher per depth level.
+* ``discover_schema`` introspects unknown databases and suggests mappings.
+* Idempotent AGGREGATED edge materialization via ``sourceEdgeIds`` tracking.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import time
+from collections import OrderedDict, defaultdict
+from typing import Any, Dict, List, Optional, Set
+
+from backend.common.interfaces.provider import GraphDataProvider
+from backend.common.models.graph import (
+    GraphNode, GraphEdge, NodeQuery, EdgeQuery,
+    LineageResult, EntityType, EdgeType, GraphSchemaStats,
+    PropertyFilter, TagFilter, TextFilter, FilterOperator,
+    EntityTypeSummary, EdgeTypeSummary, TagSummary,
+    OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy,
+    AggregatedEdgeResult, AggregatedEdgeInfo,
+)
+from .schema_mapping import SchemaMapping, map_node_props, map_edge_props
+
+logger = logging.getLogger(__name__)
+
+
+# ====================================================================
+# Module-level helpers (zero driver dependency)
+# ====================================================================
+
+def _sanitize_label(s: str) -> str:
+    """Alphanumeric + underscore only — safe for Cypher identifiers."""
+    return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
+
+
+def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = None) -> Optional[GraphNode]:
+    """Build GraphNode from a canonical property dict."""
+    if not props or not props.get("urn"):
+        return None
+    entity_type = entity_type_str or props.get("entityType", "container")
+    try:
+        return GraphNode(
+            urn=props["urn"],
+            entityType=str(entity_type),
+            displayName=props.get("displayName", ""),
+            qualifiedName=props.get("qualifiedName"),
+            description=props.get("description"),
+            properties=json.loads(props["properties"]) if isinstance(props.get("properties"), str) else (props.get("properties") or {}),
+            tags=json.loads(props["tags"]) if isinstance(props.get("tags"), str) else (props.get("tags") or []),
+            layerAssignment=props.get("layerAssignment"),
+            childCount=props.get("childCount"),
+            sourceSystem=props.get("sourceSystem"),
+            lastSyncedAt=props.get("lastSyncedAt"),
+        )
+    except Exception as e:
+        logger.warning("Failed to build GraphNode: %s", e)
+        return None
+
+
+def _edge_from_row(source_urn: str, target_urn: str, rel_type: str, props: Dict[str, Any]) -> GraphEdge:
+    """Build GraphEdge from canonical edge data."""
+    edge_id = props.get("id") or f"{source_urn}|{rel_type}|{target_urn}"
+    return GraphEdge(
+        id=edge_id,
+        sourceUrn=source_urn,
+        targetUrn=target_urn,
+        edgeType=str(rel_type),
+        confidence=props.get("confidence"),
+        properties=json.loads(props["properties"]) if isinstance(props.get("properties"), str) else (props.get("properties") or {}),
+    )
+
+
+# ====================================================================
+# In-memory caches
+# ====================================================================
+
+class _TTLCache:
+    """Simple single-value TTL cache using monotonic clock."""
+
+    def __init__(self, ttl_seconds: float = 60.0):
+        self._ttl = ttl_seconds
+        self._value: Any = None
+        self._expires: float = 0.0
+
+    def get(self) -> Any:
+        if time.monotonic() < self._expires:
+            return self._value
+        return None
+
+    def set(self, value: Any) -> None:
+        self._value = value
+        self._expires = time.monotonic() + self._ttl
+
+    def invalidate(self) -> None:
+        self._expires = 0.0
+
+
+class _URNLabelCache:
+    """Bounded LRU cache for URN -> label mappings using OrderedDict.
+
+    On ``get()`` hit the entry is moved to the end (most-recently-used).
+    On eviction the *least* recently used 10 % of entries are removed.
+    """
+
+    def __init__(self, max_size: int = 50_000):
+        self._max = max_size
+        self._data: OrderedDict[str, str] = OrderedDict()
+
+    def get(self, urn: str) -> Optional[str]:
+        val = self._data.get(urn)
+        if val is not None:
+            self._data.move_to_end(urn)  # Mark as recently used
+        return val
+
+    def put(self, urn: str, label: str) -> None:
+        if urn in self._data:
+            self._data.move_to_end(urn)
+            self._data[urn] = label
+            return
+        if len(self._data) >= self._max:
+            # Evict least-recently-used ~10 %
+            evict_count = self._max // 10
+            for _ in range(evict_count):
+                self._data.popitem(last=False)
+        self._data[urn] = label
+
+    def put_bulk(self, mapping: Dict[str, str]) -> None:
+        for urn, label in mapping.items():
+            self.put(urn, label)
+
+
+# ====================================================================
+# Neo4j Provider
+# ====================================================================
+
+class Neo4jProvider(GraphDataProvider):
+    """
+    GraphDataProvider backed by a Neo4j database via the Bolt protocol.
+
+    Supports any Neo4j database through configurable SchemaMapping that
+    translates foreign property names to Synodic's canonical model.
+
+    Configuration via ``extra_config``:
+      - ``schemaMapping``: property name translations (see SchemaMapping)
+      - ``maxConnectionPoolSize``: driver pool size (default 50)
+      - ``connectionTimeout``: connection timeout in seconds (default 30)
+      - ``redisUrl``: optional Redis for ancestor-chain caching
+    """
+
+    def __init__(
+        self,
+        uri: str,
+        username: str = "neo4j",
+        password: str = "",
+        database: str = "neo4j",
+        extra_config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self._uri = uri
+        self._username = username
+        self._password = password
+        self._database = database
+        self._extra_config = extra_config or {}
+
+        self._driver = None
+        self._lock = asyncio.Lock()
+        self._redis = None
+        self._redis_available = False
+        self._redis_lock = asyncio.Lock()
+
+        # Schema mapping
+        self._mapping = SchemaMapping.from_extra_config(self._extra_config)
+
+        # Caches
+        self._stats_cache = _TTLCache(60.0)
+        self._ontology_cache = _TTLCache(60.0)
+        self._urn_cache = _URNLabelCache(50_000)
+
+    @property
+    def name(self) -> str:
+        return "neo4j"
+
+    # ------------------------------------------------------------------ #
+    # Lifecycle                                                            #
+    # ------------------------------------------------------------------ #
+
+    async def _get_driver(self):
+        """Double-checked locking lazy driver init."""
+        if self._driver is not None:
+            return self._driver
+        async with self._lock:
+            if self._driver is not None:
+                return self._driver
+            from neo4j import AsyncGraphDatabase
+            pool_size = self._extra_config.get("maxConnectionPoolSize", 50)
+            conn_timeout = self._extra_config.get("connectionTimeout", 30)
+            self._driver = AsyncGraphDatabase.driver(
+                self._uri,
+                auth=(self._username, self._password),
+                max_connection_pool_size=pool_size,
+                connection_acquisition_timeout=conn_timeout,
+            )
+            logger.info("Neo4j driver created for %s (db=%s)", self._uri, self._database)
+        return self._driver
+
+    async def _ensure_redis(self):
+        """Lazily create Redis connection if redisUrl is configured.
+
+        Uses double-checked locking to prevent duplicate connections.
+        """
+        if self._redis is not None:
+            return
+        async with self._redis_lock:
+            if self._redis is not None:
+                return
+            redis_url = self._extra_config.get("redisUrl")
+            if not redis_url:
+                return
+            try:
+                import redis.asyncio as aioredis
+                self._redis = aioredis.from_url(redis_url, decode_responses=True)
+                await self._redis.ping()
+                self._redis_available = True
+                logger.info("Neo4j provider: Redis connected at %s", redis_url)
+            except Exception as e:
+                logger.warning("Neo4j provider: Redis unavailable (%s), using Cypher fallback", e)
+                self._redis = None
+                self._redis_available = False
+
+    async def close(self) -> None:
+        """Release driver and optional Redis connections."""
+        if self._redis is not None:
+            try:
+                await self._redis.aclose()
+            except Exception:
+                pass
+            self._redis = None
+            self._redis_available = False
+        if self._driver is not None:
+            try:
+                await self._driver.close()
+            except Exception:
+                pass
+            self._driver = None
+            logger.info("Neo4j driver closed for %s", self._uri)
+
+    # ------------------------------------------------------------------ #
+    # Query execution helpers                                              #
+    # ------------------------------------------------------------------ #
+
+    async def _run_read(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> list:
+        """Execute a read transaction with automatic transient-error retry.
+
+        Uses an async work function — ``AsyncManagedTransaction.run()``
+        and ``AsyncResult.data()`` are both coroutines in the Neo4j 5.x
+        async driver and must be awaited.
+        """
+        driver = await self._get_driver()
+        async with driver.session(database=self._database) as session:
+            try:
+                async def _work(tx):
+                    result = await tx.run(cypher, params or {})
+                    return await result.data()
+                return await session.execute_read(_work)
+            except Exception as e:
+                if type(e).__name__ in ("ServiceUnavailable", "SessionExpired"):
+                    self._driver = None
+                raise
+
+    async def _run_write(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> list:
+        """Execute a write transaction with automatic transient-error retry."""
+        driver = await self._get_driver()
+        async with driver.session(database=self._database) as session:
+            try:
+                async def _work(tx):
+                    result = await tx.run(cypher, params or {})
+                    return await result.data()
+                return await session.execute_write(_work)
+            except Exception as e:
+                if type(e).__name__ in ("ServiceUnavailable", "SessionExpired"):
+                    self._driver = None
+                raise
+
+    # ------------------------------------------------------------------ #
+    # Node / edge property serialization                                   #
+    # ------------------------------------------------------------------ #
+
+    def _node_to_write_props(self, node: GraphNode) -> Dict[str, Any]:
+        """Serialize a GraphNode to a dict using mapped property names.
+
+        When writing to a foreign Neo4j database, the property names must
+        match the schema mapping so that subsequent reads (which use the
+        mapped names) find the data.
+        """
+        m = self._mapping
+        props: Dict[str, Any] = {
+            m.identity_field: node.urn,
+            m.display_name_field: node.display_name or "",
+            m.qualified_name_field: node.qualified_name or "",
+            m.description_field: node.description or "",
+            m.tags_field: json.dumps(node.tags or []),
+            m.layer_field: node.layer_assignment or "",
+            m.source_system_field: node.source_system or "",
+            m.last_synced_field: node.last_synced_at or "",
+        }
+        if m.properties_field:
+            props[m.properties_field] = json.dumps(node.properties)
+        # When entity type is stored as a property (not derived from labels),
+        # write it explicitly so reads can find it.
+        if m.entity_type_strategy == "property" and m.entity_type_field:
+            props[m.entity_type_field] = str(node.entity_type)
+        return props
+
+    # ------------------------------------------------------------------ #
+    # Node extraction from Neo4j records                                   #
+    # ------------------------------------------------------------------ #
+
+    def _extract_node_from_record(self, record_value) -> Optional[GraphNode]:
+        """Build GraphNode from a Neo4j node object or dict using schema mapping."""
+        if record_value is None:
+            return None
+        # neo4j.graph.Node has .labels and dict() gives properties
+        if hasattr(record_value, "labels"):
+            raw_props = dict(record_value)
+            labels = sorted(record_value.labels)  # frozenset -> sorted list
+            mapped = map_node_props(raw_props, labels, self._mapping)
+            node = _node_from_props(mapped)
+            if node:
+                self._urn_cache.put(node.urn, str(node.entity_type))
+            return node
+        # Plain dict (from .data() results)
+        if isinstance(record_value, dict):
+            return _node_from_props(record_value)
+        return None
+
+    # ------------------------------------------------------------------ #
+    # Containment edge type resolution                                     #
+    # ------------------------------------------------------------------ #
+
+    def set_containment_edge_types(self, types: List[str]) -> None:
+        """Called by ContextEngine after ontology resolution.
+
+        An empty list is valid — it means no containment types (flat graph).
+        """
+        self._resolved_containment_types: Set[str] = {t.upper() for t in types}
+        self._resolved_containment_types_set = True  # sentinel: distinguishes "set to empty" from "never set"
+
+    def _get_containment_edge_types(self) -> Set[str]:
+        """Return the authoritative containment edge type set.
+
+        Resolution chain (first match wins):
+        1. Ontology-resolved types injected by ContextEngine (may be empty = no hierarchy)
+        2. CONTAINMENT_EDGE_TYPES env var
+        3. Hardcoded fallback {CONTAINS, BELONGS_TO} — only used before ontology resolves
+        """
+        if getattr(self, "_resolved_containment_types_set", False):
+            return self._resolved_containment_types
+        if not hasattr(self, "_containment_cache"):
+            config = os.getenv("CONTAINMENT_EDGE_TYPES", "").strip()
+            if config:
+                self._containment_cache = {t.strip().upper() for t in config.split(",") if t.strip()}
+            else:
+                self._containment_cache = {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value}
+        return self._containment_cache
+
+    # ------------------------------------------------------------------ #
+    # Cypher helpers                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _id_prop(self) -> str:
+        """Return backtick-escaped identity field for use in Cypher map literals.
+
+        Ensures correctness when the identity field contains special
+        characters (e.g. ``node-id``, ``my.uuid``).
+        """
+        return f"`{self._mapping.identity_field}`"
+
+    # ------------------------------------------------------------------ #
+    # Index management                                                     #
+    # ------------------------------------------------------------------ #
+
+    async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None):
+        """Create named indexes IF NOT EXISTS for common lookup properties."""
+        default_labels = [
+            EntityType.DOMAIN.value, EntityType.DATA_PLATFORM.value,
+            EntityType.CONTAINER.value, EntityType.DATASET.value,
+            EntityType.SCHEMA_FIELD.value,
+        ]
+        extra = list(entity_type_ids) if entity_type_ids else []
+        seen: set = set()
+        labels: list = []
+        for lbl in default_labels + extra:
+            if lbl not in seen:
+                seen.add(lbl)
+                labels.append(lbl)
+
+        id_field = self._mapping.identity_field
+        name_field = self._mapping.display_name_field
+        qname_field = self._mapping.qualified_name_field
+        properties = [id_field, name_field, qname_field]
+
+        for label in labels:
+            safe_label = _sanitize_label(label)
+            for prop in properties:
+                safe_prop = _sanitize_label(prop)
+                idx_name = f"idx_{safe_label}_{safe_prop}"
+                try:
+                    await self._run_write(
+                        f"CREATE INDEX {idx_name} IF NOT EXISTS FOR (n:`{safe_label}`) ON (n.`{safe_prop}`)"
+                    )
+                except Exception:
+                    pass  # Index may already exist or label may not exist yet
+
+    # ------------------------------------------------------------------ #
+    # Filter matching (Python-side post-filters)                           #
+    # ------------------------------------------------------------------ #
+
+    def _match_property_filters(self, node: GraphNode, filters: List[PropertyFilter]) -> bool:
+        for f in filters:
+            val = node.properties.get(f.field)
+            if hasattr(node, f.field):
+                val = getattr(node, f.field)
+            if not self._match_operator(val, f.operator, f.value):
+                return False
+        return True
+
+    def _match_operator(self, actual: Any, op: FilterOperator, target: Any) -> bool:
+        if op == FilterOperator.EXISTS:
+            return actual is not None
+        if op == FilterOperator.NOT_EXISTS:
+            return actual is None
+        if actual is None:
+            return False
+        if op == FilterOperator.EQUALS:
+            return actual == target
+        if op == FilterOperator.CONTAINS:
+            return str(target).lower() in str(actual).lower()
+        if op == FilterOperator.STARTS_WITH:
+            return str(actual).lower().startswith(str(target).lower())
+        if op == FilterOperator.ENDS_WITH:
+            return str(actual).lower().endswith(str(target).lower())
+        try:
+            if op == FilterOperator.GT:
+                return actual > target
+            if op == FilterOperator.LT:
+                return actual < target
+        except Exception:
+            return False
+        if op == FilterOperator.IN:
+            return isinstance(target, list) and actual in target
+        if op == FilterOperator.NOT_IN:
+            return isinstance(target, list) and actual not in target
+        return True
+
+    def _match_tag_filters(self, node: GraphNode, tag_filter: TagFilter) -> bool:
+        node_tags = set(node.tags or [])
+        target_tags = set(tag_filter.tags)
+        if tag_filter.mode == "any":
+            return not node_tags.isdisjoint(target_tags)
+        if tag_filter.mode == "all":
+            return target_tags.issubset(node_tags)
+        if tag_filter.mode == "none":
+            return node_tags.isdisjoint(target_tags)
+        return True
+
+    def _match_text_filter(self, text: str, text_filter: TextFilter) -> bool:
+        t = text if text_filter.case_sensitive else text.lower()
+        q = text_filter.text if text_filter.case_sensitive else text_filter.text.lower()
+        if text_filter.operator == "equals":
+            return t == q
+        if text_filter.operator == "contains":
+            return q in t
+        if text_filter.operator == "startsWith":
+            return t.startswith(q)
+        if text_filter.operator == "endsWith":
+            return t.endswith(q)
+        return True
+
+    # ================================================================== #
+    # Node Operations                                                      #
+    # ================================================================== #
+
+    async def get_node(self, urn: str) -> Optional[GraphNode]:
+        ip = self._id_prop()
+
+        # Label-aware lookup via cache (index-assisted, much faster)
+        label = self._urn_cache.get(urn)
+        if label:
+            safe_label = _sanitize_label(label)
+            rows = await self._run_read(
+                f"MATCH (n:`{safe_label}` {{{ip}: $urn}}) RETURN n",
+                {"urn": urn},
+            )
+            if rows:
+                return self._extract_node_from_record(rows[0]["n"])
+
+        # Fallback: label-less scan
+        rows = await self._run_read(
+            f"MATCH (n) WHERE n.{ip} = $urn RETURN n",
+            {"urn": urn},
+        )
+        if rows:
+            node = self._extract_node_from_record(rows[0]["n"])
+            if node:
+                self._urn_cache.put(urn, str(node.entity_type))
+            return node
+        return None
+
+    async def get_nodes(self, query: NodeQuery) -> List[GraphNode]:
+        ip = self._id_prop()
+        name_field = self._mapping.display_name_field
+        params: Dict[str, Any] = {}
+        conditions: List[str] = []
+
+        if query.entity_types:
+            types_lower = [str(t).lower() for t in query.entity_types]
+            params["entityTypesLower"] = types_lower
+            if self._mapping.entity_type_strategy == "label":
+                conditions.append("toLower(labels(n)[0]) IN $entityTypesLower")
+            else:
+                et_field = self._mapping.entity_type_field or "entityType"
+                conditions.append(f"toLower(n.`{et_field}`) IN $entityTypesLower")
+
+        if query.urns:
+            if len(query.urns) == 1:
+                conditions.append(f"n.{ip} = $urn0")
+                params["urn0"] = query.urns[0]
+            else:
+                params["urnList"] = query.urns
+                conditions.append(f"n.{ip} IN $urnList")
+
+        if query.tags:
+            tags_field = self._mapping.tags_field
+            params["tagVal"] = json.dumps(query.tags[0])
+            conditions.append(f"(n.`{tags_field}` IS NOT NULL AND n.`{tags_field}` CONTAINS $tagVal)")
+
+        if query.search_query:
+            params["search"] = query.search_query.lower()
+            conditions.append(
+                f"(toLower(toString(n.`{name_field}`)) CONTAINS $search "
+                f"OR toLower(toString(n.{ip})) CONTAINS $search)"
+            )
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        offset = int(query.offset or 0)
+        limit = query.limit or 100
+        params["skip"] = offset
+        params["limit"] = limit
+
+        include_child_count = query.include_child_count
+
+        if include_child_count:
+            containment = list(self._get_containment_edge_types())
+            if containment:
+                containment_rel = "|".join(f"`{_sanitize_label(t)}`" for t in containment)
+                cypher = (
+                    f"MATCH (n) {where} "
+                    f"WITH n SKIP $skip LIMIT $limit "
+                    f"OPTIONAL MATCH (n)-[:{containment_rel}]->(child) "
+                    f"RETURN n, count(child) as childCount"
+                )
+            else:
+                # No containment types — childCount is always 0
+                cypher = f"MATCH (n) {where} WITH n SKIP $skip LIMIT $limit RETURN n, 0 as childCount"
+        else:
+            cypher = f"MATCH (n) {where} RETURN n SKIP $skip LIMIT $limit"
+
+        try:
+            rows = await self._run_read(cypher, params)
+        except Exception as e:
+            logger.warning("get_nodes query failed: %s", e)
+            return []
+
+        nodes = []
+        for row in rows:
+            n = self._extract_node_from_record(row["n"])
+            child_count = row.get("childCount") if include_child_count else None
+
+            if not n:
+                continue
+            if query.property_filters and not self._match_property_filters(n, query.property_filters):
+                continue
+            if query.tag_filters and not self._match_tag_filters(n, query.tag_filters):
+                continue
+            if query.name_filter and not self._match_text_filter(n.display_name, query.name_filter):
+                continue
+
+            if child_count is not None:
+                n.child_count = int(child_count)
+                if n.properties:
+                    n.properties["childCount"] = int(child_count)
+
+            nodes.append(n)
+            if len(nodes) >= limit:
+                break
+        return nodes
+
+    async def search_nodes(self, query: str, limit: int = 10) -> List[GraphNode]:
+        return await self.get_nodes(NodeQuery(search_query=query, limit=limit))
+
+    # ================================================================== #
+    # Edge Operations                                                      #
+    # ================================================================== #
+
+    async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
+        ip = self._id_prop()
+        params: Dict[str, Any] = {}
+        conditions: List[str] = []
+
+        if query.source_urns:
+            params["sourceUrns"] = query.source_urns
+            conditions.append(f"a.{ip} IN $sourceUrns")
+        if query.target_urns:
+            params["targetUrns"] = query.target_urns
+            conditions.append(f"b.{ip} IN $targetUrns")
+        if query.any_urns:
+            params["anyUrns"] = query.any_urns
+            conditions.append(f"(a.{ip} IN $anyUrns OR b.{ip} IN $anyUrns)")
+        if query.edge_types:
+            types = [t.value if hasattr(t, "value") else str(t) for t in query.edge_types]
+            params["edgeTypes"] = types
+            conditions.append("type(r) IN $edgeTypes")
+        if query.min_confidence is not None:
+            conf_field = self._mapping.edge_confidence_field or "confidence"
+            params["minConf"] = query.min_confidence
+            conditions.append(f"r.`{conf_field}` >= $minConf")
+
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        offset = query.offset or 0
+        limit = query.limit or 100
+        params["skip"] = offset
+        params["limit"] = limit
+
+        cypher = (
+            f"MATCH (a)-[r]->(b) {where} "
+            f"RETURN a.{ip} AS src, b.{ip} AS tgt, "
+            f"type(r) AS relType, properties(r) AS rprops "
+            f"SKIP $skip LIMIT $limit"
+        )
+
+        try:
+            rows = await self._run_read(cypher, params)
+        except Exception as e:
+            logger.warning("get_edges query failed: %s", e)
+            return []
+
+        edges = []
+        for row in rows:
+            edge_props = map_edge_props(row["rprops"] or {}, self._mapping)
+            edges.append(_edge_from_row(row["src"], row["tgt"], row["relType"], edge_props))
+        return edges
+
+    # ================================================================== #
+    # Containment Hierarchy                                                #
+    # ================================================================== #
+
+    async def get_children(
+        self,
+        parent_urn: str,
+        entity_types: Optional[List[EntityType]] = None,
+        edge_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> List[GraphNode]:
+        ip = self._id_prop()
+        name_field = self._mapping.display_name_field
+        # None = caller didn't specify, use ontology/fallback; [] = explicitly no containment
+        target_edge_types = list(set(edge_types) if edge_types is not None else self._get_containment_edge_types())
+        if not target_edge_types:
+            # No containment types — flat graph, no children
+            return []
+        params: Dict[str, Any] = {
+            "parent": parent_urn, "skip": offset, "lim": limit,
+            "relTypes": target_edge_types,
+        }
+
+        search_where = ""
+        if search_query:
+            search_where = (
+                f"AND (toLower(c.`{name_field}`) CONTAINS toLower($searchQuery) "
+                f"OR toLower(c.{ip}) CONTAINS toLower($searchQuery)) "
+            )
+            params["searchQuery"] = search_query
+
+        if len(target_edge_types) == 1:
+            rel = _sanitize_label(target_edge_types[0])
+            cypher = (
+                f"MATCH (p)-[r:`{rel}`]->(c) "
+                f"WHERE p.{ip} = $parent {search_where}"
+                f"WITH c SKIP $skip LIMIT $lim "
+                f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
+                f"RETURN c, count(gc) as childCount"
+            )
+        else:
+            cypher = (
+                f"MATCH (p)-[r]->(c) "
+                f"WHERE p.{ip} = $parent AND type(r) IN $relTypes {search_where}"
+                f"WITH c SKIP $skip LIMIT $lim "
+                f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
+                f"RETURN c, count(gc) as childCount"
+            )
+
+        try:
+            rows = await self._run_read(cypher, params)
+        except Exception as e:
+            logger.warning("get_children query failed: %s", e)
+            return []
+
+        nodes = []
+        for row in rows:
+            n = self._extract_node_from_record(row["c"])
+            child_count = row["childCount"]
+            if n and (not entity_types or n.entity_type in entity_types):
+                if child_count is not None:
+                    n.child_count = int(child_count)
+                    if n.properties:
+                        n.properties["childCount"] = int(child_count)
+                nodes.append(n)
+        nodes.sort(key=lambda x: x.display_name)
+        return nodes
+
+    async def get_parent(self, child_urn: str) -> Optional[GraphNode]:
+        ip = self._id_prop()
+        containment = list(self._get_containment_edge_types())
+        if not containment:
+            # No containment types — flat graph, no parent
+            return None
+        rows = await self._run_read(
+            f"MATCH (p)-[r]->(c) WHERE c.{ip} = $child AND type(r) IN $ctypes RETURN p",
+            {"child": child_urn, "ctypes": containment},
+        )
+        if rows:
+            return self._extract_node_from_record(rows[0]["p"])
+        return None
+
+    # ================================================================== #
+    # Lineage Traversal                                                    #
+    # ================================================================== #
+
+    async def _traverse_lineage(
+        self,
+        start_urn: str,
+        direction: str,
+        depth: int,
+        descendant_types: Optional[List[EntityType]] = None,
+    ) -> Set[str]:
+        """Bounded variable-length Cypher paths excluding containment edges."""
+        ip = self._id_prop()
+        containment = list(self._get_containment_edge_types())
+        safe_depth = max(1, min(int(depth), 20))
+        params: Dict[str, Any] = {
+            "startUrn": start_urn,
+            "containmentTypes": containment,
+        }
+
+        type_clause = ""
+        if descendant_types:
+            allowed = [t.value if hasattr(t, "value") else str(t) for t in descendant_types]
+            params["allowedTypes"] = [a.lower() for a in allowed]
+            if self._mapping.entity_type_strategy == "label":
+                type_clause = "AND toLower(labels(neighbor)[0]) IN $allowedTypes "
+            else:
+                et_field = self._mapping.entity_type_field or "entityType"
+                type_clause = f"AND toLower(neighbor.`{et_field}`) IN $allowedTypes "
+
+        if direction == "upstream":
+            cypher = (
+                f"MATCH (start) WHERE start.{ip} = $startUrn "
+                f"MATCH path = (neighbor)-[*1..{safe_depth}]->(start) "
+                f"WHERE ALL(r IN relationships(path) WHERE NOT type(r) IN $containmentTypes) "
+                f"{type_clause}"
+                f"RETURN DISTINCT neighbor.{ip} AS urn"
+            )
+        else:
+            cypher = (
+                f"MATCH (start) WHERE start.{ip} = $startUrn "
+                f"MATCH path = (start)-[*1..{safe_depth}]->(neighbor) "
+                f"WHERE ALL(r IN relationships(path) WHERE NOT type(r) IN $containmentTypes) "
+                f"{type_clause}"
+                f"RETURN DISTINCT neighbor.{ip} AS urn"
+            )
+
+        try:
+            rows = await self._run_read(cypher, params)
+        except Exception as e:
+            logger.warning("_traverse_lineage failed: %s", e)
+            return set()
+
+        return {row["urn"] for row in rows if row["urn"] and row["urn"] != start_urn}
+
+    async def _build_lineage_result(
+        self,
+        center_urn: str,
+        upstream_urns: Set[str],
+        downstream_urns: Set[str],
+    ) -> LineageResult:
+        """Shared helper: fetch nodes + edges for a set of lineage URNs,
+        filter to the connected subgraph, and return a LineageResult."""
+        all_urns = upstream_urns | downstream_urns | {center_urn}
+        nodes = await self.get_nodes(
+            NodeQuery(urns=list(all_urns), limit=len(all_urns), include_child_count=False)
+        )
+        node_ids = {n.urn for n in nodes}
+        edges = await self.get_edges(
+            EdgeQuery(any_urns=list(all_urns), limit=len(all_urns) * 10)
+        )
+        edges = [e for e in edges if e.source_urn in node_ids and e.target_urn in node_ids]
+        return LineageResult(
+            nodes=nodes, edges=edges,
+            upstreamUrns=upstream_urns, downstreamUrns=downstream_urns,
+            totalCount=len(nodes), hasMore=False,
+        )
+
+    async def get_upstream(
+        self, urn: str, depth: int,
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[EntityType]] = None,
+    ) -> LineageResult:
+        upstream_urns = await self._traverse_lineage(urn, "upstream", depth, descendant_types)
+        return await self._build_lineage_result(urn, upstream_urns, set())
+
+    async def get_downstream(
+        self, urn: str, depth: int,
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[EntityType]] = None,
+    ) -> LineageResult:
+        downstream_urns = await self._traverse_lineage(urn, "downstream", depth, descendant_types)
+        return await self._build_lineage_result(urn, set(), downstream_urns)
+
+    async def get_full_lineage(
+        self, urn: str, upstream_depth: int, downstream_depth: int,
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[EntityType]] = None,
+    ) -> LineageResult:
+        # Run upstream and downstream traversals concurrently
+        up, down = await asyncio.gather(
+            self._traverse_lineage(urn, "upstream", upstream_depth, descendant_types),
+            self._traverse_lineage(urn, "downstream", downstream_depth, descendant_types),
+        )
+        return await self._build_lineage_result(urn, up, down)
+
+    async def get_trace_lineage(
+        self, urn: str, direction: str, depth: int,
+        containment_edges: List[str], lineage_edges: List[str],
+    ) -> LineageResult:
+        """Batched BFS trace lineage: one Cypher per depth level.
+
+        1. Expand scope: target + children via containment
+        2. BFS across lineage edges per depth level
+        3. Climb containment for structural context
+        """
+        ip = self._id_prop()
+        safe_containment = [_sanitize_label(t) for t in containment_edges]
+        safe_lineage = [_sanitize_label(t) for t in lineage_edges]
+
+        if not safe_lineage:
+            node = await self.get_node(urn)
+            return LineageResult(
+                nodes=[node] if node else [], edges=[],
+                upstreamUrns=set(), downstreamUrns=set(),
+                totalCount=1 if node else 0, hasMore=False,
+            )
+
+        # 1. Expand: target + children
+        start_urns = {urn}
+        if safe_containment:
+            rows = await self._run_read(
+                f"MATCH (p)-[r]->(c) "
+                f"WHERE p.{ip} = $urn AND type(r) IN $containment "
+                f"RETURN c.{ip} AS curn",
+                {"urn": urn, "containment": safe_containment},
+            )
+            for row in rows:
+                if row["curn"]:
+                    start_urns.add(row["curn"])
+
+        collected_nodes: Dict[str, GraphNode] = {}
+        collected_edges: Dict[str, GraphEdge] = {}
+        upstream_urns: Set[str] = set()
+        downstream_urns: Set[str] = set()
+
+        # 2. Batched BFS across lineage edges
+        visited_lineage = set(start_urns)
+        current_frontier = list(start_urns)
+
+        for _ in range(depth):
+            if not current_frontier:
+                break
+
+            next_frontier_up: List[str] = []
+            next_frontier_down: List[str] = []
+
+            dir_queries = []
+            if direction in ("upstream", "both"):
+                dir_queries.append((
+                    "upstream",
+                    f"MATCH (src)-[r]->(tgt) "
+                    f"WHERE tgt.{ip} IN $frontier AND type(r) IN $lineage "
+                    f"RETURN src, r, tgt",
+                ))
+            if direction in ("downstream", "both"):
+                dir_queries.append((
+                    "downstream",
+                    f"MATCH (src)-[r]->(tgt) "
+                    f"WHERE src.{ip} IN $frontier AND type(r) IN $lineage "
+                    f"RETURN src, r, tgt",
+                ))
+
+            for dir_label, cypher_q in dir_queries:
+                try:
+                    rows = await self._run_read(
+                        cypher_q,
+                        {"frontier": current_frontier, "lineage": safe_lineage},
+                    )
+                except Exception as e:
+                    logger.warning("Trace lineage BFS query failed: %s", e)
+                    continue
+
+                for row in rows:
+                    src_node = self._extract_node_from_record(row["src"])
+                    tgt_node = self._extract_node_from_record(row["tgt"])
+                    if not src_node or not tgt_node:
+                        continue
+
+                    rel = row["r"]
+                    r_type = rel.type if hasattr(rel, "type") else "RELATED_TO"
+                    r_props = dict(rel) if hasattr(rel, "items") else {}
+                    edge_props = map_edge_props(r_props, self._mapping)
+                    edge = _edge_from_row(src_node.urn, tgt_node.urn, r_type, edge_props)
+
+                    if edge.id not in collected_edges:
+                        collected_edges[edge.id] = edge
+                        collected_nodes[src_node.urn] = src_node
+                        collected_nodes[tgt_node.urn] = tgt_node
+
+                        if dir_label == "upstream":
+                            if src_node.urn not in visited_lineage:
+                                visited_lineage.add(src_node.urn)
+                                upstream_urns.add(src_node.urn)
+                                next_frontier_up.append(src_node.urn)
+                        else:
+                            if tgt_node.urn not in visited_lineage:
+                                visited_lineage.add(tgt_node.urn)
+                                downstream_urns.add(tgt_node.urn)
+                                next_frontier_down.append(tgt_node.urn)
+
+            current_frontier = next_frontier_up + next_frontier_down
+
+        # 3. Structural context: climb containment
+        all_lineage_urns = list(collected_nodes.keys())
+        if all_lineage_urns and safe_containment:
+            cypher_structure = (
+                f"MATCH (parent)-[r]->(child) "
+                f"WHERE child.{ip} IN $urns AND type(r) IN $containment "
+                f"RETURN parent, r, child"
+            )
+            current_level_urns = all_lineage_urns
+            seen_parents: Set[str] = set(collected_nodes.keys())
+
+            for _ in range(5):
+                if not current_level_urns:
+                    break
+                try:
+                    rows = await self._run_read(
+                        cypher_structure,
+                        {"urns": current_level_urns, "containment": safe_containment},
+                    )
+                except Exception:
+                    break
+
+                next_level_urns = []
+                for row in rows:
+                    parent = self._extract_node_from_record(row["parent"])
+                    child = self._extract_node_from_record(row["child"])
+                    if parent and child:
+                        collected_nodes[child.urn] = child
+                        rel = row["r"]
+                        r_type = rel.type if hasattr(rel, "type") else "CONTAINS"
+                        r_props = dict(rel) if hasattr(rel, "items") else {}
+                        edge_props = map_edge_props(r_props, self._mapping)
+                        edge = _edge_from_row(parent.urn, child.urn, r_type, edge_props)
+                        collected_edges[edge.id] = edge
+
+                        if parent.urn not in seen_parents:
+                            seen_parents.add(parent.urn)
+                            collected_nodes[parent.urn] = parent
+                            next_level_urns.append(parent.urn)
+
+                current_level_urns = next_level_urns
+
+        # Ensure origin node is present
+        if urn not in collected_nodes:
+            start_node = await self.get_node(urn)
+            if start_node:
+                collected_nodes[urn] = start_node
+
+        return LineageResult(
+            nodes=list(collected_nodes.values()),
+            edges=list(collected_edges.values()),
+            upstreamUrns=upstream_urns,
+            downstreamUrns=downstream_urns,
+            totalCount=len(collected_nodes),
+            hasMore=False,
+        )
+
+    async def get_aggregated_edges_between(
+        self, source_urns: List[str], target_urns: Optional[List[str]],
+        granularity: Any, containment_edges: List[str], lineage_edges: List[str],
+    ) -> AggregatedEdgeResult:
+        """Read pre-materialized AGGREGATED edges."""
+        ip = self._id_prop()
+
+        if target_urns:
+            cypher = (
+                f"MATCH (s)-[r:AGGREGATED]->(t) "
+                f"WHERE s.{ip} IN $sourceUrns AND t.{ip} IN $targetUrns "
+                f"AND s.{ip} <> t.{ip} "
+                f"RETURN s.{ip} AS sUrn, t.{ip} AS tUrn, "
+                f"r.weight AS weight, r.sourceEdgeTypes AS types "
+                f"ORDER BY r.weight DESC"
+            )
+            params: Dict[str, Any] = {"sourceUrns": source_urns, "targetUrns": target_urns}
+        else:
+            cypher = (
+                f"MATCH (s)-[r:AGGREGATED]->(t) "
+                f"WHERE s.{ip} IN $sourceUrns "
+                f"AND s.{ip} <> t.{ip} "
+                f"RETURN s.{ip} AS sUrn, t.{ip} AS tUrn, "
+                f"r.weight AS weight, r.sourceEdgeTypes AS types "
+                f"ORDER BY r.weight DESC"
+            )
+            params = {"sourceUrns": source_urns}
+
+        try:
+            rows = await self._run_read(cypher, params)
+        except Exception as e:
+            logger.warning("AGGREGATED edge read failed: %s", e)
+            rows = []
+
+        return self._rows_to_aggregated_result(rows)
+
+    def _rows_to_aggregated_result(self, rows: list) -> AggregatedEdgeResult:
+        aggregated = []
+        total_edges = 0
+        for row in rows:
+            w = int(row["weight"]) if row.get("weight") else 1
+            types = row.get("types")
+            edge_types = types if isinstance(types, list) else [str(types)] if types else []
+            aggregated.append(AggregatedEdgeInfo(
+                id=f"agg-{row['sUrn']}-{row['tUrn']}",
+                sourceUrn=row["sUrn"],
+                targetUrn=row["tUrn"],
+                edgeCount=w,
+                edgeTypes=edge_types,
+                confidence=1.0,
+                sourceEdgeIds=[],
+            ))
+            total_edges += w
+        return AggregatedEdgeResult(aggregatedEdges=aggregated, totalSourceEdges=total_edges)
+
+    # ================================================================== #
+    # Metadata Operations                                                  #
+    # ================================================================== #
+
+    async def get_stats(self) -> Dict[str, Any]:
+        cached = self._stats_cache.get()
+        if cached:
+            return cached
+
+        type_res = await self._run_read(
+            "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c"
+        )
+        entity_type_counts = {}
+        node_count = 0
+        for row in type_res:
+            lbl = row["lbl"] or "unknown"
+            cnt = row["c"]
+            entity_type_counts[lbl] = cnt
+            node_count += cnt
+
+        edge_type_res = await self._run_read(
+            "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"
+        )
+        edge_type_counts = {}
+        edge_count = 0
+        for row in edge_type_res:
+            t = row["t"] or "UNKNOWN"
+            cnt = row["c"]
+            edge_type_counts[t] = cnt
+            edge_count += cnt
+
+        result = {
+            "provider": "neo4j",
+            "database": self._database,
+            "nodeCount": node_count,
+            "edgeCount": edge_count,
+            "entityTypeCounts": entity_type_counts,
+            "edgeTypeCounts": edge_type_counts,
+        }
+        self._stats_cache.set(result)
+        return result
+
+    async def get_schema_stats(self) -> GraphSchemaStats:
+        name_field = self._mapping.display_name_field
+        tags_field = self._mapping.tags_field
+
+        type_res = await self._run_read(
+            f"MATCH (n) "
+            f"WITH labels(n)[0] AS lbl, n.`{name_field}` AS name "
+            f"WITH lbl, count(*) AS c, collect(name)[0..3] AS samples "
+            f"RETURN lbl, c, samples"
+        )
+
+        entity_stats = []
+        total_nodes = 0
+        for row in type_res:
+            lbl = row["lbl"] or "unknown"
+            cnt = row["c"]
+            samples = [s for s in (row["samples"] or []) if s]
+            total_nodes += cnt
+            entity_stats.append(EntityTypeSummary(id=lbl, name=lbl, count=cnt, sampleNames=samples))
+
+        edge_type_res = await self._run_read(
+            "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"
+        )
+        edge_stats = []
+        total_edges = 0
+        for row in edge_type_res:
+            t = row["t"] or "UNKNOWN"
+            cnt = row["c"]
+            edge_stats.append(EdgeTypeSummary(id=t, name=t, count=cnt))
+            total_edges += cnt
+
+        # Tag stats
+        try:
+            tag_res = await self._run_read(
+                f"MATCH (n) WHERE n.`{tags_field}` IS NOT NULL AND n.`{tags_field}` <> '[]' "
+                f"RETURN n.`{tags_field}` AS tags"
+            )
+            tag_counts: Dict[str, int] = {}
+            tag_types: Dict[str, Set[str]] = {}
+            for row in tag_res:
+                tags_raw = row["tags"]
+                try:
+                    tags = json.loads(tags_raw) if isinstance(tags_raw, str) else (tags_raw or [])
+                except Exception:
+                    continue
+                for tag in tags:
+                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
+                    if tag not in tag_types:
+                        tag_types[tag] = set()
+                    tag_types[tag].add("entity")
+            tag_stats = [
+                TagSummary(tag=t, count=c, entityTypes=list(tag_types.get(t, {"entity"})))
+                for t, c in tag_counts.items()
+            ]
+        except Exception as e:
+            logger.warning("Failed to fetch tag stats: %s", e)
+            tag_stats = []
+
+        return GraphSchemaStats(
+            totalNodes=total_nodes, totalEdges=total_edges,
+            entityTypeStats=entity_stats, edgeTypeStats=edge_stats, tagStats=tag_stats,
+        )
+
+    async def get_ontology_metadata(self) -> OntologyMetadata:
+        """Dynamic introspection — queries actual relationship types and builds
+        ontology metadata from the live database."""
+        cached = self._ontology_cache.get()
+        if cached:
+            return cached
+
+        containment = list(self._get_containment_edge_types())
+        containment_upper = {t.upper() for t in containment}
+
+        # 1. Distinct relationship types
+        type_res = await self._run_read("MATCH ()-[r]->() RETURN DISTINCT type(r) AS t")
+        all_types = [row["t"] for row in type_res]
+
+        config_lineage = os.getenv("LINEAGE_EDGE_TYPES", "").strip()
+        if config_lineage:
+            lineage_types = [t.strip() for t in config_lineage.split(",") if t.strip()]
+        else:
+            config_metadata = os.getenv("METADATA_EDGE_TYPES", "").strip()
+            metadata_types = (
+                {t.strip().upper() for t in config_metadata.split(",") if t.strip()}
+                if config_metadata else {EdgeType.TAGGED_WITH.value}
+            )
+            lineage_types = [
+                t for t in all_types
+                if t.upper() not in containment_upper
+                and t.upper() not in metadata_types
+                and t.upper() != EdgeType.AGGREGATED.value
+            ]
+
+        lineage_upper = {t.upper() for t in lineage_types}
+
+        # 2. Edge metadata
+        edge_type_metadata: Dict[str, EdgeTypeMetadata] = {}
+        for et in all_types:
+            is_containment = et.upper() in containment_upper
+            is_lineage = et.upper() in lineage_upper
+            if is_containment:
+                category = "structural"
+                direction = "child-to-parent" if et.upper() == EdgeType.BELONGS_TO.value else "parent-to-child"
+            elif is_lineage:
+                category = "flow"
+                direction = "source-to-target"
+            elif et.upper() == EdgeType.TAGGED_WITH.value:
+                category = "metadata"
+                direction = "bidirectional"
+            else:
+                category = "association"
+                direction = "bidirectional"
+            edge_type_metadata[et] = EdgeTypeMetadata(
+                isContainment=is_containment, isLineage=is_lineage,
+                direction=direction, category=category,
+                description=f"{category} relationship: {et}",
+            )
+
+        # 3. Entity hierarchy from containment edges
+        hierarchy_res = await self._run_read(
+            "MATCH (p)-[r]->(c) WHERE type(r) IN $containment "
+            "RETURN DISTINCT labels(p)[0] AS pType, labels(c)[0] AS cType, type(r) AS rType",
+            {"containment": containment},
+        )
+
+        entity_type_hierarchy: Dict[str, EntityTypeHierarchy] = {}
+        found_parent_types: Set[str] = set()
+        found_child_types: Set[str] = set()
+
+        for row in hierarchy_res:
+            p_type, c_type, r_type = row["pType"], row["cType"], row["rType"]
+            if not p_type or not c_type:
+                continue
+            meta = edge_type_metadata.get(r_type)
+            if meta and meta.direction == "child-to-parent":
+                parent_t, child_t = c_type, p_type
+            else:
+                parent_t, child_t = p_type, c_type
+
+            if parent_t not in entity_type_hierarchy:
+                entity_type_hierarchy[parent_t] = EntityTypeHierarchy(canContain=[], canBeContainedBy=[])
+            if child_t not in entity_type_hierarchy:
+                entity_type_hierarchy[child_t] = EntityTypeHierarchy(canContain=[], canBeContainedBy=[])
+
+            if child_t not in entity_type_hierarchy[parent_t].can_contain:
+                entity_type_hierarchy[parent_t].can_contain.append(child_t)
+            if parent_t not in entity_type_hierarchy[child_t].can_be_contained_by:
+                entity_type_hierarchy[child_t].can_be_contained_by.append(parent_t)
+
+            found_parent_types.add(parent_t)
+            found_child_types.add(child_t)
+
+        root_entity_types = list(found_parent_types - found_child_types)
+
+        result = OntologyMetadata(
+            containmentEdgeTypes=containment,
+            lineageEdgeTypes=lineage_types,
+            edgeTypeMetadata=edge_type_metadata,
+            entityTypeHierarchy=entity_type_hierarchy,
+            rootEntityTypes=root_entity_types,
+        )
+        self._ontology_cache.set(result)
+        return result
+
+    async def get_distinct_values(self, property_name: str) -> List[Any]:
+        if property_name in ("entityType", "entitytype"):
+            if self._mapping.entity_type_strategy == "label":
+                rows = await self._run_read("MATCH (n) RETURN DISTINCT labels(n)[0] AS lbl")
+                return [row["lbl"] for row in rows if row["lbl"]]
+            else:
+                et_field = self._mapping.entity_type_field or "entityType"
+                rows = await self._run_read(
+                    f"MATCH (n) WHERE n.`{et_field}` IS NOT NULL "
+                    f"RETURN DISTINCT n.`{et_field}` AS v LIMIT 100"
+                )
+                return [row["v"] for row in rows]
+
+        if property_name == "tags":
+            tags_field = self._mapping.tags_field
+            rows = await self._run_read(
+                f"MATCH (n) WHERE n.`{tags_field}` IS NOT NULL RETURN n.`{tags_field}` AS tags"
+            )
+            seen: Set[str] = set()
+            for row in rows:
+                raw = row["tags"]
+                try:
+                    tags = json.loads(raw) if isinstance(raw, str) else (raw or [])
+                    for t in tags:
+                        seen.add(t)
+                except Exception:
+                    pass
+            return list(seen)
+
+        mapped = self._mapping.cypher_field(property_name)
+        safe_prop = _sanitize_label(mapped) or "urn"
+        try:
+            rows = await self._run_read(
+                f"MATCH (n) WHERE n.`{safe_prop}` IS NOT NULL "
+                f"RETURN DISTINCT n.`{safe_prop}` AS v LIMIT 100"
+            )
+            return [row["v"] for row in rows]
+        except Exception:
+            return []
+
+    # ================================================================== #
+    # Ancestor / Descendant Chains                                         #
+    # ================================================================== #
+
+    async def _compute_ancestor_chain(self, urn: str) -> List[str]:
+        """Single Cypher to walk containment edges upward."""
+        ip = self._id_prop()
+        containment = list(self._get_containment_edge_types())
+        if not containment:
+            # No containment types — flat graph, no ancestors
+            return []
+        containment_cypher = "|".join(f"`{_sanitize_label(t)}`" for t in containment)
+
+        rows = await self._run_read(
+            f"MATCH path = (child)<-[:{containment_cypher}*1..10]-(ancestor) "
+            f"WHERE child.{ip} = $urn "
+            f"WITH path ORDER BY length(path) DESC LIMIT 1 "
+            f"RETURN [n IN nodes(path)[1..] | n.{ip}] AS chain",
+            {"urn": urn},
+        )
+        if rows and rows[0].get("chain"):
+            return rows[0]["chain"]
+        return []
+
+    async def _get_ancestor_chain(self, urn: str) -> List[str]:
+        """Get ancestor chain with optional Redis caching."""
+        await self._ensure_redis()
+        if self._redis_available and self._redis:
+            cache_key = f"{self._database}:ancestors"
+            try:
+                raw = await self._redis.hget(cache_key, urn)
+                if raw:
+                    return json.loads(raw)
+            except Exception:
+                pass
+
+            ancestors = await self._compute_ancestor_chain(urn)
+            try:
+                await self._redis.hset(cache_key, urn, json.dumps(ancestors))
+            except Exception:
+                pass
+            return ancestors
+
+        # No Redis — compute on the fly
+        return await self._compute_ancestor_chain(urn)
+
+    async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+        chain = await self._get_ancestor_chain(urn)
+        chain = chain[offset:offset + limit]
+        if not chain:
+            return []
+        nodes = await self.get_nodes(NodeQuery(urns=chain, limit=len(chain), include_child_count=False))
+        urn_to_node = {n.urn: n for n in nodes}
+        return [urn_to_node[u] for u in chain if u in urn_to_node]
+
+    async def get_descendants(
+        self, urn: str, depth: int = 5,
+        entity_types: Optional[List[EntityType]] = None,
+        limit: int = 100, offset: int = 0,
+    ) -> List[GraphNode]:
+        ip = self._id_prop()
+        containment = list(self._get_containment_edge_types())
+        if not containment:
+            # No containment types — flat graph, no descendants
+            return []
+        containment_cypher = "|".join(f"`{_sanitize_label(t)}`" for t in containment)
+
+        conditions = [f"root.{ip} = $urn"]
+        params: Dict[str, Any] = {"urn": urn, "skip": offset, "lim": limit}
+
+        if entity_types:
+            types = [t.value if hasattr(t, "value") else str(t) for t in entity_types]
+            params["entityTypes"] = [t.lower() for t in types]
+            if self._mapping.entity_type_strategy == "label":
+                conditions.append("toLower(labels(desc)[0]) IN $entityTypes")
+            else:
+                et_field = self._mapping.entity_type_field or "entityType"
+                conditions.append(f"toLower(desc.`{et_field}`) IN $entityTypes")
+
+        where = " AND ".join(conditions)
+        cypher = (
+            f"MATCH (root)-[:{containment_cypher}*1..{depth}]->(desc) "
+            f"WHERE {where} "
+            f"RETURN DISTINCT desc SKIP $skip LIMIT $lim"
+        )
+
+        try:
+            rows = await self._run_read(cypher, params)
+        except Exception as e:
+            logger.warning("get_descendants query failed: %s", e)
+            return []
+
+        nodes = []
+        for row in rows:
+            n = self._extract_node_from_record(row["desc"])
+            if n:
+                nodes.append(n)
+        return nodes
+
+    # ================================================================== #
+    # Tag / Layer Filtering                                                #
+    # ================================================================== #
+
+    async def get_nodes_by_tag(self, tag: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+        tags_field = self._mapping.tags_field
+        tag_pattern = json.dumps(tag)
+        rows = await self._run_read(
+            f"MATCH (n) WHERE n.`{tags_field}` IS NOT NULL AND n.`{tags_field}` CONTAINS $tag "
+            f"RETURN n SKIP $skip LIMIT $limit",
+            {"tag": tag_pattern, "skip": offset, "limit": limit},
+        )
+        nodes = []
+        for row in rows:
+            n = self._extract_node_from_record(row["n"])
+            if n and tag in (n.tags or []):
+                nodes.append(n)
+        return nodes
+
+    async def get_nodes_by_layer(self, layer_id: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+        layer_field = self._mapping.layer_field
+        rows = await self._run_read(
+            f"MATCH (n) WHERE n.`{layer_field}` = $lid RETURN n SKIP $skip LIMIT $limit",
+            {"lid": layer_id, "skip": offset, "limit": limit},
+        )
+        nodes = []
+        for row in rows:
+            n = self._extract_node_from_record(row["n"])
+            if n:
+                nodes.append(n)
+        return nodes
+
+    # ================================================================== #
+    # Write Operations                                                     #
+    # ================================================================== #
+
+    async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:
+        """Batch-save nodes and edges using UNWIND, grouped by label.
+
+        Uses mapped property names so data round-trips correctly through
+        the schema mapping layer.
+        """
+        batch_size = 500
+        ip = self._id_prop()
+
+        # Group nodes by label
+        nodes_by_label: Dict[str, list] = defaultdict(list)
+        for node in nodes:
+            label = _sanitize_label(str(node.entity_type))
+            nodes_by_label[label].append(self._node_to_write_props(node))
+
+        label_mapping = {}
+        for label, items in nodes_by_label.items():
+            for item in items:
+                label_mapping[item[self._mapping.identity_field]] = label
+
+            # Build SET clause dynamically from mapped field names
+            # All fields in the item dict except the identity field
+            set_fields = [
+                f"n.`{k}` = item.`{k}`"
+                for k in items[0].keys()
+                if k != self._mapping.identity_field
+            ]
+            set_clause = ", ".join(set_fields)
+
+            for i in range(0, len(items), batch_size):
+                batch = items[i:i + batch_size]
+                try:
+                    await self._run_write(
+                        f"UNWIND $batch AS item "
+                        f"MERGE (n:`{label}` {{{ip}: item.{ip}}}) "
+                        f"SET {set_clause}",
+                        {"batch": batch},
+                    )
+                except Exception as e:
+                    logger.warning("Batch node merge failed for label %s: %s", label, e)
+        self._urn_cache.put_bulk(label_mapping)
+
+        # Group edges by relationship type
+        edges_by_type: Dict[str, list] = defaultdict(list)
+        for edge in edges:
+            rel_type = _sanitize_label(str(edge.edge_type))
+            edges_by_type[rel_type].append({
+                "src": edge.source_urn,
+                "tgt": edge.target_urn,
+                "eid": edge.id,
+                "conf": edge.confidence,
+                "props": json.dumps(edge.properties),
+            })
+
+        for rel_type, items in edges_by_type.items():
+            for i in range(0, len(items), batch_size):
+                batch = items[i:i + batch_size]
+                try:
+                    await self._run_write(
+                        f"UNWIND $batch AS item "
+                        f"MATCH (a {{{ip}: item.src}}) "
+                        f"MATCH (b {{{ip}: item.tgt}}) "
+                        f"MERGE (a)-[r:`{rel_type}`]->(b) "
+                        f"SET r.id = item.eid, r.confidence = item.conf, "
+                        f"r.properties = item.props",
+                        {"batch": batch},
+                    )
+                except Exception as e:
+                    logger.warning("Batch edge merge failed for type %s: %s", rel_type, e)
+
+        return True
+
+    async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
+        ip = self._id_prop()
+        try:
+            label = _sanitize_label(str(node.entity_type))
+            props = self._node_to_write_props(node)
+            await self._run_write(
+                f"MERGE (n:`{label}` {{{ip}: $urn}}) SET n += $p",
+                {"urn": node.urn, "p": props},
+            )
+            self._urn_cache.put(node.urn, label)
+
+            if containment_edge:
+                rel_type = _sanitize_label(str(containment_edge.edge_type))
+                await self._run_write(
+                    f"MATCH (a {{{ip}: $src}}) MATCH (b {{{ip}: $tgt}}) "
+                    f"MERGE (a)-[r:`{rel_type}`]->(b) "
+                    f"SET r.id = $eid, r.confidence = $conf",
+                    {
+                        "src": containment_edge.source_urn,
+                        "tgt": containment_edge.target_urn,
+                        "eid": containment_edge.id,
+                        "conf": containment_edge.confidence,
+                    },
+                )
+            return True
+        except Exception as e:
+            logger.error("create_node failed: %s", e)
+            return False
+
+    # ================================================================== #
+    # Projection / Materialization Lifecycle Hooks                         #
+    # ================================================================== #
+
+    async def ensure_projections(self) -> None:
+        """Create index for AGGREGATED edge lookups."""
+        ip = self._id_prop()
+        safe_id = _sanitize_label(self._mapping.identity_field)
+        try:
+            await self._run_write(
+                f"CREATE INDEX idx_projection_{safe_id} IF NOT EXISTS "
+                f"FOR (n:_Projection) ON (n.{ip})"
+            )
+        except Exception:
+            pass
+
+    async def on_lineage_edge_written(
+        self, source_urn: str, target_urn: str, edge_id: str, edge_type: str,
+    ) -> None:
+        """Materialize AGGREGATED edges using ancestor chains.
+
+        Idempotent: tracks contributing leaf edges in ``r.sourceEdgeIds``.
+        Calling twice with the same ``edge_id`` does not change the weight.
+        Weight is always ``size(r.sourceEdgeIds)`` — the true count of
+        distinct contributing edges.
+        """
+        ip = self._id_prop()
+        s_ancestors = await self._get_ancestor_chain(source_urn)
+        t_ancestors = await self._get_ancestor_chain(target_urn)
+
+        s_chain = [source_urn] + s_ancestors
+        t_chain = [target_urn] + t_ancestors
+
+        merge_batch = []
+        for s_urn in s_chain:
+            for t_urn in t_chain:
+                if s_urn != t_urn:
+                    merge_batch.append({"s": s_urn, "t": t_urn, "eid": edge_id})
+
+        if not merge_batch:
+            return
+
+        try:
+            await self._run_write(
+                f"UNWIND $batch AS item "
+                f"MERGE (s {{{ip}: item.s}}) "
+                f"MERGE (t {{{ip}: item.t}}) "
+                f"MERGE (s)-[r:AGGREGATED]->(t) "
+                f"ON CREATE SET "
+                f"  r.sourceEdgeIds = [item.eid], "
+                f"  r.weight = 1, "
+                f"  r.sourceEdgeTypes = [$edgeType], "
+                f"  r.latestUpdate = timestamp() "
+                f"ON MATCH SET "
+                f"  r.sourceEdgeIds = CASE "
+                f"    WHEN item.eid IN coalesce(r.sourceEdgeIds, []) THEN r.sourceEdgeIds "
+                f"    ELSE coalesce(r.sourceEdgeIds, []) + item.eid END, "
+                f"  r.weight = size(CASE "
+                f"    WHEN item.eid IN coalesce(r.sourceEdgeIds, []) THEN r.sourceEdgeIds "
+                f"    ELSE coalesce(r.sourceEdgeIds, []) + item.eid END), "
+                f"  r.sourceEdgeTypes = CASE "
+                f"    WHEN $edgeType IN coalesce(r.sourceEdgeTypes, []) THEN r.sourceEdgeTypes "
+                f"    ELSE coalesce(r.sourceEdgeTypes, []) + $edgeType END, "
+                f"  r.latestUpdate = timestamp()",
+                {"batch": merge_batch, "edgeType": edge_type},
+            )
+        except Exception as e:
+            logger.error("Batched AGGREGATED MERGE failed: %s", e)
+
+    async def on_lineage_edge_deleted(
+        self, source_urn: str, target_urn: str, edge_id: str,
+    ) -> None:
+        """Remove a contributing edge from AGGREGATED relationships.
+
+        Scoped to affected pairs only — no full-graph scan. Removes the
+        ``edge_id`` from ``r.sourceEdgeIds``, recomputes weight, and
+        deletes the AGGREGATED edge when no contributing edges remain.
+        """
+        ip = self._id_prop()
+        s_ancestors = await self._get_ancestor_chain(source_urn)
+        t_ancestors = await self._get_ancestor_chain(target_urn)
+
+        s_chain = [source_urn] + s_ancestors
+        t_chain = [target_urn] + t_ancestors
+
+        pairs = [{"s": s, "t": t} for s in s_chain for t in t_chain if s != t]
+        if not pairs:
+            return
+
+        try:
+            await self._run_write(
+                f"UNWIND $batch AS item "
+                f"MATCH (s {{{ip}: item.s}})-[r:AGGREGATED]->(t {{{ip}: item.t}}) "
+                f"SET r.sourceEdgeIds = [eid IN coalesce(r.sourceEdgeIds, []) WHERE eid <> $edgeId], "
+                f"    r.weight = size([eid IN coalesce(r.sourceEdgeIds, []) WHERE eid <> $edgeId]), "
+                f"    r.latestUpdate = timestamp() "
+                f"WITH r WHERE r.weight <= 0 "
+                f"DELETE r",
+                {"batch": pairs, "edgeId": edge_id},
+            )
+        except Exception as e:
+            logger.error("Batched AGGREGATED decrement failed: %s", e)
+
+    async def on_containment_changed(self, urn: str) -> None:
+        """Invalidate ancestor cache for a node and its descendants."""
+        await self._ensure_redis()
+        if not self._redis_available or not self._redis:
+            return  # No cache to invalidate
+
+        ip = self._id_prop()
+        cache_key = f"{self._database}:ancestors"
+        containment = list(self._get_containment_edge_types())
+
+        if not containment:
+            # No containment types — only invalidate the node itself
+            try:
+                await self._redis.hdel(cache_key, urn)
+            except Exception:
+                pass
+            logger.info("Invalidated ancestor cache for 1 node (no containment types): %s", urn)
+            return
+
+        # Single query to find all descendants instead of N+1 BFS
+        containment_cypher = "|".join(f"`{_sanitize_label(t)}`" for t in containment)
+        try:
+            rows = await self._run_read(
+                f"MATCH (root)-[:{containment_cypher}*0..10]->(desc) "
+                f"WHERE root.{ip} = $urn "
+                f"RETURN DISTINCT desc.{ip} AS durn",
+                {"urn": urn},
+            )
+            urns_to_invalidate = [row["durn"] for row in rows if row["durn"]]
+        except Exception:
+            urns_to_invalidate = [urn]
+
+        # Batch invalidate in Redis
+        try:
+            if urns_to_invalidate:
+                await self._redis.hdel(cache_key, *urns_to_invalidate)
+        except Exception:
+            pass
+
+        logger.info("Invalidated ancestor cache for %d nodes under %s", len(urns_to_invalidate), urn)
+
+    # ================================================================== #
+    # Provider Registry Lifecycle                                          #
+    # ================================================================== #
+
+    async def list_graphs(self) -> List[str]:
+        """Return available Neo4j database names (excludes system DB)."""
+        driver = await self._get_driver()
+        try:
+            async with driver.session(database="system") as session:
+                result = await session.run("SHOW DATABASES YIELD name")
+                records = await result.data()
+            return [r["name"] for r in records if r["name"] != "system"]
+        except Exception as e:
+            logger.warning("list_graphs (SHOW DATABASES) failed: %s", e)
+            return []
+
+    # ================================================================== #
+    # Schema Discovery                                                     #
+    # ================================================================== #
+
+    async def discover_schema(self) -> Dict[str, Any]:
+        """Introspect the Neo4j database and return labels, relationship types,
+        property keys, sample data, and a suggested schema mapping.
+
+        Uses aggregation queries to avoid N+1 per-label round-trips.
+        """
+        try:
+            # Labels
+            label_rows = await self._run_read("CALL db.labels() YIELD label RETURN label")
+            labels = [row["label"] for row in label_rows]
+
+            # Relationship types
+            rel_rows = await self._run_read(
+                "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"
+            )
+            rel_types = [row["relationshipType"] for row in rel_rows]
+
+            # Count + samples per label in a single aggregation query
+            label_stats_rows = await self._run_read(
+                "MATCH (n) "
+                "WITH labels(n)[0] AS lbl, properties(n) AS props "
+                "WITH lbl, count(*) AS cnt, collect(props)[0..3] AS samples "
+                "RETURN lbl, cnt, samples"
+            )
+
+            label_details: Dict[str, Any] = {}
+            for row in label_stats_rows:
+                lbl = row["lbl"]
+                if not lbl:
+                    continue
+                sample_list = row["samples"] or []
+                all_keys: Set[str] = set()
+                for s in sample_list:
+                    if isinstance(s, dict):
+                        all_keys.update(s.keys())
+                label_details[lbl] = {
+                    "count": row["cnt"],
+                    "propertyKeys": sorted(all_keys),
+                    "samples": sample_list,
+                }
+
+            # Fill in any labels that had no nodes
+            for lbl in labels:
+                if lbl not in label_details:
+                    label_details[lbl] = {"count": 0, "propertyKeys": [], "samples": []}
+
+            suggested = self._suggest_mapping(label_details)
+
+            return {
+                "labels": labels,
+                "relationshipTypes": rel_types,
+                "labelDetails": label_details,
+                "suggestedMapping": suggested,
+            }
+        except Exception as e:
+            logger.error("discover_schema failed: %s", e)
+            return {}
+
+    @staticmethod
+    def _suggest_mapping(label_details: Dict[str, Any]) -> Dict[str, Any]:
+        """Heuristic mapping suggestion based on observed property keys."""
+        all_keys: Set[str] = set()
+        for detail in label_details.values():
+            all_keys.update(detail.get("propertyKeys", []))
+
+        mapping: Dict[str, str] = {}
+
+        # Identity field
+        for candidate in ("urn", "uuid", "id", "uri", "identifier", "nodeId"):
+            if candidate in all_keys:
+                mapping["identity_field"] = candidate
+                break
+
+        # Display name
+        for candidate in ("displayName", "name", "title", "label", "display_name"):
+            if candidate in all_keys:
+                mapping["display_name_field"] = candidate
+                break
+
+        # Qualified name
+        for candidate in ("qualifiedName", "qualified_name", "fqn", "fullName", "full_name"):
+            if candidate in all_keys:
+                mapping["qualified_name_field"] = candidate
+                break
+
+        # Description
+        for candidate in ("description", "desc", "summary", "about"):
+            if candidate in all_keys:
+                mapping["description_field"] = candidate
+                break
+
+        # Tags
+        for candidate in ("tags", "labels", "categories"):
+            if candidate in all_keys:
+                mapping["tags_field"] = candidate
+                break
+
+        return mapping
