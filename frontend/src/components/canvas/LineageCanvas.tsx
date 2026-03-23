@@ -162,9 +162,9 @@ export function LineageCanvas() {
 
   // Track if we've applied initial layout
   const hasAppliedInitialLayout = useRef(false)
+  const fitViewTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [layoutedNodes, setLayoutedNodes] = useState<LineageNode[]>([])
 
-  // Apply ELK layout when visible nodes change
   // Apply ELK layout when visible nodes change
   // Optimization: Check for structural changes to prevent infinite loops
   const prevNodeSignature = useRef<string>('')
@@ -173,6 +173,29 @@ export function LineageCanvas() {
   const stableNodeRef = useRef<{ id: string, x: number, y: number } | null>(null)
   const prevFocusId = useRef<string | null>(null)
   const shouldCenterOnFocus = useRef(false)
+
+  // Debounced fitView: schedules a fitView after layout settles.
+  // Cancels previous timer so rapid layout changes (roots → full graph)
+  // only trigger one fitView after the final layout completes.
+  // hasAppliedInitialLayout is set true INSIDE the timer callback so that
+  // if layout runs twice before the timer fires, the second run resets the
+  // timer and only the final layout triggers fitView.
+  const scheduleFitView = useCallback(() => {
+    if (!rfInstance) return
+    if (fitViewTimer.current) clearTimeout(fitViewTimer.current)
+    fitViewTimer.current = setTimeout(() => {
+      rfInstance.fitView({ padding: 0.2, duration: 300 })
+      hasAppliedInitialLayout.current = true
+      fitViewTimer.current = null
+    }, 250)
+  }, [rfInstance])
+
+  // If rfInstance arrives after layout already completed, fit now
+  useEffect(() => {
+    if (rfInstance && layoutedNodes.length > 0 && !hasAppliedInitialLayout.current) {
+      scheduleFitView()
+    }
+  }, [rfInstance, layoutedNodes, scheduleFitView])
 
   // Track focus changes
   useEffect(() => {
@@ -210,10 +233,21 @@ export function LineageCanvas() {
     prevExpandedIds.current = expandedIds
   }, [expandedIds, rfInstance])
 
-  useEffect(() => {
-    const nodesToLayout = visibleNodes.length > 0 ? visibleNodes : rawNodes
-    const edgesToLayout = visibleEdges.length > 0 ? visibleEdges : rawEdges
+  // Stable ref for scheduleFitView so it doesn't trigger the layout effect
+  const scheduleFitViewRef = useRef(scheduleFitView)
+  scheduleFitViewRef.current = scheduleFitView
 
+  // Compute a stable signature string so the effect only fires when the
+  // actual node/edge set changes, not on every new array reference.
+  const nodesToLayout = visibleNodes.length > 0 ? visibleNodes : rawNodes
+  const edgesToLayout = visibleEdges.length > 0 ? visibleEdges : rawEdges
+  const layoutSignature = useMemo(() => {
+    const nodeIds = nodesToLayout.map(n => n.id).sort().join(',')
+    const edgeIds = edgesToLayout.map(e => e.id).sort().join(',')
+    return `${nodeIds}|${edgeIds}|${direction}`
+  }, [nodesToLayout, edgesToLayout, direction])
+
+  useEffect(() => {
     // Don't auto-layout if editing (manual mode)
     if (isEditing && nodesToLayout.length > 0) {
       return
@@ -224,18 +258,14 @@ export function LineageCanvas() {
       return
     }
 
-    // Generate specific signature for layout-relevant properties
-    // We only care about IDs and adjacency, not all properties
-    const nodeIds = nodesToLayout.map(n => n.id).sort().join(',')
-    const edgeIds = edgesToLayout.map(e => e.id).sort().join(',')
-    const signature = `${nodeIds}|${edgeIds}|${direction}`
-
     // If signature hasn't changed, skip layout
-    if (signature === prevNodeSignature.current) {
+    if (layoutSignature === prevNodeSignature.current) {
       return
     }
 
-    prevNodeSignature.current = signature
+    prevNodeSignature.current = layoutSignature
+
+    console.log('[LineageCanvas] Layout effect: applying ELK for', nodesToLayout.length, 'nodes')
 
     // Apply layout
     applyLayout(nodesToLayout, edgesToLayout).then((positioned) => {
@@ -250,24 +280,20 @@ export function LineageCanvas() {
 
           if (dx !== 0 || dy !== 0) {
             const { x, y, zoom } = rfInstance.getViewport()
-            // Pan viewport to keep node stationary relative to screen (account for zoom!)
             rfInstance.setViewport({ x: x - (dx * zoom), y: y - (dy * zoom), zoom })
-            console.log(`[Layout] Stabilized viewport on node ${id}, shifted by ${dx}, ${dy}`)
           }
         }
-        stableNodeRef.current = null // Reset
+        stableNodeRef.current = null
       }
 
-      // 2. Focus Logic: Center on new focus node
+      // Focus Logic: Center on new focus node
       if (shouldCenterOnFocus.current && rfInstance && focusEntityId) {
         const focusNode = positioned.find(n => n.id === focusEntityId)
         if (focusNode) {
-          // Fit view to this node with some padding
           rfInstance.fitView({
             nodes: [{
               id: focusNode.id,
               position: focusNode.position,
-              // Fallback dimensions if not measured yet
               width: focusNode.measured?.width ?? focusNode.width ?? 200,
               height: focusNode.measured?.height ?? focusNode.height ?? 80
             }],
@@ -281,9 +307,13 @@ export function LineageCanvas() {
       }
 
       setLayoutedNodes(positioned as LineageNode[])
-      hasAppliedInitialLayout.current = true
+
+      if (!hasAppliedInitialLayout.current) {
+        scheduleFitViewRef.current()
+      }
     })
-  }, [visibleNodes, visibleEdges, rawNodes, rawEdges, applyLayout, direction, rfInstance])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layoutSignature, applyLayout, rfInstance])
 
   // Use layouted nodes or fall back to raw/visible
   const baseDisplayNodes = layoutedNodes.length > 0 ? layoutedNodes :
