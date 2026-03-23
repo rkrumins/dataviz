@@ -220,20 +220,23 @@ async def get_graph_stats(
     # Try fetching from cache first
     ds_id = dataSourceId or engine._data_source_id
     if ds_id:
-        stats_cache = await get_data_source_stats(session, ds_id)
-        if stats_cache:
-            try:
+        try:
+            stats_cache = await get_data_source_stats(session, ds_id)
+            if stats_cache:
                 return {
                     "nodeCount": stats_cache.node_count,
                     "edgeCount": stats_cache.edge_count,
                     "entityTypeCounts": json.loads(stats_cache.entity_type_counts),
                     "edgeTypeCounts": json.loads(stats_cache.edge_type_counts)
                 }
-            except Exception:
-                pass # Fallback to runtime if JSON fails
-    
-    # Fallback to runtime
-    return await engine.get_stats()
+        except Exception:
+            pass  # Cache lookup or parse failed — fall through to provider
+
+    # Fallback to runtime — wrap so a hung provider returns 503 instead of hanging
+    try:
+        return await engine.get_stats()
+    except Exception as exc:
+        raise HTTPException(503, detail=f"Graph provider unavailable and no cached data: {exc}")
 
 
 @router.get("/nodes", response_model=List[GraphNode], response_model_by_alias=True,
@@ -407,14 +410,17 @@ async def get_graph_introspection(
     
     ds_id = dataSourceId or engine._data_source_id
     if ds_id:
-        stats_cache = await get_data_source_stats(session, ds_id)
-        if stats_cache and stats_cache.schema_stats and stats_cache.schema_stats != "{}":
-            try:
+        try:
+            stats_cache = await get_data_source_stats(session, ds_id)
+            if stats_cache and stats_cache.schema_stats and stats_cache.schema_stats != "{}":
                 return GraphSchemaStats.model_validate(json.loads(stats_cache.schema_stats))
-            except Exception:
-                pass
-                
-    return await engine.get_schema_stats()
+        except Exception:
+            pass  # Cache lookup or parse failed — fall through to provider
+
+    try:
+        return await engine.get_schema_stats()
+    except Exception as exc:
+        raise HTTPException(503, detail=f"Graph provider unavailable and no cached data: {exc}")
 
 
 @router.get("/metadata/ontology", deprecated=True)
@@ -433,22 +439,24 @@ async def get_ontology_metadata(
     
     ds_id = dataSourceId or engine._data_source_id
     if ds_id:
-        stats_cache = await get_data_source_stats(session, ds_id)
-        if stats_cache and stats_cache.ontology_metadata and stats_cache.ontology_metadata != "{}":
-            try:
-                # Assuming the string is already a valid JSON structure from the Pydantic dump
+        try:
+            stats_cache = await get_data_source_stats(session, ds_id)
+            if stats_cache and stats_cache.ontology_metadata and stats_cache.ontology_metadata != "{}":
                 return JSONResponse(
                     content=json.loads(stats_cache.ontology_metadata),
                     headers={"Cache-Control": "private, max-age=300"},
                 )
-            except Exception:
-                pass
+        except Exception:
+            pass  # Cache lookup or parse failed — fall through to provider
 
-    result = await engine.get_ontology_metadata()
-    return JSONResponse(
-        content=result.model_dump(by_alias=True),
-        headers={"Cache-Control": "private, max-age=300"},
-    )
+    try:
+        result = await engine.get_ontology_metadata()
+        return JSONResponse(
+            content=result.model_dump(by_alias=True),
+            headers={"Cache-Control": "private, max-age=300"},
+        )
+    except Exception as exc:
+        raise HTTPException(503, detail=f"Graph provider unavailable and no cached data: {exc}")
 
 
 @router.get("/metadata/schema")
@@ -467,21 +475,24 @@ async def get_graph_schema(
     
     ds_id = dataSourceId or engine._data_source_id
     if ds_id:
-        stats_cache = await get_data_source_stats(session, ds_id)
-        if stats_cache and stats_cache.graph_schema and stats_cache.graph_schema != "{}":
-            try:
+        try:
+            stats_cache = await get_data_source_stats(session, ds_id)
+            if stats_cache and stats_cache.graph_schema and stats_cache.graph_schema != "{}":
                 return JSONResponse(
                     content=json.loads(stats_cache.graph_schema),
                     headers={"Cache-Control": "private, max-age=300"},
                 )
-            except Exception:
-                pass
+        except Exception:
+            pass  # Cache lookup or parse failed — fall through to provider
 
-    result = await engine.get_graph_schema()
-    return JSONResponse(
-        content=result.model_dump(by_alias=True),
-        headers={"Cache-Control": "private, max-age=300"},
-    )
+    try:
+        result = await engine.get_graph_schema()
+        return JSONResponse(
+            content=result.model_dump(by_alias=True),
+            headers={"Cache-Control": "private, max-age=300"},
+        )
+    except Exception as exc:
+        raise HTTPException(503, detail=f"Graph provider unavailable and no cached data: {exc}")
 
 
 @router.post("/edges/aggregated", response_model=AggregatedEdgeResult, response_model_by_alias=True)

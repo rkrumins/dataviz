@@ -50,7 +50,7 @@ export function useGraphSchema() {
     queryFn: () => fetchGraphSchema(provider),
     staleTime: 5 * 60 * 1000,   // 5 minutes — matches backend _ONTOLOGY_CACHE_TTL
     gcTime: 10 * 60 * 1000,     // 10 minutes garbage collection
-    retry: 2,
+    retry: 1,
     refetchOnWindowFocus: false,
   })
 

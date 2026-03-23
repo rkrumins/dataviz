@@ -107,9 +107,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
     }
 
     private async _doFetch<T>(url: string, fetchOptions: RequestInit, method: string, cacheKey: string): Promise<T> {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 25_000)
         try {
             const response = await fetch(url, {
                 ...fetchOptions,
+                signal: controller.signal,
                 headers: {
                     'Content-Type': 'application/json',
                     ...fetchOptions?.headers,
@@ -129,7 +132,13 @@ export class RemoteGraphProvider implements GraphDataProvider {
             }
 
             return data
+        } catch (err) {
+            if (err instanceof DOMException && err.name === 'AbortError') {
+                throw new Error(`Request timed out: ${method} ${url}`)
+            }
+            throw err
         } finally {
+            clearTimeout(timer)
             this._inflight.delete(cacheKey)
         }
     }

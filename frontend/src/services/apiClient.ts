@@ -18,13 +18,23 @@ export async function authFetch<T>(url: string, init?: RequestInit): Promise<T> 
         headers['Authorization'] = `Bearer ${token}`
     }
 
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 20_000)
+
     let res: Response
     try {
-        res = await fetch(url, { ...init, headers })
+        res = await fetch(url, { ...init, headers, signal: controller.signal })
     } catch (err) {
+        clearTimeout(timer)
+        if (err instanceof DOMException && err.name === 'AbortError') {
+            const timeoutErr = new Error('Request timed out')
+            useHealthStore.getState().reportFailure(timeoutErr)
+            throw timeoutErr
+        }
         useHealthStore.getState().reportFailure(err)
         throw err
     }
+    clearTimeout(timer)
 
     if (res.status === 401) {
         useAuthStore.getState().logout()

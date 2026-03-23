@@ -156,7 +156,13 @@ async def scheduled_polling_loop():
                 
             if tasks:
                 logger.info(f"Executing {len(tasks)} polling tasks...")
-                await asyncio.gather(*tasks)
+                results = await asyncio.gather(
+                    *[asyncio.wait_for(t, timeout=60) for t in tasks],
+                    return_exceptions=True,
+                )
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error("Polling task failed: %s", result)
                     
         except Exception as e:
             logger.error(f"Error in polling orchestration loop: {e}", exc_info=True)
