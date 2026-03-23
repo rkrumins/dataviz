@@ -1,0 +1,46 @@
+{
+  "analytics_graph": {
+    "nodes": 0,
+    "edges": 0
+  },
+  "backup_nexus_graph": {
+    "nodes": 1996,
+    "edges": 6065
+  },
+  "data_lake": {
+    "nodes": 0,
+    "edges": 0
+  },
+  "physical_lineage5": {
+    "nodes": 67870,
+    "edges": 128796
+  },
+  "physical_lineage4": {
+    "nodes": 4358,
+    "edges": 8368
+  },
+  "physical_lineage2": {
+    "nodes": 603,
+    "edges": 1121
+  },
+  "physical_lineage3": {
+    "nodes": 603,
+    "edges": 1121
+  },
+  "nexus_lineage": {
+    "nodes": 1996,
+    "edges": 6065
+  },
+  "data_manager": {
+    "nodes": 0,
+    "edges": 0
+  },
+  "lake_lineage_small": {
+    "nodes": 0,
+    "edges": 0
+  },
+  "physical_lineage": {
+    "nodes": 405,
+    "edges": 742
+  }
+}

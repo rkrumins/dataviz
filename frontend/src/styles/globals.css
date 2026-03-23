@@ -1,0 +1,476 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================
+   NEXUS LINEAGE DESIGN SYSTEM
+   Adaptive Modern Theme with Glassmorphism
+   ============================================ */
+
+@layer base {
+  :root {
+    /* === Color Primitives === */
+    --nx-bg-canvas: #fafbfc;
+    --nx-bg-elevated: #ffffff;
+    --nx-bg-overlay: rgba(255, 255, 255, 0.95);
+    --nx-bg-glass: rgba(255, 255, 255, 0.72);
+    --nx-border-glass: rgba(255, 255, 255, 0.4);
+    --nx-border-subtle: rgba(0, 0, 0, 0.08);
+    
+    /* Text */
+    --nx-text-primary: #1a1d21;
+    --nx-text-secondary: #4a5568;
+    --nx-text-muted: #8898a9;
+    --nx-text-inverse: #ffffff;
+    
+    /* Accent Palette */
+    --nx-accent-lineage: #6366f1;
+    --nx-accent-lineage-soft: rgba(99, 102, 241, 0.12);
+    --nx-accent-business: #10b981;
+    --nx-accent-business-soft: rgba(16, 185, 129, 0.12);
+    --nx-accent-technical: #f59e0b;
+    --nx-accent-technical-soft: rgba(245, 158, 11, 0.12);
+    --nx-accent-warning: #ef4444;
+    --nx-accent-warning-soft: rgba(239, 68, 68, 0.12);
+    --nx-accent-muted: #64748b;
+    
+    /* Glassmorphism */
+    --nx-glass-blur: 16px;
+    --nx-glass-saturation: 180%;
+    
+    /* Ghost node color — other node colors are defined in ontology definitions */
+    --nx-node-ghost: #94a3b8;
+    
+    /* Shadows */
+    --nx-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+    --nx-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+    --nx-shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.12);
+    --nx-shadow-glow: 0 0 24px rgba(99, 102, 241, 0.4);
+  }
+
+  .dark {
+    --nx-bg-canvas: #0d1117;
+    --nx-bg-elevated: #161b22;
+    --nx-bg-overlay: rgba(22, 27, 34, 0.95);
+    --nx-bg-glass: rgba(30, 35, 45, 0.78);
+    --nx-border-glass: rgba(255, 255, 255, 0.06);
+    --nx-border-subtle: rgba(255, 255, 255, 0.08);
+    
+    --nx-text-primary: #e6edf3;
+    --nx-text-secondary: #8b949e;
+    --nx-text-muted: #6e7681;
+    --nx-text-inverse: #0d1117;
+    
+    --nx-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --nx-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+    --nx-shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
+  }
+
+  /* === Base Styles === */
+  html {
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  body {
+    @apply bg-canvas text-ink antialiased;
+    font-family: 'Inter Variable', 'Inter', system-ui, sans-serif;
+  }
+
+  /* Smooth theme transitions */
+  * {
+    transition-property: background-color, border-color, color;
+    transition-timing-function: ease-out;
+    transition-duration: 150ms;
+  }
+
+  /* Disable transitions on theme change to prevent flash */
+  .theme-transitioning * {
+    transition: none !important;
+  }
+}
+
+@layer components {
+  /* === Glass Panel === */
+  .glass-panel {
+    background: var(--nx-bg-glass);
+    backdrop-filter: blur(var(--nx-glass-blur)) saturate(var(--nx-glass-saturation));
+    -webkit-backdrop-filter: blur(var(--nx-glass-blur)) saturate(var(--nx-glass-saturation));
+    border: 1px solid var(--nx-border-glass);
+    box-shadow: var(--nx-shadow-lg);
+  }
+
+  .glass-panel-subtle {
+    background: var(--nx-bg-glass);
+    backdrop-filter: blur(8px) saturate(150%);
+    -webkit-backdrop-filter: blur(8px) saturate(150%);
+    border: 1px solid var(--nx-border-glass);
+    box-shadow: var(--nx-shadow-md);
+  }
+
+  /* === Node Styles === */
+  .nx-node {
+    @apply relative rounded-xl transition-all duration-200;
+    background: var(--nx-bg-elevated);
+    border: 1px solid var(--nx-border-subtle);
+    box-shadow: var(--nx-shadow-md);
+  }
+
+  .nx-node:hover {
+    box-shadow: var(--nx-shadow-lg);
+    transform: translateY(-1px);
+  }
+
+  .nx-node.selected {
+    border-color: var(--nx-accent-lineage);
+    box-shadow: var(--nx-shadow-glow);
+  }
+
+  .nx-node-ghost {
+    @apply opacity-50;
+    background: transparent;
+    border: 2px dashed var(--nx-node-ghost);
+  }
+
+  /* === Edge Animations === */
+  .nx-edge-animated {
+    stroke-dasharray: 8 4;
+    animation: flow 1.5s linear infinite;
+  }
+
+  @keyframes flow {
+    from {
+      stroke-dashoffset: 40;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  /* Edge confidence gradients */
+  .nx-edge-high-confidence {
+    stroke: var(--nx-accent-lineage);
+  }
+
+  .nx-edge-medium-confidence {
+    stroke: var(--nx-accent-technical);
+  }
+
+  .nx-edge-low-confidence {
+    stroke: var(--nx-accent-warning);
+  }
+
+  /* === Buttons === */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-all duration-150;
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2;
+    @apply disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent-lineage text-white;
+    @apply hover:brightness-110 active:brightness-95;
+    @apply focus-visible:ring-accent-lineage;
+  }
+
+  .btn-secondary {
+    @apply btn bg-canvas-elevated border border-glass-border;
+    @apply hover:bg-opacity-80 active:bg-opacity-70;
+  }
+
+  .btn-ghost {
+    @apply btn bg-transparent;
+    @apply hover:bg-black/5 dark:hover:bg-white/5;
+  }
+
+  .btn-sm {
+    @apply px-3 py-1.5 text-sm;
+  }
+
+  .btn-md {
+    @apply px-4 py-2 text-sm;
+  }
+
+  .btn-lg {
+    @apply px-6 py-3 text-base;
+  }
+
+  /* === Form Controls === */
+  .input {
+    @apply w-full rounded-lg border bg-canvas-elevated px-3 py-2 text-sm;
+    @apply border-glass-border;
+    @apply placeholder:text-ink-muted;
+    @apply focus:outline-none focus:ring-2 focus:border-accent-lineage;
+    @apply transition-all duration-150;
+    --tw-ring-color: rgba(99, 102, 241, 0.5);
+  }
+
+  /* === Scrollbar === */
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: var(--nx-text-muted) transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background-color: var(--nx-text-muted);
+    border-radius: 3px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: var(--nx-text-secondary);
+  }
+
+  /* === Skeleton Loading === */
+  .skeleton {
+    @apply relative overflow-hidden bg-gradient-to-r from-transparent via-white/10 to-transparent;
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+
+  @keyframes shimmer {
+    0% {
+      background-position: -200% 0;
+    }
+    100% {
+      background-position: 200% 0;
+    }
+  }
+
+  /* === Kbd (Keyboard Shortcuts) === */
+  .kbd {
+    @apply inline-flex items-center justify-center min-w-[1.5rem] h-5 px-1.5;
+    @apply text-2xs font-mono font-medium;
+    @apply bg-black/5 dark:bg-white/10 rounded border border-black/10 dark:border-white/10;
+    @apply text-ink-secondary;
+  }
+}
+
+@layer components {
+  /* === Prose (Documentation) === */
+  .prose-synodic {
+    @apply text-ink-secondary leading-relaxed;
+    font-size: 0.9375rem;
+  }
+
+  .prose-synodic h1 {
+    @apply text-3xl font-bold text-ink mt-0 mb-6 tracking-tight;
+    font-family: 'Inter Variable', 'Inter', system-ui, sans-serif;
+  }
+
+  .prose-synodic h2 {
+    @apply text-xl font-bold text-ink mt-10 mb-4 pb-2 tracking-tight;
+    border-bottom: 1px solid var(--nx-border-glass);
+  }
+
+  .prose-synodic h3 {
+    @apply text-lg font-semibold text-ink mt-8 mb-3;
+  }
+
+  .prose-synodic h4 {
+    @apply text-base font-semibold text-ink mt-6 mb-2;
+  }
+
+  .prose-synodic h5,
+  .prose-synodic h6 {
+    @apply text-sm font-semibold text-ink mt-4 mb-2;
+  }
+
+  .prose-synodic p {
+    @apply mb-4;
+  }
+
+  .prose-synodic a {
+    @apply text-accent-lineage font-medium hover:underline;
+  }
+
+  .prose-synodic strong {
+    @apply text-ink font-semibold;
+  }
+
+  .prose-synodic ul {
+    @apply list-disc pl-6 mb-4 space-y-1;
+  }
+
+  .prose-synodic ol {
+    @apply list-decimal pl-6 mb-4 space-y-1;
+  }
+
+  .prose-synodic li {
+    @apply leading-relaxed;
+  }
+
+  .prose-synodic li > ul,
+  .prose-synodic li > ol {
+    @apply mt-1 mb-0;
+  }
+
+  .prose-synodic blockquote {
+    @apply pl-4 my-4 italic text-ink-muted;
+    border-left: 4px solid rgba(99, 102, 241, 0.3);
+  }
+
+  .prose-synodic code:not(pre code) {
+    @apply text-sm font-mono px-1.5 py-0.5 rounded;
+    background: rgba(0, 0, 0, 0.05);
+    color: var(--nx-accent-lineage);
+  }
+
+  .dark .prose-synodic code:not(pre code) {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .prose-synodic pre {
+    @apply rounded-xl p-4 mb-4 overflow-x-auto text-sm leading-relaxed;
+    background: var(--nx-bg-elevated);
+    border: 1px solid var(--nx-border-glass);
+  }
+
+  .prose-synodic pre code {
+    @apply font-mono text-sm;
+    background: transparent;
+    color: inherit;
+    padding: 0;
+  }
+
+  .prose-synodic table {
+    @apply w-full mb-4 text-sm;
+    border-collapse: collapse;
+  }
+
+  .prose-synodic thead th {
+    @apply text-left px-3 py-2 text-xs font-bold uppercase tracking-wider text-ink-muted;
+    background: rgba(0, 0, 0, 0.03);
+    border-bottom: 2px solid var(--nx-border-glass);
+  }
+
+  .dark .prose-synodic thead th {
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .prose-synodic tbody td {
+    @apply px-3 py-2;
+    border-bottom: 1px solid var(--nx-border-glass);
+  }
+
+  .prose-synodic tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  .prose-synodic hr {
+    @apply my-8;
+    border-color: var(--nx-border-glass);
+  }
+
+  .prose-synodic img {
+    @apply rounded-xl max-w-full my-4;
+  }
+
+  .prose-synodic .task-list-item {
+    @apply list-none;
+  }
+
+  .prose-synodic .task-list-item input {
+    @apply mr-2;
+  }
+
+  /* Heading anchor links */
+  .prose-synodic h1 .heading-anchor,
+  .prose-synodic h2 .heading-anchor,
+  .prose-synodic h3 .heading-anchor,
+  .prose-synodic h4 .heading-anchor,
+  .prose-synodic h5 .heading-anchor,
+  .prose-synodic h6 .heading-anchor {
+    @apply opacity-0 ml-2 text-ink-muted no-underline;
+    transition: opacity 150ms ease;
+  }
+
+  .prose-synodic h1:hover .heading-anchor,
+  .prose-synodic h2:hover .heading-anchor,
+  .prose-synodic h3:hover .heading-anchor,
+  .prose-synodic h4:hover .heading-anchor,
+  .prose-synodic h5:hover .heading-anchor,
+  .prose-synodic h6:hover .heading-anchor {
+    @apply opacity-100;
+  }
+
+}
+
+@layer utilities {
+  /* === React Flow Overrides === */
+  .react-flow__background {
+    background-color: var(--nx-bg-canvas) !important;
+  }
+
+  .react-flow__minimap {
+    @apply glass-panel-subtle rounded-xl overflow-hidden;
+  }
+
+  .react-flow__controls {
+    @apply glass-panel-subtle rounded-xl overflow-hidden;
+  }
+
+  .react-flow__controls-button {
+    @apply bg-transparent border-none;
+    @apply hover:bg-black/5 dark:hover:bg-white/10;
+  }
+
+  .react-flow__controls-button svg {
+    fill: var(--nx-text-primary);
+  }
+
+  /* === Persona Mode Indicators === */
+  .persona-business {
+    --persona-accent: var(--nx-accent-business);
+  }
+
+  .persona-technical {
+    --persona-accent: var(--nx-accent-technical);
+  }
+
+  /* === Focus States === */
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage focus-visible:ring-offset-2;
+  }
+
+  /* === Gradient Text === */
+  .gradient-text {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, var(--nx-accent-lineage), var(--nx-accent-business));
+  }
+}
+
+/* === Flat Tree Item Animations (applied to inner wrappers, not measured containers) === */
+@keyframes flatTreeSlideIn {
+  from { opacity: 0; transform: translateX(-12px) scale(0.97); }
+  to   { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+@keyframes flatTreeSlideOut {
+  from { opacity: 1; transform: translateX(0) scale(1); }
+  to   { opacity: 0; transform: translateX(-8px) scale(0.96); }
+}
+
+@keyframes flatTreeSkeletonGrow {
+  from { opacity: 0; transform: translateX(-16px); max-height: 0; }
+  to   { opacity: 1; transform: translateX(0); max-height: 60px; }
+}
+
+@keyframes flatTreeFadeIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* === React Flow Dot Pattern Background === */
+.react-flow__background-pattern {
+  fill: var(--nx-text-muted) !important;
+  opacity: 0.4;
+}
+
