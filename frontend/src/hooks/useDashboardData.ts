@@ -99,13 +99,14 @@ export function useDashboardData() {
             const fetchPromises = workspaces.flatMap(ws =>
                 (ws.dataSources || []).map(async ds => {
                     try {
-                        const url = `/api/v1/${ws.id}/graph/stats?dataSourceId=${ds.id}`
+                        // Use cached-stats endpoint (DB-only) — no provider dependency
+                        const url = `/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`
                         const res = await fetch(url)
                         if (res.ok) {
                             const data = await res.json()
-                            const nodeCount = data.node_count ?? data.nodeCount ?? data.totalNodes ?? 0
-                            const edgeCount = data.edge_count ?? data.edgeCount ?? data.totalEdges ?? 0
-                            const entityTypes = data.entity_types ?? data.entityTypes ?? []
+                            const nodeCount = data.nodeCount ?? 0
+                            const edgeCount = data.edgeCount ?? 0
+                            const entityTypes = Object.keys(data.entityTypeCounts ?? {})
                             results[`${ws.id}/${ds.id}`] = { nodeCount, edgeCount, entityTypes }
                             totalEntities += nodeCount
                         }

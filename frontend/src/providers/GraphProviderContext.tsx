@@ -168,13 +168,6 @@ export function GraphProvider({ children }: GraphProviderProps) {
         return () => { cancelled = true }
     }, [activeWorkspaceId, activeDataSourceId, activeConnectionId])
 
-    // Only block render on the very first load (no provider yet).
-    // During workspace switches the OLD provider stays in place so
-    // navigation keeps working while the new one initialises.
-    if (!currentProvider && isLoading) {
-        return null
-    }
-
     const value: GraphProviderContextValueExtended = {
         // currentProvider is guaranteed non-null here: the early-return above handles the null+loading case.
         provider: currentProvider!,
