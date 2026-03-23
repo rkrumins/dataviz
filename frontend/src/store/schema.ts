@@ -203,17 +203,26 @@ export const useSchemaStore = create<SchemaState>()(
         }
 
         if (key) {
-          // Migration: tag any unscoped views with the current scope on first set.
-          // This prevents views created before scoping was introduced from bleeding
-          // across data sources. They are attributed to whichever scope is active
-          // when the user first runs the updated app.
+          // Migration: tag any unscoped views with a scopeKey derived from their
+          // own data. Views WITH a dataSourceId get their exact scope; views WITHOUT
+          // (legacy/unscoped) get "wsId/default" so they remain visible across all
+          // datasources in their workspace — not pinned to whichever datasource
+          // happened to be active at migration time.
           const { schema } = get()
           if (schema) {
             const hasUnscopedViews = schema.views.some(v => !v.scopeKey)
             if (hasUnscopedViews) {
-              const migratedViews = schema.views.map(v =>
-                v.scopeKey ? v : { ...v, scopeKey: key }
-              )
+              const migratedViews = schema.views.map(v => {
+                if (v.scopeKey) return v
+                // Derive correct scopeKey from the view's own binding
+                const wsId = v.workspaceId ?? workspaceId
+                const viewScopeKey = wsId && v.dataSourceId
+                  ? `${wsId}/${v.dataSourceId}`
+                  : wsId
+                    ? `${wsId}/default`
+                    : key
+                return { ...v, scopeKey: viewScopeKey }
+              })
               set({
                 schema: { ...schema, views: migratedViews },
                 activeScopeKey: key,
@@ -229,13 +238,24 @@ export const useSchemaStore = create<SchemaState>()(
       visibleViews: () => {
         const { schema, activeScopeKey } = get()
         if (!schema) return []
-        // Extract just the workspaceId portion for matching workspace-level views
         const activeWorkspaceId = activeScopeKey?.split('/')[0]
+        const activeDataSourceId = activeScopeKey?.split('/')[1]
         return schema.views.filter(v => {
-          if (!v.scopeKey) return true                          // unscoped → global
-          if (v.scopeKey === activeScopeKey) return true        // exact workspace+datasource match
-          // Workspace-level views (no specific datasource) appear for any datasource in the same workspace
-          if (activeWorkspaceId && v.scopeKey === `${activeWorkspaceId}/default`) return true
+          // Global/legacy views with no scope — always visible
+          if (!v.scopeKey && !v.workspaceId) return true
+
+          // Use explicit dataSourceId field for precise filtering:
+          // - Unscoped views (dataSourceId is null/undefined) → visible for ALL datasources in same workspace
+          // - Scoped views (dataSourceId is set) → visible ONLY when that datasource is active
+          if (activeWorkspaceId && v.workspaceId === activeWorkspaceId) {
+            if (!v.dataSourceId) return true                     // workspace-level → always visible in this workspace
+            if (v.dataSourceId === activeDataSourceId) return true // exact datasource match
+            return false
+          }
+
+          // Fallback: exact scopeKey match (covers edge cases)
+          if (v.scopeKey === activeScopeKey) return true
+
           return false
         })
       },

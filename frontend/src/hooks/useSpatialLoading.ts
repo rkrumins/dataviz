@@ -54,7 +54,10 @@ export function useSpatialLoading(): SpatialLoadingResult {
   }, [])
 
   /**
-   * Determine LOD level based on zoom
+   * Determine LOD level based on zoom.
+   * NOTE: These LOD level names ('domain', 'app', 'asset') are fallback heuristics.
+   * Ideally these should be derived from schema entity type hierarchy levels,
+   * mapping zoom ranges to the schema's hierarchy.level values dynamically.
    */
   const getLODFromZoom = useCallback((zoom: number): 'domain' | 'app' | 'asset' => {
     if (zoom < 0.3) return 'domain'

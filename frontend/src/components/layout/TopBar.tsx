@@ -1,8 +1,13 @@
 import { Search, Settings, User, Moon, Sun, Monitor, LogOut } from 'lucide-react'
+import { useLocation } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
+import { WorkspaceBreadcrumb } from '@/components/layout/WorkspaceBreadcrumb'
+import { BookmarksPopover } from '@/components/layout/BookmarksPopover'
+import { NotificationBell } from '@/components/layout/NotificationBell'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaStore } from '@/store/persona'
 import { useAuthStore } from '@/store/auth'
+import { useSchemaStore } from '@/store/schema'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { cn } from '@/lib/utils'
 
@@ -10,16 +15,32 @@ interface TopBarProps {
   onOpenCommandPalette: () => void
 }
 
+/** Dynamic search placeholder based on route context */
+function useSearchPlaceholder(): string {
+  const location = useLocation()
+  const activeView = useSchemaStore((s) => s.getActiveView())
+
+  if (location.pathname.startsWith('/views/') && activeView) {
+    return `Search nodes in ${activeView.name}...`
+  }
+  if (location.pathname.startsWith('/explorer')) {
+    return 'Filter views by name, tag, or workspace...'
+  }
+  return 'Search workspaces, views, or commands...'
+}
+
 export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   const { theme, setTheme } = usePreferencesStore()
   const persona = usePersonaStore((s) => s.mode)
   const { user, logout } = useAuthStore()
+  const searchPlaceholder = useSearchPlaceholder()
 
   return (
     <header className="h-14 border-b border-glass-border bg-canvas-elevated flex items-center justify-between px-4 z-50">
-      {/* Left: Logo & Branding */}
-      <div className="flex items-center gap-3">
-        <div className="flex items-center gap-2">
+      {/* Left: Logo + Breadcrumb */}
+      <div className="flex items-center gap-3 min-w-0">
+        {/* Logo */}
+        <div className="flex items-center gap-2 shrink-0">
           <div className={cn(
             "w-8 h-8 rounded-lg flex items-center justify-center",
             "bg-gradient-to-br from-accent-lineage to-accent-business"
@@ -45,6 +66,12 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
             </p>
           </div>
         </div>
+
+        {/* Breadcrumb separator */}
+        <div className="w-px h-6 bg-glass-border shrink-0" />
+
+        {/* Workspace Breadcrumb */}
+        <WorkspaceBreadcrumb />
       </div>
 
       {/* Center: Search Bar */}
@@ -60,7 +87,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
         >
           <Search className="w-4 h-4" />
           <span className="flex-1 text-left text-sm">
-            Search entities, traces, or commands...
+            {searchPlaceholder}
           </span>
           <div className="flex items-center gap-1">
             <kbd className="kbd">⌘</kbd>
@@ -69,18 +96,22 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
         </button>
       </div>
 
-      {/* Right: Actions */}
+      {/* Right: Actions — 3 groups separated by dividers */}
       <div className="flex items-center gap-2">
-        {/* Persona Toggle */}
+        {/* Group 1: Mode */}
         <PersonaToggle />
 
-        {/* Divider */}
-        <div className="w-px h-6 bg-glass-border mx-2" />
+        <div className="w-px h-6 bg-glass-border mx-1" />
 
-        {/* Theme Switcher */}
+        {/* Group 2: Content shortcuts */}
+        <BookmarksPopover />
+        <NotificationBell />
+
+        <div className="w-px h-6 bg-glass-border mx-1" />
+
+        {/* Group 3: System / Account */}
         <ThemeSwitcher theme={theme} onChange={setTheme} />
 
-        {/* Settings */}
         <button className="btn btn-ghost p-2 rounded-lg">
           <Settings className="w-5 h-5 text-ink-secondary" />
         </button>
@@ -156,4 +187,3 @@ function ThemeSwitcher({ theme, onChange }: ThemeSwitcherProps) {
     </button>
   )
 }
-

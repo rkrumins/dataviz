@@ -1,0 +1,8 @@
+# ── Pre-populated FalkorDB for Synodic Quickstart ────────────────────
+# Contains the nexus_lineage graph (~1996 nodes, ~6065 edges).
+# FalkorDB auto-loads dump.rdb on startup.
+# ─────────────────────────────────────────────────────────────────────
+FROM falkordb/falkordb:v4.16.0
+
+# FalkorDB stores data at /var/lib/falkordb/data/ (/data/data is a symlink)
+COPY falkordb/dump.rdb /var/lib/falkordb/data/dump.rdb

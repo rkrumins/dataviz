@@ -231,6 +231,48 @@ class OntologyUpdateRequest(BaseModel):
         populate_by_name = True
 
 
+class OntologyImportRequest(BaseModel):
+    """
+    Validated import payload — mirrors the export JSON format exactly.
+    All semantic fields are required so we can detect what changed.
+    Metadata fields (id, timestamps, status flags) are accepted but ignored on import.
+    """
+    # Metadata (accepted from export JSON, ignored during import)
+    id: Optional[str] = None
+    version: Optional[int] = None
+    scope: Optional[str] = None
+    is_published: Optional[bool] = Field(None, alias="isPublished")
+    is_system: Optional[bool] = Field(None, alias="isSystem")
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    updated_at: Optional[str] = Field(None, alias="updatedAt")
+
+    # Required semantic content
+    name: str
+    description: Optional[str] = None
+    evolution_policy: str = Field("reject", alias="evolutionPolicy")
+    entity_type_definitions: Dict[str, Any] = Field(default_factory=dict, alias="entityTypeDefinitions")
+    relationship_type_definitions: Dict[str, Any] = Field(default_factory=dict, alias="relationshipTypeDefinitions")
+    containment_edge_types: List[str] = Field(default_factory=list, alias="containmentEdgeTypes")
+    lineage_edge_types: List[str] = Field(default_factory=list, alias="lineageEdgeTypes")
+    edge_type_metadata: Dict[str, Any] = Field(default_factory=dict, alias="edgeTypeMetadata")
+    entity_type_hierarchy: Dict[str, Any] = Field(default_factory=dict, alias="entityTypeHierarchy")
+    root_entity_types: List[str] = Field(default_factory=list, alias="rootEntityTypes")
+
+    class Config:
+        populate_by_name = True
+
+
+class OntologyImportResponse(BaseModel):
+    """Result of an import operation."""
+    ontology: "OntologyDefinitionResponse"
+    status: str  # "created" | "updated" | "new_version" | "no_changes"
+    summary: str
+    changes: Optional[Dict[str, Any]] = None  # type diff if applicable
+
+    class Config:
+        populate_by_name = True
+
+
 class OntologyDefinitionResponse(BaseModel):
     id: str
     name: str
@@ -247,8 +289,31 @@ class OntologyDefinitionResponse(BaseModel):
     is_published: bool = Field(alias="isPublished")
     is_system: bool = Field(False, alias="isSystem")
     scope: str = "universal"
+    schema_id: str = Field("", alias="schemaId")
+    revision: int = Field(0)
+    created_by: Optional[str] = Field(None, alias="createdBy")
+    updated_by: Optional[str] = Field(None, alias="updatedBy")
+    published_by: Optional[str] = Field(None, alias="publishedBy")
+    published_at: Optional[str] = Field(None, alias="publishedAt")
+    deleted_by: Optional[str] = Field(None, alias="deletedBy")
+    deleted_at: Optional[str] = Field(None, alias="deletedAt")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class OntologyAuditEntry(BaseModel):
+    id: str
+    ontology_id: str = Field(alias="ontologyId")
+    schema_id: str = Field(alias="schemaId")
+    action: str
+    actor: Optional[str] = None
+    version: Optional[int] = None
+    summary: Optional[str] = None
+    changes: Optional[Dict[str, Any]] = None
+    created_at: str = Field(alias="createdAt")
 
     class Config:
         populate_by_name = True
@@ -281,6 +346,30 @@ class OntologyCoverageResponse(BaseModel):
         populate_by_name = True
 
 
+class OntologyMatchResult(BaseModel):
+    ontology_id: str = Field(alias="ontologyId")
+    ontology_name: str = Field(alias="ontologyName")
+    version: int
+    jaccard_score: float = Field(alias="jaccardScore")
+    covered_entity_types: List[str] = Field(default_factory=list, alias="coveredEntityTypes")
+    uncovered_entity_types: List[str] = Field(default_factory=list, alias="uncoveredEntityTypes")
+    covered_relationship_types: List[str] = Field(default_factory=list, alias="coveredRelationshipTypes")
+    uncovered_relationship_types: List[str] = Field(default_factory=list, alias="uncoveredRelationshipTypes")
+    total_entity_types: int = Field(0, alias="totalEntityTypes")
+    total_relationship_types: int = Field(0, alias="totalRelationshipTypes")
+
+    class Config:
+        populate_by_name = True
+
+
+class OntologySuggestResponse(BaseModel):
+    suggested: OntologyCreateRequest
+    matching_ontologies: List[OntologyMatchResult] = Field(default_factory=list, alias="matchingOntologies")
+
+    class Config:
+        populate_by_name = True
+
+
 # ============================================
 # Data Source Models (workspace data sources)
 # ============================================
@@ -292,6 +381,7 @@ class DataSourceCreateRequest(BaseModel):
     ontology_id: Optional[str] = Field(None, alias="ontologyId")
     label: Optional[str] = None
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
+    extra_config: Optional[dict] = Field(None, alias="extraConfig")  # per-data-source config (schema mapping, etc.)
 
     class Config:
         populate_by_name = True
@@ -305,6 +395,7 @@ class DataSourceUpdateRequest(BaseModel):
     is_active: Optional[bool] = Field(None, alias="isActive")
     projection_mode: Optional[str] = Field(None, alias="projectionMode")  # None | "in_source" | "dedicated"
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")  # graph name when dedicated
+    extra_config: Optional[dict] = Field(None, alias="extraConfig")  # per-data-source config (schema mapping, etc.)
 
     class Config:
         populate_by_name = True
@@ -323,6 +414,7 @@ class DataSourceResponse(BaseModel):
     projection_mode: Optional[str] = Field(None, alias="projectionMode")
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
+    extra_config: Optional[dict] = Field(None, alias="extraConfig")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -493,6 +585,7 @@ class ViewResponse(BaseModel):
     workspace_id: str = Field(alias="workspaceId")
     workspace_name: Optional[str] = Field(None, alias="workspaceName")
     data_source_id: Optional[str] = Field(None, alias="dataSourceId")
+    data_source_name: Optional[str] = Field(None, alias="dataSourceName")
     view_type: str = Field(alias="viewType")
     config: Dict[str, Any] = Field(default_factory=dict)
     visibility: str = "private"
@@ -503,6 +596,7 @@ class ViewResponse(BaseModel):
     is_favourited: bool = Field(False, alias="isFavourited")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+    deleted_at: Optional[str] = Field(None, alias="deletedAt")
 
     class Config:
         populate_by_name = True
@@ -537,6 +631,72 @@ class PhysicalGraphStatsResponse(BaseModel):
     edgeCount: int = 0
     entityTypeCounts: Dict[str, int] = {}
     edgeTypeCounts: Dict[str, int] = {}
+
+
+# ============================================
+# Announcement Models (global banners)
+# ============================================
+
+class AnnouncementCreateRequest(BaseModel):
+    title: str
+    message: str
+    banner_type: str = Field(default="info", alias="bannerType")
+    is_active: bool = Field(default=True, alias="isActive")
+    snooze_duration_minutes: int = Field(default=0, alias="snoozeDurationMinutes")  # 0 = no snooze
+    cta_text: Optional[str] = Field(None, alias="ctaText")
+    cta_url: Optional[str] = Field(None, alias="ctaUrl")
+
+    class Config:
+        populate_by_name = True
+
+
+class AnnouncementUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    message: Optional[str] = None
+    banner_type: Optional[str] = Field(None, alias="bannerType")
+    is_active: Optional[bool] = Field(None, alias="isActive")
+    snooze_duration_minutes: Optional[int] = Field(None, alias="snoozeDurationMinutes")
+    cta_text: Optional[str] = Field(None, alias="ctaText")
+    cta_url: Optional[str] = Field(None, alias="ctaUrl")
+
+    class Config:
+        populate_by_name = True
+
+
+class AnnouncementResponse(BaseModel):
+    id: str
+    title: str
+    message: str
+    banner_type: str = Field(alias="bannerType")
+    is_active: bool = Field(alias="isActive")
+    snooze_duration_minutes: int = Field(0, alias="snoozeDurationMinutes")
+    cta_text: Optional[str] = Field(None, alias="ctaText")
+    cta_url: Optional[str] = Field(None, alias="ctaUrl")
+    created_by: Optional[str] = Field(None, alias="createdBy")
+    updated_by: Optional[str] = Field(None, alias="updatedBy")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class AnnouncementConfigUpdateRequest(BaseModel):
+    poll_interval_seconds: Optional[int] = Field(None, alias="pollIntervalSeconds")
+    default_snooze_minutes: Optional[int] = Field(None, alias="defaultSnoozeMinutes")
+
+    class Config:
+        populate_by_name = True
+
+
+class AnnouncementConfigResponse(BaseModel):
+    poll_interval_seconds: int = Field(15, alias="pollIntervalSeconds")
+    default_snooze_minutes: int = Field(30, alias="defaultSnoozeMinutes")
+    updated_by: Optional[str] = Field(None, alias="updatedBy")
+    updated_at: Optional[str] = Field(None, alias="updatedAt")
+
+    class Config:
+        populate_by_name = True
 
 
 class AssetListResponse(BaseModel):

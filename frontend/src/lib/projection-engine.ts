@@ -109,13 +109,16 @@ export interface AggregatedEdge {
 export function buildContainmentMap(
   _nodes: Node[],
   edges: Edge[],
-  containmentEdgeTypes: string[] = ['contains'],
+  containmentEdgeTypes: string[] = [],
 ): Map<string, string> {
   const containmentMap = new Map<string, string>()
 
+  // Pre-compute uppercase set for case-insensitive matching
+  const containmentSet = new Set(containmentEdgeTypes.map(t => t.toUpperCase()))
+
   edges.forEach((edge) => {
-    const edgeType = (edge.data?.relationship as string) || (edge.data?.edgeType as string) || ''
-    if (containmentEdgeTypes.includes(edgeType)) {
+    const edgeType = ((edge.data?.relationship as string) || (edge.data?.edgeType as string) || '').toUpperCase()
+    if (containmentSet.has(edgeType)) {
       containmentMap.set(edge.target, edge.source)
     }
   })
@@ -182,8 +185,8 @@ export function computeNodeCounts(
  * Compute counts for all nodes in the graph.
  * Returns a map of nodeId → NodeCountSummary.
  */
-export function computeAllNodeCounts(nodes: Node[], edges: Edge[]): Map<string, NodeCountSummary> {
-  const containmentMap = buildContainmentMap(nodes, edges)
+export function computeAllNodeCounts(nodes: Node[], edges: Edge[], containmentEdgeTypes: string[] = []): Map<string, NodeCountSummary> {
+  const containmentMap = buildContainmentMap(nodes, edges, containmentEdgeTypes)
   const countMap = new Map<string, NodeCountSummary>()
   nodes.forEach((node) => {
     countMap.set(node.id, computeNodeCounts(node.id, nodes, containmentMap))
@@ -251,15 +254,16 @@ export function aggregateLineageEdges(
   containmentMap: Map<string, string>,
   targetGranularityType: string | null,
   entityTypes: EntityTypeLevel[] = [],
-  containmentEdgeTypes: string[] = ['contains', 'has_schema', 'has_dataset', 'has_column'],
+  containmentEdgeTypes: string[] = [],
 ): AggregatedEdge[] {
   if (!targetGranularityType) return []
 
   const aggregatedEdges = new Map<string, AggregatedEdge>()
 
+  const containmentSet = new Set(containmentEdgeTypes.map(t => t.toUpperCase()))
   const lineageEdges = edges.filter((edge) => {
-    const rel = (edge.data?.relationship ?? edge.data?.edgeType ?? '') as string
-    return !containmentEdgeTypes.includes(rel)
+    const rel = ((edge.data?.relationship ?? edge.data?.edgeType ?? '') as string).toUpperCase()
+    return !containmentSet.has(rel)
   })
 
   lineageEdges.forEach((edge) => {
@@ -313,7 +317,7 @@ export function projectGraph(
   config: ViewProjectionConfig,
   entityTypes: EntityTypeLevel[] = [],
 ): ProjectedGraph {
-  const containmentTypes = config.containmentEdgeTypes ?? ['contains', 'has_schema', 'has_dataset', 'has_column']
+  const containmentTypes = config.containmentEdgeTypes ?? []
   const containmentMap = buildContainmentMap(nodes, edges, containmentTypes)
 
   // 1. Filter nodes by visible entity types (empty = show all)

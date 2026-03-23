@@ -34,6 +34,15 @@ export interface CatalogItemResponse {
     updatedAt: string
 }
 
+export interface CatalogItemBindingResponse {
+    id: string
+    providerId: string
+    sourceIdentifier?: string
+    name: string
+    boundWorkspaceId?: string | null
+    boundWorkspaceName?: string | null
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
     const res = await fetch(url, {
         ...init,
@@ -82,5 +91,14 @@ export const catalogService = {
 
     getImpact(id: string): Promise<ProviderImpactResponse> {
         return request<ProviderImpactResponse>(`${ADMIN_API}/${id}/impact`)
+    },
+
+    async listWithBindings(providerId?: string): Promise<CatalogItemBindingResponse[]> {
+        const url = providerId
+            ? `${ADMIN_API}/bindings?providerId=${providerId}`
+            : `${ADMIN_API}/bindings`
+        const res = await fetch(url)
+        if (!res.ok) throw new Error('Failed to load catalog bindings')
+        return res.json()
     },
 }

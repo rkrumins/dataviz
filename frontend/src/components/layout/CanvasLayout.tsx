@@ -7,6 +7,9 @@
  *   - A loading gate prevents CanvasRouter from mounting before the ontology
  *     is available, avoiding a spurious empty-state flash.
  *
+ * Gates on BOTH isLoading (first fetch) AND isFetching (refetches triggered
+ * by workspace/datasource switches) to prevent stale data from rendering.
+ *
  * AppLayout handles auth, sidebar, topbar, and the view list (lightweight).
  * This component handles the heavier ontology fetch.
  */
@@ -16,8 +19,11 @@ import { Loader2 } from 'lucide-react'
 import { useGraphSchema } from '@/hooks/useGraphSchema'
 
 export function CanvasLayout() {
-  const { isLoading } = useGraphSchema()
+  const { isLoading, isFetching } = useGraphSchema()
 
+  // Block on initial load. During refetches (workspace/datasource switch),
+  // show a subtle overlay but keep the outlet mounted so ReactFlow doesn't
+  // lose state on brief transitions.
   if (isLoading) {
     return (
       <div className="absolute inset-0 flex items-center justify-center bg-canvas">
@@ -29,5 +35,18 @@ export function CanvasLayout() {
     )
   }
 
-  return <Outlet />
+  return (
+    <>
+      <Outlet />
+      {/* Subtle overlay during schema refetches (workspace/datasource switch) */}
+      {isFetching && !isLoading && (
+        <div className="absolute inset-0 flex items-center justify-center bg-canvas/40 backdrop-blur-[2px] z-30 pointer-events-none">
+          <div className="flex flex-col items-center gap-2">
+            <Loader2 className="w-5 h-5 animate-spin text-accent-lineage" />
+            <span className="text-xs text-ink-muted">Switching context…</span>
+          </div>
+        </div>
+      )}
+    </>
+  )
 }

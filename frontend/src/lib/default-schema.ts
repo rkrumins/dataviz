@@ -476,7 +476,7 @@ const defaultViews: ViewConfiguration[] = []
 export const defaultWorkspaceSchema: WorkspaceSchema = {
   id: 'default-workspace',
   name: 'NexusLineage Workspace',
-  version: '1.1.2',  // Bumped to force schema refresh with new views
+  version: '1.1.3',  // Bumped: added containment/lineage edge type defaults
   entityTypes: defaultEntityTypes,
   relationshipTypes: defaultRelationshipTypes,
   views: defaultViews,
@@ -489,5 +489,11 @@ export const defaultWorkspaceSchema: WorkspaceSchema = {
     showConfidenceScores: true,
     animationsEnabled: true,
   },
+  // Intentionally empty — edge classification MUST come from the backend schema.
+  // If the schema API fails, the UI degrades to a flat graph (no hierarchy) rather
+  // than silently using hardcoded types that may not match the user's ontology.
+  containmentEdgeTypes: [],
+  lineageEdgeTypes: [],
+  rootEntityTypes: [],
 }
 

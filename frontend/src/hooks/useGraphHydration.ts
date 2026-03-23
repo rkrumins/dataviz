@@ -1,12 +1,15 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
-import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import {
     useContainmentEdgeTypes,
+    useLineageEdgeTypes,
     useRootEntityTypes,
     useEntityTypes,
     useSchemaIsLoading,
     useActiveView,
+    isContainmentEdgeType,
+    normalizeEdgeType,
 } from '@/store/schema'
 import type { GraphNode, GraphEdge, EntityTypeDefinition } from '@/providers/GraphDataProvider'
 
@@ -121,7 +124,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const enableHydration = options?.hydrate ?? false
 
     const provider = useGraphProvider()
+    const { workspaceId: ctxWorkspaceId, dataSourceId: ctxDataSourceId, providerVersion } = useGraphProviderContext()
     const containmentEdgeTypes = useContainmentEdgeTypes()
+    const lineageEdgeTypes = useLineageEdgeTypes()
     const rootEntityTypes = useRootEntityTypes()
     const schemaEntityTypes = useEntityTypes()
     const isSchemaLoading = useSchemaIsLoading()
@@ -137,11 +142,17 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // Track (provider, viewId) so reference views reload when the active view changes.
     const initializedKeyRef = useRef<string | null>(null)
 
+    // Cancellation: abort in-flight child loads when provider/view changes
+    const loadAbortRef = useRef<AbortController>(new AbortController())
+
     // Reset when provider changes (e.g. workspace/datasource switch)
     useEffect(() => {
         rootsAttemptedForRef.current = null
         // Also reset the hydration guard so re-hydration happens on provider change
         initializedKeyRef.current = null
+        // Cancel any in-flight child loads from the previous provider
+        loadAbortRef.current.abort()
+        loadAbortRef.current = new AbortController()
     }, [provider])
 
     // ─── Initial Hydration Effect (only when hydrate=true) ──────────────
@@ -158,10 +169,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         const layoutType = activeView?.layout.type ?? 'graph'
         const isReferenceView = layoutType === 'reference' || layoutType === 'layered-lineage'
 
-        // Key on both provider AND view ID so switching views triggers re-hydration.
-        // Without the view ID, switching from a hierarchy view to a different hierarchy
-        // view wouldn't reload data because the provider hasn't changed.
-        const initKey = `${String(provider)}:${activeView?.id ?? 'default'}:${layoutType}`
+        // Key on workspace, datasource, view ID, AND providerVersion so switching
+        // any dimension triggers re-hydration. providerVersion ensures we re-hydrate
+        // even if workspace/datasource IDs haven't changed (e.g. provider reconnect).
+        const initKey = `${ctxWorkspaceId ?? ''}:${ctxDataSourceId ?? ''}:${activeView?.id ?? 'default'}:${layoutType}:${providerVersion}`
 
         if (initializedKeyRef.current === initKey) return
         initializedKeyRef.current = initKey
@@ -393,7 +404,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         hydrate()
         return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enableHydration, provider, activeView?.id, activeView?.layout.type, rootEntityTypes, schemaEntityTypes, isSchemaLoading])
+    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootEntityTypes, schemaEntityTypes, isSchemaLoading])
 
     // ─── loadChildren ───────────────────────────────────────────────────
 
@@ -455,12 +466,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
         const existingNodeIds = new Set(nodes.map(n => n.id))
 
-        // Count loaded children via containment edges
+        // Count loaded children via containment edges (ontology-driven)
         const currentChildrenCount = edges.filter(e => {
             if (e.source !== parentId) return false
             if (!existingNodeIds.has(e.target)) return false
-            const type = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
-            return containmentEdgeTypes.some(t => t.toUpperCase() === type)
+            return isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
         }).length
 
         // If we have all children, don't refetch
@@ -473,59 +483,39 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             const urn = (parentNode.data.urn as string) || parentId
             const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
 
-            const children = await provider.getChildren(urn, {
+            // Single round-trip: children + containment edges + lineage edges
+            const result = await provider.getChildrenWithEdges(urn, {
                 edgeTypes: fetchTypes,
+                lineageEdgeTypes: lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
                 limit: 20,
                 offset: currentChildrenCount,
+                includeLineageEdges: true,
             })
 
-            if (children.length > 0) {
-                const freshNodes = useCanvasStore.getState().nodes
-                const freshEdges = useCanvasStore.getState().edges
-                const currentExistingNodeIds = new Set(freshNodes.map(n => n.id))
+            if (result.children.length > 0) {
+                const currentExistingNodeIds = new Set(
+                    useCanvasStore.getState().nodes.map(n => n.id)
+                )
 
                 const nodesToAdd: LineageNode[] = []
-                const edgesToAdd: LineageEdge[] = []
                 const newIds = new Set<string>()
 
-                children.forEach(child => {
+                result.children.forEach(child => {
                     if (!currentExistingNodeIds.has(child.urn) && !newIds.has(child.urn)) {
                         nodesToAdd.push(toCanvasNode(child))
                         newIds.add(child.urn)
                     }
-
-                    // Containment edge (synthetic ID for loaded-count tracking)
-                    const edgeId = `contains-${urn}-${child.urn}`
-                    const edgeExists = freshEdges.some(e => e.id === edgeId) || edgesToAdd.some(e => e.id === edgeId)
-
-                    if (!edgeExists) {
-                        const relationType = containmentEdgeTypes[0] ?? 'edge'
-                        edgesToAdd.push({
-                            id: edgeId,
-                            source: parentId,
-                            target: child.urn,
-                            type: 'lineage',
-                            data: {
-                                edgeType: relationType,
-                                relationship: relationType.toLowerCase(),
-                            },
-                        })
-                    }
                 })
 
-                // Fetch backend edges (lineage, association, etc.) for newly loaded children
-                const newChildUrns = nodesToAdd.map(n => n.id)
-                if (newChildUrns.length > 0) {
-                    const allCurrentUrns = useCanvasStore.getState().nodes.map(n => n.id)
-                    const allUrns = [...new Set([...allCurrentUrns, ...newChildUrns])]
-                    try {
-                        const backendEdges = await provider.getEdgesBetween(allUrns)
-                        edgesToAdd.push(...backendEdges.map(e => toCanvasEdge(e)))
-                    } catch {
-                        // Non-critical: containment edges still work
-                    }
-                }
+                const edgesToAdd = [
+                    ...result.containmentEdges,
+                    ...result.lineageEdges,
+                ].map(e => toCanvasEdge(e))
 
+                // Cancellation check before committing to the store
+                if (loadAbortRef.current.signal.aborted) return
+
+                // Single atomic commit — nodes and edges arrive together
                 const { addGraph: addGraphFresh } = useCanvasStore.getState()
                 addGraphFresh(nodesToAdd, edgesToAdd)
 
@@ -541,7 +531,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 return next
             })
         }
-    }, [provider, containmentEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaLoading, loadingNodes])
+    }, [provider, containmentEdgeTypes, lineageEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaLoading, loadingNodes])
 
     // ─── searchChildren ─────────────────────────────────────────────────
 
@@ -556,10 +546,13 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             const urn = parentNode ? (parentNode.data.urn as string || parentId) : parentId
             const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
 
-            const children = await provider.getChildren(urn, {
+            // Single round-trip: children + edges for search results
+            const result = await provider.getChildrenWithEdges(urn, {
                 edgeTypes: fetchTypes,
+                lineageEdgeTypes: lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
                 searchQuery: query,
                 limit: 50,
+                includeLineageEdges: true,
             })
 
             // Get freshest state right before mutating
@@ -579,49 +572,26 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             if (nodeIdsToRemove.length > 0) removeNodes(nodeIdsToRemove)
             if (edgeIdsToRemove.length > 0) removeEdges(edgeIdsToRemove)
 
-            if (children.length > 0) {
+            if (result.children.length > 0) {
                 const nodesToAdd: LineageNode[] = []
-                const edgesToAdd: LineageEdge[] = []
 
                 const remainingNodeIds = new Set(freshNodes.map(n => n.id))
                 nodeIdsToRemove.forEach(id => remainingNodeIds.delete(id))
                 const newIds = new Set<string>()
 
-                children.forEach(child => {
+                result.children.forEach(child => {
                     if (!remainingNodeIds.has(child.urn) && !newIds.has(child.urn)) {
                         nodesToAdd.push(toCanvasNode(child))
                         newIds.add(child.urn)
                     }
-
-                    const edgeId = `contains-${urn}-${child.urn}`
-                    if (!edgesToAdd.some(e => e.id === edgeId)) {
-                        const relationType = containmentEdgeTypes[0] ?? 'edge'
-                        edgesToAdd.push({
-                            id: edgeId,
-                            source: parentId,
-                            target: child.urn,
-                            type: 'lineage',
-                            data: {
-                                edgeType: relationType,
-                                relationship: relationType.toLowerCase(),
-                            },
-                        })
-                    }
                 })
 
-                // Fetch backend edges for search results
-                const searchUrns = nodesToAdd.map(n => n.id)
-                if (searchUrns.length > 0) {
-                    const existingNodeUrns = useCanvasStore.getState().nodes.map(n => n.id)
-                    const allUrns = [...new Set([...existingNodeUrns, ...searchUrns])]
-                    try {
-                        const backendEdges = await provider.getEdgesBetween(allUrns)
-                        edgesToAdd.push(...backendEdges.map(e => toCanvasEdge(e)))
-                    } catch {
-                        // Non-critical
-                    }
-                }
+                const edgesToAdd = [
+                    ...result.containmentEdges,
+                    ...result.lineageEdges,
+                ].map(e => toCanvasEdge(e))
 
+                if (loadAbortRef.current.signal.aborted) return
                 addGraph(nodesToAdd, edgesToAdd)
             }
         } catch (err) {
@@ -633,7 +603,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 return next
             })
         }
-    }, [provider, containmentEdgeTypes])
+    }, [provider, containmentEdgeTypes, lineageEdgeTypes])
 
     return {
         loadChildren,

@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from .endpoints import (
     graph, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
-    auth, users,
+    auth, users, announcements,
 )
 
 api_router = APIRouter()
@@ -37,6 +37,14 @@ api_router.include_router(
 )
 api_router.include_router(
     features.router, prefix="/admin/features", tags=["admin:features"],
+)
+api_router.include_router(
+    announcements.admin_router, prefix="/admin/announcements", tags=["admin:announcements"],
+)
+
+# ── Public announcements (no auth — all users see banners) ────────────
+api_router.include_router(
+    announcements.router, prefix="/announcements", tags=["announcements"],
 )
 
 # ── Top-level views (first-class, cross-workspace) ─────────────────

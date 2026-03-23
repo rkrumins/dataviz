@@ -70,8 +70,10 @@ class ProviderRegistry:
                     "Instantiating provider for workspace=%s ds=%s provider=%s graph=%s",
                     workspace_id, ds.id, ds.provider_id, ds.graph_name,
                 )
+                ds_extra = json.loads(ds.extra_config) if getattr(ds, "extra_config", None) else None
                 self._providers[cache_key] = await self._instantiate_from_provider(
-                    ds.provider_id, ds.graph_name, session
+                    ds.provider_id, ds.graph_name, session,
+                    ds_extra_config=ds_extra,
                 )
 
         return self._providers[cache_key]
@@ -214,6 +216,7 @@ class ProviderRegistry:
         provider_id: str,
         graph_name: Optional[str],
         session: AsyncSession,
+        ds_extra_config: Optional[dict] = None,
     ) -> GraphDataProvider:
         """Instantiate a GraphDataProvider from a ProviderORM row."""
         from ..db.repositories.provider_repo import get_provider_orm, get_credentials
@@ -223,9 +226,12 @@ class ProviderRegistry:
             raise KeyError(f"Provider not found: {provider_id}")
 
         credentials = await get_credentials(session, provider_id)
+        provider_extra = json.loads(row.extra_config) if row.extra_config else None
+        # Merge: data-source extra_config overrides provider-level
+        merged_extra = self._merge_extra_config(provider_extra, ds_extra_config)
         return self._create_provider_instance(
             row.provider_type, row.host, row.port, graph_name,
-            row.tls_enabled, credentials,
+            row.tls_enabled, credentials, extra_config=merged_extra,
         )
 
     async def _instantiate_from_connection(
@@ -249,6 +255,31 @@ class ProviderRegistry:
             row.tls_enabled, credentials,
         )
 
+    @staticmethod
+    def _merge_extra_config(
+        provider_config: Optional[dict],
+        datasource_config: Optional[dict],
+    ) -> Optional[dict]:
+        """Merge provider-level and data-source-level extra_config.
+        DataSource values win on conflict (shallow merge at top-level,
+        deep merge for ``schemaMapping`` sub-key).
+        """
+        if not provider_config and not datasource_config:
+            return None
+        base = dict(provider_config or {})
+        override = dict(datasource_config or {})
+        # Deep-merge the schemaMapping sub-key
+        if "schemaMapping" in base and "schemaMapping" in override:
+            merged_mapping = dict(base["schemaMapping"])
+            merged_mapping.update(
+                {k: v for k, v in override["schemaMapping"].items() if v is not None}
+            )
+            base.update(override)
+            base["schemaMapping"] = merged_mapping
+        else:
+            base.update(override)
+        return base
+
     def _create_provider_instance(
         self,
         provider_type: str,
@@ -257,6 +288,7 @@ class ProviderRegistry:
         graph_name: Optional[str],
         tls_enabled: bool,
         credentials: dict,
+        extra_config: Optional[dict] = None,
     ) -> GraphDataProvider:
         """Dispatch to the correct provider constructor."""
         ptype = provider_type.lower()
@@ -276,6 +308,7 @@ class ProviderRegistry:
                 username=credentials.get("username", "neo4j"),
                 password=credentials.get("password", ""),
                 database=graph_name or "neo4j",
+                extra_config=extra_config,
             )
 
         elif ptype == "datahub":
@@ -368,6 +401,9 @@ class ProviderRegistry:
         Create Provider + Blueprint + Workspace + legacy Connection from env vars.
         Called once on first startup when both tables are empty.
         Returns the new workspace ID.
+
+        Idempotent: uses a schema_migrations lock row to prevent multi-worker
+        races on PostgreSQL (advisory-lock-style).
         """
         from ..db.repositories import provider_repo, ontology_definition_repo, workspace_repo
         from ..db.repositories.connection_repo import create_connection
@@ -376,8 +412,42 @@ class ProviderRegistry:
             OntologyCreateRequest,
             WorkspaceCreateRequest,
             ConnectionCreateRequest,
+            DataSourceCreateRequest,
             ProviderType,
         )
+        sa_text = __import__("sqlalchemy").text
+
+        # Guard against multi-worker race: try to claim a lock row in
+        # schema_migrations.  Only the first worker to INSERT wins; the
+        # second gets an IntegrityError and falls through to re-query.
+        try:
+            from datetime import datetime, timezone
+            await session.execute(
+                sa_text(
+                    "INSERT INTO schema_migrations (key, applied_at) "
+                    "VALUES ('bootstrap_env', :now)"
+                ),
+                {"now": datetime.now(timezone.utc).isoformat()},
+            )
+            await session.flush()
+        except Exception:
+            # Another worker already claimed the lock — rollback the failed
+            # INSERT and re-check for the workspace it created.
+            await session.rollback()
+            # Brief wait for the winning worker to commit
+            import asyncio
+            await asyncio.sleep(1.0)
+            existing = await workspace_repo.get_default_workspace(session)
+            if existing:
+                logger.info("Bootstrap skipped — default workspace created by another worker: %s", existing.id)
+                return existing.id
+            # If still nothing, fall through and try to create (edge case)
+
+        # Double-check: another worker may have finished between our check and lock
+        existing = await workspace_repo.get_default_workspace(session)
+        if existing:
+            logger.info("Bootstrap skipped — default workspace already exists: %s", existing.id)
+            return existing.id
 
         provider_name = os.getenv("GRAPH_PROVIDER", "falkordb").lower()
         provider_map = {
@@ -411,7 +481,6 @@ class ProviderRegistry:
         ))
 
         # 3. Create Workspace with data source (default)
-        from backend.common.models.management import DataSourceCreateRequest
         ws = await workspace_repo.create_workspace(session, WorkspaceCreateRequest(
             name="Default Workspace",
             dataSources=[DataSourceCreateRequest(

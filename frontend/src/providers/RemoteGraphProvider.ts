@@ -196,22 +196,55 @@ export class RemoteGraphProvider implements GraphDataProvider {
             searchQuery?: string
             offset?: number
             limit?: number
+            sortProperty?: string | null
         }
     ): Promise<GraphNode[]> {
         const params = new URLSearchParams()
         if (options?.offset) params.append('offset', String(options.offset))
         if (options?.limit) params.append('limit', String(options.limit))
         if (options?.searchQuery) params.append('searchQuery', options.searchQuery)
+        if (options?.sortProperty !== undefined) params.append('sortProperty', options.sortProperty ?? '')
 
         if (options?.edgeTypes?.length) {
             options.edgeTypes.forEach(t => params.append('edgeTypes', t))
         }
 
-        // Note: Backend might ignore edgeTypes/entityTypes in the simple /children endpoint
-        // If strict filtering is needed, we might need to filter client-side or add params support
-        // For now, assuming standard parent->child traversal
-
         return await this.fetch<GraphNode[]>(`/nodes/${encodeURIComponent(parentUrn)}/children?${params.toString()}`)
+    }
+
+    async getChildrenWithEdges(
+        parentUrn: URN,
+        options?: {
+            edgeTypes?: string[]
+            lineageEdgeTypes?: string[]
+            searchQuery?: string
+            offset?: number
+            limit?: number
+            includeLineageEdges?: boolean
+            sortProperty?: string | null
+        }
+    ): Promise<{
+        children: GraphNode[]
+        containmentEdges: GraphEdge[]
+        lineageEdges: GraphEdge[]
+        totalChildren: number
+        hasMore: boolean
+    }> {
+        const params = new URLSearchParams()
+        if (options?.offset) params.append('offset', String(options.offset))
+        if (options?.limit) params.append('limit', String(options.limit))
+        if (options?.searchQuery) params.append('searchQuery', options.searchQuery)
+        if (options?.includeLineageEdges === false) params.append('includeLineageEdges', 'false')
+        if (options?.sortProperty !== undefined) params.append('sortProperty', options.sortProperty ?? '')
+
+        if (options?.edgeTypes?.length) {
+            options.edgeTypes.forEach(t => params.append('edgeTypes', t))
+        }
+        if (options?.lineageEdgeTypes?.length) {
+            options.lineageEdgeTypes.forEach(t => params.append('lineageEdgeTypes', t))
+        }
+
+        return await this.fetch(`/nodes/${encodeURIComponent(parentUrn)}/children-with-edges?${params.toString()}`)
     }
 
     async getParent(childUrn: URN): Promise<GraphNode | null> {

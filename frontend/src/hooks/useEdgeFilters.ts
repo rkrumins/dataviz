@@ -12,7 +12,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { useMemo } from 'react'
 import { useCanvasStore, type LineageEdge } from '@/store/canvas'
-import { useContainmentEdgeTypes, normalizeEdgeType } from '@/store/schema'
+import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 import type { EdgeTypeFilter } from '@/components/panels/EdgeDetailPanel'
 
 // ============================================
@@ -40,14 +40,9 @@ export const EDGE_DIRECTION_FILTERS: EdgeDirectionFilter[] = [
 // Default Filters (fallback when no edges exist)
 // ============================================
 
-export const DEFAULT_EDGE_FILTERS: EdgeTypeFilter[] = [
-    { type: 'transforms', label: 'Transforms', color: '#f59e0b', enabled: true },
-    { type: 'produces', label: 'Produces', color: '#22c55e', enabled: true },
-    { type: 'consumes', label: 'Consumes', color: '#3b82f6', enabled: true },
-    { type: 'contains', label: 'Contains', color: '#8b5cf6', enabled: true },
-    { type: 'derives_from', label: 'Derives From', color: '#a855f7', enabled: true },
-    { type: 'lineage', label: 'Lineage', color: '#06b6d4', enabled: true },
-]
+// Empty by default — filters are populated from actual edges discovered in the graph
+// via generateEdgeTypeFiltersFromEdges(). No hardcoded edge types.
+export const DEFAULT_EDGE_FILTERS: EdgeTypeFilter[] = []
 
 /**
  * Generate edge type filters from discovered edge types
@@ -281,27 +276,29 @@ export function useFilteredEdges(): {
             filters.filter((f) => f.enabled).map((f) => f.type)
         )
 
+        // When no filters are defined yet (schema not loaded, no edges discovered),
+        // pass all edges through rather than filtering everything out.
+        const hasFilters = filters.length > 0
+
         // Type-filtered edges (case-insensitive matching)
         const typeFiltered = edges.filter((edge) => {
+            const confidence = edge.data?.confidence ?? 1
+            if (confidence < confidenceThreshold) return false
+            // If no filters defined, show all edges
+            if (!hasFilters) return true
             const normalized = normalizeEdgeType(edge).toLowerCase()
             const originalType = (edge.data?.edgeType || edge.data?.relationship || 'unknown').toLowerCase()
-            const confidence = edge.data?.confidence ?? 1
             // Match against normalized or original type (case-insensitive)
-            return (enabledTypes.has(normalized) || enabledTypes.has(originalType)) && confidence >= confidenceThreshold
+            return enabledTypes.has(normalized) || enabledTypes.has(originalType)
         })
 
-        // Get containment types from ontology
-        const containmentTypes = containmentEdgeTypes || []
+        const containment = edges.filter((e) =>
+            isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
+        )
 
-        const containment = edges.filter((e) => {
-            const edgeType = normalizeEdgeType(e)
-            return containmentTypes.some(type => type.toUpperCase() === edgeType)
-        })
-
-        const lineage = edges.filter((e) => {
-            const edgeType = normalizeEdgeType(e)
-            return !containmentTypes.some(type => type.toUpperCase() === edgeType)
-        })
+        const lineage = edges.filter((e) =>
+            !isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
+        )
 
         // Apply direction filter if we have a focused node
         let directionFiltered = typeFiltered
@@ -377,8 +374,14 @@ export function useNodeEdges(nodeId: string | null): {
             filters.filter((f) => f.enabled).map((f) => f.type)
         )
 
+        // When no filters are defined yet (schema not loaded, no edges discovered),
+        // pass all edges through rather than filtering everything out.
+        const hasFilters = filters.length > 0
+
         // Filter by type first (case-insensitive matching)
         const typeFiltered = edges.filter((edge) => {
+            // If no filters defined, show all edges
+            if (!hasFilters) return true
             const normalized = normalizeEdgeType(edge).toLowerCase()
             const originalType = (edge.data?.edgeType || edge.data?.relationship || 'unknown').toLowerCase()
             // Match against normalized or original type (case-insensitive)

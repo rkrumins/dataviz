@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-    Database, Plus, Edit2, Settings, Loader2, Search,
+    Database, Plus, Edit2, Settings, Loader2, Search, AlertTriangle,
 } from 'lucide-react'
 import { workspaceService, type WorkspaceResponse, type WorkspaceCreateRequest } from '@/services/workspaceService'
-import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
+import { catalogService, type CatalogItemResponse, type CatalogItemBindingResponse } from '@/services/catalogService'
 import { WorkspaceCard } from './WorkspaceCard'
 import { AdminWizard, type WizardStep } from './AdminWizard'
 
@@ -13,6 +13,7 @@ export function RegistryWorkspaces() {
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([])
     const [catalogItems, setCatalogItems] = useState<CatalogItemResponse[]>([])
     const [dsStats, setDsStats] = useState<Record<string, { nodes: number; edges: number; types: number }>>({})
+    const [catalogBindings, setCatalogBindings] = useState<CatalogItemBindingResponse[]>([])
     const [searchQuery, setSearchQuery] = useState('')
     const [isLoading, setIsLoading] = useState(true)
     const [showWizard, setShowWizard] = useState(false)
@@ -57,6 +58,10 @@ export function RegistryWorkspaces() {
 
     useEffect(() => { loadData() }, [loadData])
 
+    useEffect(() => {
+        catalogService.listWithBindings().then(setCatalogBindings).catch(console.error)
+    }, [showWizard])
+
     const handleDelete = async (wsId: string) => {
         if (!confirm('Delete this workspace and all its data sources?')) return
         await workspaceService.delete(wsId)
@@ -83,12 +88,24 @@ export function RegistryWorkspaces() {
         finally { setWizSubmitting(false) }
     }
 
+    const wsNameDuplicate = workspaces.some(w => w.name.toLowerCase() === wizName.trim().toLowerCase())
+    const unboundCatalogs = catalogBindings.filter(b => !b.boundWorkspaceId)
+
     const wizardSteps: WizardStep[] = [
         {
-            id: 'basics', title: 'Basics', icon: Edit2, validate: () => wizName.trim() ? true : 'Please enter a workspace name.',
+            id: 'basics', title: 'Basics', icon: Edit2, validate: () => wizName.trim() && !wsNameDuplicate ? true : !wizName.trim() ? 'Please enter a workspace name.' : 'A workspace with this name already exists.',
             content: (
                 <div className="space-y-4">
-                    <div><label className="block text-sm font-medium text-ink mb-1.5">Workspace Name *</label><input value={wizName} onChange={e => setWizName(e.target.value)} placeholder="e.g. Production Analytics" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" /></div>
+                    <div>
+                        <label className="block text-sm font-medium text-ink mb-1.5">Workspace Name *</label>
+                        <input value={wizName} onChange={e => setWizName(e.target.value)} placeholder="e.g. Production Analytics" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
+                        {wsNameDuplicate && (
+                            <p className="mt-1.5 text-xs text-amber-500 flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3" />
+                                A workspace named &quot;{wizName.trim()}&quot; already exists
+                            </p>
+                        )}
+                    </div>
                     <div><label className="block text-sm font-medium text-ink mb-1.5">Description</label><textarea value={wizDesc} onChange={e => setWizDesc(e.target.value)} placeholder="Optional description for this workspace" rows={3} className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none" /></div>
                 </div>
             ),
@@ -97,8 +114,12 @@ export function RegistryWorkspaces() {
             id: 'data-source', title: 'Data Source', icon: Database, validate: () => true,
             content: (
                 <div className="space-y-4">
-                    <p className="text-xs text-ink-muted mb-4">You can connect an initial data product to this workspace now, or do it later.</p>
-                    <div><label className="block text-sm font-medium text-ink mb-1.5">Catalog Item</label><select value={wizCatalogItemId} onChange={e => setWizCatalogItemId(e.target.value)} className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"><option value="">Skip for now...</option>{catalogItems.map(c => <option key={c.id} value={c.id}>{c.name} ({c.sourceIdentifier})</option>)}</select></div>
+                    <p className="text-xs text-ink-muted mb-4">You can connect an initial data source to this workspace now, or do it later.</p>
+                    <div>
+                        <label className="block text-sm font-medium text-ink mb-1.5">Catalog Item</label>
+                        <select value={wizCatalogItemId} onChange={e => setWizCatalogItemId(e.target.value)} className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"><option value="">Skip for now...</option>{unboundCatalogs.map(c => <option key={c.id} value={c.id}>{c.name} ({c.sourceIdentifier})</option>)}</select>
+                        <p className="mt-1.5 text-xs text-ink-muted">Only unallocated data sources are shown</p>
+                    </div>
                     <div><label className="block text-sm font-medium text-ink mb-1.5">Label</label><input value={wizDsLabel} onChange={e => setWizDsLabel(e.target.value)} placeholder="e.g. Main Graph, Analytics DB" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" /></div>
                 </div>
             ),
@@ -127,7 +148,7 @@ export function RegistryWorkspaces() {
             <div className="flex items-center justify-between">
                 <div>
                     <h2 className="text-xl font-bold text-ink">Workspaces</h2>
-                    <p className="text-sm text-ink-muted mt-1">Tenant environments subscribed to data assets.</p>
+                    <p className="text-sm text-ink-muted mt-1">Tenant environments subscribed to data sources.</p>
                 </div>
                 <button onClick={() => { resetWizard(); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors">
                     <Plus className="w-4 h-4" /> Create Workspace

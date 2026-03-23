@@ -15,6 +15,7 @@ import {
   FlaskConical,
   Zap,
   Bell,
+  Layers,
 } from 'lucide-react'
 import type { FeatureCategory } from '@/services/featuresService'
 
@@ -30,6 +31,7 @@ export const ICON_BY_NAME: Record<string, ComponentType<{ className?: string }>>
   FlaskConical,
   Zap,
   Bell,
+  Layers,
 }
 
 export const DEFAULT_ICON = LayoutTemplate

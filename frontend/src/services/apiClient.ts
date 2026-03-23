@@ -6,6 +6,7 @@
  */
 
 import { useAuthStore } from '@/store/auth'
+import { useHealthStore } from '@/store/health'
 
 export async function authFetch<T>(url: string, init?: RequestInit): Promise<T> {
     const token = useAuthStore.getState().accessToken
@@ -17,7 +18,13 @@ export async function authFetch<T>(url: string, init?: RequestInit): Promise<T> 
         headers['Authorization'] = `Bearer ${token}`
     }
 
-    const res = await fetch(url, { ...init, headers })
+    let res: Response
+    try {
+        res = await fetch(url, { ...init, headers })
+    } catch (err) {
+        useHealthStore.getState().reportFailure(err)
+        throw err
+    }
 
     if (res.status === 401) {
         useAuthStore.getState().logout()

@@ -32,11 +32,31 @@ export interface OntologyUpdateRequest {
     relationshipTypeDefinitions?: Record<string, unknown>
 }
 
+export interface OntologyMatchResult {
+    ontologyId: string
+    ontologyName: string
+    version: number
+    jaccardScore: number
+    coveredEntityTypes: string[]
+    uncoveredEntityTypes: string[]
+    coveredRelationshipTypes: string[]
+    uncoveredRelationshipTypes: string[]
+    totalEntityTypes: number
+    totalRelationshipTypes: number
+}
+
+export interface OntologySuggestResponse {
+    suggested: OntologyCreateRequest
+    matchingOntologies: OntologyMatchResult[]
+}
+
 export interface OntologyDefinitionResponse {
     id: string
+    schemaId: string
     name: string
     description: string | null
     version: number
+    revision: number
     evolutionPolicy: string
     containmentEdgeTypes: string[]
     lineageEdgeTypes: string[]
@@ -48,8 +68,44 @@ export interface OntologyDefinitionResponse {
     isPublished: boolean
     isSystem: boolean
     scope: string
+    createdBy: string | null
+    updatedBy: string | null
+    publishedBy: string | null
+    publishedAt: string | null
+    deletedBy: string | null
+    deletedAt: string | null
     createdAt: string
     updatedAt: string
+}
+
+export interface OntologyAuditEntry {
+    id: string
+    ontologyId: string
+    schemaId: string
+    action: 'created' | 'updated' | 'published' | 'deleted' | 'restored' | 'cloned' | 'imported'
+    actor: string | null
+    version: number | null
+    summary: string | null
+    changes: {
+        addedEntityTypes?: string[]
+        removedEntityTypes?: string[]
+        addedRelationshipTypes?: string[]
+        removedRelationshipTypes?: string[]
+    } | null
+    createdAt: string
+}
+
+/** Result of an import operation. */
+export interface OntologyImportResponse {
+    ontology: OntologyDefinitionResponse
+    status: 'created' | 'updated' | 'new_version' | 'no_changes'
+    summary: string
+    changes: {
+        addedEntityTypes?: string[]
+        removedEntityTypes?: string[]
+        addedRelationshipTypes?: string[]
+        removedRelationshipTypes?: string[]
+    } | null
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -66,13 +122,20 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const ontologyDefinitionService = {
-    list(allVersions = false): Promise<OntologyDefinitionResponse[]> {
-        const url = allVersions ? `${ADMIN_API}?all_versions=true` : ADMIN_API
-        return request<OntologyDefinitionResponse[]>(url)
+    list(allVersions = false, includeDeleted = false): Promise<OntologyDefinitionResponse[]> {
+        const params = new URLSearchParams()
+        if (allVersions) params.set('all_versions', 'true')
+        if (includeDeleted) params.set('include_deleted', 'true')
+        const qs = params.toString()
+        return request<OntologyDefinitionResponse[]>(qs ? `${ADMIN_API}?${qs}` : ADMIN_API)
     },
 
     get(id: string): Promise<OntologyDefinitionResponse> {
         return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}`)
+    },
+
+    listVersions(id: string): Promise<OntologyDefinitionResponse[]> {
+        return request<OntologyDefinitionResponse[]>(`${ADMIN_API}/${id}/versions`)
     },
 
     create(req: OntologyCreateRequest): Promise<OntologyDefinitionResponse> {
@@ -105,6 +168,16 @@ export const ontologyDefinitionService = {
         })
     },
 
+    auditLog(id: string): Promise<OntologyAuditEntry[]> {
+        return request<OntologyAuditEntry[]>(`${ADMIN_API}/${id}/audit`)
+    },
+
+    restore(id: string): Promise<OntologyDefinitionResponse> {
+        return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}/restore`, {
+            method: 'POST',
+        })
+    },
+
     validate(id: string): Promise<OntologyValidationResponse> {
         return request<OntologyValidationResponse>(`${ADMIN_API}/${id}/validate`, {
             method: 'POST',
@@ -118,11 +191,11 @@ export const ontologyDefinitionService = {
         })
     },
 
-    suggest(stats: Record<string, unknown>, baseOntologyId?: string): Promise<OntologyCreateRequest> {
+    suggest(stats: Record<string, unknown>, baseOntologyId?: string): Promise<OntologySuggestResponse> {
         const url = baseOntologyId
             ? `${ADMIN_API}/suggest?base_ontology_id=${encodeURIComponent(baseOntologyId)}`
             : `${ADMIN_API}/suggest`
-        return request<OntologyCreateRequest>(url, {
+        return request<OntologySuggestResponse>(url, {
             method: 'POST',
             body: JSON.stringify(stats),
         })
@@ -141,6 +214,28 @@ export const ontologyDefinitionService = {
      */
     impact(id: string): Promise<OntologyImpactResponse> {
         return request<OntologyImpactResponse>(`${ADMIN_API}/${id}/impact`)
+    },
+
+    /**
+     * Import a semantic layer from exported JSON as a new draft.
+     */
+    importNew(data: Record<string, unknown>): Promise<OntologyImportResponse> {
+        return request<OntologyImportResponse>(`${ADMIN_API}/import`, {
+            method: 'POST',
+            body: JSON.stringify(data),
+        })
+    },
+
+    /**
+     * Import a semantic layer from exported JSON into an existing ontology.
+     * - Draft target → in-place update (same version)
+     * - Published target → creates new draft version
+     */
+    importInto(id: string, data: Record<string, unknown>): Promise<OntologyImportResponse> {
+        return request<OntologyImportResponse>(`${ADMIN_API}/${id}/import`, {
+            method: 'POST',
+            body: JSON.stringify(data),
+        })
     },
 }
 

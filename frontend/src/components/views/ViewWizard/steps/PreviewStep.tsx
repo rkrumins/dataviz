@@ -46,6 +46,7 @@ const VISIBILITY_META = {
 export function PreviewStep({ formData }: PreviewStepProps) {
     const schema = useSchemaStore(s => s.schema)
     const activeWorkspace = useWorkspacesStore(s => s.getActiveWorkspace())
+    const activeDataSource = useWorkspacesStore(s => s.getActiveDataSource())
 
     // Get entity type info
     const selectedEntityTypes = formData.visibleEntityTypes
@@ -232,6 +233,12 @@ export function PreviewStep({ formData }: PreviewStepProps) {
                                 <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-full text-sm">
                                     <Box className="w-3 h-3 text-slate-400" />
                                     {activeWorkspace.name}
+                                </span>
+                            )}
+                            {activeDataSource && (
+                                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 border border-emerald-200 dark:border-emerald-700/50 rounded-full text-sm">
+                                    <Box className="w-3 h-3 text-emerald-400" />
+                                    {activeDataSource.label || activeDataSource.catalogItemId || 'Data Source'}
                                 </span>
                             )}
                             {formData.tags.map(tag => (

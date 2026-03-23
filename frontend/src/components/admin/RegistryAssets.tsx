@@ -7,11 +7,11 @@
  *         lazy stats, blast-radius unregister, and inline route step
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import {
     Database, Search, Filter, Loader2, Trash2,
-    BookOpen, CheckCircle2, RefreshCw, Layers,
-    AlertTriangle, ArrowRight, Zap, X, ChevronRight
+    CheckCircle2, RefreshCw, Layers,
+    AlertTriangle, Zap, X, ChevronRight
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -20,14 +20,15 @@ import {
     type ProviderImpactResponse,
 } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
-import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
+import { Neo4jLogo, FalkorDBLogo, DataHubLogo, MockLogo } from './ProviderLogos'
+import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 
 // ─── Provider type helpers ────────────────────────────────────────────────────
 const PROVIDER_TYPES = [
-    { type: 'falkordb', label: 'FalkorDB', icon: '⚡', color: 'text-amber-500 bg-amber-500/10 border-amber-500/20' },
-    { type: 'neo4j', label: 'Neo4j', icon: '🔵', color: 'text-blue-500 bg-blue-500/10 border-blue-500/20' },
-    { type: 'datahub', label: 'DataHub', icon: '📊', color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20' },
-    { type: 'mock', label: 'Mock', icon: '🧪', color: 'text-violet-500 bg-violet-500/10 border-violet-500/20' },
+    { type: 'falkordb', label: 'FalkorDB', Logo: FalkorDBLogo, color: 'text-amber-500 bg-amber-500/10 border-amber-500/20' },
+    { type: 'neo4j', label: 'Neo4j', Logo: Neo4jLogo, color: 'text-blue-500 bg-blue-500/10 border-blue-500/20' },
+    { type: 'datahub', label: 'DataHub', Logo: DataHubLogo, color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20' },
+    { type: 'mock', label: 'Mock', Logo: MockLogo, color: 'text-violet-500 bg-violet-500/10 border-violet-500/20' },
 ]
 function getProviderConfig(type: string) {
     return PROVIDER_TYPES.find(p => p.type === type) || PROVIDER_TYPES[3]
@@ -48,7 +49,7 @@ const TYPE_COLOURS = [
 // ─── AssetRow ─────────────────────────────────────────────────────────────────
 function AssetRow({
     providerId, assetName, isRegistered, isSelected,
-    onToggle, onUnregister,
+    onToggle, onUnregister, boundWorkspaceName,
 }: {
     providerId: string
     assetName: string
@@ -56,6 +57,7 @@ function AssetRow({
     isSelected: boolean
     onToggle: (name: string) => void
     onUnregister: (name: string) => void
+    boundWorkspaceName?: string
 }) {
     const [stats, setStats] = useState<any>(null)
     const [loadingStats, setLoadingStats] = useState(false)
@@ -153,6 +155,12 @@ function AssetRow({
                             <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-500/15 text-indigo-600 border border-indigo-500/25 font-bold uppercase tracking-wide">Queued</span>
                         ) : (
                             <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-black/5 dark:bg-white/5 text-ink-muted font-bold uppercase tracking-wide">Available</span>
+                        )}
+                        {boundWorkspaceName && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-500 text-[10px] font-semibold">
+                                <Database className="w-2.5 h-2.5" />
+                                {boundWorkspaceName}
+                            </span>
                         )}
                     </div>
 
@@ -418,176 +426,6 @@ function UnregisterDialog({
     )
 }
 
-// ─── Route Step (inline bottom sheet) ─────────────────────────────────────────
-function RouteStep({
-    provider,
-    registeredCatalogs,
-    onClose,
-    onDone,
-}: {
-    provider: ProviderResponse
-    registeredCatalogs: any[]
-    onClose: () => void
-    onDone: () => void
-}) {
-    const navigate = useNavigate()
-    const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([])
-    const [selectedWorkspace, setSelectedWorkspace] = useState('new')
-    const [newWorkspaceName, setNewWorkspaceName] = useState('')
-    const [projectionMode, setProjectionMode] = useState<'in_source' | 'dedicated'>('in_source')
-    const [routing, setRouting] = useState(false)
-    const [error, setError] = useState('')
-
-    useEffect(() => {
-        workspaceService.list().then(setWorkspaces).catch(console.error)
-    }, [])
-
-    const handleRoute = async () => {
-        setRouting(true)
-        setError('')
-        try {
-            let targetWsId = selectedWorkspace
-            let targetDsId = ''
-
-            if (targetWsId === 'new') {
-                const wsName = newWorkspaceName.trim() || `${provider.name} Domain`
-                const ws = await workspaceService.create({
-                    name: wsName,
-                    dataSources: registeredCatalogs.map((c: any) => ({ catalogItemId: c.id }))
-                })
-                targetWsId = ws.id
-                targetDsId = ws.dataSources[0]?.id || ''
-                if (projectionMode === 'dedicated') {
-                    for (const ds of ws.dataSources) {
-                        await workspaceService.setProjectionMode(targetWsId, ds.id, 'dedicated')
-                    }
-                }
-            } else {
-                const added = await Promise.all(
-                    registeredCatalogs.map((c: any) =>
-                        workspaceService.addDataSource(targetWsId, { catalogItemId: c.id })
-                    )
-                )
-                targetDsId = added[0]?.id || ''
-                if (projectionMode === 'dedicated') {
-                    for (const ds of added) {
-                        await workspaceService.setProjectionMode(targetWsId, ds.id, 'dedicated')
-                    }
-                }
-            }
-            navigate(`/schema?workspaceId=${targetWsId}&dataSourceId=${targetDsId}`)
-        } catch (err: any) {
-            setError(err.message || 'Failed to route assets.')
-            setRouting(false)
-        }
-    }
-
-    return (
-        <div className="fixed inset-0 z-[60] flex items-end justify-center">
-            <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-            <div className="relative w-full max-w-2xl mx-4 mb-4 bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl p-6 animate-in slide-in-from-bottom-4 fade-in duration-300">
-                {/* Header */}
-                <div className="flex items-center justify-between mb-6">
-                    <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
-                            <BookOpen className="w-5 h-5 text-emerald-500" />
-                        </div>
-                        <div>
-                            <h3 className="text-base font-bold text-ink">
-                                {registeredCatalogs.length} Asset{registeredCatalogs.length !== 1 ? 's' : ''} Registered
-                            </h3>
-                            <p className="text-xs text-ink-muted">Route these data products to a workspace to start exploring</p>
-                        </div>
-                    </div>
-                    <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors">
-                        <X className="w-4 h-4" />
-                    </button>
-                </div>
-
-                {error && <div className="mb-4 p-3 rounded-lg bg-red-500/10 text-red-500 text-sm">{error}</div>}
-
-                <div className="grid grid-cols-2 gap-4 mb-5">
-                    {/* Workspace selection */}
-                    <div className="space-y-3">
-                        <label className="block text-xs font-bold text-ink-muted uppercase tracking-wider">Workspace Destination</label>
-                        <label className={cn(
-                            'flex items-start gap-3 p-3.5 rounded-xl border cursor-pointer transition-colors',
-                            selectedWorkspace === 'new' ? 'border-indigo-500/40 bg-indigo-500/5' : 'border-glass-border hover:border-indigo-500/20'
-                        )}>
-                            <input type="radio" checked={selectedWorkspace === 'new'} onChange={() => setSelectedWorkspace('new')} className="mt-1 accent-indigo-500" />
-                            <div className="flex-1">
-                                <span className="block text-sm font-bold text-ink mb-2">Create New Domain</span>
-                                <input
-                                    value={newWorkspaceName}
-                                    onChange={e => { setSelectedWorkspace('new'); setNewWorkspaceName(e.target.value) }}
-                                    placeholder={`${provider.name} Project`}
-                                    className="w-full px-3 py-2 rounded-lg bg-canvas border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-                                />
-                            </div>
-                        </label>
-                        {workspaces.length > 0 && (
-                            <div>
-                                <p className="text-xs font-semibold text-ink-muted mb-1.5">Or add to existing:</p>
-                                <select
-                                    value={selectedWorkspace === 'new' ? '' : selectedWorkspace}
-                                    onChange={e => setSelectedWorkspace(e.target.value)}
-                                    className="w-full px-3 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 appearance-none"
-                                >
-                                    <option value="" disabled>Select a domain...</option>
-                                    {workspaces.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
-                                </select>
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Projection strategy */}
-                    <div>
-                        <label className="block text-xs font-bold text-ink-muted uppercase tracking-wider mb-3">Aggregation Strategy</label>
-                        <div className="space-y-2">
-                            {([
-                                { id: 'in_source', title: 'In-Source', desc: 'Write aggregated edges back to the physical graph', icon: '⚡' },
-                                { id: 'dedicated', title: 'Dedicated Graph', desc: 'Sync projections to a separate cache graph', icon: '🗂️' },
-                            ] as const).map(opt => (
-                                <label key={opt.id} className={cn(
-                                    'flex items-start gap-3 p-3.5 rounded-xl border cursor-pointer transition-colors',
-                                    projectionMode === opt.id ? 'border-indigo-500/40 bg-indigo-500/5' : 'border-glass-border hover:border-indigo-500/20'
-                                )}>
-                                    <input type="radio" name="proj" className="mt-0.5 accent-indigo-500" checked={projectionMode === opt.id} onChange={() => setProjectionMode(opt.id)} />
-                                    <div>
-                                        <div className="flex items-center gap-1.5 text-sm font-bold text-ink">{opt.icon} {opt.title}</div>
-                                        <p className="text-xs text-ink-muted mt-0.5">{opt.desc}</p>
-                                    </div>
-                                </label>
-                            ))}
-                        </div>
-                    </div>
-                </div>
-
-                <div className="flex items-center justify-between pt-4 border-t border-glass-border">
-                    <p className="text-sm text-ink-muted">
-                        <span className="font-bold text-ink">{registeredCatalogs.length}</span> assets ready to route
-                    </p>
-                    <div className="flex gap-3">
-                        <button onClick={onDone} disabled={routing} className="px-5 py-2.5 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50 transition-colors">
-                            Skip for now
-                        </button>
-                        <button
-                            onClick={handleRoute}
-                            disabled={routing || (selectedWorkspace !== 'new' && !selectedWorkspace)}
-                            className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-black bg-indigo-500 text-white hover:bg-indigo-600 shadow-lg shadow-indigo-500/20 disabled:opacity-50 transition-colors"
-                        >
-                            {routing
-                                ? <><Loader2 className="w-4 h-4 animate-spin" /> Routing...</>
-                                : <><ArrowRight className="w-4 h-4" /> Route & Explore</>
-                            }
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    )
-}
-
 // ─── Main: RegistryAssets ─────────────────────────────────────────────────────
 export function RegistryAssets() {
     const [searchParams, setSearchParams] = useSearchParams()
@@ -610,10 +448,8 @@ export function RegistryAssets() {
     const [statusFilter, setStatusFilter] = useState<'all' | 'selected' | 'registered' | 'unregistered'>('all')
 
     // Actions
-    const [registering, setRegistering] = useState(false)
-    const [registerError, setRegisterError] = useState('')
-    const [registeredCatalogs, setRegisteredCatalogs] = useState<any[]>([])
-    const [showRoute, setShowRoute] = useState(false)
+    const [showOnboarding, setShowOnboarding] = useState(false)
+    const [onboardingCatalogs, setOnboardingCatalogs] = useState<any[]>([])
 
     // Unregister dialog
     const [unregisterTarget, setUnregisterTarget] = useState<CatalogItemResponse | null>(null)
@@ -656,15 +492,15 @@ export function RegistryAssets() {
             const assetList = res.assets || []
             setAssets(assetList)
             setExistingCatalogs(existing)
-            const existingSet = new Set(existing.map((c: any) => c.sourceIdentifier))
+            const existingSet = new Set(existing.map((c: any) => c.sourceIdentifier).filter(Boolean))
             setSelected(new Set(assetList.filter((a: string) => !existingSet.has(a))))
 
-            // Cache counts for sidebar
+            // Cache counts for sidebar — count by matching physical assets, not raw catalog length
             setProviderAssetCounts(prev => ({
                 ...prev,
                 [selectedProviderId]: {
                     total: assetList.length,
-                    registered: existing.length,
+                    registered: assetList.filter((a: string) => existingSet.has(a)).length,
                 }
             }))
         }).catch(err => {
@@ -681,37 +517,40 @@ export function RegistryAssets() {
         setSearchParams({ tab: 'assets', provider: id })
     }
 
-    // Register queued assets
-    const handleRegister = async () => {
-        if (!selectedProviderId) return
-        setRegistering(true)
-        setRegisterError('')
-        try {
-            const created = await Promise.all(
-                Array.from(selected).map(assetId =>
-                    catalogService.create({
-                        providerId: selectedProviderId,
-                        sourceIdentifier: assetId,
-                        name: assetId.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
-                        permittedWorkspaces: ['*'],
-                    })
-                )
-            )
-            setRegisteredCatalogs(created)
-            // Refresh catalog state
+    // Open onboarding wizard with selected assets (no API calls yet — registration
+    // happens inside the wizard on final submit so cancelling is safe).
+    const handleRegister = () => {
+        if (!selectedProviderId || selected.size === 0) return
+        // Build placeholder catalog items for the wizard to use.
+        // Real catalog items are created by the wizard's submit handler.
+        const placeholders: CatalogItemResponse[] = Array.from(selected).map(assetId => ({
+            id: `pending_${assetId}`,
+            providerId: selectedProviderId,
+            sourceIdentifier: assetId,
+            name: assetId.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+            description: undefined,
+            permittedWorkspaces: ['*'],
+            status: 'active',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+        }))
+        setOnboardingCatalogs(placeholders)
+        setShowOnboarding(true)
+    }
+
+    // Called by wizard on successful completion — refresh state
+    const handleOnboardingComplete = async () => {
+        setShowOnboarding(false)
+        setSelected(new Set())
+        if (selectedProviderId) {
             const existing = await catalogService.list(selectedProviderId)
             setExistingCatalogs(existing)
-            setSelected(new Set())
             setProviderAssetCounts(prev => ({
                 ...prev,
-                [selectedProviderId]: { total: assets.length, registered: existing.length }
+                [selectedProviderId]: { total: assets.length, registered: assets.filter(a => existing.some((c: any) => c.sourceIdentifier === a)).length }
             }))
-            setShowRoute(true)
-        } catch (err: any) {
-            setRegisterError(err.message || 'Failed to register assets.')
-        } finally {
-            setRegistering(false)
         }
+        loadProviders()
     }
 
     // Initiate unregister
@@ -738,7 +577,7 @@ export function RegistryAssets() {
             setExistingCatalogs(existing)
             setProviderAssetCounts(prev => ({
                 ...prev,
-                [selectedProviderId]: { total: assets.length, registered: existing.length }
+                [selectedProviderId]: { total: assets.length, registered: assets.filter(a => existing.some((c: any) => c.sourceIdentifier === a)).length }
             }))
             setUnregisterTarget(null)
             setUnregisterImpact(null)
@@ -756,11 +595,16 @@ export function RegistryAssets() {
         })
     }
 
-    const registeredCount = existingCatalogs.length
+    // Deduplicate: build a Set of registered source identifiers
+    // (guards against legacy duplicate catalog entries)
+    const registeredSourceIds = new Set(
+        existingCatalogs.map(c => c.sourceIdentifier).filter(Boolean)
+    )
+    const registeredCount = assets.filter(a => registeredSourceIds.has(a)).length
 
     const filteredAssets = assets.filter(g => {
         if (searchQuery && !g.toLowerCase().includes(searchQuery.toLowerCase())) return false
-        const isReg = existingCatalogs.some(c => c.sourceIdentifier === g)
+        const isReg = registeredSourceIds.has(g)
         if (statusFilter === 'registered' && !isReg) return false
         if (statusFilter === 'unregistered' && isReg) return false
         if (statusFilter === 'selected' && !selected.has(g)) return false
@@ -804,8 +648,8 @@ export function RegistryAssets() {
                                         : 'bg-canvas-elevated border-glass-border hover:border-indigo-400/30 hover:bg-indigo-500/5'
                                 )}
                             >
-                                <div className={cn('w-8 h-8 rounded-lg border flex items-center justify-center text-sm shrink-0', config.color)}>
-                                    {config.icon}
+                                <div className={cn('w-8 h-8 rounded-lg border flex items-center justify-center shrink-0', config.color)}>
+                                    <config.Logo className="w-4 h-4" />
                                 </div>
                                 <div className="flex-1 min-w-0">
                                     <p className="text-sm font-semibold text-ink truncate">{p.name}</p>
@@ -857,11 +701,23 @@ export function RegistryAssets() {
                     </div>
                 ) : (
                     <>
+                        {searchParams.get('onboarding') && (
+                            <div className="mb-4 flex items-center gap-3 px-4 py-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 animate-in slide-in-from-top-2 fade-in duration-300">
+                                <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                                <p className="text-sm text-emerald-700 dark:text-emerald-400 flex-1">
+                                    Provider connected successfully. Select graphs below to onboard them to your enterprise catalog.
+                                </p>
+                                <button onClick={() => setSearchParams({ tab: 'assets', provider: selectedProviderId || '' })} className="text-emerald-500 hover:text-emerald-600 p-1">
+                                    <X className="w-4 h-4" />
+                                </button>
+                            </div>
+                        )}
+
                         {/* Panel header */}
                         <div className="flex items-center justify-between mb-4 shrink-0">
                             <div>
                                 <h2 className="text-base font-bold text-ink flex items-center gap-2">
-                                    <span>{getProviderConfig(selectedProvider.providerType).icon}</span>
+                                    {(() => { const C = getProviderConfig(selectedProvider.providerType); return <C.Logo className="w-5 h-5" /> })()}
                                     {selectedProvider.name}
                                 </h2>
                                 <p className="text-sm text-ink-muted mt-0.5">
@@ -934,7 +790,7 @@ export function RegistryAssets() {
                                 {/* Bulk actions */}
                                 <div className="flex items-center gap-1.5">
                                     <button
-                                        onClick={() => setSelected(new Set(assets.filter(a => !existingCatalogs.some(c => c.sourceIdentifier === a))))}
+                                        onClick={() => setSelected(new Set(assets.filter(a => !registeredSourceIds.has(a))))}
                                         className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-600 bg-indigo-500/10 hover:bg-indigo-500/20 transition-colors"
                                     >
                                         Select All
@@ -950,14 +806,6 @@ export function RegistryAssets() {
                             </div>
                         </div>
 
-                        {/* Error from registration */}
-                        {registerError && (
-                            <div className="mb-3 p-3 rounded-lg bg-red-500/10 text-red-500 text-sm flex items-center gap-2 shrink-0">
-                                <AlertTriangle className="w-4 h-4 shrink-0" />
-                                {registerError}
-                            </div>
-                        )}
-
                         {/* Asset list */}
                         <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-0">
                             {assetsLoading ? (
@@ -965,7 +813,7 @@ export function RegistryAssets() {
                                     <Loader2 className="w-8 h-8 animate-spin" />
                                     <div className="text-center">
                                         <p className="font-semibold text-sm">Scanning Provider</p>
-                                        <p className="text-xs opacity-70 mt-1">Discovering physical data assets...</p>
+                                        <p className="text-xs opacity-70 mt-1">Discovering physical data sources...</p>
                                     </div>
                                 </div>
                             ) : assetsError ? (
@@ -987,7 +835,7 @@ export function RegistryAssets() {
                                         key={assetName}
                                         providerId={selectedProviderId!}
                                         assetName={assetName}
-                                        isRegistered={existingCatalogs.some(c => c.sourceIdentifier === assetName)}
+                                        isRegistered={registeredSourceIds.has(assetName)}
                                         isSelected={selected.has(assetName)}
                                         onToggle={toggleSelection}
                                         onUnregister={handleUnregisterClick}
@@ -1007,13 +855,10 @@ export function RegistryAssets() {
                             </div>
                             <button
                                 onClick={handleRegister}
-                                disabled={assetsLoading || selected.size === 0 || registering}
+                                disabled={assetsLoading || selected.size === 0}
                                 className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-black tracking-wide bg-indigo-500 text-white hover:bg-indigo-600 shadow-lg shadow-indigo-500/20 transition-all active:scale-95 disabled:opacity-50 disabled:active:scale-100 disabled:shadow-none"
                             >
-                                {registering
-                                    ? <><Loader2 className="w-4 h-4 animate-spin" /> Registering...</>
-                                    : <><Zap className="w-4 h-4" /> Onboard Assets ({selected.size})</>
-                                }
+                                <Zap className="w-4 h-4" /> Onboard Sources ({selected.size})
                             </button>
                         </div>
                     </>
@@ -1031,12 +876,13 @@ export function RegistryAssets() {
                 />
             )}
 
-            {showRoute && selectedProvider && (
-                <RouteStep
-                    provider={selectedProvider}
-                    registeredCatalogs={registeredCatalogs}
-                    onClose={() => setShowRoute(false)}
-                    onDone={() => setShowRoute(false)}
+            {showOnboarding && providers.find(p => p.id === selectedProviderId) && (
+                <AssetOnboardingWizard
+                    provider={providers.find(p => p.id === selectedProviderId)!}
+                    catalogItems={onboardingCatalogs}
+                    isOpen={showOnboarding}
+                    onComplete={handleOnboardingComplete}
+                    onClose={() => setShowOnboarding(false)}
                 />
             )}
         </div>

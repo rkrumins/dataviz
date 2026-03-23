@@ -7,6 +7,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      '@docs': path.resolve(__dirname, '../docs'),
     },
   },
   build: {
@@ -23,6 +24,12 @@ export default defineConfig({
             if (id.includes('zustand')) {
               return 'vendor-state'
             }
+            if (id.includes('react-markdown') || id.includes('remark-') || id.includes('rehype-') || id.includes('unified') || id.includes('mdast') || id.includes('hast') || id.includes('micromark')) {
+              return 'vendor-markdown'
+            }
+            if (id.includes('mermaid') || id.includes('dagre') || id.includes('d3') || id.includes('elkjs')) {
+              return 'vendor-mermaid'
+            }
           }
         },
       },
@@ -32,10 +39,11 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8002',
+        target: 'http://localhost:8000',
         changeOrigin: true,
       },
     },
   },
 })
+
 

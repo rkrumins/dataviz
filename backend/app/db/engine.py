@@ -120,94 +120,40 @@ class Base(DeclarativeBase):
 
 async def init_db() -> None:
     """
-    Create all tables that don't yet exist.
+    Create all tables that don't yet exist and apply incremental migrations.
     Called once during application lifespan startup.
+    Works for both SQLite (dev/quickstart) and PostgreSQL (production).
     """
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz
+    sa_text = __import__("sqlalchemy").text
+
     engine = get_engine()
-    async with engine.begin() as conn:
-        from . import models  # noqa: F401 — registers ORM models with Base
-        await conn.run_sync(Base.metadata.create_all)
+    # ── 1. Create all ORM-defined tables ──────────────────────────────
+    # With multi-worker servers (e.g. gunicorn), multiple workers may race
+    # to create_all simultaneously.  On PostgreSQL this can cause
+    # IntegrityError on pg_type_typname_nsp_index.  Safe to ignore —
+    # the other worker's transaction will win and create the tables.
+    from . import models  # noqa: F401 — registers ORM models with Base
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as _create_err:
+        logger.warning("create_all race (safe to ignore): %s", _create_err)
+        # Tables may already exist from the winning worker — verify
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
-    # ── Create feature_categories / feature_definitions / feature_flags if missing ─
-    async with engine.begin() as conn:
-        if DATABASE_URL.startswith("sqlite"):
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "CREATE TABLE IF NOT EXISTS feature_categories "
-                    "(id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL, icon TEXT NOT NULL, color TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, "
-                    "preview INTEGER NOT NULL DEFAULT 1, preview_label TEXT, preview_footer TEXT)"
-                )
-            )
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "CREATE TABLE IF NOT EXISTS feature_definitions "
-                    "(key TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, category_id TEXT NOT NULL, "
-                    "type TEXT NOT NULL, default_value TEXT NOT NULL, user_overridable INTEGER NOT NULL DEFAULT 0, "
-                    "options TEXT, help_url TEXT, admin_hint TEXT, sort_order INTEGER NOT NULL DEFAULT 0, deprecated INTEGER NOT NULL DEFAULT 0, implemented INTEGER NOT NULL DEFAULT 0)"
-                )
-            )
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "CREATE TABLE IF NOT EXISTS feature_flags "
-                    "(id INTEGER PRIMARY KEY CHECK (id = 1), config TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0)"
-                )
-            )
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "CREATE TABLE IF NOT EXISTS feature_registry_meta "
-                    "(id INTEGER PRIMARY KEY CHECK (id = 1), experimental_notice_enabled INTEGER NOT NULL DEFAULT 1, "
-                    "experimental_notice_title TEXT, experimental_notice_message TEXT, updated_at TEXT NOT NULL)"
-                )
-            )
-            logger.info("Migration: feature_categories, feature_definitions, feature_flags, feature_registry_meta ensured")
-
-    # ── Create user / auth tables if missing ───────────────────────────
-    async with engine.begin() as conn:
-        if DATABASE_URL.startswith("sqlite"):
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "CREATE TABLE IF NOT EXISTS users "
-                    "(id TEXT NOT NULL PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, "
-                    "first_name TEXT NOT NULL, last_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', "
-                    "auth_provider TEXT NOT NULL DEFAULT 'local', external_id TEXT, metadata TEXT DEFAULT '{}', "
-                    "reset_token_hash TEXT, reset_token_expires_at TEXT, "
-                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT)"
-                )
-            )
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "CREATE TABLE IF NOT EXISTS user_roles "
-                    "(id TEXT NOT NULL PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
-                    "role_name TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL, "
-                    "UNIQUE(user_id, role_name))"
-                )
-            )
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "CREATE TABLE IF NOT EXISTS user_approvals "
-                    "(id TEXT NOT NULL PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
-                    "approved_by TEXT, status TEXT NOT NULL DEFAULT 'pending', rejection_reason TEXT, "
-                    "created_at TEXT NOT NULL, resolved_at TEXT)"
-                )
-            )
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "CREATE TABLE IF NOT EXISTS outbox_events "
-                    "(id TEXT NOT NULL PRIMARY KEY, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', "
-                    "processed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"
-                )
-            )
-            logger.info("Migration: users, user_roles, user_approvals, outbox_events ensured")
-
-    # ── Inline schema migrations ──────────────────────────────────────
-    # SQLAlchemy create_all only creates NEW tables, not new columns on
-    # existing tables.  We run safe ALTER TABLE statements here.
+    # ── 2. Inline ALTER TABLE migrations for pre-existing databases ───
+    # create_all only creates NEW tables, not new columns on existing
+    # tables.  Each ALTER is wrapped in try/except so it's safe to re-run.
     async with engine.begin() as conn:
         migrations = [
             "ALTER TABLE workspace_data_sources ADD COLUMN projection_mode TEXT",
             "ALTER TABLE workspace_data_sources ADD COLUMN dedicated_graph_name TEXT",
             "ALTER TABLE workspace_data_sources ADD COLUMN catalog_item_id TEXT",
             "ALTER TABLE workspace_data_sources ADD COLUMN access_level TEXT DEFAULT 'read'",
+            "ALTER TABLE workspace_data_sources ADD COLUMN extra_config TEXT",
             "ALTER TABLE context_models ADD COLUMN view_type TEXT",
             "ALTER TABLE context_models ADD COLUMN config TEXT",
             "ALTER TABLE context_models ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
@@ -234,16 +180,110 @@ async def init_db() -> None:
             "ALTER TABLE feature_definitions ADD COLUMN implemented INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE feature_registry_meta ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE feature_flags ADD COLUMN version INTEGER NOT NULL DEFAULT 0",
+            # Phase 3: Ontology versioning + audit columns
+            "ALTER TABLE ontologies ADD COLUMN schema_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE ontologies ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ontologies ADD COLUMN created_by TEXT",
+            "ALTER TABLE ontologies ADD COLUMN updated_by TEXT",
+            # Announcements: replace is_dismissible with snooze_duration_minutes
+            "ALTER TABLE announcements ADD COLUMN snooze_duration_minutes INTEGER NOT NULL DEFAULT 0",
+            # Soft-delete for ontologies and views
+            "ALTER TABLE ontologies ADD COLUMN deleted_at TEXT DEFAULT NULL",
+            "ALTER TABLE ontologies ADD COLUMN published_by TEXT DEFAULT NULL",
+            "ALTER TABLE ontologies ADD COLUMN published_at TEXT DEFAULT NULL",
+            "ALTER TABLE ontologies ADD COLUMN deleted_by TEXT DEFAULT NULL",
+            "ALTER TABLE views ADD COLUMN deleted_at TEXT",
         ]
         for stmt in migrations:
             try:
-                await conn.execute(
-                    __import__("sqlalchemy").text(stmt)
-                )
+                await conn.execute(sa_text(stmt))
                 logger.info("Migration applied: %s", stmt)
             except Exception:
-                # Column already exists — safe to ignore
+                # Column/table already exists — safe to ignore
                 pass
+
+    # ── 3. Backfill schema_id for existing ontologies ─────────────────
+    async with engine.begin() as conn:
+        try:
+            result = await conn.execute(
+                sa_text("SELECT id, name FROM ontologies WHERE schema_id = '' ORDER BY name, version")
+            )
+            rows = result.fetchall()
+            if rows:
+                name_to_schema: dict[str, str] = {}
+                for row_id, name in rows:
+                    if not name:
+                        schema_id = row_id
+                    else:
+                        if name not in name_to_schema:
+                            name_to_schema[name] = row_id
+                        schema_id = name_to_schema[name]
+                    await conn.execute(
+                        sa_text("UPDATE ontologies SET schema_id = :sid WHERE id = :rid"),
+                        {"sid": schema_id, "rid": row_id},
+                    )
+                logger.info("Backfilled schema_id for %d ontologies", len(rows))
+        except Exception:
+            pass
+
+    # ── 4. Seed singleton rows (announcement_config) ──────────────────
+    async with engine.begin() as conn:
+        try:
+            result = await conn.execute(
+                sa_text("SELECT 1 FROM announcement_config WHERE id = 1")
+            )
+            if result.scalar() is None:
+                now_iso = _dt.now(_tz.utc).isoformat()
+                await conn.execute(
+                    sa_text(
+                        "INSERT INTO announcement_config (id, poll_interval_seconds, default_snooze_minutes, updated_at) "
+                        "VALUES (1, 15, 30, :now)"
+                    ),
+                    {"now": now_iso},
+                )
+                logger.info("Seed: announcement_config default row inserted")
+        except Exception:
+            pass
+
+    # ── 5. (Removed) announcementsEnabled seed — now handled by seed_feature_registry()
+
+    # ── 6. One-time: undo bad data_source_id backfill ─────────────────
+    # A prior migration incorrectly guessed data_source_id for legacy views.
+    # Reset to NULL so these views use the active datasource (pre-fix behavior).
+    # This MUST only run once — subsequent runs would wipe legitimately-set
+    # data_source_id values on views targeting the primary datasource.
+    async with engine.begin() as conn:
+        try:
+            result = await conn.execute(
+                sa_text("SELECT 1 FROM schema_migrations WHERE key = 'undo_bad_ds_backfill'")
+            )
+            if result.scalar() is None:
+                await conn.execute(
+                    sa_text(
+                        """
+                        UPDATE views
+                        SET data_source_id = NULL
+                        WHERE data_source_id IS NOT NULL
+                          AND data_source_id = (
+                              SELECT ds.id FROM workspace_data_sources ds
+                              WHERE ds.workspace_id = views.workspace_id
+                              ORDER BY ds.is_primary DESC, ds.created_at ASC
+                              LIMIT 1
+                          )
+                        """
+                    )
+                )
+                now_iso = _dt.now(_tz.utc).isoformat()
+                await conn.execute(
+                    sa_text(
+                        "INSERT INTO schema_migrations (key, applied_at) "
+                        "VALUES ('undo_bad_ds_backfill', :now)"
+                    ),
+                    {"now": now_iso},
+                )
+                logger.info("Migration applied: undo_bad_ds_backfill")
+        except Exception:
+            pass
 
     logger.info("Management DB initialised at %s", DATABASE_URL)
 

@@ -15,6 +15,7 @@ import { RemoteGraphProvider } from './RemoteGraphProvider'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useConnectionsStore } from '@/store/connections'
 import { useCanvasStore } from '@/store/canvas'
+import { useHealthStore } from '@/store/health'
 
 // MockProvider (+ its 113 kB demo-data.ts) is loaded lazily so it never
 // appears in the initial bundle. It is only fetched when the backend is
@@ -37,6 +38,10 @@ export interface GraphProviderContextValueExtended extends GraphProviderContextV
     setWorkspaceId: (id: string | null) => void
     dataSourceId: string | null
     setDataSourceId: (id: string | null) => void
+    /** True once the provider has been created AND background connectivity check has resolved (success or fail). */
+    providerReady: boolean
+    /** Monotonically increasing counter — increments each time a new provider instance is created. */
+    providerVersion: number
     /** @deprecated Use workspaceId — kept for backward compat */
     connectionId: string | null
     /** @deprecated Use setWorkspaceId — kept for backward compat */
@@ -69,6 +74,16 @@ export function GraphProvider({ children }: GraphProviderProps) {
     const [isLoading, setIsLoading] = useState(true)
     const [error, setError] = useState<Error | null>(null)
     const [currentProvider, setCurrentProvider] = useState<GraphDataProvider | null>(null)
+    const [providerReady, setProviderReady] = useState(false)
+    const [providerVersion, setProviderVersion] = useState(0)
+
+    // Track the workspace/datasource the CURRENT provider was built for.
+    // This prevents a mismatch render where Zustand has updated to workspace B
+    // but currentProvider still points to workspace A. By keeping these in local
+    // state (updated atomically with the provider), consumers always see
+    // consistent (workspaceId, provider) pairs — no stale schema fetches.
+    const [providerWorkspaceId, setProviderWorkspaceId] = useState<string | null>(null)
+    const [providerDataSourceId, setProviderDataSourceId] = useState<string | null>(null)
 
     // Track previous IDs so we only rebuild the provider when it changes
     const prevWorkspaceId = useRef<string | null | undefined>(undefined)
@@ -119,8 +134,14 @@ export function GraphProvider({ children }: GraphProviderProps) {
 
             // Set the provider IMMEDIATELY — don't block on getStats().
             // This ensures navigation works instantly when switching workspaces.
+            // Update providerWorkspaceId/providerDataSourceId atomically with the
+            // provider so consumers never see a mismatch between IDs and provider.
             if (!cancelled) {
+                setProviderReady(false)
                 setCurrentProvider(p)
+                setProviderWorkspaceId(activeWorkspaceId)
+                setProviderDataSourceId(activeDataSourceId)
+                setProviderVersion(v => v + 1)
                 setIsLoading(false)
             }
 
@@ -131,6 +152,12 @@ export function GraphProvider({ children }: GraphProviderProps) {
             } catch (err) {
                 if (!cancelled) {
                     setError(err instanceof Error ? err : new Error('Provider connection failed'))
+                    // Feed the health store for faster banner detection
+                    useHealthStore.getState().reportFailure(err)
+                }
+            } finally {
+                if (!cancelled) {
+                    setProviderReady(true)
                 }
             }
         }
@@ -153,10 +180,15 @@ export function GraphProvider({ children }: GraphProviderProps) {
         provider: currentProvider!,
         isLoading,
         error,
-        workspaceId: activeWorkspaceId,
+        // Use provider-tracked IDs (not Zustand's activeWorkspaceId) so
+        // consumers never see a mismatch between workspace IDs and the provider.
+        // Zustand may update ahead of the provider rebuild; these stay in sync.
+        workspaceId: providerWorkspaceId,
         setWorkspaceId: setActiveWorkspace,
-        dataSourceId: activeDataSourceId,
+        dataSourceId: providerDataSourceId,
         setDataSourceId: setActiveDataSource,
+        providerReady,
+        providerVersion,
         connectionId: activeConnectionId,
         setConnectionId: setActiveConnection,
     }
@@ -205,6 +237,8 @@ export function useGraphProviderContext(): GraphProviderContextValueExtended {
             setWorkspaceId: () => {},
             dataSourceId: null,
             setDataSourceId: () => {},
+            providerReady: true,
+            providerVersion: 0,
             connectionId: null,
             setConnectionId: () => {},
         }

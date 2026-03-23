@@ -50,10 +50,8 @@ export const useConnectionsStore = create<ConnectionsState>()(
                         set({ activeConnectionId: primary?.id ?? null })
                     }
                 } catch (err) {
-                    set({
-                        isLoading: false,
-                        error: err instanceof Error ? err.message : 'Failed to load connections',
-                    })
+                    // Legacy /connections endpoint may not exist — treat as empty list
+                    set({ connections: [], isLoading: false, error: null })
                 }
             },
 

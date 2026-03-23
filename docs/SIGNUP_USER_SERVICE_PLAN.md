@@ -4,7 +4,26 @@
 
 ---
 
-## 1. Current State
+## Implementation Status (2026 Q1)
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **Database schema** (users, user_roles, user_approvals, outbox_events) | **Done** | All tables implemented in `backend/app/db/models.py`. Uses prefixed hex UUIDs (`usr_*`) rather than UUID v7. |
+| **Auth endpoints** (signup, login, forgot/reset password) | **Done** | Registered under `/api/v1/auth/*` |
+| **User management endpoints** (GET /users/me, admin CRUD) | **Done** | Registered under `/api/v1/users/*` and `/api/v1/admin/users/*` |
+| **Argon2id password hashing** | **Done** | OWASP-recommended hashing with constant-time comparison |
+| **JWT issuance & verification** | **Done** | HS256, configurable expiry, role claims in payload |
+| **Admin approval flow** | **Done** | Pending → Approve/Reject with audit trail in `user_approvals` |
+| **Frontend auth pages** (Login, SignUp, Reset) | **Done** | Glass-panel design, zxcvbn strength meter |
+| **Transactional outbox** (write side) | **Done** | Events written in same transaction as user operations |
+| **Outbox consumer** (read/publish side) | **Pending** | Events accumulate with `processed = false`. No consumer process implemented yet. See [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md). |
+| **SSO (SAML2/OIDC)** | **Pending** | `auth_provider` field exists in schema but SSO login flow not implemented |
+| **Force password change on first login** | **Pending** | `must_change_password` flag not implemented |
+| **Rate limiting** | **Partial** | Feature flag rate limits exist; per-IP signup/login limits not yet at API gateway level |
+
+---
+
+## 1. Current State (as of plan creation)
 
 - **Auth:** Client-only in `frontend/src/store/auth.ts` — env-based username/password hash (SHA-256), no backend auth API.
 - **Backend:** FastAPI at `/api/v1`, async SQLAlchemy in `backend/app/db/models.py`, repos + Pydantic in `backend/common/models/management.py`. `ViewFavouriteORM` has `user_id` (Text) with no FK; views endpoints use `_PLACEHOLDER_USER`.

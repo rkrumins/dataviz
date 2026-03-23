@@ -128,8 +128,16 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete, dataSour
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
     const { clearAssignments, setLayers } = useReferenceModelStore()
-    const visibleViews = useSchemaStore(s => s.visibleViews)
     const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
+    const activeDataSourceId = useWorkspacesStore(s => s.activeDataSourceId)
+
+    // In edit mode, look up the view from ALL views (not just workspace-filtered
+    // visibleViews) so the form data loads correctly even if the view's data
+    // source doesn't match the currently selected one.
+    const editingView = useMemo(() => {
+        if (mode !== 'edit' || !viewId || !schema) return null
+        return schema.views.find(v => v.id === viewId) ?? null
+    }, [mode, viewId, schema])
 
     // Current step
     const [currentStep, setCurrentStep] = useState<WizardStep>('basics')
@@ -142,33 +150,32 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete, dataSour
     // Form data
     const [formData, setFormData] = useState<WizardFormData>(() => ({ ...getInitialFormData(schema), dataSourceId }))
 
-    // Load existing view for edit mode
+    // Load existing view for edit mode — search ALL views (not just visible ones)
+    // so cross-workspace editing works.
     useEffect(() => {
-        if (mode === 'edit' && viewId && schema) {
-            const existingView = visibleViews().find(v => v.id === viewId)
-            if (existingView) {
-                setFormData({
-                    name: existingView.name,
-                    description: existingView.description ?? '',
-                    icon: existingView.icon ?? 'Layout',
-                    visibility: (existingView as any).visibility ?? (existingView.isPublic ? 'enterprise' : 'private'),
-                    tags: (existingView as any).tags ?? [],
-                    layoutType: existingView.layout.type as 'graph' | 'hierarchy' | 'reference',
-                    layers: existingView.layout.referenceLayout?.layers ?? [],
-                    visibleEntityTypes: existingView.content.visibleEntityTypes,
-                    visibleRelationshipTypes: existingView.content.visibleRelationshipTypes,
-                    advancedFilters: (existingView.filters.fieldFilters || []).map(f => ({
-                        id: `${f.field}-${Date.now()}-${Math.random()}`,
-                        type: f.field === 'tags' ? 'tag' : f.field === 'name' ? 'name' : 'property',
-                        label: f.field === 'tags' ? `Tag: ${f.value}` : f.field === 'name' ? `Name contains "${f.value}"` : `${f.field}=${f.value}`,
-                        value: f.value
-                    })),
-                    scopeEdges: existingView.layout.referenceLayout?.layers?.[0]?.scopeEdges, // Simplified for now, usually per layer but can be globalized
-                    isValid: true
-                })
-            }
+        if (mode === 'edit' && editingView) {
+            setFormData({
+                name: editingView.name,
+                description: editingView.description ?? '',
+                icon: editingView.icon ?? 'Layout',
+                visibility: (editingView as any).visibility ?? (editingView.isPublic ? 'enterprise' : 'private'),
+                tags: (editingView as any).tags ?? [],
+                dataSourceId: editingView.dataSourceId ?? undefined,
+                layoutType: editingView.layout.type as 'graph' | 'hierarchy' | 'reference',
+                layers: editingView.layout.referenceLayout?.layers ?? [],
+                visibleEntityTypes: editingView.content.visibleEntityTypes,
+                visibleRelationshipTypes: editingView.content.visibleRelationshipTypes,
+                advancedFilters: (editingView.filters.fieldFilters || []).map(f => ({
+                    id: `${f.field}-${Date.now()}-${Math.random()}`,
+                    type: f.field === 'tags' ? 'tag' : f.field === 'name' ? 'name' : 'property',
+                    label: f.field === 'tags' ? `Tag: ${f.value}` : f.field === 'name' ? `Name contains "${f.value}"` : `${f.field}=${f.value}`,
+                    value: f.value
+                })),
+                scopeEdges: editingView.layout.referenceLayout?.layers?.[0]?.scopeEdges,
+                isValid: true
+            })
         }
-    }, [mode, viewId, schema])
+    }, [mode, editingView])
 
     // Dynamic steps based on layout
     const activeSteps = useMemo(() => {
@@ -201,6 +208,10 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete, dataSour
             if (mode === 'create') {
                 setFormData({ ...getInitialFormData(schema), dataSourceId })
             }
+        } else {
+            // Clear store on wizard close to prevent stale instanceAssignments
+            // from leaking into ContextViewCanvas when navigating to a view
+            clearAssignments()
         }
     }, [isOpen, mode, schema, dataSourceId, clearSelection, clearAssignments])
 
@@ -276,6 +287,7 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete, dataSour
                     visibleRelationshipTypes: formData.visibleRelationshipTypes,
                     fieldFilters,
                     workspaceId: activeWorkspaceId ?? '',
+                    dataSourceId: activeDataSourceId ?? undefined,
                     contextModelId: linkedContextModelId ?? undefined,
                     visibility: formData.visibility,
                     tags: formData.tags.length > 0 ? formData.tags : undefined,
@@ -315,7 +327,7 @@ export function ViewWizard({ mode, viewId, isOpen, onClose, onComplete, dataSour
         } finally {
             setIsSubmitting(false)
         }
-    }, [mode, viewId, formData, activeWorkspaceId, onComplete, onClose, navigate, setLayers, buildFieldFilters])
+    }, [mode, viewId, formData, activeWorkspaceId, activeDataSourceId, onComplete, onClose, navigate, setLayers, buildFieldFilters])
 
     // Update form data
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {

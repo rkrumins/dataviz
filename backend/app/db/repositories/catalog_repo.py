@@ -50,7 +50,41 @@ async def list_catalog_items(
         stmt = stmt.where(CatalogItemORM.provider_id == provider_id)
     stmt = stmt.order_by(CatalogItemORM.created_at)
     result = await session.execute(stmt)
-    return [_to_response(r) for r in result.scalars().all()]
+    rows = result.scalars().all()
+
+    # Deduplicate: keep only the earliest row per (provider_id, source_identifier).
+    # This handles legacy duplicates that predate the unique constraint.
+    seen: dict[tuple[str, str | None], bool] = {}
+    deduped = []
+    for r in rows:
+        key = (r.provider_id, r.source_identifier)
+        if key not in seen:
+            seen[key] = True
+            deduped.append(r)
+    return [_to_response(r) for r in deduped]
+
+
+async def cleanup_duplicate_catalog_items(session: AsyncSession) -> int:
+    """Remove duplicate catalog items, keeping the earliest entry per
+    (provider_id, source_identifier). Returns number of rows deleted."""
+    result = await session.execute(
+        select(CatalogItemORM).order_by(CatalogItemORM.created_at)
+    )
+    rows = result.scalars().all()
+    seen: dict[tuple[str, str | None], str] = {}  # key -> kept id
+    to_delete: list[str] = []
+    for r in rows:
+        key = (r.provider_id, r.source_identifier)
+        if key in seen:
+            to_delete.append(r.id)
+        else:
+            seen[key] = r.id
+    if to_delete:
+        await session.execute(
+            delete(CatalogItemORM).where(CatalogItemORM.id.in_(to_delete))
+        )
+        await session.flush()
+    return len(to_delete)
 
 
 async def get_catalog_item(
@@ -77,6 +111,20 @@ async def create_catalog_item(
     req: CatalogItemCreateRequest,
 ) -> CatalogItemResponse:
     import json
+
+    # Idempotent: if a catalog item already exists for (provider_id, source_identifier),
+    # return the existing one instead of creating a duplicate.
+    if req.source_identifier:
+        existing = await session.execute(
+            select(CatalogItemORM).where(
+                CatalogItemORM.provider_id == req.provider_id,
+                CatalogItemORM.source_identifier == req.source_identifier,
+            ).limit(1)
+        )
+        found = existing.scalar_one_or_none()
+        if found:
+            return _to_response(found)
+
     row = CatalogItemORM(
         provider_id=req.provider_id,
         source_identifier=req.source_identifier,

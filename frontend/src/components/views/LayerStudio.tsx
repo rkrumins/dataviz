@@ -48,6 +48,10 @@ import { makeDraftSave, type ContextModelCreateRequest } from '@/services/contex
 import type { ViewLayerConfig, EntityAssignmentConfig } from '@/types/schema'
 import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useReferenceModelStore } from '@/store/referenceModelStore'
+import { useCanvasStore } from '@/store/canvas'
+import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
+import { ChildReassignConfirmDialog, type ChildReassignInfo } from '../dialogs/ChildReassignConfirmDialog'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -184,14 +188,174 @@ export function LayerStudio({
     onDraftSaved,
 }: LayerStudioProps) {
     const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
+    const storeParentMap = useReferenceModelStore(s => s.parentMap)
+    const storeEffectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
 
-    // ── Layer state ─────────────────────────────────────────────────────────────
+    // Build containment parent map from canvas edges (ground truth).
+    // The referenceModelStore.parentMap may be empty in the wizard context
+    // because computeAssignments hasn't run yet.
+    const canvasEdges = useCanvasStore(s => s.edges)
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+
+    const canvasParentMap = useMemo(() => {
+        const map = new Map<string, string>() // childId -> parentId
+        canvasEdges.forEach(edge => {
+            if (isContainmentEdgeType(normalizeEdgeType(edge), containmentEdgeTypes)) {
+                map.set(edge.target, edge.source)
+            }
+        })
+        return map
+    }, [canvasEdges, containmentEdgeTypes])
+
+    // Merge: canvas-derived parent map takes precedence (always fresh),
+    // then fall back to store parent map (populated after computeAssignments)
+    const parentMap = useMemo(() => {
+        if (canvasParentMap.size > 0) return canvasParentMap
+        return storeParentMap
+    }, [canvasParentMap, storeParentMap])
+
+    // Build layer assignment lookup from formData.layers (wizard state)
+    // AND store effectiveAssignments (backend state).
+    // Wizard formData.layers entityAssignments are the immediate source of truth
+    // when the user is actively assigning in the wizard.
+    const layerAssignmentMap = useMemo(() => {
+        const map = new Map<string, string>() // entityId -> layerId
+        // Start with store assignments (lower priority)
+        storeEffectiveAssignments.forEach((a, entityId) => {
+            map.set(entityId, a.layerId)
+        })
+        // Override with wizard formData.layers assignments (higher priority)
+        ;(formData.layers ?? []).forEach(layer => {
+            layer.entityAssignments?.forEach(a => {
+                map.set(a.entityId, layer.id)
+            })
+        })
+        return map
+    }, [storeEffectiveAssignments, formData.layers])
+
+    // ── Containment inheritance enforcement ──────────────────────────────────────
+    const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
+    const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+    const showAssignmentWarning = useCallback((message: string) => {
+        setAssignmentWarning(message)
+        if (warningTimerRef.current) clearTimeout(warningTimerRef.current)
+        warningTimerRef.current = setTimeout(() => setAssignmentWarning(null), 5000)
+    }, [])
+
+    /** Check if an entity is a containment child whose parent is in a different layer */
+    const isContainmentLocked = useCallback((entityId: string, targetLayerId: string): boolean => {
+        const parentId = parentMap.get(entityId)
+        if (!parentId) return false
+        const parentLayerId = layerAssignmentMap.get(parentId)
+        return !!parentLayerId && parentLayerId !== targetLayerId
+    }, [parentMap, layerAssignmentMap])
+
+    /** Build reverse child map from parentMap */
+    const childMap = useMemo(() => {
+        const map = new Map<string, string[]>()
+        parentMap.forEach((pId, cId) => {
+            const list = map.get(pId) ?? []
+            list.push(cId)
+            map.set(pId, list)
+        })
+        return map
+    }, [parentMap])
+
+    /** Get all containment descendants currently assigned to a different layer */
+    const getDescendantsInDifferentLayer = useCallback((entityId: string, targetLayerId: string): string[] => {
+        const result: string[] = []
+        const queue = [...(childMap.get(entityId) ?? [])]
+        const visited = new Set<string>()
+        while (queue.length > 0) {
+            const cId = queue.shift()!
+            if (visited.has(cId)) continue
+            visited.add(cId)
+            const currentLayer = layerAssignmentMap.get(cId)
+            if (currentLayer && currentLayer !== targetLayerId) {
+                result.push(cId)
+            }
+            queue.push(...(childMap.get(cId) ?? []))
+        }
+        return result
+    }, [childMap, layerAssignmentMap])
+
+    // ── Node name lookup for confirmation dialog ────────────────────────────────
+    const canvasNodes = useCanvasStore(s => s.nodes)
+    const nodeNameMap = useMemo(() => {
+        const map = new Map<string, string>()
+        canvasNodes.forEach(n => {
+            map.set(n.id, (n.data as { label?: string; businessLabel?: string }).label
+                ?? (n.data as { businessLabel?: string }).businessLabel ?? n.id)
+        })
+        return map
+    }, [canvasNodes])
+
+    // ── Confirmation dialog for child reassignment ────────────────────────────
+    const [pendingReassign, setPendingReassign] = useState<{
+        info: ChildReassignInfo
+        /** Callback that performs the actual reassignment */
+        commit: () => void
+    } | null>(null)
+
+    // ── Layer state with undo/redo ───────────────────────────────────────────────
     const layers = formData.layers ?? []
 
+    const undoStackRef = useRef<ViewLayerConfig[][]>([])
+    const redoStackRef = useRef<ViewLayerConfig[][]>([])
+    const isUndoRedoRef = useRef(false)
+
     const handleUpdateLayers = useCallback(
-        (next: ViewLayerConfig[]) => updateFormData({ layers: next }),
-        [updateFormData]
+        (next: ViewLayerConfig[]) => {
+            if (!isUndoRedoRef.current) {
+                undoStackRef.current = [...undoStackRef.current, layers]
+                redoStackRef.current = []
+                // Cap stack size
+                if (undoStackRef.current.length > 50) undoStackRef.current.shift()
+            }
+            updateFormData({ layers: next })
+        },
+        [updateFormData, layers]
     )
+
+    const canUndo = undoStackRef.current.length > 0
+    const canRedo = redoStackRef.current.length > 0
+
+    const handleUndo = useCallback(() => {
+        if (undoStackRef.current.length === 0) return
+        const prev = undoStackRef.current[undoStackRef.current.length - 1]
+        undoStackRef.current = undoStackRef.current.slice(0, -1)
+        redoStackRef.current = [...redoStackRef.current, layers]
+        isUndoRedoRef.current = true
+        updateFormData({ layers: prev })
+        isUndoRedoRef.current = false
+    }, [updateFormData, layers])
+
+    const handleRedo = useCallback(() => {
+        if (redoStackRef.current.length === 0) return
+        const next = redoStackRef.current[redoStackRef.current.length - 1]
+        redoStackRef.current = redoStackRef.current.slice(0, -1)
+        undoStackRef.current = [...undoStackRef.current, layers]
+        isUndoRedoRef.current = true
+        updateFormData({ layers: next })
+        isUndoRedoRef.current = false
+    }, [updateFormData, layers])
+
+    // Keyboard shortcuts for undo/redo
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+                e.preventDefault()
+                if (e.shiftKey) {
+                    handleRedo()
+                } else {
+                    handleUndo()
+                }
+            }
+        }
+        window.addEventListener('keydown', handler)
+        return () => window.removeEventListener('keydown', handler)
+    }, [handleUndo, handleRedo])
 
     // ── Logical nodes ───────────────────────────────────────────────────────────
     const logicalNodes = useLogicalNodes(layers, handleUpdateLayers)
@@ -254,6 +418,77 @@ export function LayerStudio({
         [layers, handleUpdateLayers]
     )
 
+    // ── Shared: commit entity + descendants to a layer ─────────────────────────
+    const commitAssignment = useCallback(
+        (entityIds: string[], descendantsToMove: string[], layerId: string, logicalNodeId?: string) => {
+            const allMovedIds = new Set([...entityIds, ...descendantsToMove])
+            const next = layers.map(l => {
+                const filtered: EntityAssignmentConfig[] = (l.entityAssignments ?? []).filter(
+                    a => !allMovedIds.has(a.entityId)
+                )
+                if (l.id === layerId) {
+                    return {
+                        ...l,
+                        entityAssignments: [
+                            ...filtered,
+                            ...entityIds.map(id => ({
+                                entityId: id,
+                                layerId,
+                                logicalNodeId,
+                                inheritsChildren: true,
+                                priority: 1000,
+                                assignedBy: 'user' as const,
+                                assignedAt: new Date().toISOString(),
+                            })),
+                            ...descendantsToMove.map(dId => ({
+                                entityId: dId,
+                                layerId,
+                                inheritsChildren: true,
+                                priority: 999,
+                                assignedBy: 'rule' as const,
+                                assignedAt: new Date().toISOString(),
+                            })),
+                        ],
+                    }
+                }
+                return { ...l, entityAssignments: filtered }
+            })
+            handleUpdateLayers(next)
+        },
+        [layers, handleUpdateLayers]
+    )
+
+    /** Show confirmation dialog if descendants need moving, otherwise commit immediately */
+    const confirmOrCommit = useCallback(
+        (entityIds: string[], descendantsToMove: string[], layerId: string, logicalNodeId?: string) => {
+            if (descendantsToMove.length === 0) {
+                commitAssignment(entityIds, [], layerId, logicalNodeId)
+                return
+            }
+            // Build info for the confirmation dialog
+            const info: ChildReassignInfo = {
+                entityId: entityIds[0],
+                entityName: entityIds.length === 1
+                    ? (nodeNameMap.get(entityIds[0]) ?? entityIds[0])
+                    : `${entityIds.length} entities`,
+                targetLayerId: layerId,
+                descendantsToMove: descendantsToMove.map(dId => ({
+                    id: dId,
+                    name: nodeNameMap.get(dId) ?? dId,
+                    currentLayerId: layerAssignmentMap.get(dId) ?? '',
+                })),
+            }
+            setPendingReassign({
+                info,
+                commit: () => {
+                    commitAssignment(entityIds, descendantsToMove, layerId, logicalNodeId)
+                    setPendingReassign(null)
+                },
+            })
+        },
+        [commitAssignment, nodeNameMap, layerAssignmentMap]
+    )
+
     // ── Assignment from entity tree ─────────────────────────────────────────────
     const handleAssignmentChange = useCallback(
         (entityId: string, layerId: string | null) => {
@@ -267,107 +502,69 @@ export function LayerStudio({
                 return
             }
 
-            const targetLayerId = layerId
-            const targetNodeId =
-                layerId === activeTarget?.layerId ? activeTarget?.nodeId : undefined
+            // HARD RULE: Block containment children from being assigned to a different layer
+            if (isContainmentLocked(entityId, layerId)) {
+                showAssignmentWarning('Cannot assign child to a different layer than its parent. Children always inherit their parent\'s layer assignment.')
+                return
+            }
 
-            const next = layers.map(l => {
-                const filtered: EntityAssignmentConfig[] = (l.entityAssignments ?? []).filter(
-                    a => a.entityId !== entityId
-                )
-                if (l.id === targetLayerId) {
-                    return {
-                        ...l,
-                        entityAssignments: [
-                            ...filtered,
-                            {
-                                entityId,
-                                layerId: targetLayerId,
-                                logicalNodeId: targetNodeId,
-                                inheritsChildren: true,
-                                priority: 1000,
-                                assignedBy: 'user' as const,
-                                assignedAt: new Date().toISOString(),
-                            },
-                        ],
-                    }
-                }
-                return { ...l, entityAssignments: filtered }
-            })
-            handleUpdateLayers(next)
+            // DOWN check: gather descendants in a different layer
+            const descendantsToMove = getDescendantsInDifferentLayer(entityId, layerId)
+            const targetNodeId = layerId === activeTarget?.layerId ? activeTarget?.nodeId : undefined
+
+            confirmOrCommit([entityId], descendantsToMove, layerId, targetNodeId)
         },
-        [activeTarget, layers, handleUpdateLayers]
+        [activeTarget, layers, handleUpdateLayers, isContainmentLocked, getDescendantsInDifferentLayer, showAssignmentWarning, confirmOrCommit]
     )
 
     const handleBulkAssignment = useCallback(
         (layerId: string, entityIds: string[]) => {
-            const targetNodeId =
-                layerId === activeTarget?.layerId ? activeTarget?.nodeId : undefined
+            // UP check: filter out containment-locked children
+            const allowed = entityIds.filter(id => !isContainmentLocked(id, layerId))
+            const blockedCount = entityIds.length - allowed.length
+            if (blockedCount > 0) {
+                showAssignmentWarning(`${blockedCount} assignment(s) blocked: children inherit their parent's layer.`)
+            }
+            if (allowed.length === 0) return
 
-            const next = layers.map(l => {
-                const filtered = (l.entityAssignments ?? []).filter(
-                    a => !entityIds.includes(a.entityId)
-                )
-                if (l.id === layerId) {
-                    return {
-                        ...l,
-                        entityAssignments: [
-                            ...filtered,
-                            ...entityIds.map(id => ({
-                                entityId: id,
-                                layerId,
-                                logicalNodeId: targetNodeId,
-                                inheritsChildren: true,
-                                priority: 1000,
-                                assignedBy: 'user' as const,
-                                assignedAt: new Date().toISOString(),
-                            })),
-                        ],
-                    }
-                }
-                return { ...l, entityAssignments: filtered }
+            // DOWN check: collect containment descendants that need to follow
+            const allDescendantsToMove: string[] = []
+            allowed.forEach(id => {
+                allDescendantsToMove.push(...getDescendantsInDifferentLayer(id, layerId))
             })
-            handleUpdateLayers(next)
+
+            const targetNodeId = layerId === activeTarget?.layerId ? activeTarget?.nodeId : undefined
+            confirmOrCommit(allowed, allDescendantsToMove, layerId, targetNodeId)
         },
-        [activeTarget, layers, handleUpdateLayers]
+        [activeTarget, isContainmentLocked, getDescendantsInDifferentLayer, showAssignmentWarning, confirmOrCommit]
     )
 
     // ── Direct drop onto hierarchy panel layer/node ─────────────────────────────
     const handleHierarchyDrop = useCallback(
         (layerId: string, nodeId: string | undefined, payload: DropPayload) => {
-            const entityIds: string[] = payload.entityIds?.length
+            const rawIds: string[] = payload.entityIds?.length
                 ? payload.entityIds
                 : payload.entityId
                     ? [payload.entityId]
                     : []
 
+            if (rawIds.length === 0) return
+
+            // UP check: filter out containment-locked children
+            const entityIds = rawIds.filter(id => !isContainmentLocked(id, layerId))
+            const blockedCount = rawIds.length - entityIds.length
+            if (blockedCount > 0) {
+                showAssignmentWarning(`${blockedCount} assignment(s) blocked: children inherit their parent's layer.`)
+            }
             if (entityIds.length === 0) return
 
-            const next = layers.map(l => {
-                // Remove entity from ALL layers first (exclusive assignment)
-                const filtered: EntityAssignmentConfig[] = (l.entityAssignments ?? []).filter(
-                    a => !entityIds.includes(a.entityId)
-                )
-                if (l.id === layerId) {
-                    return {
-                        ...l,
-                        entityAssignments: [
-                            ...filtered,
-                            ...entityIds.map(id => ({
-                                entityId: id,
-                                layerId,
-                                logicalNodeId: nodeId ?? undefined,
-                                inheritsChildren: true,
-                                priority: 1000,
-                                assignedBy: 'user' as const,
-                                assignedAt: new Date().toISOString(),
-                            })),
-                        ],
-                    }
-                }
-                return { ...l, entityAssignments: filtered }
+            // DOWN check: collect all containment descendants that need to follow
+            const allDescendantsToMove: string[] = []
+            entityIds.forEach(id => {
+                allDescendantsToMove.push(...getDescendantsInDifferentLayer(id, layerId))
             })
-            handleUpdateLayers(next)
+
+            confirmOrCommit(entityIds, allDescendantsToMove, layerId, nodeId)
 
             // Update active target to reflect where the drop landed
             const layer = layers.find(l => l.id === layerId)
@@ -382,7 +579,7 @@ export function LayerStudio({
                 })
             }
         },
-        [layers, handleUpdateLayers, logicalNodes]
+        [layers, logicalNodes, isContainmentLocked, getDescendantsInDifferentLayer, showAssignmentWarning, confirmOrCommit]
     )
 
     // ── Auto-organize ───────────────────────────────────────────────────────────
@@ -394,20 +591,18 @@ export function LayerStudio({
 
     // ── Render ──────────────────────────────────────────────────────────────────
 
-    const containmentEdgeTypes = formData.scopeEdges?.edgeTypes ?? []
-
     return (
         <div className="flex flex-col h-full gap-0">
             {/* Toolbar */}
             <div className="flex items-center justify-between px-1 pb-3">
                 <div className="flex items-center gap-2">
-                    {/* Undo / Redo */}
+                    {/* Undo / Redo — covers assignments, logical nodes, reordering */}
                     <button
-                        onClick={logicalNodes.undo}
-                        disabled={!logicalNodes.canUndo}
+                        onClick={handleUndo}
+                        disabled={!canUndo}
                         className={cn(
                             'p-1.5 rounded-lg transition-colors text-slate-400',
-                            logicalNodes.canUndo
+                            canUndo
                                 ? 'hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-slate-700 dark:hover:text-slate-200'
                                 : 'opacity-30 cursor-not-allowed'
                         )}
@@ -416,11 +611,11 @@ export function LayerStudio({
                         <Undo2 className="w-4 h-4" />
                     </button>
                     <button
-                        onClick={logicalNodes.redo}
-                        disabled={!logicalNodes.canRedo}
+                        onClick={handleRedo}
+                        disabled={!canRedo}
                         className={cn(
                             'p-1.5 rounded-lg transition-colors text-slate-400',
-                            logicalNodes.canRedo
+                            canRedo
                                 ? 'hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-slate-700 dark:hover:text-slate-200'
                                 : 'opacity-30 cursor-not-allowed'
                         )}
@@ -501,6 +696,15 @@ export function LayerStudio({
                     </button>
                 </div>
             </div>
+
+            {/* Containment inheritance warning */}
+            {assignmentWarning && (
+                <div className="mx-1 mb-2 px-3 py-2 rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-xs flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    <span className="flex-1"><span className="font-medium">Assignment blocked.</span> {assignmentWarning}</span>
+                    <button onClick={() => setAssignmentWarning(null)} className="text-red-400 hover:text-red-600">&times;</button>
+                </div>
+            )}
 
             {/* Three-panel layout */}
             <div className="relative flex-1 min-h-0">
@@ -585,6 +789,14 @@ export function LayerStudio({
                     )}
                 </AnimatePresence>
             </div>
+
+            {/* Child reassignment confirmation dialog */}
+            <ChildReassignConfirmDialog
+                info={pendingReassign?.info ?? null}
+                layers={layers}
+                onConfirm={() => pendingReassign?.commit()}
+                onCancel={() => setPendingReassign(null)}
+            />
         </div>
     )
 }

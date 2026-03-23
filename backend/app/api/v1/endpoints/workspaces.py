@@ -45,15 +45,21 @@ async def create_workspace(
     if not req.data_sources:
         req.data_sources = []
 
-    # Validate all referenced catalog items and ontologies exist
+    # Validate all referenced catalog items / providers and ontologies exist
     from backend.app.db.repositories import catalog_repo
     for ds in req.data_sources:
-        if not await catalog_repo.get_catalog_item(session, ds.catalog_item_id):
-            raise HTTPException(status_code=404, detail=f"Catalog Item '{ds.catalog_item_id}' not found")
+        if ds.catalog_item_id:
+            if not await catalog_repo.get_catalog_item(session, ds.catalog_item_id):
+                raise HTTPException(status_code=404, detail=f"Catalog Item '{ds.catalog_item_id}' not found")
+        elif not ds.provider_id:
+            raise HTTPException(status_code=422, detail="Each data source requires either catalogItemId or providerId")
         if ds.ontology_id and not await ontology_definition_repo.get_ontology(session, ds.ontology_id):
             raise HTTPException(status_code=404, detail=f"Ontology '{ds.ontology_id}' not found")
 
-    return await workspace_repo.create_workspace(session, req)
+    try:
+        return await workspace_repo.create_workspace(session, req)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceResponse)
@@ -137,12 +143,23 @@ async def add_data_source(
     ws = await workspace_repo.get_workspace_orm(session, workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
-    from backend.app.db.repositories import catalog_repo
-    if not await catalog_repo.get_catalog_item(session, req.catalog_item_id):
-        raise HTTPException(status_code=404, detail=f"Catalog Item '{req.catalog_item_id}' not found")
+    # Validate references based on which path is used
+    if req.catalog_item_id:
+        from backend.app.db.repositories import catalog_repo
+        if not await catalog_repo.get_catalog_item(session, req.catalog_item_id):
+            raise HTTPException(status_code=404, detail=f"Catalog Item '{req.catalog_item_id}' not found")
+    elif not req.provider_id:
+        raise HTTPException(status_code=422, detail="Either catalogItemId or providerId is required")
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
         raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
-    return await data_source_repo.create_data_source(session, workspace_id, req)
+    try:
+        return await data_source_repo.create_data_source(session, workspace_id, req)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        if "uq_ds_ws_prov_graph" in str(e) or "already allocated" in str(e):
+            raise HTTPException(status_code=409, detail="This data source already exists on this workspace")
+        raise
 
 
 @router.put("/{workspace_id}/data-sources/{ds_id}", response_model=DataSourceResponse)

@@ -96,11 +96,11 @@ async def upsert_feature_flags(
                     id=CONFIG_ROW_ID,
                     config=config_json,
                     updated_at=now,
-                    version=0,
+                    version=new_version,
                 )
             )
             await session.flush()
-            return (now, 0)
+            return (now, new_version)
         except Exception:
             # Row was created by another request (e.g. duplicate key); treat as conflict.
             raise ConcurrencyConflictError(

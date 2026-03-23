@@ -22,11 +22,11 @@ import {
     X,
     AlertTriangle,
     CheckSquare,
-    Square
+    Square,
+    GitBranch
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
-import { useSchemaStore } from '@/store/schema'
 import {
     useReferenceModelStore,
     useInstanceAssignments,
@@ -91,11 +91,19 @@ type EntityVisualEntry = { icon?: string; color?: string }
 // Tree Row Component
 // ============================================
 
+interface ChildAllocationSummary {
+    layerId: string
+    layerName: string
+    layerColor: string
+    count: number
+}
+
 interface TreeRowProps {
     node: FlatNode
     layers: ViewLayerConfig[]
     searchQuery: string
     entityVisualMap: Record<string, EntityVisualEntry>
+    childAllocations?: ChildAllocationSummary[]
     onToggle: (id: string) => void
     onSelect: (id: string, multi: boolean) => void
     onAssign: (entityId: string, layerId: string) => void
@@ -109,6 +117,7 @@ function TreeRow({
     layers,
     searchQuery,
     entityVisualMap,
+    childAllocations,
     onToggle,
     onSelect,
     onAssign,
@@ -226,6 +235,34 @@ function TreeRow({
                 </span>
             )}
 
+            {/* Children Allocated Indicator */}
+            {childAllocations && childAllocations.length > 0 && (
+                <div
+                    className="flex items-center gap-1.5 flex-shrink-0 px-2 py-1 rounded-lg bg-indigo-50/80 dark:bg-indigo-950/30 border border-indigo-200/60 dark:border-indigo-800/40"
+                    title={childAllocations.map(a => `${a.layerName}: ${a.count} child${a.count > 1 ? 'ren' : ''}`).join('\n')}
+                >
+                    <GitBranch className="w-3 h-3 text-indigo-500 dark:text-indigo-400 flex-shrink-0" />
+                    <span className="text-[10px] font-medium text-indigo-600 dark:text-indigo-300 whitespace-nowrap">
+                        {childAllocations.reduce((sum, a) => sum + a.count, 0)} in
+                    </span>
+                    {childAllocations.slice(0, 3).map(a => (
+                        <span
+                            key={a.layerId}
+                            className="text-[10px] font-medium px-1.5 py-px rounded whitespace-nowrap"
+                            style={{
+                                backgroundColor: (a.layerColor) + '20',
+                                color: a.layerColor,
+                            }}
+                        >
+                            {a.layerName}
+                        </span>
+                    ))}
+                    {childAllocations.length > 3 && (
+                        <span className="text-[10px] text-indigo-400 dark:text-indigo-500">+{childAllocations.length - 3}</span>
+                    )}
+                </div>
+            )}
+
             {/* Conflict Warning */}
             {node.hasConflict && (
                 <div className="flex items-center gap-1 text-amber-500 flex-shrink-0" title={node.conflictMessage}>
@@ -297,7 +334,6 @@ export function WizardAssignmentTree({
 }: WizardAssignmentTreeProps) {
     // Store hooks
     const { nodes, edges } = useCanvasStore()
-    const schema = useSchemaStore(s => s.schema)
     const instanceAssignments = useInstanceAssignments()
     const effectiveAssignments = useEffectiveAssignments()
     const conflicts = useAssignmentConflicts()
@@ -322,6 +358,8 @@ export function WizardAssignmentTree({
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
     const [draggingNode, setDraggingNode] = useState<EntityTreeNode | null>(null)
     const [typeFilter, setTypeFilter] = useState<string>('all')
+    const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
+    const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
     const parentRef = useRef<HTMLDivElement>(null)
     const searchInputRef = useRef<HTMLInputElement>(null)
@@ -441,6 +479,48 @@ export function WizardAssignmentTree({
             .sort((a, b) => a.name.localeCompare(b.name))
     }, [nodes, edges, containmentSet, instanceAssignments, conflicts, layers, effectiveAssignments, manualAssignmentMap])
 
+    // Build child allocation map: for each entity with children, which layers are descendants assigned to?
+    const childAllocationMap = useMemo(() => {
+        const map = new Map<string, ChildAllocationSummary[]>()
+        const layerLookup = new Map(layers.map(l => [l.id, l]))
+
+        const collectDescendantLayers = (node: EntityTreeNode): Map<string, number> => {
+            const layerCounts = new Map<string, number>()
+            for (const child of node.children) {
+                if (child.assignedLayerId && !child.isInherited) {
+                    layerCounts.set(child.assignedLayerId, (layerCounts.get(child.assignedLayerId) ?? 0) + 1)
+                }
+                // Recurse into grandchildren
+                const childLayers = collectDescendantLayers(child)
+                childLayers.forEach((count, layerId) => {
+                    layerCounts.set(layerId, (layerCounts.get(layerId) ?? 0) + count)
+                })
+            }
+            return layerCounts
+        }
+
+        const processNode = (node: EntityTreeNode) => {
+            if (node.children.length > 0) {
+                const layerCounts = collectDescendantLayers(node)
+                if (layerCounts.size > 0) {
+                    const summaries: ChildAllocationSummary[] = []
+                    layerCounts.forEach((count, layerId) => {
+                        const layer = layerLookup.get(layerId)
+                        if (layer) {
+                            summaries.push({ layerId, layerName: layer.name, layerColor: layer.color ?? '#94a3b8', count })
+                        }
+                    })
+                    if (summaries.length > 0) {
+                        map.set(node.id, summaries.sort((a, b) => b.count - a.count))
+                    }
+                }
+                node.children.forEach(processNode)
+            }
+        }
+        entityTree.forEach(processNode)
+        return map
+    }, [entityTree, layers])
+
     // Use schema entity types for filter (same as Entities step) — not tree-derived.
     // This ensures Column, Term, Type, Glossary (and any custom types) always appear.
     const schemaEntityTypes = useEntityTypes()
@@ -545,13 +625,15 @@ export function WizardAssignmentTree({
         }
     }, [])
 
+    const showAssignmentWarning = useCallback((message: string) => {
+        setAssignmentWarning(message)
+        if (warningTimerRef.current) clearTimeout(warningTimerRef.current)
+        warningTimerRef.current = setTimeout(() => setAssignmentWarning(null), 5000)
+    }, [])
+
     const handleAssign = useCallback((entityId: string, layerId: string) => {
         if (!layerId) {
             // "Remove" action logic
-            // We need to know if we are currently inherited or explicit
-            // Re-find the node in the flattened list (most efficient since we have it)
-            // Or look it up in the instance assignments map
-
             const instanceAssignment = instanceAssignments.get(entityId)
             const isExplicitlyExcluded = instanceAssignment?.layerId === '__UNASSIGNED__'
 
@@ -559,30 +641,24 @@ export function WizardAssignmentTree({
                 // Was excluded -> Revert to Default (Inheritance)
                 removeEntityAssignment(entityId)
             } else {
-                // Check if current effective assignment matches a parent's assignment (Inheritance check)
-                // This is tricky without the tree context. 
-                // Let's use the `flattenedNodes` to find the node state if possible, 
-                // BUT `flattenedNodes` only has VISIBLE nodes.
-                // We should assume that if user clicked X, they accessed it via UI. 
-                // But `handleAssign` might be called from outside UI context? No, internal use.
-
-                // Let's try to find it in the flat list
                 const nodeInTree = flattenedNodes.find(n => n.id === entityId)
 
-                // If found and isInherited -> Exclude
                 if (nodeInTree?.isInherited) {
                     assignEntityToLayer(entityId, '__UNASSIGNED__', { inheritsChildren: true })
-                }
-                // Else (Explicitly assigned or Unassigned Root) -> Remove Assignment
-                else {
+                } else {
                     removeEntityAssignment(entityId)
                 }
             }
+            onAssignmentChange?.(entityId, null)
         } else {
-            assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
+            const result = assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
+            if (!result.success && result.conflict?.type === 'containment_locked') {
+                showAssignmentWarning(result.conflict.message)
+                return // Don't propagate blocked assignment
+            }
+            onAssignmentChange?.(entityId, layerId)
         }
-        onAssignmentChange?.(entityId, layerId || null)
-    }, [assignEntityToLayer, removeEntityAssignment, onAssignmentChange, instanceAssignments, flattenedNodes])
+    }, [assignEntityToLayer, removeEntityAssignment, onAssignmentChange, instanceAssignments, flattenedNodes, showAssignmentWarning])
 
     const handleBulkAssign = useCallback((layerId: string) => {
         const ids = Array.from(selectedIds)
@@ -596,18 +672,27 @@ export function WizardAssignmentTree({
         }
 
         // Fallback to one-by-one if onBulkAssign not provided
+        let blockedCount = 0
         ids.forEach(entityId => {
             if (!layerId) {
                 removeEntityAssignment(entityId)
+                onAssignmentChange?.(entityId, null)
             } else {
-                assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
+                const result = assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
+                if (!result.success && result.conflict?.type === 'containment_locked') {
+                    blockedCount++
+                    return
+                }
+                onAssignmentChange?.(entityId, layerId)
             }
-            onAssignmentChange?.(entityId, layerId || null)
         })
+        if (blockedCount > 0) {
+            showAssignmentWarning(`${blockedCount} assignment(s) blocked: children inherit their parent's layer.`)
+        }
 
         // Clear selection after bulk action
         setSelectedIds(new Set())
-    }, [selectedIds, onBulkAssign, onAssignmentChange, removeEntityAssignment, assignEntityToLayer])
+    }, [selectedIds, onBulkAssign, onAssignmentChange, removeEntityAssignment, assignEntityToLayer, showAssignmentWarning])
 
     const handleSelectAllChildren = useCallback(() => {
         if (selectedIds.size !== 1) return
@@ -720,6 +805,15 @@ export function WizardAssignmentTree({
                         </div>
                     )}
                 </div>
+
+                {/* Containment inheritance warning */}
+                {assignmentWarning && (
+                    <div className="flex items-center gap-2 px-3 py-2 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-xl text-xs text-red-700 dark:text-red-400">
+                        <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                        <span className="flex-1"><span className="font-medium">Assignment blocked.</span> {assignmentWarning}</span>
+                        <button onClick={() => setAssignmentWarning(null)} className="text-red-400 hover:text-red-600">&times;</button>
+                    </div>
+                )}
 
                 {/* Search */}
                 <div className="relative">
@@ -888,6 +982,7 @@ export function WizardAssignmentTree({
                                         layers={layers}
                                         searchQuery={searchQuery}
                                         entityVisualMap={entityVisualMap}
+                                        childAllocations={childAllocationMap.get(node.id)}
                                         onToggle={handleToggle}
                                         onSelect={handleSelect}
                                         onAssign={handleAssign}
