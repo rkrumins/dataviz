@@ -71,10 +71,18 @@ class ProviderRegistry:
                     workspace_id, ds.id, ds.provider_id, ds.graph_name,
                 )
                 ds_extra = json.loads(ds.extra_config) if getattr(ds, "extra_config", None) else None
-                self._providers[cache_key] = await self._instantiate_from_provider(
-                    ds.provider_id, ds.graph_name, session,
-                    ds_extra_config=ds_extra,
-                )
+                try:
+                    self._providers[cache_key] = await asyncio.wait_for(
+                        self._instantiate_from_provider(
+                            ds.provider_id, ds.graph_name, session,
+                            ds_extra_config=ds_extra,
+                        ),
+                        timeout=15,
+                    )
+                except asyncio.TimeoutError:
+                    raise ConnectionError(
+                        f"Provider instantiation timed out for {cache_key}"
+                    )
 
         return self._providers[cache_key]
 
@@ -135,9 +143,17 @@ class ProviderRegistry:
         async with self._legacy_locks[resolved_id]:
             if resolved_id not in self._legacy_providers:
                 logger.info("Instantiating provider for connection_id=%s", resolved_id)
-                self._legacy_providers[resolved_id] = await self._instantiate_from_connection(
-                    resolved_id, session
-                )
+                try:
+                    self._legacy_providers[resolved_id] = await asyncio.wait_for(
+                        self._instantiate_from_connection(
+                            resolved_id, session
+                        ),
+                        timeout=15,
+                    )
+                except asyncio.TimeoutError:
+                    raise ConnectionError(
+                        f"Provider instantiation timed out for connection {resolved_id}"
+                    )
 
         return self._legacy_providers[resolved_id]
 

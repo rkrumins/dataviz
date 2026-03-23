@@ -5,6 +5,7 @@ This service is **stateless** — it accepts connection params in the request
 body rather than reading from the management DB.  Intended for pre-registration
 testing (e.g. "does this FalkorDB host exist?") and capability discovery.
 """
+import asyncio
 import time
 from typing import List, Optional
 from fastapi import APIRouter, Body, HTTPException
@@ -97,9 +98,11 @@ async def ping_falkordb(req: FalkorDBPingRequest = Body(...)):
     provider = FalkorDBProvider(host=req.host, port=req.port, graph_name=req.graph_name)
     try:
         t0 = time.perf_counter()
-        await provider.get_stats()
+        await asyncio.wait_for(provider.get_stats(), timeout=10)
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
         return {"status": "healthy", "latencyMs": latency_ms}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="FalkorDB ping timed out")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"FalkorDB ping failed: {exc}")
 
@@ -113,8 +116,10 @@ async def list_falkordb_graphs(req: FalkorDBPingRequest = Body(...)):
     from backend.app.providers.falkordb_provider import FalkorDBProvider
     provider = FalkorDBProvider(host=req.host, port=req.port, graph_name=req.graph_name)
     try:
-        graphs = await provider.list_graphs()
+        graphs = await asyncio.wait_for(provider.list_graphs(), timeout=10)
         return {"graphs": graphs}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="FalkorDB timed out while listing graphs")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to list FalkorDB graphs: {exc}")
 
@@ -148,9 +153,11 @@ async def ping_neo4j(req: Neo4jPingRequest = Body(...)):
     )
     try:
         t0 = time.perf_counter()
-        await provider.get_stats()
+        await asyncio.wait_for(provider.get_stats(), timeout=10)
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
         return {"status": "healthy", "latencyMs": latency_ms}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Neo4j ping timed out")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Neo4j ping failed: {exc}")
     finally:
@@ -172,8 +179,10 @@ async def list_neo4j_databases(req: Neo4jPingRequest = Body(...)):
         database=req.database,
     )
     try:
-        databases = await provider.list_graphs()
+        databases = await asyncio.wait_for(provider.list_graphs(), timeout=10)
         return {"databases": databases}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Neo4j timed out while listing databases")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to list Neo4j databases: {exc}")
     finally:
@@ -199,9 +208,11 @@ async def ping_datahub(req: DataHubPingRequest = Body(...)):
     provider = DataHubGraphQLProvider(base_url=req.base_url, token=req.token)
     try:
         t0 = time.perf_counter()
-        result = await provider.get_stats()
+        result = await asyncio.wait_for(provider.get_stats(), timeout=10)
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
         return {"status": result.get("status", "UNKNOWN"), "latencyMs": latency_ms}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="DataHub ping timed out")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"DataHub ping failed: {exc}")
     finally:

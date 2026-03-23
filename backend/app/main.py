@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import time
@@ -6,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from starlette.responses import JSONResponse
 
 from .api.v1.api import api_router
 from .db.engine import init_db, close_db, get_async_session
@@ -107,7 +109,11 @@ async def lifespan(_app: FastAPI):
     if _auto_bootstrap:
         async with get_async_session() as session:
             try:
-                await provider_registry._resolve_primary_id(session)
+                await asyncio.wait_for(
+                    provider_registry._resolve_primary_id(session), timeout=10
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Primary connection bootstrap timed out after 10s — provider may be unreachable")
             except Exception as exc:
                 logger.warning("Primary connection bootstrap warning: %s", exc)
     else:
@@ -116,8 +122,12 @@ async def lifespan(_app: FastAPI):
     logger.info("Synodic Visualization Service started")
     yield
 
-    # Shutdown — release all provider connection pools
-    await provider_registry.evict_all()
+    # Shutdown — release all provider connection pools (with timeout so a hung
+    # provider doesn't block graceful shutdown indefinitely).
+    try:
+        await asyncio.wait_for(provider_registry.evict_all(), timeout=5)
+    except asyncio.TimeoutError:
+        logger.warning("Provider shutdown timed out after 5s — forcing exit")
     await close_db()
     logger.info("Synodic Visualization Service stopped")
 
@@ -138,6 +148,48 @@ app = FastAPI(
 
 # Rate-limit 429 handler
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Global handler for management DB failures — returns structured 503 instead of
+# raw 500 with stack trace, so the frontend can show a meaningful message.
+from sqlalchemy.exc import OperationalError as _SAOperationalError
+
+@app.exception_handler(_SAOperationalError)
+async def _db_operational_error_handler(_request, exc):
+    logger.error("Management DB unavailable: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Management database is temporarily unavailable. Please try again."},
+    )
+
+# ------------------------------------------------------------------ #
+# Timeout middleware (raw ASGI — avoids BaseHTTPMiddleware streaming   #
+# issues). Wraps every HTTP request in asyncio.wait_for so a hung     #
+# provider can never block a request indefinitely.                     #
+# ------------------------------------------------------------------ #
+
+class _TimeoutMiddleware:
+    """ASGI middleware: abort any HTTP request exceeding *timeout* seconds."""
+    def __init__(self, app, timeout: float = 30.0):
+        self.app = app
+        self.timeout = timeout
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        try:
+            await asyncio.wait_for(
+                self.app(scope, receive, send), timeout=self.timeout,
+            )
+        except asyncio.TimeoutError:
+            response = JSONResponse(
+                {"detail": "Request timed out — the graph provider may be unreachable."},
+                status_code=504,
+            )
+            await response(scope, receive, send)
+
+# Must be added FIRST so it wraps all other middleware.
+app.add_middleware(_TimeoutMiddleware, timeout=30.0)
 
 # ------------------------------------------------------------------ #
 # Middleware (outermost → innermost order)                             #
@@ -202,13 +254,18 @@ async def health_check():
         result["dependencies"]["management_db"] = f"unhealthy: {exc}"
         result["status"] = "degraded"
 
-    # Primary provider ping
+    # Primary provider ping (with timeout so a hung provider doesn't block the
+    # entire health endpoint — which in turn blocks the frontend login flow).
     try:
         async with get_async_session() as session:
-            primary_id = await provider_registry._resolve_primary_id(session)
-            provider = await provider_registry.get_provider(primary_id, session)
+            primary_id = await asyncio.wait_for(
+                provider_registry._resolve_primary_id(session), timeout=5
+            )
+            provider = await asyncio.wait_for(
+                provider_registry.get_provider(primary_id, session), timeout=5
+            )
             t0 = time.perf_counter()
-            await provider.get_stats()
+            await asyncio.wait_for(provider.get_stats(), timeout=10)
             latency_ms = round((time.perf_counter() - t0) * 1000, 2)
             result["dependencies"]["primary_provider"] = {
                 "id": primary_id,
@@ -216,6 +273,9 @@ async def health_check():
                 "status": "healthy",
                 "latencyMs": latency_ms,
             }
+    except asyncio.TimeoutError:
+        result["dependencies"]["primary_provider"] = {"status": "unhealthy: timeout"}
+        result["status"] = "degraded"
     except Exception as exc:
         result["dependencies"]["primary_provider"] = {"status": f"unhealthy: {exc}"}
         result["status"] = "degraded"
