@@ -1,4 +1,5 @@
 import { useState, useCallback, type FC } from 'react'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { Network, Plus, Trash2, CheckCircle, AlertCircle, Activity, Shield, Database, Edit2 } from 'lucide-react'
 import { useConnections } from '@/hooks/useConnections'
 import { type ConnectionCreateRequest, type ConnectionUpdateRequest } from '@/services/connectionService'
@@ -87,7 +88,7 @@ export const ConnectionsTab: FC = () => {
         if (!form.host || !form.port) return
         setGraphsLoading(true)
         try {
-            const res = await fetch('/graph/v1/providers/falkordb/graphs', {
+            const res = await fetchWithTimeout('/graph/v1/providers/falkordb/graphs', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

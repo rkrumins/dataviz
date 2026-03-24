@@ -168,6 +168,32 @@ export function GraphProvider({ children }: GraphProviderProps) {
         return () => { cancelled = true }
     }, [activeWorkspaceId, activeDataSourceId, activeConnectionId])
 
+    // Re-validate provider connectivity when backend recovers from an outage.
+    // The main provider effect only re-runs when IDs change — this handles the
+    // case where the same workspace stays active through a backend restart.
+    useEffect(() => {
+        const unsubscribe = useHealthStore.subscribe((state, prev) => {
+            const wasDown = prev.status === 'unreachable' || prev.status === 'degraded'
+            const isBack = state.status === 'recovered'
+            if (!wasDown || !isBack || !currentProvider) return
+
+            setError(null)
+            setProviderReady(false)
+            currentProvider.getStats()
+                .then(() => {
+                    setProviderReady(true)
+                    // Increment providerVersion so canvas hooks (useGraphHydration)
+                    // detect the recovery and re-hydrate with fresh data.
+                    setProviderVersion(v => v + 1)
+                })
+                .catch((err) => {
+                    setError(err instanceof Error ? err : new Error('Provider still unreachable'))
+                    setProviderReady(true)
+                })
+        })
+        return unsubscribe
+    }, [currentProvider])
+
     const value: GraphProviderContextValueExtended = {
         // currentProvider is guaranteed non-null here: the early-return above handles the null+loading case.
         provider: currentProvider!,

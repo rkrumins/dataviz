@@ -157,7 +157,7 @@ async def scheduled_polling_loop():
             if tasks:
                 logger.info(f"Executing {len(tasks)} polling tasks...")
                 results = await asyncio.gather(
-                    *[asyncio.wait_for(t, timeout=60) for t in tasks],
+                    *[asyncio.wait_for(t, timeout=30) for t in tasks],
                     return_exceptions=True,
                 )
                 for result in results:

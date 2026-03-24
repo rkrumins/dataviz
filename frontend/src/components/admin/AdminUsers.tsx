@@ -14,9 +14,9 @@ import {
     Users, CheckCircle2, XCircle, Clock, Shield, AlertCircle,
     RefreshCw, Search, UserPlus, Ban, X, Loader2, Mail,
     ChevronDown, ChevronUp, KeyRound, Eye, UserCog,
-    RotateCcw, Lock, Copy, Check,
+    RotateCcw, Lock, Copy, Check, Link2,
 } from 'lucide-react'
-import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
+import { adminUserService, type AdminUserResponse, type InviteResponse } from '@/services/adminUserService'
 import { cn } from '@/lib/utils'
 
 // ── Types & constants ────────────────────────────────────────────────
@@ -29,6 +29,7 @@ type ModalType =
     | { kind: 'role'; userId: string; name: string; currentRole: string }
     | { kind: 'suspend'; userId: string; name: string }
     | { kind: 'resetPassword'; userId: string; name: string }
+    | { kind: 'invite' }
     | null
 
 const STATUS_TABS: { value: StatusFilter; label: string; icon: typeof Clock }[] = [
@@ -168,6 +169,12 @@ export function AdminUsers() {
 
     // Reset password mode: 'direct' or 'token'
     const [resetMode, setResetMode] = useState<'direct' | 'token'>('token')
+
+    // Invite state
+    const [inviteRole, setInviteRole] = useState('user')
+    const [inviteResult, setInviteResult] = useState<InviteResponse | null>(null)
+    const [inviteCopied, setInviteCopied] = useState(false)
+    const [inviteLoading, setInviteLoading] = useState(false)
 
     // ── Data fetching ────────────────────────────────────────────────
 
@@ -320,6 +327,34 @@ export function AdminUsers() {
         setGeneratedToken(null)
         setTokenCopied(false)
         setResetMode('token')
+        setInviteResult(null)
+        setInviteCopied(false)
+        setInviteRole('user')
+    }
+
+    const handleCreateInvite = async () => {
+        setInviteLoading(true)
+        setError(null)
+        try {
+            const resp = await adminUserService.createInvite(inviteRole)
+            setInviteResult(resp)
+            setSuccessMsg('Invite link generated')
+        } catch (err: any) {
+            setError(err.message || 'Failed to create invite')
+        } finally {
+            setInviteLoading(false)
+        }
+    }
+
+    const inviteUrl = inviteResult
+        ? `${window.location.origin}/signup?invite=${inviteResult.inviteToken}`
+        : ''
+
+    const handleCopyInvite = async () => {
+        if (!inviteUrl) return
+        await navigator.clipboard.writeText(inviteUrl)
+        setInviteCopied(true)
+        setTimeout(() => setInviteCopied(false), 2000)
     }
 
     const openRoleModal = (user: AdminUserResponse) => {
@@ -363,14 +398,23 @@ export function AdminUsers() {
                         </p>
                     </div>
                 </div>
-                <button
-                    onClick={fetchUsers}
-                    disabled={loading}
-                    className="px-4 py-2 border border-glass-border bg-canvas-elevated hover:bg-black/5 dark:hover:bg-white/5 rounded-xl font-medium text-sm text-ink transition-colors flex items-center gap-2 disabled:opacity-50"
-                >
-                    <RefreshCw className={cn("w-4 h-4", loading && "animate-spin")} />
-                    Refresh
-                </button>
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => setModal({ kind: 'invite' })}
+                        className="px-4 py-2 rounded-xl font-medium text-sm text-white bg-accent-lineage hover:brightness-110 transition-all flex items-center gap-2 shadow-sm shadow-accent-lineage/20"
+                    >
+                        <Link2 className="w-4 h-4" />
+                        Invite by Link
+                    </button>
+                    <button
+                        onClick={fetchUsers}
+                        disabled={loading}
+                        className="px-4 py-2 border border-glass-border bg-canvas-elevated hover:bg-black/5 dark:hover:bg-white/5 rounded-xl font-medium text-sm text-ink transition-colors flex items-center gap-2 disabled:opacity-50"
+                    >
+                        <RefreshCw className={cn("w-4 h-4", loading && "animate-spin")} />
+                        Refresh
+                    </button>
+                </div>
             </div>
 
             {/* KPI Cards */}
@@ -794,6 +838,83 @@ export function AdminUsers() {
                                         confirmLabel="Update Role" confirmIcon={CheckCircle2}
                                         confirmClass="bg-accent-lineage hover:brightness-110 shadow-accent-lineage/20"
                                         loading={!!actionLoading} disabled={selectedRole === modal.currentRole} />
+                                </>
+                            )}
+
+                            {/* ── Invite modal ── */}
+                            {modal.kind === 'invite' && (
+                                <>
+                                    <ModalHeader icon={Link2} iconBg="bg-accent-lineage/10 border-accent-lineage/20" iconColor="text-accent-lineage"
+                                        title="Invite by Link" subtitle="Generate a shareable signup link" onClose={closeModal} />
+
+                                    {inviteResult ? (
+                                        <div className="space-y-4 mb-5">
+                                            <div className="p-4 rounded-xl bg-accent-lineage/5 border border-accent-lineage/20">
+                                                <p className="text-xs font-semibold uppercase tracking-wider text-accent-lineage mb-2">Invite Link</p>
+                                                <div className="flex items-center gap-2">
+                                                    <code className="flex-1 text-xs font-mono bg-black/5 dark:bg-white/5 px-3 py-2 rounded-lg break-all text-ink select-all">
+                                                        {inviteUrl}
+                                                    </code>
+                                                    <button onClick={handleCopyInvite}
+                                                        className="p-2 rounded-lg bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20 transition-colors shrink-0">
+                                                        {inviteCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                                                    </button>
+                                                </div>
+                                                <p className="text-[11px] text-ink-muted mt-2">
+                                                    Role: <span className="font-semibold capitalize">{inviteResult.role}</span> &middot; Expires: {formatDate(inviteResult.expiresAt)}
+                                                </p>
+                                                <p className="text-[11px] text-ink-muted mt-1">
+                                                    Share this link with the user. They will be auto-activated upon signup.
+                                                </p>
+                                            </div>
+                                            <div className="flex justify-end">
+                                                <button onClick={closeModal}
+                                                    className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 transition-all">
+                                                    Done
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <>
+                                            <p className="text-sm text-ink-secondary mb-4">
+                                                Generate a link that lets a new user sign up and bypass the approval queue.
+                                                Choose what role the invited user will receive.
+                                            </p>
+                                            <div className="space-y-2 mb-5">
+                                                {AVAILABLE_ROLES.map(r => {
+                                                    const RIcon = r.icon
+                                                    const isSelected = inviteRole === r.value
+                                                    return (
+                                                        <button key={r.value} onClick={() => setInviteRole(r.value)}
+                                                            className={cn(
+                                                                "w-full flex items-center gap-3 p-3 rounded-xl border transition-colors text-left",
+                                                                isSelected
+                                                                    ? "border-accent-lineage bg-accent-lineage/5"
+                                                                    : "border-glass-border hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
+                                                            )}>
+                                                            <div className={cn(
+                                                                "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
+                                                                isSelected ? "bg-accent-lineage/10 text-accent-lineage" : "bg-black/5 dark:bg-white/5 text-ink-muted"
+                                                            )}>
+                                                                <RIcon className="w-4 h-4" />
+                                                            </div>
+                                                            <div>
+                                                                <p className={cn("text-sm font-semibold", isSelected ? "text-accent-lineage" : "text-ink")}>{r.label}</p>
+                                                                <p className="text-[11px] text-ink-muted">{r.description}</p>
+                                                            </div>
+                                                            {isSelected && (
+                                                                <CheckCircle2 className="w-5 h-5 text-accent-lineage ml-auto shrink-0" />
+                                                            )}
+                                                        </button>
+                                                    )
+                                                })}
+                                            </div>
+                                            <ModalFooter onCancel={closeModal} onConfirm={handleCreateInvite}
+                                                confirmLabel="Generate Link" confirmIcon={Link2}
+                                                confirmClass="bg-accent-lineage hover:brightness-110 shadow-accent-lineage/20"
+                                                loading={inviteLoading} />
+                                        </>
+                                    )}
                                 </>
                             )}
 

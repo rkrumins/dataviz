@@ -3,6 +3,8 @@
  * Providers are pure infrastructure: host/port/credentials, no graph or ontology.
  */
 
+import { fetchWithTimeout } from './fetchWithTimeout'
+
 const ADMIN_API = '/api/v1/admin/providers'
 
 export type ProviderType = 'falkordb' | 'neo4j' | 'datahub' | 'mock'
@@ -119,7 +121,7 @@ function friendlyError(raw: string): string {
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
         ...init,
         headers: { 'Content-Type': 'application/json', ...init?.headers },
     })

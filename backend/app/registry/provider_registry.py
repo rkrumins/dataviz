@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Dict, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,10 +24,17 @@ logger = logging.getLogger(__name__)
 
 
 class ProviderRegistry:
+    # How long to remember a failed provider instantiation (seconds).
+    # During this window, requests fail fast instead of re-trying the full
+    # connection timeout.  Cleared on eviction or manual reset.
+    NEGATIVE_CACHE_TTL = 30
+
     def __init__(self) -> None:
         # Workspace-centric cache: (provider_id, graph_name) → provider
         self._providers: Dict[Tuple[str, str], GraphDataProvider] = {}
         self._locks: Dict[Tuple[str, str], asyncio.Lock] = {}
+        # Negative cache: (provider_id, graph_name) → monotonic timestamp of last failure
+        self._failed_cache: Dict[Tuple[str, str], float] = {}
         # Legacy connection-based cache (kept during migration)
         self._legacy_providers: Dict[str, GraphDataProvider] = {}
         self._legacy_locks: Dict[str, asyncio.Lock] = {}
@@ -61,6 +69,18 @@ class ProviderRegistry:
 
         cache_key = (ds.provider_id, ds.graph_name or "")
 
+        # Fail fast if this provider recently failed (negative cache)
+        failed_at = self._failed_cache.get(cache_key)
+        if failed_at is not None:
+            age = time.monotonic() - failed_at
+            if age < self.NEGATIVE_CACHE_TTL:
+                raise ConnectionError(
+                    f"Provider {cache_key} recently failed ({age:.0f}s ago). "
+                    f"Will retry in {self.NEGATIVE_CACHE_TTL - age:.0f}s."
+                )
+            else:
+                del self._failed_cache[cache_key]
+
         if cache_key not in self._locks:
             self._locks[cache_key] = asyncio.Lock()
 
@@ -77,12 +97,16 @@ class ProviderRegistry:
                             ds.provider_id, ds.graph_name, session,
                             ds_extra_config=ds_extra,
                         ),
-                        timeout=15,
+                        timeout=10,
                     )
                 except asyncio.TimeoutError:
+                    self._failed_cache[cache_key] = time.monotonic()
                     raise ConnectionError(
                         f"Provider instantiation timed out for {cache_key}"
                     )
+                except Exception:
+                    self._failed_cache[cache_key] = time.monotonic()
+                    raise
 
         return self._providers[cache_key]
 
@@ -148,7 +172,7 @@ class ProviderRegistry:
                         self._instantiate_from_connection(
                             resolved_id, session
                         ),
-                        timeout=15,
+                        timeout=10,
                     )
                 except asyncio.TimeoutError:
                     raise ConnectionError(
@@ -190,6 +214,7 @@ class ProviderRegistry:
             except Exception as exc:
                 logger.warning("Error closing provider %s: %s", cache_key, exc)
         self._locks.pop(cache_key, None)
+        self._failed_cache.pop(cache_key, None)
         logger.info("Evicted provider for key=%s", cache_key)
 
     async def evict_workspace(self, workspace_id: str, session: AsyncSession) -> None:
@@ -221,6 +246,7 @@ class ProviderRegistry:
             await self.evict_data_source(key[0], key[1])
         for conn_id in list(self._legacy_providers.keys()):
             await self.evict(conn_id)
+        self._failed_cache.clear()
         self._default_ws_id = None
 
     # ------------------------------------------------------------------ #

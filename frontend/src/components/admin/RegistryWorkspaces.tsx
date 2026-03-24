@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useNavigate } from 'react-router-dom'
 import {
     Database, Plus, Edit2, Settings, Loader2, Search, AlertTriangle,
@@ -35,22 +36,25 @@ export function RegistryWorkspaces() {
             setCatalogItems(catList)
 
             const statsMap: Record<string, { nodes: number; edges: number; types: number }> = {}
-            for (const ws of wsList) {
+            // Fetch cached stats from management DB (no provider dependency) in parallel
+            const statsPromises = wsList.map(async (ws) => {
                 let totalNodes = 0, totalEdges = 0, allTypes = new Set<string>()
-                for (const ds of ws.dataSources || []) {
+                const dsPromises = (ws.dataSources || []).map(async (ds) => {
                     try {
-                        const res = await fetch(`/api/v1/${ws.id}/graph/stats?dataSourceId=${ds.id}`)
+                        const res = await fetchWithTimeout(`/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`)
                         if (res.ok) {
                             const data = await res.json()
-                            totalNodes += (data.node_count ?? data.nodeCount ?? 0)
-                            totalEdges += (data.edge_count ?? data.edgeCount ?? 0)
-                            const types = data.entity_types ?? data.entityTypes ?? []
-                            types.forEach((t: string) => allTypes.add(t))
+                            totalNodes += (data.nodeCount ?? 0)
+                            totalEdges += (data.edgeCount ?? 0)
+                            const typeCounts = data.entityTypeCounts ?? {}
+                            Object.keys(typeCounts).forEach((t: string) => allTypes.add(t))
                         }
-                    } catch { /* ignore */ }
-                }
+                    } catch { /* no cached stats yet */ }
+                })
+                await Promise.all(dsPromises)
                 statsMap[ws.id] = { nodes: totalNodes, edges: totalEdges, types: allTypes.size }
-            }
+            })
+            await Promise.all(statsPromises)
             setDsStats(statsMap)
         } catch (err) { console.error('Failed to load workspaces', err) }
         finally { setIsLoading(false) }

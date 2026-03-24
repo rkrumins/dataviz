@@ -16,6 +16,7 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import {
   useSchemaStore,
   useContainmentEdgeTypes,
@@ -335,7 +336,7 @@ export function ContextViewCanvas({
   // Handle save graph
   const handleSave = useCallback(async () => {
     try {
-      const response = await fetch('/api/v1/graph/save', {
+      const response = await fetchWithTimeout('/api/v1/graph/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nodes, edges })

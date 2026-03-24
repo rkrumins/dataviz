@@ -136,8 +136,7 @@ services:
     profiles: ["seed"]
     build:
       context: .
-      dockerfile: backend/Dockerfile.viz
-    entrypoint: ["python", "-m", "backend.scripts.docker_seed"]
+      dockerfile: backend/Dockerfile.seed
     environment:
       FALKORDB_HOST: falkordb
       FALKORDB_PORT: "6379"

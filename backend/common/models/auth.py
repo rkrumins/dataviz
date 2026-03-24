@@ -22,6 +22,7 @@ class SignUpRequest(BaseModel):
     password: str = Field(min_length=8)
     first_name: str = Field(alias="firstName", min_length=1, max_length=100)
     last_name: str = Field(alias="lastName", min_length=1, max_length=100)
+    invite_token: Optional[str] = Field(None, alias="inviteToken")
 
     @field_validator("email")
     @classmethod
@@ -134,3 +135,36 @@ class ResetTokenResponse(BaseModel):
 
     reset_token: str = Field(alias="resetToken")
     expires_at: str = Field(alias="expiresAt")
+
+
+class CreateInviteRequest(BaseModel):
+    """Admin creates an invite link with optional role and expiry."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    role: str = Field("user", min_length=1, max_length=50)
+    expires_in_hours: int = Field(72, alias="expiresInHours", ge=1, le=720)
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        allowed = {"admin", "user", "viewer"}
+        if v not in allowed:
+            raise ValueError(f"Role must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+
+class InviteTokenResponse(BaseModel):
+    """Returned to admin after generating an invite."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    invite_token: str = Field(alias="inviteToken")
+    role: str
+    expires_at: str = Field(alias="expiresAt")
+
+
+class InviteVerifyResponse(BaseModel):
+    """Returned to the signup page when validating an invite token."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    valid: bool
+    role: Optional[str] = None

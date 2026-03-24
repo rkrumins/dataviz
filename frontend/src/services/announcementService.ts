@@ -5,6 +5,7 @@
  * Admin endpoints (auth required): /api/v1/admin/announcements
  */
 import { authFetch } from './apiClient'
+import { fetchWithTimeout } from './fetchWithTimeout'
 
 const PUBLIC_URL = '/api/v1/announcements'
 const ADMIN_URL = '/api/v1/admin/announcements'
@@ -61,7 +62,7 @@ export const announcementService = {
   /** Fetch active announcements (public, no auth needed for banner display). */
   async getActive(): Promise<AnnouncementResponse[]> {
     try {
-      const res = await fetch(PUBLIC_URL)
+      const res = await fetchWithTimeout(PUBLIC_URL)
       if (!res.ok) return []
       return res.json()
     } catch {
@@ -100,7 +101,7 @@ export const announcementService = {
   /** Fetch global banner config (public, no auth). */
   async getConfig(): Promise<AnnouncementConfigResponse> {
     try {
-      const res = await fetch(`${PUBLIC_URL}/config`)
+      const res = await fetchWithTimeout(`${PUBLIC_URL}/config`)
       if (!res.ok) return { pollIntervalSeconds: 15, defaultSnoozeMinutes: 30 }
       return res.json()
     } catch {

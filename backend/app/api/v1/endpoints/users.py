@@ -30,6 +30,8 @@ from backend.common.models.auth import (
     AdminResetPasswordRequest,
     ApproveRejectRequest,
     ChangeRoleRequest,
+    CreateInviteRequest,
+    InviteTokenResponse,
     ResetTokenResponse,
     UserPublicResponse,
 )
@@ -310,3 +312,44 @@ async def generate_reset_token(
 
     logger.info("Reset token generated for user %s by admin %s", user_id, admin.id)
     return ResetTokenResponse(resetToken=raw_token, expiresAt=expires_at)
+
+
+# ── Invite link ──────────────────────────────────────────────────────
+
+@admin_router.post(
+    "/invite",
+    response_model=InviteTokenResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_invite(
+    body: CreateInviteRequest,
+    admin=Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Generate a signed invite token that lets a new user sign up and
+    be auto-activated with the specified role.  The frontend constructs
+    the full URL from its own origin."""
+    from backend.app.auth.jwt import create_invite_token
+
+    token, expires_at = create_invite_token(
+        role=body.role,
+        created_by=admin.id,
+        expires_in_hours=body.expires_in_hours,
+    )
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.invite_created",
+        payload={
+            "role": body.role,
+            "created_by": admin.id,
+            "expires_at": expires_at,
+        },
+    )
+
+    logger.info("Invite token created by admin %s (role=%s)", admin.id, body.role)
+    return InviteTokenResponse(
+        inviteToken=token,
+        role=body.role,
+        expiresAt=expires_at,
+    )
