@@ -16,12 +16,15 @@ import { useEffect, useRef, useState } from 'react'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useHealthStore } from '@/store/health'
 import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { useGraphSchema } from '@/hooks/useGraphSchema'
 import { useRecentViews } from '@/hooks/useRecentViews'
 import { getView, viewToViewConfig, type View } from '@/services/viewApiService'
 import { switchToViewScope, parseDataSourceId, type ScopeSwitchResult } from '@/utils/viewNavigation'
 import type { ViewConfiguration } from '@/types/schema'
+
+const LOADING_SCHEMA_TIMEOUT_MS = 8_000
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -58,6 +61,8 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
   // Active view from the store
   const activeView = useSchemaStore((s) => s.getActiveView())
 
+  // Incrementing counter to force Step 1 to re-run (e.g. after backend recovery)
+  const [retryCount, setRetryCount] = useState(0)
   // Track which viewId we've already fully navigated to, to avoid re-running
   const completedViewRef = useRef<string | null>(null)
   // Track the scope switch result to know if we need to wait
@@ -66,6 +71,9 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
   const switchProviderVersionRef = useRef<number>(providerVersion)
   // Cancellation for API fetches
   const cancelledRef = useRef(false)
+  // Ref-tracked status for health recovery subscription (avoids stale closure)
+  const statusRef = useRef<ViewNavigationStatus>(status)
+  statusRef.current = status
 
   // ─── Step 1: Resolve view & switch scope ──────────────────────────────
 
@@ -112,10 +120,15 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
           if (data.config?.viewport) {
             setViewport(data.config.viewport)
           }
-        } catch {
+        } catch (err) {
           if (!cancelledRef.current) {
+            completedViewRef.current = viewId  // Prevent retry loop
             setStatus('error')
-            setError('View not found')
+            setError(
+              err instanceof Error && err.message.includes('500')
+                ? 'The backend returned an error loading this view. Please try again later.'
+                : 'View not found',
+            )
           }
           return
         }
@@ -171,7 +184,7 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
     return () => {
       cancelledRef.current = true
     }
-  }, [viewId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [viewId, retryCount]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── Step 2: Wait for provider rebuild after scope switch ─────────────
 
@@ -191,32 +204,43 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
     if (status !== 'loading-schema') return
     if (schemaIsLoading || schemaIsFetching) return
 
-    // Schema is ready — activate the view
-    if (viewId) {
-      setActiveView(viewId)
-      completedViewRef.current = viewId
-      setStatus('ready')
-
-      const viewConfig = useSchemaStore.getState().schema?.views.find(v => v.id === viewId)
-      if (viewConfig) {
-        const dsId = viewConfig.dataSourceId ?? parseDataSourceId(viewConfig.scopeKey) ?? undefined
-        const ds = dsId
-          ? useWorkspacesStore.getState().workspaces
-              .flatMap(w => w.dataSources ?? [])
-              .find(d => d.id === dsId)
-          : undefined
-        recordVisit({
-          viewId: viewConfig.id,
-          viewName: viewConfig.name,
-          viewType: viewConfig.layout?.type ?? 'graph',
-          workspaceId: viewConfig.workspaceId,
-          workspaceName: viewConfig.workspaceName,
-          dataSourceId: dsId,
-          dataSourceName: ds?.label || ds?.catalogItemId || undefined,
-        })
-      }
-    }
+    // Schema settled (success or error with fallback) — activate view
+    activateView()
   }, [status, schemaIsLoading, schemaIsFetching, viewId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Safety timeout: if stuck in loading-schema for too long, proceed anyway
+  // (default schema is already loaded by useGraphSchema fallback)
+  useEffect(() => {
+    if (status !== 'loading-schema') return
+    const timer = setTimeout(() => activateView(), LOADING_SCHEMA_TIMEOUT_MS)
+    return () => clearTimeout(timer)
+  }, [status, viewId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function activateView() {
+    if (!viewId || completedViewRef.current === viewId) return
+    setActiveView(viewId)
+    completedViewRef.current = viewId
+    setStatus('ready')
+
+    const viewConfig = useSchemaStore.getState().schema?.views.find(v => v.id === viewId)
+    if (viewConfig) {
+      const dsId = viewConfig.dataSourceId ?? parseDataSourceId(viewConfig.scopeKey) ?? undefined
+      const ds = dsId
+        ? useWorkspacesStore.getState().workspaces
+            .flatMap(w => w.dataSources ?? [])
+            .find(d => d.id === dsId)
+        : undefined
+      recordVisit({
+        viewId: viewConfig.id,
+        viewName: viewConfig.name,
+        viewType: viewConfig.layout?.type ?? 'graph',
+        workspaceId: viewConfig.workspaceId,
+        workspaceName: viewConfig.workspaceName,
+        dataSourceId: dsId,
+        dataSourceName: ds?.label || ds?.catalogItemId || undefined,
+      })
+    }
+  }
 
   // ─── Step 4: Handle rapid navigation (viewId changes while in progress) ─
 
@@ -224,6 +248,25 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
     // When viewId changes, reset the completed ref so the pipeline re-runs
     completedViewRef.current = null
   }, [viewId])
+
+  // ─── Step 5: Auto-retry on backend recovery ───────────────────────────
+  // When the backend comes back from an outage, reset error state so the
+  // view re-resolves automatically — no manual page refresh needed.
+
+  useEffect(() => {
+    const unsubscribe = useHealthStore.subscribe((state, prev) => {
+      const wasDown = prev.status === 'unreachable' || prev.status === 'degraded'
+      const isBack = state.status === 'recovered' || (state.status === 'healthy' && wasDown)
+      if (!isBack) return
+      if (statusRef.current !== 'error') return // only retry if we're currently in error
+
+      // Reset so Step 1 effect re-runs with fresh retryCount
+      completedViewRef.current = null
+      setError(null)
+      setRetryCount(c => c + 1)
+    })
+    return unsubscribe
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   return {
     status,

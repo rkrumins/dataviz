@@ -2,7 +2,8 @@
  * Shared authenticated fetch wrapper.
  *
  * Attaches the JWT access token from the auth store to every request.
- * On 401, calls logout() so the user is redirected to /login.
+ * On 401, marks the session as expired so the UI can prompt re-auth
+ * without nuking the current page state.
  */
 
 import { useAuthStore } from '@/store/auth'
@@ -19,7 +20,7 @@ export async function authFetch<T>(url: string, init?: RequestInit): Promise<T> 
     }
 
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 20_000)
+    const timer = setTimeout(() => controller.abort(), 6_000)
 
     let res: Response
     try {
@@ -37,7 +38,7 @@ export async function authFetch<T>(url: string, init?: RequestInit): Promise<T> 
     clearTimeout(timer)
 
     if (res.status === 401) {
-        useAuthStore.getState().logout()
+        useAuthStore.getState().expireSession()
         throw new Error('Session expired — please log in again.')
     }
 

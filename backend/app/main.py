@@ -161,6 +161,16 @@ async def _db_operational_error_handler(_request, exc):
         content={"detail": "Management database is temporarily unavailable. Please try again."},
     )
 
+# Provider connectivity failures — return 503 (Service Unavailable) so the
+# frontend can distinguish provider-down (503) from bugs (500) and timeouts (504).
+@app.exception_handler(ConnectionError)
+async def _connection_error_handler(_request, exc):
+    logger.warning("Provider connection error: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc)},
+    )
+
 # ------------------------------------------------------------------ #
 # Timeout middleware (raw ASGI — avoids BaseHTTPMiddleware streaming   #
 # issues). Wraps every HTTP request in asyncio.wait_for so a hung     #
@@ -189,7 +199,7 @@ class _TimeoutMiddleware:
             await response(scope, receive, send)
 
 # Must be added FIRST so it wraps all other middleware.
-app.add_middleware(_TimeoutMiddleware, timeout=30.0)
+app.add_middleware(_TimeoutMiddleware, timeout=25.0)
 
 # ------------------------------------------------------------------ #
 # Middleware (outermost → innermost order)                             #
@@ -281,3 +291,52 @@ async def health_check():
         result["status"] = "degraded"
 
     return result
+
+
+@app.get("/api/v1/health/providers", tags=["health"])
+async def provider_health_check():
+    """
+    Per-workspace provider health — returns status for each data source.
+    The frontend uses this to show health badges and warn users before
+    navigating to a workspace with a dead provider.
+    """
+    from .db.repositories.workspace_repo import list_workspaces
+    from .db.repositories.data_source_repo import list_data_sources
+
+    providers: dict = {}
+
+    try:
+        async with get_async_session() as session:
+            workspaces = await list_workspaces(session)
+
+            # Build tasks for concurrent health checks
+            async def check_provider(ws_id: str, ds_id: str, ds_provider_id: str):
+                key = f"{ws_id}:{ds_id}"
+                try:
+                    provider = await asyncio.wait_for(
+                        provider_registry.get_provider_for_workspace(ws_id, session, ds_id),
+                        timeout=5,
+                    )
+                    await asyncio.wait_for(provider.get_stats(), timeout=5)
+                    return key, {"status": "healthy", "providerId": ds_provider_id}
+                except Exception as exc:
+                    return key, {"status": "unhealthy", "error": str(exc)[:200]}
+
+            tasks = []
+            for ws in workspaces:
+                sources = await list_data_sources(session, ws.id)
+                for ds in sources:
+                    tasks.append(check_provider(ws.id, ds.id, ds.provider_id))
+
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for item in results:
+                    if isinstance(item, Exception):
+                        continue
+                    key, status = item
+                    providers[key] = status
+
+    except Exception as exc:
+        return {"providers": {}, "error": str(exc)[:200]}
+
+    return {"providers": providers}

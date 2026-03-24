@@ -2,6 +2,8 @@
  * Auth Service — signup, login, and user profile API calls.
  */
 
+import { fetchWithTimeout } from './fetchWithTimeout'
+
 const AUTH_API = '/api/v1/auth'
 const USERS_API = '/api/v1/users'
 
@@ -12,6 +14,7 @@ export interface SignUpRequest {
     password: string
     firstName: string
     lastName: string
+    inviteToken?: string
 }
 
 export interface LoginRequest {
@@ -38,7 +41,7 @@ export interface LoginResponse {
 // ── HTTP helper (no auth header for public endpoints) ─────────────────
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
         ...init,
         headers: { 'Content-Type': 'application/json', ...init?.headers },
     })
@@ -91,5 +94,11 @@ export const authService = {
             method: 'POST',
             body: JSON.stringify({ token, newPassword }),
         })
+    },
+
+    verifyInvite(token: string): Promise<{ valid: boolean; role: string | null }> {
+        return request<{ valid: boolean; role: string | null }>(
+            `${AUTH_API}/verify-invite?token=${encodeURIComponent(token)}`,
+        )
     },
 }

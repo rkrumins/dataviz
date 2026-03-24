@@ -4,6 +4,8 @@
  * each binding a Provider + Graph Name + Ontology.
  */
 
+import { fetchWithTimeout } from './fetchWithTimeout'
+
 const ADMIN_API = '/api/v1/admin/workspaces'
 
 // ============================================================
@@ -80,7 +82,7 @@ export interface WorkspaceDataSourceImpactResponse {
 // ============================================================
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
         ...init,
         headers: { 'Content-Type': 'application/json', ...init?.headers },
     })
@@ -139,7 +141,7 @@ export const workspaceService = {
 
     async addDataSource(wsId: string, req: DataSourceCreateRequest): Promise<DataSourceResponse> {
         const url = `${ADMIN_API}/${wsId}/data-sources`
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(req),

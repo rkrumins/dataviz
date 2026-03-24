@@ -3,6 +3,7 @@
  * API base URL is configurable via env (VITE_FEATURES_API_URL or VITE_API_BASE_URL).
  * When API is unavailable, uses generated fallback (see scripts/generate-features-fallback).
  */
+import { fetchWithTimeout } from './fetchWithTimeout'
 
 function getFeaturesApiUrl(): string {
   if (import.meta.env.VITE_FEATURES_API_URL) {
@@ -172,7 +173,7 @@ function parseApiError(status: number, body: unknown): string {
 // ─── HTTP helper ───────────────────────────────────────────────────────────
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })

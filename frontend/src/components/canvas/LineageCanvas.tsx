@@ -42,6 +42,7 @@ import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType }
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore, useContainmentEdgeTypes, useLineageEdgeTypes, useRelationshipTypes } from '@/store/schema'
 import { cn } from '@/lib/utils'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useGraphProvider } from '@/providers'
 import * as LucideIcons from 'lucide-react'
 
@@ -401,7 +402,7 @@ export function LineageCanvas() {
 
   const onSave = useCallback(async () => {
     try {
-      const response = await fetch('http://localhost:8002/api/v1/graph/save', {
+      const response = await fetchWithTimeout('/api/v1/graph/save', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
