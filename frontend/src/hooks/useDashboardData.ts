@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useWorkspaces } from './useWorkspaces'
 import { useSchemaStore } from '@/store/schema'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import type { ViewConfiguration } from '@/types/schema'
 
 const EMPTY_VIEWS: ViewConfiguration[] = []
@@ -101,7 +102,7 @@ export function useDashboardData() {
                     try {
                         // Use cached-stats endpoint (DB-only) — no provider dependency
                         const url = `/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`
-                        const res = await fetch(url)
+                        const res = await fetchWithTimeout(url)
                         if (res.ok) {
                             const data = await res.json()
                             const nodeCount = data.nodeCount ?? 0
@@ -129,7 +130,7 @@ export function useDashboardData() {
         const fetchTemplates = async () => {
             setIsLoadingTemplates(true)
             try {
-                const res = await fetch('/api/v1/admin/context-model-templates')
+                const res = await fetchWithTimeout('/api/v1/admin/context-model-templates')
                 if (res.ok) {
                     const data = await res.json()
                     setTemplates(data || [])
@@ -148,7 +149,7 @@ export function useDashboardData() {
         const fetchOntologies = async () => {
             setIsLoadingOntologies(true)
             try {
-                const res = await fetch('/api/v1/admin/ontologies')
+                const res = await fetchWithTimeout('/api/v1/admin/ontologies')
                 if (res.ok) {
                     const data = await res.json()
                     setOntologies(data || [])

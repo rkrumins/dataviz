@@ -1,8 +1,9 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Lock, User, AtSign, ChevronRight, AlertCircle, ShieldCheck, CheckCircle2 } from 'lucide-react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Lock, User, AtSign, ChevronRight, AlertCircle, ShieldCheck, CheckCircle2, Sparkles } from 'lucide-react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
+import { authService } from '@/services/authService'
 import { cn } from '@/lib/utils'
 
 // Lazy-load zxcvbn to keep the initial bundle small
@@ -39,6 +40,12 @@ export function SignUpPage() {
     const [passwordFeedback, setPasswordFeedback] = useState('')
     const [successMessage, setSuccessMessage] = useState('')
 
+    // Invite token handling
+    const [searchParams] = useSearchParams()
+    const inviteToken = searchParams.get('invite')
+    const [inviteRole, setInviteRole] = useState<string | null>(null)
+    const [inviteValid, setInviteValid] = useState<boolean | null>(null)
+
     const navigate = useNavigate()
     const { signup, error, clearError, isLoading, isAuthenticated } = useAuthStore()
 
@@ -48,6 +55,17 @@ export function SignUpPage() {
     }, [isAuthenticated, navigate])
 
     useEffect(() => { clearError() }, [clearError])
+
+    // Verify invite token on mount
+    useEffect(() => {
+        if (!inviteToken) return
+        authService.verifyInvite(inviteToken).then((res) => {
+            setInviteValid(res.valid)
+            setInviteRole(res.role)
+        }).catch(() => {
+            setInviteValid(false)
+        })
+    }, [inviteToken])
 
     // Debounced password strength check
     useEffect(() => {
@@ -75,7 +93,9 @@ export function SignUpPage() {
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
         if (!canSubmit) return
-        const result = await signup({ email, password, firstName, lastName })
+        const req: Parameters<typeof signup>[0] = { email, password, firstName, lastName }
+        if (inviteToken && inviteValid) req.inviteToken = inviteToken
+        const result = await signup(req)
         if (result.ok) {
             setSuccessMessage(result.message)
         }
@@ -130,9 +150,29 @@ export function SignUpPage() {
                             Nexus<span className="gradient-text">Lineage</span>
                         </h1>
                         <p className="text-sm text-ink-secondary text-center">
-                            Create your account
+                            {inviteToken && inviteValid
+                                ? "You've been invited to join"
+                                : 'Create your account'}
                         </p>
                     </div>
+
+                    {/* Invite banner */}
+                    {inviteToken && inviteValid && (
+                        <div className="flex items-center gap-2.5 p-3 mb-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+                            <Sparkles className="w-4 h-4 text-emerald-500 shrink-0" />
+                            <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                                Your account will be activated immediately as <span className="font-semibold capitalize">{inviteRole}</span>.
+                            </p>
+                        </div>
+                    )}
+                    {inviteToken && inviteValid === false && (
+                        <div className="flex items-center gap-2.5 p-3 mb-4 rounded-xl bg-red-500/10 border border-red-500/20">
+                            <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+                            <p className="text-xs text-red-600 dark:text-red-400">
+                                This invite link is invalid or has expired. You can still sign up — your account will require admin approval.
+                            </p>
+                        </div>
+                    )}
 
                     {/* Success State */}
                     <AnimatePresence mode="wait">

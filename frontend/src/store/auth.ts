@@ -16,9 +16,14 @@ interface AuthState {
     accessToken: string | null
     error: string | null
     isLoading: boolean
+    /** True when a 401 was received but the user hasn't been fully logged out.
+     *  Lets the UI show a re-auth prompt instead of a hard redirect. */
+    sessionExpired: boolean
     login: (email: string, password: string) => Promise<boolean>
     signup: (req: SignUpRequest) => Promise<{ ok: boolean; message: string }>
     logout: () => void
+    /** Mark the session as expired without clearing user data. */
+    expireSession: () => void
     clearError: () => void
 }
 
@@ -30,9 +35,10 @@ export const useAuthStore = create<AuthState>()(
             accessToken: null,
             error: null,
             isLoading: false,
+            sessionExpired: false,
 
             login: async (email, password) => {
-                set({ error: null, isLoading: true })
+                set({ error: null, isLoading: true, sessionExpired: false })
                 try {
                     const resp = await authService.login({ email, password })
                     set({
@@ -41,6 +47,7 @@ export const useAuthStore = create<AuthState>()(
                         accessToken: resp.accessToken,
                         error: null,
                         isLoading: false,
+                        sessionExpired: false,
                     })
                     return true
                 } catch (err: any) {
@@ -75,7 +82,12 @@ export const useAuthStore = create<AuthState>()(
                     accessToken: null,
                     error: null,
                     isLoading: false,
+                    sessionExpired: false,
                 })
+            },
+
+            expireSession: () => {
+                set({ sessionExpired: true })
             },
 
             clearError: () => {

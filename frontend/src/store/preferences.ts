@@ -56,6 +56,10 @@ interface PreferencesState {
   unpinView: (viewId: string) => void
   reorderPins: (viewIds: string[]) => void
 
+  // User avatar
+  avatarId: string | null
+  setAvatarId: (id: string | null) => void
+
   // Onboarding
   onboardingCompletedSteps: string[]
   onboardingDismissedAt: string | null
@@ -120,6 +124,10 @@ export const usePreferencesStore = create<PreferencesState>()(
       autoLOD: false, // Off by default - user can enable
       setAutoLOD: (autoLOD) => set({ autoLOD }),
       toggleAutoLOD: () => set((state) => ({ autoLOD: !state.autoLOD })),
+
+      // User avatar
+      avatarId: null,
+      setAvatarId: (avatarId) => set({ avatarId }),
 
       // Pinned views
       pinnedViewIds: [],

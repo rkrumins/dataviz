@@ -1,3 +1,5 @@
+import { getCircuitBreaker, type CircuitBreaker } from '@/services/circuitBreaker'
+
 import type {
     GraphDataProvider,
     GraphNode,
@@ -37,6 +39,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
     private readonly workspaceId?: string
     private readonly dataSourceId?: string
     private readonly connectionId?: string
+    private readonly circuitBreaker: CircuitBreaker
 
     /** In-flight request deduplication: identical concurrent requests share one Promise */
     private _inflight = new Map<string, Promise<unknown>>()
@@ -49,6 +52,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         this.workspaceId = options?.workspaceId
         this.dataSourceId = options?.dataSourceId
         this.connectionId = options?.connectionId
+        this.circuitBreaker = getCircuitBreaker(this.workspaceId, this.dataSourceId)
     }
 
     // ==========================================
@@ -107,8 +111,14 @@ export class RemoteGraphProvider implements GraphDataProvider {
     }
 
     private async _doFetch<T>(url: string, fetchOptions: RequestInit, method: string, cacheKey: string): Promise<T> {
+        // Circuit breaker: fail fast if provider is known-dead
+        if (!this.circuitBreaker.canRequest()) {
+            this._inflight.delete(cacheKey)
+            throw new Error('Provider unavailable (circuit open)')
+        }
+
         const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), 25_000)
+        const timer = setTimeout(() => controller.abort(), 12_000)
         try {
             const response = await fetch(url, {
                 ...fetchOptions,
@@ -121,7 +131,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
             if (!response.ok) {
                 const errorText = await response.text()
-                throw new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
+                const error = new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
+                // 5xx errors indicate provider/backend failure — feed circuit breaker
+                if (response.status >= 500) {
+                    this.circuitBreaker.recordFailure()
+                }
+                throw error
             }
 
             const data = await response.json() as T
@@ -131,10 +146,16 @@ export class RemoteGraphProvider implements GraphDataProvider {
                 this._responseCache.set(cacheKey, { data, ts: Date.now() })
             }
 
+            this.circuitBreaker.recordSuccess()
             return data
         } catch (err) {
             if (err instanceof DOMException && err.name === 'AbortError') {
+                this.circuitBreaker.recordFailure()
                 throw new Error(`Request timed out: ${method} ${url}`)
+            }
+            // Network errors (fetch itself failed) — feed circuit breaker
+            if (err instanceof TypeError) {
+                this.circuitBreaker.recordFailure()
             }
             throw err
         } finally {

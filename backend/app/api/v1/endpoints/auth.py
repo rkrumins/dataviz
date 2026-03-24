@@ -25,6 +25,7 @@ from backend.common.models.auth import (
     UserPublicResponse,
     ForgotPasswordRequest,
     ResetPasswordRequest,
+    InviteVerifyResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,41 +97,76 @@ async def signup(
     body: SignUpRequest,
     session: AsyncSession = Depends(get_db_session),
 ):
+    import jwt as pyjwt
+    from backend.app.auth.jwt import decode_invite_token
+
     # 1. Password strength
     _check_password_strength(body.password)
 
-    # 2. Check email uniqueness — return the same 201 response regardless
+    # 2. Validate invite token (if provided)
+    invite_role = None
+    invite_admin = None
+    if body.invite_token:
+        try:
+            payload = decode_invite_token(body.invite_token)
+            invite_role = payload.get("role", "user")
+            invite_admin = payload.get("created_by")
+        except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invite link is invalid or has expired.",
+            )
+
+    # 3. Check email uniqueness — return the same 201 response regardless
     # to prevent email enumeration attacks.
     existing = await user_repo.get_user_by_email(session, body.email)
     if existing is not None:
         logger.debug("Signup attempt with existing email (suppressed)")
-        return SignUpResponse(message="Account created. Awaiting administrator approval.")
+        msg = "Account created and activated." if invite_role else "Account created. Awaiting administrator approval."
+        return SignUpResponse(message=msg)
 
-    # 3. Hash password
+    # 4. Hash password
     hashed = hash_password(body.password)
 
-    # 4. Create user (status=pending)
+    # 5. Create user — auto-activate if invited, otherwise pending
+    user_status = "active" if invite_role else "pending"
     user = await user_repo.create_user(
         session,
         email=body.email,
         password_hash=hashed,
         first_name=body.first_name,
         last_name=body.last_name,
-        status="pending",
+        status=user_status,
     )
 
-    # 5. Create pending approval record
-    await user_repo.create_approval(session, user.id, status="pending")
-
-    # 6. Outbox event
-    await user_repo.create_outbox_event(
-        session,
-        event_type="user.created",
-        payload={"user_id": user.id, "email": user.email},
-    )
-
-    logger.info("User signed up: %s (pending approval)", user.id)
-    return SignUpResponse(message="Account created. Awaiting administrator approval.")
+    if invite_role:
+        # Invited: assign the role from the invite and mark as approved
+        await user_repo.assign_role(session, user.id, invite_role)
+        await user_repo.create_approval(
+            session, user.id, status="approved", approved_by=invite_admin,
+        )
+        await user_repo.create_outbox_event(
+            session,
+            event_type="user.created_via_invite",
+            payload={
+                "user_id": user.id,
+                "email": user.email,
+                "role": invite_role,
+                "invited_by": invite_admin,
+            },
+        )
+        logger.info("User signed up via invite: %s (role=%s)", user.id, invite_role)
+        return SignUpResponse(message="Account created and activated. You can now sign in.")
+    else:
+        # Standard signup: pending approval
+        await user_repo.create_approval(session, user.id, status="pending")
+        await user_repo.create_outbox_event(
+            session,
+            event_type="user.created",
+            payload={"user_id": user.id, "email": user.email},
+        )
+        logger.info("User signed up: %s (pending approval)", user.id)
+        return SignUpResponse(message="Account created. Awaiting administrator approval.")
 
 
 # ── POST /auth/login ──────────────────────────────────────────────────
@@ -244,3 +280,18 @@ async def reset_password(
 
     logger.info("Password reset completed for user %s", user.id)
     return {"message": "Password has been reset successfully. You can now sign in."}
+
+
+# ── GET /auth/verify-invite ──────────────────────────────────────────
+
+@router.get("/verify-invite", response_model=InviteVerifyResponse)
+async def verify_invite(token: str):
+    """Validate an invite token and return the assigned role."""
+    from backend.app.auth.jwt import decode_invite_token
+    import jwt as pyjwt
+
+    try:
+        payload = decode_invite_token(token)
+        return InviteVerifyResponse(valid=True, role=payload.get("role", "user"))
+    except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+        return InviteVerifyResponse(valid=False, role=None)

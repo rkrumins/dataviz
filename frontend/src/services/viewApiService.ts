@@ -7,6 +7,7 @@
  * API scope: /api/v1/views (top-level, cross-workspace)
  */
 import type { ViewConfiguration } from '@/types/schema'
+import { fetchWithTimeout } from './fetchWithTimeout'
 
 // ============================================
 // Types
@@ -81,7 +82,7 @@ export interface ViewListParams {
 // ============================================
 
 async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
         headers: { 'Content-Type': 'application/json', ...options?.headers },
         ...options,
     })

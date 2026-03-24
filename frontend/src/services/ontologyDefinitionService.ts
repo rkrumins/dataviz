@@ -3,6 +3,8 @@
  * Ontologies are standalone, versioned, reusable semantic configurations.
  */
 
+import { fetchWithTimeout } from './fetchWithTimeout'
+
 const ADMIN_API = '/api/v1/admin/ontologies'
 
 export interface OntologyCreateRequest {
@@ -109,7 +111,7 @@ export interface OntologyImportResponse {
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
         ...init,
         headers: { 'Content-Type': 'application/json', ...init?.headers },
     })

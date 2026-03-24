@@ -11,6 +11,7 @@
 import type {
     ViewLayerConfig, ScopeFilterConfig, EntityAssignmentConfig, ScopeEdgeConfig,
 } from '@/types/schema'
+import { fetchWithTimeout } from './fetchWithTimeout'
 
 // ============================================
 // Types
@@ -58,7 +59,7 @@ export interface ContextModelUpdateRequest {
 // ============================================
 
 async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
         headers: { 'Content-Type': 'application/json', ...options?.headers },
         ...options,
     })

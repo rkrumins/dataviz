@@ -3,6 +3,7 @@
  * Merges the navigational landing page with system-wide Insights.
  */
 import { useState, useEffect, useCallback } from 'react'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useNavigate } from 'react-router-dom'
 import {
     CircleDot, ArrowRightLeft, Database, Layers, Server,
@@ -55,7 +56,7 @@ export function AdminOverview() {
                 for (const ds of ws.dataSources || []) {
                     try {
                         // Use cached-stats endpoint (DB-only) — no provider dependency
-                        const res = await fetch(`/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`)
+                        const res = await fetchWithTimeout(`/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`)
                         if (res.ok) {
                             const data = await res.json()
                             totalNodes += data.nodeCount ?? 0

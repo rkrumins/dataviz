@@ -116,7 +116,7 @@ class FalkorDBProvider(GraphDataProvider):
                 host=self._host,
                 port=self._port,
                 max_connections=12,
-                timeout=20,
+                timeout=10,
                 decode_responses=True,
             )
             # Separate pool for Redis data-structure ops (caching, SADD, HSET, etc.)

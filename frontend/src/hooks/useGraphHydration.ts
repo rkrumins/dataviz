@@ -40,6 +40,8 @@ export interface UseGraphHydrationResult {
     failedNodes: Set<string>
     /** Current phase of initial hydration (only meaningful when hydrate=true). */
     hydrationPhase: HydrationPhase
+    /** Error message if hydration failed (e.g. provider unavailable). */
+    hydrationError: string | null
 }
 
 interface UseGraphHydrationOptions {
@@ -135,6 +137,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
     const [failedNodes, setFailedNodes] = useState<Set<string>>(new Set())
     const [hydrationPhase, setHydrationPhase] = useState<HydrationPhase>('idle')
+    const [hydrationError, setHydrationError] = useState<string | null>(null)
 
     // Prevent infinite retries when API returns [] for roots
     const rootsAttemptedForRef = useRef<string | null>(null)
@@ -179,8 +182,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
         const { setGraph } = useCanvasStore.getState()
 
-        // Clear canvas atomically
+        // Clear canvas and error state atomically
         setGraph([], [])
+        setHydrationError(null)
 
         const controller = new AbortController()
 
@@ -397,6 +401,12 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             } catch (err) {
                 if (!controller.signal.aborted) {
                     console.error('[useGraphHydration] Hydration failed:', err)
+                    const msg = err instanceof Error ? err.message : 'Failed to load graph data'
+                    setHydrationError(
+                        msg.includes('circuit') || msg.includes('timed out') || msg.includes('503')
+                            ? 'The graph provider for this view is unavailable. The view definition is loaded but graph data cannot be displayed.'
+                            : msg
+                    )
                 }
             }
         }
@@ -612,5 +622,6 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         loadingNodes,
         failedNodes,
         hydrationPhase,
+        hydrationError,
     }
 }

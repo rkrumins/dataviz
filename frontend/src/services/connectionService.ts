@@ -6,6 +6,8 @@
  * ping/discovery and is called directly from the ConnectionsPanel UI.
  */
 
+import { fetchWithTimeout } from './fetchWithTimeout'
+
 const API = '/api/v1/connections'
 
 export interface ConnectionCredentials {
@@ -52,7 +54,7 @@ export interface ConnectionResponse {
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
         ...init,
         headers: { 'Content-Type': 'application/json', ...init?.headers },
     })

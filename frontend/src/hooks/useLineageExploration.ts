@@ -750,6 +750,7 @@ export interface UseLineageExplorationResult {
   resetPagination: () => void
   fetchTrace: (nodeId: string, provider: any) => Promise<any>
   traceStatus: 'idle' | 'loading' | 'success' | 'error'
+  traceError: string | null
 }
 
 
@@ -780,7 +781,8 @@ export function useLineageExploration(): UseLineageExplorationResult {
     loadMoreNodes,
     resetPagination,
     fetchTrace,
-    traceStatus
+    traceStatus,
+    traceError,
   } = useLineageExplorationStore()
 
   const rawNodes = useCanvasStore((s) => s.nodes)
@@ -858,7 +860,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
               }
             }
           } catch (err) {
-            console.error("Failed to lazy load nodes", err)
+            console.error("[useLineageExploration] Failed to lazy load nodes for", parentId, err)
           }
         }
       }
@@ -1098,6 +1100,7 @@ export function useLineageExploration(): UseLineageExplorationResult {
     resetPagination,
     fetchTrace,
     traceStatus,
+    traceError,
   }
 }
 
