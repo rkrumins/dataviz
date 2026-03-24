@@ -13,8 +13,10 @@
 import { Suspense, useMemo } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Loader2 } from 'lucide-react'
+import { AlertTriangle, Loader2, RefreshCw, WifiOff } from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
+import { useGraphProviderContext } from '@/providers/GraphProviderContext'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { LineageCanvas } from './LineageCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
@@ -28,12 +30,13 @@ interface CanvasRouterProps {
 
 export function CanvasRouter({ className }: CanvasRouterProps) {
   const activeView = useSchemaStore((s) => s.getActiveView())
+  const { providerVersion } = useGraphProviderContext()
   const layoutType = activeView?.layout.type ?? 'graph'
 
   // Single source of truth for initial graph data loading.
   // Only CanvasRouter passes hydrate=true — canvas components use the hook
   // without hydration (loadChildren/searchChildren only).
-  useGraphHydration({ hydrate: true })
+  const { hydrationError } = useGraphHydration({ hydrate: true })
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {
@@ -51,6 +54,10 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
   }, [layoutType])
 
   return (
+    <ErrorBoundary
+      resetKeys={[activeView?.id, providerVersion]}
+      fallback={(error, reset) => <CanvasError error={error} onRetry={reset} />}
+    >
     <ReactFlowProvider>
     <div className={cn("relative w-full h-full", className)}>
       <AnimatePresence>
@@ -67,6 +74,10 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
         </motion.div>
       </AnimatePresence>
 
+      {hydrationError && (
+        <ProviderUnavailableOverlay message={hydrationError} />
+      )}
+
       {activeView && layoutType !== 'graph' && (
         <div className="absolute top-4 left-4 z-10 pointer-events-none">
           <ViewBadge
@@ -78,6 +89,45 @@ export function CanvasRouter({ className }: CanvasRouterProps) {
       )}
     </div>
     </ReactFlowProvider>
+    </ErrorBoundary>
+  )
+}
+
+function ProviderUnavailableOverlay({ message }: { message: string }) {
+  return (
+    <div className="absolute inset-0 z-20 flex items-center justify-center bg-canvas/80 backdrop-blur-sm pointer-events-none">
+      <div className="flex flex-col items-center gap-3 max-w-sm text-center pointer-events-auto">
+        <div className="w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-950/40 flex items-center justify-center">
+          <WifiOff className="w-5 h-5 text-amber-500" />
+        </div>
+        <h3 className="text-base font-semibold text-ink">Provider Unavailable</h3>
+        <p className="text-sm text-ink-muted">{message}</p>
+        <p className="text-xs text-ink-muted/70">
+          The canvas will automatically reload when the provider recovers.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function CanvasError({ error, onRetry }: { error: Error; onRetry: () => void }) {
+  return (
+    <div className="w-full h-full flex items-center justify-center bg-canvas">
+      <div className="flex flex-col items-center gap-4 max-w-md text-center">
+        <div className="w-12 h-12 rounded-full bg-red-100 dark:bg-red-950/40 flex items-center justify-center">
+          <AlertTriangle className="w-6 h-6 text-red-500" />
+        </div>
+        <h3 className="text-lg font-semibold text-ink">This view encountered an error</h3>
+        <p className="text-sm text-ink-muted">{error.message}</p>
+        <button
+          onClick={onRetry}
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-accent-lineage text-white text-sm font-medium hover:bg-accent-lineage/90 transition-colors"
+        >
+          <RefreshCw className="w-4 h-4" />
+          Retry
+        </button>
+      </div>
+    </div>
   )
 }
 

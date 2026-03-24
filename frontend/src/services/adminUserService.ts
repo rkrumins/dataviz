@@ -23,6 +23,12 @@ export interface ResetTokenResponse {
     expiresAt: string
 }
 
+export interface InviteResponse {
+    inviteToken: string
+    role: string
+    expiresAt: string
+}
+
 export const adminUserService = {
     listUsers(status?: string): Promise<AdminUserResponse[]> {
         const params = status ? `?status=${encodeURIComponent(status)}` : ''
@@ -71,6 +77,13 @@ export const adminUserService = {
     generateResetToken(userId: string): Promise<ResetTokenResponse> {
         return authFetch<ResetTokenResponse>(`${ADMIN_USERS_API}/${userId}/generate-reset-token`, {
             method: 'POST',
+        })
+    },
+
+    createInvite(role: string = 'user', expiresInHours: number = 72): Promise<InviteResponse> {
+        return authFetch<InviteResponse>(`${ADMIN_USERS_API}/invite`, {
+            method: 'POST',
+            body: JSON.stringify({ role, expiresInHours }),
         })
     },
 }

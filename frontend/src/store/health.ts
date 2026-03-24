@@ -9,6 +9,7 @@
  * Adaptive polling: 30s when healthy, 5s when unhealthy.
  */
 import { create } from 'zustand'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 
 export type HealthStatus = 'healthy' | 'degraded' | 'unreachable' | 'recovered'
 export type HealthReason = 'none' | 'network-offline' | 'backend-down' | 'backend-degraded'
@@ -89,7 +90,7 @@ export const useHealthStore = create<HealthState>()((set, get) => ({
     }
 
     try {
-      const res = await fetch(HEALTH_URL, { cache: 'no-store' })
+      const res = await fetchWithTimeout(HEALTH_URL, { cache: 'no-store', timeoutMs: 3_000 })
 
       if (!res.ok) {
         applyFailure(get, set, 'backend-down', `Backend returned HTTP ${res.status}.`)

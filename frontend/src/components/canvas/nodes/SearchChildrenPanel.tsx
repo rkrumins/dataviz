@@ -15,6 +15,7 @@ export function SearchChildrenPanel({ parentId, parentName, onClose }: SearchChi
     const [query, setQuery] = useState('')
     const [results, setResults] = useState<GraphNode[]>([])
     const [isLoading, setIsLoading] = useState(false)
+    const [searchError, setSearchError] = useState<string | null>(null)
 
     const provider = useGraphProvider()
     const addNodes = useCanvasStore((s) => s.addNodes)
@@ -24,11 +25,13 @@ export function SearchChildrenPanel({ parentId, parentName, onClose }: SearchChi
     useEffect(() => {
         if (!query.trim()) {
             setResults([])
+            setSearchError(null)
             return
         }
 
         const timer = setTimeout(async () => {
             setIsLoading(true)
+            setSearchError(null)
             try {
                 if (provider.getContainment) {
                     const response = await provider.getContainment({
@@ -49,6 +52,11 @@ export function SearchChildrenPanel({ parentId, parentName, onClose }: SearchChi
                 }
             } catch (err) {
                 console.error('Search failed', err)
+                setSearchError(
+                    err instanceof Error && err.message.includes('circuit')
+                        ? 'Provider unavailable'
+                        : 'Search failed'
+                )
             } finally {
                 setIsLoading(false)
             }
@@ -105,7 +113,13 @@ export function SearchChildrenPanel({ parentId, parentName, onClose }: SearchChi
                 </button>
             )}
 
-            {query && !isLoading && results.length === 0 && (
+            {query && !isLoading && searchError && (
+                <div className="mt-2 text-xs text-red-500 text-center">
+                    {searchError}
+                </div>
+            )}
+
+            {query && !isLoading && !searchError && results.length === 0 && (
                 <div className="mt-2 text-xs text-ink-muted text-center italic">
                     No results found
                 </div>

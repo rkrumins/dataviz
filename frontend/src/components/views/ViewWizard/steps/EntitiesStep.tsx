@@ -9,6 +9,7 @@
  */
 
 import { useState, useMemo, useCallback, useEffect } from 'react'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Search,
@@ -27,7 +28,7 @@ import {
     ListTree
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
 import type { GraphSchemaStats } from '@/providers/GraphDataProvider'
 import type { WizardFormData, ActiveFilter } from '../ViewWizard'
@@ -51,6 +52,7 @@ interface EntitiesStepProps {
 
 export function EntitiesStep({ formData, updateFormData, dataSourceId }: EntitiesStepProps) {
     const provider = useGraphProvider()
+    const { workspaceId } = useGraphProviderContext()
     const {
         entityTypes: dsEntityTypes,
         relationshipTypes: dsRelationshipTypes,
@@ -67,12 +69,29 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
     const [showEdgeTypes, setShowEdgeTypes] = useState(false)
     const [showScopeConfig, setShowScopeConfig] = useState(false)
 
-    // Load dynamic data
+    // Load dynamic data — try DB cache first, fall back to provider
     useEffect(() => {
         async function loadDynamicData() {
             try {
                 setIsLoadingStats(true)
-                const schemaStats = await provider.getSchemaStats()
+                let schemaStats: GraphSchemaStats | null = null
+
+                // 1. Try cached stats from management DB (no provider dependency)
+                if (workspaceId && dataSourceId) {
+                    try {
+                        const res = await fetchWithTimeout(`/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-stats`)
+                        if (res.ok) {
+                            const data = await res.json()
+                            if (data.schemaStats) schemaStats = data.schemaStats as GraphSchemaStats
+                        }
+                    } catch { /* cache miss — fall through */ }
+                }
+
+                // 2. Fall back to provider
+                if (!schemaStats) {
+                    schemaStats = await provider.getSchemaStats()
+                }
+
                 setStats(schemaStats)
 
                 // Initialize scope if empty
@@ -91,7 +110,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
             }
         }
         loadDynamicData()
-    }, [provider, containmentEdgeTypes, formData.scopeEdges?.edgeTypes.length, updateFormData])
+    }, [provider, workspaceId, dataSourceId, containmentEdgeTypes, formData.scopeEdges?.edgeTypes.length, updateFormData])
 
     // Entity types with selection state and real counts
     const entityTypesWithState = useMemo(() => {

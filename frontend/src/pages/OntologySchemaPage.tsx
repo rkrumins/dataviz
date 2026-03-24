@@ -6,6 +6,7 @@
  * into features/ontology/components/.
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useBlocker } from 'react-router'
 import { Lock, PenLine, Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, Copy, ShieldCheck, Upload, X, Clock, Save, CircleDot, LayoutDashboard, Download, Trash2, RotateCcw } from 'lucide-react'
@@ -603,7 +604,7 @@ export function OntologySchemaPage() {
   async function handleExport() {
     if (!selectedOntology) return
     try {
-      const res = await fetch(`/api/v1/admin/ontologies/${selectedOntology.id}/export`)
+      const res = await fetchWithTimeout(`/api/v1/admin/ontologies/${selectedOntology.id}/export`)
       if (!res.ok) throw new Error(`Export failed: ${res.statusText}`)
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)

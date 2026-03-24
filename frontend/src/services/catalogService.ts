@@ -4,6 +4,7 @@
  */
 
 import { ProviderImpactResponse } from './providerService'
+import { fetchWithTimeout } from './fetchWithTimeout'
 
 const ADMIN_API = '/api/v1/admin/catalog'
 
@@ -44,7 +45,7 @@ export interface CatalogItemBindingResponse {
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
         ...init,
         headers: { 'Content-Type': 'application/json', ...init?.headers },
     })
@@ -59,7 +60,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 export const catalogService = {
     async list(providerId?: string): Promise<CatalogItemResponse[]> {
         const url = providerId ? `${ADMIN_API}?providerId=${providerId}` : ADMIN_API
-        const res = await fetch(url)
+        const res = await fetchWithTimeout(url)
         if (!res.ok) throw new Error('Failed to load catalog items')
         return res.json()
     },
@@ -69,7 +70,7 @@ export const catalogService = {
     },
 
     async create(req: CatalogItemCreateRequest): Promise<CatalogItemResponse> {
-        const res = await fetch(ADMIN_API, {
+        const res = await fetchWithTimeout(ADMIN_API, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(req),
@@ -97,7 +98,7 @@ export const catalogService = {
         const url = providerId
             ? `${ADMIN_API}/bindings?providerId=${providerId}`
             : `${ADMIN_API}/bindings`
-        const res = await fetch(url)
+        const res = await fetchWithTimeout(url)
         if (!res.ok) throw new Error('Failed to load catalog bindings')
         return res.json()
     },
