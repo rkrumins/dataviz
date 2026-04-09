@@ -52,8 +52,9 @@ function CoverageRing({ percent, size = 52, stroke = 5, color }: {
         stroke={color} strokeWidth={stroke} strokeLinecap="round"
         strokeDasharray={circ} strokeDashoffset={offset}
         className="transition-all duration-500" />
-      <text x={size / 2} y={size / 2} textAnchor="middle" dominantBaseline="central"
-        className="rotate-90 origin-center fill-current text-ink font-bold"
+      <text x={size / 2} y={size / 2} textAnchor="middle" dy="0.35em"
+        transform={`rotate(90, ${size / 2}, ${size / 2})`}
+        className="fill-current text-ink font-bold"
         style={{ fontSize: size * 0.28 }}>
         {percent}%
       </text>

@@ -37,6 +37,185 @@ import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspace
 import { listViews, type View } from '@/services/viewApiService'
 import { OntologyStatusBadge } from './OntologyStatusBadge'
 
+// ---------------------------------------------------------------------------
+// QuickAssignmentBar — compact bar showing current assignments as chips
+// with ability to assign to any data source across all workspaces.
+// ---------------------------------------------------------------------------
+
+function QuickAssignmentBar({
+  workspaces,
+  selectedOntologyId,
+  isAssigning,
+  onAssignToDataSource,
+  onUnassignFromDataSource,
+  onRollOutToWorkspace,
+}: {
+  workspaces: WorkspaceResponse[]
+  selectedOntologyId: string
+  isAssigning: boolean
+  onAssignToDataSource: (wsId: string, dsId: string) => void
+  onUnassignFromDataSource?: (wsId: string, dsId: string) => void
+  onRollOutToWorkspace?: (wsId: string) => void
+}) {
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [pickerSearch, setPickerSearch] = useState('')
+
+  // Find all data sources currently using this ontology
+  const assignments = useMemo(() => {
+    const result: Array<{ wsId: string; wsName: string; dsId: string; dsLabel: string }> = []
+    for (const ws of workspaces) {
+      for (const ds of ws.dataSources ?? []) {
+        if (ds.ontologyId === selectedOntologyId) {
+          result.push({ wsId: ws.id, wsName: ws.name, dsId: ds.id, dsLabel: ds.label || ds.id })
+        }
+      }
+    }
+    return result
+  }, [workspaces, selectedOntologyId])
+
+  // All data sources for the assignment picker
+  const allDataSources = useMemo(() => {
+    const q = pickerSearch.toLowerCase()
+    return workspaces.map(ws => ({
+      ...ws,
+      filteredDs: (ws.dataSources ?? []).filter(ds => {
+        if (!q) return true
+        return (ds.label || ds.id).toLowerCase().includes(q) || ws.name.toLowerCase().includes(q)
+      }),
+    })).filter(ws => ws.filteredDs.length > 0)
+  }, [workspaces, pickerSearch])
+
+  return (
+    <div className="flex items-center gap-2 px-5 py-2 border-t border-glass-border/40 bg-black/[0.01] dark:bg-white/[0.01]">
+      <span className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider flex-shrink-0">
+        Assigned to
+      </span>
+
+      {/* Assignment chips */}
+      <div className="flex items-center gap-1.5 flex-wrap flex-1 min-w-0">
+        {assignments.length === 0 && (
+          <span className="text-[11px] text-ink-muted/50 italic">No data sources</span>
+        )}
+        {assignments.map(a => (
+          <span
+            key={`${a.wsId}-${a.dsId}`}
+            className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 group"
+          >
+            <Database className="w-2.5 h-2.5 opacity-60" />
+            <span className="truncate max-w-[120px]" title={`${a.wsName} / ${a.dsLabel}`}>
+              {a.dsLabel}
+            </span>
+            {onUnassignFromDataSource && (
+              <button
+                onClick={() => onUnassignFromDataSource(a.wsId, a.dsId)}
+                disabled={isAssigning}
+                className="p-0.5 rounded-full hover:bg-red-500/20 text-emerald-500 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 disabled:opacity-30"
+                title="Unassign"
+              >
+                <X className="w-2.5 h-2.5" />
+              </button>
+            )}
+          </span>
+        ))}
+      </div>
+
+      {/* Assign button with picker */}
+      <Popover.Root open={pickerOpen} onOpenChange={setPickerOpen}>
+        <Popover.Trigger asChild>
+          <button
+            disabled={isAssigning}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/[0.08] hover:bg-indigo-500/[0.15] border border-indigo-500/20 transition-all disabled:opacity-50 flex-shrink-0"
+          >
+            {isAssigning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
+            Assign
+          </button>
+        </Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Content
+            className="w-[320px] bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in zoom-in-95"
+            sideOffset={6}
+            align="end"
+          >
+            {/* Search */}
+            <div className="p-3 border-b border-glass-border/50">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted/50" />
+                <input
+                  type="text"
+                  value={pickerSearch}
+                  onChange={e => setPickerSearch(e.target.value)}
+                  placeholder="Search data sources..."
+                  className="w-full pl-9 pr-3 py-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-all"
+                  autoFocus
+                />
+              </div>
+            </div>
+
+            {/* Workspace/DataSource tree */}
+            <div className="max-h-[300px] overflow-y-auto p-2">
+              {allDataSources.map(ws => (
+                <div key={ws.id} className="mb-1">
+                  <div className="flex items-center justify-between px-2 py-1.5">
+                    <span className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider truncate">
+                      {ws.name}
+                    </span>
+                    {onRollOutToWorkspace && (
+                      <button
+                        onClick={() => { onRollOutToWorkspace(ws.id); setPickerOpen(false) }}
+                        disabled={isAssigning}
+                        className="text-[9px] font-semibold text-indigo-500 hover:text-indigo-600 transition-colors disabled:opacity-50"
+                      >
+                        Assign all
+                      </button>
+                    )}
+                  </div>
+                  {ws.filteredDs.map(ds => {
+                    const isAssigned = ds.ontologyId === selectedOntologyId
+                    const hasOtherOntology = !!ds.ontologyId && !isAssigned
+                    return (
+                      <button
+                        key={ds.id}
+                        onClick={() => {
+                          if (!isAssigned) {
+                            onAssignToDataSource(ws.id, ds.id)
+                            setPickerOpen(false)
+                          }
+                        }}
+                        disabled={isAssigning || isAssigned}
+                        className={cn(
+                          'w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left transition-all',
+                          isAssigned
+                            ? 'bg-emerald-500/[0.06] text-emerald-700 dark:text-emerald-400'
+                            : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-secondary',
+                          (isAssigning || isAssigned) && 'cursor-default',
+                        )}
+                      >
+                        <Database className={cn('w-3.5 h-3.5 flex-shrink-0', isAssigned ? 'text-emerald-500' : 'text-ink-muted/50')} />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-medium truncate">{ds.label || ds.id}</p>
+                          {hasOtherOntology && (
+                            <p className="text-[10px] text-amber-500 mt-0.5">Currently uses another schema</p>
+                          )}
+                        </div>
+                        {isAssigned && <Check className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />}
+                      </button>
+                    )
+                  })}
+                </div>
+              ))}
+              {allDataSources.length === 0 && (
+                <p className="text-center text-xs text-ink-muted py-6">No data sources found</p>
+              )}
+            </div>
+          </Popover.Content>
+        </Popover.Portal>
+      </Popover.Root>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+
 interface ImpactedView {
   id: string
   name: string
@@ -53,6 +232,12 @@ interface OntologyContextBannerProps {
   isAssigning: boolean
   onAssign: (ontologyId: string | undefined) => void
   onSwitchEnvironment: (workspaceId: string, dataSourceId: string) => void
+  /** Assign the current ontology to any data source (ontology-centric) */
+  onAssignToDataSource?: (workspaceId: string, dataSourceId: string) => void
+  /** Unassign the current ontology from a data source */
+  onUnassignFromDataSource?: (workspaceId: string, dataSourceId: string) => void
+  /** Roll out the current ontology to all data sources in a workspace */
+  onRollOutToWorkspace?: (workspaceId: string) => void
 }
 
 export function OntologyContextBanner({
@@ -65,6 +250,9 @@ export function OntologyContextBanner({
   isAssigning,
   onAssign,
   onSwitchEnvironment,
+  onAssignToDataSource,
+  onUnassignFromDataSource,
+  onRollOutToWorkspace,
 }: OntologyContextBannerProps) {
   const [envOpen, setEnvOpen] = useState(false)
   const [envSearch, setEnvSearch] = useState('')
@@ -536,6 +724,18 @@ export function OntologyContextBanner({
           </div>
         )}
       </div>
+
+      {/* ── Quick Assignment Chips (ontology-centric) ── */}
+      {selectedOntology && onAssignToDataSource && (
+        <QuickAssignmentBar
+          workspaces={workspaces}
+          selectedOntologyId={selectedOntology.id}
+          isAssigning={isAssigning}
+          onAssignToDataSource={onAssignToDataSource}
+          onUnassignFromDataSource={onUnassignFromDataSource}
+          onRollOutToWorkspace={onRollOutToWorkspace}
+        />
+      )}
 
       {/* ── Re-assignment Confirmation Dialog ── */}
       {confirmTarget && (

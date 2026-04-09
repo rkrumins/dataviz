@@ -165,6 +165,14 @@ export function RelationshipTypeEditor({
         })}
       </div>
 
+      {/* Read-only banner for immutable ontologies */}
+      {readOnly && (
+        <div className="mx-4 mt-3 px-3 py-2 rounded-lg bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/50 dark:border-amber-800/30 text-xs text-amber-700 dark:text-amber-300 flex items-center gap-2">
+          <LucideIcons.Lock className="w-3.5 h-3.5 flex-shrink-0" />
+          <span>This schema is locked. <strong>Clone</strong> it to make edits.</span>
+        </div>
+      )}
+
       {/* Content */}
       <div className="flex-1 overflow-y-auto custom-scrollbar">
         <fieldset disabled={readOnly} className={cn(readOnly && 'opacity-75')}>

@@ -2,16 +2,21 @@
  * OntologyDetailHeader — extracted header component for the detail pane.
  *
  * Two-tier layout:
- *   Tier 1 (always visible): Name + version/status + primary action
+ *   Tier 1 (always visible): Name + version/status + primary actions
  *   Tier 2 (expandable): Description + metadata dates
  *
- * Toolbar uses an overflow menu for secondary actions to reduce clutter.
+ * Toolbar states:
+ *   - Draft, no changes: [... menu] [Publish]
+ *   - Draft, has changes: [Discard] [Review Changes] [Save All] [Publish]
+ *   - Immutable: [... menu] [Clone to Edit]
+ *
+ * No explicit "Edit" button — drafts auto-enter edit mode on interaction.
  */
 import { useState } from 'react'
 import {
   Lock, PenLine, Loader2, Save, X, ShieldCheck,
   Copy, Download, Upload, Settings, MoreHorizontal,
-  CircleDot, Trash2, ChevronDown, ChevronUp,
+  CircleDot, Trash2, ChevronDown, ChevronUp, Eye,
 } from 'lucide-react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { cn } from '@/lib/utils'
@@ -20,13 +25,12 @@ import { OntologyStatusBadge } from './OntologyStatusBadge'
 
 interface OntologyDetailHeaderProps {
   ontology: OntologyDefinitionResponse
-  isEditing: boolean
   isImmutable: boolean
   hasPendingChanges: boolean
   isSaving: boolean
-  onEnterEdit: () => void
   onDiscard: () => void
   onSave: () => void
+  onReviewChanges: () => void
   onValidate: () => void
   onPublish: () => void
   onClone: () => void
@@ -38,13 +42,12 @@ interface OntologyDetailHeaderProps {
 
 export function OntologyDetailHeader({
   ontology,
-  isEditing,
   isImmutable,
   hasPendingChanges,
   isSaving,
-  onEnterEdit,
   onDiscard,
   onSave,
+  onReviewChanges,
   onValidate,
   onPublish,
   onClone,
@@ -129,125 +132,121 @@ export function OntologyDetailHeader({
 
         {/* Action toolbar */}
         <div className="flex items-center gap-1.5 flex-shrink-0 ml-4">
-          {isEditing ? (
+          {/* Overflow menu — always visible */}
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button className="flex items-center justify-center w-9 h-9 rounded-xl border border-glass-border hover:border-glass-border-hover hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-muted hover:text-ink transition-all">
+                <MoreHorizontal className="w-4 h-4" />
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                className="min-w-[180px] bg-canvas-elevated border border-glass-border rounded-xl shadow-xl p-1.5 z-50 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2"
+                sideOffset={6}
+                align="end"
+              >
+                {!ontology.isSystem && (
+                  <DropdownMenu.Item
+                    onClick={onEditDetails}
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
+                  >
+                    <Settings className="w-3.5 h-3.5" />
+                    Edit Details
+                  </DropdownMenu.Item>
+                )}
+                <DropdownMenu.Item
+                  onClick={onValidate}
+                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  Validate
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  onClick={onClone}
+                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  Clone
+                </DropdownMenu.Item>
+                <DropdownMenu.Separator className="h-px bg-glass-border/60 my-1" />
+                <DropdownMenu.Item
+                  onClick={onExport}
+                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Export JSON
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  onClick={onImport}
+                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  Import JSON
+                </DropdownMenu.Item>
+                {!ontology.isSystem && !ontology.isPublished && (
+                  <>
+                    <DropdownMenu.Separator className="h-px bg-glass-border/60 my-1" />
+                    <DropdownMenu.Item
+                      onClick={onDelete}
+                      className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-red-500 hover:text-red-600 hover:bg-red-500/[0.06] cursor-pointer outline-none transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Delete
+                    </DropdownMenu.Item>
+                  </>
+                )}
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+
+          {/* Contextual actions based on state */}
+          {hasPendingChanges && (
             <>
               <button
                 onClick={onDiscard}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/20 hover:bg-red-100 dark:hover:bg-red-950/40 border border-red-200/60 dark:border-red-800/40 transition-all"
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/20 transition-all"
               >
-                <X className="w-4 h-4" />
+                <X className="w-3.5 h-3.5" />
                 Discard
               </button>
               <button
-                onClick={onValidate}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold border border-glass-border hover:border-emerald-300 hover:bg-emerald-500/[0.06] text-ink-secondary hover:text-emerald-600 transition-all"
+                onClick={onReviewChanges}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border border-glass-border hover:border-indigo-300 hover:bg-indigo-500/[0.06] text-ink-secondary hover:text-indigo-600 transition-all"
               >
-                <ShieldCheck className="w-4 h-4" />
-                Validate
+                <Eye className="w-3.5 h-3.5" />
+                Review
               </button>
               <button
                 onClick={onSave}
-                disabled={!hasPendingChanges || isSaving}
-                className={cn(
-                  'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-bold transition-all',
-                  hasPendingChanges
-                    ? 'bg-emerald-500 text-white hover:bg-emerald-600 shadow-md shadow-emerald-500/25 hover:shadow-lg hover:shadow-emerald-500/30'
-                    : 'bg-emerald-500/40 text-white/60 cursor-not-allowed shadow-none',
-                )}
+                disabled={isSaving}
+                className="flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-bold bg-emerald-500 text-white hover:bg-emerald-600 shadow-md shadow-emerald-500/25 hover:shadow-lg hover:shadow-emerald-500/30 transition-all disabled:opacity-60"
               >
                 {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                {isSaving ? 'Saving...' : 'Save Changes'}
+                {isSaving ? 'Saving...' : 'Save All'}
               </button>
             </>
-          ) : (
-            <>
-              {/* Overflow menu for secondary actions */}
-              <DropdownMenu.Root>
-                <DropdownMenu.Trigger asChild>
-                  <button className="flex items-center justify-center w-9 h-9 rounded-xl border border-glass-border hover:border-glass-border-hover hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-muted hover:text-ink transition-all">
-                    <MoreHorizontal className="w-4 h-4" />
-                  </button>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content
-                    className="min-w-[180px] bg-canvas-elevated border border-glass-border rounded-xl shadow-xl p-1.5 z-50 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2"
-                    sideOffset={6}
-                    align="end"
-                  >
-                    {!ontology.isSystem && (
-                      <DropdownMenu.Item
-                        onClick={onEditDetails}
-                        className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
-                      >
-                        <Settings className="w-3.5 h-3.5" />
-                        Edit Details
-                      </DropdownMenu.Item>
-                    )}
-                    <DropdownMenu.Item
-                      onClick={onValidate}
-                      className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
-                    >
-                      <ShieldCheck className="w-3.5 h-3.5" />
-                      Validate
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                      onClick={onClone}
-                      className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                      Clone
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator className="h-px bg-glass-border/60 my-1" />
-                    <DropdownMenu.Item
-                      onClick={onExport}
-                      className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Export JSON
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                      onClick={onImport}
-                      className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      Import JSON
-                    </DropdownMenu.Item>
-                    {!ontology.isSystem && !ontology.isPublished && (
-                      <>
-                        <DropdownMenu.Separator className="h-px bg-glass-border/60 my-1" />
-                        <DropdownMenu.Item
-                          onClick={onDelete}
-                          className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-red-500 hover:text-red-600 hover:bg-red-500/[0.06] cursor-pointer outline-none transition-colors"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          Delete
-                        </DropdownMenu.Item>
-                      </>
-                    )}
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
-              </DropdownMenu.Root>
+          )}
 
-              {/* Primary actions */}
-              {!isImmutable && (
-                <>
-                  <button
-                    onClick={onEnterEdit}
-                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20"
-                  >
-                    <PenLine className="w-4 h-4" />
-                    Edit
-                  </button>
-                  <button
-                    onClick={onPublish}
-                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:from-indigo-600 hover:to-purple-600 transition-all shadow-md shadow-indigo-500/25"
-                  >
-                    <Upload className="w-4 h-4" />
-                    Publish
-                  </button>
-                </>
-              )}
-            </>
+          {/* Publish — shown for drafts */}
+          {!isImmutable && (
+            <button
+              onClick={onPublish}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:from-indigo-600 hover:to-purple-600 transition-all shadow-md shadow-indigo-500/25"
+            >
+              <Upload className="w-4 h-4" />
+              Publish
+            </button>
+          )}
+
+          {/* Clone to Edit — shown for immutable ontologies */}
+          {isImmutable && !ontology.deletedAt && (
+            <button
+              onClick={onClone}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20"
+            >
+              <Copy className="w-4 h-4" />
+              Clone to Edit
+            </button>
           )}
         </div>
       </div>
