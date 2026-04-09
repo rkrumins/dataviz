@@ -88,40 +88,8 @@ export const DataHubLogo: React.FC<LogoProps> = ({ className }) => (
 );
 
 /**
- * Mock/test beaker icon in violet.
- */
-export const MockLogo: React.FC<LogoProps> = ({ className }) => (
-  <svg
-    viewBox="0 0 24 24"
-    fill="none"
-    xmlns="http://www.w3.org/2000/svg"
-    className={className}
-  >
-    {/* Beaker body */}
-    <path
-      d="M9 3H15V9L19 18C19.3 18.7 18.8 19.5 18 19.5H6C5.2 19.5 4.7 18.7 5 18L9 9V3Z"
-      stroke="#7C3AED"
-      strokeWidth="1.5"
-      strokeLinejoin="round"
-      strokeLinecap="round"
-    />
-    {/* Liquid fill */}
-    <path
-      d="M7.5 15L10 11.5L13 13.5L16.5 15H7.5Z"
-      fill="#7C3AED"
-      opacity="0.3"
-    />
-    {/* Rim */}
-    <line x1="7.5" y1="3" x2="16.5" y2="3" stroke="#7C3AED" strokeWidth="1.5" strokeLinecap="round" />
-    {/* Bubbles */}
-    <circle cx="11" cy="16" r="0.8" fill="#7C3AED" />
-    <circle cx="13.5" cy="14.5" r="0.6" fill="#7C3AED" />
-  </svg>
-);
-
-/**
  * Returns the matching provider logo component for a given provider type string.
- * Falls back to MockLogo for unknown types.
+ * Falls back to FalkorDBLogo for unknown types.
  */
 export function getProviderLogo(
   type: string
@@ -132,5 +100,5 @@ export function getProviderLogo(
   if (key.includes("falkor")) return FalkorDBLogo;
   if (key.includes("datahub")) return DataHubLogo;
 
-  return MockLogo;
+  return FalkorDBLogo;
 }

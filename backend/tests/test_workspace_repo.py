@@ -17,7 +17,7 @@ async def _seed_catalog(session, provider_id="prov_test1", catalog_id="cat_test1
     provider = ProviderORM(
         id=provider_id,
         name="Test Provider",
-        provider_type="mock",
+        provider_type="falkordb",
         host="localhost",
         port=6379,
     )

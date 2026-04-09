@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
-    LineageResult, EntityType, EdgeType, GraphSchemaStats, OntologyMetadata,
+    LineageResult, GraphSchemaStats, OntologyMetadata,
     ChildrenWithEdgesResult,
 )
 
@@ -57,7 +57,7 @@ class GraphDataProvider(ABC):
     async def get_children(
         self,
         parent_urn: str,
-        entity_types: Optional[List[EntityType]] = None,
+        entity_types: Optional[List[str]] = None,
         edge_types: Optional[List[str]] = None,
         search_query: Optional[str] = None,
         offset: int = 0,
@@ -133,7 +133,7 @@ class GraphDataProvider(ABC):
         urn: str,
         depth: int,
         include_column_lineage: bool = False,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> LineageResult:
         pass
 
@@ -143,7 +143,7 @@ class GraphDataProvider(ABC):
         urn: str,
         depth: int,
         include_column_lineage: bool = False,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> LineageResult:
         pass
 
@@ -154,7 +154,7 @@ class GraphDataProvider(ABC):
         upstream_depth: int,
         downstream_depth: int,
         include_column_lineage: bool = False,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> LineageResult:
         pass
 
@@ -213,7 +213,7 @@ class GraphDataProvider(ABC):
         self,
         urn: str,
         depth: int = 5,
-        entity_types: Optional[List[EntityType]] = None,
+        entity_types: Optional[List[str]] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> List[GraphNode]:

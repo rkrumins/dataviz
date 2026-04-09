@@ -8,17 +8,16 @@ import { cn } from '@/lib/utils'
 import { providerService, type ProviderResponse, type ProviderCreateRequest, type ProviderUpdateRequest, type ProviderImpactResponse, type SchemaDiscoveryResult } from '@/services/providerService'
 import { AdminWizard, type WizardStep } from './AdminWizard'
 import { DeleteProviderDialog } from './DeleteProviderDialog'
-import { Neo4jLogo, FalkorDBLogo, DataHubLogo, MockLogo } from './ProviderLogos'
+import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
 
 const PROVIDER_TYPES = [
     { type: 'falkordb' as const, label: 'FalkorDB', Logo: FalkorDBLogo, color: 'text-amber-500 bg-amber-500/10 border-amber-500/20', desc: 'High-performance graph database' },
     { type: 'neo4j' as const, label: 'Neo4j', Logo: Neo4jLogo, color: 'text-blue-500 bg-blue-500/10 border-blue-500/20', desc: 'The original graph database' },
     { type: 'datahub' as const, label: 'DataHub', Logo: DataHubLogo, color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20', desc: 'LinkedIn metadata platform' },
-    { type: 'mock' as const, label: 'Mock', Logo: MockLogo, color: 'text-violet-500 bg-violet-500/10 border-violet-500/20', desc: 'Testing & development' },
 ]
 
 function getProviderConfig(type: string) {
-    return PROVIDER_TYPES.find(p => p.type === type) || PROVIDER_TYPES[3]
+    return PROVIDER_TYPES.find(p => p.type === type) || PROVIDER_TYPES[0]
 }
 
 type HealthStatus = 'checking' | 'healthy' | 'unhealthy' | 'unknown'

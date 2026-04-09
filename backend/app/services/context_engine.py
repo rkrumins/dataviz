@@ -11,7 +11,6 @@ from ..models.graph import (
 import os
 
 from ..providers.base import GraphDataProvider
-from ..providers.mock_provider import MockGraphProvider
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,7 +30,7 @@ def _create_provider() -> GraphDataProvider:
             graph_name=os.getenv("FALKORDB_GRAPH_NAME", "nexus_lineage"),
             seed_file=os.getenv("FALKORDB_SEED_FILE"),
         )
-    return MockGraphProvider()
+    raise ValueError(f"Unknown GRAPH_PROVIDER: {provider_name!r}")
 
 
 # Granularity is now expressed as an entity type ID string (e.g. "dataset", "term").
@@ -46,7 +45,9 @@ class ContextEngine:
         provider: GraphDataProvider = None,
         ontology_service: Optional["OntologyServiceProtocol"] = None,
     ):
-        self.provider = provider or MockGraphProvider()
+        if provider is None:
+            raise ValueError("ContextEngine requires an explicit provider; no default available.")
+        self.provider = provider
         self._ontology_service = ontology_service  # injected; None = legacy path
         self._connection_id: Optional[str] = None
         self._workspace_id: Optional[str] = None

@@ -23,9 +23,6 @@ export type {
 
 export { resolveLayerAssignment } from './GraphDataProvider'
 
-// Provider implementations
-export { MockProvider, getMockProvider } from './MockProvider'
-
 // React integration
 export {
     GraphProvider,

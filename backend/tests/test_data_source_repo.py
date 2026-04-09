@@ -23,7 +23,7 @@ from backend.common.models.management import (
 # ── helpers ───────────────────────────────────────────────────────────
 
 async def _seed_provider(session: AsyncSession, prov_id="prov_ds1") -> str:
-    prov = ProviderORM(id=prov_id, name="DS Provider", provider_type="mock")
+    prov = ProviderORM(id=prov_id, name="DS Provider", provider_type="falkordb")
     session.add(prov)
     await session.flush()
     return prov_id

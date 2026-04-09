@@ -24,7 +24,7 @@ async def _seed_workspace(session: AsyncSession, ws_id="ws_test1") -> str:
 async def _seed_data_source(
     session: AsyncSession, ws_id: str, ds_id="ds_test1"
 ) -> str:
-    prov = ProviderORM(id="prov_cm_test", name="CM Provider", provider_type="mock")
+    prov = ProviderORM(id="prov_cm_test", name="CM Provider", provider_type="falkordb")
     session.add(prov)
     await session.flush()
     ds = WorkspaceDataSourceORM(

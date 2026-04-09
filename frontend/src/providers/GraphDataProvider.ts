@@ -31,16 +31,11 @@ export type URN = string
 export type EntityType = string
 
 /**
- * Edge types for relationships between entities
+ * Edge type identifier -- any string defined in the active ontology.
+ * Custom ontologies produce edge types that are not enumerable at compile time.
+ * Use the schema store or `useRelationshipTypes()` to get available types at runtime.
  */
-export type EdgeType =
-    | 'CONTAINS'       // Parent-child containment (table contains columns)
-    | 'BELONGS_TO'     // Inverse of CONTAINS
-    | 'TRANSFORMS'     // Data lineage (ETL, SQL transform)
-    | 'PRODUCES'       // Job produces dataset
-    | 'CONSUMES'       // Job consumes dataset
-    | 'TAGGED_WITH'    // Entity tagged with term/classification
-    | 'RELATED_TO'     // Generic relationship
+export type EdgeType = string
 
 // ============================================
 // Graph Node & Edge
@@ -443,7 +438,6 @@ export interface ContainmentResult {
  * Abstract interface for graph data providers
  * 
  * Implementations:
- * - MockProvider: Uses local demo data
  * - FalkorDBProvider: Cypher queries to FalkorDB/Neo4j
  * - DataHubProvider: GraphQL queries to DataHub
  */

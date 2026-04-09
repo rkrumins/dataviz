@@ -11,7 +11,6 @@ class ProviderType(str, Enum):
     FALKORDB = "falkordb"
     NEO4J = "neo4j"
     DATAHUB = "datahub"
-    MOCK = "mock"
 
 
 # ============================================

@@ -31,7 +31,7 @@ async def _seed_provider_workspace(
     ws_id: str = "ws_bfv",
 ):
     """Seed a provider and workspace, return (prov_id, ws_id)."""
-    session.add(ProviderORM(id=prov_id, name="BFV Provider", provider_type="mock"))
+    session.add(ProviderORM(id=prov_id, name="BFV Provider", provider_type="falkordb"))
     session.add(WorkspaceORM(id=ws_id, name="BFV Workspace"))
     await session.flush()
     return prov_id, ws_id

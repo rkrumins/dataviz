@@ -15,7 +15,7 @@ from backend.common.models.management import RuleSetCreateRequest, RuleSetRespon
 async def _create_connection(session: AsyncSession, name: str = "test-conn") -> GraphConnectionORM:
     conn = GraphConnectionORM(
         name=name,
-        provider_type="mock",
+        provider_type="falkordb",
     )
     session.add(conn)
     await session.flush()
