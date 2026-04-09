@@ -239,6 +239,21 @@ class GraphDataProvider(ABC):
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         pass
 
+    @abstractmethod
+    async def create_edge(self, edge: GraphEdge) -> bool:
+        """Persist a new edge. Returns True on success."""
+        pass
+
+    @abstractmethod
+    async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
+        """Update mutable properties of an edge. Returns updated edge or None if not found."""
+        pass
+
+    @abstractmethod
+    async def delete_edge(self, edge_id: str) -> bool:
+        """Delete an edge by its ID. Returns True on success, False if not found."""
+        pass
+
     # ==========================================
     # Optional Extension Methods
     # (concrete implementations are optional — default no-ops)

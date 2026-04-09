@@ -176,8 +176,21 @@ class ContextEngine:
                     # Push resolved containment types to the provider so subsequent
                     # queries (childCount, hierarchy) use the correct edge set.
                     # Always push — even an empty list is meaningful (= no containment).
+                    has_real_ontology = bool(
+                        resolved.resolution_sources
+                        and any(s in ("assigned", "system_default")
+                                for s in resolved.resolution_sources.values())
+                    )
                     if hasattr(self.provider, 'set_containment_edge_types'):
-                        self.provider.set_containment_edge_types(resolved.containment_edge_types)
+                        self.provider.set_containment_edge_types(
+                            resolved.containment_edge_types,
+                            from_ontology=has_real_ontology,
+                        )
+                    if hasattr(self.provider, 'set_resolved_edge_metadata'):
+                        self.provider.set_resolved_edge_metadata(
+                            resolved.edge_type_metadata,
+                            resolved.lineage_edge_types,
+                        )
                     # Ensure indices exist for all ontology-defined entity types.
                     if hasattr(self.provider, 'ensure_indices') and resolved.entity_type_definitions:
                         try:
@@ -1024,32 +1037,37 @@ class ContextEngine:
             parent_entity_type = str(parent_node.entity_type)
 
         # Ontology-driven validation
-        if resolved and resolved.entity_type_definitions:
-            result = validate_node_mutation(
-                op=MutationOp.CREATE,
-                entity_type=str(request.entity_type),
-                ontology=resolved,
-                parent_entity_type=parent_entity_type,
+        validation_warnings: List[str] = []
+        result = validate_node_mutation(
+            op=MutationOp.CREATE,
+            entity_type=str(request.entity_type),
+            ontology=resolved,
+            parent_entity_type=parent_entity_type,
+        )
+        if not result.ok:
+            return CreateNodeResult(
+                node=None,
+                containmentEdge=None,
+                success=False,
+                error="; ".join(result.errors),
             )
-            if not result.ok:
-                return CreateNodeResult(
-                    node=None,
-                    containmentEdge=None,
-                    success=False,
-                    error="; ".join(result.errors),
-                )
+        validation_warnings = result.warnings or []
 
         # Generate a canonical Synodic URN
         urn = make_urn(entity_type=str(request.entity_type), source_system="manual")
 
         if request.parent_urn and parent_entity_type:
-            
-            # Create containment edge
+
+            # Derive containment edge type from ontology (fallback to CONTAINS)
+            containment_type = "CONTAINS"
+            if resolved and resolved.containment_edge_types:
+                containment_type = resolved.containment_edge_types[0]
+
             containment_edge = GraphEdge(
                 id=f"contains-{request.parent_urn}-{urn}",
                 sourceUrn=request.parent_urn,
                 targetUrn=urn,
-                edgeType="CONTAINS",
+                edgeType=containment_type,
                 confidence=1.0,
                 properties={}
             )
@@ -1094,7 +1112,8 @@ class ContextEngine:
             node=new_node,
             containmentEdge=containment_edge,
             success=True,
-            error=None
+            error=None,
+            warnings=validation_warnings,
         )
 
     # ------------------------------------------------------------------ #
@@ -1121,17 +1140,16 @@ class ContextEngine:
         if not target_node:
             return EdgeMutationResult(success=False, error=f"Target node not found: {request.target_urn}")
 
-        # Validate against ontology
-        if resolved is not None and resolved.relationship_type_definitions:
-            val = validate_edge_mutation(
-                op=MutationOp.CREATE,
-                edge_type=request.edge_type,
-                source_entity_type=str(source_node.entity_type),
-                target_entity_type=str(target_node.entity_type),
-                ontology=resolved,
-            )
-            if not val.ok:
-                return EdgeMutationResult(success=False, error="; ".join(val.errors), warnings=val.warnings)
+        # Validate against ontology (fail-open when no ontology is active)
+        val = validate_edge_mutation(
+            op=MutationOp.CREATE,
+            edge_type=request.edge_type,
+            source_entity_type=str(source_node.entity_type),
+            target_entity_type=str(target_node.entity_type),
+            ontology=resolved,
+        )
+        if not val.ok:
+            return EdgeMutationResult(success=False, error="; ".join(val.errors), warnings=val.warnings)
 
         edge_id = request.idempotency_key or f"edge-{_uuid.uuid4().hex[:12]}"
         edge = GraphEdge(
@@ -1145,12 +1163,12 @@ class ContextEngine:
 
         try:
             await self.provider.create_edge(edge)
-        except NotImplementedError:
+        except (NotImplementedError, AttributeError):
             logger.warning("Provider does not support edge creation — returning optimistic result")
         except Exception as exc:
             return EdgeMutationResult(success=False, error=str(exc))
 
-        return EdgeMutationResult(edge=edge, success=True)
+        return EdgeMutationResult(edge=edge, success=True, warnings=val.warnings or [])
 
     async def update_edge(self, edge_id: str, request) -> Any:
         """Update mutable edge properties."""
@@ -1161,7 +1179,7 @@ class ContextEngine:
             if edge is None:
                 return EdgeMutationResult(success=False, error=f"Edge '{edge_id}' not found")
             return EdgeMutationResult(edge=edge, success=True)
-        except NotImplementedError:
+        except (NotImplementedError, AttributeError):
             return EdgeMutationResult(success=False, error="Provider does not support edge updates")
         except Exception as exc:
             return EdgeMutationResult(success=False, error=str(exc))
@@ -1170,7 +1188,7 @@ class ContextEngine:
         """Delete an edge by ID. Returns True on success."""
         try:
             return await self.provider.delete_edge(edge_id)
-        except NotImplementedError:
+        except (NotImplementedError, AttributeError):
             logger.warning("Provider does not support edge deletion")
             return False
 

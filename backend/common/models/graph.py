@@ -350,6 +350,7 @@ class CreateNodeResult(BaseModel):
     containment_edge: Optional[GraphEdge] = Field(None, alias="containmentEdge")
     success: bool = True
     error: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
 
     class Config:
         populate_by_name = True

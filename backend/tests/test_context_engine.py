@@ -133,6 +133,15 @@ class _StubProvider(GraphDataProvider):
     async def create_node(self, node, containment_edge=None) -> bool:
         return True
 
+    async def create_edge(self, edge) -> bool:
+        return True
+
+    async def update_edge(self, edge_id, properties=None) -> Optional[GraphEdge]:
+        return None
+
+    async def delete_edge(self, edge_id) -> bool:
+        return True
+
 
 class _StubOntologyService:
     """Stub OntologyServiceProtocol for unit tests."""

@@ -14,8 +14,9 @@ import { GitBranch, ChevronDown, ChevronUp, Eye, EyeOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
 import { useEdgeFiltersStore } from '@/hooks/useEdgeFilters'
-import { useSchemaStore, useContainmentEdgeTypes, useRelationshipTypes } from '@/store/schema'
+import { useContainmentEdgeTypes, useRelationshipTypes } from '@/store/schema'
 import { getAllEdgeTypeDefinitions, normalizeEdgeType } from '@/utils/edgeTypeUtils'
+import { generateEdgeColorFromType } from '@/lib/type-visuals'
 
 // ─── Data-shape helpers ───────────────────────────────────────────────────────
 // Projected edges (from useEdgeProjection) carry a `types: string[]` array and
@@ -106,7 +107,7 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
                 return schemaDef ?? {
                     type: typeKey,
                     label: typeKey,
-                    color: '#6b7280',
+                    color: generateEdgeColorFromType(typeKey),
                     description: `Relationship type: ${typeKey}`,
                     strokeStyle: 'solid' as const,
                     animated: false,

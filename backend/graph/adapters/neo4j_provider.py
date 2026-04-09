@@ -1556,6 +1556,36 @@ class Neo4jProvider(GraphDataProvider):
             logger.error("create_node failed: %s", e)
             return False
 
+    async def create_edge(self, edge: GraphEdge) -> bool:
+        """Create a single edge in Neo4j."""
+        ip = self._id_prop()
+        try:
+            rel_type = _sanitize_label(str(edge.edge_type))
+            await self._run_write(
+                f"MATCH (a {{{ip}: $src}}) MATCH (b {{{ip}: $tgt}}) "
+                f"MERGE (a)-[r:`{rel_type}`]->(b) "
+                f"SET r.id = $eid, r.confidence = $conf, r.properties = $props",
+                {
+                    "src": edge.source_urn,
+                    "tgt": edge.target_urn,
+                    "eid": edge.id,
+                    "conf": edge.confidence or 1.0,
+                    "props": json.dumps(edge.properties or {}),
+                },
+            )
+            return True
+        except Exception as e:
+            logger.error("create_edge failed: %s", e)
+            return False
+
+    async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
+        """Update edge properties by edge ID."""
+        raise NotImplementedError("Neo4j update_edge not yet implemented")
+
+    async def delete_edge(self, edge_id: str) -> bool:
+        """Delete an edge by its ID property."""
+        raise NotImplementedError("Neo4j delete_edge not yet implemented")
+
     # ================================================================== #
     # Projection / Materialization Lifecycle Hooks                         #
     # ================================================================== #

@@ -249,10 +249,10 @@ class TestMutationValidator:
 
     def test_invalid_parent_containment_rejected(self):
         resolved = _resolved()
-        # Column cannot contain a domain
+        # Domain can only contain "system" — "dataset" is not allowed
         result = validate_node_mutation(
-            MutationOp.CREATE, "domain", resolved,
-            parent_entity_type="column",
+            MutationOp.CREATE, "dataset", resolved,
+            parent_entity_type="domain",
         )
         assert not result.ok
 

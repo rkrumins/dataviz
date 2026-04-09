@@ -5,7 +5,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useSchemaStore } from '@/store/schema'
 import { useLineageExplorationStore } from '@/hooks/useLineageExploration'
 import { cn } from '@/lib/utils'
-import type { EntityInstance } from '@/types/schema'
+import { generateColorFromType, generateIconFallback } from '@/lib/type-visuals'
+import type { EntityInstance, EntityVisualConfig } from '@/types/schema'
 
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
@@ -71,18 +72,25 @@ export const GenericNode = memo(function GenericNode({
   const getEntityVisual = useSchemaStore((s) => s.getEntityVisual)
 
   const entityType = getEntityType(typeId)
-  const visual = getEntityVisual(typeId)
+  const schemaVisual = getEntityVisual(typeId)
 
-  if (!entityType || !visual) {
-    return <FallbackNode data={entityData} selected={!!selected} />
+  // Hash-palette fallback for types not in the schema (custom graphs)
+  const visual: EntityVisualConfig = schemaVisual ?? {
+    icon: generateIconFallback(typeId),
+    color: generateColorFromType(typeId),
+    shape: 'rounded',
+    size: 'md',
+    borderStyle: 'solid',
+    showInMinimap: true,
   }
 
   // Get fields to display in the node
   const visibleFields = useMemo(() => {
+    if (!entityType) return []
     return entityType.fields
       .filter((f) => f.showInNode)
       .sort((a, b) => a.displayOrder - b.displayOrder)
-  }, [entityType.fields])
+  }, [entityType])
 
   // Get the primary label - handle both nested and flat structures
   const entityFields = (entityData.data || entityData) as Record<string, unknown>
