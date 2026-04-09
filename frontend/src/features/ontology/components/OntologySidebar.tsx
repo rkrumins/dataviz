@@ -63,12 +63,6 @@ function getStatusKey(o: OntologyDefinitionResponse): Exclude<StatusFilter, 'all
   return 'draft'
 }
 
-function truncateDescription(desc: string | null | undefined, max = 80): string | null {
-  if (!desc) return null
-  if (desc.length <= max) return desc
-  return desc.slice(0, max).trimEnd() + '…'
-}
-
 const MIN_WIDTH = 260
 const MAX_WIDTH = 480
 const DEFAULT_WIDTH = 320
@@ -234,21 +228,60 @@ export function OntologySidebar({
     return new Set(Object.keys(active.entityTypeDefinitions ?? {}))
   }, [activeOntologyId, ontologies])
 
-  // ── Render a single ontology item ──────────────────────────────
+  // ── Group-by toggle ─────────────────────────────────────────────
+  const [groupBy, setGroupBy] = useState<'flat' | 'workspace' | 'status'>('flat')
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+
+  function toggleGroup(key: string) {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  // Build workspace→ontologies grouping
+  const workspaceGroups = useMemo(() => {
+    const groups = new Map<string, { name: string; ontologies: OntologyDefinitionResponse[] }>()
+    const assigned = new Set<string>()
+    for (const ws of workspaces) {
+      for (const ds of ws.dataSources ?? []) {
+        if (ds.ontologyId) {
+          const ont = filtered.find(o => o.id === ds.ontologyId)
+          if (ont) {
+            if (!groups.has(ws.id)) groups.set(ws.id, { name: ws.name, ontologies: [] })
+            const g = groups.get(ws.id)!
+            if (!g.ontologies.find(o => o.id === ont.id)) g.ontologies.push(ont)
+            assigned.add(ont.id)
+          }
+        }
+      }
+    }
+    const unassigned = filtered.filter(o => !assigned.has(o.id))
+    return { groups, unassigned }
+  }, [filtered, workspaces])
+
+  // Build status groups
+  const statusGroups = useMemo(() => {
+    const system = filtered.filter(o => o.isSystem)
+    const published = filtered.filter(o => o.isPublished && !o.isSystem)
+    const draft = filtered.filter(o => !o.isPublished && !o.isSystem)
+    return { system, published, draft }
+  }, [filtered])
+
+  // ── Render a single ontology item (simplified: 2 rows) ────────
   function renderItem(o: OntologyDefinitionResponse, isPinned = false) {
     const entityCount = Object.keys(o.entityTypeDefinitions ?? {}).length
     const relCount = Object.keys(o.relationshipTypeDefinitions ?? {}).length
     const isSelected = o.id === selectedOntologyId
     const isDeleted = !!o.deletedAt
     const statusKey = getStatusKey(o)
-    const config = STATUS_CONFIGS[statusKey]
-    const StatusIcon = isDeleted ? Trash2 : config.icon
     const isActive = o.id === activeOntologyId
     const dsCount = assignmentCountMap.get(o.id) ?? 0
-    const desc = truncateDescription(o.description)
     const wsNames = ontologyWorkspaceMap.get(o.id) ?? []
 
-    // Match score: entity type overlap with active ontology
+    // Match score for tooltip
     let matchPercent: number | null = null
     if (activeOntologyEntityTypes && !isActive && !isDeleted && entityCount > 0) {
       const thisTypes = new Set(Object.keys(o.entityTypeDefinitions ?? {}))
@@ -258,12 +291,21 @@ export function OntologySidebar({
       if (union > 0) matchPercent = Math.round((overlap / union) * 100)
     }
 
+    const statusDotColor = isDeleted
+      ? 'bg-red-400'
+      : statusKey === 'system'
+        ? 'bg-indigo-500'
+        : statusKey === 'published'
+          ? 'bg-emerald-500'
+          : 'bg-amber-500'
+
     return (
       <button
         key={o.id}
         onClick={() => navigate(`/schema/${o.id}`)}
+        title={matchPercent ? `${matchPercent}% entity type overlap` : undefined}
         className={cn(
-          'w-full text-left rounded-xl p-3 transition-all group relative',
+          'w-full text-left rounded-xl px-3 py-2.5 transition-all group relative',
           isDeleted && 'opacity-60',
           isPinned && 'border border-emerald-500/20 bg-gradient-to-r from-emerald-500/[0.06] to-emerald-500/[0.02] dark:from-emerald-500/[0.10] dark:to-emerald-500/[0.03]',
           !isPinned && !isDeleted && isSelected && 'bg-gradient-to-r from-indigo-500/[0.08] to-violet-500/[0.04] dark:from-indigo-500/[0.12] dark:to-violet-500/[0.06] ring-1 ring-indigo-500/20 shadow-sm',
@@ -272,138 +314,74 @@ export function OntologySidebar({
           isDeleted && !isSelected && 'hover:bg-red-500/[0.03]',
         )}
       >
-        {/* Row 1: Icon + Name + badges */}
-        <div className="flex items-center gap-2.5">
-          <div className={cn(
-            'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors',
-            isDeleted
-              ? 'bg-red-500/10 dark:bg-red-500/15'
-              : isPinned
-                ? 'bg-emerald-500/15 dark:bg-emerald-500/20'
-                : isSelected
-                  ? 'bg-indigo-500/15 dark:bg-indigo-500/20'
-                  : 'bg-black/[0.04] dark:bg-white/[0.06] group-hover:bg-black/[0.06] dark:group-hover:bg-white/[0.08]',
-          )}>
-            <StatusIcon className={cn(
-              'w-3.5 h-3.5',
-              isDeleted ? 'text-red-400' : isPinned ? 'text-emerald-500' : isSelected ? 'text-indigo-500' : config.color,
-            )} />
-          </div>
-
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className={cn(
-                'text-[13px] font-semibold truncate',
-                isDeleted && 'line-through text-ink-muted',
-                !isDeleted && (isSelected || isPinned ? 'text-ink' : 'text-ink-secondary group-hover:text-ink'),
-              )}>
-                {o.name}
-              </span>
-              {isDeleted && (
-                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-red-500/10 text-[8px] font-bold text-red-500 dark:text-red-400 flex-shrink-0 ring-1 ring-red-500/20">
-                  <Trash2 className="w-2 h-2" />
-                  DELETED
-                </span>
-              )}
-              {isActive && !isDeleted && (
-                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-[8px] font-bold text-emerald-600 dark:text-emerald-400 flex-shrink-0 ring-1 ring-emerald-500/20">
-                  <Link2 className="w-2 h-2" />
-                  ASSIGNED
-                </span>
-              )}
-              {matchPercent !== null && matchPercent > 0 && (
-                <span className={cn(
-                  'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[8px] font-bold flex-shrink-0 ring-1',
-                  matchPercent >= 75
-                    ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 ring-emerald-500/20'
-                    : matchPercent >= 40
-                      ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 ring-amber-500/20'
-                      : 'bg-black/[0.04] dark:bg-white/[0.04] text-ink-muted ring-glass-border/40',
-                )}
-                  title={`${matchPercent}% entity type overlap with active ontology`}
-                >
-                  {matchPercent}% match
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Row 2: Description */}
-        {desc && (
-          <p className={cn(
-            'text-[11px] leading-snug mt-1.5 ml-[38px]',
-            isDeleted ? 'text-ink-muted/40' : isSelected || isPinned ? 'text-ink-muted' : 'text-ink-muted/50',
-          )}>
-            {desc}
-          </p>
-        )}
-
-        {/* Row 3: Meta info */}
-        <div className="flex items-center gap-2 mt-1.5 ml-[38px] flex-wrap">
+        {/* Row 1: Status dot + Name + version + badges */}
+        <div className="flex items-center gap-2">
+          <span className={cn('w-2 h-2 rounded-full flex-shrink-0', statusDotColor)} />
           <span className={cn(
-            'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold font-mono border',
-            isDeleted
-              ? 'text-ink-muted/40 border-transparent'
-              : o.isPublished || o.isSystem
-                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/15'
-                : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/15',
+            'text-[13px] font-semibold truncate flex-1 min-w-0',
+            isDeleted && 'line-through text-ink-muted',
+            !isDeleted && (isSelected || isPinned ? 'text-ink' : 'text-ink-secondary group-hover:text-ink'),
           )}>
-            {!isDeleted && (o.isPublished || o.isSystem
-              ? <Lock className="w-2.5 h-2.5" />
-              : <PenLine className="w-2.5 h-2.5" />
-            )}
+            {o.name}
+          </span>
+          <span className={cn(
+            'text-[10px] font-mono font-bold flex-shrink-0',
+            isDeleted ? 'text-ink-muted/40' : 'text-ink-muted',
+          )}>
             v{o.version}
           </span>
-          <span className={cn(
-            'inline-flex items-center gap-0.5 text-[10px]',
-            isDeleted ? 'text-ink-muted/40' : isSelected || isPinned ? 'text-ink-muted' : 'text-ink-muted/50',
-          )}>
-            <Box className="w-2.5 h-2.5" />
-            {entityCount}
-          </span>
-          <span className={cn(
-            'inline-flex items-center gap-0.5 text-[10px]',
-            isDeleted ? 'text-ink-muted/40' : isSelected || isPinned ? 'text-ink-muted' : 'text-ink-muted/50',
-          )}>
-            <GitBranch className="w-2.5 h-2.5" />
-            {relCount}
-          </span>
-          {isDeleted && o.deletedAt && (
-            <>
-              <span className="text-ink-muted/20">·</span>
-              <span className="text-[10px] text-red-400/60">
-                {new Date(o.deletedAt).toLocaleDateString()}
-              </span>
-            </>
+          {isActive && !isDeleted && (
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-[8px] font-bold text-emerald-600 dark:text-emerald-400 flex-shrink-0 ring-1 ring-emerald-500/20">
+              <Link2 className="w-2 h-2" />
+              ACTIVE
+            </span>
           )}
-          {!isDeleted && dsCount > 0 && !isActive && (
-            <>
-              <span className="text-ink-muted/20">·</span>
-              <span className="inline-flex items-center gap-0.5 text-[10px] text-ink-muted/50">
-                <Database className="w-2.5 h-2.5" />
-                {dsCount}
-              </span>
-            </>
+          {isDeleted && (
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-red-500/10 text-[8px] font-bold text-red-500 flex-shrink-0">
+              <Trash2 className="w-2 h-2" />
+            </span>
           )}
         </div>
 
-        {/* Row 4: Workspace chips */}
-        {!isDeleted && wsNames.length > 0 && (
-          <div className="flex items-center gap-1 mt-1.5 ml-[38px] flex-wrap">
-            {wsNames.slice(0, 3).map(name => (
-              <span
-                key={name}
-                className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-black/[0.04] dark:bg-white/[0.06] text-[9px] font-medium text-ink-muted"
-              >
-                {name}
-              </span>
-            ))}
-            {wsNames.length > 3 && (
-              <span className="text-[9px] text-ink-muted/50">+{wsNames.length - 3}</span>
-            )}
-          </div>
-        )}
+        {/* Row 2: Entity/rel counts + workspace count */}
+        <div className="flex items-center justify-between mt-1 ml-4">
+          <span className={cn(
+            'text-[11px]',
+            isDeleted ? 'text-ink-muted/40' : 'text-ink-muted/60',
+          )}>
+            {entityCount} entities · {relCount} rels
+          </span>
+          {!isDeleted && dsCount > 0 && !isActive && (
+            <span className="inline-flex items-center gap-0.5 text-[10px] text-ink-muted/50">
+              <Database className="w-2.5 h-2.5" />
+              {dsCount}
+            </span>
+          )}
+          {!isDeleted && wsNames.length > 0 && groupBy !== 'workspace' && (
+            <span className="text-[10px] text-ink-muted/40 truncate max-w-[100px]" title={wsNames.join(', ')}>
+              {wsNames[0]}{wsNames.length > 1 ? ` +${wsNames.length - 1}` : ''}
+            </span>
+          )}
+        </div>
+      </button>
+    )
+  }
+
+  // ── Render a group header ─────────────────────────────────────
+  function renderGroupHeader(key: string, label: string, count: number, dotColor?: string) {
+    const isOpen = !collapsedGroups.has(key)
+    return (
+      <button
+        key={`header-${key}`}
+        onClick={() => toggleGroup(key)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-[11px] font-semibold text-ink-muted uppercase tracking-wider hover:text-ink transition-colors"
+      >
+        {dotColor && <span className={cn('w-2 h-2 rounded-full flex-shrink-0', dotColor)} />}
+        <span className="flex-1 text-left truncate">{label}</span>
+        <span className="px-1.5 py-0.5 rounded-full bg-black/[0.04] dark:bg-white/[0.06] text-[10px] font-bold">
+          {count}
+        </span>
+        {isOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
       </button>
     )
   }
@@ -674,6 +652,24 @@ export function OntologySidebar({
           })}
         </div>
 
+        {/* Group-by toggle */}
+        <div className="flex items-center gap-0.5 mt-1.5 p-0.5 rounded-lg bg-black/[0.02] dark:bg-white/[0.02]">
+          {(['flat', 'workspace', 'status'] as const).map(mode => (
+            <button
+              key={mode}
+              onClick={() => setGroupBy(mode)}
+              className={cn(
+                'flex-1 px-2 py-1 rounded-md text-[10px] font-semibold transition-all capitalize',
+                groupBy === mode
+                  ? 'bg-white dark:bg-white/10 shadow-sm text-ink'
+                  : 'text-ink-muted/60 hover:text-ink-muted',
+              )}
+            >
+              {mode === 'flat' ? 'All' : mode === 'workspace' ? 'By Workspace' : 'By Status'}
+            </button>
+          ))}
+        </div>
+
         {/* Deleted toggle */}
         {counts.deleted > 0 && (
           <button
@@ -731,44 +727,108 @@ export function OntologySidebar({
           </div>
         ) : (
           <>
-            {/* Pinned active ontology */}
-            {pinnedOntology && (
-              <div className="mb-2">
-                <div className="flex items-center gap-1.5 px-1 mb-1.5">
-                  <Link2 className="w-3 h-3 text-emerald-500" />
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
-                    Assigned
-                  </span>
+            {groupBy === 'flat' && (
+              <>
+                {/* Pinned active ontology */}
+                {pinnedOntology && (
+                  <div className="mb-2">
+                    <div className="flex items-center gap-1.5 px-1 mb-1.5">
+                      <Link2 className="w-3 h-3 text-emerald-500" />
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                        Assigned
+                      </span>
+                    </div>
+                    {renderItem(pinnedOntology, true)}
+                  </div>
+                )}
+
+                {/* Separator */}
+                {pinnedOntology && restOntologies.length > 0 && (
+                  <div className="flex items-center gap-2 px-1 py-2">
+                    <div className="flex-1 h-px bg-glass-border/60" />
+                    <span className="text-[9px] font-medium text-ink-muted/40 uppercase tracking-wider">
+                      {STATUS_TABS.find(f => f.id === statusFilter)?.label ?? 'All'}
+                    </span>
+                    <div className="flex-1 h-px bg-glass-border/60" />
+                  </div>
+                )}
+
+                {/* Deleted section header */}
+                {showDeleted && restOntologies.length > 0 && (
+                  <div className="flex items-center gap-1.5 px-1 mb-1.5">
+                    <Trash2 className="w-3 h-3 text-red-400" />
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-red-400">
+                      Deleted
+                    </span>
+                  </div>
+                )}
+
+                {/* Rest of ontologies */}
+                <div className="space-y-1">
+                  {restOntologies.map(o => renderItem(o))}
                 </div>
-                {renderItem(pinnedOntology, true)}
+              </>
+            )}
+
+            {groupBy === 'workspace' && (
+              <div className="space-y-1">
+                {Array.from(workspaceGroups.groups.entries()).map(([wsId, group]) => (
+                  <div key={wsId}>
+                    {renderGroupHeader(wsId, group.name, group.ontologies.length, 'bg-indigo-500')}
+                    {!collapsedGroups.has(wsId) && (
+                      <div className="space-y-1 ml-1 pl-2 border-l border-glass-border/40">
+                        {group.ontologies.map(o => renderItem(o, o.id === activeOntologyId))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {workspaceGroups.unassigned.length > 0 && (
+                  <div>
+                    {renderGroupHeader('__unassigned__', 'Unassigned', workspaceGroups.unassigned.length)}
+                    {!collapsedGroups.has('__unassigned__') && (
+                      <div className="space-y-1 ml-1 pl-2 border-l border-glass-border/40">
+                        {workspaceGroups.unassigned.map(o => renderItem(o))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
-            {/* Separator */}
-            {pinnedOntology && restOntologies.length > 0 && (
-              <div className="flex items-center gap-2 px-1 py-2">
-                <div className="flex-1 h-px bg-glass-border/60" />
-                <span className="text-[9px] font-medium text-ink-muted/40 uppercase tracking-wider">
-                  {STATUS_TABS.find(f => f.id === statusFilter)?.label ?? 'All'}
-                </span>
-                <div className="flex-1 h-px bg-glass-border/60" />
+            {groupBy === 'status' && (
+              <div className="space-y-1">
+                {statusGroups.system.length > 0 && (
+                  <div>
+                    {renderGroupHeader('__system__', 'System', statusGroups.system.length, 'bg-indigo-500')}
+                    {!collapsedGroups.has('__system__') && (
+                      <div className="space-y-1 ml-1 pl-2 border-l border-glass-border/40">
+                        {statusGroups.system.map(o => renderItem(o))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {statusGroups.published.length > 0 && (
+                  <div>
+                    {renderGroupHeader('__published__', 'Published', statusGroups.published.length, 'bg-emerald-500')}
+                    {!collapsedGroups.has('__published__') && (
+                      <div className="space-y-1 ml-1 pl-2 border-l border-glass-border/40">
+                        {statusGroups.published.map(o => renderItem(o))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {statusGroups.draft.length > 0 && (
+                  <div>
+                    {renderGroupHeader('__draft__', 'Drafts', statusGroups.draft.length, 'bg-amber-500')}
+                    {!collapsedGroups.has('__draft__') && (
+                      <div className="space-y-1 ml-1 pl-2 border-l border-glass-border/40">
+                        {statusGroups.draft.map(o => renderItem(o))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
-
-            {/* Deleted section header */}
-            {showDeleted && restOntologies.length > 0 && (
-              <div className="flex items-center gap-1.5 px-1 mb-1.5">
-                <Trash2 className="w-3 h-3 text-red-400" />
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-red-400">
-                  Deleted
-                </span>
-              </div>
-            )}
-
-            {/* Rest of ontologies */}
-            <div className="space-y-1">
-              {restOntologies.map(o => renderItem(o))}
-            </div>
           </>
         )}
       </div>
