@@ -20,7 +20,7 @@ from backend.common.models.management import (
 def _make_create_req(**overrides) -> ProviderCreateRequest:
     defaults = dict(
         name="test-provider",
-        provider_type=ProviderType.MOCK,
+        provider_type=ProviderType.FALKORDB,
         host="localhost",
         port=6379,
         credentials=ConnectionCredentials(username="user", password="pass"),
@@ -39,7 +39,7 @@ async def test_create_provider_returns_response(db_session):
 
     assert resp.id is not None
     assert resp.name == "test-provider"
-    assert resp.provider_type == ProviderType.MOCK
+    assert resp.provider_type == ProviderType.FALKORDB
     assert resp.host == "localhost"
     assert resp.port == 6379
     assert resp.tls_enabled is False

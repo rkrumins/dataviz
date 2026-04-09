@@ -1,7 +1,7 @@
 from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, Field
 from enum import Enum
-from .graph import EntityType, GraphNode, GraphEdge
+from .graph import GraphNode, GraphEdge
 
 
 class RuleOperator(str, Enum):

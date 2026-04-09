@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Set
 from backend.common.interfaces.provider import GraphDataProvider
 from backend.common.models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
-    LineageResult, EntityType, EdgeType, GraphSchemaStats,
+    LineageResult, GraphSchemaStats,
     PropertyFilter, TagFilter, TextFilter, FilterOperator,
     EntityTypeSummary, EdgeTypeSummary, TagSummary,
     OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy,
@@ -375,7 +375,7 @@ class Neo4jProvider(GraphDataProvider):
             if config:
                 self._containment_cache = {t.strip().upper() for t in config.split(",") if t.strip()}
             else:
-                self._containment_cache = {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value}
+                self._containment_cache = {"CONTAINS", "BELONGS_TO"}
         return self._containment_cache
 
     # ------------------------------------------------------------------ #
@@ -397,9 +397,9 @@ class Neo4jProvider(GraphDataProvider):
     async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None):
         """Create named indexes IF NOT EXISTS for common lookup properties."""
         default_labels = [
-            EntityType.DOMAIN.value, EntityType.DATA_PLATFORM.value,
-            EntityType.CONTAINER.value, EntityType.DATASET.value,
-            EntityType.SCHEMA_FIELD.value,
+            "domain", "dataPlatform",
+            "container", "dataset",
+            "schemaField",
         ]
         extra = list(entity_type_ids) if entity_type_ids else []
         seen: set = set()
@@ -672,7 +672,7 @@ class Neo4jProvider(GraphDataProvider):
     async def get_children(
         self,
         parent_urn: str,
-        entity_types: Optional[List[EntityType]] = None,
+        entity_types: Optional[List[str]] = None,
         edge_types: Optional[List[str]] = None,
         search_query: Optional[str] = None,
         offset: int = 0,
@@ -758,7 +758,7 @@ class Neo4jProvider(GraphDataProvider):
         start_urn: str,
         direction: str,
         depth: int,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> Set[str]:
         """Bounded variable-length Cypher paths excluding containment edges."""
         ip = self._id_prop()
@@ -830,7 +830,7 @@ class Neo4jProvider(GraphDataProvider):
     async def get_upstream(
         self, urn: str, depth: int,
         include_column_lineage: bool = False,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> LineageResult:
         upstream_urns = await self._traverse_lineage(urn, "upstream", depth, descendant_types)
         return await self._build_lineage_result(urn, upstream_urns, set())
@@ -838,7 +838,7 @@ class Neo4jProvider(GraphDataProvider):
     async def get_downstream(
         self, urn: str, depth: int,
         include_column_lineage: bool = False,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> LineageResult:
         downstream_urns = await self._traverse_lineage(urn, "downstream", depth, descendant_types)
         return await self._build_lineage_result(urn, set(), downstream_urns)
@@ -846,7 +846,7 @@ class Neo4jProvider(GraphDataProvider):
     async def get_full_lineage(
         self, urn: str, upstream_depth: int, downstream_depth: int,
         include_column_lineage: bool = False,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> LineageResult:
         # Run upstream and downstream traversals concurrently
         up, down = await asyncio.gather(
@@ -1200,13 +1200,13 @@ class Neo4jProvider(GraphDataProvider):
             config_metadata = os.getenv("METADATA_EDGE_TYPES", "").strip()
             metadata_types = (
                 {t.strip().upper() for t in config_metadata.split(",") if t.strip()}
-                if config_metadata else {EdgeType.TAGGED_WITH.value}
+                if config_metadata else {"TAGGED_WITH"}
             )
             lineage_types = [
                 t for t in all_types
                 if t.upper() not in containment_upper
                 and t.upper() not in metadata_types
-                and t.upper() != EdgeType.AGGREGATED.value
+                and t.upper() != "AGGREGATED"
             ]
 
         lineage_upper = {t.upper() for t in lineage_types}
@@ -1218,11 +1218,11 @@ class Neo4jProvider(GraphDataProvider):
             is_lineage = et.upper() in lineage_upper
             if is_containment:
                 category = "structural"
-                direction = "child-to-parent" if et.upper() == EdgeType.BELONGS_TO.value else "parent-to-child"
+                direction = "child-to-parent" if et.upper() == "BELONGS_TO" else "parent-to-child"
             elif is_lineage:
                 category = "flow"
                 direction = "source-to-target"
-            elif et.upper() == EdgeType.TAGGED_WITH.value:
+            elif et.upper() == "TAGGED_WITH":
                 category = "metadata"
                 direction = "bidirectional"
             else:
@@ -1377,7 +1377,7 @@ class Neo4jProvider(GraphDataProvider):
 
     async def get_descendants(
         self, urn: str, depth: int = 5,
-        entity_types: Optional[List[EntityType]] = None,
+        entity_types: Optional[List[str]] = None,
         limit: int = 100, offset: int = 0,
     ) -> List[GraphNode]:
         ip = self._id_prop()
@@ -1555,6 +1555,36 @@ class Neo4jProvider(GraphDataProvider):
         except Exception as e:
             logger.error("create_node failed: %s", e)
             return False
+
+    async def create_edge(self, edge: GraphEdge) -> bool:
+        """Create a single edge in Neo4j."""
+        ip = self._id_prop()
+        try:
+            rel_type = _sanitize_label(str(edge.edge_type))
+            await self._run_write(
+                f"MATCH (a {{{ip}: $src}}) MATCH (b {{{ip}: $tgt}}) "
+                f"MERGE (a)-[r:`{rel_type}`]->(b) "
+                f"SET r.id = $eid, r.confidence = $conf, r.properties = $props",
+                {
+                    "src": edge.source_urn,
+                    "tgt": edge.target_urn,
+                    "eid": edge.id,
+                    "conf": edge.confidence or 1.0,
+                    "props": json.dumps(edge.properties or {}),
+                },
+            )
+            return True
+        except Exception as e:
+            logger.error("create_edge failed: %s", e)
+            return False
+
+    async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
+        """Update edge properties by edge ID."""
+        raise NotImplementedError("Neo4j update_edge not yet implemented")
+
+    async def delete_edge(self, edge_id: str) -> bool:
+        """Delete an edge by its ID property."""
+        raise NotImplementedError("Neo4j delete_edge not yet implemented")
 
     # ================================================================== #
     # Projection / Materialization Lifecycle Hooks                         #

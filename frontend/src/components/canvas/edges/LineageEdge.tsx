@@ -8,10 +8,11 @@ import {
 } from '@xyflow/react'
 import { cn } from '@/lib/utils'
 import { useEdgeFiltersStore } from '@/hooks/useEdgeFilters'
+import { useEdgeVisual } from '@/hooks/useEntityVisual'
 
 interface LineageEdgeData {
   confidence?: number
-  edgeType?: 'produces' | 'consumes' | 'transforms'
+  edgeType?: string
   animated?: boolean
   label?: string
   // Trace flags for consistent highlighting
@@ -53,6 +54,9 @@ export const LineageEdge = memo(function LineageEdge({
   const highlightMode = useEdgeFiltersStore((s) => s.highlightMode)
   const isHighlighted = highlightedEdgeIds.has(id) || isTraced
 
+  // Schema-driven edge visual
+  const edgeVisual = useEdgeVisual(edgeType)
+
   // Calculate bezier path
   const [edgePath, labelX, labelY] = getBezierPath({
     sourceX,
@@ -64,26 +68,18 @@ export const LineageEdge = memo(function LineageEdge({
     curvature: 0.25,
   })
 
-  // Determine edge color based on confidence or edge type
+  // Determine edge color: schema-driven first, then confidence-based fallback
   const edgeColor = useMemo(() => {
-    // Color by type
-    const typeColors: Record<string, string> = {
-      produces: '#22c55e',
-      consumes: '#3b82f6',
-      transforms: '#f59e0b',
-      contains: '#8b5cf6',
-      lineage: '#6366f1',
+    // Use schema-driven color (includes hash-based palette fallback for unknown types)
+    if (edgeType) {
+      return edgeVisual.strokeColor
     }
 
-    if (edgeType && typeColors[edgeType]) {
-      return typeColors[edgeType]
-    }
-
-    // Fallback to confidence-based colors
+    // Fallback to confidence-based colors when no edge type is set
     if (confidence >= 0.8) return '#6366f1' // High - Indigo
     if (confidence >= 0.5) return '#f59e0b' // Medium - Amber
     return '#ef4444' // Low - Red
-  }, [confidence, edgeType])
+  }, [confidence, edgeType, edgeVisual.strokeColor])
 
   // Highlight color
   const highlightColor = '#f59e0b' // Amber for highlights
@@ -92,14 +88,12 @@ export const LineageEdge = memo(function LineageEdge({
   const gradientId = `edge-gradient-${id}`
   const highlightGradientId = `edge-highlight-gradient-${id}`
 
-  // Edge type icon mapping
-  const edgeTypeLabel: Record<string, string> = {
-    produces: '→',
-    consumes: '←',
-    transforms: '⟷',
-    contains: '⊂',
-    lineage: '→',
-  }
+  // Format edge type ID to a readable label
+  const edgeTypeLabel = edgeType
+    .toLowerCase()
+    .split('_')
+    .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ')
 
   // Calculate style based on highlight mode
   const getHighlightStyles = () => {
@@ -295,7 +289,7 @@ export const LineageEdge = memo(function LineageEdge({
             "flex items-center gap-1.5",
             isHighlighted && "ring-1 ring-amber-500/50"
           )}>
-            <span className="text-ink-muted">{edgeTypeLabel[edgeType] || '→'}</span>
+            <span className="text-ink-muted">{edgeTypeLabel}</span>
             <span className={cn(
               confidence >= 0.8 ? "text-indigo-500" :
                 confidence >= 0.5 ? "text-amber-500" : "text-red-500"

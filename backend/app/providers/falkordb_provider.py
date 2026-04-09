@@ -11,7 +11,7 @@ from typing import List, Optional, Dict, Any, Set
 
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
-    LineageResult, EntityType, EdgeType, GraphSchemaStats,
+    LineageResult, GraphSchemaStats,
     PropertyFilter, TagFilter, TextFilter, FilterOperator,
     EntityTypeSummary, EdgeTypeSummary, TagSummary,
     OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy,
@@ -181,11 +181,11 @@ class FalkorDBProvider(GraphDataProvider):
         those labels are indexed in addition to the hardcoded defaults.
         """
         default_labels = [
-            EntityType.DOMAIN.value,
-            EntityType.DATA_PLATFORM.value,
-            EntityType.CONTAINER.value,
-            EntityType.DATASET.value,
-            EntityType.SCHEMA_FIELD.value,
+            "domain",
+            "dataPlatform",
+            "container",
+            "dataset",
+            "schemaField",
         ]
         extra = list(entity_type_ids) if entity_type_ids else []
         seen: set[str] = set()
@@ -208,15 +208,38 @@ class FalkorDBProvider(GraphDataProvider):
     def name(self) -> str:
         return "FalkorDBProvider"
 
-    def set_containment_edge_types(self, types: List[str]) -> None:
+    def set_containment_edge_types(self, types: List[str], from_ontology: bool = True) -> None:
         """Called by ContextEngine after ontology resolution to inject the
         authoritative containment edge types from the resolver.
 
-        An empty list is a valid input — it means the ontology explicitly
-        defines no containment types (flat graph, no hierarchy).
+        Parameters
+        ----------
+        types : list
+            The containment edge types. Empty list means the ontology explicitly
+            defines no containment types (flat graph, no hierarchy).
+        from_ontology : bool
+            True if these came from a real ontology definition (assigned or system).
+            False if from introspection-only — an empty list should NOT suppress
+            the hardcoded fallback.
         """
-        self._resolved_containment_types: Set[str] = {t.upper() for t in types}
-        self._resolved_containment_types_set = True  # sentinel: distinguishes "set to empty" from "never set"
+        if from_ontology or types:
+            self._resolved_containment_types: Set[str] = {t.upper() for t in types}
+            self._resolved_containment_types_set = True
+        # else: introspection-only with no containment found — don't set sentinel
+
+    def set_resolved_edge_metadata(
+        self,
+        edge_type_metadata: Dict[str, Any],
+        lineage_edge_types: List[str],
+    ) -> None:
+        """Called by ContextEngine after ontology resolution to inject the
+        authoritative edge classification from the resolver.
+        When set, get_ontology_metadata() uses this instead of
+        re-deriving from env vars and hardcoded type names.
+        """
+        self._resolved_edge_metadata = {k.upper(): v for k, v in edge_type_metadata.items()}
+        self._resolved_lineage_types: Set[str] = {t.upper() for t in lineage_edge_types}
+        self._resolved_edge_metadata_set = True
 
     def _get_containment_edge_types(self) -> Set[str]:
         """Return the authoritative containment edge type set.
@@ -235,7 +258,7 @@ class FalkorDBProvider(GraphDataProvider):
             if config:
                 self._containment_cache = {t.strip().upper() for t in config.split(",") if t.strip()}
             else:
-                self._containment_cache = {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value}
+                self._containment_cache = {"CONTAINS", "BELONGS_TO"}
         return self._containment_cache
 
     def _extract_node_from_result(self, row) -> Optional[GraphNode]:
@@ -246,7 +269,7 @@ class FalkorDBProvider(GraphDataProvider):
         if hasattr(cell, "properties"):
             props = cell.properties or {}
             labels = getattr(cell, "labels", None) or []
-            entity_type = labels[0] if labels else props.get("entityType", "container")
+            entity_type = labels[0] if labels else props.get("entityType", "unknown")
             return _node_from_props(props, entity_type)
         if isinstance(cell, dict):
             return _node_from_props(cell)
@@ -511,7 +534,7 @@ class FalkorDBProvider(GraphDataProvider):
     async def get_children(
         self,
         parent_urn: str,
-        entity_types: Optional[List[EntityType]] = None,
+        entity_types: Optional[List[str]] = None,
         edge_types: Optional[List[str]] = None,
         search_query: Optional[str] = None,
         offset: int = 0,
@@ -708,7 +731,7 @@ class FalkorDBProvider(GraphDataProvider):
         start_urn: str,
         direction: str,
         depth: int,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> Set[str]:
         """Single-query lineage traversal using bounded variable-length Cypher paths.
 
@@ -760,7 +783,7 @@ class FalkorDBProvider(GraphDataProvider):
         urn: str,
         depth: int,
         include_column_lineage: bool = False,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> LineageResult:
         upstream_urns = await self._traverse_lineage(urn, "upstream", depth, descendant_types)
         all_urns = upstream_urns | {urn}
@@ -782,7 +805,7 @@ class FalkorDBProvider(GraphDataProvider):
         urn: str,
         depth: int,
         include_column_lineage: bool = False,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> LineageResult:
         downstream_urns = await self._traverse_lineage(urn, "downstream", depth, descendant_types)
         all_urns = downstream_urns | {urn}
@@ -805,7 +828,7 @@ class FalkorDBProvider(GraphDataProvider):
         upstream_depth: int,
         downstream_depth: int,
         include_column_lineage: bool = False,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> LineageResult:
         up = await self._traverse_lineage(urn, "upstream", upstream_depth, descendant_types)
         down = await self._traverse_lineage(urn, "downstream", downstream_depth, descendant_types)
@@ -1405,7 +1428,7 @@ class FalkorDBProvider(GraphDataProvider):
                     if not src_node_obj or not tgt_node_obj:
                         continue
 
-                    r_type = getattr(edge_obj_raw, "relation", None) or getattr(edge_obj_raw, "type", None) or "RELATED_TO"
+                    r_type = getattr(edge_obj_raw, "relation", None) or getattr(edge_obj_raw, "type", None) or "UNKNOWN"
                     r_props = getattr(edge_obj_raw, "properties", {})
 
                     edge = _edge_from_row(src_node_obj.urn, tgt_node_obj.urn, r_type, r_props)
@@ -1657,40 +1680,50 @@ class FalkorDBProvider(GraphDataProvider):
         type_res = await self._graph.ro_query("MATCH ()-[r]->() RETURN DISTINCT type(r)")
         all_types = [row[0] for row in (type_res.result_set or [])]
         
-        config_lineage = os.getenv("LINEAGE_EDGE_TYPES", "").strip()
-        if config_lineage:
-            lineage_types = [t.strip() for t in config_lineage.split(",") if t.strip()]
+        # Use ontology-resolved edge metadata if available, otherwise fall back to heuristics
+        resolved_meta = getattr(self, "_resolved_edge_metadata", None)
+        resolved_lineage = getattr(self, "_resolved_lineage_types", None)
+
+        if resolved_meta is not None and resolved_lineage is not None:
+            # Ontology-driven classification
+            lineage_types = [t for t in all_types if t.upper() in resolved_lineage]
         else:
-            # Infer lineage: anything not containment, not metadata, and not AGGREGATED
-            config_metadata = os.getenv("METADATA_EDGE_TYPES", "").strip()
-            metadata_types = {t.strip().upper() for t in config_metadata.split(",") if t.strip()} if config_metadata else {EdgeType.TAGGED_WITH.value}
-            
-            lineage_types = []
-            for t in all_types:
-                if t.upper() not in containment_upper and t.upper() not in metadata_types and t.upper() != EdgeType.AGGREGATED.value:
-                    lineage_types.append(t)
+            # Heuristic fallback (pre-ontology or no ontology)
+            config_lineage = os.getenv("LINEAGE_EDGE_TYPES", "").strip()
+            if config_lineage:
+                lineage_types = [t.strip() for t in config_lineage.split(",") if t.strip()]
+            else:
+                config_metadata = os.getenv("METADATA_EDGE_TYPES", "").strip()
+                metadata_types = {t.strip().upper() for t in config_metadata.split(",") if t.strip()} if config_metadata else set()
+                lineage_types = []
+                for t in all_types:
+                    if t.upper() not in containment_upper and t.upper() not in metadata_types and t.upper() != "AGGREGATED":
+                        lineage_types.append(t)
 
         lineage_upper = {t.upper() for t in lineage_types}
-        
+
         # 2. Build Edge Metadata
         edge_type_metadata: Dict[str, EdgeTypeMetadata] = {}
         for et in all_types:
-            is_containment = et.upper() in containment_upper
-            is_lineage = et.upper() in lineage_upper
-            
-            if is_containment:
+            et_upper = et.upper()
+            is_containment = et_upper in containment_upper
+            is_lineage = et_upper in lineage_upper
+
+            # Prefer resolved ontology metadata for direction/category
+            if resolved_meta and et_upper in resolved_meta:
+                meta = resolved_meta[et_upper]
+                direction = meta.get("direction", "bidirectional") if isinstance(meta, dict) else getattr(meta, "direction", "bidirectional")
+                category = meta.get("category", "association") if isinstance(meta, dict) else getattr(meta, "category", "association")
+            elif is_containment:
                 category = "structural"
-                direction = "child-to-parent" if et.upper() == EdgeType.BELONGS_TO.value else "parent-to-child"
+                direction = "parent-to-child"
             elif is_lineage:
                 category = "flow"
                 direction = "source-to-target"
-            elif et.upper() == EdgeType.TAGGED_WITH.value:
-                category = "metadata"
-                direction = "bidirectional"
             else:
                 category = "association"
                 direction = "bidirectional"
-                
+
             edge_type_metadata[et] = EdgeTypeMetadata(
                 isContainment=is_containment,
                 isLineage=is_lineage,
@@ -1798,7 +1831,7 @@ class FalkorDBProvider(GraphDataProvider):
         self,
         urn: str,
         depth: int = 5,
-        entity_types: Optional[List[EntityType]] = None,
+        entity_types: Optional[List[str]] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> List[GraphNode]:
@@ -1978,6 +2011,61 @@ class FalkorDBProvider(GraphDataProvider):
             return True
         except Exception as e:
             logger.error(f"create_node failed: {e}")
+            return False
+
+    async def create_edge(self, edge: GraphEdge) -> bool:
+        """Create a single edge in FalkorDB."""
+        await self._ensure_connected()
+        try:
+            rel_type = _sanitize_label(str(edge.edge_type))
+            await self._graph.query(
+                f"MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}}) "
+                f"MERGE (a)-[r:{rel_type}]->(b) "
+                f"SET r.id = $eid, r.confidence = $conf, r.properties = $props",
+                params={
+                    "src": edge.source_urn,
+                    "tgt": edge.target_urn,
+                    "eid": edge.id,
+                    "conf": edge.confidence or 1.0,
+                    "props": json.dumps(edge.properties or {}),
+                },
+            )
+            return True
+        except Exception as e:
+            logger.error(f"create_edge failed: {e}")
+            return False
+
+    async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
+        """Update edge properties by edge ID."""
+        await self._ensure_connected()
+        try:
+            result = await self._graph.query(
+                "MATCH (a)-[r]->(b) WHERE r.id = $eid "
+                "SET r.properties = $props "
+                "RETURN a.urn, b.urn, type(r), properties(r)",
+                params={"eid": edge_id, "props": json.dumps(properties)},
+            )
+            if not result.result_set:
+                return None
+            row = result.result_set[0]
+            return _edge_from_row(row[0], row[1], row[2], row[3] or {})
+        except Exception as e:
+            logger.error(f"update_edge failed: {e}")
+            return None
+
+    async def delete_edge(self, edge_id: str) -> bool:
+        """Delete an edge by its ID property."""
+        await self._ensure_connected()
+        try:
+            result = await self._graph.query(
+                "MATCH ()-[r]->() WHERE r.id = $eid DELETE r RETURN count(r)",
+                params={"eid": edge_id},
+            )
+            if result.result_set and result.result_set[0][0] > 0:
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"delete_edge failed: {e}")
             return False
 
     # ------------------------------------------------------------------ #

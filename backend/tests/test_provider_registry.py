@@ -11,21 +11,29 @@ from backend.common.interfaces.provider import GraphDataProvider
 
 
 # ---------------------------------------------------------------------------
+# Minimal stub for cache tests (no real connection needed)
+# ---------------------------------------------------------------------------
+
+class _StubProvider(GraphDataProvider):
+    """Lightweight stub that satisfies the GraphDataProvider interface."""
+
+    @property
+    def name(self) -> str:
+        return "stub"
+
+    async def close(self) -> None:
+        pass
+
+    # All other abstract methods are left unimplemented — these tests
+    # only exercise cache management, not provider behaviour.
+
+
+# ---------------------------------------------------------------------------
 # Tests — _create_provider_instance
 # ---------------------------------------------------------------------------
 
 
 class TestCreateProviderInstance:
-    def test_mock_provider(self):
-        reg = ProviderRegistry()
-        provider = reg._create_provider_instance(
-            provider_type="mock",
-            host=None, port=None, graph_name=None,
-            tls_enabled=False, credentials={},
-        )
-        from backend.app.providers.mock_provider import MockGraphProvider
-        assert isinstance(provider, MockGraphProvider)
-
     def test_falkordb_provider(self):
         reg = ProviderRegistry()
         provider = reg._create_provider_instance(
@@ -46,14 +54,15 @@ class TestCreateProviderInstance:
             )
 
     def test_provider_type_is_case_insensitive(self):
+        """FalkorDB should be resolved regardless of case."""
         reg = ProviderRegistry()
         provider = reg._create_provider_instance(
-            provider_type="MOCK",
-            host=None, port=None, graph_name=None,
+            provider_type="FALKORDB",
+            host="localhost", port=6379, graph_name="g",
             tls_enabled=False, credentials={},
         )
-        from backend.app.providers.mock_provider import MockGraphProvider
-        assert isinstance(provider, MockGraphProvider)
+        from backend.app.providers.falkordb_provider import FalkorDBProvider
+        assert isinstance(provider, FalkorDBProvider)
 
 
 # ---------------------------------------------------------------------------
@@ -110,11 +119,9 @@ class TestMergeExtraConfig:
 class TestCacheBehavior:
     async def test_evict_all_clears_all_caches(self):
         reg = ProviderRegistry()
-        # Manually populate caches to simulate loaded providers
-        from backend.app.providers.mock_provider import MockGraphProvider
-        mock = MockGraphProvider()
-        reg._providers[("prov1", "graph1")] = mock
-        reg._legacy_providers["conn1"] = mock
+        stub = _StubProvider()
+        reg._providers[("prov1", "graph1")] = stub
+        reg._legacy_providers["conn1"] = stub
         reg._default_ws_id = "ws_123"
 
         await reg.evict_all()
@@ -125,10 +132,9 @@ class TestCacheBehavior:
 
     async def test_evict_data_source_removes_specific_key(self):
         reg = ProviderRegistry()
-        from backend.app.providers.mock_provider import MockGraphProvider
-        mock = MockGraphProvider()
-        reg._providers[("prov1", "g1")] = mock
-        reg._providers[("prov2", "g2")] = mock
+        stub = _StubProvider()
+        reg._providers[("prov1", "g1")] = stub
+        reg._providers[("prov2", "g2")] = stub
 
         await reg.evict_data_source("prov1", "g1")
 
@@ -138,9 +144,8 @@ class TestCacheBehavior:
     def test_cache_key_is_provider_id_graph_name_tuple(self):
         """Verify the cache uses (provider_id, graph_name) as key."""
         reg = ProviderRegistry()
-        from backend.app.providers.mock_provider import MockGraphProvider
-        mock = MockGraphProvider()
+        stub = _StubProvider()
 
         key = ("provider_abc", "my_graph")
-        reg._providers[key] = mock
-        assert reg._providers[("provider_abc", "my_graph")] is mock
+        reg._providers[key] = stub
+        assert reg._providers[("provider_abc", "my_graph")] is stub

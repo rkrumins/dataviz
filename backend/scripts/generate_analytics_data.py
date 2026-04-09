@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 # Add project root for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from backend.app.models.graph import GraphNode, GraphEdge, EntityType, EdgeType
+from backend.app.models.graph import GraphNode, GraphEdge
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -82,16 +82,16 @@ class AnalyticsDataGenerator:
         self.node_count = 0
         self.edge_count = 0
 
-    def _get_urn(self, entity_type: EntityType, name: str, flow: str) -> str:
+    def _get_urn(self, entity_type: str, name: str, flow: str) -> str:
         # Technical URN with meaningful parts
         h = uuid.uuid4().hex[:6]
-        return f"urn:li:{entity_type.value}:{flow}:{name.lower().replace(' ', '_')}_{h}"
+        return f"urn:li:{entity_type}:{flow}:{name.lower().replace(' ', '_')}_{h}"
 
-    def add_node(self, 
-                 entity_type: EntityType, 
-                 name: str, 
-                 flow: str, 
-                 parent_urn: str = None, 
+    def add_node(self,
+                 entity_type: str,
+                 name: str,
+                 flow: str,
+                 parent_urn: str = None,
                  props: Dict = None) -> str:
         urn = self._get_urn(entity_type, name, flow)
         
@@ -118,15 +118,15 @@ class AnalyticsDataGenerator:
         self.node_count += 1
         
         if parent_urn:
-            self.add_edge(parent_urn, urn, EdgeType.CONTAINS, flow)
+            self.add_edge(parent_urn, urn, "CONTAINS", flow)
             if parent_urn not in self.children_by_urn:
                 self.children_by_urn[parent_urn] = []
             self.children_by_urn[parent_urn].append(urn)
-        
+
         return urn
 
-    def add_edge(self, source: str, target: str, edge_type: EdgeType, flow: str, props: Dict = None):
-        edge_id = f"{edge_type.value.lower()}-{source}-{target}-{uuid.uuid4().hex[:4]}"
+    def add_edge(self, source: str, target: str, edge_type: str, flow: str, props: Dict = None):
+        edge_id = f"{edge_type.lower()}-{source}-{target}-{uuid.uuid4().hex[:4]}"
         edge = GraphEdge(
             id=edge_id,
             sourceUrn=source,
@@ -167,13 +167,13 @@ class AnalyticsDataGenerator:
         # Multiple independent operational source systems
         for sys_cfg in SOURCE_SYSTEMS:
             if flow_node_count >= target: break
-            sys_urn = self.add_node(EntityType.SYSTEM, sys_cfg["name"], "raw", props={"source_type": sys_cfg["type"]})
+            sys_urn = self.add_node("system", sys_cfg["name"], "raw", props={"source_type": sys_cfg["type"]})
             flow_node_count += 1
             
             # Each system has its own databases
             for db_name in sys_cfg["dbs"]:
                 if flow_node_count >= target: break
-                db_urn = self.add_node(EntityType.CONTAINER, db_name, "raw", parent_urn=sys_urn)
+                db_urn = self.add_node("container", db_name, "raw", parent_urn=sys_urn)
                 flow_node_count += 1
                 
                 # Tables within each database
@@ -181,7 +181,7 @@ class AnalyticsDataGenerator:
                 for _ in range(num_tables):
                     if flow_node_count >= target: break
                     blueprint = random.choice(list(SCHEMA_TEMPLATES.keys()))
-                    tbl_urn = self.add_node(EntityType.DATASET, blueprint.upper(), "raw", parent_urn=db_urn)
+                    tbl_urn = self.add_node("dataset", blueprint.upper(), "raw", parent_urn=db_urn)
                     self.assets_by_flow["raw"]["datasets"].append(tbl_urn)
                     flow_node_count += 1
                     
@@ -189,7 +189,7 @@ class AnalyticsDataGenerator:
                     cols = SCHEMA_TEMPLATES[blueprint]
                     for col_name in cols:
                         if flow_node_count >= target: break
-                        col_urn = self.add_node(EntityType.SCHEMA_FIELD, col_name, "raw", parent_urn=tbl_urn)
+                        col_urn = self.add_node("schemaField", col_name, "raw", parent_urn=tbl_urn)
                         self.assets_by_flow["raw"]["columns"].append(col_urn)
                         flow_node_count += 1
 
@@ -199,11 +199,11 @@ class AnalyticsDataGenerator:
         flow_node_count = 0
 
         # Central Data Warehouse System (e.g., Snowflake)
-        dwh_urn = self.add_node(EntityType.SYSTEM, "Enterprise_Data_Warehouse", "curated", props={"platform": "Snowflake"})
+        dwh_urn = self.add_node("system", "Enterprise_Data_Warehouse", "curated", props={"platform": "Snowflake"})
         flow_node_count += 1
         
         # Standardized ODS / Staging area
-        ods_urn = self.add_node(EntityType.CONTAINER, "ODS_Staging_DB", "curated", parent_urn=dwh_urn)
+        ods_urn = self.add_node("container", "ODS_Staging_DB", "curated", parent_urn=dwh_urn)
         flow_node_count += 1
         
         while flow_node_count < target:
@@ -213,22 +213,22 @@ class AnalyticsDataGenerator:
             
             # Create a "cleansed" version in DWH
             dwh_tbl_name = f"stg_{raw_node.display_name}"
-            dwh_tbl_urn = self.add_node(EntityType.DATASET, dwh_tbl_name, "curated", parent_urn=ods_urn)
+            dwh_tbl_urn = self.add_node("dataset", dwh_tbl_name, "curated", parent_urn=ods_urn)
             self.assets_by_flow["curated"]["datasets"].append(dwh_tbl_urn)
             flow_node_count += 1
             
-            self.add_edge(raw_ds, dwh_tbl_urn, EdgeType.TRANSFORMS, "curated", {"logic": "SCD Type 1 Ingestion"})
+            self.add_edge(raw_ds, dwh_tbl_urn, "TRANSFORMS", "curated", {"logic": "SCD Type 1 Ingestion"})
             
             # Map columns and create schema lineage
             raw_cols = self.children_by_urn.get(raw_ds, [])
             for r_col in raw_cols:
                 if flow_node_count >= target: break
                 r_node = self.urn_to_node[r_col]
-                dwh_col_urn = self.add_node(EntityType.SCHEMA_FIELD, r_node.display_name, "curated", parent_urn=dwh_tbl_urn)
+                dwh_col_urn = self.add_node("schemaField", r_node.display_name, "curated", parent_urn=dwh_tbl_urn)
                 self.assets_by_flow["curated"]["columns"].append(dwh_col_urn)
                 flow_node_count += 1
                 
-                self.add_edge(r_col, dwh_col_urn, EdgeType.PRODUCES, "curated")
+                self.add_edge(r_col, dwh_col_urn, "PRODUCES", "curated")
 
     def _generate_aggregated(self, target: int):
         logger.info(f"Generating AGGREGATED layer (Data Products - Cross Source Joins)")
@@ -236,10 +236,10 @@ class AnalyticsDataGenerator:
         flow_node_count = 0
 
         # Semantic Layer / Data Product Engine
-        product_sys_urn = self.add_node(EntityType.SYSTEM, "Data_Product_Platform", "aggregated")
+        product_sys_urn = self.add_node("system", "Data_Product_Platform", "aggregated")
         flow_node_count += 1
         
-        prod_db_urn = self.add_node(EntityType.CONTAINER, "Analytical_Products_DB", "aggregated", parent_urn=product_sys_urn)
+        prod_db_urn = self.add_node("container", "Analytical_Products_DB", "aggregated", parent_urn=product_sys_urn)
         flow_node_count += 1
         
         DATA_PRODUCTS = [
@@ -250,7 +250,7 @@ class AnalyticsDataGenerator:
         
         while flow_node_count < target:
             dp_cfg = random.choice(DATA_PRODUCTS)
-            asset_urn = self.add_node(EntityType.DATASET, dp_cfg["name"], "aggregated", parent_urn=prod_db_urn)
+            asset_urn = self.add_node("dataset", dp_cfg["name"], "aggregated", parent_urn=prod_db_urn)
             self.assets_by_flow["aggregated"]["datasets"].append(asset_urn)
             flow_node_count += 1
             
@@ -260,13 +260,13 @@ class AnalyticsDataGenerator:
                 for c_ds_urn in self.assets_by_flow["curated"]["datasets"]:
                     if src_key in c_ds_urn.lower():
                         found_sources.append(c_ds_urn)
-                        self.add_edge(c_ds_urn, asset_urn, EdgeType.TRANSFORMS, "aggregated", {"join_type": "LEFT_OUTER"})
+                        self.add_edge(c_ds_urn, asset_urn, "TRANSFORMS", "aggregated", {"join_type": "LEFT_OUTER"})
             
             # Create metrics (columns) that combine these sources
             metrics = ["total_revenue", "avg_engagement", "risk_score", "last_event"]
             for m_name in metrics:
                 if flow_node_count >= target: break
-                m_urn = self.add_node(EntityType.SCHEMA_FIELD, m_name, "aggregated", parent_urn=asset_urn)
+                m_urn = self.add_node("schemaField", m_name, "aggregated", parent_urn=asset_urn)
                 self.assets_by_flow["aggregated"]["columns"].append(m_urn)
                 flow_node_count += 1
                 
@@ -275,7 +275,7 @@ class AnalyticsDataGenerator:
                     src_ds = random.choice(found_sources)
                     src_cols = self.children_by_urn.get(src_ds, [])
                     if src_cols:
-                        self.add_edge(random.choice(src_cols), m_urn, EdgeType.PRODUCES, "aggregated")
+                        self.add_edge(random.choice(src_cols), m_urn, "PRODUCES", "aggregated")
 
     def _generate_reporting(self, target: int):
         logger.info(f"Generating REPORTING layer (Dashboards & Metrics)")
@@ -283,35 +283,35 @@ class AnalyticsDataGenerator:
         flow_node_count = 0
 
         # BI Tool Instance
-        bi_urn = self.add_node(EntityType.SYSTEM, "Tableau_Server", "reporting")
+        bi_urn = self.add_node("system", "Tableau_Server", "reporting")
         flow_node_count += 1
         
-        folder_urn = self.add_node(EntityType.CONTAINER, "Executive_Reports", "reporting", parent_urn=bi_urn)
+        folder_urn = self.add_node("container", "Executive_Reports", "reporting", parent_urn=bi_urn)
         flow_node_count += 1
         
         DASHBOARD_NAMES = ["CEO_Overview", "Marketing_Dashboard", "Operational_Health", "Financial_KPIs"]
         
         while flow_node_count < target:
             d_name = random.choice(DASHBOARD_NAMES)
-            dash_urn = self.add_node(EntityType.DASHBOARD, d_name, "reporting", parent_urn=folder_urn)
+            dash_urn = self.add_node("dashboard", d_name, "reporting", parent_urn=folder_urn)
             self.assets_by_flow["reporting"]["dashboards"].append(dash_urn)
             flow_node_count += 1
             
             num_charts = random.randint(2, 5)
             for c_idx in range(num_charts):
                 if flow_node_count >= target: break
-                chart_urn = self.add_node(EntityType.CHART, f"Kpi_Chart_{c_idx}", "reporting", parent_urn=dash_urn)
+                chart_urn = self.add_node("chart", f"Kpi_Chart_{c_idx}", "reporting", parent_urn=dash_urn)
                 self.assets_by_flow["reporting"]["charts"].append(chart_urn)
                 flow_node_count += 1
                 
                 # Consume from a Data Product
                 dp_urn = random.choice(self.assets_by_flow["aggregated"]["datasets"])
-                self.add_edge(dp_urn, chart_urn, EdgeType.CONSUMES, "reporting")
+                self.add_edge(dp_urn, chart_urn, "CONSUMES", "reporting")
                 
                 # Column-level lineage from metric to chart
                 metrics = self.children_by_urn.get(dp_urn, [])
                 if metrics:
-                    self.add_edge(random.choice(metrics), chart_urn, EdgeType.PRODUCES, "reporting")
+                    self.add_edge(random.choice(metrics), chart_urn, "PRODUCES", "reporting")
 
     def _top_up_edges(self):
         target_edges = int(len(self.nodes) * self.edge_ratio)
@@ -322,9 +322,9 @@ class AnalyticsDataGenerator:
         logger.info(f"Topping up edges: {current_edges} -> {target_edges}")
         # Add random lineage edges between random nodes of appropriate types
         potential_lineage = [
-            (EntityType.DATASET, EntityType.DATASET, EdgeType.TRANSFORMS),
-            (EntityType.SCHEMA_FIELD, EntityType.SCHEMA_FIELD, EdgeType.PRODUCES),
-            (EntityType.DATASET, EntityType.CHART, EdgeType.CONSUMES)
+            ("dataset", "dataset", "TRANSFORMS"),
+            ("schemaField", "schemaField", "PRODUCES"),
+            ("dataset", "chart", "CONSUMES"),
         ]
         
         nodes_by_type = {}

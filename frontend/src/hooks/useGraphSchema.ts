@@ -5,14 +5,14 @@
  * - DB-first: tries the cached-schema endpoint (management DB, no provider needed)
  * - Background refresh: fires provider.getFullSchema() in parallel; if it returns
  *   newer data it silently updates the schema store
- * - Fallback: if both DB cache and provider fail, falls back to defaultWorkspaceSchema
+ * - Fallback: if both DB cache and provider fail, falls back to fallbackWorkspaceSchema
  * - Returns {isLoading, isError, error} so callers can render skeleton/error states
  */
 import { useEffect, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { useSchemaStore } from '@/store/schema'
-import { defaultWorkspaceSchema } from '@/lib/default-schema'
+import { fallbackWorkspaceSchema } from '@/lib/fallback-schema'
 import type { GraphSchema } from '@/providers/GraphDataProvider'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 
@@ -56,7 +56,7 @@ async function fetchGraphSchema(
  * useGraphSchema
  *
  * Fetches the graph schema once per session (5 min stale time) and syncs it
- * into the Zustand schema store. Falls back to defaultWorkspaceSchema on error.
+ * into the Zustand schema store. Falls back to fallbackWorkspaceSchema on error.
  *
  * Call this from CanvasLayout (canvas-bearing routes only).
  * Child components read schema from useSchemaStore() as before.
@@ -77,7 +77,7 @@ export function useGraphSchema() {
     queryFn: () => fetchGraphSchema(provider, workspaceId ?? undefined, dataSourceId ?? undefined),
     staleTime: 5 * 60 * 1000,   // 5 minutes — matches backend _ONTOLOGY_CACHE_TTL
     gcTime: 10 * 60 * 1000,     // 10 minutes garbage collection
-    retry: false,                // Don't retry — fallback to defaultWorkspaceSchema handles it
+    retry: false,                // Don't retry — fallback to fallbackWorkspaceSchema handles it
     refetchOnWindowFocus: false,
   })
 
@@ -90,8 +90,8 @@ export function useGraphSchema() {
       } else {
         // Graph returned empty schema — fall back to defaults
         const currentSchema = useSchemaStore.getState().schema
-        if (currentSchema?.id === defaultWorkspaceSchema.id) return
-        loadSchema(defaultWorkspaceSchema)
+        if (currentSchema?.id === fallbackWorkspaceSchema.id) return
+        loadSchema(fallbackWorkspaceSchema)
       }
     } else if (query.isError) {
       // No data at all — fall back to defaults so the app remains usable
@@ -101,8 +101,8 @@ export function useGraphSchema() {
         query.error,
       )
       const currentSchema = useSchemaStore.getState().schema
-      if (currentSchema?.id === defaultWorkspaceSchema.id) return
-      loadSchema(defaultWorkspaceSchema)
+      if (currentSchema?.id === fallbackWorkspaceSchema.id) return
+      loadSchema(fallbackWorkspaceSchema)
     }
   }, [query.data, query.isError, loadFromBackend, loadSchema])
 

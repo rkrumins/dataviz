@@ -75,15 +75,33 @@ def validate_node_mutation(
     errors: List[str] = []
     warnings: List[str] = []
 
+    # Fail-open: no ontology definitions → allow all, warn
+    if not ontology.entity_type_definitions:
+        return MutationResult.success(warnings=[
+            f"No ontology is active — entity type '{entity_type}' accepted without validation. "
+            "Assign an ontology to enable type checking."
+        ])
+
     # entity_type_definitions is a dict (type_id → EntityTypeDefEntry) on ResolvedOntology
     known_types = set(ontology.entity_type_definitions.keys())
+    # Case-insensitive lookup map for graceful handling of case mismatches
+    known_types_upper = {k.upper(): k for k in known_types}
 
     if op == MutationOp.CREATE:
         if entity_type not in known_types:
-            errors.append(
-                f"Entity type '{entity_type}' is not defined in the active ontology. "
-                f"Known types: {sorted(known_types)}"
-            )
+            # Try case-insensitive match before rejecting
+            canonical = known_types_upper.get(entity_type.upper())
+            if canonical:
+                warnings.append(
+                    f"Entity type '{entity_type}' matched '{canonical}' via case-insensitive lookup. "
+                    f"Consider using the canonical form '{canonical}'."
+                )
+                entity_type = canonical
+            else:
+                errors.append(
+                    f"Entity type '{entity_type}' is not defined in the active ontology. "
+                    f"Known types: {sorted(known_types)}"
+                )
         if parent_entity_type is not None and entity_type in known_types:
             if parent_entity_type not in known_types:
                 errors.append(
@@ -94,16 +112,11 @@ def validate_node_mutation(
                 parent_def = ontology.entity_type_definitions.get(parent_entity_type)
                 if parent_def is not None:
                     allowed_children = set(parent_def.hierarchy.can_contain)
-                    # Empty can_contain means the type cannot contain anything.
-                    # Non-empty means only those listed types are allowed.
-                    if entity_type not in allowed_children:
+                    # Empty can_contain = unrestricted (allows any child type)
+                    if allowed_children and entity_type not in allowed_children:
                         errors.append(
                             f"Ontology does not allow '{parent_entity_type}' to contain '{entity_type}'. "
-                            + (
-                                f"Allowed children: {sorted(allowed_children)}"
-                                if allowed_children
-                                else f"'{parent_entity_type}' cannot contain any child nodes."
-                            )
+                            f"Allowed children: {sorted(allowed_children)}"
                         )
 
     elif op == MutationOp.UPDATE:
@@ -151,6 +164,13 @@ def validate_edge_mutation(
     """
     errors: List[str] = []
     warnings: List[str] = []
+
+    # Fail-open: no ontology definitions → allow all, warn
+    if not ontology.relationship_type_definitions:
+        return MutationResult.success(warnings=[
+            f"No ontology is active — relationship type '{edge_type}' accepted without validation. "
+            "Assign an ontology to enable type checking."
+        ])
 
     # relationship_type_definitions is a dict (type_id → RelationshipTypeDefEntry)
     rel_by_id = {k.upper(): v for k, v in ontology.relationship_type_definitions.items()}

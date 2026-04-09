@@ -237,16 +237,22 @@ def resolve_ontology(
             sources[k] = "assigned"
 
     # Layer 3 — introspection: synthesize definitions for unknown types
+    # Use case-insensitive matching to avoid duplicates (e.g. "HAS" from FalkorDB
+    # vs "has" from ontology definition)
     if introspected_entity_ids:
+        existing_upper = {k.upper() for k in entity_defs}
         for eid in introspected_entity_ids:
-            if eid not in entity_defs:
+            if eid.upper() not in existing_upper:
                 entity_defs[eid] = EntityTypeDefEntry(name=_humanize(eid), plural_name=_humanize(eid) + "s")
                 sources[eid] = "introspection"
+                existing_upper.add(eid.upper())
     if introspected_rel_ids:
+        existing_upper = {k.upper() for k in rel_defs}
         for rid in introspected_rel_ids:
-            if rid not in rel_defs:
+            if rid.upper() not in existing_upper:
                 rel_defs[rid] = RelationshipTypeDefEntry(name=_humanize(rid))
                 sources[rid] = "introspection"
+                existing_upper.add(rid.upper())
 
     flat = derive_flat_lists(entity_defs, rel_defs)
 

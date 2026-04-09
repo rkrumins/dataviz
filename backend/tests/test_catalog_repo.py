@@ -19,7 +19,7 @@ from backend.common.models.management import (
 async def _create_provider(session: AsyncSession, name: str = "test-provider") -> ProviderORM:
     prov = ProviderORM(
         name=name,
-        provider_type="mock",
+        provider_type="falkordb",
     )
     session.add(prov)
     await session.flush()

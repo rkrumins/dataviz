@@ -6,47 +6,6 @@ from pydantic import BaseModel, Field, validator
 # Enums
 # ============================================
 
-class EntityType(str, Enum):
-    DATA_PLATFORM = 'dataPlatform'
-    CONTAINER = 'container'
-    DATASET = 'dataset'
-    SCHEMA_FIELD = 'schemaField'
-    DATA_JOB = 'dataJob'
-    DATA_FLOW = 'dataFlow'
-    DASHBOARD = 'dashboard'
-    CHART = 'chart'
-    GLOSSARY_TERM = 'glossaryTerm'
-    TAG = 'tag'
-    DOMAIN = 'domain'
-    SYSTEM = 'system'
-    APP = 'app'
-    REPORT = 'report'
-
-class EdgeType(str, Enum):
-    CONTAINS = 'CONTAINS'
-    BELONGS_TO = 'BELONGS_TO'
-    TRANSFORMS = 'TRANSFORMS'
-    PRODUCES = 'PRODUCES'
-    CONSUMES = 'CONSUMES'
-    TAGGED_WITH = 'TAGGED_WITH'
-    RELATED_TO = 'RELATED_TO'
-    AGGREGATED = 'AGGREGATED'
-    DEPENDS_ON = 'DEPENDS_ON'
-    DEFINED_BY = 'DEFINED_BY'
-
-class Granularity(str, Enum):
-    """
-    Deprecated: fixed 5-bucket enum replaced by ontology-native entity type ID strings.
-    Granularity is now expressed as an entity type ID (e.g. "dataset", "term") whose
-    hierarchy.level in the active ontology determines the coarseness of projection.
-    This class is retained only for backward-compat with GraphQL types and legacy callers.
-    """
-    COLUMN = 'column'
-    TABLE = 'table'
-    SCHEMA = 'schema'
-    SYSTEM = 'system'
-    DOMAIN = 'domain'
-
 class FilterOperator(str, Enum):
     EQUALS = 'equals'
     CONTAINS = 'contains'
@@ -65,7 +24,7 @@ class FilterOperator(str, Enum):
 
 class GraphNode(BaseModel):
     urn: str
-    entity_type: str = Field(alias="entityType")  # open string; use EntityType enum for well-known values
+    entity_type: str = Field(alias="entityType")  # open string; validated against the active ontology
     display_name: str = Field(alias="displayName")
     qualified_name: Optional[str] = Field(None, alias="qualifiedName")
     description: Optional[str] = None
@@ -83,7 +42,7 @@ class GraphEdge(BaseModel):
     id: str
     source_urn: str = Field(alias="sourceUrn")
     target_urn: str = Field(alias="targetUrn")
-    edge_type: str = Field(alias="edgeType")  # open string; use EdgeType enum for well-known values
+    edge_type: str = Field(alias="edgeType")  # open string; validated against the active ontology
     confidence: Optional[float] = None
     properties: Dict[str, Any] = Field(default_factory=dict)
 
@@ -391,6 +350,7 @@ class CreateNodeResult(BaseModel):
     containment_edge: Optional[GraphEdge] = Field(None, alias="containmentEdge")
     success: bool = True
     error: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
 
     class Config:
         populate_by_name = True

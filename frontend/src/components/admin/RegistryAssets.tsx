@@ -20,7 +20,7 @@ import {
     type ProviderImpactResponse,
 } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
-import { Neo4jLogo, FalkorDBLogo, DataHubLogo, MockLogo } from './ProviderLogos'
+import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
 import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 
 // ─── Provider type helpers ────────────────────────────────────────────────────
@@ -28,10 +28,9 @@ const PROVIDER_TYPES = [
     { type: 'falkordb', label: 'FalkorDB', Logo: FalkorDBLogo, color: 'text-amber-500 bg-amber-500/10 border-amber-500/20' },
     { type: 'neo4j', label: 'Neo4j', Logo: Neo4jLogo, color: 'text-blue-500 bg-blue-500/10 border-blue-500/20' },
     { type: 'datahub', label: 'DataHub', Logo: DataHubLogo, color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20' },
-    { type: 'mock', label: 'Mock', Logo: MockLogo, color: 'text-violet-500 bg-violet-500/10 border-violet-500/20' },
 ]
 function getProviderConfig(type: string) {
-    return PROVIDER_TYPES.find(p => p.type === type) || PROVIDER_TYPES[3]
+    return PROVIDER_TYPES.find(p => p.type === type) || PROVIDER_TYPES[0]
 }
 
 // Stable palette of subtle indicator colours cycling for type chips

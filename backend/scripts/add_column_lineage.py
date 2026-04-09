@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Tuple, Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from backend.app.models.graph import GraphNode, GraphEdge, EntityType, EdgeType
+from backend.app.models.graph import GraphNode, GraphEdge
 
 
 # Layer ordering for lineage direction (upstream -> downstream)

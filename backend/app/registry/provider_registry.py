@@ -360,10 +360,6 @@ class ProviderRegistry:
                 token=credentials.get("token"),
             )
 
-        elif ptype == "mock":
-            from backend.app.providers.mock_provider import MockGraphProvider
-            return MockGraphProvider()
-
         raise ValueError(f"Unknown provider_type: {ptype!r}")
 
     # ------------------------------------------------------------------ #
@@ -389,7 +385,6 @@ class ProviderRegistry:
             "falkordb": ProviderType.FALKORDB,
             "neo4j": ProviderType.NEO4J,
             "datahub": ProviderType.DATAHUB,
-            "mock": ProviderType.MOCK,
         }
         ptype = provider_map.get(connection_orm.provider_type.lower(), ProviderType.FALKORDB)
 
@@ -496,7 +491,6 @@ class ProviderRegistry:
             "falkordb": ProviderType.FALKORDB,
             "neo4j": ProviderType.NEO4J,
             "datahub": ProviderType.DATAHUB,
-            "mock": ProviderType.MOCK,
         }
         ptype = provider_map.get(provider_name, ProviderType.FALKORDB)
 

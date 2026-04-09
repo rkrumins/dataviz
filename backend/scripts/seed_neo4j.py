@@ -42,7 +42,7 @@ from typing import Dict, List, Set, Tuple
 # Add project root for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from backend.common.models.graph import GraphNode, GraphEdge, EntityType, EdgeType
+from backend.common.models.graph import GraphNode, GraphEdge
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

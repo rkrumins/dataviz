@@ -15,6 +15,7 @@ import * as LucideIcons from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
+import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { cn } from '@/lib/utils'
 
 // ============================================
@@ -85,21 +86,8 @@ export function EntityDrawer({
     return schema.entityTypes.find(t => t.id === selectedNode.data.type)
   }, [selectedNode, schema])
 
-  // Colors based on entity type
-  const colors = useMemo(() => {
-    const typeColors: Record<string, { bg: string; text: string; accent: string }> = {
-      domain: { bg: 'bg-purple-500/10', text: 'text-purple-500', accent: '#a855f7' },
-      system: { bg: 'bg-cyan-500/10', text: 'text-cyan-500', accent: '#06b6d4' },
-      app: { bg: 'bg-cyan-500/10', text: 'text-cyan-500', accent: '#06b6d4' },
-      asset: { bg: 'bg-green-500/10', text: 'text-green-500', accent: '#22c55e' },
-      dataset: { bg: 'bg-emerald-500/10', text: 'text-emerald-500', accent: '#10b981' },
-      column: { bg: 'bg-indigo-500/10', text: 'text-indigo-500', accent: '#6366f1' },
-      pipeline: { bg: 'bg-amber-500/10', text: 'text-amber-500', accent: '#f59e0b' },
-      dashboard: { bg: 'bg-pink-500/10', text: 'text-pink-500', accent: '#ec4899' },
-    }
-    const nodeType = selectedNode?.data.type as string
-    return typeColors[nodeType] ?? { bg: 'bg-gray-500/10', text: 'text-gray-500', accent: '#6b7280' }
-  }, [selectedNode])
+  // Colors based on entity type (resolved from schema with hash-based fallback)
+  const colors = useEntityColorSet((selectedNode?.data.type as string) ?? '')
 
   // Get display label based on persona mode
   const displayLabel = useMemo(() => {
@@ -228,10 +216,10 @@ export function EntityDrawer({
           {/* Type Badge & Close */}
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
-              <span className={cn(
-                "px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide",
-                colors.bg, colors.text
-              )}>
+              <span
+                className="px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide"
+                style={{ backgroundColor: colors.bg, color: colors.text }}
+              >
                 {entityType?.name || selectedNode.data.type}
               </span>
               {formData.confidence !== undefined && (
@@ -556,7 +544,7 @@ interface ViewModeContentProps {
   formData: Record<string, any>
   urn: string
   childCount: number
-  colors: { bg: string; text: string; accent: string }
+  colors: { hex: string; bg: string; text: string; accent: string }
   entityType: any
   additionalFields: string[]
   onCopyUrn: () => void
@@ -632,10 +620,8 @@ function ViewModeContent({
             {(formData.classifications as string[]).map(tag => (
               <span
                 key={tag}
-                className={cn(
-                  "px-3 py-1.5 rounded-lg text-xs font-medium",
-                  colors.bg, colors.text
-                )}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium"
+                style={{ backgroundColor: colors.bg, color: colors.text }}
               >
                 {tag}
               </span>

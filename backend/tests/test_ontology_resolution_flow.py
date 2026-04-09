@@ -104,7 +104,7 @@ async def test_sqlalchemy_repo_prefers_primary_data_source_when_unspecified():
     session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
     async with session_factory() as session:
         workspace = WorkspaceORM(id="ws1", name="Workspace")
-        provider = ProviderORM(id="prov1", name="Provider", provider_type="mock")
+        provider = ProviderORM(id="prov1", name="Provider", provider_type="falkordb")
         ont_primary = OntologyORM(id="ont_primary", name="Primary", version=1, entity_type_definitions=json.dumps({}), relationship_type_definitions=json.dumps({}))
         ont_other = OntologyORM(id="ont_other", name="Other", version=1, entity_type_definitions=json.dumps({}), relationship_type_definitions=json.dumps({}))
         session.add_all([workspace, provider, ont_primary, ont_other])

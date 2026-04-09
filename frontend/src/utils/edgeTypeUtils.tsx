@@ -11,6 +11,7 @@
 import type { LineageEdge } from '@/store/canvas'
 import type { RelationshipTypeSchema } from '@/types/schema'
 import { normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
+import { generateColorFromType } from '@/lib/type-visuals'
 
 export { normalizeEdgeType }
 import {
@@ -76,17 +77,7 @@ function formatEdgeTypeLabel(type: string): string {
  * This function is only called when the schema has no definition for the type.
  */
 function getDefaultColor(type: string): string {
-    const normalized = type.toUpperCase()
-
-    // Generate a consistent color from the type string
-    let hash = 0
-    for (let i = 0; i < normalized.length; i++) {
-        hash = normalized.charCodeAt(i) + ((hash << 5) - hash)
-    }
-
-    // Generate a color in the blue-purple range
-    const hue = Math.abs(hash % 360)
-    return `hsl(${hue}, 65%, 50%)`
+    return generateColorFromType(type.toUpperCase())
 }
 
 /**
