@@ -9,7 +9,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useBlocker } from 'react-router'
-import { Lock, PenLine, Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, Copy, ShieldCheck, Upload, X, Clock, Save, CircleDot, LayoutDashboard, Download, Trash2, RotateCcw } from 'lucide-react'
+import { Loader2, BookOpen, Box, GitBranch, BarChart3, Users, Settings, X, LayoutDashboard, Trash2, RotateCcw } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { EntityTypeEditor } from '@/components/schema/EntityTypeEditor'
 import { RelationshipTypeEditor } from '@/components/schema/RelationshipTypeEditor'
@@ -19,7 +19,7 @@ import {
 } from '@/services/ontologyDefinitionService'
 import { workspaceService } from '@/services/workspaceService'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { fetchSchemaStats } from '@/features/ontology/lib/ontology-utils'
+import { fetchSchemaStats, generateSuggestedName } from '@/features/ontology/lib/ontology-utils'
 import { cn } from '@/lib/utils'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import type { EntityTypeSummary, EdgeTypeSummary } from '@/providers/GraphDataProvider'
@@ -36,17 +36,14 @@ import {
 import type { OntologyTab, EditorPanel, RelTypeWithClassifications, Toast, ToastType } from '@/features/ontology/lib/ontology-types'
 
 import { OntologyContextBanner } from '@/features/ontology/components/OntologyContextBanner'
+import { OntologyDetailHeader } from '@/features/ontology/components/OntologyDetailHeader'
 import { OntologySidebar } from '@/features/ontology/components/OntologySidebar'
-import { OntologyStatusBadge } from '@/features/ontology/components/OntologyStatusBadge'
 import { ToastNotification } from '@/features/ontology/components/ToastNotification'
 import { CreateOntologyDialog } from '@/features/ontology/components/dialogs/CreateOntologyDialog'
 import { EditDetailsDialog } from '@/features/ontology/components/dialogs/EditDetailsDialog'
-import { EntityTypesPanel } from '@/features/ontology/components/panels/EntityTypesPanel'
-import { RelationshipsPanel } from '@/features/ontology/components/panels/RelationshipsPanel'
-import { HierarchyPanel } from '@/features/ontology/components/panels/HierarchyPanel'
+import { SchemaPanel } from '@/features/ontology/components/panels/SchemaPanel'
 import { CoveragePanel } from '@/features/ontology/components/panels/CoveragePanel'
-import { UsagePanel } from '@/features/ontology/components/panels/UsagePanel'
-import { VersionHistoryPanel } from '@/features/ontology/components/panels/VersionHistoryPanel'
+import { AdoptionPanel } from '@/features/ontology/components/panels/AdoptionPanel'
 import { SettingsPanel } from '@/features/ontology/components/panels/SettingsPanel'
 import { DeleteConfirmDialog } from '@/features/ontology/components/dialogs/DeleteConfirmDialog'
 import { UnsavedChangesDialog } from '@/features/ontology/components/dialogs/UnsavedChangesDialog'
@@ -66,14 +63,20 @@ const TAB_DEFS: Array<{
   icon: React.ComponentType<{ className?: string }>
 }> = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'entities', label: 'Entity Types', icon: Box },
-  { id: 'relationships', label: 'Relationships', icon: GitBranch },
-  { id: 'hierarchy', label: 'Hierarchy', icon: FolderTree },
+  { id: 'schema', label: 'Schema', icon: Box },
   { id: 'coverage', label: 'Coverage', icon: BarChart3 },
-  { id: 'usage', label: 'Usage', icon: Users },
-  { id: 'history', label: 'History', icon: Clock },
+  { id: 'adoption', label: 'Adoption', icon: Users },
   { id: 'settings', label: 'Settings', icon: Settings },
 ]
+
+/** Map legacy tab URLs to new tab IDs for backward compatibility */
+const LEGACY_TAB_MAP: Record<string, OntologyTab> = {
+  entities: 'schema',
+  relationships: 'schema',
+  hierarchy: 'schema',
+  usage: 'adoption',
+  history: 'adoption',
+}
 
 // ---------------------------------------------------------------------------
 // Main Page Component
@@ -83,7 +86,8 @@ export function OntologySchemaPage() {
   const navigate = useNavigate()
   const { ontologyId } = useParams<{ ontologyId: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
-  const activeTab = (searchParams.get('tab') || 'overview') as OntologyTab
+  const rawTab = searchParams.get('tab') || 'overview'
+  const activeTab = (LEGACY_TAB_MAP[rawTab] || rawTab) as OntologyTab
 
   // ── Workspace context ──────────────────────────────────────────────
   const workspaces = useWorkspacesStore(s => s.workspaces)
@@ -534,7 +538,7 @@ export function OntologySchemaPage() {
     setShowSuggestDialog(false)
     try {
       const cloned = await mutations.clone.mutateAsync(ontologyId)
-      navigate(schemaUrl(cloned.id, 'entities'))
+      navigate(schemaUrl(cloned.id, 'schema'))
       showToast('success', 'Cloned — now editing a new draft')
     } catch (err: unknown) {
       showToast('error', `Clone failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
@@ -542,17 +546,22 @@ export function OntologySchemaPage() {
   }
 
   /** User chose "Create New Draft" (skip recommendations). */
-  async function handleSuggestCreateDraft() {
+  async function handleSuggestCreateDraft(name?: string) {
     const response = suggestResponseRef.current
     if (!response) return
     setIsSuggesting(true)
     try {
+      const finalName = name || generateSuggestedName(
+        activeDataSource?.label,
+        activeWorkspace?.name,
+        Object.keys(response.suggested.entityTypeDefinitions ?? {}),
+      )
       const created = await ontologyDefinitionService.create({
         ...response.suggested,
-        name: `Suggested Semantic Layer (${new Date().toLocaleDateString()})`,
+        name: finalName,
       })
       setShowSuggestDialog(false)
-      navigate(schemaUrl(created.id, 'entities'))
+      navigate(schemaUrl(created.id, 'schema'))
       showToast('info', 'Draft created from graph — review types and publish when ready')
     } catch (err: unknown) {
       showToast('error', `Failed to create draft: ${err instanceof Error ? err.message : 'Unknown error'}`)
@@ -687,7 +696,7 @@ export function OntologySchemaPage() {
         const stats = await fetchSchemaStats(activeWorkspaceId, activeDataSourceId ?? undefined)
         const response = await ontologyDefinitionService.suggest(stats as unknown as Record<string, unknown>)
         const created = await ontologyDefinitionService.create({ ...response.suggested, name })
-        navigate(schemaUrl(created.id, 'entities'))
+        navigate(schemaUrl(created.id, 'schema'))
         showToast('success', `"${name}" created with ${Object.keys(created.entityTypeDefinitions ?? {}).length} entity types from your graph`)
       } catch (err: unknown) {
         showToast('error', `Failed to create: ${err instanceof Error ? err.message : 'Unknown error'}`)
@@ -857,168 +866,34 @@ export function OntologySchemaPage() {
                 </div>
               )}
 
-              {/* Detail header — clean AdminRegistry style */}
-              <div className="flex-shrink-0 px-8 pt-6 pb-0">
-                {/* Top row: name + status + toolbar */}
-                <div className="flex items-start justify-between mb-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-3">
-                      <h1 className="text-2xl font-bold tracking-tight text-ink truncate">{selectedOntology.name}</h1>
-                      <span className={cn(
-                        'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold font-mono flex-shrink-0 border',
-                        selectedOntology.isPublished || selectedOntology.isSystem
-                          ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/40'
-                          : 'bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border-amber-200/50 dark:border-amber-800/40',
-                      )}>
-                        {selectedOntology.isPublished || selectedOntology.isSystem
-                          ? <Lock className="w-3 h-3" />
-                          : <PenLine className="w-3 h-3" />}
-                        v{selectedOntology.version}
-                      </span>
-                      <OntologyStatusBadge ontology={selectedOntology} />
-                      {hasPendingChanges && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/10 text-[10px] font-bold text-amber-600 dark:text-amber-400 ring-1 ring-amber-500/20 animate-pulse">
-                          <CircleDot className="w-2.5 h-2.5" />
-                          Unsaved
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-sm text-ink-muted mt-1 max-w-2xl">
-                      {selectedOntology.description || `${Object.keys(selectedOntology.entityTypeDefinitions ?? {}).length} entity types · ${Object.keys(selectedOntology.relationshipTypeDefinitions ?? {}).length} relationships`}
-                    </p>
-                    {/* Metadata row */}
-                    <div className="flex items-center gap-4 mt-2 flex-wrap text-[11px] text-ink-muted">
-                      <span>Created {new Date(selectedOntology.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}{selectedOntology.createdBy ? ` by ${selectedOntology.createdBy}` : ''}</span>
-                      <span className="opacity-30">·</span>
-                      <span>Updated {new Date(selectedOntology.updatedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}{selectedOntology.updatedBy ? ` by ${selectedOntology.updatedBy}` : ''}</span>
-                      {selectedOntology.publishedAt && (
-                        <>
-                          <span className="opacity-30">·</span>
-                          <span className="text-emerald-600 dark:text-emerald-400">
-                            Published {new Date(selectedOntology.publishedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
-                            {selectedOntology.publishedBy ? ` by ${selectedOntology.publishedBy}` : ''}
-                          </span>
-                        </>
-                      )}
-                      <span className="opacity-30">·</span>
-                      <span>{selectedOntology.scope}</span>
-                    </div>
-                  </div>
-
-                  {/* Action toolbar */}
-                  <div className="flex items-center gap-1.5 flex-shrink-0 ml-4">
-                    {!selectedOntology.isSystem && !isEditing && (
-                      <button
-                        onClick={() => setEditDetailsTarget(selectedOntology)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-all"
-                      >
-                        <Settings className="w-3.5 h-3.5" />
-                        Details
-                      </button>
-                    )}
-                    {!isEditing && (
-                      <>
-                        <button
-                          onClick={handleExport}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-glass-border-hover hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-secondary transition-all"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          Export
-                        </button>
-                        <button
-                          onClick={() => fileInputRef.current?.click()}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-glass-border-hover hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-secondary transition-all"
-                        >
-                          <Upload className="w-3.5 h-3.5" />
-                          Import
-                        </button>
-                        <button
-                          onClick={handleClone}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-indigo-300 hover:bg-indigo-500/[0.06] text-ink-secondary hover:text-indigo-600 transition-all"
-                        >
-                          <Copy className="w-3.5 h-3.5" />
-                          Clone
-                        </button>
-                      </>
-                    )}
-
-                    {isEditing ? (
-                      <>
-                        {/* Discard */}
-                        <button
-                          onClick={discardChanges}
-                          className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/20 hover:bg-red-100 dark:hover:bg-red-950/40 border border-red-200/60 dark:border-red-800/40 transition-all"
-                        >
-                          <X className="w-4 h-4" />
-                          Discard
-                        </button>
-                        <button
-                          onClick={handleValidate}
-                          className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold border border-glass-border hover:border-emerald-300 hover:bg-emerald-500/[0.06] text-ink-secondary hover:text-emerald-600 transition-all"
-                        >
-                          <ShieldCheck className="w-4 h-4" />
-                          Validate
-                        </button>
-                        {/* Save Changes — primary action when editing */}
-                        <button
-                          onClick={handleSaveAllChanges}
-                          disabled={!hasPendingChanges || isSaving}
-                          className={cn(
-                            'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-bold transition-all',
-                            hasPendingChanges
-                              ? 'bg-emerald-500 text-white hover:bg-emerald-600 shadow-md shadow-emerald-500/25 hover:shadow-lg hover:shadow-emerald-500/30'
-                              : 'bg-emerald-500/40 text-white/60 cursor-not-allowed shadow-none',
-                          )}
-                        >
-                          {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                          {isSaving ? 'Saving...' : 'Save Changes'}
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          onClick={handleValidate}
-                          className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold border border-glass-border hover:border-emerald-300 hover:bg-emerald-500/[0.06] text-ink-secondary hover:text-emerald-600 transition-all"
-                        >
-                          <ShieldCheck className="w-4 h-4" />
-                          Validate
-                        </button>
-                        {!isImmutable && (
-                          <>
-                            <button
-                              onClick={enterEditMode}
-                              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20"
-                            >
-                              <PenLine className="w-4 h-4" />
-                              Edit
-                            </button>
-                            <button
-                              onClick={handlePublish}
-                              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:from-indigo-600 hover:to-purple-600 transition-all shadow-md shadow-indigo-500/25"
-                            >
-                              <Upload className="w-4 h-4" />
-                              Publish
-                            </button>
-                          </>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-              </div>
+              {/* Detail header — extracted component with overflow menu */}
+              <OntologyDetailHeader
+                ontology={selectedOntology}
+                isEditing={isEditing}
+                isImmutable={isImmutable}
+                hasPendingChanges={hasPendingChanges}
+                isSaving={isSaving}
+                onEnterEdit={enterEditMode}
+                onDiscard={discardChanges}
+                onSave={handleSaveAllChanges}
+                onValidate={handleValidate}
+                onPublish={handlePublish}
+                onClone={handleClone}
+                onExport={handleExport}
+                onImport={() => fileInputRef.current?.click()}
+                onEditDetails={() => setEditDetailsTarget(selectedOntology)}
+                onDelete={handleDeleteOntology}
+              />
 
               {/* Tabs — underline style (AdminRegistry pattern) */}
               <div className="flex items-center gap-1 border-b border-glass-border px-8 shrink-0">
                 {TAB_DEFS.map(t => {
                   const Icon = t.icon
                   const isActive = activeTab === t.id
-                  const count = t.id === 'entities' ? entityTypes.length
-                    : t.id === 'relationships' ? relTypes.length
+                  const count = t.id === 'schema' ? entityTypes.length + relTypes.length
                     : undefined
                   const tabHasChanges = isEditing && (
-                    (t.id === 'entities' && hasEntityChanges) ||
-                    (t.id === 'relationships' && hasRelChanges) ||
-                    (t.id === 'hierarchy' && hasHierarchyChanges)
+                    (t.id === 'schema' && (hasEntityChanges || hasRelChanges || hasHierarchyChanges))
                   )
                   return (
                     <button
@@ -1073,48 +948,35 @@ export function OntologySchemaPage() {
                         />
                       )}
 
-                      {activeTab === 'entities' && (
-                        <EntityTypesPanel
-                          entityTypes={entityTypes}
-                          entityStatMap={entityStatMap}
-                          isLocked={isLocked}
-                          search={search}
-                          validationResult={validationResult}
-                          editorPanel={editorPanel}
-                          changedIds={changedEntityIds}
-                          onSearch={setSearch}
-                          onEdit={et => setEditorPanel({ kind: 'entity', data: et })}
-                          onNew={() => setEditorPanel({ kind: 'entity' })}
-                          onDelete={handleDeleteEntityType}
-                          onDismissValidation={() => setValidationResult(null)}
-                        />
-                      )}
-
-                      {activeTab === 'relationships' && (
-                        <RelationshipsPanel
-                          relTypes={relTypes}
-                          edgeStatMap={edgeStatMap}
-                          isLocked={isLocked}
-                          search={search}
-                          editorPanel={editorPanel}
-                          changedIds={changedRelIds}
-                          onSearch={setSearch}
-                          onEdit={rt => setEditorPanel({ kind: 'rel', data: rt })}
-                          onNew={() => setEditorPanel({ kind: 'rel' })}
-                          onDelete={handleDeleteRelType}
-                        />
-                      )}
-
-                      {activeTab === 'hierarchy' && (
-                        <HierarchyPanel
+                      {activeTab === 'schema' && (
+                        <SchemaPanel
                           selectedOntology={selectedOntology}
                           entityTypes={entityTypes}
                           relTypes={relTypes}
                           isLocked={isLocked}
+                          search={search}
+                          editorPanel={editorPanel}
+                          onSearch={setSearch}
+                          entityStatMap={entityStatMap}
+                          changedEntityIds={changedEntityIds}
+                          validationResult={validationResult}
+                          onEditEntity={et => setEditorPanel({ kind: 'entity', data: et })}
+                          onNewEntity={() => setEditorPanel({ kind: 'entity' })}
+                          onDeleteEntity={handleDeleteEntityType}
+                          onDismissValidation={() => setValidationResult(null)}
+                          edgeStatMap={edgeStatMap}
+                          changedRelIds={changedRelIds}
+                          onEditRel={rt => setEditorPanel({ kind: 'rel', data: rt })}
+                          onNewRel={() => setEditorPanel({ kind: 'rel' })}
+                          onDeleteRel={handleDeleteRelType}
                           isSaving={isSaving}
                           onReparent={handleReparentEntityType}
-                          onEditType={et => { setEditorPanel({ kind: 'entity', data: et }); setTab('entities') }}
+                          onEditTypeFromHierarchy={et => setEditorPanel({ kind: 'entity', data: et })}
                           onUpdateContainmentEdgeTypes={handleUpdateContainmentEdgeTypes}
+                          hasEntityChanges={hasEntityChanges}
+                          hasRelChanges={!!hasRelChanges}
+                          hasHierarchyChanges={hasHierarchyChanges}
+                          initialSubView={rawTab === 'relationships' ? 'relationships' : rawTab === 'hierarchy' ? 'hierarchy' : undefined}
                         />
                       )}
 
@@ -1136,7 +998,7 @@ export function OntologySchemaPage() {
                                 behavior: { selectable: true, draggable: true, expandable: true, traceable: true, clickAction: 'select', doubleClickAction: 'expand' },
                               },
                             })
-                            setTab('entities')
+                            setTab('schema')
                           }}
                           onDefineRel={typeId => {
                             const name = humanizeId(typeId)
@@ -1148,17 +1010,13 @@ export function OntologySchemaPage() {
                                 bidirectional: false, showLabel: false, isContainment: false, isLineage: false,
                               },
                             })
-                            setTab('relationships')
+                            setTab('schema')
                           }}
                         />
                       )}
 
-                      {activeTab === 'usage' && (
-                        <UsagePanel ontology={selectedOntology} workspaces={workspaces} ontologies={ontologies} />
-                      )}
-
-                      {activeTab === 'history' && (
-                        <VersionHistoryPanel ontology={selectedOntology} />
+                      {activeTab === 'adoption' && (
+                        <AdoptionPanel ontology={selectedOntology} workspaces={workspaces} ontologies={ontologies} />
                       )}
 
                       {activeTab === 'settings' && (
@@ -1320,6 +1178,7 @@ export function OntologySchemaPage() {
       {showSuggestDialog && (
         <SuggestConfirmDialog
           dataSourceLabel={activeDataSource?.label || activeDataSource?.id || null}
+          suggestedName={generateSuggestedName(activeDataSource?.label, activeWorkspace?.name)}
           ontologies={ontologies}
           currentOntologyId={activeDataSource?.ontologyId ?? null}
           assignmentCountMap={assignmentCountMap}
