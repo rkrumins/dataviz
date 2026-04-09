@@ -13,6 +13,7 @@ import { useState, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
+import { generateIconFallback } from '@/lib/type-visuals'
 import type { ViewConfiguration, EntityTypeSchema, ViewLayerConfig, LayerAssignmentRuleConfig, LogicalNodeConfig } from '@/types/schema'
 import { cn } from '@/lib/utils'
 import { EntityAssignmentPanel } from './EntityAssignmentPanel'
@@ -798,7 +799,7 @@ function LogicalNodeEditor({
         onClick={() => setIsExpanded(!isExpanded)}
       >
         <LucideIcons.ChevronRight className={cn("w-4 h-4 text-ink-muted transition-transform", isExpanded && "rotate-90")} />
-        <DynamicIcon name={node.type === 'container' ? 'Box' : 'Folder'} className="w-4 h-4 text-accent-lineage" />
+        <DynamicIcon name={generateIconFallback(node.type || 'unknown')} className="w-4 h-4 text-accent-lineage" />
         <input
           type="text"
           value={node.name}
