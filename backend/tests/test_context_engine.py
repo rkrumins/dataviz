@@ -164,11 +164,9 @@ def _edge(src: str, tgt: str, etype: str = "CONTAINS") -> GraphEdge:
 
 
 class TestContextEngineInit:
-    def test_default_provider_is_mock_when_none(self):
-        from backend.app.providers.mock_provider import MockGraphProvider
-
-        engine = ContextEngine(provider=None)
-        assert isinstance(engine.provider, MockGraphProvider)
+    def test_none_provider_raises(self):
+        with pytest.raises(ValueError, match="requires an explicit provider"):
+            ContextEngine(provider=None)
 
     def test_custom_provider_is_used(self):
         stub = _StubProvider()

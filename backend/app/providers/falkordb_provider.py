@@ -11,7 +11,7 @@ from typing import List, Optional, Dict, Any, Set
 
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
-    LineageResult, EntityType, EdgeType, GraphSchemaStats,
+    LineageResult, GraphSchemaStats,
     PropertyFilter, TagFilter, TextFilter, FilterOperator,
     EntityTypeSummary, EdgeTypeSummary, TagSummary,
     OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy,
@@ -181,11 +181,11 @@ class FalkorDBProvider(GraphDataProvider):
         those labels are indexed in addition to the hardcoded defaults.
         """
         default_labels = [
-            EntityType.DOMAIN.value,
-            EntityType.DATA_PLATFORM.value,
-            EntityType.CONTAINER.value,
-            EntityType.DATASET.value,
-            EntityType.SCHEMA_FIELD.value,
+            "domain",
+            "dataPlatform",
+            "container",
+            "dataset",
+            "schemaField",
         ]
         extra = list(entity_type_ids) if entity_type_ids else []
         seen: set[str] = set()
@@ -235,7 +235,7 @@ class FalkorDBProvider(GraphDataProvider):
             if config:
                 self._containment_cache = {t.strip().upper() for t in config.split(",") if t.strip()}
             else:
-                self._containment_cache = {EdgeType.CONTAINS.value, EdgeType.BELONGS_TO.value}
+                self._containment_cache = {"CONTAINS", "BELONGS_TO"}
         return self._containment_cache
 
     def _extract_node_from_result(self, row) -> Optional[GraphNode]:
@@ -511,7 +511,7 @@ class FalkorDBProvider(GraphDataProvider):
     async def get_children(
         self,
         parent_urn: str,
-        entity_types: Optional[List[EntityType]] = None,
+        entity_types: Optional[List[str]] = None,
         edge_types: Optional[List[str]] = None,
         search_query: Optional[str] = None,
         offset: int = 0,
@@ -708,7 +708,7 @@ class FalkorDBProvider(GraphDataProvider):
         start_urn: str,
         direction: str,
         depth: int,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> Set[str]:
         """Single-query lineage traversal using bounded variable-length Cypher paths.
 
@@ -760,7 +760,7 @@ class FalkorDBProvider(GraphDataProvider):
         urn: str,
         depth: int,
         include_column_lineage: bool = False,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> LineageResult:
         upstream_urns = await self._traverse_lineage(urn, "upstream", depth, descendant_types)
         all_urns = upstream_urns | {urn}
@@ -782,7 +782,7 @@ class FalkorDBProvider(GraphDataProvider):
         urn: str,
         depth: int,
         include_column_lineage: bool = False,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> LineageResult:
         downstream_urns = await self._traverse_lineage(urn, "downstream", depth, descendant_types)
         all_urns = downstream_urns | {urn}
@@ -805,7 +805,7 @@ class FalkorDBProvider(GraphDataProvider):
         upstream_depth: int,
         downstream_depth: int,
         include_column_lineage: bool = False,
-        descendant_types: Optional[List[EntityType]] = None,
+        descendant_types: Optional[List[str]] = None,
     ) -> LineageResult:
         up = await self._traverse_lineage(urn, "upstream", upstream_depth, descendant_types)
         down = await self._traverse_lineage(urn, "downstream", downstream_depth, descendant_types)
@@ -1663,11 +1663,11 @@ class FalkorDBProvider(GraphDataProvider):
         else:
             # Infer lineage: anything not containment, not metadata, and not AGGREGATED
             config_metadata = os.getenv("METADATA_EDGE_TYPES", "").strip()
-            metadata_types = {t.strip().upper() for t in config_metadata.split(",") if t.strip()} if config_metadata else {EdgeType.TAGGED_WITH.value}
+            metadata_types = {t.strip().upper() for t in config_metadata.split(",") if t.strip()} if config_metadata else {"TAGGED_WITH"}
             
             lineage_types = []
             for t in all_types:
-                if t.upper() not in containment_upper and t.upper() not in metadata_types and t.upper() != EdgeType.AGGREGATED.value:
+                if t.upper() not in containment_upper and t.upper() not in metadata_types and t.upper() != "AGGREGATED":
                     lineage_types.append(t)
 
         lineage_upper = {t.upper() for t in lineage_types}
@@ -1680,11 +1680,11 @@ class FalkorDBProvider(GraphDataProvider):
             
             if is_containment:
                 category = "structural"
-                direction = "child-to-parent" if et.upper() == EdgeType.BELONGS_TO.value else "parent-to-child"
+                direction = "child-to-parent" if et.upper() == "BELONGS_TO" else "parent-to-child"
             elif is_lineage:
                 category = "flow"
                 direction = "source-to-target"
-            elif et.upper() == EdgeType.TAGGED_WITH.value:
+            elif et.upper() == "TAGGED_WITH":
                 category = "metadata"
                 direction = "bidirectional"
             else:
@@ -1798,7 +1798,7 @@ class FalkorDBProvider(GraphDataProvider):
         self,
         urn: str,
         depth: int = 5,
-        entity_types: Optional[List[EntityType]] = None,
+        entity_types: Optional[List[str]] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> List[GraphNode]:

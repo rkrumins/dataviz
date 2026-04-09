@@ -3,14 +3,126 @@ Phase 4 — API endpoint tests for /api/v1/{ws_id}/graph/*.
 
 Graph endpoints depend on `get_context_engine` which resolves a
 ContextEngine from the workspace/connection.  We override this
-dependency to return a ContextEngine backed by MockGraphProvider,
-which ships with deterministic demo data.
+dependency to return a ContextEngine backed by a lightweight
+_StubProvider, which ships with deterministic in-memory data.
 """
 import pytest
+from typing import Any, Dict, List, Optional
 from httpx import AsyncClient
 
+from backend.common.interfaces.provider import GraphDataProvider
+from backend.common.models.graph import (
+    GraphEdge,
+    GraphNode,
+    GraphSchemaStats,
+    LineageResult,
+    NodeQuery,
+    EdgeQuery,
+    OntologyMetadata,
+)
 from backend.app.services.context_engine import ContextEngine
-from backend.app.providers.mock_provider import MockGraphProvider
+
+
+# ── Stub provider ────────────────────────────────────────────────────────
+
+class _StubProvider(GraphDataProvider):
+    """Minimal in-memory provider for API tests."""
+
+    def __init__(self):
+        self._nodes: Dict[str, GraphNode] = {}
+        self._edges: List[GraphEdge] = []
+        # Seed a handful of deterministic nodes/edges
+        for i in range(1, 4):
+            urn = f"urn:li:dataset:(urn:li:dataPlatform:demo,DemoTable{i},PROD)"
+            self._nodes[urn] = GraphNode(
+                urn=urn, displayName=f"DemoTable{i}", entityType="dataset",
+            )
+        src = list(self._nodes.keys())
+        if len(src) >= 2:
+            self._edges.append(GraphEdge(
+                id=f"{src[0]}->{src[1]}",
+                sourceUrn=src[0], targetUrn=src[1], edgeType="TRANSFORMS",
+            ))
+
+    @property
+    def name(self) -> str:
+        return "stub"
+
+    async def get_node(self, urn: str) -> Optional[GraphNode]:
+        return self._nodes.get(urn)
+
+    async def get_nodes(self, query: NodeQuery) -> List[GraphNode]:
+        if query.urns:
+            return [self._nodes[u] for u in query.urns if u in self._nodes]
+        return list(self._nodes.values())
+
+    async def search_nodes(self, query: str, limit: int = 10, **kw) -> List[GraphNode]:
+        return [
+            n for n in self._nodes.values()
+            if query.lower() in n.display_name.lower()
+        ][:limit]
+
+    async def get_edges(self, query: EdgeQuery = None) -> List[GraphEdge]:
+        if query and query.any_urns:
+            urns = set(query.any_urns)
+            return [e for e in self._edges if e.source_urn in urns or e.target_urn in urns]
+        return self._edges
+
+    async def get_children(self, parent_urn, entity_types=None, edge_types=None, **kw) -> List[GraphNode]:
+        child_urns = {e.target_urn for e in self._edges if e.source_urn == parent_urn}
+        return [self._nodes[u] for u in child_urns if u in self._nodes]
+
+    async def get_parent(self, child_urn: str) -> Optional[GraphNode]:
+        return None
+
+    async def get_upstream(self, urn, depth, include_column_lineage=False, descendant_types=None) -> LineageResult:
+        return LineageResult(nodes=list(self._nodes.values()), edges=self._edges, totalCount=len(self._nodes), hasMore=False)
+
+    async def get_downstream(self, urn, depth, include_column_lineage=False, descendant_types=None) -> LineageResult:
+        return LineageResult(nodes=list(self._nodes.values()), edges=self._edges, totalCount=len(self._nodes), hasMore=False)
+
+    async def get_full_lineage(self, urn, upstream_depth, downstream_depth, include_column_lineage=False, descendant_types=None) -> LineageResult:
+        return LineageResult(nodes=list(self._nodes.values()), edges=self._edges, totalCount=len(self._nodes), hasMore=False)
+
+    async def get_aggregated_edges_between(self, source_urns, target_urns, granularity, containment_edges, lineage_edges) -> Any:
+        return []
+
+    async def get_trace_lineage(self, urn, direction, depth, containment_edges, lineage_edges) -> LineageResult:
+        return LineageResult(nodes=list(self._nodes.values()), edges=self._edges, totalCount=len(self._nodes), hasMore=False)
+
+    async def get_stats(self) -> Dict[str, Any]:
+        return {"node_count": len(self._nodes), "edge_count": len(self._edges)}
+
+    async def get_schema_stats(self) -> GraphSchemaStats:
+        return GraphSchemaStats(totalNodes=len(self._nodes), totalEdges=len(self._edges))
+
+    async def get_ontology_metadata(self) -> OntologyMetadata:
+        return OntologyMetadata(
+            containmentEdgeTypes=["CONTAINS"],
+            lineageEdgeTypes=["TRANSFORMS"],
+            edgeTypeMetadata={}, entityTypeHierarchy={}, rootEntityTypes=[],
+        )
+
+    async def get_distinct_values(self, property_name: str) -> List[Any]:
+        return []
+
+    async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+        return []
+
+    async def get_descendants(self, urn, depth=5, entity_types=None, limit=100, offset=0) -> List[GraphNode]:
+        return []
+
+    async def get_nodes_by_tag(self, tag, limit=100, offset=0) -> List[GraphNode]:
+        return []
+
+    async def get_nodes_by_layer(self, layer_id, limit=100, offset=0) -> List[GraphNode]:
+        return []
+
+    async def save_custom_graph(self, nodes, edges) -> bool:
+        return True
+
+    async def create_node(self, node, containment_edge=None) -> bool:
+        return True
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────
@@ -19,12 +131,12 @@ from backend.app.providers.mock_provider import MockGraphProvider
 async def graph_client(test_client: AsyncClient):
     """
     Yield a test client with get_context_engine overridden to use
-    a fresh MockGraphProvider (no real workspace resolution needed).
+    a fresh _StubProvider (no real workspace resolution needed).
     """
     from backend.app.main import app
     from backend.app.api.v1.endpoints.graph import get_context_engine
 
-    mock_engine = ContextEngine(provider=MockGraphProvider())
+    mock_engine = ContextEngine(provider=_StubProvider())
 
     async def _override():
         return mock_engine
@@ -36,7 +148,7 @@ async def graph_client(test_client: AsyncClient):
 
 
 def _get_sample_urn(engine: ContextEngine) -> str:
-    """Return an arbitrary URN from the mock provider's demo data."""
+    """Return an arbitrary URN from the stub provider's data."""
     nodes = engine.provider._nodes
     if nodes:
         return next(iter(nodes))
@@ -170,7 +282,7 @@ async def test_list_nodes(graph_client):
 async def test_get_children(graph_client):
     """GET children of a known node returns a list or empty list."""
     client, engine = graph_client
-    # Use a root node that is likely to have children in demo data
+    # Use a root node that is likely to have children in stub data
     urn = _get_sample_urn(engine)
 
     resp = await client.get(
@@ -178,7 +290,7 @@ async def test_get_children(graph_client):
         params={"limit": 10, "offset": 0},
     )
     # The endpoint may fail if ontology resolution hits an edge case with
-    # the mock provider (no real ontology service).  Accept 200 or 500.
+    # the stub provider (no real ontology service).  Accept 200 or 500.
     assert resp.status_code in (200, 500)
     if resp.status_code == 200:
         assert isinstance(resp.json(), list)

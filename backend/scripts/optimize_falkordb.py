@@ -14,7 +14,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from backend.app.providers.falkordb_provider import FalkorDBProvider
-from backend.app.models.graph import EntityType
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -29,13 +28,12 @@ async def optimize():
     await provider._ensure_connected()
     
     # Define labels and properties to index
-    # We use both EntityType values and some extra ones if needed
     labels = [
-        EntityType.DOMAIN.value,
-        EntityType.DATA_PLATFORM.value,
-        EntityType.CONTAINER.value,
-        EntityType.DATASET.value,
-        EntityType.SCHEMA_FIELD.value
+        "domain",
+        "dataPlatform",
+        "container",
+        "dataset",
+        "schemaField",
     ]
     
     properties = ["urn", "displayName", "qualifiedName"]

@@ -2,7 +2,7 @@ import re
 import time
 import logging
 from typing import List, Dict, Optional, Set, Any, Tuple
-from backend.app.models.graph import GraphNode, GraphEdge, EdgeType
+from backend.app.models.graph import GraphNode, GraphEdge
 from backend.app.models.assignment import (
     LayerAssignmentRequest, LayerAssignmentResult, EntityAssignment,
     ViewLayerConfig, LayerAssignmentRuleConfig, LayerAssignmentStats,
@@ -161,7 +161,7 @@ class AssignmentEngine:
                 "falling back to hardcoded {CONTAINS, BELONGS_TO}. "
                 "This should only happen during legacy/un-resolved paths."
             )
-            ct = {EdgeType.CONTAINS.value.upper(), EdgeType.BELONGS_TO.value.upper()}
+            ct = {"CONTAINS", "BELONGS_TO"}
 
         # Determine parent->child direction from edge semantics:
         # Convention: if source has *more* children than target for this edge type,
@@ -169,7 +169,7 @@ class AssignmentEngine:
         # CONTAINS (parent->child) and BELONGS_TO (child->parent) semantics,
         # we check if the edge type matches the BELONGS_TO pattern (child is source).
         # For any other containment type we assume source=parent, target=child.
-        belongs_to_upper = EdgeType.BELONGS_TO.value.upper()
+        belongs_to_upper = "BELONGS_TO"
 
         for edge in edges:
             et = edge.edge_type.upper() if isinstance(edge.edge_type, str) else str(edge.edge_type).upper()

@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 # Add project root for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from backend.app.models.graph import GraphNode, GraphEdge, EntityType, EdgeType
+from backend.app.models.graph import GraphNode, GraphEdge
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -86,12 +86,12 @@ class LargeSeeder:
         }
         self.fields_by_dataset: Dict[str, List[str]] = {}
 
-    def _get_urn(self, entity_type: EntityType, name: str, extra: str = "") -> str:
+    def _get_urn(self, entity_type: str, name: str, extra: str = "") -> str:
         clean_name = name.lower().replace(" ", "_").replace(".", "_")
         suffix = f"_{extra}" if extra else f"_{uuid.uuid4().hex[:8]}"
-        return f"urn:li:{entity_type.value}:{clean_name}{suffix}"
+        return f"urn:li:{entity_type}:{clean_name}{suffix}"
 
-    def add_node(self, entity_type: EntityType, name: str, parent_urn: str = None, props: Dict = None, extra_urn: str = "") -> str:
+    def add_node(self, entity_type: str, name: str, parent_urn: str = None, props: Dict = None, extra_urn: str = "") -> str:
         urn = self._get_urn(entity_type, name, extra_urn)
         node = GraphNode(
             urn=urn,
@@ -103,16 +103,15 @@ class LargeSeeder:
         )
         self.nodes.append(node)
         self.node_count += 1
-        label = entity_type.value if hasattr(entity_type, "value") else str(entity_type)
-        self.urn_to_label[urn] = label
-        
+        self.urn_to_label[urn] = entity_type
+
         if parent_urn:
-            self.add_edge(parent_urn, urn, EdgeType.CONTAINS)
-        
+            self.add_edge(parent_urn, urn, "CONTAINS")
+
         return urn
 
-    def add_edge(self, source: str, target: str, edge_type: EdgeType, props: Dict = None):
-        edge_id = f"{edge_type.value.lower()}-{source}-{target}"
+    def add_edge(self, source: str, target: str, edge_type: str, props: Dict = None):
+        edge_id = f"{edge_type.lower()}-{source}-{target}"
         # Truncate extremely long IDs
         if len(edge_id) > 240:
             edge_id = edge_id[:200] + "_" + uuid.uuid4().hex[:8]
@@ -129,114 +128,114 @@ class LargeSeeder:
 
     def generate_domain(self, domain_name: str, scenario: str):
         logger.info(f"Generating domain: {domain_name} ({scenario})")
-        domain_urn = self.add_node(EntityType.DOMAIN, domain_name)
-        
+        domain_urn = self.add_node("domain", domain_name)
+
         # 1. Source System
         platform_name = scenario.capitalize()
-        platform_urn = self.add_node(EntityType.DATA_PLATFORM, platform_name, domain_urn)
+        platform_urn = self.add_node("dataPlatform", platform_name, domain_urn)
         db_name = f"{scenario.upper()}_PROD"
-        db_urn = self.add_node(EntityType.CONTAINER, db_name, platform_urn)
-        
+        db_urn = self.add_node("container", db_name, platform_urn)
+
         tables = SCHEMAS.get(scenario, {})
         for table_name, cols in tables.items():
-            table_urn = self.add_node(EntityType.DATASET, table_name, db_urn)
+            table_urn = self.add_node("dataset", table_name, db_urn)
             self.datasets_by_layer["source"].append(table_urn)
             self.fields_by_dataset[table_urn] = []
             for col in cols:
-                col_urn = self.add_node(EntityType.SCHEMA_FIELD, col, table_urn)
+                col_urn = self.add_node("schemaField", col, table_urn)
                 self.fields_by_dataset[table_urn].append(col_urn)
 
         # 2. Airflow Ingestion -> S3 Bronze
-        s3_urn = self.add_node(EntityType.DATA_PLATFORM, "AWS_S3", domain_urn)
-        bronze_bucket = self.add_node(EntityType.CONTAINER, f"{domain_name.lower()}-bronze", s3_urn)
-        airflow_urn = self.add_node(EntityType.DATA_FLOW, f"Ingest_{scenario.capitalize()}", domain_urn)
-        
+        s3_urn = self.add_node("dataPlatform", "AWS_S3", domain_urn)
+        bronze_bucket = self.add_node("container", f"{domain_name.lower()}-bronze", s3_urn)
+        airflow_urn = self.add_node("dataFlow", f"Ingest_{scenario.capitalize()}", domain_urn)
+
         for table_urn in self.datasets_by_layer["source"]:
             table_name = table_urn.split(":")[-1].split("_")[0]
-            job_urn = self.add_node(EntityType.DATA_JOB, f"Load_{table_name}", airflow_urn)
-            
+            job_urn = self.add_node("dataJob", f"Load_{table_name}", airflow_urn)
+
             # Bronze Dataset
-            bronze_ds_urn = self.add_node(EntityType.DATASET, f"raw_{table_name}", bronze_bucket)
+            bronze_ds_urn = self.add_node("dataset", f"raw_{table_name}", bronze_bucket)
             self.datasets_by_layer["bronze"].append(bronze_ds_urn)
             self.fields_by_dataset[bronze_ds_urn] = []
-            
+
             # Lineage: Source -> Job -> Bronze
-            self.add_edge(table_urn, job_urn, EdgeType.CONSUMES)
-            self.add_edge(job_urn, bronze_ds_urn, EdgeType.PRODUCES)
-            
+            self.add_edge(table_urn, job_urn, "CONSUMES")
+            self.add_edge(job_urn, bronze_ds_urn, "PRODUCES")
+
             # Column Lineage
             for i, src_col in enumerate(self.fields_by_dataset[table_urn]):
                 col_name = src_col.split(":")[-1].split("_")[0]
-                dst_col = self.add_node(EntityType.SCHEMA_FIELD, col_name, bronze_ds_urn)
+                dst_col = self.add_node("schemaField", col_name, bronze_ds_urn)
                 self.fields_by_dataset[bronze_ds_urn].append(dst_col)
-                self.add_edge(src_col, dst_col, EdgeType.PRODUCES, {"logic": "S3 Copy"})
+                self.add_edge(src_col, dst_col, "PRODUCES", {"logic": "S3 Copy"})
 
         # 3. Spark Processing -> S3 Silver
-        silver_bucket = self.add_node(EntityType.CONTAINER, f"{domain_name.lower()}-silver", s3_urn)
-        spark_urn = self.add_node(EntityType.SYSTEM, "Spark_Cluster", domain_urn)
-        
+        silver_bucket = self.add_node("container", f"{domain_name.lower()}-silver", s3_urn)
+        spark_urn = self.add_node("system", "Spark_Cluster", domain_urn)
+
         # Scale up Bronze -> Silver (Refinement)
         for ds_urn in self.datasets_by_layer["bronze"]:
             ds_name = ds_urn.split(":")[-1].split("_")[1] # e.g. raw_Account -> Account
-            spark_job = self.add_node(EntityType.DATA_JOB, f"Clean_{ds_name}", spark_urn)
-            
-            silver_ds_urn = self.add_node(EntityType.DATASET, f"clean_{ds_name}", silver_bucket)
+            spark_job = self.add_node("dataJob", f"Clean_{ds_name}", spark_urn)
+
+            silver_ds_urn = self.add_node("dataset", f"clean_{ds_name}", silver_bucket)
             self.datasets_by_layer["silver"].append(silver_ds_urn)
             self.fields_by_dataset[silver_ds_urn] = []
-            
-            self.add_edge(ds_urn, spark_job, EdgeType.CONSUMES)
-            self.add_edge(spark_job, silver_ds_urn, EdgeType.PRODUCES)
-            
+
+            self.add_edge(ds_urn, spark_job, "CONSUMES")
+            self.add_edge(spark_job, silver_ds_urn, "PRODUCES")
+
             for src_col in self.fields_by_dataset[ds_urn]:
                 col_name = src_col.split(":")[-1].split("_")[0]
-                dst_col = self.add_node(EntityType.SCHEMA_FIELD, col_name, silver_ds_urn)
+                dst_col = self.add_node("schemaField", col_name, silver_ds_urn)
                 self.fields_by_dataset[silver_ds_urn].append(dst_col)
-                self.add_edge(src_col, dst_col, EdgeType.TRANSFORMS, {"logic": "Data Cleansing"})
+                self.add_edge(src_col, dst_col, "TRANSFORMS", {"logic": "Data Cleansing"})
 
         # 4. Snowflake Mart (Cross-system Joins)
-        snowflake_urn = self.add_node(EntityType.DATA_PLATFORM, "Snowflake", domain_urn)
-        dw_urn = self.add_node(EntityType.CONTAINER, "ANALYTICS_DW", snowflake_urn)
-        dbt_urn = self.add_node(EntityType.DATA_FLOW, "dbt_Transforms", domain_urn)
-        
+        snowflake_urn = self.add_node("dataPlatform", "Snowflake", domain_urn)
+        dw_urn = self.add_node("container", "ANALYTICS_DW", snowflake_urn)
+        dbt_urn = self.add_node("dataFlow", "dbt_Transforms", domain_urn)
+
         # Example Cross-Join: dim_customer (SFDC + ERP)
-        dim_cust_job = self.add_node(EntityType.DATA_JOB, "Build_Dim_Customer", dbt_urn)
-        dim_cust_ds = self.add_node(EntityType.DATASET, "dim_customer", dw_urn)
+        dim_cust_job = self.add_node("dataJob", "Build_Dim_Customer", dbt_urn)
+        dim_cust_ds = self.add_node("dataset", "dim_customer", dw_urn)
         self.datasets_by_layer["mart"].append(dim_cust_ds)
-        
+
         # Link to some silver datasets
         sources = random.sample(self.datasets_by_layer["silver"], min(3, len(self.datasets_by_layer["silver"])))
         for s in sources:
-            self.add_edge(s, dim_cust_job, EdgeType.CONSUMES)
-        self.add_edge(dim_cust_job, dim_cust_ds, EdgeType.PRODUCES)
-        
+            self.add_edge(s, dim_cust_job, "CONSUMES")
+        self.add_edge(dim_cust_job, dim_cust_ds, "PRODUCES")
+
         # Columns for dim_customer
         cust_cols = ["customer_key", "name", "segment", "lifetime_value", "last_order_date"]
         for col in cust_cols:
-            c_urn = self.add_node(EntityType.SCHEMA_FIELD, col, dim_cust_ds)
+            c_urn = self.add_node("schemaField", col, dim_cust_ds)
             # Find matching silver column
             for s in sources:
                 matching_cols = [fc for fc in self.fields_by_dataset[s] if col in fc.lower()]
                 if matching_cols:
-                    self.add_edge(matching_cols[0], c_urn, EdgeType.TRANSFORMS, {"logic": "Join Logic"})
+                    self.add_edge(matching_cols[0], c_urn, "TRANSFORMS", {"logic": "Join Logic"})
 
     def scale_filler(self, target: int):
         """Fill up to target count with random objects."""
         current = self.node_count
         if current >= target: return
-        
+
         logger.info(f"Scaling filler: {current} -> {target}")
-        scale_dom = self.add_node(EntityType.DOMAIN, "Scale_Legacy")
-        scale_plat = self.add_node(EntityType.DATA_PLATFORM, "Archive_Storage", scale_dom)
-        
+        scale_dom = self.add_node("domain", "Scale_Legacy")
+        scale_plat = self.add_node("dataPlatform", "Archive_Storage", scale_dom)
+
         while self.node_count < target:
             c_idx = self.node_count // 1000
-            cont = self.add_node(EntityType.CONTAINER, f"arc_db_{c_idx}", scale_plat)
+            cont = self.add_node("container", f"arc_db_{c_idx}", scale_plat)
             for d in range(10):
                 if self.node_count >= target: break
-                ds = self.add_node(EntityType.DATASET, f"table_{d}", cont)
+                ds = self.add_node("dataset", f"table_{d}", cont)
                 for f in range(10):
                     if self.node_count >= target: break
-                    self.add_node(EntityType.SCHEMA_FIELD, f"col_{f}", ds)
+                    self.add_node("schemaField", f"col_{f}", ds)
 
     def generate(self):
         start = time.time()
@@ -265,7 +264,7 @@ async def push_to_falkordb(seeder: LargeSeeder):
     # 1. Group nodes by label
     nodes_by_label: Dict[str, List[Dict]] = {}
     for node in seeder.nodes:
-        label = node.entity_type.value if hasattr(node.entity_type, "value") else str(node.entity_type)
+        label = str(node.entity_type)
         if label not in nodes_by_label:
             nodes_by_label[label] = []
         nodes_by_label[label].append({
@@ -295,7 +294,7 @@ async def push_to_falkordb(seeder: LargeSeeder):
     # 3. Group edges by (SrcLabel, TgtLabel, Type)
     edges_grouped: Dict[Tuple[str, str, str], List[Dict]] = {}
     for edge in seeder.edges:
-        etype = edge.edge_type.value if hasattr(edge.edge_type, "value") else str(edge.edge_type)
+        etype = str(edge.edge_type)
         src_label = seeder.urn_to_label.get(edge.source_urn)
         tgt_label = seeder.urn_to_label.get(edge.target_urn)
         

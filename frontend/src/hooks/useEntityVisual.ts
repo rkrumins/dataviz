@@ -15,28 +15,33 @@
  */
 import { useSchemaStore } from '@/store/schema'
 import type { EntityVisualConfig, RelationshipVisualConfig } from '@/types/schema'
+import { generateColorFromType, generateIconFallback, generateEdgeColorFromType } from '@/lib/type-visuals'
 
 // -----------------------------------------------------------------------
-// Fallback defaults (used when schema is not yet loaded or type is unknown)
+// Fallback generators (per-type deterministic visuals for unknown types)
 // -----------------------------------------------------------------------
 
-const ENTITY_VISUAL_FALLBACK: EntityVisualConfig = {
-  icon: 'Box',
-  color: '#6366f1',
-  shape: 'rounded',
-  size: 'md',
-  borderStyle: 'solid',
-  showInMinimap: true,
+function entityVisualFallback(typeId: string): EntityVisualConfig {
+  return {
+    icon: generateIconFallback(typeId),
+    color: generateColorFromType(typeId),
+    shape: 'rounded',
+    size: 'md',
+    borderStyle: 'solid',
+    showInMinimap: true,
+  }
 }
 
-const EDGE_VISUAL_FALLBACK: RelationshipVisualConfig = {
-  strokeColor: '#6366f1',
-  strokeWidth: 2,
-  strokeStyle: 'solid',
-  animated: true,
-  animationSpeed: 'normal',
-  arrowType: 'arrow',
-  curveType: 'bezier',
+function edgeVisualFallback(edgeTypeId: string): RelationshipVisualConfig {
+  return {
+    strokeColor: generateEdgeColorFromType(edgeTypeId),
+    strokeWidth: 2,
+    strokeStyle: 'solid',
+    animated: true,
+    animationSpeed: 'normal',
+    arrowType: 'arrow',
+    curveType: 'bezier',
+  }
 }
 
 // -----------------------------------------------------------------------
@@ -45,11 +50,11 @@ const EDGE_VISUAL_FALLBACK: RelationshipVisualConfig = {
 
 /**
  * Returns visual configuration for an entity type.
- * Falls back to ENTITY_VISUAL_FALLBACK for unknown types.
+ * Falls back to a deterministic palette-based visual for unknown types.
  */
 export function useEntityVisual(typeId: string): EntityVisualConfig {
   const getEntityVisual = useSchemaStore((s) => s.getEntityVisual)
-  return getEntityVisual(typeId) ?? ENTITY_VISUAL_FALLBACK
+  return getEntityVisual(typeId) ?? entityVisualFallback(typeId)
 }
 
 /**
@@ -74,9 +79,9 @@ export function getEntityVisual(
   schemaOrState: { schema: ReturnType<typeof useSchemaStore.getState>['schema'] } | null,
   typeId: string,
 ): EntityVisualConfig {
-  if (!schemaOrState?.schema) return ENTITY_VISUAL_FALLBACK
+  if (!schemaOrState?.schema) return entityVisualFallback(typeId)
   const entityType = schemaOrState.schema.entityTypes.find((et) => et.id === typeId)
-  if (!entityType) return ENTITY_VISUAL_FALLBACK
+  if (!entityType) return entityVisualFallback(typeId)
   return entityType.visual
 }
 
@@ -87,7 +92,7 @@ export function getEdgeVisual(
   schemaOrState: { schema: ReturnType<typeof useSchemaStore.getState>['schema'] } | null,
   edgeTypeId: string,
 ): RelationshipVisualConfig {
-  if (!schemaOrState?.schema) return EDGE_VISUAL_FALLBACK
+  if (!schemaOrState?.schema) return edgeVisualFallback(edgeTypeId)
   return getEdgeVisualFromSchema(schemaOrState.schema, edgeTypeId)
 }
 
@@ -99,14 +104,31 @@ function getEdgeVisualFromSchema(
   schema: ReturnType<typeof useSchemaStore.getState>['schema'],
   edgeTypeId: string,
 ): RelationshipVisualConfig {
-  if (!schema) return EDGE_VISUAL_FALLBACK
+  if (!schema) return edgeVisualFallback(edgeTypeId)
 
   const normalized = edgeTypeId.toUpperCase()
   const relType = schema.relationshipTypes.find(
     (rt) => rt.id.toUpperCase() === normalized
   )
-  if (!relType) return EDGE_VISUAL_FALLBACK
+  if (!relType) return edgeVisualFallback(edgeTypeId)
 
   return relType.visual
 }
 
+// -----------------------------------------------------------------------
+// Convenience hooks
+// -----------------------------------------------------------------------
+
+/**
+ * Returns a color set derived from the entity type's visual config.
+ * Useful for components that need bg/text/accent inline styles.
+ */
+export function useEntityColorSet(typeId: string): { hex: string; bg: string; text: string; accent: string } {
+  const visual = useEntityVisual(typeId)
+  return {
+    hex: visual.color,
+    bg: `${visual.color}1a`,    // 10% opacity
+    text: visual.color,
+    accent: visual.color,
+  }
+}

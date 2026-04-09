@@ -6,6 +6,7 @@ import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import type { HierarchyNode } from './types'
 import type { ViewLayerConfig } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
+import { generateIconFallback } from '@/lib/type-visuals'
 
 interface FlatTreeItemProps {
   node: HierarchyNode
@@ -70,7 +71,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const nodeColor = visual?.color ?? layer.color
   // Logical nodes use a folder/group icon instead of entity type icon
   const logicalIcon = isLogical
-    ? (node.typeId === 'system' ? 'Server' : node.typeId === 'container' ? 'Package' : 'FolderOpen')
+    ? (entityType?.visual?.icon ?? generateIconFallback(node.typeId))
     : undefined
 
   const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || 0

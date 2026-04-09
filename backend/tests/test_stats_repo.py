@@ -16,7 +16,7 @@ from backend.app.db.models import (
 
 async def _seed_data_source(session: AsyncSession, ds_id="ds_stat1") -> str:
     """Seed provider, workspace, and data source. Returns data source ID."""
-    prov = ProviderORM(id="prov_stat1", name="Stats Provider", provider_type="mock")
+    prov = ProviderORM(id="prov_stat1", name="Stats Provider", provider_type="falkordb")
     session.add(prov)
     ws = WorkspaceORM(id="ws_stat1", name="Stats Workspace")
     session.add(ws)
