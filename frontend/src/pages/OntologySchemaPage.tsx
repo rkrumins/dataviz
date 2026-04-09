@@ -197,6 +197,7 @@ export function OntologySchemaPage() {
   const [workingRelDefs, setWorkingRelDefs] = useState<Record<string, unknown> | null>(null)
   const [workingContainment, setWorkingContainment] = useState<string[] | null>(null)
   const [workingLineage, setWorkingLineage] = useState<string[] | null>(null)
+  const hasStagedChangesRef = useRef(false)
 
   // ── Derived ────────────────────────────────────────────────────────
   const isDeleted = !!selectedOntology?.deletedAt
@@ -226,9 +227,10 @@ export function OntologySchemaPage() {
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [effectiveRelDefs])
 
-  // Detect pending changes
+  // Detect pending changes (explicit dirty flag + deep comparison fallback)
   const hasPendingChanges = useMemo(() => {
     if (!isEditing || !selectedOntology) return false
+    if (hasStagedChangesRef.current) return true
     if (workingEntityDefs && JSON.stringify(workingEntityDefs) !== JSON.stringify(selectedOntology.entityTypeDefinitions ?? {})) return true
     if (workingRelDefs && JSON.stringify(workingRelDefs) !== JSON.stringify(selectedOntology.relationshipTypeDefinitions ?? {})) return true
     if (workingContainment && JSON.stringify(workingContainment) !== JSON.stringify(selectedOntology.containmentEdgeTypes ?? [])) return true
@@ -303,6 +305,7 @@ export function OntologySchemaPage() {
     setWorkingRelDefs(null)
     setWorkingContainment(null)
     setWorkingLineage(null)
+    hasStagedChangesRef.current = false
     setIsEditing(false)
     setEditorPanel(null)
   }
@@ -444,6 +447,7 @@ export function OntologySchemaPage() {
     }
 
     setWorkingEntityDefs(updatedDefs)
+    hasStagedChangesRef.current = true
     showToast('info', `"${entityType.name}" updated — save to persist`)
     setEditorPanel(null)
   }
@@ -475,6 +479,7 @@ export function OntologySchemaPage() {
     setWorkingRelDefs(updatedRelDefs)
     setWorkingContainment(containment)
     setWorkingLineage(lineage)
+    hasStagedChangesRef.current = true
     showToast('info', `"${relType.name}" updated — save to persist`)
     setEditorPanel(null)
   }
@@ -485,6 +490,7 @@ export function OntologySchemaPage() {
     const defs = { ...workingEntityDefs }
     delete defs[id]
     setWorkingEntityDefs(defs)
+    hasStagedChangesRef.current = true
     showToast('info', `"${name}" removed — save to persist`)
   }
 
@@ -494,6 +500,7 @@ export function OntologySchemaPage() {
     const defs = { ...workingRelDefs }
     delete defs[id.toUpperCase()]
     setWorkingRelDefs(defs)
+    hasStagedChangesRef.current = true
     showToast('info', `"${name}" removed — save to persist`)
   }
 
@@ -772,12 +779,14 @@ export function OntologySchemaPage() {
     }
 
     setWorkingEntityDefs(defs)
+    hasStagedChangesRef.current = true
     showToast('info', newParentId ? `Moved under ${humanizeId(newParentId)} — save to persist` : `"${humanizeId(childId)}" is now a root type — save to persist`)
   }
 
   function handleUpdateContainmentEdgeTypes(newList: string[]) {
     if (!selectedOntology || isLocked) return
     setWorkingContainment(newList)
+    hasStagedChangesRef.current = true
     showToast('info', 'Containment edge types updated — save to persist')
   }
 
@@ -907,27 +916,31 @@ export function OntologySchemaPage() {
                         Details
                       </button>
                     )}
-                    <button
-                      onClick={handleExport}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-glass-border-hover hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-secondary transition-all"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Export
-                    </button>
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-glass-border-hover hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-secondary transition-all"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      Import
-                    </button>
-                    <button
-                      onClick={handleClone}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-indigo-300 hover:bg-indigo-500/[0.06] text-ink-secondary hover:text-indigo-600 transition-all"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                      Clone
-                    </button>
+                    {!isEditing && (
+                      <>
+                        <button
+                          onClick={handleExport}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-glass-border-hover hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-secondary transition-all"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          Export
+                        </button>
+                        <button
+                          onClick={() => fileInputRef.current?.click()}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-glass-border-hover hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-secondary transition-all"
+                        >
+                          <Upload className="w-3.5 h-3.5" />
+                          Import
+                        </button>
+                        <button
+                          onClick={handleClone}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-glass-border hover:border-indigo-300 hover:bg-indigo-500/[0.06] text-ink-secondary hover:text-indigo-600 transition-all"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                          Clone
+                        </button>
+                      </>
+                    )}
 
                     {isEditing ? (
                       <>
@@ -1040,7 +1053,7 @@ export function OntologySchemaPage() {
 
               {/* Tab content + editor panel */}
               <div className="flex-1 min-h-0 flex relative">
-                <div className={cn('min-w-0 overflow-y-auto', editorPanel ? 'flex-[2]' : 'flex-1')}>
+                <div className={cn('min-w-0 overflow-y-auto flex-1', editorPanel && 'mr-[440px]')}>
                   <AnimatePresence mode="wait">
                     <motion.div
                       key={activeTab}
@@ -1161,71 +1174,68 @@ export function OntologySchemaPage() {
                   </AnimatePresence>
                 </div>
 
-                {/* Editor slide-in with backdrop */}
+                {/* Backdrop — CSS transition with immediate pointer-events removal (fixes Safari AnimatePresence freeze) */}
+                <div
+                  className={cn(
+                    'fixed inset-0 bg-black/15 dark:bg-black/25 z-20 transition-opacity duration-200',
+                    editorPanel ? 'opacity-100' : 'opacity-0 pointer-events-none',
+                  )}
+                  onClick={() => setEditorPanel(null)}
+                />
+
+                {/* Editor slide-in panel */}
                 <AnimatePresence>
                   {editorPanel && (
-                    <>
-                      {/* Backdrop overlay */}
-                      <motion.div
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        transition={{ duration: 0.2 }}
-                        className="fixed inset-0 bg-black/15 dark:bg-black/25 z-20"
-                        onClick={() => setEditorPanel(null)}
-                      />
-
-                      {/* Panel */}
-                      <motion.div
-                        initial={{ x: 40, opacity: 0 }}
-                        animate={{ x: 0, opacity: 1 }}
-                        exit={{ x: 40, opacity: 0 }}
-                        transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-                        className="w-[440px] flex-shrink-0 border-l border-glass-border overflow-hidden flex flex-col relative z-30 bg-canvas-elevated"
-                      >
-                        {/* Editor header */}
-                        <div className="flex items-center justify-between px-5 py-3.5 border-b border-glass-border bg-gradient-to-r from-indigo-500/[0.04] to-transparent">
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            {editorPanel.kind === 'entity'
-                              ? <Box className="w-4 h-4 text-indigo-500 flex-shrink-0" />
-                              : <GitBranch className="w-4 h-4 text-indigo-500 flex-shrink-0" />}
-                            <span className="text-sm font-semibold text-ink truncate">{editorTitle}</span>
-                          </div>
-                          <button
-                            onClick={() => setEditorPanel(null)}
-                            className="p-1 rounded-md hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted hover:text-ink transition-colors flex-shrink-0"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
+                    <motion.div
+                      key="editor-panel"
+                      initial={{ x: 40, opacity: 0 }}
+                      animate={{ x: 0, opacity: 1 }}
+                      exit={{ x: 40, opacity: 0 }}
+                      transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+                      className="absolute top-0 bottom-0 right-0 w-[440px] border-l border-glass-border overflow-hidden flex flex-col z-30 bg-canvas-elevated"
+                    >
+                      {/* Editor header */}
+                      <div className="flex items-center justify-between px-5 py-3.5 border-b border-glass-border bg-gradient-to-r from-indigo-500/[0.04] to-transparent">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          {editorPanel.kind === 'entity'
+                            ? <Box className="w-4 h-4 text-indigo-500 flex-shrink-0" />
+                            : <GitBranch className="w-4 h-4 text-indigo-500 flex-shrink-0" />}
+                          <span className="text-sm font-semibold text-ink truncate">{editorTitle}</span>
                         </div>
+                        <button
+                          onClick={() => setEditorPanel(null)}
+                          className="p-1 rounded-md hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted hover:text-ink transition-colors flex-shrink-0"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
 
-                        {/* Saving overlay */}
-                        {isSaving && (
-                          <div className="absolute inset-0 bg-canvas/80 flex items-center justify-center z-10 backdrop-blur-sm">
-                            <Loader2 className="w-5 h-5 animate-spin text-accent-lineage" />
-                          </div>
-                        )}
+                      {/* Saving overlay */}
+                      {isSaving && (
+                        <div className="absolute inset-0 bg-canvas/80 flex items-center justify-center z-10 backdrop-blur-sm">
+                          <Loader2 className="w-5 h-5 animate-spin text-accent-lineage" />
+                        </div>
+                      )}
 
-                        {editorPanel.kind === 'entity' && (
-                          <EntityTypeEditor
-                            entityType={editorPanel.data}
-                            availableEntityTypes={entityTypes.map(et => ({ id: et.id, name: et.name }))}
-                            readOnly={isLocked}
-                            onSave={handleSaveEntityType}
-                            onCancel={() => setEditorPanel(null)}
-                          />
-                        )}
-                        {editorPanel.kind === 'rel' && (
-                          <RelationshipTypeEditor
-                            relType={editorPanel.data}
-                            availableEntityTypes={entityTypes.map(et => ({ id: et.id, name: et.name }))}
-                            readOnly={isLocked}
-                            onSave={handleSaveRelType as (rt: RelationshipTypeSchema & { isContainment?: boolean; isLineage?: boolean; category?: string; direction?: string }) => void}
-                            onCancel={() => setEditorPanel(null)}
-                          />
-                        )}
-                      </motion.div>
-                    </>
+                      {editorPanel.kind === 'entity' && (
+                        <EntityTypeEditor
+                          entityType={editorPanel.data}
+                          availableEntityTypes={entityTypes.map(et => ({ id: et.id, name: et.name }))}
+                          readOnly={isLocked}
+                          onSave={handleSaveEntityType}
+                          onCancel={() => setEditorPanel(null)}
+                        />
+                      )}
+                      {editorPanel.kind === 'rel' && (
+                        <RelationshipTypeEditor
+                          relType={editorPanel.data}
+                          availableEntityTypes={entityTypes.map(et => ({ id: et.id, name: et.name }))}
+                          readOnly={isLocked}
+                          onSave={handleSaveRelType as (rt: RelationshipTypeSchema & { isContainment?: boolean; isLineage?: boolean; category?: string; direction?: string }) => void}
+                          onCancel={() => setEditorPanel(null)}
+                        />
+                      )}
+                    </motion.div>
                   )}
                 </AnimatePresence>
               </div>

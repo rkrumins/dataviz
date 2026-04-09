@@ -71,7 +71,7 @@ export function EntityTypeEditor({ entityType, availableEntityTypes = [], readOn
   const canSave = form.name.trim() && form.id.trim()
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col flex-1 min-h-0">
       {/* Tabs — underline style matching page tabs */}
       <div className="flex items-center border-b border-glass-border px-4 shrink-0">
         {TAB_DEFS.map(t => {
