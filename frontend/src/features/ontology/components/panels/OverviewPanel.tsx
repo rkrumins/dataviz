@@ -32,6 +32,7 @@ import type { CoverageState } from '../../lib/ontology-types'
 import { fetchSchemaStats } from '../../lib/ontology-utils'
 import { formatCount, entityDefToSchema, relDefToSchema } from '../../lib/ontology-parsers'
 import { SchemaMinimapSVG } from '../SchemaMinimapSVG'
+import { SchemaHealthRing } from '../SchemaHealthRing'
 
 interface OverviewPanelProps {
   ontology: OntologyDefinitionResponse
@@ -183,7 +184,7 @@ export function OverviewPanel({
   return (
     <div className="space-y-8">
       {/* ── Status Banner + Schema Minimap ───────────────────────── */}
-      <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Status banner */}
         <div className={cn(
           'rounded-2xl border p-4 flex items-start gap-3',
@@ -203,6 +204,23 @@ export function OverviewPanel({
           <SchemaMinimapSVG
             entityTypes={minimapData.entities}
             relationships={minimapData.rels}
+          />
+        </div>
+
+        {/* Schema health score */}
+        <div className="rounded-2xl border border-glass-border bg-canvas-elevated/30 p-4 flex items-center justify-center">
+          <SchemaHealthRing
+            entityTypes={Object.entries((ontology.entityTypeDefinitions ?? {}) as Record<string, Record<string, unknown>>).map(([id, def]) => {
+              const s = entityDefToSchema(id, def)
+              return { id: s.id, name: s.name, description: s.description, visual: { icon: s.visual.icon, color: s.visual.color } }
+            })}
+            relationships={Object.entries((ontology.relationshipTypeDefinitions ?? {}) as Record<string, Record<string, unknown>>).map(([id, def]) => {
+              const s = relDefToSchema(id, def)
+              return { id: s.id, name: s.name, sourceTypes: s.sourceTypes, targetTypes: s.targetTypes }
+            })}
+            containmentCount={(ontology.containmentEdgeTypes ?? []).length}
+            coveragePercent={coverage ? Math.round(coverage.coveragePercent) : null}
+            onNavigateTab={onNavigateTab}
           />
         </div>
       </section>
