@@ -60,15 +60,6 @@ _PROVIDERS: List[ProviderCapabilities] = [
         supportsWriteBack=False,
         defaultPort=None,
     ),
-    ProviderCapabilities(
-        name="mock",
-        displayName="Mock (testing)",
-        supportsMultiGraph=False,
-        supportsLineage=True,
-        supportsContainment=True,
-        supportsWriteBack=True,
-        defaultPort=None,
-    ),
 ]
 
 

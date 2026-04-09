@@ -3,7 +3,6 @@ from typing import List, Optional, Set, Dict, Any
 from ..providers.falkordb_provider import FalkorDBProvider
 # Avoid circular import if possible, but context_engine is in same package
 from .context_engine import context_engine
-from ..models.graph import EdgeType, EntityType
 
 logger = logging.getLogger(__name__)
 

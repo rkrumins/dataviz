@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaStore } from '@/store/persona'
+import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { cn } from '@/lib/utils'
 
 interface DetailPanelProps {
@@ -33,23 +34,13 @@ export function DetailPanel({ isOpen, nodeId }: DetailPanelProps) {
     [nodes, nodeId]
   )
 
+  const colors = useEntityColorSet((node?.data.type as string) ?? '')
+
   if (!node) return null
 
   const label = mode === 'business'
     ? (node.data.businessLabel || node.data.label)
     : (node.data.technicalLabel || node.data.label)
-
-  const typeColors: Record<string, { bg: string; text: string; border: string }> = {
-    domain: { bg: 'bg-purple-500/10', text: 'text-purple-500', border: 'border-purple-500' },
-    app: { bg: 'bg-cyan-500/10', text: 'text-cyan-500', border: 'border-cyan-500' },
-    asset: { bg: 'bg-green-500/10', text: 'text-green-500', border: 'border-green-500' },
-    column: { bg: 'bg-indigo-500/10', text: 'text-indigo-500', border: 'border-indigo-500' },
-    dataset: { bg: 'bg-emerald-500/10', text: 'text-emerald-500', border: 'border-emerald-500' },
-    ghost: { bg: 'bg-slate-500/10', text: 'text-slate-500', border: 'border-slate-500' },
-  }
-  // Fallback for unknown types
-  const defaultColors = { bg: 'bg-gray-500/10', text: 'text-gray-500', border: 'border-gray-500' }
-  const colors = typeColors[node.data.type as string] ?? defaultColors
 
   return (
     <AnimatePresence>
@@ -69,10 +60,10 @@ export function DetailPanel({ isOpen, nodeId }: DetailPanelProps) {
             <div className="flex items-start justify-between gap-3">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">
-                  <span className={cn(
-                    "px-2 py-0.5 rounded text-2xs font-medium uppercase",
-                    colors.bg, colors.text
-                  )}>
+                  <span
+                    className="px-2 py-0.5 rounded text-2xs font-medium uppercase"
+                    style={{ backgroundColor: colors.bg, color: colors.text }}
+                  >
                     {node.data.type}
                   </span>
                   {node.data.confidence !== undefined && (
@@ -145,10 +136,8 @@ export function DetailPanel({ isOpen, nodeId }: DetailPanelProps) {
                   {node.data.classifications.map((tag) => (
                     <span
                       key={tag}
-                      className={cn(
-                        "px-2 py-1 rounded-lg text-xs font-medium",
-                        colors.bg, colors.text
-                      )}
+                      className="px-2 py-1 rounded-lg text-xs font-medium"
+                      style={{ backgroundColor: colors.bg, color: colors.text }}
                     >
                       {tag}
                     </span>

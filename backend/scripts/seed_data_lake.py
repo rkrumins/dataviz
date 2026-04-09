@@ -43,7 +43,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from backend.app.models.graph import EntityType, EdgeType, GraphEdge, GraphNode
+from backend.app.models.graph import GraphEdge, GraphNode
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("seed_data_lake")
@@ -808,7 +808,7 @@ class DataLakeBuilder:
         self.nodes: List[GraphNode] = []
         self.edges: List[GraphEdge] = []
         self.urn_index: Dict[str, GraphNode] = {}  # urn -> node
-        self.urn_to_label: Dict[str, str] = {}  # urn -> entity_type.value
+        self.urn_to_label: Dict[str, str] = {}  # urn -> entity_type string
         # Track column URNs by qualified path for lineage wiring
         # key = "layer.table.column" e.g. "ecommerce.customers.email"
         self.column_urn: Dict[str, str] = {}
@@ -825,17 +825,17 @@ class DataLakeBuilder:
         self.snowflake_urn: Optional[str] = None
         self.tableau_system: Optional[str] = None
 
-    def _lineage_edge_type(self) -> EdgeType:
+    def _lineage_edge_type(self) -> str:
         """TRANSFORMS for all column-level lineage."""
-        return EdgeType.TRANSFORMS
+        return "TRANSFORMS"
 
-    def _urn(self, entity_type: EntityType, name: str) -> str:
+    def _urn(self, entity_type: str, name: str) -> str:
         self._urn_counter += 1
         clean = name.lower().replace(" ", "_").replace("/", "_").replace(".", "_")[:60]
-        return f"urn:li:{entity_type.value}:{clean}_{self._urn_counter:08x}"
+        return f"urn:li:{entity_type}:{clean}_{self._urn_counter:08x}"
 
     def add_node(
-        self, entity_type: EntityType, name: str, parent_urn: str = None,
+        self, entity_type: str, name: str, parent_urn: str = None,
         description: str = None, layer: str = None, source_system: str = None,
         tags: List[str] = None, props: Dict[str, Any] = None,
     ) -> str:
@@ -858,16 +858,15 @@ class DataLakeBuilder:
         )
         self.nodes.append(node)
         self.urn_index[urn] = node
-        label = entity_type.value if hasattr(entity_type, "value") else str(entity_type)
-        self.urn_to_label[urn] = label
+        self.urn_to_label[urn] = entity_type
 
         if parent_urn:
-            self.add_edge(parent_urn, urn, EdgeType.CONTAINS)
+            self.add_edge(parent_urn, urn, "CONTAINS")
 
         return urn
 
     def add_edge(
-        self, source: str, target: str, edge_type: EdgeType,
+        self, source: str, target: str, edge_type: str,
         props: Dict[str, Any] = None, confidence: float = None,
     ):
         self._urn_counter += 1
@@ -893,7 +892,7 @@ class DataLakeBuilder:
         has_pii = False
         for col_name, dtype, nullable, is_pii, col_desc in columns:
             col_urn = self.add_node(
-                EntityType.SCHEMA_FIELD, col_name,
+                "schemaField", col_name,
                 parent_urn=ds_urn,
                 description=col_desc,
                 props={"dataType": dtype, "nullable": nullable},
@@ -903,7 +902,7 @@ class DataLakeBuilder:
             if is_pii:
                 has_pii = True
                 if "PII" in self.tag_urns:
-                    self.add_edge(col_urn, self.tag_urns["PII"], EdgeType.TAGGED_WITH)
+                    self.add_edge(col_urn, self.tag_urns["PII"], "TAGGED_WITH")
         return has_pii
 
     def build_governance(self):
@@ -912,7 +911,7 @@ class DataLakeBuilder:
 
         for tag_name, tag_desc in GOVERNANCE_TAGS:
             urn = self.add_node(
-                EntityType.TAG, tag_name,
+                "tag", tag_name,
                 description=tag_desc,
                 props={"category": "governance"},
             )
@@ -920,7 +919,7 @@ class DataLakeBuilder:
 
         for term_name, term_desc, domain in GLOSSARY_TERMS:
             urn = self.add_node(
-                EntityType.GLOSSARY_TERM, term_name,
+                "glossaryTerm", term_name,
                 description=term_desc,
                 props={"domain": domain},
             )
@@ -936,14 +935,14 @@ class DataLakeBuilder:
         """E-Commerce PostgreSQL: Platform → Container (db.schema) → Tables."""
         logger.info("  Source: E-Commerce PostgreSQL")
         platform = self.add_node(
-            EntityType.DATA_PLATFORM, "PostgreSQL",
+            "dataPlatform", "PostgreSQL",
             parent_urn=self.domain_urn,
             description="Open-source relational database",
             source_system="postgresql",
         )
         # Flatten server/database/schema into one container under dataPlatform
         schema_container = self.add_node(
-            EntityType.CONTAINER, "ecomm_prod.public",
+            "container", "ecomm_prod.public",
             parent_urn=platform,
             description="E-commerce transactional database — ecomm-prod-01.internal (AWS RDS, PostgreSQL 16)",
             layer="source", source_system="postgresql",
@@ -956,7 +955,7 @@ class DataLakeBuilder:
 
         for table_name, columns in ECOMMERCE_TABLES.items():
             ds_urn = self.add_node(
-                EntityType.DATASET, table_name,
+                "dataset", table_name,
                 parent_urn=schema_container,
                 description=f"ecomm_prod.public.{table_name}",
                 layer="source", source_system="postgresql",
@@ -966,19 +965,19 @@ class DataLakeBuilder:
             col_prefix = f"ecommerce.{table_name}"
             has_pii = self._add_table_columns("ecommerce", table_name, columns, ds_urn, "source", col_prefix)
             if has_pii and "GDPR-Regulated" in self.tag_urns:
-                self.add_edge(ds_urn, self.tag_urns["GDPR-Regulated"], EdgeType.TAGGED_WITH)
+                self.add_edge(ds_urn, self.tag_urns["GDPR-Regulated"], "TAGGED_WITH")
 
     def build_source_salesforce(self):
         """Salesforce CRM: Platform → Org → Objects."""
         logger.info("  Source: Salesforce CRM")
         platform = self.add_node(
-            EntityType.DATA_PLATFORM, "Salesforce",
+            "dataPlatform", "Salesforce",
             parent_urn=self.domain_urn,
             description="CRM platform (Sales Cloud)",
             source_system="salesforce",
         )
         org = self.add_node(
-            EntityType.CONTAINER, "acme-corp.my.salesforce.com",
+            "container", "acme-corp.my.salesforce.com",
             parent_urn=platform,
             description="Production Salesforce org (Enterprise edition)",
             layer="source", source_system="salesforce",
@@ -987,7 +986,7 @@ class DataLakeBuilder:
 
         for table_name, columns in CRM_TABLES.items():
             ds_urn = self.add_node(
-                EntityType.DATASET, table_name,
+                "dataset", table_name,
                 parent_urn=org,
                 description=f"Salesforce standard object: {table_name}",
                 layer="source", source_system="salesforce",
@@ -997,13 +996,13 @@ class DataLakeBuilder:
             col_prefix = f"crm.{table_name}"
             has_pii = self._add_table_columns("crm", table_name, columns, ds_urn, "source", col_prefix)
             if has_pii and "GDPR-Regulated" in self.tag_urns:
-                self.add_edge(ds_urn, self.tag_urns["GDPR-Regulated"], EdgeType.TAGGED_WITH)
+                self.add_edge(ds_urn, self.tag_urns["GDPR-Regulated"], "TAGGED_WITH")
 
     def build_source_sap(self):
         """SAP ERP: Platform → Container (system:module) → Tables."""
         logger.info("  Source: SAP ERP")
         platform = self.add_node(
-            EntityType.DATA_PLATFORM, "SAP ERP",
+            "dataPlatform", "SAP ERP",
             parent_urn=self.domain_urn,
             description="SAP ECC 6.0 on HANA",
             source_system="sap",
@@ -1020,14 +1019,14 @@ class DataLakeBuilder:
             mod_code, mod_desc = module_map[table_name]
             if mod_code not in module_urns:
                 module_urns[mod_code] = self.add_node(
-                    EntityType.CONTAINER, f"PRD-800:{mod_code}",
+                    "container", f"PRD-800:{mod_code}",
                     parent_urn=platform,
                     description=f"{mod_desc} — PRD-800 (client 800, SAP_BASIS 756, HANA 2.0)",
                     layer="source", source_system="sap",
                     props={"type": "sap_module", "sap_system": "PRD-800", "module": mod_code},
                 )
             ds_urn = self.add_node(
-                EntityType.DATASET, table_name,
+                "dataset", table_name,
                 parent_urn=module_urns[mod_code],
                 description=f"SAP table: {table_name}",
                 layer="source", source_system="sap",
@@ -1037,7 +1036,7 @@ class DataLakeBuilder:
             col_prefix = f"erp.{table_name}"
             has_pii = self._add_table_columns("erp", table_name, columns, ds_urn, "source", col_prefix)
             if has_pii and "GDPR-Regulated" in self.tag_urns:
-                self.add_edge(ds_urn, self.tag_urns["GDPR-Regulated"], EdgeType.TAGGED_WITH)
+                self.add_edge(ds_urn, self.tag_urns["GDPR-Regulated"], "TAGGED_WITH")
 
     # ── 2. Staging ──────────────────────────────────────────────────
     # AWS S3: Platform → Bucket → Prefix per source → Datasets
@@ -1047,7 +1046,7 @@ class DataLakeBuilder:
         logger.info("  Staging layer (raw landing zone)...")
 
         s3_platform = self.add_node(
-            EntityType.DATA_PLATFORM, "AWS S3",
+            "dataPlatform", "AWS S3",
             parent_urn=self.domain_urn,
             description="Amazon S3 object storage",
             source_system="aws_s3",
@@ -1055,7 +1054,7 @@ class DataLakeBuilder:
 
         # Airflow DAG for ingestion
         ingest_flow = self.add_node(
-            EntityType.DATA_FLOW, "Airflow: raw_ingestion_dag",
+            "dataFlow", "Airflow: raw_ingestion_dag",
             parent_urn=self.airflow_system,
             description="Airflow DAG: daily extract from all source systems → S3 staging",
             source_system="airflow",
@@ -1069,7 +1068,7 @@ class DataLakeBuilder:
         ]:
             # One container per source prefix directly under S3 dataPlatform (no nesting)
             source_prefix = self.add_node(
-                EntityType.CONTAINER, f"acme-data-lake/staging/{sys_key}",
+                "container", f"acme-data-lake/staging/{sys_key}",
                 parent_urn=s3_platform,
                 description=f"Raw data from {sys_label} source system (Parquet, date-partitioned)",
                 layer="staging", source_system="aws_s3",
@@ -1078,7 +1077,7 @@ class DataLakeBuilder:
 
             for table_name, columns in tables.items():
                 job = self.add_node(
-                    EntityType.DATA_JOB, f"extract_{sys_key}_{table_name}",
+                    "dataJob", f"extract_{sys_key}_{table_name}",
                     parent_urn=ingest_flow,
                     description=f"Full extract: {sys_key}.{table_name} → S3 Parquet",
                     source_system="airflow",
@@ -1086,25 +1085,25 @@ class DataLakeBuilder:
                 )
                 src_ds = self.dataset_urn.get(f"{sys_key}.{table_name}")
                 if src_ds:
-                    self.add_edge(job, src_ds, EdgeType.CONSUMES, confidence=1.0)
+                    self.add_edge(job, src_ds, "CONSUMES", confidence=1.0)
 
                 stg_ds = self.add_node(
-                    EntityType.DATASET, f"raw_{table_name}",
+                    "dataset", f"raw_{table_name}",
                     parent_urn=source_prefix,
                     description=f"Raw Parquet: {sys_key}.{table_name} with ingestion metadata",
                     layer="staging", source_system="airflow",
                     tags=["staging", "raw", "parquet"],
                 )
                 self.dataset_urn[f"staging.{sys_key}.{table_name}"] = stg_ds
-                self.add_edge(job, stg_ds, EdgeType.PRODUCES, confidence=1.0)
+                self.add_edge(job, stg_ds, "PRODUCES", confidence=1.0)
 
                 if "SLA-Critical" in self.tag_urns:
-                    self.add_edge(stg_ds, self.tag_urns["SLA-Critical"], EdgeType.TAGGED_WITH)
+                    self.add_edge(stg_ds, self.tag_urns["SLA-Critical"], "TAGGED_WITH")
 
                 # 1:1 column copy + lineage
                 for col_name, dtype, nullable, is_pii, col_desc in columns:
                     stg_col = self.add_node(
-                        EntityType.SCHEMA_FIELD, col_name,
+                        "schemaField", col_name,
                         parent_urn=stg_ds,
                         description=f"Raw copy: {col_desc}",
                         props={"dataType": dtype, "nullable": nullable},
@@ -1112,7 +1111,7 @@ class DataLakeBuilder:
                     self.column_urn[f"staging.{sys_key}.{table_name}.{col_name}"] = stg_col
                     src_col = self.column_urn.get(f"{sys_key}.{table_name}.{col_name}")
                     if src_col:
-                        self.add_edge(src_col, stg_col, EdgeType.TRANSFORMS, {"logic": "Parquet COPY (full extract)"}, confidence=1.0)
+                        self.add_edge(src_col, stg_col, "TRANSFORMS", {"logic": "Parquet COPY (full extract)"}, confidence=1.0)
 
                 # Metadata columns (no upstream lineage — generated by Airflow)
                 for meta_col, meta_type, meta_desc in [
@@ -1121,7 +1120,7 @@ class DataLakeBuilder:
                     ("_batch_id", "varchar(36)", "Airflow DAG run ID"),
                 ]:
                     self.add_node(
-                        EntityType.SCHEMA_FIELD, meta_col,
+                        "schemaField", meta_col,
                         parent_urn=stg_ds,
                         description=meta_desc,
                         props={"dataType": meta_type, "nullable": False},
@@ -1136,7 +1135,7 @@ class DataLakeBuilder:
         logger.info("  Bronze layer (immutable history)...")
 
         self.databricks_urn = self.add_node(
-            EntityType.SYSTEM, "Databricks",
+            "system", "Databricks",
             parent_urn=self.domain_urn,
             description="Databricks Lakehouse platform (Unity Catalog + Spark processing)",
             source_system="databricks",
@@ -1144,7 +1143,7 @@ class DataLakeBuilder:
         )
         # Flatten workspace/catalog/schema into one container per schema under system
         bronze_schema = self.add_node(
-            EntityType.CONTAINER, "data_lake.bronze",
+            "container", "data_lake.bronze",
             parent_urn=self.databricks_urn,
             description="Unity Catalog: data_lake.bronze — immutable, append-only raw data (Delta Lake)",
             layer="bronze", source_system="databricks",
@@ -1152,7 +1151,7 @@ class DataLakeBuilder:
         )
 
         bronze_flow = self.add_node(
-            EntityType.DATA_FLOW, "Spark: bronze_autoloader",
+            "dataFlow", "Spark: bronze_autoloader",
             parent_urn=self.databricks_urn,
             description="Databricks Auto Loader: S3 staging → Delta bronze (CloudFiles trigger)",
             source_system="databricks",
@@ -1162,7 +1161,7 @@ class DataLakeBuilder:
         for sys_key, tables in [("ecommerce", ECOMMERCE_TABLES), ("crm", CRM_TABLES), ("erp", ERP_TABLES)]:
             for table_name, columns in tables.items():
                 job = self.add_node(
-                    EntityType.DATA_JOB, f"bronze_{sys_key}_{table_name}",
+                    "dataJob", f"bronze_{sys_key}_{table_name}",
                     parent_urn=bronze_flow,
                     description=f"Auto Loader: append raw_{table_name} → bronze_{table_name} (Delta)",
                     source_system="databricks",
@@ -1171,22 +1170,22 @@ class DataLakeBuilder:
                 )
                 stg_ds = self.dataset_urn.get(f"staging.{sys_key}.{table_name}")
                 if stg_ds:
-                    self.add_edge(job, stg_ds, EdgeType.CONSUMES, confidence=1.0)
+                    self.add_edge(job, stg_ds, "CONSUMES", confidence=1.0)
 
                 brz_ds = self.add_node(
-                    EntityType.DATASET, f"bronze_{table_name}",
+                    "dataset", f"bronze_{table_name}",
                     parent_urn=bronze_schema,
                     description=f"data_lake.bronze.bronze_{table_name} — immutable history of {sys_key}.{table_name}",
                     layer="bronze", source_system="databricks",
                     tags=["bronze", "delta", "append-only"],
                 )
                 self.dataset_urn[f"bronze.{sys_key}.{table_name}"] = brz_ds
-                self.add_edge(job, brz_ds, EdgeType.PRODUCES, confidence=1.0)
+                self.add_edge(job, brz_ds, "PRODUCES", confidence=1.0)
 
                 # 1:1 column lineage staging → bronze
                 for col_name, dtype, nullable, is_pii, col_desc in columns:
                     brz_col = self.add_node(
-                        EntityType.SCHEMA_FIELD, col_name,
+                        "schemaField", col_name,
                         parent_urn=brz_ds,
                         description=col_desc,
                         props={"dataType": dtype, "nullable": nullable},
@@ -1194,7 +1193,7 @@ class DataLakeBuilder:
                     self.column_urn[f"bronze.{sys_key}.{table_name}.{col_name}"] = brz_col
                     stg_col = self.column_urn.get(f"staging.{sys_key}.{table_name}.{col_name}")
                     if stg_col:
-                        self.add_edge(stg_col, brz_col, EdgeType.TRANSFORMS, {"logic": "Delta APPEND (schema on read)"}, confidence=1.0)
+                        self.add_edge(stg_col, brz_col, "TRANSFORMS", {"logic": "Delta APPEND (schema on read)"}, confidence=1.0)
 
                 # Bronze-specific metadata columns
                 for meta_col, meta_type, meta_desc in [
@@ -1203,7 +1202,7 @@ class DataLakeBuilder:
                     ("_row_hash", "varchar(64)", "SHA256 of business key columns (dedup reference)"),
                 ]:
                     self.add_node(
-                        EntityType.SCHEMA_FIELD, meta_col,
+                        "schemaField", meta_col,
                         parent_urn=brz_ds,
                         description=meta_desc,
                         props={"dataType": meta_type, "nullable": False},
@@ -1218,7 +1217,7 @@ class DataLakeBuilder:
         logger.info("  Silver layer (cleaned + transformed)...")
 
         silver_schema = self.add_node(
-            EntityType.CONTAINER, "data_lake.silver",
+            "container", "data_lake.silver",
             parent_urn=self.databricks_urn,
             description="Unity Catalog: data_lake.silver — cleaned, typed, deduplicated (Delta, MERGE upserts)",
             layer="silver", source_system="databricks",
@@ -1227,7 +1226,7 @@ class DataLakeBuilder:
         )
 
         dbt_silver_flow = self.add_node(
-            EntityType.DATA_FLOW, "dbt: silver_transforms",
+            "dataFlow", "dbt: silver_transforms",
             parent_urn=self.dbt_system,
             description="dbt project: bronze → silver (cleaning, dedup, type casting, business rules)",
             source_system="dbt",
@@ -1236,7 +1235,7 @@ class DataLakeBuilder:
 
         for silver_table, spec in SILVER_TRANSFORMS.items():
             job = self.add_node(
-                EntityType.DATA_JOB, f"dbt_model_{silver_table}",
+                "dataJob", f"dbt_model_{silver_table}",
                 parent_urn=dbt_silver_flow,
                 description=f"dbt incremental model: {silver_table}",
                 source_system="dbt",
@@ -1246,25 +1245,25 @@ class DataLakeBuilder:
             for sys_key, src_table in spec["sources"]:
                 brz_ds = self.dataset_urn.get(f"bronze.{sys_key}.{src_table}")
                 if brz_ds:
-                    self.add_edge(job, brz_ds, EdgeType.CONSUMES, confidence=0.95)
+                    self.add_edge(job, brz_ds, "CONSUMES", confidence=0.95)
 
             silver_ds = self.add_node(
-                EntityType.DATASET, silver_table,
+                "dataset", silver_table,
                 parent_urn=silver_schema,
                 description=f"data_lake.silver.{silver_table} — cleaned and deduplicated",
                 layer="silver", source_system="dbt",
                 tags=["silver", "cleaned", "dbt"],
             )
             self.dataset_urn[f"silver.{silver_table}"] = silver_ds
-            self.add_edge(job, silver_ds, EdgeType.PRODUCES, confidence=0.95)
+            self.add_edge(job, silver_ds, "PRODUCES", confidence=0.95)
 
             if "SLA-Critical" in self.tag_urns:
-                self.add_edge(silver_ds, self.tag_urns["SLA-Critical"], EdgeType.TAGGED_WITH)
+                self.add_edge(silver_ds, self.tag_urns["SLA-Critical"], "TAGGED_WITH")
 
             for col_name, dtype, source_refs, logic, col_desc in spec["columns"]:
                 is_pii = col_name.lower() in PII_COLUMN_NAMES
                 silver_col = self.add_node(
-                    EntityType.SCHEMA_FIELD, col_name,
+                    "schemaField", col_name,
                     parent_urn=silver_ds,
                     description=col_desc,
                     props={"dataType": dtype, "transformLogic": logic},
@@ -1272,7 +1271,7 @@ class DataLakeBuilder:
                 )
                 self.column_urn[f"silver.{silver_table}.{col_name}"] = silver_col
                 if is_pii and "PII" in self.tag_urns:
-                    self.add_edge(silver_col, self.tag_urns["PII"], EdgeType.TAGGED_WITH)
+                    self.add_edge(silver_col, self.tag_urns["PII"], "TAGGED_WITH")
 
                 for src_ref in source_refs:
                     src_table, src_col_name = src_ref
@@ -1288,7 +1287,7 @@ class DataLakeBuilder:
         logger.info("  Data quality tests (dbt test)...")
 
         test_flow = self.add_node(
-            EntityType.DATA_FLOW, "dbt: data_quality_tests",
+            "dataFlow", "dbt: data_quality_tests",
             parent_urn=self.dbt_system,
             description="dbt test suite: schema tests, data tests, freshness checks",
             source_system="dbt",
@@ -1308,7 +1307,7 @@ class DataLakeBuilder:
         ]
         for table, column, test_type, desc in silver_tests:
             test_job = self.add_node(
-                EntityType.DATA_JOB, f"test_{table}_{column}_{test_type}",
+                "dataJob", f"test_{table}_{column}_{test_type}",
                 parent_urn=test_flow,
                 description=desc,
                 source_system="dbt",
@@ -1316,7 +1315,7 @@ class DataLakeBuilder:
             )
             ds = self.dataset_urn.get(f"silver.{table}")
             if ds:
-                self.add_edge(test_job, ds, EdgeType.CONSUMES, confidence=1.0)
+                self.add_edge(test_job, ds, "CONSUMES", confidence=1.0)
 
         # Gold tests
         gold_tests = [
@@ -1331,7 +1330,7 @@ class DataLakeBuilder:
         ]
         for table, column, test_type, desc in gold_tests:
             test_job = self.add_node(
-                EntityType.DATA_JOB, f"test_{table}_{column}_{test_type}",
+                "dataJob", f"test_{table}_{column}_{test_type}",
                 parent_urn=test_flow,
                 description=desc,
                 source_system="dbt",
@@ -1339,7 +1338,7 @@ class DataLakeBuilder:
             )
             ds = self.dataset_urn.get(f"gold.{table}")
             if ds:
-                self.add_edge(test_job, ds, EdgeType.CONSUMES, confidence=1.0)
+                self.add_edge(test_job, ds, "CONSUMES", confidence=1.0)
 
         # Freshness tests (source freshness)
         freshness_tests = [
@@ -1349,7 +1348,7 @@ class DataLakeBuilder:
         ]
         for ds_key, col, max_hours, desc in freshness_tests:
             test_job = self.add_node(
-                EntityType.DATA_JOB, f"freshness_{ds_key.replace('.', '_')}",
+                "dataJob", f"freshness_{ds_key.replace('.', '_')}",
                 parent_urn=test_flow,
                 description=desc,
                 source_system="dbt",
@@ -1357,7 +1356,7 @@ class DataLakeBuilder:
             )
             ds = self.dataset_urn.get(ds_key)
             if ds:
-                self.add_edge(test_job, ds, EdgeType.CONSUMES, confidence=1.0)
+                self.add_edge(test_job, ds, "CONSUMES", confidence=1.0)
 
     # ── 5. Gold ─────────────────────────────────────────────────────
     # Snowflake: Platform → Account → Database → Schema → Tables
@@ -1367,7 +1366,7 @@ class DataLakeBuilder:
         logger.info("  Gold layer (dimensional model)...")
 
         self.snowflake_urn = self.add_node(
-            EntityType.DATA_PLATFORM, "Snowflake",
+            "dataPlatform", "Snowflake",
             parent_urn=self.domain_urn,
             description="Snowflake enterprise data warehouse",
             source_system="snowflake",
@@ -1375,7 +1374,7 @@ class DataLakeBuilder:
         )
         # Flatten account/database/schema into one container per schema under dataPlatform
         gold_schema = self.add_node(
-            EntityType.CONTAINER, "ANALYTICS.GOLD",
+            "container", "ANALYTICS.GOLD",
             parent_urn=self.snowflake_urn,
             description="Gold schema: conformed dimensional model (star schema) — ACME_CORP.ANALYTICS.GOLD",
             layer="gold", source_system="snowflake",
@@ -1383,7 +1382,7 @@ class DataLakeBuilder:
         )
 
         dbt_gold_flow = self.add_node(
-            EntityType.DATA_FLOW, "dbt: gold_dimensional_model",
+            "dataFlow", "dbt: gold_dimensional_model",
             parent_urn=self.dbt_system,
             description="dbt project: silver → gold star schema (dims + facts)",
             source_system="dbt",
@@ -1398,11 +1397,11 @@ class DataLakeBuilder:
         # Tag gold datasets as Certified
         for key, urn in self.dataset_urn.items():
             if key.startswith("gold.") and "Certified" in self.tag_urns:
-                self.add_edge(urn, self.tag_urns["Certified"], EdgeType.TAGGED_WITH)
+                self.add_edge(urn, self.tag_urns["Certified"], "TAGGED_WITH")
 
         # Wire glossary terms to domain
         for _, urn in self.glossary_urns.items():
-            self.add_edge(urn, self.domain_urn, EdgeType.BELONGS_TO)
+            self.add_edge(urn, self.domain_urn, "BELONGS_TO")
 
         # RELATED_TO between dims and their facts (star schema joins)
         for fact_name in GOLD_FACTS:
@@ -1412,12 +1411,12 @@ class DataLakeBuilder:
             for dim_name in GOLD_DIMENSIONS:
                 dim_urn = self.dataset_urn.get(f"gold.{dim_name}")
                 if dim_urn:
-                    self.add_edge(fact_urn, dim_urn, EdgeType.DEPENDS_ON, {"reason": "star schema FK join"})
+                    self.add_edge(fact_urn, dim_urn, "DEPENDS_ON", {"reason": "star schema FK join"})
 
     def _build_gold_table(self, table_name, spec, parent_urn, flow_urn, table_type):
         """Build a single gold dim/fact with full column lineage."""
         job = self.add_node(
-            EntityType.DATA_JOB, f"dbt_model_{table_name}",
+            "dataJob", f"dbt_model_{table_name}",
             parent_urn=flow_urn,
             description=f"dbt table model: ANALYTICS.GOLD.{table_name}",
             source_system="dbt",
@@ -1427,24 +1426,24 @@ class DataLakeBuilder:
         for src_table in spec["sources"]:
             src_ds = self.dataset_urn.get(f"silver.{src_table}") or self.dataset_urn.get(f"gold.{src_table}")
             if src_ds:
-                self.add_edge(job, src_ds, EdgeType.CONSUMES, confidence=0.9)
+                self.add_edge(job, src_ds, "CONSUMES", confidence=0.9)
 
         ds_urn = self.add_node(
-            EntityType.DATASET, table_name,
+            "dataset", table_name,
             parent_urn=parent_urn,
             description=spec["description"],
             layer="gold", source_system="dbt",
             tags=["gold", table_type, "dbt", "certified"],
         )
         self.dataset_urn[f"gold.{table_name}"] = ds_urn
-        self.add_edge(job, ds_urn, EdgeType.PRODUCES, confidence=0.9)
+        self.add_edge(job, ds_urn, "PRODUCES", confidence=0.9)
 
         if "SOX-Auditable" in self.tag_urns and table_type == "fact":
-            self.add_edge(ds_urn, self.tag_urns["SOX-Auditable"], EdgeType.TAGGED_WITH)
+            self.add_edge(ds_urn, self.tag_urns["SOX-Auditable"], "TAGGED_WITH")
 
         for col_name, dtype, source_refs, logic, col_desc in spec["columns"]:
             col_urn = self.add_node(
-                EntityType.SCHEMA_FIELD, col_name,
+                "schemaField", col_name,
                 parent_urn=ds_urn,
                 description=col_desc,
                 props={"dataType": dtype, "transformLogic": logic},
@@ -1457,7 +1456,7 @@ class DataLakeBuilder:
                 )
                 if src_col_urn:
                     conf = 1.0 if logic == "pass-through" else round(random.uniform(0.8, 0.95), 2)
-                    self.add_edge(src_col_urn, col_urn, EdgeType.TRANSFORMS, {"logic": logic}, confidence=conf)
+                    self.add_edge(src_col_urn, col_urn, "TRANSFORMS", {"logic": logic}, confidence=conf)
 
     # ── 6. Reporting / Marts ────────────────────────────────────────
     # Reporting schema in same Snowflake database; Tableau with site/project nesting
@@ -1468,7 +1467,7 @@ class DataLakeBuilder:
 
         # ── Snowflake REPORTING schema (sibling of GOLD) ────────────
         rpt_schema = self.add_node(
-            EntityType.CONTAINER, "ANALYTICS.REPORTING",
+            "container", "ANALYTICS.REPORTING",
             parent_urn=self.snowflake_urn,
             description="Reporting schema: pre-aggregated mart tables for BI consumption — ACME_CORP.ANALYTICS.REPORTING",
             layer="mart", source_system="snowflake",
@@ -1476,7 +1475,7 @@ class DataLakeBuilder:
         )
 
         dbt_rpt_flow = self.add_node(
-            EntityType.DATA_FLOW, "dbt: reporting_marts",
+            "dataFlow", "dbt: reporting_marts",
             parent_urn=self.dbt_system,
             description="dbt project: gold → reporting aggregated mart tables",
             source_system="dbt",
@@ -1485,7 +1484,7 @@ class DataLakeBuilder:
 
         for rpt_name, spec in REPORTING_TABLES.items():
             job = self.add_node(
-                EntityType.DATA_JOB, f"dbt_model_{rpt_name}",
+                "dataJob", f"dbt_model_{rpt_name}",
                 parent_urn=dbt_rpt_flow,
                 description=f"dbt table model: ANALYTICS.REPORTING.{rpt_name}",
                 source_system="dbt",
@@ -1494,24 +1493,24 @@ class DataLakeBuilder:
             for src_table in spec["sources"]:
                 src_ds = self.dataset_urn.get(f"gold.{src_table}")
                 if src_ds:
-                    self.add_edge(job, src_ds, EdgeType.CONSUMES, confidence=0.95)
+                    self.add_edge(job, src_ds, "CONSUMES", confidence=0.95)
 
             rpt_ds = self.add_node(
-                EntityType.DATASET, rpt_name,
+                "dataset", rpt_name,
                 parent_urn=rpt_schema,
                 description=spec["description"],
                 layer="mart", source_system="dbt",
                 tags=["mart", "aggregated", "dbt"],
             )
             self.dataset_urn[f"mart.{rpt_name}"] = rpt_ds
-            self.add_edge(job, rpt_ds, EdgeType.PRODUCES, confidence=0.95)
+            self.add_edge(job, rpt_ds, "PRODUCES", confidence=0.95)
 
             if "Certified" in self.tag_urns:
-                self.add_edge(rpt_ds, self.tag_urns["Certified"], EdgeType.TAGGED_WITH)
+                self.add_edge(rpt_ds, self.tag_urns["Certified"], "TAGGED_WITH")
 
             for col_name, dtype, source_refs, logic, col_desc in spec["columns"]:
                 rpt_col = self.add_node(
-                    EntityType.SCHEMA_FIELD, col_name,
+                    "schemaField", col_name,
                     parent_urn=rpt_ds,
                     description=col_desc,
                     props={"dataType": dtype, "aggregationLogic": logic},
@@ -1520,17 +1519,17 @@ class DataLakeBuilder:
                 for src_table, src_col in source_refs:
                     src_col_urn = self.column_urn.get(f"gold.{src_table}.{src_col}")
                     if src_col_urn:
-                        self.add_edge(src_col_urn, rpt_col, EdgeType.TRANSFORMS, {"logic": logic}, confidence=0.9)
+                        self.add_edge(src_col_urn, rpt_col, "TRANSFORMS", {"logic": logic}, confidence=0.9)
 
         # ── Tableau: System → Container (site/project flattened), System → Dashboard → Chart ──
         self.tableau_system = self.add_node(
-            EntityType.SYSTEM, "Tableau Cloud",
+            "system", "Tableau Cloud",
             parent_urn=self.domain_urn,
             description="Tableau Cloud BI platform",
             source_system="tableau",
         )
         self.add_node(
-            EntityType.CONTAINER, "acme-analytics / Enterprise Analytics",
+            "container", "acme-analytics / Enterprise Analytics",
             parent_urn=self.tableau_system,
             description="Production Tableau site and project for executive and operational dashboards",
             layer="consumption", source_system="tableau",
@@ -1540,7 +1539,7 @@ class DataLakeBuilder:
 
         for dash_name, dash_spec in DASHBOARDS.items():
             dash_urn = self.add_node(
-                EntityType.DASHBOARD, dash_name,
+                "dashboard", dash_name,
                 parent_urn=self.tableau_system,
                 description=dash_spec["description"],
                 layer="consumption", source_system="tableau",
@@ -1548,19 +1547,19 @@ class DataLakeBuilder:
             )
             for chart_name, source_table, source_cols in dash_spec["charts"]:
                 chart_urn = self.add_node(
-                    EntityType.CHART, chart_name,
+                    "chart", chart_name,
                     parent_urn=dash_urn,
                     description=f"Tableau worksheet: {chart_name}",
                     layer="consumption", source_system="tableau",
                 )
                 ds_urn = self.dataset_urn.get(f"mart.{source_table}") or self.dataset_urn.get(f"gold.{source_table}")
                 if ds_urn:
-                    self.add_edge(chart_urn, ds_urn, EdgeType.CONSUMES, confidence=1.0)
+                    self.add_edge(chart_urn, ds_urn, "CONSUMES", confidence=1.0)
                 for src_col in source_cols:
                     col_key = f"mart.{source_table}.{src_col}" if self.column_urn.get(f"mart.{source_table}.{src_col}") else f"gold.{source_table}.{src_col}"
                     src_col_urn = self.column_urn.get(col_key)
                     if src_col_urn:
-                        self.add_edge(chart_urn, src_col_urn, EdgeType.CONSUMES, {"logic": "Tableau Live Connection"}, confidence=1.0)
+                        self.add_edge(chart_urn, src_col_urn, "CONSUMES", {"logic": "Tableau Live Connection"}, confidence=1.0)
 
         # ── Scheduled Reports ───────────────────────────────────────
         report_defs = [
@@ -1572,7 +1571,7 @@ class DataLakeBuilder:
         ]
         for rpt_name, rpt_desc, source_table, schedule in report_defs:
             rpt_urn = self.add_node(
-                EntityType.REPORT, rpt_name,
+                "report", rpt_name,
                 parent_urn=self.domain_urn,
                 description=rpt_desc,
                 layer="consumption",
@@ -1580,14 +1579,14 @@ class DataLakeBuilder:
             )
             ds_urn = self.dataset_urn.get(f"mart.{source_table}")
             if ds_urn:
-                self.add_edge(rpt_urn, ds_urn, EdgeType.CONSUMES, confidence=1.0)
+                self.add_edge(rpt_urn, ds_urn, "CONSUMES", confidence=1.0)
             # Column-level CONSUMES for end-to-end traceability
             mart_prefix = f"mart.{source_table}."
             for col_key, col_urn in self.column_urn.items():
                 if col_key.startswith(mart_prefix):
-                    self.add_edge(rpt_urn, col_urn, EdgeType.CONSUMES, confidence=0.9)
+                    self.add_edge(rpt_urn, col_urn, "CONSUMES", confidence=0.9)
             if "SLA-Critical" in self.tag_urns and schedule in ("daily", "weekly"):
-                self.add_edge(rpt_urn, self.tag_urns["SLA-Critical"], EdgeType.TAGGED_WITH)
+                self.add_edge(rpt_urn, self.tag_urns["SLA-Critical"], "TAGGED_WITH")
 
         # ── Internal Applications ───────────────────────────────────
         for app_name, app_desc, sources in [
@@ -1596,7 +1595,7 @@ class DataLakeBuilder:
             ("Finance Workbench", "Accounting reconciliation and close tool", ["gold.fact_revenue", "mart.rpt_executive_kpis"]),
         ]:
             app_urn = self.add_node(
-                EntityType.APP, app_name,
+                "app", app_name,
                 parent_urn=self.domain_urn,
                 description=app_desc,
                 props={"team": app_name.split()[0].lower() + "-eng"},
@@ -1604,12 +1603,12 @@ class DataLakeBuilder:
             for src_key in sources:
                 ds_urn = self.dataset_urn.get(src_key)
                 if ds_urn:
-                    self.add_edge(app_urn, ds_urn, EdgeType.CONSUMES)
+                    self.add_edge(app_urn, ds_urn, "CONSUMES")
                     # Column-level CONSUMES for end-to-end traceability
                     col_prefix = f"{src_key}."
                     for col_key, col_urn in self.column_urn.items():
                         if col_key.startswith(col_prefix):
-                            self.add_edge(app_urn, col_urn, EdgeType.CONSUMES, confidence=0.8)
+                            self.add_edge(app_urn, col_urn, "CONSUMES", confidence=0.8)
 
     # ── Glossary Wiring ────────────────────────────────────────────
 
@@ -1674,7 +1673,7 @@ class DataLakeBuilder:
             for col_key in col_keys:
                 col_urn = self.column_urn.get(col_key)
                 if col_urn:
-                    self.add_edge(col_urn, term_urn, EdgeType.DEFINED_BY)
+                    self.add_edge(col_urn, term_urn, "DEFINED_BY")
                     wired += 1
         logger.info(f"    Wired {wired} DEFINED_BY edges")
 
@@ -1724,7 +1723,7 @@ class DataLakeBuilder:
         sub_urn = domain_urn
         if sub_urn is None:
             sub_urn = self.add_node(
-                EntityType.DOMAIN, sub_name,
+                "domain", sub_name,
                 parent_urn=self.domain_urn,
                 description=f"Business unit: {sub_name} ({sub_code})",
                 props={"subsidiary_code": sub_code},
@@ -1735,7 +1734,7 @@ class DataLakeBuilder:
         # Create a regional ingestion system under the subsidiary domain
         # (system can contain dataFlow; dataPlatform cannot)
         regional_ingest_system = self.add_node(
-            EntityType.SYSTEM, f"Data Ingestion ({sub_code})",
+            "system", f"Data Ingestion ({sub_code})",
             parent_urn=sub_urn,
             description=f"Ingestion orchestration for {sub_name}",
             source_system="airflow",
@@ -1743,7 +1742,7 @@ class DataLakeBuilder:
 
         # S3 staging platform for this subsidiary
         staging_platform = self.add_node(
-            EntityType.DATA_PLATFORM, f"S3 Staging ({sub_code})",
+            "dataPlatform", f"S3 Staging ({sub_code})",
             parent_urn=sub_urn,
             description=f"S3 staging landing zone for {sub_name}",
             source_system="aws_s3",
@@ -1764,14 +1763,14 @@ class DataLakeBuilder:
 
                 # dataPlatform directly under subsidiary domain (ontology: domain → dataPlatform)
                 platform_urn = self.add_node(
-                    EntityType.DATA_PLATFORM, f"{plat_name} ({sub_code}-{region})",
+                    "dataPlatform", f"{plat_name} ({sub_code}-{region})",
                     parent_urn=sub_urn,
                     description=f"{plat_name} instance for {sub_name} in {region}",
                     source_system=plat_source,
                 )
 
                 server_urn = self.add_node(
-                    EntityType.CONTAINER, f"{plat_source}-{sub_code.lower()}-{region}",
+                    "container", f"{plat_source}-{sub_code.lower()}-{region}",
                     parent_urn=platform_urn,
                     description=f"{plat_name} server/org ({region})",
                     layer="source", source_system=plat_source,
@@ -1790,7 +1789,7 @@ class DataLakeBuilder:
                 if with_lineage:
                     # dataFlow under system (ontology: system → dataFlow)
                     ingest_flow_urn = self.add_node(
-                        EntityType.DATA_FLOW,
+                        "dataFlow",
                         f"Airflow: ingest_{sub_code}_{region}_{plat_source}",
                         parent_urn=regional_ingest_system,
                         description=f"Ingestion pipeline: {plat_name} ({sub_code}/{region})",
@@ -1799,7 +1798,7 @@ class DataLakeBuilder:
                     )
                     # container under dataPlatform (ontology: dataPlatform → container)
                     staging_container_urn = self.add_node(
-                        EntityType.CONTAINER,
+                        "container",
                         f"staging_{sub_code}_{region}_{plat_source}",
                         parent_urn=staging_platform,
                         description=f"Staging zone for {plat_name} ({region})",
@@ -1816,7 +1815,7 @@ class DataLakeBuilder:
                     ns = f"{sub_code}.{region}.{plat_source}"
 
                     ds_urn = self.add_node(
-                        EntityType.DATASET, tbl_name,
+                        "dataset", tbl_name,
                         parent_urn=server_urn,
                         description=f"{plat_source}.{tbl_name} ({sub_code}/{region})",
                         layer="source", source_system=plat_source,
@@ -1828,7 +1827,7 @@ class DataLakeBuilder:
                     col_urns = []
                     for col_name, dtype, nullable, is_pii, col_desc in columns:
                         col_urn = self.add_node(
-                            EntityType.SCHEMA_FIELD, col_name,
+                            "schemaField", col_name,
                             parent_urn=ds_urn,
                             description=col_desc,
                             props={"dataType": dtype, "nullable": nullable},
@@ -1837,36 +1836,36 @@ class DataLakeBuilder:
                         self.column_urn[f"{ds_key}.{col_name}"] = col_urn
                         col_urns.append((col_name, col_urn, dtype, nullable, col_desc))
                         if is_pii and "PII" in self.tag_urns:
-                            self.add_edge(col_urn, self.tag_urns["PII"], EdgeType.TAGGED_WITH)
+                            self.add_edge(col_urn, self.tag_urns["PII"], "TAGGED_WITH")
 
                     # Build lineage chain: source → staging → bronze (with column lineage)
                     if with_lineage and ingest_flow_urn and staging_container_urn:
                         job_urn = self.add_node(
-                            EntityType.DATA_JOB,
+                            "dataJob",
                             f"extract_{ns}_{tbl_name}",
                             parent_urn=ingest_flow_urn,
                             description=f"Extract {tbl_name} from {plat_source}",
                             source_system="airflow",
                         )
-                        self.add_edge(job_urn, ds_urn, EdgeType.CONSUMES, confidence=1.0)
+                        self.add_edge(job_urn, ds_urn, "CONSUMES", confidence=1.0)
 
                         stg_ds = self.add_node(
-                            EntityType.DATASET, f"raw_{tbl_name}",
+                            "dataset", f"raw_{tbl_name}",
                             parent_urn=staging_container_urn,
                             description=f"Raw staging: {tbl_name}",
                             layer="staging", source_system="airflow",
                             tags=["staging", "raw"],
                         )
-                        self.add_edge(job_urn, stg_ds, EdgeType.PRODUCES, confidence=1.0)
+                        self.add_edge(job_urn, stg_ds, "PRODUCES", confidence=1.0)
 
                         for col_name, src_col_urn, dtype, nullable, col_desc in col_urns:
                             stg_col = self.add_node(
-                                EntityType.SCHEMA_FIELD, col_name,
+                                "schemaField", col_name,
                                 parent_urn=stg_ds,
                                 description=f"Raw copy: {col_desc}",
                                 props={"dataType": dtype, "nullable": nullable},
                             )
-                            self.add_edge(src_col_urn, stg_col, EdgeType.TRANSFORMS,
+                            self.add_edge(src_col_urn, stg_col, "TRANSFORMS",
                                           {"logic": "Parquet COPY"}, confidence=1.0)
 
     def _build_global_scale(self):
@@ -1926,7 +1925,7 @@ class DataLakeBuilder:
         sub_domain_urns: Dict[str, str] = {}
         for sub_name, sub_code, all_regions in selected_subs:
             sub_domain_urns[sub_code] = self.add_node(
-                EntityType.DOMAIN, sub_name,
+                "domain", sub_name,
                 parent_urn=self.domain_urn,
                 description=f"Business unit: {sub_name} ({sub_code})",
                 props={"subsidiary_code": sub_code},
@@ -1980,19 +1979,19 @@ class DataLakeBuilder:
         logger.info("=" * 60)
 
         self.domain_urn = self.add_node(
-            EntityType.DOMAIN, "Enterprise Data Lake",
+            "domain", "Enterprise Data Lake",
             description="Central enterprise data lake spanning e-commerce, CRM, and financial systems",
         )
 
         # Orchestration / processing systems (must be SYSTEM to contain dataFlow)
         self.airflow_system = self.add_node(
-            EntityType.SYSTEM, "Apache Airflow",
+            "system", "Apache Airflow",
             parent_urn=self.domain_urn,
             description="Apache Airflow orchestration — schedules and monitors data pipelines",
             source_system="airflow",
         )
         self.dbt_system = self.add_node(
-            EntityType.SYSTEM, "dbt Cloud",
+            "system", "dbt Cloud",
             parent_urn=self.domain_urn,
             description="dbt Cloud — SQL-based data transformation and testing platform",
             source_system="dbt",
@@ -2048,13 +2047,11 @@ class DataLakeBuilder:
 
         node_counts = Counter()
         for n in self.nodes:
-            label = n.entity_type.value if hasattr(n.entity_type, "value") else str(n.entity_type)
-            node_counts[label] += 1
+            node_counts[n.entity_type] += 1
 
         edge_counts = Counter()
         for e in self.edges:
-            etype = e.edge_type.value if hasattr(e.edge_type, "value") else str(e.edge_type)
-            edge_counts[etype] += 1
+            edge_counts[e.edge_type] += 1
 
         logger.info("  Node breakdown:")
         for label, count in sorted(node_counts.items(), key=lambda x: -x[1]):
@@ -2094,7 +2091,7 @@ async def push_to_falkordb(builder: DataLakeBuilder, graph_name: str = "data_lak
     # ── 1. Group nodes by label ─────────────────────────────────────
     nodes_by_label: Dict[str, List[Dict]] = {}
     for node in builder.nodes:
-        label = node.entity_type.value if hasattr(node.entity_type, "value") else str(node.entity_type)
+        label = node.entity_type
         if label not in nodes_by_label:
             nodes_by_label[label] = []
         nodes_by_label[label].append({
@@ -2133,7 +2130,7 @@ async def push_to_falkordb(builder: DataLakeBuilder, graph_name: str = "data_lak
     # ── 3. Group edges by (src_label, tgt_label, edge_type) ─────────
     edges_grouped: Dict[Tuple[str, str, str], List[Dict]] = {}
     for edge in builder.edges:
-        etype = edge.edge_type.value if hasattr(edge.edge_type, "value") else str(edge.edge_type)
+        etype = edge.edge_type
         src_label = builder.urn_to_label.get(edge.source_urn)
         tgt_label = builder.urn_to_label.get(edge.target_urn)
         if not src_label or not tgt_label:

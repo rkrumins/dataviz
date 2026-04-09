@@ -42,7 +42,7 @@ from typing import Dict, List
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from backend.app.models.graph import GraphNode, GraphEdge, EntityType, EdgeType
+from backend.app.models.graph import GraphNode, GraphEdge
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("seed_falkordb")
@@ -841,11 +841,11 @@ class EnterpriseGraphBuilder:
         self.column_urn: Dict[str, str] = {}
         self.dataset_urn: Dict[str, str] = {}
 
-    def _urn(self, entity_type: EntityType, name: str) -> str:
+    def _urn(self, entity_type: str, name: str) -> str:
         clean = name.lower().replace(" ", "_").replace("/", "_").replace(".", "_")
-        return f"urn:li:{entity_type.value}:{clean}_{uuid.uuid4().hex[:8]}"
+        return f"urn:li:{entity_type}:{clean}_{uuid.uuid4().hex[:8]}"
 
-    def add_node(self, entity_type: EntityType, name: str, parent_urn: str = None,
+    def add_node(self, entity_type: str, name: str, parent_urn: str = None,
                  props: Dict = None) -> str:
         urn = self._urn(entity_type, name)
         self.nodes.append(GraphNode(
@@ -855,14 +855,14 @@ class EnterpriseGraphBuilder:
         if parent_urn:
             self.edges.append(GraphEdge(
                 id=f"contains-{parent_urn}-{urn}", sourceUrn=parent_urn,
-                targetUrn=urn, edgeType=EdgeType.CONTAINS, properties={},
+                targetUrn=urn, edgeType="CONTAINS", properties={},
             ))
         return urn
 
     def add_lineage(self, source_urn: str, target_urn: str, logic: str):
         self.edges.append(GraphEdge(
             id=f"transforms-{source_urn}-{target_urn}", sourceUrn=source_urn,
-            targetUrn=target_urn, edgeType=EdgeType.TRANSFORMS,
+            targetUrn=target_urn, edgeType="TRANSFORMS",
             properties={"logic": logic},
         ))
 
@@ -874,10 +874,10 @@ class EnterpriseGraphBuilder:
         for sys_cfg in SOURCES.values():
             d = sys_cfg["domain"]
             if d not in domains:
-                domains[d] = self.add_node(EntityType.DOMAIN, d)
+                domains[d] = self.add_node("domain", d)
 
         # Snowflake = shared DWH/Lake platform
-        snowflake = self.add_node(EntityType.DATA_PLATFORM, "Snowflake",
+        snowflake = self.add_node("dataPlatform", "Snowflake",
                                    props={"type": "cloud_data_warehouse"})
 
         # ── 1. Source Systems (× breadth) ────────────────────────────
@@ -885,22 +885,22 @@ class EnterpriseGraphBuilder:
             suffix = f"_r{b_idx}" if self.breadth > 1 else ""
             for sys_key, sys_cfg in SOURCES.items():
                 domain_urn = domains[sys_cfg["domain"]]
-                plat = self.add_node(EntityType.DATA_PLATFORM,
+                plat = self.add_node("dataPlatform",
                                       f"{sys_cfg['platform']}{suffix}",
                                       parent_urn=domain_urn,
                                       props={"type": "source_system"})
-                cont = self.add_node(EntityType.CONTAINER,
+                cont = self.add_node("container",
                                       f"{sys_cfg['container']}{suffix}",
                                       parent_urn=plat)
 
                 for tbl_name, columns in sys_cfg["tables"].items():
-                    ds = self.add_node(EntityType.DATASET, f"{tbl_name}{suffix}",
+                    ds = self.add_node("dataset", f"{tbl_name}{suffix}",
                                         parent_urn=cont,
                                         props={"layer": "source", "system": sys_key})
                     self.dataset_urn[f"{sys_key}.{tbl_name}{suffix}"] = ds
 
                     for col_name, col_type, nullable, is_pii, desc in columns:
-                        col = self.add_node(EntityType.SCHEMA_FIELD, col_name,
+                        col = self.add_node("schemaField", col_name,
                                              parent_urn=ds,
                                              props={"dataType": col_type, "nullable": nullable,
                                                     "isPii": is_pii, "description": desc})
@@ -911,7 +911,7 @@ class EnterpriseGraphBuilder:
                             self.column_urn[f"{key}{suffix}"] = col
 
         # ── 2. Silver (in Snowflake) ─────────────────────────────────
-        silver_cont = self.add_node(EntityType.CONTAINER, "SILVER",
+        silver_cont = self.add_node("container", "SILVER",
                                      parent_urn=snowflake,
                                      props={"layer": "silver", "schema": "clean"})
         self._build_transform_layer(SILVER, silver_cont)
@@ -921,13 +921,13 @@ class EnterpriseGraphBuilder:
             self._build_intermediate_tiers(SILVER, snowflake)
 
         # ── 4. Gold (in Snowflake) ───────────────────────────────────
-        gold_cont = self.add_node(EntityType.CONTAINER, "GOLD",
+        gold_cont = self.add_node("container", "GOLD",
                                     parent_urn=snowflake,
                                     props={"layer": "gold", "schema": "analytics"})
         self._build_transform_layer(GOLD, gold_cont)
 
         # ── 5. Reporting (in Snowflake) ──────────────────────────────
-        rpt_cont = self.add_node(EntityType.CONTAINER, "REPORTING",
+        rpt_cont = self.add_node("container", "REPORTING",
                                    parent_urn=snowflake,
                                    props={"layer": "reporting", "schema": "marts"})
         self._build_transform_layer(REPORTING, rpt_cont)
@@ -939,20 +939,20 @@ class EnterpriseGraphBuilder:
         if self.scale > 1:
             self._build_scale_filler()
 
-        lineage_n = sum(1 for e in self.edges if e.edge_type == EdgeType.TRANSFORMS)
-        contain_n = sum(1 for e in self.edges if e.edge_type == EdgeType.CONTAINS)
+        lineage_n = sum(1 for e in self.edges if e.edge_type == "TRANSFORMS")
+        contain_n = sum(1 for e in self.edges if e.edge_type == "CONTAINS")
         logger.info(f"Build complete: {len(self.nodes)} nodes, {len(self.edges)} edges "
                      f"(CONTAINS: {contain_n}, TRANSFORMS: {lineage_n})")
 
     def _build_transform_layer(self, transforms: Dict, container_urn: str):
         for table_name, spec in transforms.items():
-            ds = self.add_node(EntityType.DATASET, table_name, parent_urn=container_urn,
+            ds = self.add_node("dataset", table_name, parent_urn=container_urn,
                                 props={"description": spec.get("description", "")})
             self.dataset_urn[table_name] = ds
 
             for col_def in spec["columns"]:
                 col_name, col_type, upstream_refs, logic, desc = col_def
-                col = self.add_node(EntityType.SCHEMA_FIELD, col_name, parent_urn=ds,
+                col = self.add_node("schemaField", col_name, parent_urn=ds,
                                      props={"dataType": col_type, "description": desc,
                                             "transformLogic": logic})
                 self.column_urn[f"{table_name}.{col_name}"] = col
@@ -964,13 +964,13 @@ class EnterpriseGraphBuilder:
 
     def _build_intermediate_tiers(self, silver_transforms: Dict, snowflake_urn: str):
         for tier in range(1, self.depth):
-            cont = self.add_node(EntityType.CONTAINER, f"INTERMEDIATE_T{tier}",
+            cont = self.add_node("container", f"INTERMEDIATE_T{tier}",
                                   parent_urn=snowflake_urn,
                                   props={"layer": f"intermediate_t{tier}"})
 
             for table_name, spec in silver_transforms.items():
                 int_table = f"int_{table_name}_t{tier}"
-                ds = self.add_node(EntityType.DATASET, int_table, parent_urn=cont,
+                ds = self.add_node("dataset", int_table, parent_urn=cont,
                                     props={"description": f"Tier {tier} of {table_name}"})
                 self.dataset_urn[int_table] = ds
 
@@ -981,7 +981,7 @@ class EnterpriseGraphBuilder:
                     prev_table = table_name if tier == 1 else f"int_{table_name}_t{tier - 1}"
                     src_key = f"{prev_table}.{col_name}"
 
-                    col = self.add_node(EntityType.SCHEMA_FIELD, col_name, parent_urn=ds,
+                    col = self.add_node("schemaField", col_name, parent_urn=ds,
                                          props={"dataType": col_type, "description": desc})
                     new_key = f"{int_table}.{col_name}"
                     self.column_urn[new_key] = col
@@ -994,18 +994,18 @@ class EnterpriseGraphBuilder:
                         self.column_urn[f"{table_name}.{col_name}"] = col
 
     def _build_dashboards(self):
-        bi_plat = self.add_node(EntityType.DATA_PLATFORM, "Tableau",
+        bi_plat = self.add_node("dataPlatform", "Tableau",
                                  props={"type": "bi_platform"})
 
         for dash_name, dash_cfg in DASHBOARDS.items():
-            dash = self.add_node(EntityType.DASHBOARD, dash_name, parent_urn=bi_plat,
+            dash = self.add_node("dashboard", dash_name, parent_urn=bi_plat,
                                   props={"description": dash_cfg["description"]})
 
             for chart_name, source_table, chart_cols in dash_cfg["charts"]:
-                chart = self.add_node(EntityType.CHART, chart_name, parent_urn=dash)
+                chart = self.add_node("chart", chart_name, parent_urn=dash)
 
                 for col_name in chart_cols:
-                    field = self.add_node(EntityType.SCHEMA_FIELD, col_name,
+                    field = self.add_node("schemaField", col_name,
                                            parent_urn=chart,
                                            props={"dataType": "metric", "layer": "dashboard"})
                     src = self.column_urn.get(f"{source_table}.{col_name}")
@@ -1018,15 +1018,15 @@ class EnterpriseGraphBuilder:
         if current >= target:
             return
         logger.info(f"Adding scale filler: {current} → {target} nodes")
-        plat = self.add_node(EntityType.DATA_PLATFORM, "Legacy_Archive")
+        plat = self.add_node("dataPlatform", "Legacy_Archive")
         remaining = target - current
         n_cont = max(1, remaining // 110)
         for ci in range(n_cont):
-            cont = self.add_node(EntityType.CONTAINER, f"Archive_DB_{ci}", parent_urn=plat)
+            cont = self.add_node("container", f"Archive_DB_{ci}", parent_urn=plat)
             for di in range(10):
-                ds = self.add_node(EntityType.DATASET, f"Archive_Table_{ci}_{di}", parent_urn=cont)
+                ds = self.add_node("dataset", f"Archive_Table_{ci}_{di}", parent_urn=cont)
                 for fi in range(10):
-                    self.add_node(EntityType.SCHEMA_FIELD, f"col_{fi}", parent_urn=ds)
+                    self.add_node("schemaField", f"col_{fi}", parent_urn=ds)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

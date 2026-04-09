@@ -27,6 +27,7 @@ import '@xyflow/react/dist/style.css'
 import { AnimatePresence } from 'framer-motion'
 import { ArrowRight, ArrowDown, Loader2, GitBranch } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { generateColorFromType } from '@/lib/type-visuals'
 
 // Node/Edge components
 import { GhostNode } from './nodes/GhostNode'
@@ -259,13 +260,7 @@ export function LayeredLineageCanvas({
   const minimapNodeColor = useCallback((node: LineageNode) => {
     const entityType = schema?.entityTypes.find((et) => et.id === node.data.type)
     if (entityType) return entityType.visual.color
-    switch (node.data.type) {
-      case 'domain': return '#8b5cf6'
-      case 'app': return '#06b6d4'
-      case 'asset': return '#22c55e'
-      case 'ghost': return '#94a3b8'
-      default: return '#6366f1'
-    }
+    return generateColorFromType(node.data.type as string)
   }, [schema])
 
   // ── Render ────────────────────────────────────────────────────────────

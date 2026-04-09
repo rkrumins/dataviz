@@ -1,8 +1,5 @@
 # Re-export from common kernel — preserves all existing imports unchanged.
 from backend.common.models.graph import (
-    EntityType,
-    EdgeType,
-    Granularity,
     FilterOperator,
     GraphNode,
     GraphEdge,
@@ -44,7 +41,7 @@ from backend.common.models.graph import (
 )
 
 __all__ = [
-    "EntityType", "EdgeType", "Granularity", "FilterOperator",
+    "FilterOperator",
     "GraphNode", "GraphEdge",
     "PropertyFilter", "TagFilter", "TextFilter", "NodeQuery", "EdgeQuery",
     "LineageResult", "ContainmentResult", "ChildrenWithEdgesResult",

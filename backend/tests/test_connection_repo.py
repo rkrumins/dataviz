@@ -15,7 +15,7 @@ from backend.common.models.management import (
 def _make_create_req(**overrides) -> ConnectionCreateRequest:
     defaults = dict(
         name="test-connection",
-        provider_type=ProviderType.MOCK,
+        provider_type=ProviderType.FALKORDB,
         host="localhost",
         port=6379,
         graph_name="test-graph",
@@ -35,7 +35,7 @@ async def test_create_connection_returns_response(db_session):
 
     assert resp.id is not None
     assert resp.name == "test-connection"
-    assert resp.provider_type == ProviderType.MOCK
+    assert resp.provider_type == ProviderType.FALKORDB
     assert resp.host == "localhost"
     assert resp.port == 6379
     assert resp.graph_name == "test-graph"

@@ -54,7 +54,7 @@ from typing import Any, Dict, List, Tuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from backend.app.models.graph import EntityType, EdgeType, GraphEdge, GraphNode
+from backend.app.models.graph import GraphEdge, GraphNode
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("seed_platform_lineage")
@@ -835,12 +835,12 @@ class PlatformLineageBuilder:
 
     # ── Helpers ──────────────────────────────────────────────────────
 
-    def _urn(self, etype: EntityType, name: str) -> str:
+    def _urn(self, etype: str, name: str) -> str:
         self._counter += 1
         clean = name.lower().replace(" ", "_").replace("/", "_").replace(".", "_")[:60]
-        return f"urn:li:{etype.value}:{clean}_{self._counter:08x}"
+        return f"urn:li:{etype}:{clean}_{self._counter:08x}"
 
-    def node(self, etype: EntityType, name: str, parent: str = None,
+    def node(self, etype: str, name: str, parent: str = None,
              desc: str = None, layer: str = None, source: str = None,
              tags: List[str] = None, props: Dict[str, Any] = None) -> str:
         urn = self._urn(etype, name)
@@ -855,12 +855,12 @@ class PlatformLineageBuilder:
         )
         self.nodes.append(n)
         self.urn_index[urn] = n
-        self.urn_to_label[urn] = etype.value if hasattr(etype, "value") else str(etype)
+        self.urn_to_label[urn] = etype
         if parent:
-            self.edge(parent, urn, EdgeType.CONTAINS)
+            self.edge(parent, urn, "CONTAINS")
         return urn
 
-    def edge(self, src: str, tgt: str, etype: EdgeType,
+    def edge(self, src: str, tgt: str, etype: str,
              props: Dict[str, Any] = None, confidence: float = None):
         self._counter += 1
         e = GraphEdge(
@@ -878,14 +878,14 @@ class PlatformLineageBuilder:
             is_pii = col_def[2] if len(col_def) > 2 else False
             col_desc = col_def[3] if len(col_def) > 3 else col_name
             col_urn = self.node(
-                EntityType.SCHEMA_FIELD, col_name, parent=ds_urn,
+                "schemaField", col_name, parent=ds_urn,
                 desc=col_desc, props={"dataType": dtype},
                 tags=["pii"] if is_pii else [],
             )
             self.col[f"{table_key}.{col_name}"] = col_urn
             result.append((col_name, col_urn))
             if is_pii and "PII" in self.tag_urns:
-                self.edge(col_urn, self.tag_urns["PII"], EdgeType.TAGGED_WITH)
+                self.edge(col_urn, self.tag_urns["PII"], "TAGGED_WITH")
         return result
 
     # ── Build Steps ──────────────────────────────────────────────────
@@ -894,12 +894,12 @@ class PlatformLineageBuilder:
         logger.info("  Governance (tags + glossary)...")
         for tag_name, tag_desc in TAGS:
             self.tag_urns[tag_name] = self.node(
-                EntityType.TAG, tag_name, desc=tag_desc,
+                "tag", tag_name, desc=tag_desc,
                 props={"category": "governance"},
             )
         for term, desc, domain_area in GLOSSARY_TERMS:
             self.glossary_urns[term] = self.node(
-                EntityType.GLOSSARY_TERM, term, desc=desc,
+                "glossaryTerm", term, desc=desc,
                 props={"domain": domain_area},
             )
 
@@ -910,17 +910,17 @@ class PlatformLineageBuilder:
             for inst in src_def["instances"]:
                 inst_id = inst["id"]
                 platform = self.node(
-                    EntityType.DATA_PLATFORM, inst["name"], parent=domain,
+                    "dataPlatform", inst["name"], parent=domain,
                     desc=inst["description"], source=src_key,
                     props={"region": inst.get("region", "")},
                 )
                 container = self.node(
-                    EntityType.CONTAINER, inst["container_name"], parent=platform,
+                    "container", inst["container_name"], parent=platform,
                     desc=inst["description"], layer="source", source=src_key,
                 )
                 for table_name, columns in src_def["tables"].items():
                     ds_urn = self.node(
-                        EntityType.DATASET, table_name, parent=container,
+                        "dataset", table_name, parent=container,
                         desc=f"{inst_id}.{table_name}", layer="source", source=src_key,
                         tags=["source"],
                     )
@@ -933,12 +933,12 @@ class PlatformLineageBuilder:
         logger.info("  Staging layer (S3 + Airflow)...")
 
         s3 = self.node(
-            EntityType.DATA_PLATFORM, "AWS S3", parent=domain,
+            "dataPlatform", "AWS S3", parent=domain,
             desc="Amazon S3 — data lake staging zone", source="aws_s3",
         )
 
         airflow = self.node(
-            EntityType.SYSTEM, "Apache Airflow", parent=domain,
+            "system", "Apache Airflow", parent=domain,
             desc="Airflow orchestration — schedules daily ingestion DAGs",
             source="airflow",
         )
@@ -950,7 +950,7 @@ class PlatformLineageBuilder:
                 region = inst.get("region", "")
 
                 staging_container = self.node(
-                    EntityType.CONTAINER, f"acme-data-lake/staging/{inst_id}",
+                    "container", f"acme-data-lake/staging/{inst_id}",
                     parent=s3,
                     desc=f"Raw landing zone for {inst['name']} ({region})",
                     layer="staging", source="aws_s3",
@@ -958,7 +958,7 @@ class PlatformLineageBuilder:
                 )
 
                 ingest_flow = self.node(
-                    EntityType.DATA_FLOW, f"ingest_{inst_id}", parent=airflow,
+                    "dataFlow", f"ingest_{inst_id}", parent=airflow,
                     desc=f"Daily extract: {inst['name']} → S3 staging",
                     source="airflow",
                     props={"schedule": "0 4 * * *", "region": region},
@@ -966,28 +966,28 @@ class PlatformLineageBuilder:
 
                 for table_name, columns in src_def["tables"].items():
                     job = self.node(
-                        EntityType.DATA_JOB, f"extract_{inst_id}_{table_name}",
+                        "dataJob", f"extract_{inst_id}_{table_name}",
                         parent=ingest_flow,
                         desc=f"Extract {inst_id}.{table_name} → S3 Parquet",
                         source="airflow",
                     )
                     src_ds = self.ds.get(f"source.{inst_id}.{table_name}")
                     if src_ds:
-                        self.edge(job, src_ds, EdgeType.CONSUMES)
+                        self.edge(job, src_ds, "CONSUMES")
 
                     stg_ds = self.node(
-                        EntityType.DATASET, f"raw_{table_name}", parent=staging_container,
+                        "dataset", f"raw_{table_name}", parent=staging_container,
                         desc=f"Raw copy of {inst_id}.{table_name}",
                         layer="staging", source="aws_s3",
                         tags=["staging", "raw"],
                     )
                     self.ds[f"staging.{inst_id}.{table_name}"] = stg_ds
-                    self.edge(job, stg_ds, EdgeType.PRODUCES)
+                    self.edge(job, stg_ds, "PRODUCES")
 
                     # Column-level: source → staging (1:1 pass-through)
                     for col_name, dtype, is_pii, col_desc in columns:
                         stg_col = self.node(
-                            EntityType.SCHEMA_FIELD, col_name, parent=stg_ds,
+                            "schemaField", col_name, parent=stg_ds,
                             desc=f"Raw copy: {col_desc}",
                             props={"dataType": dtype},
                             tags=["pii"] if is_pii else [],
@@ -995,7 +995,7 @@ class PlatformLineageBuilder:
                         self.col[f"staging.{inst_id}.{table_name}.{col_name}"] = stg_col
                         src_col = self.col.get(f"source.{inst_id}.{table_name}.{col_name}")
                         if src_col:
-                            self.edge(src_col, stg_col, EdgeType.TRANSFORMS,
+                            self.edge(src_col, stg_col, "TRANSFORMS",
                                       {"logic": "raw pass-through"})
 
     def build_bronze(self, databricks: str):
@@ -1003,7 +1003,7 @@ class PlatformLineageBuilder:
         logger.info("  Bronze layer (Databricks Delta)...")
 
         bronze_flow = self.node(
-            EntityType.DATA_FLOW, "bronze_autoloader", parent=databricks,
+            "dataFlow", "bronze_autoloader", parent=databricks,
             desc="Databricks Auto Loader: S3 staging → Delta bronze",
             source="databricks",
         )
@@ -1014,7 +1014,7 @@ class PlatformLineageBuilder:
                 inst_id = inst["id"]
 
                 bronze_container = self.node(
-                    EntityType.CONTAINER, f"data_lake.bronze.{inst_id}",
+                    "container", f"data_lake.bronze.{inst_id}",
                     parent=databricks,
                     desc=f"Bronze schema for {inst['name']} — immutable Delta Lake",
                     layer="bronze", source="databricks",
@@ -1022,34 +1022,34 @@ class PlatformLineageBuilder:
 
                 for table_name, columns in src_def["tables"].items():
                     job = self.node(
-                        EntityType.DATA_JOB, f"bronze_{inst_id}_{table_name}",
+                        "dataJob", f"bronze_{inst_id}_{table_name}",
                         parent=bronze_flow,
                         desc=f"Auto Loader: {inst_id}.raw_{table_name} → bronze_{table_name}",
                         source="databricks",
                     )
                     stg_ds = self.ds.get(f"staging.{inst_id}.{table_name}")
                     if stg_ds:
-                        self.edge(job, stg_ds, EdgeType.CONSUMES)
+                        self.edge(job, stg_ds, "CONSUMES")
 
                     brz_ds = self.node(
-                        EntityType.DATASET, f"bronze_{table_name}", parent=bronze_container,
+                        "dataset", f"bronze_{table_name}", parent=bronze_container,
                         desc=f"Immutable history of {inst_id}.{table_name}",
                         layer="bronze", source="databricks",
                         tags=["bronze", "delta"],
                     )
                     self.ds[f"bronze.{inst_id}.{table_name}"] = brz_ds
-                    self.edge(job, brz_ds, EdgeType.PRODUCES)
+                    self.edge(job, brz_ds, "PRODUCES")
 
                     for col_name, dtype, is_pii, col_desc in columns:
                         brz_col = self.node(
-                            EntityType.SCHEMA_FIELD, col_name, parent=brz_ds,
+                            "schemaField", col_name, parent=brz_ds,
                             desc=col_desc, props={"dataType": dtype},
                             tags=["pii"] if is_pii else [],
                         )
                         self.col[f"bronze.{inst_id}.{table_name}.{col_name}"] = brz_col
                         stg_col = self.col.get(f"staging.{inst_id}.{table_name}.{col_name}")
                         if stg_col:
-                            self.edge(stg_col, brz_col, EdgeType.TRANSFORMS,
+                            self.edge(stg_col, brz_col, "TRANSFORMS",
                                       {"logic": "append-only copy"})
 
     def build_silver(self, databricks: str, dbt: str):
@@ -1057,13 +1057,13 @@ class PlatformLineageBuilder:
         logger.info("  Silver layer (dbt transforms — consolidation point)...")
 
         silver_container = self.node(
-            EntityType.CONTAINER, "data_lake.silver", parent=databricks,
+            "container", "data_lake.silver", parent=databricks,
             desc="Silver schema — cleaned, typed, deduplicated (Delta, MERGE upserts). "
                  "Consolidation point: all regional instances merge here.",
             layer="silver", source="databricks",
         )
         silver_flow = self.node(
-            EntityType.DATA_FLOW, "silver_transforms", parent=dbt,
+            "dataFlow", "silver_transforms", parent=dbt,
             desc="dbt project: bronze → silver (cleaning, dedup, type casting, regional merge)",
             source="dbt",
         )
@@ -1076,7 +1076,7 @@ class PlatformLineageBuilder:
 
         for silver_table, spec in SILVER_TABLES.items():
             job = self.node(
-                EntityType.DATA_JOB, f"dbt_{silver_table}", parent=silver_flow,
+                "dataJob", f"dbt_{silver_table}", parent=silver_flow,
                 desc=f"dbt model: {silver_table} (UNION ALL across regions + dedup)",
                 source="dbt",
             )
@@ -1085,19 +1085,19 @@ class PlatformLineageBuilder:
                 for inst_id in all_instance_ids:
                     brz_ds = self.ds.get(f"bronze.{inst_id}.{src_table}")
                     if brz_ds:
-                        self.edge(job, brz_ds, EdgeType.CONSUMES)
+                        self.edge(job, brz_ds, "CONSUMES")
 
             silver_ds = self.node(
-                EntityType.DATASET, silver_table, parent=silver_container,
+                "dataset", silver_table, parent=silver_container,
                 desc=spec["description"], layer="silver", source="dbt",
                 tags=["silver", "cleaned", "consolidated"],
             )
             self.ds[f"silver.{silver_table}"] = silver_ds
-            self.edge(job, silver_ds, EdgeType.PRODUCES)
+            self.edge(job, silver_ds, "PRODUCES")
 
             for col_name, dtype, src_refs, logic, col_desc in spec["columns"]:
                 col_urn = self.node(
-                    EntityType.SCHEMA_FIELD, col_name, parent=silver_ds,
+                    "schemaField", col_name, parent=silver_ds,
                     desc=col_desc, props={"dataType": dtype, "transformLogic": logic},
                 )
                 self.col[f"silver.{silver_table}.{col_name}"] = col_urn
@@ -1106,19 +1106,19 @@ class PlatformLineageBuilder:
                     for inst_id in all_instance_ids:
                         brz_col = self.col.get(f"bronze.{inst_id}.{src_table}.{src_col}")
                         if brz_col:
-                            self.edge(brz_col, col_urn, EdgeType.TRANSFORMS, {"logic": logic})
+                            self.edge(brz_col, col_urn, "TRANSFORMS", {"logic": logic})
 
     def build_gold(self, snowflake: str, dbt: str):
         """Gold layer: star schema dims + facts in Snowflake."""
         logger.info("  Gold layer (Snowflake star schema)...")
 
         gold_container = self.node(
-            EntityType.CONTAINER, "ANALYTICS.GOLD", parent=snowflake,
+            "container", "ANALYTICS.GOLD", parent=snowflake,
             desc="Gold schema — conformed dimensional model (star schema)",
             layer="gold", source="snowflake",
         )
         gold_flow = self.node(
-            EntityType.DATA_FLOW, "gold_dimensional_model", parent=dbt,
+            "dataFlow", "gold_dimensional_model", parent=dbt,
             desc="dbt project: silver → gold star schema", source="dbt",
         )
 
@@ -1134,78 +1134,78 @@ class PlatformLineageBuilder:
                 fact_urn = self.ds.get(f"gold.{fact_name}")
                 dim_urn = self.ds.get(f"gold.{dim_name}")
                 if fact_urn and dim_urn:
-                    self.edge(fact_urn, dim_urn, EdgeType.DEPENDS_ON,
+                    self.edge(fact_urn, dim_urn, "DEPENDS_ON",
                               {"reason": "star schema FK join"})
 
     def _build_gold_table(self, table_name, spec, container, flow, src_layer):
         job = self.node(
-            EntityType.DATA_JOB, f"dbt_{table_name}", parent=flow,
+            "dataJob", f"dbt_{table_name}", parent=flow,
             desc=f"dbt model: {table_name}", source="dbt",
         )
         for src_table in spec["sources"]:
             src_ds = self.ds.get(f"{src_layer}.{src_table}")
             if src_ds:
-                self.edge(job, src_ds, EdgeType.CONSUMES)
+                self.edge(job, src_ds, "CONSUMES")
 
         ds_urn = self.node(
-            EntityType.DATASET, table_name, parent=container,
+            "dataset", table_name, parent=container,
             desc=spec["description"], layer="gold", source="snowflake",
             tags=["gold", "dimensional"],
         )
         self.ds[f"gold.{table_name}"] = ds_urn
-        self.edge(job, ds_urn, EdgeType.PRODUCES)
+        self.edge(job, ds_urn, "PRODUCES")
 
         if "Certified" in self.tag_urns:
-            self.edge(ds_urn, self.tag_urns["Certified"], EdgeType.TAGGED_WITH)
+            self.edge(ds_urn, self.tag_urns["Certified"], "TAGGED_WITH")
 
         for col_name, dtype, src_refs, logic, col_desc in spec["columns"]:
             col_urn = self.node(
-                EntityType.SCHEMA_FIELD, col_name, parent=ds_urn,
+                "schemaField", col_name, parent=ds_urn,
                 desc=col_desc, props={"dataType": dtype, "transformLogic": logic},
             )
             self.col[f"gold.{table_name}.{col_name}"] = col_urn
             for src_table, src_col in src_refs:
                 src_col_urn = self.col.get(f"{src_layer}.{src_table}.{src_col}")
                 if src_col_urn:
-                    self.edge(src_col_urn, col_urn, EdgeType.TRANSFORMS, {"logic": logic})
+                    self.edge(src_col_urn, col_urn, "TRANSFORMS", {"logic": logic})
 
     def build_reporting(self, snowflake: str, dbt: str):
         """Reporting mart tables + Tableau dashboards."""
         logger.info("  Reporting layer (marts + dashboards)...")
 
         rpt_container = self.node(
-            EntityType.CONTAINER, "ANALYTICS.REPORTING", parent=snowflake,
+            "container", "ANALYTICS.REPORTING", parent=snowflake,
             desc="Reporting schema — pre-aggregated mart tables for BI",
             layer="mart", source="snowflake",
         )
         rpt_flow = self.node(
-            EntityType.DATA_FLOW, "reporting_marts", parent=dbt,
+            "dataFlow", "reporting_marts", parent=dbt,
             desc="dbt project: gold → reporting marts", source="dbt",
         )
 
         for rpt_name, spec in REPORTING_TABLES.items():
             job = self.node(
-                EntityType.DATA_JOB, f"dbt_{rpt_name}", parent=rpt_flow,
+                "dataJob", f"dbt_{rpt_name}", parent=rpt_flow,
                 desc=f"dbt model: {rpt_name}", source="dbt",
             )
             for src_table in spec["sources"]:
                 src_ds = self.ds.get(f"gold.{src_table}")
                 if src_ds:
-                    self.edge(job, src_ds, EdgeType.CONSUMES)
+                    self.edge(job, src_ds, "CONSUMES")
 
             rpt_ds = self.node(
-                EntityType.DATASET, rpt_name, parent=rpt_container,
+                "dataset", rpt_name, parent=rpt_container,
                 desc=spec["description"], layer="mart", source="snowflake",
                 tags=["mart", "reporting"],
             )
             self.ds[f"mart.{rpt_name}"] = rpt_ds
-            self.edge(job, rpt_ds, EdgeType.PRODUCES)
+            self.edge(job, rpt_ds, "PRODUCES")
             if "Certified" in self.tag_urns:
-                self.edge(rpt_ds, self.tag_urns["Certified"], EdgeType.TAGGED_WITH)
+                self.edge(rpt_ds, self.tag_urns["Certified"], "TAGGED_WITH")
 
             for col_name, dtype, src_refs, logic, col_desc in spec["columns"]:
                 col_urn = self.node(
-                    EntityType.SCHEMA_FIELD, col_name, parent=rpt_ds,
+                    "schemaField", col_name, parent=rpt_ds,
                     desc=col_desc,
                     props={"dataType": dtype, "aggregationLogic": logic},
                 )
@@ -1213,7 +1213,7 @@ class PlatformLineageBuilder:
                 for src_table, src_col in src_refs:
                     src_col_urn = self.col.get(f"gold.{src_table}.{src_col}")
                     if src_col_urn:
-                        self.edge(src_col_urn, col_urn, EdgeType.TRANSFORMS,
+                        self.edge(src_col_urn, col_urn, "TRANSFORMS",
                                   {"logic": logic})
 
     def build_dashboards(self, domain: str):
@@ -1221,36 +1221,36 @@ class PlatformLineageBuilder:
         logger.info("  Dashboards (Tableau)...")
 
         tableau = self.node(
-            EntityType.SYSTEM, "Tableau Cloud", parent=domain,
+            "system", "Tableau Cloud", parent=domain,
             desc="Tableau Cloud BI platform", source="tableau",
         )
         self.node(
-            EntityType.CONTAINER, "acme-analytics / Enterprise Analytics",
+            "container", "acme-analytics / Enterprise Analytics",
             parent=tableau, desc="Production Tableau site and project",
             layer="consumption", source="tableau",
         )
 
         for dash_name, dash_spec in DASHBOARDS.items():
             dash = self.node(
-                EntityType.DASHBOARD, dash_name, parent=tableau,
+                "dashboard", dash_name, parent=tableau,
                 desc=dash_spec["description"], layer="consumption",
                 source="tableau",
             )
             for chart_name, source_table, source_cols in dash_spec["charts"]:
                 chart = self.node(
-                    EntityType.CHART, chart_name, parent=dash,
+                    "chart", chart_name, parent=dash,
                     desc=f"Tableau worksheet: {chart_name}",
                     source="tableau",
                 )
                 # chart CONSUMES the reporting dataset
                 rpt_ds = self.ds.get(f"mart.{source_table}")
                 if rpt_ds:
-                    self.edge(chart, rpt_ds, EdgeType.CONSUMES)
+                    self.edge(chart, rpt_ds, "CONSUMES")
                 # chart CONSUMES each referenced column
                 for col_name in source_cols:
                     col_urn = self.col.get(f"mart.{source_table}.{col_name}")
                     if col_urn:
-                        self.edge(chart, col_urn, EdgeType.CONSUMES)
+                        self.edge(chart, col_urn, "CONSUMES")
 
     def build_glossary_wiring(self):
         """Wire glossary terms to relevant columns via DEFINED_BY."""
@@ -1269,7 +1269,7 @@ class PlatformLineageBuilder:
             for path in col_paths:
                 col_urn = self.col.get(path)
                 if col_urn:
-                    self.edge(col_urn, term_urn, EdgeType.DEFINED_BY)
+                    self.edge(col_urn, term_urn, "DEFINED_BY")
                     count += 1
         logger.info(f"    Wired {count} DEFINED_BY edges")
 
@@ -1287,7 +1287,7 @@ class PlatformLineageBuilder:
 
         # Root domain
         enterprise = self.node(
-            EntityType.DOMAIN, "Enterprise Data Platform",
+            "domain", "Enterprise Data Platform",
             desc="End-to-end data platform: sources → warehouse → reporting",
         )
 
@@ -1300,7 +1300,7 @@ class PlatformLineageBuilder:
                     bu_name = f"{bu_name} {bu_idx // len(_BU_NAMES) + 1}"
                 logger.info(f"  ── Business Unit: {bu_name} ──")
                 domain = self.node(
-                    EntityType.DOMAIN, bu_name,
+                    "domain", bu_name,
                     desc=f"Business unit: {bu_name}",
                 )
                 # BU domain is peer to enterprise (both are root domains)
@@ -1310,18 +1310,18 @@ class PlatformLineageBuilder:
 
             # Shared systems (per BU so containment is correct)
             dbt = self.node(
-                EntityType.SYSTEM, "dbt Cloud" if business_units == 1 else f"dbt Cloud ({bu_name})",
+                "system", "dbt Cloud" if business_units == 1 else f"dbt Cloud ({bu_name})",
                 parent=domain,
                 desc="dbt Cloud — SQL-based transformation platform", source="dbt",
             )
             databricks = self.node(
-                EntityType.SYSTEM, "Databricks" if business_units == 1 else f"Databricks ({bu_name})",
+                "system", "Databricks" if business_units == 1 else f"Databricks ({bu_name})",
                 parent=domain,
                 desc="Databricks Lakehouse — Unity Catalog + Spark processing",
                 source="databricks",
             )
             snowflake = self.node(
-                EntityType.DATA_PLATFORM, "Snowflake" if business_units == 1 else f"Snowflake ({bu_name})",
+                "dataPlatform", "Snowflake" if business_units == 1 else f"Snowflake ({bu_name})",
                 parent=domain,
                 desc="Snowflake enterprise data warehouse", source="snowflake",
             )
@@ -1345,10 +1345,10 @@ class PlatformLineageBuilder:
         from collections import Counter
         nc = Counter()
         for n in self.nodes:
-            nc[n.entity_type.value if hasattr(n.entity_type, "value") else str(n.entity_type)] += 1
+            nc[n.entity_type] += 1
         ec = Counter()
         for e in self.edges:
-            ec[e.edge_type.value if hasattr(e.edge_type, "value") else str(e.edge_type)] += 1
+            ec[e.edge_type] += 1
         lc = Counter()
         for n in self.nodes:
             lc[n.layer_assignment or "(none)"] += 1
@@ -1380,7 +1380,7 @@ async def push_to_falkordb(builder: PlatformLineageBuilder, graph_name: str):
 
     nodes_by_label: Dict[str, List[Dict]] = {}
     for n in builder.nodes:
-        label = n.entity_type.value if hasattr(n.entity_type, "value") else str(n.entity_type)
+        label = n.entity_type
         nodes_by_label.setdefault(label, []).append({
             "urn": n.urn, "displayName": n.display_name or "",
             "qualifiedName": n.qualified_name or "",
@@ -1413,7 +1413,7 @@ async def push_to_falkordb(builder: PlatformLineageBuilder, graph_name: str):
 
     edges_grouped: Dict[Tuple[str, str, str], List[Dict]] = {}
     for e in builder.edges:
-        etype = e.edge_type.value if hasattr(e.edge_type, "value") else str(e.edge_type)
+        etype = e.edge_type
         sl = builder.urn_to_label.get(e.source_urn)
         tl = builder.urn_to_label.get(e.target_urn)
         if not sl or not tl:

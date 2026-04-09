@@ -17,18 +17,6 @@ import { useConnectionsStore } from '@/store/connections'
 import { useCanvasStore } from '@/store/canvas'
 import { useHealthStore } from '@/store/health'
 
-// MockProvider (+ its 113 kB demo-data.ts) is loaded lazily so it never
-// appears in the initial bundle. It is only fetched when the backend is
-// unreachable or when a component is rendered outside a GraphProvider.
-let _mockProvider: GraphDataProvider | null = null
-async function ensureMockProvider(): Promise<GraphDataProvider> {
-  if (!_mockProvider) {
-    const { getMockProvider } = await import('./MockProvider')
-    _mockProvider = getMockProvider()
-  }
-  return _mockProvider
-}
-
 // ============================================
 // Extended context value
 // ============================================
@@ -228,14 +216,9 @@ export function GraphProvider({ children }: GraphProviderProps) {
  */
 export function useGraphProvider(): GraphDataProvider {
     const context = useContext(GraphProviderContext)
-
     if (!context) {
-        // Trigger background load for next render cycle
-        void ensureMockProvider()
-        if (_mockProvider) return _mockProvider
         throw new Error('useGraphProvider must be used within a <GraphProvider>')
     }
-
     return context.provider
 }
 
@@ -244,25 +227,9 @@ export function useGraphProvider(): GraphDataProvider {
  */
 export function useGraphProviderContext(): GraphProviderContextValueExtended {
     const context = useContext(GraphProviderContext)
-
     if (!context) {
-        void ensureMockProvider()
-        if (!_mockProvider) throw new Error('useGraphProviderContext must be used within a <GraphProvider>')
-        return {
-            provider: _mockProvider,
-            isLoading: false,
-            error: null,
-            workspaceId: null,
-            setWorkspaceId: () => {},
-            dataSourceId: null,
-            setDataSourceId: () => {},
-            providerReady: true,
-            providerVersion: 0,
-            connectionId: null,
-            setConnectionId: () => {},
-        }
+        throw new Error('useGraphProviderContext must be used within a <GraphProvider>')
     }
-
     return context
 }
 
