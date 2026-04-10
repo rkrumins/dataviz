@@ -31,3 +31,32 @@ export async function fetchSchemaStats(
   const provider = new RemoteGraphProvider({ workspaceId, dataSourceId })
   return provider.getSchemaStats()
 }
+
+/**
+ * Generate a meaningful name for a suggested ontology based on available context.
+ * Prefers data source label, then workspace name, then dominant entity types.
+ */
+export function generateSuggestedName(
+  dataSourceLabel: string | null | undefined,
+  workspaceName: string | null | undefined,
+  entityTypeIds?: string[],
+): string {
+  if (dataSourceLabel) return `${dataSourceLabel} Schema`
+  if (workspaceName) return `${workspaceName} Schema`
+
+  if (entityTypeIds && entityTypeIds.length > 0) {
+    // Humanize the most common entity type as a domain hint
+    const first = entityTypeIds[0]
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase())
+    if (entityTypeIds.length <= 3) {
+      const names = entityTypeIds.map(id =>
+        id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+      )
+      return `${names.join(', ')} Schema`
+    }
+    return `${first} + ${entityTypeIds.length - 1} Types Schema`
+  }
+
+  return 'Graph Schema'
+}

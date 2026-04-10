@@ -1,5 +1,4 @@
-import { useState } from 'react'
-import { Save, Trash2, Loader2, AlertTriangle, Shield, Lock, Info, ShieldOff, GitMerge, RotateCcw } from 'lucide-react'
+import { Trash2, AlertTriangle, Shield, Lock, Info, ShieldOff, GitMerge, RotateCcw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { OntologyStatusBadge } from '../OntologyStatusBadge'
@@ -7,18 +6,29 @@ import { formatDate } from '../../lib/ontology-parsers'
 
 interface SettingsPanelProps {
   ontology: OntologyDefinitionResponse
-  onSaveDetails: (updates: { name: string; description: string; evolutionPolicy: string }) => void
+  /** Current working values (staged, survives tab switches). Null = no edits yet. */
+  workingDetails: { name: string; description: string; evolutionPolicy: string } | null
+  /** Called when user changes any field — stages the change. */
+  onUpdateDetails: (updates: { name: string; description: string; evolutionPolicy: string }) => void
   onDelete: () => void
-  isSaving: boolean
   assignmentCount: number
 }
 
-export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, assignmentCount }: SettingsPanelProps) {
-  const [name, setName] = useState(ontology.name)
-  const [description, setDescription] = useState(ontology.description ?? '')
-  const [evolutionPolicy, setEvolutionPolicy] = useState(ontology.evolutionPolicy ?? 'reject')
+export function SettingsPanel({ ontology, workingDetails, onUpdateDetails, onDelete, assignmentCount }: SettingsPanelProps) {
   const isLocked = ontology.isSystem || ontology.isPublished
-  const hasChanges = name !== ontology.name || description !== (ontology.description ?? '') || evolutionPolicy !== (ontology.evolutionPolicy ?? 'reject')
+
+  // Use working details if available, otherwise server state
+  const name = workingDetails?.name ?? ontology.name
+  const description = workingDetails?.description ?? (ontology.description ?? '')
+  const evolutionPolicy = workingDetails?.evolutionPolicy ?? (ontology.evolutionPolicy ?? 'reject')
+
+  function updateField(field: 'name' | 'description' | 'evolutionPolicy', value: string) {
+    onUpdateDetails({
+      name: field === 'name' ? value : name,
+      description: field === 'description' ? value : description,
+      evolutionPolicy: field === 'evolutionPolicy' ? value : evolutionPolicy,
+    })
+  }
 
   const policyOptions = [
     {
@@ -46,10 +56,6 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
       accentSelected: 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/30 ring-1 ring-indigo-500/20',
     },
   ]
-
-  function handleDelete() {
-    onDelete()
-  }
 
   return (
     <div className="space-y-8 max-w-2xl">
@@ -90,7 +96,7 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
               <input
                 type="text"
                 value={name}
-                onChange={e => setName(e.target.value)}
+                onChange={e => updateField('name', e.target.value)}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-all"
                 placeholder="Semantic layer name..."
               />
@@ -107,7 +113,7 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
             ) : (
               <textarea
                 value={description}
-                onChange={e => setDescription(e.target.value)}
+                onChange={e => updateField('description', e.target.value)}
                 rows={3}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-all resize-none"
                 placeholder="Describe the purpose and scope of this semantic layer..."
@@ -142,7 +148,7 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
             return (
               <button
                 key={opt.value}
-                onClick={() => !isLocked && setEvolutionPolicy(opt.value)}
+                onClick={() => !isLocked && updateField('evolutionPolicy', opt.value)}
                 disabled={isLocked}
                 className={cn(
                   'w-full text-left px-4 py-3.5 rounded-xl border-2 transition-all',
@@ -173,16 +179,11 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
         </div>
       </div>
 
-      {/* Save button */}
-      {!isLocked && hasChanges && (
-        <button
-          onClick={() => onSaveDetails({ name: name.trim(), description, evolutionPolicy })}
-          disabled={!name.trim() || isSaving}
-          className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors disabled:opacity-50 shadow-sm"
-        >
-          {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          Save Changes
-        </button>
+      {/* Note about saving */}
+      {workingDetails && (
+        <p className="text-xs text-ink-muted/60 italic">
+          Changes are staged — use &ldquo;Save All&rdquo; in the header to persist.
+        </p>
       )}
 
       {/* Danger Zone */}
@@ -202,7 +203,7 @@ export function SettingsPanel({ ontology, onSaveDetails, onDelete, isSaving, ass
             )}
           </p>
           <button
-            onClick={handleDelete}
+            onClick={onDelete}
             disabled={assignmentCount > 0}
             className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed text-red-600 border border-red-200 dark:border-red-800 hover:bg-red-50 dark:hover:bg-red-950/30"
           >
