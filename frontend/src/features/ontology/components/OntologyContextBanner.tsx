@@ -39,11 +39,22 @@ import { OntologyStatusBadge } from './OntologyStatusBadge'
 
 // ---------------------------------------------------------------------------
 // QuickAssignmentBar — compact bar showing current assignments as chips
-// with ability to assign to any data source across all workspaces.
+// with confirmation flow, usage stats, and assign picker.
 // ---------------------------------------------------------------------------
+
+interface AssignConfirmTarget {
+  wsId: string
+  wsName: string
+  dsId: string
+  dsLabel: string
+  currentOntologyName: string | null
+  viewCount: number | null
+  loading: boolean
+}
 
 function QuickAssignmentBar({
   workspaces,
+  ontologies,
   selectedOntologyId,
   isAssigning,
   onAssignToDataSource,
@@ -51,6 +62,7 @@ function QuickAssignmentBar({
   onRollOutToWorkspace,
 }: {
   workspaces: WorkspaceResponse[]
+  ontologies: OntologyDefinitionResponse[]
   selectedOntologyId: string
   isAssigning: boolean
   onAssignToDataSource: (wsId: string, dsId: string) => void
@@ -59,6 +71,8 @@ function QuickAssignmentBar({
 }) {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerSearch, setPickerSearch] = useState('')
+  const [confirmTarget, setConfirmTarget] = useState<AssignConfirmTarget | null>(null)
+  const [unassignTarget, setUnassignTarget] = useState<{ wsId: string; dsId: string; dsLabel: string } | null>(null)
 
   // Find all data sources currently using this ontology
   const assignments = useMemo(() => {
@@ -73,6 +87,13 @@ function QuickAssignmentBar({
     return result
   }, [workspaces, selectedOntologyId])
 
+  // Ontology name lookup
+  const ontologyNameMap = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const o of ontologies) m.set(o.id, o.name)
+    return m
+  }, [ontologies])
+
   // All data sources for the assignment picker
   const allDataSources = useMemo(() => {
     const q = pickerSearch.toLowerCase()
@@ -85,132 +106,267 @@ function QuickAssignmentBar({
     })).filter(ws => ws.filteredDs.length > 0)
   }, [workspaces, pickerSearch])
 
-  return (
-    <div className="flex items-center gap-2 px-5 py-2 border-t border-glass-border/40 bg-black/[0.01] dark:bg-white/[0.01]">
-      <span className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider flex-shrink-0">
-        Assigned to
-      </span>
+  /** Initiate assignment with confirmation check */
+  const initiateAssign = useCallback(async (wsId: string, wsName: string, dsId: string, dsLabel: string, currentOntologyId: string | null) => {
+    setPickerOpen(false)
+    if (!currentOntologyId) {
+      // No existing assignment — assign directly
+      onAssignToDataSource(wsId, dsId)
+      return
+    }
+    // Has existing assignment — show confirmation with view impact
+    const target: AssignConfirmTarget = {
+      wsId, wsName, dsId, dsLabel,
+      currentOntologyName: ontologyNameMap.get(currentOntologyId) ?? currentOntologyId,
+      viewCount: null,
+      loading: true,
+    }
+    setConfirmTarget(target)
+    try {
+      const views = await listViews({ workspaceId: wsId })
+      setConfirmTarget(prev => prev ? { ...prev, viewCount: views.length, loading: false } : null)
+    } catch {
+      setConfirmTarget(prev => prev ? { ...prev, viewCount: null, loading: false } : null)
+    }
+  }, [onAssignToDataSource, ontologyNameMap])
 
-      {/* Assignment chips */}
-      <div className="flex items-center gap-1.5 flex-wrap flex-1 min-w-0">
-        {assignments.length === 0 && (
-          <span className="text-[11px] text-ink-muted/50 italic">No data sources</span>
-        )}
-        {assignments.map(a => (
-          <span
-            key={`${a.wsId}-${a.dsId}`}
-            className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 group"
-          >
-            <Database className="w-2.5 h-2.5 opacity-60" />
-            <span className="truncate max-w-[120px]" title={`${a.wsName} / ${a.dsLabel}`}>
-              {a.dsLabel}
+  return (
+    <>
+      <div className="flex items-center gap-2 px-5 py-2.5 border-t border-glass-border/40 bg-black/[0.01] dark:bg-white/[0.01]">
+        <span className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider flex-shrink-0">
+          Assigned to
+        </span>
+
+        {/* Assignment chips */}
+        <div className="flex items-center gap-1.5 flex-wrap flex-1 min-w-0">
+          {assignments.length === 0 && (
+            <span className="text-[11px] text-ink-muted/50 italic">No data sources</span>
+          )}
+          {assignments.map(a => (
+            <span
+              key={`${a.wsId}-${a.dsId}`}
+              className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 group"
+            >
+              <Database className="w-2.5 h-2.5 opacity-60" />
+              <span className="truncate max-w-[120px]" title={`${a.wsName} / ${a.dsLabel}`}>
+                {a.dsLabel}
+              </span>
+              <span className="text-[9px] text-emerald-600/50 dark:text-emerald-500/50 hidden group-hover:inline ml-0.5">
+                {a.wsName}
+              </span>
+              {onUnassignFromDataSource && (
+                <button
+                  onClick={() => setUnassignTarget({ wsId: a.wsId, dsId: a.dsId, dsLabel: a.dsLabel })}
+                  disabled={isAssigning}
+                  className="p-0.5 rounded-full hover:bg-red-500/20 text-emerald-500 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 disabled:opacity-30"
+                  title="Unassign"
+                >
+                  <X className="w-2.5 h-2.5" />
+                </button>
+              )}
             </span>
-            {onUnassignFromDataSource && (
-              <button
-                onClick={() => onUnassignFromDataSource(a.wsId, a.dsId)}
-                disabled={isAssigning}
-                className="p-0.5 rounded-full hover:bg-red-500/20 text-emerald-500 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 disabled:opacity-30"
-                title="Unassign"
-              >
-                <X className="w-2.5 h-2.5" />
-              </button>
-            )}
-          </span>
-        ))}
+          ))}
+          {assignments.length > 0 && (
+            <span className="text-[10px] text-ink-muted/40 ml-1">
+              {assignments.length} data source{assignments.length !== 1 ? 's' : ''}
+            </span>
+          )}
+        </div>
+
+        {/* Assign button with picker */}
+        <Popover.Root open={pickerOpen} onOpenChange={setPickerOpen}>
+          <Popover.Trigger asChild>
+            <button
+              disabled={isAssigning}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/[0.08] hover:bg-indigo-500/[0.15] border border-indigo-500/20 transition-all disabled:opacity-50 flex-shrink-0"
+            >
+              {isAssigning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
+              Assign
+            </button>
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Content
+              className="w-[340px] bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in zoom-in-95"
+              sideOffset={6}
+              align="end"
+            >
+              {/* Search */}
+              <div className="p-3 border-b border-glass-border/50">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted/50" />
+                  <input
+                    type="text"
+                    value={pickerSearch}
+                    onChange={e => setPickerSearch(e.target.value)}
+                    placeholder="Search data sources..."
+                    className="w-full pl-9 pr-3 py-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-all"
+                    autoFocus
+                  />
+                </div>
+              </div>
+
+              {/* Workspace/DataSource tree */}
+              <div className="max-h-[320px] overflow-y-auto p-2">
+                {allDataSources.map(ws => (
+                  <div key={ws.id} className="mb-1.5">
+                    <div className="flex items-center justify-between px-2 py-1.5">
+                      <span className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider truncate">
+                        {ws.name}
+                      </span>
+                      {onRollOutToWorkspace && (
+                        <button
+                          onClick={() => { onRollOutToWorkspace(ws.id); setPickerOpen(false) }}
+                          disabled={isAssigning}
+                          className="text-[9px] font-semibold text-indigo-500 hover:text-indigo-600 transition-colors disabled:opacity-50"
+                        >
+                          Assign all
+                        </button>
+                      )}
+                    </div>
+                    {ws.filteredDs.map(ds => {
+                      const isAssigned = ds.ontologyId === selectedOntologyId
+                      const hasOtherOntology = !!ds.ontologyId && !isAssigned
+                      const otherName = hasOtherOntology ? ontologyNameMap.get(ds.ontologyId!) : null
+                      return (
+                        <button
+                          key={ds.id}
+                          onClick={() => {
+                            if (!isAssigned) {
+                              initiateAssign(ws.id, ws.name, ds.id, ds.label || ds.id, hasOtherOntology ? ds.ontologyId! : null)
+                            }
+                          }}
+                          disabled={isAssigning || isAssigned}
+                          className={cn(
+                            'w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-left transition-all',
+                            isAssigned
+                              ? 'bg-emerald-500/[0.06] text-emerald-700 dark:text-emerald-400'
+                              : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-secondary',
+                            (isAssigning || isAssigned) && 'cursor-default',
+                          )}
+                        >
+                          <Database className={cn('w-3.5 h-3.5 flex-shrink-0', isAssigned ? 'text-emerald-500' : hasOtherOntology ? 'text-amber-400' : 'text-ink-muted/50')} />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-medium truncate">{ds.label || ds.id}</p>
+                            {hasOtherOntology && (
+                              <p className="text-[10px] text-amber-500 mt-0.5 flex items-center gap-1">
+                                <AlertTriangle className="w-2.5 h-2.5" />
+                                Uses &ldquo;{otherName || 'another schema'}&rdquo;
+                              </p>
+                            )}
+                            {isAssigned && (
+                              <p className="text-[10px] text-emerald-500/70 mt-0.5">Currently assigned</p>
+                            )}
+                          </div>
+                          {isAssigned && <Check className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />}
+                        </button>
+                      )
+                    })}
+                  </div>
+                ))}
+                {allDataSources.length === 0 && (
+                  <p className="text-center text-xs text-ink-muted py-6">No data sources found</p>
+                )}
+              </div>
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
       </div>
 
-      {/* Assign button with picker */}
-      <Popover.Root open={pickerOpen} onOpenChange={setPickerOpen}>
-        <Popover.Trigger asChild>
-          <button
-            disabled={isAssigning}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/[0.08] hover:bg-indigo-500/[0.15] border border-indigo-500/20 transition-all disabled:opacity-50 flex-shrink-0"
-          >
-            {isAssigning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
-            Assign
-          </button>
-        </Popover.Trigger>
-        <Popover.Portal>
-          <Popover.Content
-            className="w-[320px] bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in zoom-in-95"
-            sideOffset={6}
-            align="end"
-          >
-            {/* Search */}
-            <div className="p-3 border-b border-glass-border/50">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted/50" />
-                <input
-                  type="text"
-                  value={pickerSearch}
-                  onChange={e => setPickerSearch(e.target.value)}
-                  placeholder="Search data sources..."
-                  className="w-full pl-9 pr-3 py-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-all"
-                  autoFocus
-                />
+      {/* ── Reassignment Confirmation Dialog ── */}
+      {confirmTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setConfirmTarget(null)} />
+          <div className="relative w-full max-w-md mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl animate-in fade-in zoom-in-95 p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/15 flex items-center justify-center">
+                <AlertTriangle className="w-5 h-5 text-amber-500" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-ink">Replace existing schema?</h3>
+                <p className="text-[11px] text-ink-muted mt-0.5">
+                  {confirmTarget.dsLabel} in {confirmTarget.wsName}
+                </p>
               </div>
             </div>
 
-            {/* Workspace/DataSource tree */}
-            <div className="max-h-[300px] overflow-y-auto p-2">
-              {allDataSources.map(ws => (
-                <div key={ws.id} className="mb-1">
-                  <div className="flex items-center justify-between px-2 py-1.5">
-                    <span className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider truncate">
-                      {ws.name}
-                    </span>
-                    {onRollOutToWorkspace && (
-                      <button
-                        onClick={() => { onRollOutToWorkspace(ws.id); setPickerOpen(false) }}
-                        disabled={isAssigning}
-                        className="text-[9px] font-semibold text-indigo-500 hover:text-indigo-600 transition-colors disabled:opacity-50"
-                      >
-                        Assign all
-                      </button>
-                    )}
-                  </div>
-                  {ws.filteredDs.map(ds => {
-                    const isAssigned = ds.ontologyId === selectedOntologyId
-                    const hasOtherOntology = !!ds.ontologyId && !isAssigned
-                    return (
-                      <button
-                        key={ds.id}
-                        onClick={() => {
-                          if (!isAssigned) {
-                            onAssignToDataSource(ws.id, ds.id)
-                            setPickerOpen(false)
-                          }
-                        }}
-                        disabled={isAssigning || isAssigned}
-                        className={cn(
-                          'w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left transition-all',
-                          isAssigned
-                            ? 'bg-emerald-500/[0.06] text-emerald-700 dark:text-emerald-400'
-                            : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-secondary',
-                          (isAssigning || isAssigned) && 'cursor-default',
-                        )}
-                      >
-                        <Database className={cn('w-3.5 h-3.5 flex-shrink-0', isAssigned ? 'text-emerald-500' : 'text-ink-muted/50')} />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-medium truncate">{ds.label || ds.id}</p>
-                          {hasOtherOntology && (
-                            <p className="text-[10px] text-amber-500 mt-0.5">Currently uses another schema</p>
-                          )}
-                        </div>
-                        {isAssigned && <Check className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />}
-                      </button>
-                    )
-                  })}
-                </div>
-              ))}
-              {allDataSources.length === 0 && (
-                <p className="text-center text-xs text-ink-muted py-6">No data sources found</p>
-              )}
+            <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-3 mb-4">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-ink-muted">Current:</span>
+                <span className="font-semibold text-ink">{confirmTarget.currentOntologyName}</span>
+                <ArrowRightLeft className="w-3 h-3 text-ink-muted mx-1" />
+                <span className="text-ink-muted">New:</span>
+                <span className="font-semibold text-indigo-600 dark:text-indigo-400">This schema</span>
+              </div>
             </div>
-          </Popover.Content>
-        </Popover.Portal>
-      </Popover.Root>
-    </div>
+
+            {confirmTarget.loading ? (
+              <div className="flex items-center gap-2 text-xs text-ink-muted py-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Checking for impacted views...
+              </div>
+            ) : confirmTarget.viewCount && confirmTarget.viewCount > 0 ? (
+              <div className="rounded-xl border border-amber-200/50 dark:border-amber-800/30 bg-amber-50/50 dark:bg-amber-950/15 p-3 mb-4">
+                <p className="text-xs text-amber-700 dark:text-amber-400">
+                  <span className="font-semibold">{confirmTarget.viewCount} view{confirmTarget.viewCount !== 1 ? 's' : ''}</span>
+                  {' '}in this workspace may be affected by this change.
+                </p>
+              </div>
+            ) : null}
+
+            <div className="flex items-center justify-end gap-2 mt-4">
+              <button
+                onClick={() => setConfirmTarget(null)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  onAssignToDataSource(confirmTarget.wsId, confirmTarget.dsId)
+                  setConfirmTarget(null)
+                }}
+                disabled={isAssigning || confirmTarget.loading}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-amber-500 text-white hover:bg-amber-600 transition-colors shadow-sm disabled:opacity-50"
+              >
+                Replace & Assign
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Unassign Confirmation Dialog ── */}
+      {unassignTarget && onUnassignFromDataSource && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setUnassignTarget(null)} />
+          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl animate-in fade-in zoom-in-95 p-6">
+            <h3 className="text-sm font-bold text-ink mb-2">Unassign schema?</h3>
+            <p className="text-xs text-ink-muted mb-4">
+              Remove this schema from <span className="font-semibold text-ink">{unassignTarget.dsLabel}</span>?
+              Views using this data source may stop working correctly.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => setUnassignTarget(null)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  onUnassignFromDataSource(unassignTarget.wsId, unassignTarget.dsId)
+                  setUnassignTarget(null)
+                }}
+                disabled={isAssigning}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors shadow-sm disabled:opacity-50"
+              >
+                Unassign
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 
@@ -729,6 +885,7 @@ export function OntologyContextBanner({
       {selectedOntology && onAssignToDataSource && (
         <QuickAssignmentBar
           workspaces={workspaces}
+          ontologies={ontologies}
           selectedOntologyId={selectedOntology.id}
           isAssigning={isAssigning}
           onAssignToDataSource={onAssignToDataSource}
