@@ -227,6 +227,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             offset?: number
             limit?: number
             sortProperty?: string | null
+            cursor?: string | null
         }
     ): Promise<GraphNode[]> {
         const params = new URLSearchParams()
@@ -234,6 +235,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         if (options?.limit) params.append('limit', String(options.limit))
         if (options?.searchQuery) params.append('searchQuery', options.searchQuery)
         if (options?.sortProperty !== undefined) params.append('sortProperty', options.sortProperty ?? '')
+        if (options?.cursor) params.append('cursor', options.cursor)
 
         if (options?.edgeTypes?.length) {
             options.edgeTypes.forEach(t => params.append('edgeTypes', t))
@@ -252,6 +254,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             limit?: number
             includeLineageEdges?: boolean
             sortProperty?: string | null
+            cursor?: string | null
         }
     ): Promise<{
         children: GraphNode[]
@@ -259,6 +262,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         lineageEdges: GraphEdge[]
         totalChildren: number
         hasMore: boolean
+        nextCursor?: string | null
     }> {
         const params = new URLSearchParams()
         if (options?.offset) params.append('offset', String(options.offset))
@@ -266,6 +270,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         if (options?.searchQuery) params.append('searchQuery', options.searchQuery)
         if (options?.includeLineageEdges === false) params.append('includeLineageEdges', 'false')
         if (options?.sortProperty !== undefined) params.append('sortProperty', options.sortProperty ?? '')
+        if (options?.cursor) params.append('cursor', options.cursor)
 
         if (options?.edgeTypes?.length) {
             options.edgeTypes.forEach(t => params.append('edgeTypes', t))

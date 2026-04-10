@@ -497,6 +497,7 @@ export interface GraphDataProvider {
             offset?: number
             limit?: number
             sortProperty?: string | null // Node property to sort by (default: displayName, null = no sort)
+            cursor?: string | null // Cursor for keyset pagination (displayName of last item)
         }
     ): Promise<GraphNode[]>
 
@@ -514,6 +515,7 @@ export interface GraphDataProvider {
             limit?: number
             includeLineageEdges?: boolean
             sortProperty?: string | null // Node property to sort by (default: displayName, null = no sort)
+            cursor?: string | null // Cursor for keyset pagination (displayName of last item)
         }
     ): Promise<{
         children: GraphNode[]
@@ -521,6 +523,7 @@ export interface GraphDataProvider {
         lineageEdges: GraphEdge[]
         totalChildren: number
         hasMore: boolean
+        nextCursor?: string | null
     }>
 
     /**

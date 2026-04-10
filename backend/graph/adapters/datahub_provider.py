@@ -128,7 +128,9 @@ class DataHubGraphQLProvider(GraphDataProvider):
         raise NotImplementedError(_NOT_IMPLEMENTED)
 
     async def get_children(
-        self, urn: str, edge_types: Optional[List[str]] = None, limit: int = 100
+        self, parent_urn: str, entity_types=None, edge_types=None,
+        search_query=None, offset: int = 0, limit: int = 100,
+        sort_property=None, cursor=None,
     ) -> List[GraphNode]:
         raise NotImplementedError(_NOT_IMPLEMENTED)
 

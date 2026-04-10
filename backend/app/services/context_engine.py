@@ -257,9 +257,9 @@ class ContextEngine:
             return []
         return []  # No ontology at all — graceful empty
 
-    async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, search_query: Optional[str] = None, limit: int = 100, offset: int = 0, sort_property: Optional[str] = "displayName") -> List[GraphNode]:
+    async def get_children(self, urn: str, edge_types: Optional[List[str]] = None, search_query: Optional[str] = None, limit: int = 100, offset: int = 0, sort_property: Optional[str] = "displayName", cursor: Optional[str] = None) -> List[GraphNode]:
         edge_types = await self._ensure_containment_edge_types(edge_types)
-        return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property)
+        return await self.provider.get_children(urn, entity_types=None, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property, cursor=cursor)
 
     async def get_children_with_edges(
         self, urn: str, edge_types: Optional[List[str]] = None,
@@ -268,6 +268,7 @@ class ContextEngine:
         limit: int = 100, offset: int = 0,
         include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName",
+        cursor: Optional[str] = None,
     ) -> ChildrenWithEdgesResult:
         edge_types = await self._ensure_containment_edge_types(edge_types)
         if not lineage_edge_types:
@@ -278,7 +279,7 @@ class ContextEngine:
             urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
             search_query=search_query, limit=limit, offset=offset,
             include_lineage_edges=include_lineage_edges,
-            sort_property=sort_property,
+            sort_property=sort_property, cursor=cursor,
         )
 
     async def get_edges(self, query: EdgeQuery = None) -> List[GraphEdge]:

@@ -21,8 +21,8 @@ const PER_TYPE_LIMIT = 200
 // ─── Interfaces ─────────────────────────────────────────────────────────────
 
 interface LoadChildrenOptions {
-    /** When true, load all schema entity types for root (used by Assignment tree) */
-    useAllSchemaTypes?: boolean
+    // Reserved for future use. The useAllSchemaTypes option was removed —
+    // the Entity Browser now uses the dedicated useEntityBrowser hook.
 }
 
 export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete'
@@ -418,7 +418,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
     // ─── loadChildren ───────────────────────────────────────────────────
 
-    const loadChildren = useCallback(async (parentId: string, options?: LoadChildrenOptions) => {
+    const loadChildren = useCallback(async (parentId: string, _options?: LoadChildrenOptions) => {
         const { nodes, edges, addGraph } = useCanvasStore.getState()
 
         // ── Handle root loading (empty parentId) ────────────────────
@@ -426,13 +426,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             if (loadingNodes.has('ROOT')) return
             if (isSchemaLoading) return
 
-            const typesToLoad = options?.useAllSchemaTypes && schemaEntityTypes.length > 0
-                ? schemaEntityTypes.map((et) => et.id)
-                : rootEntityTypes
+            const typesToLoad = rootEntityTypes
 
             if (typesToLoad.length === 0) return
 
-            const key = `all:${options?.useAllSchemaTypes ?? false}:${typesToLoad.join(',')}`
+            const key = `all:${typesToLoad.join(',')}`
             if (rootsAttemptedForRef.current === key) return
             rootsAttemptedForRef.current = key
 
