@@ -63,6 +63,7 @@ class GraphDataProvider(ABC):
         offset: int = 0,
         limit: int = 100,
         sort_property: Optional[str] = "displayName",
+        cursor: Optional[str] = None,
     ) -> List[GraphNode]:
         pass
 
@@ -76,6 +77,7 @@ class GraphDataProvider(ABC):
         limit: int = 100,
         include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName",
+        cursor: Optional[str] = None,
     ) -> ChildrenWithEdgesResult:
         """Get children with containment and optionally lineage edges in one round-trip.
 
@@ -86,7 +88,7 @@ class GraphDataProvider(ABC):
         children = await self.get_children(
             parent_urn, edge_types=edge_types,
             search_query=search_query, offset=offset, limit=limit,
-            sort_property=sort_property,
+            sort_property=sort_property, cursor=cursor,
         )
         child_urns = [c.urn for c in children]
         all_urns = [parent_urn] + child_urns
@@ -111,12 +113,14 @@ class GraphDataProvider(ABC):
         has_more = len(children) >= limit
         total = offset + len(children) + (1 if has_more else 0)
 
+        next_cursor = children[-1].display_name if children and has_more else None
         return ChildrenWithEdgesResult(
             children=children,
             containmentEdges=containment_edges,
             lineageEdges=lineage_edges,
             totalChildren=total,
             hasMore=has_more,
+            nextCursor=next_cursor,
         )
 
     @abstractmethod

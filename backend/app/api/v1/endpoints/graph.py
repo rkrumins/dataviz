@@ -155,10 +155,11 @@ async def get_node_children(
     sort_property: Optional[str] = Query("displayName", alias="sortProperty", description="Node property to sort by. Pass null to skip sorting."),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
+    cursor: Optional[str] = Query(None, description="Cursor for keyset pagination (displayName of last item). Takes precedence over offset."),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Lazy load children nodes."""
-    return await engine.get_children(urn, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property)
+    return await engine.get_children(urn, edge_types=edge_types, search_query=search_query, limit=limit, offset=offset, sort_property=sort_property, cursor=cursor)
 
 
 @router.get("/nodes/{urn}/children-with-edges", response_model=ChildrenWithEdgesResult, response_model_by_alias=True)
@@ -170,6 +171,7 @@ async def get_children_with_edges(
     sort_property: Optional[str] = Query("displayName", alias="sortProperty", description="Node property to sort by. Pass null to skip sorting."),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
+    cursor: Optional[str] = Query(None, description="Cursor for keyset pagination (displayName of last item). Takes precedence over offset."),
     include_lineage_edges: bool = Query(True, alias="includeLineageEdges"),
     engine: ContextEngine = Depends(get_context_engine),
 ):
@@ -178,7 +180,7 @@ async def get_children_with_edges(
         urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
         search_query=search_query, limit=limit, offset=offset,
         include_lineage_edges=include_lineage_edges,
-        sort_property=sort_property,
+        sort_property=sort_property, cursor=cursor,
     )
 
 

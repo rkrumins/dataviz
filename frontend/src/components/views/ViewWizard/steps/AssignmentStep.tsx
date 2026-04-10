@@ -33,21 +33,31 @@ export function AssignmentStep({ formData, updateFormData, linkedContextModelId,
     // to the store on final submit (in ViewWizard.handleSubmit). Syncing
     // during the wizard causes premature background rendering in ContextViewCanvas.
 
-    // Build containment parent map from canvas edges (ground truth for wizard context)
+    // Build containment parent map from canvas edges + API-driven browser data
     const canvasEdges = useCanvasStore(s => s.edges)
     const containmentEdgeTypes = useContainmentEdgeTypes()
     const storeParentMap = useReferenceModelStore(s => s.parentMap)
     const storeEffectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
 
+    // The Entity Browser's API-sourced containment data (from useEntityBrowser hook)
+    const [browserParentMap, setBrowserParentMap] = useState(new Map<string, string>())
+
     const parentMap = useMemo(() => {
         const map = new Map<string, string>()
+        // Canvas edges (may have data from hydration)
         canvasEdges.forEach(edge => {
             if (isContainmentEdgeType(normalizeEdgeType(edge), containmentEdgeTypes)) {
                 map.set(edge.target, edge.source)
             }
         })
-        return map.size > 0 ? map : storeParentMap
-    }, [canvasEdges, containmentEdgeTypes, storeParentMap])
+        // Store parent map as fallback
+        if (map.size === 0) {
+            storeParentMap.forEach((parent, child) => map.set(child, parent))
+        }
+        // Browser's API-sourced containment data takes precedence
+        browserParentMap.forEach((parent, child) => map.set(child, parent))
+        return map
+    }, [canvasEdges, containmentEdgeTypes, storeParentMap, browserParentMap])
 
     // Layer assignment lookup: wizard formData.layers > store effectiveAssignments
     const layerAssignmentMap = useMemo(() => {
@@ -234,6 +244,7 @@ export function AssignmentStep({ formData, updateFormData, linkedContextModelId,
                     layers={formData.layers || []}
                     onAssignmentChange={handleAssignmentChange}
                     onBulkAssign={handleBulkAssignment}
+                    onParentMapChange={setBrowserParentMap}
                     className="h-full"
                 />
             </div>

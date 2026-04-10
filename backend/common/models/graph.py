@@ -126,6 +126,7 @@ class ChildrenWithEdgesResult(BaseModel):
     lineage_edges: List[GraphEdge] = Field(default_factory=list, alias="lineageEdges")
     total_children: int = Field(alias="totalChildren")
     has_more: bool = Field(alias="hasMore")
+    next_cursor: Optional[str] = Field(None, alias="nextCursor")
 
     class Config:
         populate_by_name = True
