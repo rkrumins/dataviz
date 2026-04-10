@@ -161,13 +161,15 @@ export function OntologyDetailHeader({
                   <ShieldCheck className="w-3.5 h-3.5" />
                   Validate
                 </DropdownMenu.Item>
-                <DropdownMenu.Item
-                  onClick={onClone}
-                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
-                >
-                  <Copy className="w-3.5 h-3.5" />
-                  Clone
-                </DropdownMenu.Item>
+                {!isImmutable && (
+                  <DropdownMenu.Item
+                    onClick={onClone}
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    Clone
+                  </DropdownMenu.Item>
+                )}
                 <DropdownMenu.Separator className="h-px bg-glass-border/60 my-1" />
                 <DropdownMenu.Item
                   onClick={onExport}

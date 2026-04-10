@@ -308,11 +308,15 @@ export function OntologySchemaPage() {
       setWorkingRelDefs({ ...((selectedOntology.relationshipTypeDefinitions as Record<string, unknown>) ?? {}) })
       setWorkingContainment([...(selectedOntology.containmentEdgeTypes ?? [])])
       setWorkingLineage([...(selectedOntology.lineageEdgeTypes ?? [])])
+      showToast('info', 'Editing mode — changes are staged until you save')
     }
     return true
   }
 
   function discardChanges() {
+    if (hasPendingChanges) {
+      if (!window.confirm('Discard all unsaved changes? This cannot be undone.')) return
+    }
     setWorkingEntityDefs(null)
     setWorkingRelDefs(null)
     setWorkingContainment(null)
