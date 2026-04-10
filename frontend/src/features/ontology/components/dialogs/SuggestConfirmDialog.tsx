@@ -18,6 +18,8 @@ type Phase = 'confirm' | 'analyzing' | 'recommendations'
 
 interface SuggestConfirmDialogProps {
   dataSourceLabel: string | null
+  /** Pre-generated meaningful name for the new draft. */
+  suggestedName?: string
   ontologies: OntologyDefinitionResponse[]
   /** The ontology ID currently assigned to the active data source. */
   currentOntologyId: string | null
@@ -30,7 +32,7 @@ interface SuggestConfirmDialogProps {
   }>
   onUseExisting: (ontologyId: string) => void
   onCloneExisting: (ontologyId: string) => void
-  onCreateDraft: () => void
+  onCreateDraft: (name?: string) => void
   onClose: () => void
   isCreating: boolean
 }
@@ -50,8 +52,9 @@ function CoverageRing({ percent, size = 52, stroke = 5, color }: {
         stroke={color} strokeWidth={stroke} strokeLinecap="round"
         strokeDasharray={circ} strokeDashoffset={offset}
         className="transition-all duration-500" />
-      <text x={size / 2} y={size / 2} textAnchor="middle" dominantBaseline="central"
-        className="rotate-90 origin-center fill-current text-ink font-bold"
+      <text x={size / 2} y={size / 2} textAnchor="middle" dy="0.35em"
+        transform={`rotate(90, ${size / 2}, ${size / 2})`}
+        className="fill-current text-ink font-bold"
         style={{ fontSize: size * 0.28 }}>
         {percent}%
       </text>
@@ -80,6 +83,7 @@ function MiniBar({ covered, total, label, colorClass }: {
 
 export function SuggestConfirmDialog({
   dataSourceLabel,
+  suggestedName,
   ontologies,
   currentOntologyId,
   assignmentCountMap,
@@ -96,6 +100,7 @@ export function SuggestConfirmDialog({
   const [error, setError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [draftName, setDraftName] = useState(suggestedName || 'Graph Schema')
 
   const isBusy = phase === 'analyzing' || isCreating
 
@@ -585,17 +590,30 @@ export function SuggestConfirmDialog({
             </div>
           )}
 
-          {/* "Create from Graph" selection summary */}
+          {/* "Create from Graph" selection summary with name input */}
           {phase === 'recommendations' && selectedId === '__create_from_graph__' && (
             <div className="px-6 pt-3 pb-0">
-              <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-indigo-50/40 dark:bg-indigo-950/15 border border-indigo-500/15">
-                <Sparkles className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" />
-                <span className="text-[11px] text-ink-secondary">
-                  Selected: <span className="font-semibold text-ink">Create from Physical Graph</span>
-                  <span className="text-ink-muted ml-1">
-                    — {graphCounts.entities} entity type{graphCounts.entities !== 1 ? 's' : ''}, {graphCounts.rels} relationship{graphCounts.rels !== 1 ? 's' : ''}
+              <div className="rounded-lg bg-indigo-50/40 dark:bg-indigo-950/15 border border-indigo-500/15 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" />
+                  <span className="text-[11px] text-ink-secondary">
+                    New draft: <span className="font-semibold text-ink">{draftName}</span>
+                    <span className="text-ink-muted ml-1">
+                      — {graphCounts.entities} entity type{graphCounts.entities !== 1 ? 's' : ''}, {graphCounts.rels} relationship{graphCounts.rels !== 1 ? 's' : ''}
+                    </span>
                   </span>
-                </span>
+                </div>
+                <div className="mt-2">
+                  <label className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider mb-1 block">Name your schema</label>
+                  <input
+                    type="text"
+                    value={draftName}
+                    onChange={e => setDraftName(e.target.value)}
+                    placeholder="Enter schema name..."
+                    className="w-full px-3 py-1.5 rounded-lg bg-white dark:bg-black/20 border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/30 transition-all"
+                    autoFocus
+                  />
+                </div>
               </div>
             </div>
           )}
@@ -658,13 +676,13 @@ export function SuggestConfirmDialog({
                   {/* Primary confirm — changes label based on selection */}
                   {selectedId === '__create_from_graph__' ? (
                     <button
-                      onClick={onCreateDraft}
-                      disabled={isCreating}
+                      onClick={() => onCreateDraft(draftName.trim() || undefined)}
+                      disabled={isCreating || !draftName.trim()}
                       className={cn(
                         'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm',
                         'bg-gradient-to-r from-indigo-500 to-purple-500 text-white',
                         'hover:from-indigo-600 hover:to-purple-600 shadow-indigo-500/25',
-                        isCreating && 'opacity-60',
+                        (isCreating || !draftName.trim()) && 'opacity-60',
                       )}
                     >
                       {isCreating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}

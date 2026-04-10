@@ -17,11 +17,12 @@ import {
   CheckCircle2,
   FolderTree,
   Route,
-  Users,
-  Eye,
   BarChart3,
   Database,
   AlertTriangle,
+  PenLine,
+  Shield,
+  Lock,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -29,9 +30,9 @@ import { ontologyDefinitionService as ontologyService } from '@/services/ontolog
 import type { GraphSchemaStats } from '@/providers/GraphDataProvider'
 import type { CoverageState } from '../../lib/ontology-types'
 import { fetchSchemaStats } from '../../lib/ontology-utils'
-import { useOntologyAssignments } from '../../hooks/useOntologies'
-import { listViews } from '@/services/viewApiService'
-import { formatCount } from '../../lib/ontology-parsers'
+import { formatCount, entityDefToSchema, relDefToSchema } from '../../lib/ontology-parsers'
+import { SchemaMinimapSVG } from '../SchemaMinimapSVG'
+import { SchemaHealthRing } from '../SchemaHealthRing'
 
 interface OverviewPanelProps {
   ontology: OntologyDefinitionResponse
@@ -114,45 +115,7 @@ export function OverviewPanel({
     return () => { cancelled = true }
   }, [workspaceId, dataSourceId, ontology.id])
 
-  // Fetch assignment + view data
-  const { data: assignments } = useOntologyAssignments(ontology.id)
 
-  const [viewCount, setViewCount] = useState<number | null>(null)
-  const [loadingViews, setLoadingViews] = useState(false)
-
-  useEffect(() => {
-    if (!assignments || assignments.length === 0) {
-      setViewCount(0)
-      return
-    }
-
-    let cancelled = false
-    setLoadingViews(true)
-
-    const uniqueWsIds = [...new Set(assignments.map(a => a.workspaceId))]
-
-    Promise.all(
-      uniqueWsIds.map(async (wsId) => {
-        try {
-          const views = await listViews({ workspaceId: wsId })
-          return views.length
-        } catch {
-          return 0
-        }
-      })
-    ).then(counts => {
-      if (cancelled) return
-      setViewCount(counts.reduce((sum, c) => sum + c, 0))
-      setLoadingViews(false)
-    })
-
-    return () => { cancelled = true }
-  }, [assignments])
-
-  const workspaceCount = useMemo(() => {
-    if (!assignments) return 0
-    return new Set(assignments.map(a => a.workspaceId)).size
-  }, [assignments])
 
   const entityCount = Object.keys(ontology.entityTypeDefinitions ?? {}).length
   const relCount = Object.keys(ontology.relationshipTypeDefinitions ?? {}).length
@@ -174,27 +137,113 @@ export function OverviewPanel({
     ? coverage.uncoveredEntityTypes.length + coverage.uncoveredRelationshipTypes.length
     : null
 
+  // Build minimap data from ontology definitions
+  const minimapData = useMemo(() => {
+    const entityDefs = ontology.entityTypeDefinitions as Record<string, Record<string, unknown>> ?? {}
+    const relDefs = ontology.relationshipTypeDefinitions as Record<string, Record<string, unknown>> ?? {}
+
+    const entities = Object.entries(entityDefs).map(([id, def]) => {
+      const schema = entityDefToSchema(id, def)
+      return { id: schema.id, name: schema.name, color: schema.visual.color }
+    })
+
+    const rels = Object.entries(relDefs).map(([id, def]) => {
+      const schema = relDefToSchema(id, def)
+      const source = schema.sourceTypes[0] ?? ''
+      const target = schema.targetTypes[0] ?? ''
+      return { source, target, name: schema.name }
+    }).filter(r => r.source && r.target)
+
+    return { entities, rels }
+  }, [ontology.entityTypeDefinitions, ontology.relationshipTypeDefinitions])
+
+  // Status banner text
+  const statusBanner = useMemo(() => {
+    if (ontology.isSystem) return {
+      icon: Shield,
+      text: 'System-provided schema — clone it to customize for your needs',
+      color: 'bg-indigo-50/60 dark:bg-indigo-950/20 border-indigo-200/50 dark:border-indigo-800/30 text-indigo-700 dark:text-indigo-300',
+      iconColor: 'text-indigo-500',
+    }
+    if (ontology.isPublished) return {
+      icon: Lock,
+      text: `Published and active on ${assignmentCount} data source${assignmentCount !== 1 ? 's' : ''}`,
+      color: 'bg-emerald-50/60 dark:bg-emerald-950/20 border-emerald-200/50 dark:border-emerald-800/30 text-emerald-700 dark:text-emerald-300',
+      iconColor: 'text-emerald-500',
+    }
+    return {
+      icon: PenLine,
+      text: 'This schema is a draft — edit entity types and relationships, then publish when ready',
+      color: 'bg-amber-50/60 dark:bg-amber-950/20 border-amber-200/50 dark:border-amber-800/30 text-amber-700 dark:text-amber-300',
+      iconColor: 'text-amber-500',
+    }
+  }, [ontology.isSystem, ontology.isPublished, assignmentCount])
+
+  const StatusIcon = statusBanner.icon
+
   return (
     <div className="space-y-8">
-      {/* ── Schema Composition ───────────────────────────────────── */}
+      {/* ── Status Banner + Schema Minimap ───────────────────────── */}
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Status banner */}
+        <div className={cn(
+          'rounded-2xl border p-4 flex items-start gap-3',
+          statusBanner.color,
+        )}>
+          <StatusIcon className={cn('w-5 h-5 flex-shrink-0 mt-0.5', statusBanner.iconColor)} />
+          <div>
+            <p className="text-sm font-semibold leading-snug">{statusBanner.text}</p>
+            {ontology.description && (
+              <p className="text-xs mt-2 opacity-70 leading-relaxed">{ontology.description}</p>
+            )}
+          </div>
+        </div>
+
+        {/* Schema minimap */}
+        <div className="rounded-2xl border border-glass-border bg-canvas-elevated/30 p-3 flex items-center justify-center">
+          <SchemaMinimapSVG
+            entityTypes={minimapData.entities}
+            relationships={minimapData.rels}
+          />
+        </div>
+
+        {/* Schema health score */}
+        <div className="rounded-2xl border border-glass-border bg-canvas-elevated/30 p-4 flex items-center justify-center">
+          <SchemaHealthRing
+            entityTypes={Object.entries((ontology.entityTypeDefinitions ?? {}) as Record<string, Record<string, unknown>>).map(([id, def]) => {
+              const s = entityDefToSchema(id, def)
+              return { id: s.id, name: s.name, description: s.description, visual: { icon: s.visual.icon, color: s.visual.color } }
+            })}
+            relationships={Object.entries((ontology.relationshipTypeDefinitions ?? {}) as Record<string, Record<string, unknown>>).map(([id, def]) => {
+              const s = relDefToSchema(id, def)
+              return { id: s.id, name: s.name, sourceTypes: s.sourceTypes, targetTypes: s.targetTypes }
+            })}
+            containmentCount={(ontology.containmentEdgeTypes ?? []).length}
+            coveragePercent={coverage ? Math.round(coverage.coveragePercent) : null}
+            onNavigateTab={onNavigateTab}
+          />
+        </div>
+      </section>
+
+      {/* ── Key Metrics ─────────────────────────────────────────── */}
       <section>
         <h3 className="text-xs font-semibold text-ink-muted uppercase tracking-wider mb-3">
-          Schema Composition
+          Key Metrics
         </h3>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <StatCard
             icon={Box}
             label="Entity Types"
             value={entityCount}
             accent="bg-indigo-50 dark:bg-indigo-950/30 text-indigo-500"
-            onClick={() => onNavigateTab('entities')}
+            onClick={() => onNavigateTab('schema')}
           />
           <StatCard
             icon={GitBranch}
             label="Relationships"
             value={relCount}
             accent="bg-purple-50 dark:bg-purple-950/30 text-purple-500"
-            onClick={() => onNavigateTab('relationships')}
+            onClick={() => onNavigateTab('schema')}
           />
           <StatCard
             icon={BarChart3}
@@ -203,35 +252,12 @@ export function OverviewPanel({
             accent="bg-emerald-50 dark:bg-emerald-950/30 text-emerald-500"
             onClick={() => onNavigateTab('coverage')}
           />
-        </div>
-      </section>
-
-      {/* ── Usage & Adoption ─────────────────────────────────────── */}
-      <section>
-        <h3 className="text-xs font-semibold text-ink-muted uppercase tracking-wider mb-3">
-          Usage &amp; Adoption
-        </h3>
-        <div className="grid grid-cols-3 gap-3">
           <StatCard
             icon={Database}
             label="Data Sources"
             value={assignmentCount}
             accent="bg-amber-50 dark:bg-amber-950/30 text-amber-500"
-            onClick={() => onNavigateTab('usage')}
-          />
-          <StatCard
-            icon={Users}
-            label="Workspaces"
-            value={workspaceCount}
-            accent="bg-rose-50 dark:bg-rose-950/30 text-rose-500"
-            onClick={() => onNavigateTab('usage')}
-          />
-          <StatCard
-            icon={Eye}
-            label="Views"
-            value={loadingViews ? '...' : (viewCount ?? '—')}
-            accent="bg-sky-50 dark:bg-sky-950/30 text-sky-500"
-            onClick={() => onNavigateTab('usage')}
+            onClick={() => onNavigateTab('adoption')}
           />
         </div>
       </section>
@@ -244,7 +270,7 @@ export function OverviewPanel({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {/* Hierarchy */}
           <button
-            onClick={() => onNavigateTab('hierarchy')}
+            onClick={() => onNavigateTab('schema')}
             className="rounded-2xl border border-glass-border bg-canvas-elevated/50 p-4 text-left hover:shadow-sm hover:border-glass-border-hover transition-all group"
           >
             <div className="flex items-center gap-2 mb-3">
