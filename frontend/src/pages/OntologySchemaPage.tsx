@@ -204,8 +204,10 @@ export function OntologySchemaPage() {
   const [workingRelDefs, setWorkingRelDefs] = useState<Record<string, unknown> | null>(null)
   const [workingContainment, setWorkingContainment] = useState<string[] | null>(null)
   const [workingLineage, setWorkingLineage] = useState<string[] | null>(null)
+  const [workingDetails, setWorkingDetails] = useState<{ name: string; description: string; evolutionPolicy: string } | null>(null)
   const hasStagedChangesRef = useRef(false)
   const [showChangesReview, setShowChangesReview] = useState(false)
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false)
 
   // ── Derived ────────────────────────────────────────────────────────
   const isDeleted = !!selectedOntology?.deletedAt
@@ -237,7 +239,15 @@ export function OntologySchemaPage() {
   }, [effectiveRelDefs])
 
   // Detect pending changes (explicit dirty flag + deep comparison fallback)
+  const hasDetailChanges = useMemo(() => {
+    if (!workingDetails || !selectedOntology) return false
+    return workingDetails.name !== selectedOntology.name ||
+      workingDetails.description !== (selectedOntology.description ?? '') ||
+      workingDetails.evolutionPolicy !== (selectedOntology.evolutionPolicy ?? 'reject')
+  }, [workingDetails, selectedOntology])
+
   const hasPendingChanges = useMemo(() => {
+    if (hasDetailChanges) return true
     if (!isInEditMode || !selectedOntology) return false
     if (hasStagedChangesRef.current) return true
     if (workingEntityDefs && JSON.stringify(workingEntityDefs) !== JSON.stringify(selectedOntology.entityTypeDefinitions ?? {})) return true
@@ -245,7 +255,7 @@ export function OntologySchemaPage() {
     if (workingContainment && JSON.stringify(workingContainment) !== JSON.stringify(selectedOntology.containmentEdgeTypes ?? [])) return true
     if (workingLineage && JSON.stringify(workingLineage) !== JSON.stringify(selectedOntology.lineageEdgeTypes ?? [])) return true
     return false
-  }, [isInEditMode, selectedOntology, workingEntityDefs, workingRelDefs, workingContainment, workingLineage])
+  }, [hasDetailChanges, isInEditMode, selectedOntology, workingEntityDefs, workingRelDefs, workingContainment, workingLineage])
 
   // Track which individual entity/rel IDs have been modified
   const changedEntityIds = useMemo((): Set<string> => {
@@ -308,21 +318,27 @@ export function OntologySchemaPage() {
       setWorkingRelDefs({ ...((selectedOntology.relationshipTypeDefinitions as Record<string, unknown>) ?? {}) })
       setWorkingContainment([...(selectedOntology.containmentEdgeTypes ?? [])])
       setWorkingLineage([...(selectedOntology.lineageEdgeTypes ?? [])])
-      showToast('info', 'Editing mode — changes are staged until you save')
     }
     return true
   }
 
   function discardChanges() {
     if (hasPendingChanges) {
-      if (!window.confirm('Discard all unsaved changes? This cannot be undone.')) return
+      setShowDiscardConfirm(true)
+      return
     }
+    doDiscard()
+  }
+
+  function doDiscard() {
     setWorkingEntityDefs(null)
     setWorkingRelDefs(null)
     setWorkingContainment(null)
     setWorkingLineage(null)
+    setWorkingDetails(null)
     hasStagedChangesRef.current = false
     setEditorPanel(null)
+    setShowDiscardConfirm(false)
   }
 
   async function handleSaveAllChanges() {
@@ -334,6 +350,11 @@ export function OntologySchemaPage() {
       if (workingRelDefs) req.relationshipTypeDefinitions = workingRelDefs
       if (workingContainment) req.containmentEdgeTypes = workingContainment
       if (workingLineage) req.lineageEdgeTypes = workingLineage
+      if (workingDetails) {
+        req.name = workingDetails.name
+        if (workingDetails.description) req.description = workingDetails.description
+        req.evolutionPolicy = workingDetails.evolutionPolicy
+      }
 
       await mutations.update.mutateAsync({ id: selectedOntology.id, req })
       showToast('success', 'All changes saved')
@@ -965,10 +986,12 @@ export function OntologySchemaPage() {
                   const isActive = activeTab === t.id
                   const count = t.id === 'schema' ? entityTypes.length + relTypes.length
                     : undefined
-                  const tabHasChanges = isInEditMode && (
-                    (t.id === 'schema' && (hasEntityChanges || hasRelChanges)) ||
-                    (t.id === 'hierarchy' && hasHierarchyChanges)
-                  )
+                  const tabHasChanges =
+                    (isInEditMode && (
+                      (t.id === 'schema' && (hasEntityChanges || hasRelChanges)) ||
+                      (t.id === 'hierarchy' && hasHierarchyChanges)
+                    )) ||
+                    (t.id === 'settings' && hasDetailChanges)
                   return (
                     <button
                       key={t.id}
@@ -1105,9 +1128,9 @@ export function OntologySchemaPage() {
                       {activeTab === 'settings' && (
                         <SettingsPanel
                           ontology={selectedOntology}
-                          onSaveDetails={handleSaveOntologyDetails}
+                          workingDetails={workingDetails}
+                          onUpdateDetails={setWorkingDetails}
                           onDelete={handleDeleteOntology}
-                          isSaving={mutations.update.isPending}
                           assignmentCount={assignmentCountMap.get(selectedOntology.id) ?? 0}
                         />
                       )}
@@ -1286,14 +1309,48 @@ export function OntologySchemaPage() {
         />
       )}
 
+      {/* Discard Confirmation */}
+      {showDiscardConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowDiscardConfirm(false)} />
+          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl animate-in fade-in zoom-in-95 p-6">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-xl bg-red-500/15 flex items-center justify-center">
+                <Trash2 className="w-5 h-5 text-red-500" />
+              </div>
+              <h3 className="text-sm font-bold text-ink">Discard all changes?</h3>
+            </div>
+            <p className="text-xs text-ink-muted mb-5 leading-relaxed">
+              All unsaved changes to entity types, relationships, hierarchy, and settings will be lost. This cannot be undone.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => setShowDiscardConfirm(false)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+              >
+                Keep Editing
+              </button>
+              <button
+                onClick={doDiscard}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors shadow-sm"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Discard Changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Changes Review Dialog */}
-      {showChangesReview && selectedOntology && workingEntityDefs && workingRelDefs && (
+      {showChangesReview && selectedOntology && hasPendingChanges && (
         <ChangesReviewDialog
           ontology={selectedOntology}
-          workingEntityDefs={workingEntityDefs as Record<string, unknown>}
-          workingRelDefs={workingRelDefs as Record<string, unknown>}
+          workingEntityDefs={(workingEntityDefs ?? selectedOntology.entityTypeDefinitions ?? {}) as Record<string, unknown>}
+          workingRelDefs={(workingRelDefs ?? selectedOntology.relationshipTypeDefinitions ?? {}) as Record<string, unknown>}
           workingContainment={workingContainment ?? selectedOntology.containmentEdgeTypes ?? []}
           workingLineage={workingLineage ?? selectedOntology.lineageEdgeTypes ?? []}
+          workingDetails={workingDetails}
           isSaving={isSaving}
           onSave={() => { setShowChangesReview(false); handleSaveAllChanges() }}
           onClose={() => setShowChangesReview(false)}

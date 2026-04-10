@@ -24,6 +24,8 @@ interface ChangesReviewDialogProps {
   workingContainment: string[]
   /** Working copy of lineage edge type IDs. */
   workingLineage: string[]
+  /** Working copy of settings (name, description, evolution policy). Null = no settings changes. */
+  workingDetails?: { name: string; description: string; evolutionPolicy: string } | null
   /** True while the save request is in flight. */
   isSaving: boolean
   /** Callback to persist all changes. */
@@ -162,6 +164,7 @@ export function ChangesReviewDialog({
   workingRelDefs,
   workingContainment,
   workingLineage,
+  workingDetails,
   isSaving,
   onSave,
   onClose,
@@ -199,6 +202,16 @@ export function ChangesReviewDialog({
     [ontology.lineageEdgeTypes, workingLineage],
   )
 
+  // Check for settings changes (name, description, evolution policy)
+  const settingsChanges = useMemo(() => {
+    if (!workingDetails) return []
+    const changes: string[] = []
+    if (workingDetails.name !== ontology.name) changes.push(`Name: "${ontology.name}" → "${workingDetails.name}"`)
+    if (workingDetails.description !== (ontology.description ?? '')) changes.push('Description updated')
+    if (workingDetails.evolutionPolicy !== (ontology.evolutionPolicy ?? 'reject')) changes.push(`Evolution policy: ${ontology.evolutionPolicy ?? 'reject'} → ${workingDetails.evolutionPolicy}`)
+    return changes
+  }, [workingDetails, ontology])
+
   // --- aggregate summary counts ----------------------------------------
 
   const totalAdded = entityDiff.added.length + relDiff.added.length
@@ -206,7 +219,8 @@ export function ChangesReviewDialog({
     entityDiff.modified.length +
     relDiff.modified.length +
     (containmentChanged ? 1 : 0) +
-    (lineageChanged ? 1 : 0)
+    (lineageChanged ? 1 : 0) +
+    (settingsChanges.length > 0 ? 1 : 0)
   const totalRemoved = entityDiff.removed.length + relDiff.removed.length
 
   return (
@@ -347,6 +361,23 @@ export function ChangesReviewDialog({
                     </div>
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* ---- Settings changes ---- */}
+          {settingsChanges.length > 0 && (
+            <div>
+              <p className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider mb-2">
+                Settings
+              </p>
+              <div className="rounded-xl border bg-amber-500/5 border-amber-500/10 px-4 py-3 space-y-1">
+                {settingsChanges.map((change, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <PenLine className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
+                    <span className="text-sm text-ink">{change}</span>
+                  </div>
+                ))}
               </div>
             </div>
           )}
