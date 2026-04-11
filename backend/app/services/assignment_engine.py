@@ -1,14 +1,16 @@
 import re
 import time
 import logging
-from typing import List, Dict, Optional, Set, Any, Tuple
+from typing import TYPE_CHECKING, List, Dict, Optional, Set, Any, Tuple
 from backend.app.models.graph import GraphNode, GraphEdge
 from backend.app.models.assignment import (
     LayerAssignmentRequest, LayerAssignmentResult, EntityAssignment,
     ViewLayerConfig, LayerAssignmentRuleConfig, LayerAssignmentStats,
     EntityAssignmentConfig
 )
-from backend.app.services.context_engine import context_engine
+
+if TYPE_CHECKING:
+    from backend.app.services.context_engine import ContextEngine
 
 logger = logging.getLogger(__name__)
 
@@ -16,29 +18,43 @@ class AssignmentEngine:
     def __init__(self):
         pass
 
-    async def compute_assignments(self, request: LayerAssignmentRequest) -> LayerAssignmentResult:
-        start_time = time.time()
-        
-        # 1. Fetch Graph Data based on Scope
-        # If scope_filter is provided, use it. Otherwise fetch all (or large subset).
-        # For now, let's assume we fetch all nodes that "matter" or rely on ContextEngine to get the working set.
-        # In a real heavy app, this might need a specific query for "Everything in View".
-        
-        # For this implementation, we will fetch nodes and edges via context_engine
-        # assuming we want to assign everything visible or relevant.
-        # Let's simple fetch all nodes for now (WARN: expensive for huge graphs).
-        # Optimization: Fetch only updated nodes or viewport? 
-        # Requirement: "Migrate mocked behavior... heavy client logic... to backend"
-        # The client usually passes full context or we fetch it.
-        # Let's fetch all nodes.
-        from backend.app.models.graph import NodeQuery, EdgeQuery
-        # Use Pydantic models instead of dicts
-        all_nodes = await context_engine.provider.get_nodes(NodeQuery())
-        all_edges = await context_engine.provider.get_edges(EdgeQuery())
+    async def compute_assignments(
+        self,
+        request: LayerAssignmentRequest,
+        engine: Optional["ContextEngine"] = None,
+    ) -> LayerAssignmentResult:
+        """Compute layer assignments using the provided workspace-scoped engine.
 
-        # Resolve containment edge types from the ontology
-        ontology = await context_engine.get_ontology_metadata()
-        containment_edge_types: Set[str] = set(ontology.containment_edge_types) if ontology.containment_edge_types else set()
+        ``engine`` must be the ContextEngine created by ``get_context_engine``
+        in the FastAPI endpoint. Passing it here ensures ``_resolve_ontology()``
+        runs before any provider call that needs containment edge types, which
+        eliminates the intermittent ProviderConfigurationError that occurred
+        when the ontology cache was cold.
+
+        Falls back to the global singleton only for tests / legacy callers.
+        """
+        if engine is None:
+            # Lazy import avoids a circular import at module level.
+            from backend.app.services.context_engine import context_engine as _singleton
+            engine = _singleton
+
+        start_time = time.time()
+
+        # ── Resolve ontology FIRST ────────────────────────────────────────
+        # This calls _resolve_ontology() which pushes the ontology-authoritative
+        # containment edge types into the provider via set_containment_edge_types().
+        # Any subsequent provider call (including get_nodes, which internally uses
+        # _get_containment_edge_types() for child-count queries) is then guaranteed
+        # to find the types already injected.
+        from backend.app.models.graph import NodeQuery, EdgeQuery
+        ontology = await engine.get_ontology_metadata()
+        containment_edge_types: Set[str] = (
+            set(ontology.containment_edge_types) if ontology.containment_edge_types else set()
+        )
+
+        # ── Fetch graph data via the scoped engine ────────────────────────
+        all_nodes = await engine.provider.get_nodes(NodeQuery())
+        all_edges = await engine.provider.get_edges(EdgeQuery())
 
         logging.info(f"Computing assignments for {len(all_nodes)} nodes and {len(all_edges)} edges")
 
