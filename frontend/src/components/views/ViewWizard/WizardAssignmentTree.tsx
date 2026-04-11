@@ -34,7 +34,7 @@ import {
     useEffectiveAssignments
 } from '@/store/referenceModelStore'
 import type { ViewLayerConfig, AssignmentConflict } from '@/types/schema'
-import { useContainmentEdgeTypes, useEntityTypes, useRootEntityTypes, useSchemaIsLoading } from '@/store/schema'
+import { useContainmentEdgeTypes, useEntityTypes, useSchemaIsLoading } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
 
@@ -343,28 +343,29 @@ export function WizardAssignmentTree({
     className
 }: WizardAssignmentTreeProps) {
     // ── API-driven Entity Browser (replaces canvas store + useGraphHydration) ──
+    // The browser now queries GET /nodes/top-level, so we no longer need to
+    // pass a list of "root entity types" — the server defines top-level
+    // structurally (no incoming containment edge). Orphan instances of
+    // non-root types surface automatically.
     const provider = useGraphProvider()
-    const rootEntityTypes = useRootEntityTypes()
     const containmentEdgeTypes = useContainmentEdgeTypes()
     const entityTypeDefinitions = useEntityTypes()
     const isSchemaLoading = useSchemaIsLoading()
 
     const browser = useEntityBrowser({
         provider,
-        rootEntityTypes,
         containmentEdgeTypes,
         entityTypeDefinitions,
         enabled: !isSchemaLoading,
     })
 
-    // Load roots from API when schema is ready.
-    // Uses rootEntityTypes if defined, falls back to all entity types.
+    // Load top-level entities from API when schema is ready.
     useEffect(() => {
-        if (!isSchemaLoading && (rootEntityTypes.length > 0 || entityTypeDefinitions.length > 0)) {
-            browser.loadRoots()
+        if (!isSchemaLoading && entityTypeDefinitions.length > 0) {
+            browser.loadTopLevel()
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isSchemaLoading, rootEntityTypes.length, entityTypeDefinitions.length])
+    }, [isSchemaLoading, entityTypeDefinitions.length])
 
     // Propagate parentMap changes to AssignmentStep for containment inheritance
     useEffect(() => {
@@ -407,7 +408,7 @@ export function WizardAssignmentTree({
     )
 
     const entityTree = useMemo<EntityTreeNode[]>(() => {
-        if (browser.rootIds.length === 0) return []
+        if (browser.topLevelIds.length === 0) return []
 
         const conflictMap = new Map<string, AssignmentConflict>()
         conflicts.forEach(c => conflictMap.set(c.entityId, c))
@@ -469,15 +470,16 @@ export function WizardAssignmentTree({
             }
         }
 
-        // Exclude nodes that have a known parent (from containment edges loaded on expand).
-        // These appear in rootIds because the initial flat query returned them, but they
-        // belong as children in the hierarchy, not as top-level roots.
-        return browser.rootIds
+        // Exclude nodes that have a known parent (from containment edges loaded
+        // on expand). These appear in topLevelIds because the initial top-level
+        // query pre-dated the expand — once a parent link is discovered they
+        // belong as children in the hierarchy, not as roots.
+        return browser.topLevelIds
             .filter(urn => !browser.parentMap.has(urn))
             .map(urn => buildNode(urn, 0))
             .filter((n): n is EntityTreeNode => n !== null)
             .sort((a, b) => a.name.localeCompare(b.name))
-    }, [browser.nodes, browser.rootIds, browser.parentMap, browser.typeFilter, pathTypes, conflicts, effectiveAssignments, manualAssignmentMap])
+    }, [browser.nodes, browser.topLevelIds, browser.parentMap, browser.typeFilter, pathTypes, conflicts, effectiveAssignments, manualAssignmentMap])
 
     // Build child allocation map: for each entity with children, which layers are descendants assigned to?
     const childAllocationMap = useMemo(() => {
@@ -570,17 +572,17 @@ export function WizardAssignmentTree({
 
         traverse(entityTree)
 
-        // Root "load more" sentinel
-        if (browser.rootHasMore) {
+        // Top-level "load more" sentinel
+        if (browser.topLevelHasMore) {
             result.push({
-                id: '__more:roots',
+                id: '__more:top-level',
                 isLoadMore: true as const,
                 depth: 0,
             })
         }
 
         return result
-    }, [entityTree, expandedIds, selectedIds, browser.nodes, browser.rootHasMore])
+    }, [entityTree, expandedIds, selectedIds, browser.nodes, browser.topLevelHasMore])
 
     // Virtualization
     const rowVirtualizer = useVirtualizer({
@@ -789,6 +791,21 @@ export function WizardAssignmentTree({
                         <p className="text-sm text-slate-500">
                             {browser.isLoading ? 'Loading...' : `${flattenedNodes.length} entities`} • {selectedIds.size} selected
                         </p>
+                        {!browser.isLoading && browser.topLevelTotalCount > 0 && (
+                            <p className="text-[11px] text-slate-400 mt-0.5">
+                                {browser.topLevelMetadata.rootTypeCount} top-level
+                                {browser.topLevelMetadata.orphanCount > 0 && (
+                                    <>
+                                        {' · '}
+                                        <span className="text-amber-600 dark:text-amber-400 font-medium">
+                                            {browser.topLevelMetadata.orphanCount} orphan
+                                        </span>
+                                    </>
+                                )}
+                                {' · '}
+                                {browser.topLevelTotalCount} total
+                            </p>
+                        )}
                     </div>
 
                     {conflicts.length > 0 && (
@@ -967,7 +984,7 @@ export function WizardAssignmentTree({
                             // "Load more" sentinel row
                             if ('isLoadMore' in node && node.isLoadMore) {
                                 const parentId = 'parentId' in node ? node.parentId : undefined
-                                const isLoadingMore = browser.loadingNodes.has(parentId ?? '__roots')
+                                const isLoadingMore = browser.loadingNodes.has(parentId ?? '__top-level')
                                 return (
                                     <div
                                         key={node.id}
@@ -983,7 +1000,7 @@ export function WizardAssignmentTree({
                                         <button
                                             className="flex items-center gap-2 w-full px-3 py-2 text-xs text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-xl transition-colors disabled:opacity-50"
                                             style={{ paddingLeft: `${(node.depth ?? 0) * 20 + 32}px` }}
-                                            onClick={() => parentId ? browser.loadMoreChildren(parentId) : browser.loadMoreRoots()}
+                                            onClick={() => parentId ? browser.loadMoreChildren(parentId) : browser.loadMoreTopLevel()}
                                             disabled={isLoadingMore}
                                         >
                                             {isLoadingMore

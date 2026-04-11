@@ -232,6 +232,15 @@ export interface GraphSchema {
     rootEntityTypes: string[]
     containmentEdgeTypes: string[]
     lineageEdgeTypes: string[]
+    /**
+     * SHA-256 digest of the underlying OntologyMetadata projection.
+     * Byte-identical to `ViewORM.ontology_digest` at save time — the
+     * ViewWizard compares the view's stored digest against this value
+     * to decide whether to render <OntologyDriftBanner>. Null when the
+     * backend couldn't resolve the ontology; drift check no-ops in
+     * that case.
+     */
+    ontologyDigest?: string | null
 }
 
 // ============================================
@@ -431,6 +440,49 @@ export interface ContainmentResult {
 }
 
 // ============================================
+// Top-Level / Orphan Node Query Types
+// ============================================
+
+/**
+ * Query for nodes that sit at the top of the containment hierarchy.
+ *
+ * Definition (enterprise-ready, ontology-agnostic):
+ *   A node is "top-level" if there is NO incoming containment edge of any
+ *   type defined in the active ontology. This covers both ontology roots
+ *   (e.g. Domain entities that are always roots) AND orphan instances of
+ *   non-root types (e.g. a Platform that was ingested without a Domain).
+ *
+ * Replaces the old "rootEntityTypes" heuristic which silently mis-classified
+ * any ontology where the root type wasn't actually at the top, and couldn't
+ * surface orphans at all.
+ */
+export interface TopLevelNodesQuery {
+    /** Optional entity-type filter for the type-picker dropdown. */
+    entityTypes?: EntityType[]
+    /** Case-insensitive substring search over displayName/urn. */
+    searchQuery?: string
+    /** Page size. Backend clamps to 1..1000. */
+    limit?: number
+    /** Keyset cursor: the displayName of the last node returned on the
+     *  previous page. `null`/undefined starts from the beginning. */
+    cursor?: string | null
+    /** When true (default), each returned node has `childCount` populated. */
+    includeChildCount?: boolean
+}
+
+export interface TopLevelNodesResult {
+    nodes: GraphNode[]
+    /** Total count across all pages (diagnostic — NOT nodes.length). */
+    totalCount: number
+    hasMore: boolean
+    nextCursor: string | null
+    /** How many of `totalCount` are ontology-root instances. */
+    rootTypeCount: number
+    /** How many are orphans of non-root types (missing containment in-edge). */
+    orphanCount: number
+}
+
+// ============================================
 // Provider Interface
 // ============================================
 
@@ -547,6 +599,18 @@ export interface GraphDataProvider {
      * Used for SearchChildrenPanel and similar UIs
      */
     getContainment?(params: { parentUrn: URN; searchQuery?: string; limit?: number }): Promise<ContainmentResult>
+
+    /**
+     * Get nodes sitting at the top of the containment hierarchy — every
+     * node with NO incoming containment edge, regardless of entity type.
+     * This is the ontology-agnostic replacement for "root-type" queries
+     * and is what the ViewWizard's AssignmentStep uses to seed its tree.
+     *
+     * Backend MUST raise on empty containment-edge ontology: silently
+     * returning everything (or hardcoding CONTAINS/BELONGS_TO) is the
+     * behavior this method was introduced to replace.
+     */
+    getTopLevelNodes(query: TopLevelNodesQuery): Promise<TopLevelNodesResult>
 
     // ==========================================
     // Lineage Traversal

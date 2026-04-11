@@ -20,6 +20,8 @@ import type {
     AggregatedEdgeResult,
     CreateNodeRequest,
     CreateNodeResult,
+    TopLevelNodesQuery,
+    TopLevelNodesResult,
 } from './GraphDataProvider'
 
 const API_BASE = '/api/v1'
@@ -292,6 +294,23 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
     async getDescendants(urn: URN, depth = 10): Promise<GraphNode[]> {
         return await this.fetch<GraphNode[]>(`/nodes/${encodeURIComponent(urn)}/descendants?depth=${depth}`)
+    }
+
+    async getTopLevelNodes(query: TopLevelNodesQuery): Promise<TopLevelNodesResult> {
+        const params = new URLSearchParams()
+        // Don't swallow an explicit limit of 0 — backend clamps to [1,1000].
+        if (query.limit !== undefined) params.append('limit', String(query.limit))
+        if (query.searchQuery) params.append('searchQuery', query.searchQuery)
+        if (query.cursor) params.append('cursor', query.cursor)
+        if (query.includeChildCount === false) params.append('includeChildCount', 'false')
+        if (query.entityTypes?.length) {
+            query.entityTypes.forEach(t => params.append('entityTypes', t))
+        }
+        // Backend returns camelCase via response_model_by_alias=True, so the
+        // wire shape already matches TopLevelNodesResult one-to-one.
+        return await this.fetch<TopLevelNodesResult>(
+            `/nodes/top-level?${params.toString()}`,
+        )
     }
 
     async getContainment(params: { parentUrn: URN; searchQuery?: string; limit?: number }): Promise<ContainmentResult> {

@@ -580,6 +580,11 @@ class ViewORM(Base):
     )
     view_type = Column(Text, nullable=False, default="graph")
     config = Column(Text, nullable=False, default="{}")       # JSON: full ViewConfiguration
+    # Ontology digest captured at view save time — used by the wizard to
+    # detect drift when a user edits a view whose ontology has changed since
+    # creation. Nullable because legacy rows pre-date the column; the wizard
+    # treats NULL as "drift check unavailable" (no warning shown).
+    ontology_digest = Column(Text, nullable=True, default=None)
     # EXTENSION POINT: persist referenced_entity_types / referenced_relationship_types
     # for view-ontology compatibility checks once real breakage workflows appear.
     visibility = Column(Text, nullable=False, default="private")

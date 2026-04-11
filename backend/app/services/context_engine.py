@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json as _json
 import logging
 import time
 from typing import List, Dict, Any, Set, Optional, Tuple, TYPE_CHECKING
@@ -6,7 +8,7 @@ from ..models.graph import (
     GraphNode, GraphEdge, LineageResult, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
-    CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult,
+    CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult, TopLevelNodesResult,
 )
 import os
 
@@ -120,6 +122,36 @@ class ContextEngine:
         """
         resolved = await self._resolve_ontology()
         return resolved.to_flat_metadata()
+
+    async def get_ontology_digest(self) -> Optional[str]:
+        """Return a stable SHA-256 digest of the active ontology.
+
+        Used by the ViewWizard drift detector: when a view is saved, this
+        digest is captured on the ``ViewORM.ontology_digest`` column; when
+        the view is later edited, the wizard compares the stored digest
+        against the current one and surfaces a non-blocking banner when
+        they differ.
+
+        The digest is computed from the flat OntologyMetadata projection
+        (containment/lineage edge types, edge-type metadata, entity-type
+        hierarchy, root entity types) serialized as canonical JSON. This
+        means semantically-identical ontologies produce identical digests
+        regardless of dict/list ordering in the source-of-truth store.
+
+        Returns None when the ontology cannot be resolved (provider down,
+        no service wired, etc.) so callers can defensively skip persisting
+        a bogus digest.
+        """
+        try:
+            meta = await self.get_ontology_metadata()
+        except Exception as exc:
+            logger.warning("get_ontology_digest: unable to resolve ontology (%s)", exc)
+            return None
+        payload = meta.model_dump(by_alias=True)
+        canonical = _json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), default=str,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def invalidate_ontology_cache(self) -> None:
         """Clear cached ontology so the next call re-fetches from source."""
@@ -280,6 +312,41 @@ class ContextEngine:
             search_query=search_query, limit=limit, offset=offset,
             include_lineage_edges=include_lineage_edges,
             sort_property=sort_property, cursor=cursor,
+        )
+
+    async def get_top_level_or_orphan_nodes(
+        self,
+        *,
+        entity_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+        include_child_count: bool = True,
+    ) -> TopLevelNodesResult:
+        """Return instances with no incoming containment edge, scoped to the
+        active workspace/data-source ontology.
+
+        ContextEngine is the correct layer to inject `root_entity_types` from
+        the resolved ontology because the provider is ontology-agnostic. The
+        provider classifies each returned row as "root type" vs "orphan" using
+        that list so the frontend can render a single unified list with a
+        "N top-level · M orphan" badge.
+        """
+        # Ensure ontology has been resolved — this also pushes the resolved
+        # containment edge types into the provider as a side effect, so the
+        # provider's structural predicate uses the ontology-authoritative set.
+        resolved = await self._resolve_ontology()
+        root_types: List[str] = []
+        if resolved and getattr(resolved, "root_entity_types", None):
+            root_types = list(resolved.root_entity_types)
+
+        return await self.provider.get_top_level_or_orphan_nodes(
+            root_entity_types=root_types,
+            entity_types=entity_types,
+            search_query=search_query,
+            limit=limit,
+            cursor=cursor,
+            include_child_count=include_child_count,
         )
 
     async def get_edges(self, query: EdgeQuery = None) -> List[GraphEdge]:
@@ -775,6 +842,22 @@ class ContextEngine:
             entity_types = self._build_entity_types_from_dicts(stats, ontology, sys_ent)
             relationship_types = self._build_rel_types_from_dicts(stats, ontology, sys_rel)
 
+        # Compute the ontology digest from the same OntologyMetadata
+        # projection that `get_ontology_digest()` uses, so the value
+        # embedded here is byte-identical to what gets stamped onto
+        # `ViewORM.ontology_digest` at save time. Keeping the algorithm
+        # in one place is important — the ViewWizard drift check is a
+        # pure equality test (see `hasOntologyDrifted`).
+        try:
+            ontology_payload = ontology.model_dump(by_alias=True)
+            canonical = _json.dumps(
+                ontology_payload, sort_keys=True, separators=(",", ":"), default=str,
+            )
+            ontology_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        except Exception as exc:
+            logger.warning("get_graph_schema: failed to compute ontology digest (%s)", exc)
+            ontology_digest = None
+
         return GraphSchema(
             version="1.0.0",
             entityTypes=entity_types,
@@ -782,6 +865,7 @@ class ContextEngine:
             rootEntityTypes=ontology.root_entity_types,
             containmentEdgeTypes=ontology.containment_edge_types,
             lineageEdgeTypes=ontology.lineage_edge_types,
+            ontologyDigest=ontology_digest,
         )
 
     def _build_entity_types_from_resolved(self, stats, resolved) -> List[EntityTypeDefinition]:

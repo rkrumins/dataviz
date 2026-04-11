@@ -17,6 +17,13 @@ const queryClient = new QueryClient({
   },
 })
 
+// Exposed for non-component modules (e.g. workspaceSwitchCleanup) that need
+// to evict queries when the active workspace changes. Returns null during
+// module load before this file has executed — callers must tolerate that.
+export function getQueryClient(): QueryClient | null {
+  return queryClient
+}
+
 // GraphProvider manages the RemoteGraphProvider lifecycle internally,
 // creating a workspace-scoped instance whenever the active workspace changes.
 // RouterProvider handles URL-based navigation; AppLayout (inside routes)

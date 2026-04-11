@@ -10,6 +10,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { workspaceService, type WorkspaceResponse, type DataSourceResponse } from '@/services/workspaceService'
 import { useSchemaStore } from '@/store/schema'
+import { cleanupOnWorkspaceSwitch } from '@/store/workspaceSwitchCleanup'
 
 interface WorkspacesState {
     workspaces: WorkspaceResponse[]
@@ -85,14 +86,35 @@ export const useWorkspacesStore = create<WorkspacesState>()(
                 const ws = id ? get().workspaces.find((w) => w.id === id) : null
                 const primaryDs = ws?.dataSources?.find((ds) => ds.isPrimary)
                     ?? ws?.dataSources?.[0] ?? null
+                const nextDsId = primaryDs?.id ?? null
+                const prev = get()
+                const scopeChanged =
+                    prev.activeWorkspaceId !== id ||
+                    prev.activeDataSourceId !== nextDsId
+
+                // Cleanup BEFORE the state transition so the next render of
+                // any <SchemaScope> sees an empty cache and triggers a cold
+                // fetch for the new scope. Skip when nothing is actually
+                // changing — no-op setters must not purge caches.
+                if (scopeChanged) {
+                    cleanupOnWorkspaceSwitch()
+                }
+
                 set({
                     activeWorkspaceId: id,
-                    activeDataSourceId: primaryDs?.id ?? null,
+                    activeDataSourceId: nextDsId,
                 })
-                useSchemaStore.getState().setActiveScopeKey(id, primaryDs?.id ?? null)
+                useSchemaStore.getState().setActiveScopeKey(id, nextDsId)
             },
 
             setActiveDataSource: (id) => {
+                const prev = get()
+                const scopeChanged = prev.activeDataSourceId !== id
+
+                if (scopeChanged) {
+                    cleanupOnWorkspaceSwitch()
+                }
+
                 set({ activeDataSourceId: id })
                 const wsId = get().activeWorkspaceId
                 useSchemaStore.getState().setActiveScopeKey(wsId, id)

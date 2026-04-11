@@ -38,6 +38,7 @@ from backend.common.models.graph import (
     BatchCommandResult,
     BatchResponse,
     ChildrenWithEdgesResult,
+    TopLevelNodesResult,
 )
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "GraphNode", "GraphEdge",
     "PropertyFilter", "TagFilter", "TextFilter", "NodeQuery", "EdgeQuery",
     "LineageResult", "ContainmentResult", "ChildrenWithEdgesResult",
+    "TopLevelNodesResult",
     "EntityTypeSummary", "EdgeTypeSummary", "TagSummary", "GraphSchemaStats",
     "EdgeTypeMetadata", "EntityTypeHierarchy", "OntologyMetadata",
     "FieldSchema", "EntityVisualSchema", "EntityHierarchySchema",
