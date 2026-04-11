@@ -223,3 +223,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 
+nexus_lineage.db
+nexus_core.db
+backend/nexus_core.db
+backend/nexus_lineage.db
