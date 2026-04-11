@@ -7,7 +7,7 @@
  *
  * Refactored from AppShell + App.tsx to support route-based navigation.
  */
-import { useEffect, useState, createContext, useContext } from 'react'
+import { useEffect, useState } from 'react'
 import { Outlet, Navigate, useNavigate } from 'react-router-dom'
 import { AlertTriangle, Home, LogIn, Lock } from 'lucide-react'
 import { TopBar } from './TopBar'
@@ -23,22 +23,9 @@ import { listViews, viewToViewConfig } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useRouteSync } from '@/hooks/useRouteSync'
 import { useBackendRecovery } from '@/hooks/useBackendRecovery'
+import { ViewEditorContext, useViewEditorModal } from './viewEditorContext'
 
-// Context for View Editor Modal
-interface ViewEditorContextType {
-  openViewEditor: (viewId?: string) => void
-  closeViewEditor: () => void
-}
-
-const ViewEditorContext = createContext<ViewEditorContextType | null>(null)
-
-export function useViewEditorModal() {
-  const context = useContext(ViewEditorContext)
-  if (!context) {
-    throw new Error('useViewEditorModal must be used within AppLayout')
-  }
-  return context
-}
+export { useViewEditorModal }
 
 export function AppLayout() {
   const { isAuthenticated, sessionExpired, login, logout } = useAuthStore()
