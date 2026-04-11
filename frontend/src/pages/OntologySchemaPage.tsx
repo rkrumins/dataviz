@@ -358,7 +358,7 @@ export function OntologySchemaPage() {
 
       await mutations.update.mutateAsync({ id: selectedOntology.id, req })
       showToast('success', 'All changes saved')
-      discardChanges()
+      doDiscard()
     } catch (err: unknown) {
       showToast('error', `Failed to save: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
