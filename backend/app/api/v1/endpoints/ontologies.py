@@ -17,6 +17,7 @@ from backend.app.ontology.resolver import (
     validate_ontology,
 )
 from backend.app.ontology.service import LocalOntologyService
+from backend.app.services.context_engine import context_engine as _legacy_engine
 from backend.common.models.management import (
     OntologyCreateRequest,
     OntologyUpdateRequest,
@@ -33,6 +34,24 @@ from backend.common.models.management import (
 from backend.common.models.graph import GraphSchemaStats
 
 router = APIRouter()
+
+
+def _invalidate_ontology_caches() -> None:
+    """Clear the legacy singleton ContextEngine's resolved-ontology cache.
+
+    Per-request workspace engines are short-lived and re-resolve the
+    ontology on each request, so they are self-correcting after a mutation.
+    The legacy module-level ``context_engine`` singleton is the only place
+    that caches a ResolvedOntology across requests (TTL 300s), so it must
+    be invalidated explicitly whenever an ontology definition changes.
+
+    Swallows exceptions because cache invalidation must never break a
+    successful mutation — stale reads are recoverable, lost writes aren't.
+    """
+    try:
+        _legacy_engine.invalidate_ontology_cache()
+    except Exception:  # noqa: BLE001 — defensive: never break mutation flow
+        pass
 
 
 @router.get("", response_model=List[OntologyDefinitionResponse])
@@ -53,7 +72,9 @@ async def create_ontology(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Create a new ontology (starts at version 1, unpublished)."""
-    return await ontology_definition_repo.create_ontology(session, req)
+    result = await ontology_definition_repo.create_ontology(session, req)
+    _invalidate_ontology_caches()
+    return result
 
 
 @router.get("/{ontology_id}/versions", response_model=List[OntologyDefinitionResponse])
@@ -139,6 +160,7 @@ async def update_ontology(
     ontology = await ontology_definition_repo.update_ontology(session, ontology_id, req)
     if not ontology:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    _invalidate_ontology_caches()
     return ontology
 
 
@@ -162,6 +184,7 @@ async def delete_ontology(
             detail="Cannot delete ontology: one or more data sources still reference it.",
         )
     await ontology_definition_repo.delete_ontology(session, ontology_id)
+    _invalidate_ontology_caches()
 
 
 @router.post("/{ontology_id}/restore", response_model=OntologyDefinitionResponse)
@@ -173,6 +196,7 @@ async def restore_ontology(
     restored = await ontology_definition_repo.restore_ontology(session, ontology_id)
     if not restored:
         raise HTTPException(status_code=404, detail=f"No deleted ontology '{ontology_id}' found to restore")
+    _invalidate_ontology_caches()
     return restored
 
 
@@ -200,6 +224,7 @@ async def publish_ontology(
     ontology = await ontology_definition_repo.publish_ontology(session, ontology_id)
     if not ontology:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    _invalidate_ontology_caches()
     return ontology
 
 
@@ -229,7 +254,9 @@ async def clone_ontology(
         entityTypeDefinitions=json.loads(source.entity_type_definitions or "{}"),
         relationshipTypeDefinitions=json.loads(source.relationship_type_definitions or "{}"),
     )
-    return await ontology_definition_repo.create_ontology(session, req)
+    result = await ontology_definition_repo.create_ontology(session, req)
+    _invalidate_ontology_caches()
+    return result
 
 
 @router.post("/{ontology_id}/validate", response_model=OntologyValidationResponse)
@@ -425,7 +452,9 @@ async def import_ontology_new(
     Validates the JSON structure against the export format.
     """
     try:
-        return await ontology_definition_repo.import_ontology(session, req, target_id=None)
+        result = await ontology_definition_repo.import_ontology(session, req, target_id=None)
+        _invalidate_ontology_caches()
+        return result
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -447,7 +476,9 @@ async def import_ontology_into(
     - No changes detected → returns status="no_changes" without modification.
     """
     try:
-        return await ontology_definition_repo.import_ontology(session, req, target_id=ontology_id)
+        result = await ontology_definition_repo.import_ontology(session, req, target_id=ontology_id)
+        _invalidate_ontology_caches()
+        return result
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 

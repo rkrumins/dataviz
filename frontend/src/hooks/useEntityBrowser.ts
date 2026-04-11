@@ -1,15 +1,29 @@
 /**
- * useEntityBrowser - API-authoritative entity browsing hook for the ViewWizard.
+ * useEntityBrowser — API-authoritative entity browsing hook for the ViewWizard.
  *
- * Loads entities hierarchically per the ontology: root types first, lazy-expand
- * children via containment edges, hierarchy-preserving type filter, server-side
- * search. Every browse action hits the API — no stale caches.
+ * Loads entities that sit at the TOP of the containment hierarchy (ontology
+ * roots + orphan instances of non-root types), then lazy-expands children
+ * via containment edges. Every browse action hits the API — no stale caches.
+ *
+ * Why "top-level" and not "root types":
+ *   The old implementation derived a list of "root entity types" from the
+ *   ontology and then queried `getNodes({ entityTypes: rootTypes })`. That
+ *   was both ontology-specific (custom ontologies may have no single root)
+ *   AND silently ignored orphans — a Platform ingested without a Domain
+ *   would just disappear from the wizard. The new `getTopLevelNodes`
+ *   endpoint is a *structural* query: "nodes with no incoming containment
+ *   edge", which makes the wizard correct on any ontology and surfaces
+ *   orphans explicitly (diagnostic `rootTypeCount` / `orphanCount` fields).
  *
  * Designed for million-node scale:
- * - Cursor-based pagination (O(log N) via GET /children-with-edges?cursor=)
+ * - Cursor-based pagination for both top-level AND child loads
  * - Strictly lazy: ONE level per expand, never recursive
- * - Type filter is pure frontend ontology computation (no API call)
- * - Scoped search within expanded subtrees
+ * - Type filter is pure frontend ontology computation (no API call) when
+ *   filtering what the user sees; when the filter is active AND no search
+ *   is running, we re-query with `entityTypes=[typeId]` so the top-level
+ *   page is pre-narrowed by the server instead of fetching N pages and
+ *   filtering them down client-side.
+ * - Scoped search within expanded subtrees via `/nodes/top-level?searchQuery`
  */
 
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
@@ -40,23 +54,35 @@ export interface BrowserNode {
     loaded: boolean
 }
 
+export interface TopLevelMetadata {
+    /** How many top-level nodes are ontology-root instances. */
+    rootTypeCount: number
+    /** How many are orphans of non-root types (missing containment in-edge). */
+    orphanCount: number
+}
+
 export interface UseEntityBrowserOptions {
     provider: GraphDataProvider
-    /** Root entity types from the ontology (types with no canBeContainedBy) */
-    rootEntityTypes: string[]
-    /** Containment edge types from the ontology (is_containment=true) */
+    /** Containment edge types from the ontology (is_containment=true).
+     *  Still required for child-expansion calls. */
     containmentEdgeTypes: string[]
-    /** Full entity type definitions from the ontology (for canContain chains) */
+    /**
+     * Full entity type definitions from the ontology — kept ONLY so the
+     * type-filter UI can compute `canContain` chains and show/hide
+     * intermediate branches in the tree. NOT used for data loading.
+     */
     entityTypeDefinitions: EntityTypeDefinition[]
-    /** Set to false while schema is still loading */
+    /** Set to false while schema is still loading. */
     enabled: boolean
 }
 
 export interface UseEntityBrowserResult {
     // ─── Data (from API responses) ───
     nodes: Map<string, BrowserNode>
-    rootIds: string[]
-    rootHasMore: boolean
+    topLevelIds: string[]
+    topLevelHasMore: boolean
+    topLevelTotalCount: number
+    topLevelMetadata: TopLevelMetadata
     parentMap: Map<string, string>
 
     // ─── Ontology-derived ───
@@ -71,8 +97,8 @@ export interface UseEntityBrowserResult {
     error: string | null
 
     // ─── Actions ───
-    loadRoots: () => Promise<void>
-    loadMoreRoots: () => Promise<void>
+    loadTopLevel: () => Promise<void>
+    loadMoreTopLevel: () => Promise<void>
     expandNode: (urn: string) => Promise<void>
     loadMoreChildren: (parentUrn: string) => Promise<void>
     setSearch: (query: string) => void
@@ -83,12 +109,18 @@ export interface UseEntityBrowserResult {
 // ─── Hook ───────────────────────────────────────────────────────────────────
 
 export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBrowserResult {
-    const { provider, rootEntityTypes, containmentEdgeTypes, entityTypeDefinitions, enabled } = options
+    const { provider, containmentEdgeTypes, entityTypeDefinitions, enabled } = options
 
     // ─── State ───
     const [nodes, setNodes] = useState<Map<string, BrowserNode>>(new Map())
-    const [rootIds, setRootIds] = useState<string[]>([])
-    const [rootHasMore, setRootHasMore] = useState(false)
+    const [topLevelIds, setTopLevelIds] = useState<string[]>([])
+    const [topLevelHasMore, setTopLevelHasMore] = useState(false)
+    const [topLevelCursor, setTopLevelCursor] = useState<string | null>(null)
+    const [topLevelTotalCount, setTopLevelTotalCount] = useState(0)
+    const [topLevelMetadata, setTopLevelMetadata] = useState<TopLevelMetadata>({
+        rootTypeCount: 0,
+        orphanCount: 0,
+    })
     const [parentMap, setParentMap] = useState<Map<string, string>>(new Map())
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
     const [isLoading, setIsLoading] = useState(false)
@@ -102,28 +134,26 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
     // Use refs for state that callbacks need to read without re-creating closures
     const nodesRef = useRef(nodes)
     nodesRef.current = nodes
+    // Capture current filter/search inside loaders without retriggering the
+    // callback identity every time the user types — the callback reads the
+    // ref at call-time instead.
+    const typeFilterRef = useRef(typeFilter)
+    typeFilterRef.current = typeFilter
 
     // Reset when provider changes (workspace/datasource switch)
     useEffect(() => {
         if (providerRef.current !== provider) {
             providerRef.current = provider
             setNodes(new Map())
-            setRootIds([])
-            setRootHasMore(false)
+            setTopLevelIds([])
+            setTopLevelHasMore(false)
+            setTopLevelCursor(null)
+            setTopLevelTotalCount(0)
+            setTopLevelMetadata({ rootTypeCount: 0, orphanCount: 0 })
             setParentMap(new Map())
             setError(null)
         }
     }, [provider])
-
-    // ─── Compute root types to load (memoized) ───
-    const effectiveRootTypes = useMemo(() => {
-        if (rootEntityTypes.length > 0) return rootEntityTypes
-        // Compute from ontology: types with no canBeContainedBy parents
-        const computed = entityTypeDefinitions
-            .filter(et => !et.hierarchy?.canBeContainedBy?.length)
-            .map(et => et.id)
-        return computed.length > 0 ? computed : entityTypeDefinitions.map(et => et.id)
-    }, [rootEntityTypes, entityTypeDefinitions])
 
     // ─── Ontology computations (memoized, zero API calls) ───
 
@@ -173,89 +203,110 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         setLoadingNodes(prev => { const next = new Set(prev); next.delete(id); return next })
     }, [])
 
-    // ─── loadRoots ───
+    const mergeTopLevelResult = useCallback(
+        (
+            result: Awaited<ReturnType<GraphDataProvider['getTopLevelNodes']>>,
+            mode: 'replace' | 'append',
+        ) => {
+            if (mode === 'replace') {
+                const newNodes = new Map<string, BrowserNode>()
+                const newIds: string[] = []
+                for (const node of result.nodes) {
+                    newNodes.set(node.urn, {
+                        node,
+                        childIds: [],
+                        totalChildren: node.childCount ?? 0,
+                        hasMore: false,
+                        nextCursor: null,
+                        loaded: false,
+                    })
+                    newIds.push(node.urn)
+                }
+                setNodes(newNodes)
+                setTopLevelIds(newIds)
+                setParentMap(new Map())
+            } else {
+                setNodes(prev => {
+                    const next = new Map(prev)
+                    for (const node of result.nodes) {
+                        if (!next.has(node.urn)) {
+                            next.set(node.urn, {
+                                node,
+                                childIds: [],
+                                totalChildren: node.childCount ?? 0,
+                                hasMore: false,
+                                nextCursor: null,
+                                loaded: false,
+                            })
+                        }
+                    }
+                    return next
+                })
+                setTopLevelIds(prev => {
+                    const existing = new Set(prev)
+                    const newIds = result.nodes
+                        .filter(n => !existing.has(n.urn))
+                        .map(n => n.urn)
+                    return [...prev, ...newIds]
+                })
+            }
+            setTopLevelHasMore(Boolean(result.hasMore))
+            setTopLevelCursor(result.nextCursor ?? null)
+            setTopLevelTotalCount(result.totalCount ?? 0)
+            setTopLevelMetadata({
+                rootTypeCount: result.rootTypeCount ?? 0,
+                orphanCount: result.orphanCount ?? 0,
+            })
+        },
+        [],
+    )
 
-    const loadRoots = useCallback(async () => {
-        if (!enabled || effectiveRootTypes.length === 0) return
+    // ─── loadTopLevel ───
+
+    const loadTopLevel = useCallback(async () => {
+        if (!enabled) return
 
         setIsLoading(true)
         setError(null)
 
         try {
-            const result = await provider.getNodes({
-                entityTypes: effectiveRootTypes,
+            const activeFilter = typeFilterRef.current
+            const result = await provider.getTopLevelNodes({
+                entityTypes: activeFilter ? [activeFilter] : undefined,
                 limit: PAGE_SIZE,
-                offset: 0,
+                cursor: null,
+                includeChildCount: true,
             })
-
-            const newNodes = new Map<string, BrowserNode>()
-            const newRootIds: string[] = []
-
-            for (const node of result) {
-                newNodes.set(node.urn, {
-                    node,
-                    childIds: [],
-                    totalChildren: node.childCount ?? 0,
-                    hasMore: false,
-                    nextCursor: null,
-                    loaded: false,
-                })
-                newRootIds.push(node.urn)
-            }
-
-            setNodes(newNodes)
-            setRootIds(newRootIds)
-            setRootHasMore(result.length >= PAGE_SIZE)
-            setParentMap(new Map())
+            mergeTopLevelResult(result, 'replace')
         } catch (err) {
-            console.error('[useEntityBrowser] Failed to load roots:', err)
-            setError(err instanceof Error ? err.message : 'Failed to load root entities')
+            console.error('[useEntityBrowser] Failed to load top-level nodes:', err)
+            setError(err instanceof Error ? err.message : 'Failed to load entities')
         } finally {
             setIsLoading(false)
         }
-    }, [enabled, provider, effectiveRootTypes])
+    }, [enabled, provider, mergeTopLevelResult])
 
-    // ─── loadMoreRoots ───
+    // ─── loadMoreTopLevel ───
 
-    const loadMoreRoots = useCallback(async () => {
-        if (!rootHasMore) return
-        addLoading('__roots')
+    const loadMoreTopLevel = useCallback(async () => {
+        if (!topLevelHasMore) return
+        addLoading('__top-level')
 
         try {
-            const result = await provider.getNodes({
-                entityTypes: effectiveRootTypes,
+            const activeFilter = typeFilterRef.current
+            const result = await provider.getTopLevelNodes({
+                entityTypes: activeFilter ? [activeFilter] : undefined,
                 limit: PAGE_SIZE,
-                offset: rootIds.length,
+                cursor: topLevelCursor,
+                includeChildCount: true,
             })
-
-            setNodes(prev => {
-                const next = new Map(prev)
-                for (const node of result) {
-                    if (!next.has(node.urn)) {
-                        next.set(node.urn, {
-                            node,
-                            childIds: [],
-                            totalChildren: node.childCount ?? 0,
-                            hasMore: false,
-                            nextCursor: null,
-                            loaded: false,
-                        })
-                    }
-                }
-                return next
-            })
-            setRootIds(prev => {
-                const existing = new Set(prev)
-                const newIds = result.filter(n => !existing.has(n.urn)).map(n => n.urn)
-                return [...prev, ...newIds]
-            })
-            setRootHasMore(result.length >= PAGE_SIZE)
+            mergeTopLevelResult(result, 'append')
         } catch (err) {
-            console.error('[useEntityBrowser] Failed to load more roots:', err)
+            console.error('[useEntityBrowser] Failed to load more top-level nodes:', err)
         } finally {
-            removeLoading('__roots')
+            removeLoading('__top-level')
         }
-    }, [rootHasMore, provider, effectiveRootTypes, rootIds.length, addLoading, removeLoading])
+    }, [topLevelHasMore, topLevelCursor, provider, mergeTopLevelResult, addLoading, removeLoading])
 
     // ─── expandNode: lazy-load direct children (ONE level only) ───
     // Uses nodesRef to avoid re-creating this callback when nodes change.
@@ -398,56 +449,46 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         }
 
         if (!query.trim()) {
-            loadRoots()
+            loadTopLevel()
             return
         }
 
         searchTimerRef.current = setTimeout(async () => {
             setIsLoading(true)
             try {
-                const searchEntityTypes = typeFilter ? [typeFilter] : undefined
-                const result = await provider.getNodes({
+                const activeFilter = typeFilterRef.current
+                const result = await provider.getTopLevelNodes({
+                    entityTypes: activeFilter ? [activeFilter] : undefined,
                     searchQuery: query,
-                    entityTypes: searchEntityTypes,
                     limit: PAGE_SIZE,
-                    offset: 0,
+                    cursor: null,
+                    includeChildCount: true,
                 })
-
-                const newNodes = new Map<string, BrowserNode>()
-                const newRootIds: string[] = []
-
-                for (const node of result) {
-                    newNodes.set(node.urn, {
-                        node,
-                        childIds: [],
-                        totalChildren: node.childCount ?? 0,
-                        hasMore: false,
-                        nextCursor: null,
-                        loaded: false,
-                    })
-                    newRootIds.push(node.urn)
-                }
-
-                setNodes(newNodes)
-                setRootIds(newRootIds)
-                setRootHasMore(result.length >= PAGE_SIZE)
-                setParentMap(new Map())
+                mergeTopLevelResult(result, 'replace')
             } catch (err) {
                 console.error('[useEntityBrowser] Search failed:', err)
+                setError(err instanceof Error ? err.message : 'Search failed')
             } finally {
                 setIsLoading(false)
             }
         }, 300)
-    }, [provider, typeFilter, loadRoots])
+    }, [provider, mergeTopLevelResult, loadTopLevel])
 
     // ─── setTypeFilter ───
 
     const setTypeFilter = useCallback((typeId: string | null) => {
         setTypeFilterState(typeId)
+        // Re-query top-level with the new filter. If the user has an active
+        // search, preserve it; otherwise fall through to a plain top-level
+        // refresh. Update the ref immediately so the async callbacks see the
+        // new filter without waiting for the next render.
+        typeFilterRef.current = typeId
         if (searchQuery.trim()) {
             setSearch(searchQuery)
+        } else {
+            loadTopLevel()
         }
-    }, [searchQuery, setSearch])
+    }, [searchQuery, setSearch, loadTopLevel])
 
     // ─── refresh ───
 
@@ -455,9 +496,9 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         if (searchQuery.trim()) {
             setSearch(searchQuery)
         } else {
-            await loadRoots()
+            await loadTopLevel()
         }
-    }, [searchQuery, setSearch, loadRoots])
+    }, [searchQuery, setSearch, loadTopLevel])
 
     // Cleanup
     useEffect(() => {
@@ -468,8 +509,10 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
 
     return {
         nodes,
-        rootIds,
-        rootHasMore,
+        topLevelIds,
+        topLevelHasMore,
+        topLevelTotalCount,
+        topLevelMetadata,
         parentMap,
         canTransitivelyContain,
         typesOnPathTo,
@@ -478,8 +521,8 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         searchQuery,
         typeFilter,
         error,
-        loadRoots,
-        loadMoreRoots,
+        loadTopLevel,
+        loadMoreTopLevel,
         expandNode,
         loadMoreChildren,
         setSearch,

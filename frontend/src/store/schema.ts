@@ -55,6 +55,12 @@ interface SchemaState {
   // Format: "${workspaceId}/${dataSourceId}" | null (null = global)
   activeScopeKey: string | null;
 
+  // Scope of the currently-loaded schema. Used by loadFromBackend to detect
+  // cross-workspace payload swaps so the no-op guard can't accidentally skip
+  // a legitimate workspace switch that happened to produce the same digest.
+  // Format: "${workspaceId}/${dataSourceId}" | null.
+  lastLoadedScopeKey: string | null;
+
   // Loading state for backend schema
   isLoadingFromBackend: boolean;
   backendSchemaError: string | null;
@@ -70,8 +76,17 @@ interface SchemaState {
   // views where !view.scopeKey (global/legacy) OR view.scopeKey === activeScopeKey
   visibleViews: () => ViewConfiguration[];
 
-  // Backend schema loading
-  loadFromBackend: (backendSchema: GraphSchema) => void;
+  // Backend schema loading. `scope` identifies which workspace/data-source
+  // this payload belongs to — loadFromBackend uses it to guard against
+  // accidental cross-workspace content swaps and to stamp lastLoadedScopeKey.
+  loadFromBackend: (
+    backendSchema: GraphSchema,
+    scope?: { workspaceId?: string | null; dataSourceId?: string | null },
+  ) => void;
+
+  // Full reset: clears schema, active view, and all derived state. Called
+  // by cleanupOnWorkspaceSwitch so the next <SchemaScope> render cold-fetches.
+  reset: () => void;
 
   // Entity Types
   addEntityType: (entityType: EntityTypeSchema) => void;
@@ -175,6 +190,7 @@ export const useSchemaStore = create<SchemaState>()(
       schema: null,
       activeViewId: null,
       activeScopeKey: null,
+      lastLoadedScopeKey: null,
       isLoadingFromBackend: false,
       backendSchemaError: null,
 
@@ -262,19 +278,33 @@ export const useSchemaStore = create<SchemaState>()(
 
       // Load backend schema (ontology only — entity types + relationship types).
       // Views are loaded separately from the Context Model API.
-      loadFromBackend: (backendSchema) => {
+      loadFromBackend: (backendSchema, scope) => {
         try {
           const entityTypes = backendSchema.entityTypes.map(convertBackendEntityType)
           const relationshipTypes = backendSchema.relationshipTypes.map(convertBackendRelationshipType)
+          // Derive a scope key from whatever the caller passed — if none,
+          // fall back to the currently-active scope. The scope key is part
+          // of the no-op guard so two workspaces with a coincidentally-
+          // identical ontology digest still trigger a legitimate rewrite
+          // when the user switches between them.
+          const incomingScopeKey = (() => {
+            const ws = scope?.workspaceId ?? null
+            const ds = scope?.dataSourceId ?? null
+            if (ws && ds) return `${ws}/${ds}`
+            return get().activeScopeKey
+          })()
           set((state) => {
             const prevSchema = state.schema
             const nextContainment = backendSchema.containmentEdgeTypes ?? DEFAULT_CONTAINMENT_EDGE_TYPES
             const nextLineage = backendSchema.lineageEdgeTypes ?? DEFAULT_LINEAGE_EDGE_TYPES
 
-            // Strategic no-op: do not write store state if ontology schema payload
-            // hasn't actually changed. This prevents render churn and update loops.
+            // Strategic no-op: skip the write only when (a) the payload is
+            // byte-identical AND (b) we're still inside the same scope key.
+            // Dropping the scope check would let a cross-workspace switch
+            // with a matching digest accidentally serve stale state.
             if (
               prevSchema &&
+              state.lastLoadedScopeKey === incomingScopeKey &&
               prevSchema.version === backendSchema.version &&
               jsonEquals(prevSchema.entityTypes, entityTypes) &&
               jsonEquals(prevSchema.relationshipTypes, relationshipTypes) &&
@@ -291,10 +321,19 @@ export const useSchemaStore = create<SchemaState>()(
               return state
             }
 
-            // Preserve view state (loaded from Context Model API) across ontology refreshes.
-            const preservedViews = prevSchema?.views ?? []
-            const defaultViewId = prevSchema?.defaultViewId ?? (preservedViews[0]?.id ?? '')
-            const activeViewStillValid = !!state.activeViewId && preservedViews.some(v => v.id === state.activeViewId)
+            // Preserve view state (loaded from Context Model API) across
+            // same-scope ontology refreshes, but blow it away on a scope
+            // switch — otherwise a stale view from workspace W1 lingers
+            // after switching to W2.
+            const isSameScope = state.lastLoadedScopeKey === incomingScopeKey
+            const preservedViews = isSameScope ? (prevSchema?.views ?? []) : []
+            const defaultViewId = isSameScope
+              ? (prevSchema?.defaultViewId ?? (preservedViews[0]?.id ?? ''))
+              : ''
+            const activeViewStillValid =
+              isSameScope &&
+              !!state.activeViewId &&
+              preservedViews.some(v => v.id === state.activeViewId)
 
             const workspaceSchema: WorkspaceSchema = {
               id: prevSchema?.id ?? generateId('workspace'),
@@ -314,6 +353,7 @@ export const useSchemaStore = create<SchemaState>()(
               ...state,
               schema: workspaceSchema,
               activeViewId: activeViewStillValid ? state.activeViewId : (defaultViewId || null),
+              lastLoadedScopeKey: incomingScopeKey,
               isLoadingFromBackend: false,
               backendSchemaError: null,
             }
@@ -325,6 +365,15 @@ export const useSchemaStore = create<SchemaState>()(
           })
         }
       },
+
+      reset: () =>
+        set({
+          schema: null,
+          activeViewId: null,
+          lastLoadedScopeKey: null,
+          isLoadingFromBackend: false,
+          backendSchemaError: null,
+        }),
 
       setActiveView: (viewId) => set({ activeViewId: viewId }),
 
@@ -552,12 +601,17 @@ export const useSchemaStore = create<SchemaState>()(
     }),
     {
       name: 'nexus-schema',
-      // Only persist UI state — schema types come from the backend (React Query cache).
-      // Persisting entity/relationship type definitions caused stale data issues when
-      // the ontology changed server-side; the server is now the single source of truth.
+      // ONLY persist `activeViewId` (a UI preference: the last view the user
+      // had selected). Schema data is never persisted — it's refetched from
+      // the backend via <SchemaScope> on every page load, which is the only
+      // safe lifecycle after the Phase 2 refactor. `activeScopeKey` is also
+      // intentionally NOT persisted: it mirrors the workspaces store and
+      // must be re-derived from the authoritative source on page load.
+      // `lastLoadedScopeKey` must also never be persisted — if it survives
+      // a reload it will fool the no-op guard into skipping a legitimate
+      // first fetch.
       partialize: (state) => ({
         activeViewId: state.activeViewId,
-        activeScopeKey: state.activeScopeKey,
       }),
     }
   )

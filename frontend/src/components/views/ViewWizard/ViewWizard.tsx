@@ -1,12 +1,39 @@
 /**
- * ViewWizard - Modern, intuitive wizard for creating and editing views
- * 
- * Features:
- * - Step-by-step guided flow
- * - Beautiful animations and transitions
- * - Smart defaults and suggestions
- * - Real-time preview
- * - Works for both CREATE and EDIT modes
+ * ViewWizard — modern, intuitive wizard for creating and editing views.
+ *
+ * Architecture: three nested layers that together solve the bootstrapping
+ * chicken-egg problem that plagued the single-component original:
+ *
+ *   ViewWizard              — outer shell controlled by `isOpen`. Never
+ *                             touches schema or view data. Its only job is
+ *                             to mount / unmount `ViewWizardScopeResolver`.
+ *
+ *   ViewWizardScopeResolver — phase 1: resolves the scope the wizard will
+ *                             operate on. In edit mode, that means fetching
+ *                             `{workspaceId, dataSourceId}` from the view
+ *                             row (via `useViewMetadata`) WITHOUT touching
+ *                             the schema store — this is what unblocks
+ *                             cross-workspace edits. In create mode, the
+ *                             active workspace/dataSource are the scope.
+ *                             Then mounts `<SchemaScope>` for that scope.
+ *
+ *   ViewWizardBody          — phase 2: schema is guaranteed loaded for the
+ *                             resolved scope, so it may freely read from
+ *                             `useSchemaStore`. Hydrates form state from
+ *                             the full view (via `useViewFull`) in edit
+ *                             mode, and renders the wizard UI.
+ *
+ * Why two hooks (`useViewMetadata` + `useViewFull`): they share a single
+ * React-Query cache entry (`['view', viewId]`), so the GET /views/{id}
+ * call fires exactly once even though both layers consume it. Metadata
+ * is a `select` projection; full is the raw response. See the hook file
+ * for the full rationale.
+ *
+ * Why no `schema.views.find(v => v.id === viewId)`: the original code
+ * read the editing view out of the schema store, which created the
+ * chicken-egg (schema is needed to find the view, but the view tells
+ * us which schema to load). Fetching the view via its own dedicated
+ * endpoint cleanly separates "ontology" from "views" in the cache.
  */
 
 import React, { useState, useCallback, useMemo, useEffect } from 'react'
@@ -24,7 +51,8 @@ import {
     Save,
     Eye,
     Loader2,
-    ClipboardList
+    ClipboardList,
+    AlertCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
@@ -32,6 +60,13 @@ import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { viewService } from '@/services/viewService'
+import { viewToViewConfig } from '@/services/viewApiService'
+import { SchemaScope } from '@/components/schema/SchemaScope'
+import {
+    OntologyDriftBanner,
+    hasOntologyDrifted,
+} from '@/components/schema/OntologyDriftBanner'
+import { useViewMetadata, useViewFull, type ViewMetadata } from '@/hooks/useViewMetadata'
 import type { ViewConfiguration, ViewLayerConfig, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
 
 // Import step components

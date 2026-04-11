@@ -16,9 +16,10 @@ from ..models.graph import (
     EntityTypeSummary, EdgeTypeSummary, TagSummary,
     OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy,
     AggregatedEdgeResult, AggregatedEdgeInfo,
-    ChildrenWithEdgesResult,
+    ChildrenWithEdgesResult, TopLevelNodesResult,
 )
 from .base import GraphDataProvider
+from backend.common.interfaces.provider import ProviderConfigurationError
 
 logger = logging.getLogger(__name__)
 
@@ -246,11 +247,19 @@ class FalkorDBProvider(GraphDataProvider):
 
         Resolution chain (first match wins):
         1. Ontology-resolved types injected by ContextEngine (may be empty = no hierarchy)
-        2. CONTAINMENT_EDGE_TYPES env var
-        3. Hardcoded fallback {CONTAINS, BELONGS_TO} — only used before ontology resolves
+        2. CONTAINMENT_EDGE_TYPES env var (explicit operator opt-in)
+        3. Raise ProviderConfigurationError — there is no safe hardcoded fallback
+           in a multi-tenant, custom-ontology system.
+
+        Enterprise tenants may use arbitrary edge type naming (e.g. "HAS_TABLE",
+        "PART_OF", "OWNS"). Silently defaulting to {CONTAINS, BELONGS_TO} produced
+        the "no results" bug in /nodes/top-level because such tenants legitimately
+        have neither type, yet the provider classified everything as "has a parent".
+        The right failure mode is loud and actionable at the API boundary.
         """
         # Prefer ontology-resolved types if they have been explicitly set
-        # (even if the set is empty — empty is a valid resolved state)
+        # (even if the set is empty — empty is a valid resolved state that
+        # indicates a flat graph with no containment hierarchy)
         if getattr(self, "_resolved_containment_types_set", False):
             return self._resolved_containment_types
         if not hasattr(self, "_containment_cache"):
@@ -258,7 +267,12 @@ class FalkorDBProvider(GraphDataProvider):
             if config:
                 self._containment_cache = {t.strip().upper() for t in config.split(",") if t.strip()}
             else:
-                self._containment_cache = {"CONTAINS", "BELONGS_TO"}
+                raise ProviderConfigurationError(
+                    "Containment edge types are not configured for this provider. "
+                    "ContextEngine must call set_containment_edge_types() from a "
+                    "resolved ontology, or the CONTAINMENT_EDGE_TYPES env var must "
+                    "be set. No hardcoded fallback is safe in a multi-tenant system."
+                )
         return self._containment_cache
 
     def _extract_node_from_result(self, row) -> Optional[GraphNode]:
@@ -803,6 +817,169 @@ class FalkorDBProvider(GraphDataProvider):
         if result.result_set and len(result.result_set) > 0:
             return self._extract_node_from_result(result.result_set[0])
         return None
+
+    async def get_top_level_or_orphan_nodes(
+        self,
+        *,
+        root_entity_types: Optional[List[str]] = None,
+        entity_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+        include_child_count: bool = True,
+    ) -> TopLevelNodesResult:
+        """Return structurally top-level nodes (no incoming containment edge).
+
+        Mixes ontology root-type instances and orphan non-root instances so the
+        wizard can show both in one list, with a root/orphan split in the
+        badge text. Classification is done in Python on the returned rows.
+
+        Pagination is cursor-based on displayName for stability under writes:
+        callers pass cursor=None for the first page and the returned
+        next_cursor for subsequent pages.
+        """
+        await self._ensure_connected()
+
+        # Raises ProviderConfigurationError if no types resolvable — surfaced
+        # as HTTP 400 by the endpoint. An empty set is a valid state meaning
+        # "flat graph, every node is top-level".
+        containment = self._get_containment_edge_types()
+        containment_rel_types = "|".join([_sanitize_label(t) for t in sorted(containment)])
+        root_types_set = {str(t) for t in (root_entity_types or [])}
+
+        params: Dict[str, Any] = {"limit": int(limit)}
+
+        # ── Build optional filters ────────────────────────────────────────
+        # Each filter produces a WHERE fragment applied uniformly to both the
+        # page query and the count query.
+        filter_fragments: List[str] = []
+
+        if search_query:
+            params["search"] = search_query.lower()
+            filter_fragments.append(
+                "(toLower(toString(n.displayName)) CONTAINS $search "
+                "OR toLower(toString(n.urn)) CONTAINS $search)"
+            )
+
+        # Structural top-level predicate — the whole point of this method.
+        # Empty containment set = flat graph, skip the predicate entirely.
+        #
+        # IMPORTANT: Use openCypher 1.0 pattern negation `NOT ()-[:T]->(n)`
+        # NOT `NOT EXISTS { MATCH ... }` which is Neo4j 4.x+ / ISO GQL syntax
+        # and is NOT supported by FalkorDB. The subquery form silently throws,
+        # gets caught below, and returns empty — which was the original bug.
+        if containment_rel_types:
+            filter_fragments.append(
+                "NOT ()-[:" + containment_rel_types + "]->(n)"
+            )
+
+        # ── Build MATCH clause: label UNION if entity_types specified ─────
+        use_label_union = bool(entity_types)
+        safe_types: List[str] = []
+        if use_label_union:
+            safe_types = [_sanitize_label(str(t)) for t in entity_types if str(t)]
+            if not safe_types:
+                use_label_union = False
+
+        # Page-query cursor: keyset over displayName for stability under writes.
+        page_filters = list(filter_fragments)
+        if cursor is not None:
+            params["cursor"] = str(cursor)
+            page_filters.append("toString(n.displayName) > $cursor")
+
+        def _build_match(filters: List[str]) -> str:
+            where_clause = (" WHERE " + " AND ".join(filters)) if filters else ""
+            if use_label_union:
+                branches = [
+                    f"MATCH (n:{label}){where_clause} RETURN n"
+                    for label in safe_types
+                ]
+                return "CALL { " + " UNION ".join(branches) + " }"
+            return f"MATCH (n){where_clause}"
+
+        # ── Page query ────────────────────────────────────────────────────
+        if include_child_count and containment_rel_types:
+            page_cypher = (
+                _build_match(page_filters)
+                + " WITH n ORDER BY toString(n.displayName) ASC LIMIT $limit"
+                + f" OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)"
+                + " RETURN n, count(child) as childCount"
+            )
+        else:
+            page_cypher = (
+                _build_match(page_filters)
+                + " WITH n ORDER BY toString(n.displayName) ASC LIMIT $limit"
+                + " RETURN n, 0 as childCount"
+            )
+
+        try:
+            page_result = await self._graph.ro_query(page_cypher, params=params)
+        except Exception as e:
+            logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
+            page_result = None
+
+        nodes: List[GraphNode] = []
+        root_type_count = 0
+        orphan_count = 0
+        if page_result and page_result.result_set:
+            for row in page_result.result_set:
+                node = self._extract_node_from_result(row[0] if isinstance(row, (list, tuple)) else row)
+                if not node:
+                    continue
+                try:
+                    child_count = int(row[1]) if isinstance(row, (list, tuple)) and len(row) > 1 else None
+                except (TypeError, ValueError):
+                    child_count = None
+                if child_count is not None:
+                    node.child_count = child_count
+                    if node.properties is not None:
+                        node.properties["childCount"] = child_count
+                # Classify: root-type instance vs orphan of non-root type
+                if root_types_set and str(node.entity_type) in root_types_set:
+                    root_type_count += 1
+                else:
+                    orphan_count += 1
+                nodes.append(node)
+
+        has_more = len(nodes) >= int(limit)
+        next_cursor = nodes[-1].display_name if (has_more and nodes) else None
+
+        # ── Total count query (no cursor filter) ──────────────────────────
+        # We run this separately so the page result reflects the cursor, but
+        # the total accurately shows how many top-level entities exist.
+        count_params: Dict[str, Any] = {}
+        if "search" in params:
+            count_params["search"] = params["search"]
+
+        if use_label_union:
+            where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
+            count_branches = [
+                f"MATCH (n:{label}){where_clause} RETURN n"
+                for label in safe_types
+            ]
+            count_cypher = "CALL { " + " UNION ".join(count_branches) + " } RETURN count(n) as total"
+        else:
+            where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
+            count_cypher = f"MATCH (n){where_clause} RETURN count(n) as total"
+
+        total_count = 0
+        try:
+            count_result = await self._graph.ro_query(count_cypher, params=count_params)
+            if count_result and count_result.result_set:
+                first = count_result.result_set[0]
+                total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
+        except Exception as e:
+            logger.warning(f"get_top_level_or_orphan_nodes count query failed: {e}")
+            total_count = len(nodes)
+
+        return TopLevelNodesResult(
+            nodes=nodes,
+            totalCount=total_count,
+            hasMore=has_more,
+            nextCursor=next_cursor,
+            rootTypeCount=root_type_count,
+            orphanCount=orphan_count,
+        )
 
     async def _traverse_lineage(
         self,

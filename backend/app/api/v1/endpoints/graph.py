@@ -1,7 +1,8 @@
 from typing import List, Optional, Any
+import hashlib
 import json
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -15,8 +16,9 @@ from backend.app.models.graph import (
     CreateNodeRequest, CreateNodeResult,
     CreateEdgeRequest, UpdateEdgeRequest, EdgeMutationResult,
     BatchCommandRequest, BatchCommandResult, BatchResponse,
-    ChildrenWithEdgesResult,
+    ChildrenWithEdgesResult, TopLevelNodesResult,
 )
+from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.app.services.context_engine import context_engine, ContextEngine
 from backend.app.db.engine import get_db_session
 from backend.app.registry.provider_registry import provider_registry
@@ -120,6 +122,70 @@ async def get_lineage_trace(
         include_inherited_lineage=include_inherited_lineage,
         lineage_edge_types=lineage_edge_types,
     )
+
+
+@router.get(
+    "/nodes/top-level",
+    response_model=TopLevelNodesResult,
+    response_model_by_alias=True,
+)
+async def get_top_level_nodes(
+    entityTypes: Optional[List[str]] = Query(
+        None,
+        description="Restrict to these entity type IDs. None = all types.",
+    ),
+    searchQuery: Optional[str] = Query(
+        None,
+        description="Case-insensitive substring match against displayName/urn.",
+    ),
+    limit: int = Query(100, ge=1, le=1000),
+    cursor: Optional[str] = Query(
+        None,
+        description="Keyset cursor (displayName of the last node on the previous page).",
+    ),
+    includeChildCount: bool = Query(True, description="Populate child_count on each node."),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Return instances that have no incoming containment edge.
+
+    "Top-level" is defined **structurally**: a node ``n`` is top-level iff
+    there is no edge ``(n' -[:CONTAINMENT_EDGE]-> n)`` for any configured
+    containment type. The result therefore mixes:
+      - Instances of ontology root types (Domain, Platform, …)
+      - Orphan instances of non-root types (e.g. a Table with no schema parent,
+        perhaps from a broken or incremental import)
+
+    The response's ``rootTypeCount`` and ``orphanCount`` fields let the UI
+    distinguish the two classes (e.g. an "orphan" badge in the wizard tree).
+
+    Containment edge types are resolved from the ontology bound to the active
+    data source. If the ontology has no containment edges configured and no
+    ``CONTAINMENT_EDGE_TYPES`` env override is present, the provider raises
+    :class:`ProviderConfigurationError`, which is translated to HTTP 400 —
+    the API must never silently fall back to hardcoded type names.
+
+    **Route-ordering note.** This handler MUST be declared before
+    ``/nodes/{urn}`` — FastAPI/Starlette matches routes in registration
+    order, and the generic ``{urn}`` path would otherwise swallow
+    ``/nodes/top-level`` and return 404 for a non-existent URN.
+    """
+    try:
+        return await engine.get_top_level_or_orphan_nodes(
+            entity_types=entityTypes,
+            search_query=searchQuery,
+            limit=limit,
+            cursor=cursor,
+            include_child_count=includeChildCount,
+        )
+    except ProviderConfigurationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Ontology configuration error: {exc}. Configure containment "
+                "edge types on the active ontology (or set CONTAINMENT_EDGE_TYPES "
+                "as a deployment-level override)."
+            ),
+        )
 
 
 @router.get("/nodes/{urn}", response_model=GraphNode, response_model_by_alias=True)
@@ -497,8 +563,40 @@ async def get_ontology_metadata(
         raise HTTPException(503, detail=f"Graph provider unavailable and no cached data: {exc}")
 
 
+def _schema_etag(payload: dict) -> str:
+    """Compute a weak ETag over the JSON-serialized schema payload.
+
+    Uses SHA-256 over canonical JSON (sorted keys, no whitespace) so that
+    semantically-identical responses produce identical ETags regardless of
+    dict key order. Emitted as a weak validator because the payload is a
+    deterministic serialisation, not a byte-exact representation.
+    """
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f'W/"{digest}"'
+
+
+def _schema_response(payload: dict, request: Request) -> Response:
+    """Build a cache-aware JSONResponse with ETag/If-None-Match handling.
+
+    Returns 304 Not Modified with an empty body when the client's
+    If-None-Match header matches the computed ETag. Otherwise returns
+    200 with the payload and the ETag header attached.
+    """
+    etag = _schema_etag(payload)
+    if_none_match = request.headers.get("if-none-match")
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, max-age=0, must-revalidate",
+    }
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(content=payload, headers=headers)
+
+
 @router.get("/metadata/schema")
 async def get_graph_schema(
+    request: Request,
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     connectionId: Optional[str] = Query(None, description="Legacy connection ID."),
@@ -508,6 +606,10 @@ async def get_graph_schema(
     Get complete graph schema including entity types, relationship types,
     visual configurations, and hierarchy rules.
     This enables frontend to dynamically load schema from backend.
+
+    Responds with a weak ETag computed from the canonical payload. Clients
+    that send a matching If-None-Match header get a 304 Not Modified with
+    no body — use this to avoid re-parsing unchanged schemas on refetch.
     """
     from backend.app.db.repositories.stats_repo import get_data_source_stats
 
@@ -517,10 +619,7 @@ async def get_graph_schema(
         try:
             stats_cache = await get_data_source_stats(session, ds_id)
             if stats_cache and stats_cache.graph_schema and stats_cache.graph_schema != "{}":
-                return JSONResponse(
-                    content=json.loads(stats_cache.graph_schema),
-                    headers={"Cache-Control": "private, max-age=300"},
-                )
+                return _schema_response(json.loads(stats_cache.graph_schema), request)
         except Exception:
             pass  # Cache lookup or parse failed — fall through to provider
 
@@ -530,10 +629,7 @@ async def get_graph_schema(
             ws_id, provider_registry, session, data_source_id=dataSourceId
         ) if ws_id else await ContextEngine.for_connection(connectionId, provider_registry, session)
         result = await engine.get_graph_schema()
-        return JSONResponse(
-            content=result.model_dump(by_alias=True),
-            headers={"Cache-Control": "private, max-age=300"},
-        )
+        return _schema_response(result.model_dump(by_alias=True), request)
     except Exception as exc:
         raise HTTPException(503, detail=f"Graph provider unavailable and no cached data: {exc}")
 

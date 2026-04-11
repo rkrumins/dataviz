@@ -193,6 +193,8 @@ async def init_db() -> None:
             "ALTER TABLE ontologies ADD COLUMN published_at TEXT DEFAULT NULL",
             "ALTER TABLE ontologies ADD COLUMN deleted_by TEXT DEFAULT NULL",
             "ALTER TABLE views ADD COLUMN deleted_at TEXT",
+            # ViewWizard drift detection: ontology digest captured at save time
+            "ALTER TABLE views ADD COLUMN ontology_digest TEXT DEFAULT NULL",
         ]
         for stmt in migrations:
             try:

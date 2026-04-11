@@ -586,6 +586,10 @@ class ViewResponse(BaseModel):
     data_source_id: Optional[str] = Field(None, alias="dataSourceId")
     data_source_name: Optional[str] = Field(None, alias="dataSourceName")
     view_type: str = Field(alias="viewType")
+    # Layout algorithm (reference | hierarchical | force | …). Projected from
+    # config.layoutType so metadata-only consumers (e.g. the ViewWizard's
+    # scope resolver) can branch on it without parsing the full config.
+    layout_type: Optional[str] = Field(None, alias="layoutType")
     config: Dict[str, Any] = Field(default_factory=dict)
     visibility: str = "private"
     created_by: Optional[str] = Field(None, alias="createdBy")
@@ -596,6 +600,12 @@ class ViewResponse(BaseModel):
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
     deleted_at: Optional[str] = Field(None, alias="deletedAt")
+    # Ontology digest captured at view save time. When the wizard opens a
+    # view for edit, it compares this against the currently-resolved ontology
+    # digest; a mismatch surfaces a non-blocking drift banner so the user
+    # knows some entity classifications may have changed since creation.
+    # NULL on legacy rows → wizard treats as "drift check unavailable".
+    ontology_digest: Optional[str] = Field(None, alias="ontologyDigest")
 
     class Config:
         populate_by_name = True
