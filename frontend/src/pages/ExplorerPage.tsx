@@ -13,7 +13,6 @@ import { useSearchParams } from 'react-router-dom'
 import {
   Compass, Search, LayoutGrid, List, X, TrendingUp, Plus,
 } from 'lucide-react'
-import { AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth'
 import { useExplorerViews, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
@@ -34,8 +33,7 @@ import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { updateViewVisibility, restoreView as restoreViewApi, type View } from '@/services/viewApiService'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useWorkspacesStore } from '@/store/workspaces'
-import type { Toast, ToastType } from '@/features/ontology/lib/ontology-types'
-import { ToastNotification } from '@/features/ontology/components/ToastNotification'
+import { useToast } from '@/components/ui/toast'
 import { AggregationProgressBanner } from '@/components/explorer/AggregationProgressBanner'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -242,12 +240,7 @@ export function ExplorerPage() {
 
   // ─── Handlers ───────────────────────────────────────────────────────
 
-  const [toast, setToast] = useState<Toast | null>(null)
-  const toastIdRef = useRef(0)
-
-  const showToast = useCallback((type: ToastType, message: string) => {
-    setToast({ type, message, id: ++toastIdRef.current })
-  }, [])
+  const { showToast } = useToast()
 
   const handleShare = useCallback((view: View) => {
     navigator.clipboard.writeText(`${window.location.origin}/views/${view.id}`)
@@ -615,10 +608,6 @@ export function ExplorerPage() {
         permanent={parsed.category === 'deleted'}
       />
 
-      {/* ── Toast ── */}
-      <AnimatePresence>
-        {toast && <ToastNotification key={toast.id} toast={toast} onDismiss={() => setToast(null)} />}
-      </AnimatePresence>
     </div>
   )
 }

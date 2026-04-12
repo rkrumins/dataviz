@@ -18,7 +18,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
-import { DataLoadingToasts } from '@/components/ui/DataLoadingBanner'
+import { useLoadingToast } from '@/components/ui/toast'
 import { LineageCanvas } from './LineageCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
@@ -51,6 +51,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // without hydration (loadChildren/searchChildren only).
   const { hydrationError, hydrationPhase, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
   const isInitialLoad = isHydrating && hydrationPhase !== 'complete'
+  useLoadingToast('hydration', isInitialLoad && !hydrationError, hydrationPhase === 'roots' ? 'Loading graph data' : hydrationPhase === 'edges' ? 'Loading relationships' : 'Preparing view')
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {
@@ -90,12 +91,6 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
 
       {hydrationError && (
         <ProviderUnavailableOverlay message={hydrationError} />
-      )}
-
-      {!hydrationError && (
-        <DataLoadingToasts items={[
-          { key: 'hydration', isLoading: isInitialLoad, label: hydrationPhase === 'roots' ? 'Loading graph data' : hydrationPhase === 'edges' ? 'Loading relationships' : 'Preparing view' },
-        ]} />
       )}
 
       {activeView && layoutType !== 'graph' && (
