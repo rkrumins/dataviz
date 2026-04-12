@@ -8,27 +8,31 @@
  *       <MyFeatureThatReadsSchema />
  *     </SchemaScope>
  *
- * This replaces the old implicit assumption that CanvasLayout had already
- * fetched the schema for the currently-active workspace — which broke every
- * non-canvas route (Dashboard, wizard, admin) and every cross-workspace view
- * edit.
- *
  * Behavior:
+ * - When the requested scope differs from the global active provider, creates
+ *   a scoped RemoteGraphProvider (from the shared pool) and wraps children in
+ *   a ProviderOverride. All downstream useGraphProvider() calls receive the
+ *   correctly-scoped provider — no consumer changes needed.
  * - Fetches schema for the given scope via useGraphSchema()
  * - Renders a loading UI until the schema is ready
  * - Catches errors via ErrorBoundary so a failed fetch surfaces loudly
- *   instead of silently serving stale/empty data
- * - Resets the error boundary when the scope changes, so switching workspace
- *   after an error re-arms the fetch
+ * - Resets the error boundary when the scope changes
  *
- * This component should be the ONLY place that decides "is schema ready yet".
- * Child components can safely read from useSchemaStore() — the contract is
- * that if they render, the schema for the given scope has loaded.
+ * This component is the ONLY place (outside ViewExecutionProvider for canvas
+ * views) that decides "is schema ready yet" and "which provider should
+ * children use". Child components can safely read from useSchemaStore() and
+ * call useGraphProvider() — both are guaranteed correct for the given scope.
  */
-import { ReactNode } from 'react'
+import { ReactNode, useMemo, useState, useEffect, useRef } from 'react'
 import { AlertCircle, Loader2, RefreshCw } from 'lucide-react'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useGraphSchema } from '@/hooks/useGraphSchema'
+import {
+  ProviderOverride,
+  useGraphProviderContext,
+  type GraphProviderContextValueExtended,
+} from '@/providers/GraphProviderContext'
+import { getOrCreateProvider, poolKey } from '@/providers/providerPool'
 
 export interface SchemaScopeProps {
   workspaceId: string | null | undefined
@@ -81,10 +85,95 @@ function DefaultErrorUI({ error, reset }: { error: Error; reset: () => void }) {
 }
 
 /**
- * Inner body — rendered inside the ErrorBoundary so thrown errors from
- * useGraphSchema (via throwOnError-style assertions) become boundary catches.
+ * SchemaScopeBody — scope boundary + provider override.
+ *
+ * When the requested (workspaceId, dataSourceId) differs from the global
+ * active provider, this creates a scoped RemoteGraphProvider from the shared
+ * pool and wraps all children in a ProviderOverride. This ensures that
+ * useGraphProvider() and useGraphProviderContext() calls within children
+ * return the correctly-scoped provider — not the global active one.
+ *
+ * When the scope matches the global provider, children render directly
+ * with no override overhead.
  */
 function SchemaScopeBody({
+  workspaceId,
+  dataSourceId,
+  children,
+  fallback,
+  loadingLabel,
+}: Omit<SchemaScopeProps, 'errorFallback'>) {
+  const globalCtx = useGraphProviderContext()
+
+  // Determine if we need a scoped provider or can reuse the global one
+  const scopeMatchesGlobal =
+    workspaceId === globalCtx.workspaceId &&
+    (dataSourceId === globalCtx.dataSourceId ||
+      (!dataSourceId && !globalCtx.dataSourceId))
+
+  // Get or create a scoped provider when scope differs from global
+  const scopedProvider = useMemo(() => {
+    if (scopeMatchesGlobal || !workspaceId) return null
+    return getOrCreateProvider(workspaceId, dataSourceId ?? null)
+  }, [scopeMatchesGlobal, workspaceId, dataSourceId])
+
+  // Local provider version — increments when scope changes
+  const [localVersion, setLocalVersion] = useState(1)
+  const prevScopeRef = useRef(
+    workspaceId ? poolKey(workspaceId, dataSourceId ?? null) : null,
+  )
+  useEffect(() => {
+    const key = workspaceId ? poolKey(workspaceId, dataSourceId ?? null) : null
+    if (key !== prevScopeRef.current) {
+      prevScopeRef.current = key
+      setLocalVersion(v => v + 1)
+    }
+  }, [workspaceId, dataSourceId])
+
+  // Build the override context value for the scoped provider
+  const overrideCtx = useMemo<GraphProviderContextValueExtended | null>(() => {
+    if (!scopedProvider || !workspaceId) return null
+    return {
+      provider: scopedProvider,
+      isLoading: false,
+      error: null,
+      workspaceId,
+      dataSourceId: dataSourceId ?? null,
+      providerReady: true,
+      providerVersion: localVersion,
+      // No-ops: scoped contexts don't mutate workspace selection
+      setWorkspaceId: () => {},
+      setDataSourceId: () => {},
+      connectionId: null,
+      setConnectionId: () => {},
+    }
+  }, [scopedProvider, workspaceId, dataSourceId, localVersion])
+
+  // SchemaScopeInner runs INSIDE the ProviderOverride so useGraphSchema's
+  // call to useGraphProvider() returns the scoped provider
+  const inner = (
+    <SchemaScopeInner
+      workspaceId={workspaceId}
+      dataSourceId={dataSourceId}
+      fallback={fallback}
+      loadingLabel={loadingLabel}
+    >
+      {children}
+    </SchemaScopeInner>
+  )
+
+  if (overrideCtx) {
+    return <ProviderOverride value={overrideCtx}>{inner}</ProviderOverride>
+  }
+  return inner
+}
+
+/**
+ * SchemaScopeInner — fetches schema and gates children on readiness.
+ * Rendered inside the ProviderOverride (when cross-workspace) so that
+ * useGraphSchema picks up the correctly-scoped provider.
+ */
+function SchemaScopeInner({
   workspaceId,
   dataSourceId,
   children,
