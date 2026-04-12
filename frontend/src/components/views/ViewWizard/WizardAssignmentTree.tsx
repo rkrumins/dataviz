@@ -39,6 +39,7 @@ import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
 
 import { useEntityBrowser } from '@/hooks/useEntityBrowser'
+import { DataLoadingToasts } from '@/components/ui/DataLoadingBanner'
 
 
 // ============================================
@@ -789,7 +790,12 @@ export function WizardAssignmentTree({
                             Entity Browser
                         </h3>
                         <p className="text-sm text-slate-500">
-                            {browser.isLoading ? 'Loading...' : `${flattenedNodes.length} entities`} • {selectedIds.size} selected
+                            {browser.isLoading ? (
+                                <span className="inline-flex items-center gap-1.5">
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                    Loading entities...
+                                </span>
+                            ) : `${flattenedNodes.length} entities`} • {selectedIds.size} selected
                         </p>
                         {!browser.isLoading && browser.topLevelTotalCount > 0 && (
                             <p className="text-[11px] text-slate-400 mt-0.5">
@@ -955,21 +961,28 @@ export function WizardAssignmentTree({
                 className="flex-1 overflow-auto px-2 py-2"
             >
                 {flattenedNodes.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center h-40 text-slate-400">
-                        <Search className="w-10 h-10 mb-2 opacity-50" />
-                        <p className="text-sm font-medium">No entities found</p>
-                        <p className="text-xs mt-1 text-center max-w-[260px] text-slate-500">
-                            The graph may be empty or entity types may not match the schema.
-                        </p>
-                        {searchQuery && (
-                            <button
-                                onClick={() => setSearchQuery('')}
-                                className="mt-2 text-xs text-blue-500 hover:underline"
-                            >
-                                Clear search
-                            </button>
-                        )}
-                    </div>
+                    (browser.isLoading || isSchemaLoading) ? (
+                        <div className="flex flex-col items-center justify-center h-40 text-slate-400">
+                            <Loader2 className="w-8 h-8 mb-3 animate-spin text-blue-500/60" />
+                            <p className="text-sm font-medium text-slate-500">Loading entities...</p>
+                        </div>
+                    ) : (
+                        <div className="flex flex-col items-center justify-center h-40 text-slate-400">
+                            <Search className="w-10 h-10 mb-2 opacity-50" />
+                            <p className="text-sm font-medium">No entities found</p>
+                            <p className="text-xs mt-1 text-center max-w-[260px] text-slate-500">
+                                The graph may be empty or entity types may not match the schema.
+                            </p>
+                            {searchQuery && (
+                                <button
+                                    onClick={() => setSearchQuery('')}
+                                    className="mt-2 text-xs text-blue-500 hover:underline"
+                                >
+                                    Clear search
+                                </button>
+                            )}
+                        </div>
+                    )
                 ) : (
                     <div
                         style={{
@@ -1052,6 +1065,12 @@ export function WizardAssignmentTree({
                     Tip: Shift+click for range select • Cmd+click for multi-select • Drag to layers
                 </p>
             </div>
+
+            {/* Floating loading toasts */}
+            <DataLoadingToasts items={[
+                { key: 'entities', isLoading: browser.isLoading && flattenedNodes.length > 0, label: 'Loading entities' },
+                { key: 'schema', isLoading: isSchemaLoading, label: 'Loading schema' },
+            ]} />
         </div>
     )
 }

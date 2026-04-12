@@ -66,6 +66,7 @@ import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/
 import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay } from './LineageFlowOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
+import { DataLoadingToasts } from '@/components/ui/DataLoadingBanner'
 
 // Re-export for backward compatibility
 export { defaultReferenceModelLayers } from './constants'
@@ -209,6 +210,7 @@ export function ContextViewCanvas({
     aggregatedEdges,
     fetchAggregated,
     clearCache: clearAggregationCache,
+    isLoading: isLoadingAggregatedEdges,
     granularity: lineageGranularity,
     setGranularity: setLineageGranularity,
   } = useAggregatedLineage({ granularity: null })
@@ -872,6 +874,13 @@ export function ContextViewCanvas({
             <span className="text-amber-600 dark:text-amber-500">Hierarchy is disabled — all nodes appear flat. Configure your ontology to enable parent-child nesting.</span>
           </div>
         )}
+        {/* Floating loading toasts */}
+        <DataLoadingToasts items={[
+          { key: 'assignments', isLoading: assignmentStatus === 'loading', label: 'Computing layer assignments' },
+          { key: 'agg-edges', isLoading: isLoadingAggregatedEdges, label: 'Loading aggregated edges' },
+          { key: 'children', isLoading: isLoadingChildren, label: 'Expanding hierarchy' },
+        ]} />
+
         {/* Warning: containment inheritance violation attempt */}
         {assignmentWarning && (
           <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-xs flex items-center gap-2 z-20">
