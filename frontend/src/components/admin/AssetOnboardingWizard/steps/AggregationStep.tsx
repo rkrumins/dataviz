@@ -161,6 +161,26 @@ export function AggregationStep({ formData, updateFormData }: AggregationStepPro
                     )
                 })}
             </div>
+            
+            {/* Info Banner */}
+            <motion.div
+                initial={{ opacity: 0, y: 15 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.25 }}
+                className="mt-4 px-4 py-3 rounded-xl border border-indigo-500/20 bg-indigo-500/5 flex items-start gap-3"
+            >
+                <div className="w-8 h-8 rounded-lg bg-indigo-500/10 flex items-center justify-center shrink-0 mt-0.5">
+                    <Settings className="w-4 h-4 text-indigo-500" />
+                </div>
+                <div>
+                    <h4 className="text-sm font-semibold text-ink">Background Aggregation</h4>
+                    <p className="text-xs text-ink-muted mt-0.5 leading-relaxed">
+                        Graph aggregation pre-computes hierarchical topology to optimize deep graph queries. 
+                        This process runs safely in the background after onboarding completes. 
+                        You'll be able to track progress in the Explorer View and create Views once readiness reaches 100%.
+                    </p>
+                </div>
+            </motion.div>
         </div>
     )
 }

@@ -20,6 +20,8 @@ import {
     type ProviderImpactResponse,
 } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
+import { workspaceService } from '@/services/workspaceService'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
 import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 
@@ -48,7 +50,7 @@ const TYPE_COLOURS = [
 // ─── AssetRow ─────────────────────────────────────────────────────────────────
 function AssetRow({
     providerId, assetName, isRegistered, isSelected,
-    onToggle, onUnregister, boundWorkspaceName,
+    onToggle, onUnregister, boundWorkspaceName, onReaggregate
 }: {
     providerId: string
     assetName: string
@@ -56,6 +58,7 @@ function AssetRow({
     isSelected: boolean
     onToggle: (name: string) => void
     onUnregister: (name: string) => void
+    onReaggregate?: (name: string) => void
     boundWorkspaceName?: string
 }) {
     const [stats, setStats] = useState<any>(null)
@@ -315,6 +318,16 @@ function AssetRow({
                         })()}
 
                     </div>
+                    {isRegistered && onReaggregate && (
+                        <div className="mt-4 pt-3 border-t border-glass-border flex justify-end">
+                            <button
+                                onClick={(e) => { e.stopPropagation(); onReaggregate(assetName); }}
+                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors"
+                            >
+                                <RefreshCw className="w-3.5 h-3.5" /> Force Re-Aggregation
+                            </button>
+                        </div>
+                    )}
                 </div>
             )}
         </div>
@@ -585,6 +598,30 @@ export function RegistryAssets() {
         }
     }
 
+    const handleReaggregate = useCallback(async (assetName: string) => {
+        const item = existingCatalogs.find(c => c.sourceIdentifier === assetName)
+        if (!item) return
+        try {
+            const wsList = await workspaceService.list()
+            const dataSourcesToTrigger = wsList.flatMap((ws: any) => 
+                ws.dataSources?.filter((ds: any) => ds.catalogItemId === item.id) || []
+            )
+            await Promise.all(dataSourcesToTrigger.map((ds: any) => 
+                fetchWithTimeout(`/api/v1/admin/data-sources/${ds.id}/aggregation-jobs?triggerSource=manual`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        projectionMode: ds.projectionMode || 'in_source',
+                        batchSize: 1000
+                    })
+                })
+            ))
+            // Re-aggregation triggered successfully
+        } catch (e) {
+            console.error('Failed to trigger aggregation', e)
+        }
+    }, [existingCatalogs])
+
     const toggleSelection = (g: string) => {
         setSelected(prev => {
             const next = new Set(prev)
@@ -838,6 +875,7 @@ export function RegistryAssets() {
                                         isSelected={selected.has(assetName)}
                                         onToggle={toggleSelection}
                                         onUnregister={handleUnregisterClick}
+                                        onReaggregate={handleReaggregate}
                                     />
                                 ))
                             )}

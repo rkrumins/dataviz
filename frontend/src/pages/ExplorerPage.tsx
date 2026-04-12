@@ -36,6 +36,7 @@ import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useWorkspacesStore } from '@/store/workspaces'
 import type { Toast, ToastType } from '@/features/ontology/lib/ontology-types'
 import { ToastNotification } from '@/features/ontology/components/ToastNotification'
+import { AggregationProgressBanner } from '@/components/explorer/AggregationProgressBanner'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -84,6 +85,9 @@ export function ExplorerPage() {
   const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number; permanent?: boolean } | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showBulkDelete, setShowBulkDelete] = useState(false)
+  
+  // Readiness gate
+  const [isDataSourceReady, setIsDataSourceReady] = useState(true)
 
   // ─── URL param setters ──────────────────────────────────────────────
 
@@ -342,16 +346,22 @@ export function ExplorerPage() {
             </div>
             <button
               onClick={() => openViewEditor()}
-              disabled={!activeWorkspaceId}
+              disabled={!activeWorkspaceId || !isDataSourceReady}
               className={cn(
                 'inline-flex items-center gap-2 rounded-xl px-4 py-2.5',
                 'text-sm font-semibold',
-                activeWorkspaceId
+                activeWorkspaceId && isDataSourceReady
                   ? 'bg-gradient-to-r from-accent-lineage to-violet-600 text-white shadow-lg shadow-accent-lineage/20 hover:shadow-xl hover:-translate-y-0.5'
                   : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
                 'transition-all duration-200',
               )}
-              title={activeWorkspaceId ? 'Create a new view in this workspace' : 'Select a workspace first'}
+              title={
+                !activeWorkspaceId 
+                  ? 'Select a workspace first' 
+                  : !isDataSourceReady 
+                    ? 'Graph must complete aggregation first' 
+                    : 'Create a new view in this workspace'
+              }
             >
               <Plus className="w-4 h-4" />
               New View
@@ -440,6 +450,15 @@ export function ExplorerPage() {
             </div>
           </div>
         </div>
+
+        {/* ── Headline Banner for Aggregation ───────────────────── */}
+        {activeWorkspaceId && parsed.dataSourceId && (
+          <AggregationProgressBanner 
+            workspaceId={activeWorkspaceId}
+            dataSourceId={parsed.dataSourceId}
+            onStatusChange={setIsDataSourceReady}
+          />
+        )}
 
         {/* ── Featured / Pinned ────────────────────────────────── */}
         {!hasActiveFilters && pinnedViews.length > 0 && (

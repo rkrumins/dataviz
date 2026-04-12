@@ -412,7 +412,17 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         }
 
         hydrate()
-        return () => controller.abort()
+        return () => {
+            controller.abort()
+            // Reset the guard so the next effect run (same initKey, new deps snapshot)
+            // can re-start hydration. Without this, a mid-flight abort (e.g. background
+            // schema refresh changing rootEntityTypes) leaves initializedKeyRef permanently
+            // set to initKey, causing the subsequent run to return early and the canvas
+            // to stay empty — most visible on cross-workspace view navigation.
+            if (initializedKeyRef.current === initKey) {
+                initializedKeyRef.current = null
+            }
+        }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootEntityTypes, schemaEntityTypes, isSchemaLoading])
 

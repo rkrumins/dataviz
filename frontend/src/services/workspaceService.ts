@@ -41,6 +41,12 @@ export interface DataSourceResponse {
     dedicatedGraphName?: string | null  // graph name when dedicated
     createdAt: string
     updatedAt: string
+    
+    // Aggregation state
+    aggregationStatus: 'none' | 'pending' | 'running' | 'ready' | 'failed' | 'skipped'
+    lastAggregatedAt?: string
+    aggregationEdgeCount: number
+    aggregationSchedule?: string
 }
 
 // ============================================================
