@@ -40,7 +40,8 @@ import { NodePalette } from './NodePalette'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
-import { useSchemaStore, useContainmentEdgeTypes, useLineageEdgeTypes, useRelationshipTypes } from '@/store/schema'
+import { useSchemaStore } from '@/store/schema'
+import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { cn } from '@/lib/utils'
 import { generateColorFromType } from '@/lib/type-visuals'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
@@ -102,9 +103,9 @@ export function LineageCanvas() {
 
   const { showMinimap, showGrid, snapToGrid } = usePreferencesStore()
   const schema = useSchemaStore((s) => s.schema)
-  const relationshipTypes = useRelationshipTypes()
-  const containmentEdgeTypes = useContainmentEdgeTypes()
-  const lineageEdgeTypes = useLineageEdgeTypes()
+  const relationshipTypes = useViewRelationshipTypes()
+  const containmentEdgeTypes = useViewContainmentEdgeTypes()
+  const lineageEdgeTypes = useViewLineageEdgeTypes()
 
   // Edge detail panel
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()

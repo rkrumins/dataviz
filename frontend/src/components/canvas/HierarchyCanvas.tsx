@@ -14,7 +14,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
-import { useSchemaStore, useContainmentEdgeTypes, useLineageEdgeTypes, isContainmentEdgeType, normalizeEdgeType, useRelationshipTypes } from '@/store/schema'
+import { useSchemaStore, isContainmentEdgeType, normalizeEdgeType } from '@/store/schema'
+import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 
@@ -73,10 +74,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const addEdges = useCanvasStore(s => s.addEdges)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const schema = useSchemaStore((s) => s.schema)
-  const containmentEdgeTypes = useContainmentEdgeTypes()
-  const lineageEdgeTypes = useLineageEdgeTypes()
+  const containmentEdgeTypes = useViewContainmentEdgeTypes()
+  const lineageEdgeTypes = useViewLineageEdgeTypes()
   const { loadChildren, loadingNodes } = useGraphHydration()
-  const relationshipTypes = useRelationshipTypes()
+  const relationshipTypes = useViewRelationshipTypes()
   const provider = useGraphProvider()
 
   // Search state
