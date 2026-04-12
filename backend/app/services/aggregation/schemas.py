@@ -57,6 +57,24 @@ class AggregationJobResponse(BaseModel):
     updated_at: Optional[str] = Field(None, alias="updatedAt")
     created_at: str = Field(alias="createdAt")
 
+    # Enrichment fields — populated by global listing endpoint, None for per-DS endpoints
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    workspace_name: Optional[str] = Field(None, alias="workspaceName")
+    data_source_label: Optional[str] = Field(None, alias="dataSourceLabel")
+    projection_mode: Optional[str] = Field(None, alias="projectionMode")
+    duration_seconds: Optional[float] = Field(None, alias="durationSeconds")
+    edge_coverage_pct: Optional[float] = Field(None, alias="edgeCoveragePct")
+
+    class Config:
+        populate_by_name = True
+
+
+class PaginatedJobsResponse(BaseModel):
+    items: List[AggregationJobResponse]
+    total: int
+    limit: int
+    offset: int
+
     class Config:
         populate_by_name = True
 

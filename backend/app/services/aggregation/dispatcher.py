@@ -43,6 +43,12 @@ class InProcessDispatcher:
         self._active_tasks[job_id] = task
         task.add_done_callback(lambda t: self._on_done(job_id, t))
 
+    def cancel_task(self, job_id: str) -> None:
+        """Cancel the asyncio task for a job as a backup signal."""
+        task = self._active_tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
+
     def _on_done(self, job_id: str, task: asyncio.Task) -> None:
         self._active_tasks.pop(job_id, None)
         if task.cancelled():

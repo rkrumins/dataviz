@@ -349,6 +349,13 @@ class GraphDataProvider(ABC):
         """Called when a node's containment (parent) changes. Rebuilds ancestor chains."""
         pass
 
+    async def purge_aggregated_edges(self) -> int:
+        """Remove ALL materialized AGGREGATED edges from the graph.
+
+        Returns the number of edges deleted.
+        """
+        return 0
+
     async def discover_schema(self) -> Dict[str, Any]:
         """Introspect the database and return available labels, relationship
         types, property keys, and sample data.

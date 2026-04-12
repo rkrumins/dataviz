@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Server, Database, Layers } from 'lucide-react'
+import { Server, Database, Layers, Activity } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
@@ -10,6 +10,7 @@ import { RegistryWorkspaces } from './RegistryWorkspaces'
 import { RegistryAssets } from './RegistryAssets'
 import { FirstRunHero } from './FirstRunHero'
 import { OnboardingProgress } from './OnboardingProgress'
+import { RegistryJobHistory } from './RegistryJobHistory'
 
 export function AdminRegistry() {
     const [searchParams, setSearchParams] = useSearchParams()
@@ -72,6 +73,12 @@ export function AdminRegistry() {
             icon: Database,
             desc: 'Allocate assets to isolated domains',
         },
+        {
+            id: 'jobs',
+            label: 'Job History',
+            icon: Activity,
+            desc: 'Global aggregation job history and monitoring',
+        },
     ]
 
     return (
@@ -121,6 +128,7 @@ export function AdminRegistry() {
                 {activeTab === 'connections' && <RegistryConnections />}
                 {activeTab === 'assets' && <RegistryAssets />}
                 {activeTab === 'workspaces' && <RegistryWorkspaces />}
+                {activeTab === 'jobs' && <RegistryJobHistory />}
             </div>
         </div>
     )
