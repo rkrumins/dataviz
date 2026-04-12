@@ -23,7 +23,7 @@ import {
 } from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
-import type { WizardFormData } from '../ViewWizard'
+import type { WizardFormData, ScopeContext } from '../ViewWizard'
 
 // ============================================
 // Types
@@ -31,6 +31,8 @@ import type { WizardFormData } from '../ViewWizard'
 
 interface PreviewStepProps {
     formData: WizardFormData
+    /** Resolved scope context — used for workspace/data source display. */
+    scopeContext?: ScopeContext
 }
 
 // ============================================
@@ -43,10 +45,14 @@ const VISIBILITY_META = {
     enterprise: { label: 'Enterprise', icon: Globe, color: 'green' },
 } as const
 
-export function PreviewStep({ formData }: PreviewStepProps) {
+export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
     const schema = useSchemaStore(s => s.schema)
     const activeWorkspace = useWorkspacesStore(s => s.getActiveWorkspace())
     const activeDataSource = useWorkspacesStore(s => s.getActiveDataSource())
+
+    // Use scopeContext when provided (create mode), fall back to globals (edit mode)
+    const workspaceName = scopeContext?.workspaceName ?? activeWorkspace?.name
+    const dataSourceLabel = scopeContext?.dataSourceLabel ?? activeDataSource?.label ?? activeDataSource?.catalogItemId ?? 'Data Source'
 
     // Get entity type info
     const selectedEntityTypes = formData.visibleEntityTypes
@@ -229,16 +235,16 @@ export function PreviewStep({ formData }: PreviewStepProps) {
                             <Check className="w-5 h-5 text-green-500" />
                         </div>
                         <div className="flex flex-wrap gap-2">
-                            {activeWorkspace && (
+                            {workspaceName && (
                                 <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-full text-sm">
                                     <Box className="w-3 h-3 text-slate-400" />
-                                    {activeWorkspace.name}
+                                    {workspaceName}
                                 </span>
                             )}
-                            {activeDataSource && (
+                            {dataSourceLabel && (
                                 <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 border border-emerald-200 dark:border-emerald-700/50 rounded-full text-sm">
                                     <Box className="w-3 h-3 text-emerald-400" />
-                                    {activeDataSource.label || activeDataSource.catalogItemId || 'Data Source'}
+                                    {dataSourceLabel}
                                 </span>
                             )}
                             {formData.tags.map(tag => (

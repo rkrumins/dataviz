@@ -21,7 +21,7 @@ import { createContext, useContext, useState, useEffect, useRef, useMemo, type R
 import type { GraphSchema } from './GraphDataProvider'
 import type { GraphProviderContextValueExtended } from './GraphProviderContext'
 import { useGraphProviderContext, ProviderOverride } from './GraphProviderContext'
-import { RemoteGraphProvider } from './RemoteGraphProvider'
+import { getOrCreateProvider, poolKey } from './providerPool'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useGraphSchema } from '@/hooks/useGraphSchema'
 import { useSchemaStore, convertBackendEntityType, convertBackendRelationshipType } from '@/store/schema'
@@ -55,47 +55,6 @@ const ViewExecCtx = createContext<ViewExecutionContextValue | null>(null)
 /** Read the current view execution context (null outside a ViewExecutionProvider). */
 export function useViewExecutionContext(): ViewExecutionContextValue | null {
   return useContext(ViewExecCtx)
-}
-
-// ─── Provider Pool ─────────────────────────────────────────────────────────
-
-interface PoolEntry {
-  provider: RemoteGraphProvider
-  lastUsed: number
-}
-
-const providerPool = new Map<string, PoolEntry>()
-const POOL_MAX_SIZE = 8
-
-function poolKey(wsId: string, dsId: string | null): string {
-  return `${wsId}:${dsId ?? 'default'}`
-}
-
-function getOrCreateProvider(wsId: string, dsId: string | null): RemoteGraphProvider {
-  const key = poolKey(wsId, dsId)
-  const existing = providerPool.get(key)
-  if (existing) {
-    existing.lastUsed = Date.now()
-    return existing.provider
-  }
-  // Evict LRU if pool is full
-  if (providerPool.size >= POOL_MAX_SIZE) {
-    let oldestKey: string | null = null
-    let oldestTime = Infinity
-    for (const [k, v] of providerPool) {
-      if (v.lastUsed < oldestTime) {
-        oldestTime = v.lastUsed
-        oldestKey = k
-      }
-    }
-    if (oldestKey) providerPool.delete(oldestKey)
-  }
-  const provider = new RemoteGraphProvider({
-    workspaceId: wsId,
-    dataSourceId: dsId ?? undefined,
-  })
-  providerPool.set(key, { provider, lastUsed: Date.now() })
-  return provider
 }
 
 // ─── Schema Resolution ─────────────────────────────────────────────────────

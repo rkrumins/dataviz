@@ -86,8 +86,8 @@ export function ExplorerPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   
-  // Readiness gate
-  const [isDataSourceReady, setIsDataSourceReady] = useState(true)
+  // no-op callback for aggregation banner (informational only — no longer gates view creation)
+  const onAggregationStatus = useCallback((_isReady: boolean) => {}, [])
 
   // ─── URL param setters ──────────────────────────────────────────────
 
@@ -346,22 +346,13 @@ export function ExplorerPage() {
             </div>
             <button
               onClick={() => openViewEditor()}
-              disabled={!activeWorkspaceId || !isDataSourceReady}
               className={cn(
                 'inline-flex items-center gap-2 rounded-xl px-4 py-2.5',
                 'text-sm font-semibold',
-                activeWorkspaceId && isDataSourceReady
-                  ? 'bg-gradient-to-r from-accent-lineage to-violet-600 text-white shadow-lg shadow-accent-lineage/20 hover:shadow-xl hover:-translate-y-0.5'
-                  : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
+                'bg-gradient-to-r from-accent-lineage to-violet-600 text-white shadow-lg shadow-accent-lineage/20 hover:shadow-xl hover:-translate-y-0.5',
                 'transition-all duration-200',
               )}
-              title={
-                !activeWorkspaceId 
-                  ? 'Select a workspace first' 
-                  : !isDataSourceReady 
-                    ? 'Graph must complete aggregation first' 
-                    : 'Create a new view in this workspace'
-              }
+              title="Create a new view"
             >
               <Plus className="w-4 h-4" />
               New View
@@ -456,7 +447,7 @@ export function ExplorerPage() {
           <AggregationProgressBanner 
             workspaceId={activeWorkspaceId}
             dataSourceId={parsed.dataSourceId}
-            onStatusChange={setIsDataSourceReady}
+            onStatusChange={onAggregationStatus}
           />
         )}
 
