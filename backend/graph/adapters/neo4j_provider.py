@@ -1732,6 +1732,35 @@ class Neo4jProvider(GraphDataProvider):
 
         logger.info("Invalidated ancestor cache for %d nodes under %s", len(urns_to_invalidate), urn)
 
+    async def purge_aggregated_edges(self) -> int:
+        """Remove ALL materialized AGGREGATED edges from the graph."""
+        try:
+            rows = await self._run_write(
+                "MATCH ()-[r:AGGREGATED]->() "
+                "WITH r LIMIT 100000 "
+                "DELETE r "
+                "RETURN count(r) as deleted",
+                {},
+            )
+            deleted = rows[0]["deleted"] if rows else 0
+
+            # Clean up Redis tracking keys
+            if self._redis_available and self._redis:
+                pattern = f"{self._database}:agg:sourceEdgeIds:*"
+                cursor = 0
+                while True:
+                    cursor, keys = await self._redis.scan(cursor, match=pattern, count=500)
+                    if keys:
+                        await self._redis.delete(*keys)
+                    if cursor == 0:
+                        break
+
+            logger.info("Purged %d AGGREGATED edges from %s", deleted, self._database)
+            return deleted
+        except Exception as e:
+            logger.error("Failed to purge AGGREGATED edges: %s", e)
+            raise
+
     # ================================================================== #
     # Provider Registry Lifecycle                                          #
     # ================================================================== #

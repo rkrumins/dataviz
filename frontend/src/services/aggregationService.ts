@@ -33,6 +33,32 @@ export interface AggregationJobResponse {
   completedAt?: string;
   updatedAt?: string;
   createdAt: string;
+  // Enrichment fields — populated by global listing endpoint
+  workspaceId?: string;
+  workspaceName?: string;
+  dataSourceLabel?: string;
+  projectionMode?: string;
+  durationSeconds?: number;
+  edgeCoveragePct?: number;
+}
+
+export interface PaginatedJobsResponse {
+  items: AggregationJobResponse[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface JobHistoryFilters {
+  status?: string[];
+  workspaceId?: string;
+  dataSourceId?: string[];
+  projectionMode?: string;
+  triggerSource?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  limit?: number;
+  offset?: number;
 }
 
 export interface DataSourceReadinessResponse {
@@ -54,7 +80,18 @@ export interface DriftCheckResponse {
   lastCheckedAt?: string;
 }
 
+export interface JobsSummary {
+  total: number;
+  byStatus: Record<string, number>;
+  successRate: number | null;
+  avgDurationSeconds: number | null;
+}
+
 class AggregationService {
+  async getJobsSummary(): Promise<JobsSummary> {
+    return authFetch<JobsSummary>('/api/v1/admin/aggregation-jobs/summary');
+  }
+
   async triggerAggregation(
     dataSourceId: string,
     request: AggregationTriggerRequest,
@@ -102,6 +139,20 @@ class AggregationService {
     );
   }
 
+  async deleteJob(jobId: string): Promise<void> {
+    return authFetch<void>(
+      `/api/v1/admin/aggregation-jobs/${jobId}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  async purgeAggregation(dataSourceId: string): Promise<{ deletedEdges: number; dataSourceId: string }> {
+    return authFetch<{ deletedEdges: number; dataSourceId: string }>(
+      `/api/v1/admin/data-sources/${dataSourceId}/purge-aggregation`,
+      { method: 'POST' }
+    );
+  }
+
   async skipAggregation(dataSourceId: string): Promise<DataSourceReadinessResponse> {
     return authFetch<DataSourceReadinessResponse>(
       `/api/v1/admin/data-sources/${dataSourceId}/skip-aggregation`,
@@ -119,6 +170,23 @@ class AggregationService {
         method: 'PUT',
         body: JSON.stringify({ cronExpression }),
       }
+    );
+  }
+
+  async listJobsGlobal(filters: JobHistoryFilters = {}): Promise<PaginatedJobsResponse> {
+    const params = new URLSearchParams();
+    if (filters.status?.length) filters.status.forEach(s => params.append('status', s));
+    if (filters.workspaceId) params.set('workspaceId', filters.workspaceId);
+    if (filters.dataSourceId?.length) filters.dataSourceId.forEach(id => params.append('dataSourceId', id));
+    if (filters.projectionMode) params.set('projectionMode', filters.projectionMode);
+    if (filters.triggerSource) params.set('triggerSource', filters.triggerSource);
+    if (filters.dateFrom) params.set('dateFrom', filters.dateFrom);
+    if (filters.dateTo) params.set('dateTo', filters.dateTo);
+    if (filters.limit) params.set('limit', String(filters.limit));
+    if (filters.offset !== undefined) params.set('offset', String(filters.offset));
+    const qs = params.toString();
+    return authFetch<PaginatedJobsResponse>(
+      `/api/v1/admin/aggregation-jobs${qs ? `?${qs}` : ''}`
     );
   }
 
