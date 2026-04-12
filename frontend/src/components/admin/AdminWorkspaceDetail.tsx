@@ -16,6 +16,8 @@ import { catalogService, type CatalogItemResponse } from '@/services/catalogServ
 import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import { useSchemaViews } from '@/store/schema'
+import { aggregationService } from '@/services/aggregationService'
+import { useToast } from '@/components/ui/toast'
 import { DataSourceCard } from './DataSourceCard'
 import { AdminWizard, type WizardStep } from './AdminWizard'
 
@@ -80,6 +82,7 @@ export function AdminWorkspaceDetail() {
     const { wsId } = useParams<{ wsId: string }>()
     const navigate = useNavigate()
     const allViews = useSchemaViews()
+    const { showToast } = useToast()
 
     const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null)
     const [catalogItems, setCatalogItems] = useState<CatalogItemResponse[]>([])
@@ -239,10 +242,20 @@ export function AdminWorkspaceDetail() {
                     batchSize: 1000
                 })
             })
-            // Optionally, we could show a toast or auto-refresh
             loadWorkspace()
         } catch (err) {
             console.error('Failed to trigger aggregation', err)
+        }
+    }
+
+    const handlePurge = async (ds: DataSourceResponse) => {
+        try {
+            const result = await aggregationService.purgeAggregation(ds.id)
+            showToast('success', `Purged ${result.deletedEdges.toLocaleString()} aggregated edges`)
+            loadWorkspace()
+        } catch (err: any) {
+            showToast('error', err?.message ?? 'Purge failed')
+            throw err
         }
     }
 
@@ -424,6 +437,7 @@ export function AdminWorkspaceDetail() {
                             onDelete={workspace.dataSources.length > 1 ? () => handleDeleteDsClick(ds.id, ds.label || ds.catalogItemId) : undefined}
                             onExplore={() => navigate(`/schema?workspaceId=${workspace.id}&dataSourceId=${ds.id}`)}
                             onReaggregate={() => handleReaggregate(ds)}
+                            onPurge={() => handlePurge(ds)}
                         />
                     ))}
                 </div>
