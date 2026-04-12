@@ -39,7 +39,7 @@ import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
 
 import { useEntityBrowser } from '@/hooks/useEntityBrowser'
-import { DataLoadingBanner } from '@/components/ui/DataLoadingBanner'
+import { DataLoadingToasts } from '@/components/ui/DataLoadingBanner'
 
 
 // ============================================
@@ -962,13 +962,9 @@ export function WizardAssignmentTree({
             >
                 {flattenedNodes.length === 0 ? (
                     (browser.isLoading || isSchemaLoading) ? (
-                        <div className="flex flex-col items-center justify-center h-40">
-                            <DataLoadingBanner
-                                isLoading
-                                label="Loading entities"
-                                detail="Fetching top-level nodes from the graph..."
-                                mode="banner"
-                            />
+                        <div className="flex flex-col items-center justify-center h-40 text-slate-400">
+                            <Loader2 className="w-8 h-8 mb-3 animate-spin text-blue-500/60" />
+                            <p className="text-sm font-medium text-slate-500">Loading entities...</p>
                         </div>
                     ) : (
                         <div className="flex flex-col items-center justify-center h-40 text-slate-400">
@@ -1069,6 +1065,12 @@ export function WizardAssignmentTree({
                     Tip: Shift+click for range select • Cmd+click for multi-select • Drag to layers
                 </p>
             </div>
+
+            {/* Floating loading toasts */}
+            <DataLoadingToasts items={[
+                { key: 'entities', isLoading: browser.isLoading && flattenedNodes.length > 0, label: 'Loading entities' },
+                { key: 'schema', isLoading: isSchemaLoading, label: 'Loading schema' },
+            ]} />
         </div>
     )
 }
