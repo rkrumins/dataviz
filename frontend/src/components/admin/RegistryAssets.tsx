@@ -50,7 +50,7 @@ const TYPE_COLOURS = [
 // ─── AssetRow ─────────────────────────────────────────────────────────────────
 function AssetRow({
     providerId, assetName, isRegistered, isSelected,
-    onToggle, onUnregister, boundWorkspaceName, onReaggregate
+    onToggle, onUnregister, boundWorkspaceName, onReaggregate, onPurge
 }: {
     providerId: string
     assetName: string
@@ -59,11 +59,14 @@ function AssetRow({
     onToggle: (name: string) => void
     onUnregister: (name: string) => void
     onReaggregate?: (name: string) => void
+    onPurge?: (name: string) => void
     boundWorkspaceName?: string
 }) {
     const [stats, setStats] = useState<any>(null)
     const [loadingStats, setLoadingStats] = useState(false)
     const [expanded, setExpanded] = useState(false)
+    const [purgeConfirm, setPurgeConfirm] = useState(false)
+    const [purgeLoading, setPurgeLoading] = useState(false)
     const ref = useRef<HTMLDivElement>(null)
 
     useEffect(() => {
@@ -318,14 +321,59 @@ function AssetRow({
                         })()}
 
                     </div>
-                    {isRegistered && onReaggregate && (
-                        <div className="mt-4 pt-3 border-t border-glass-border flex justify-end">
-                            <button
-                                onClick={(e) => { e.stopPropagation(); onReaggregate(assetName); }}
-                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors"
-                            >
-                                <RefreshCw className="w-3.5 h-3.5" /> Force Re-Aggregation
-                            </button>
+                    {isRegistered && (onReaggregate || onPurge) && (
+                        <div className="mt-4 pt-3 border-t border-glass-border space-y-2">
+                            <div className="flex justify-end gap-2">
+                                {onPurge && !purgeConfirm && (
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); setPurgeConfirm(true); }}
+                                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-red-500 hover:bg-red-500/5 border border-glass-border hover:border-red-500/20 transition-colors"
+                                    >
+                                        <Trash2 className="w-3.5 h-3.5" /> Purge Edges
+                                    </button>
+                                )}
+                                {onReaggregate && (
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); onReaggregate(assetName); }}
+                                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors"
+                                    >
+                                        <RefreshCw className="w-3.5 h-3.5" /> Force Re-Aggregation
+                                    </button>
+                                )}
+                            </div>
+                            {purgeConfirm && (
+                                <div className="p-3 rounded-lg border border-red-500/20 bg-red-500/5 space-y-2" onClick={e => e.stopPropagation()}>
+                                    <div className="flex items-start gap-2">
+                                        <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+                                        <p className="text-xs text-red-400 leading-relaxed">
+                                            This will remove all materialized aggregated edges from the graph for this asset. This cannot be undone.
+                                        </p>
+                                    </div>
+                                    <div className="flex justify-end gap-2">
+                                        <button
+                                            onClick={() => setPurgeConfirm(false)}
+                                            disabled={purgeLoading}
+                                            className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            onClick={async () => {
+                                                setPurgeLoading(true)
+                                                try { onPurge!(assetName) } finally {
+                                                    setPurgeLoading(false)
+                                                    setPurgeConfirm(false)
+                                                }
+                                            }}
+                                            disabled={purgeLoading}
+                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50 shadow-sm shadow-red-500/25"
+                                        >
+                                            {purgeLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                                            Confirm Purge
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
@@ -622,6 +670,22 @@ export function RegistryAssets() {
         }
     }, [existingCatalogs])
 
+    const handlePurge = useCallback(async (assetName: string) => {
+        const item = existingCatalogs.find(c => c.sourceIdentifier === assetName)
+        if (!item) return
+        try {
+            const wsList = await workspaceService.list()
+            const dataSources = wsList.flatMap((ws: any) =>
+                ws.dataSources?.filter((ds: any) => ds.catalogItemId === item.id) || []
+            )
+            await Promise.all(dataSources.map((ds: any) =>
+                fetchWithTimeout(`/api/v1/admin/data-sources/${ds.id}/purge-aggregation`, { method: 'POST' })
+            ))
+        } catch (e) {
+            console.error('Failed to purge aggregated edges', e)
+        }
+    }, [existingCatalogs])
+
     const toggleSelection = (g: string) => {
         setSelected(prev => {
             const next = new Set(prev)
@@ -876,6 +940,7 @@ export function RegistryAssets() {
                                         onToggle={toggleSelection}
                                         onUnregister={handleUnregisterClick}
                                         onReaggregate={handleReaggregate}
+                                        onPurge={handlePurge}
                                     />
                                 ))
                             )}
