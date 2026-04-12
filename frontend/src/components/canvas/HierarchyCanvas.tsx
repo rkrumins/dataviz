@@ -18,7 +18,7 @@ import { useSchemaStore, isContainmentEdgeType, normalizeEdgeType } from '@/stor
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
-import { DataLoadingToasts } from '@/components/ui/DataLoadingBanner'
+import { useLoadingToast } from '@/components/ui/toast'
 
 // UX-first interaction components (unified with LineageCanvas)
 import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
@@ -78,6 +78,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
   const lineageEdgeTypes = useViewLineageEdgeTypes()
   const { loadChildren, loadingNodes, isLoading: isLoadingChildren } = useGraphHydration()
+  useLoadingToast('hier-children', isLoadingChildren, 'Expanding hierarchy')
   const relationshipTypes = useViewRelationshipTypes()
   const provider = useGraphProvider()
 
@@ -496,10 +497,6 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
 
       {/* Hierarchy Content */}
       <div className="flex-1 overflow-auto p-6 custom-scrollbar">
-        <DataLoadingToasts items={[
-          { key: 'children', isLoading: isLoadingChildren, label: 'Expanding hierarchy' },
-        ]} />
-
         {hierarchyTree.length === 0 ? (
           <EmptyState />
         ) : (

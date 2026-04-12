@@ -66,7 +66,7 @@ import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/
 import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay } from './LineageFlowOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
-import { DataLoadingToasts } from '@/components/ui/DataLoadingBanner'
+import { useLoadingToast } from '@/components/ui/toast'
 
 // Re-export for backward compatibility
 export { defaultReferenceModelLayers } from './constants'
@@ -690,6 +690,11 @@ export function ContextViewCanvas({
   // Toggle node expansion with Lazy Loading
   const { loadChildren, searchChildren, isLoading: isLoadingChildren, loadingNodes, failedNodes } = useGraphHydration()
 
+  // Floating loading toasts
+  useLoadingToast('ctx-assignments', assignmentStatus === 'loading', 'Computing layer assignments')
+  useLoadingToast('ctx-agg-edges', isLoadingAggregatedEdges, 'Loading aggregated edges')
+  useLoadingToast('ctx-children', isLoadingChildren, 'Expanding hierarchy')
+
   // Tracks nodes currently being fetched — prevents duplicate fetches on rapid clicks.
   // A ref (not state) because we need synchronous reads inside the toggle callback.
   const pendingLoadRef = useRef<Set<string>>(new Set())
@@ -874,13 +879,6 @@ export function ContextViewCanvas({
             <span className="text-amber-600 dark:text-amber-500">Hierarchy is disabled — all nodes appear flat. Configure your ontology to enable parent-child nesting.</span>
           </div>
         )}
-        {/* Floating loading toasts */}
-        <DataLoadingToasts items={[
-          { key: 'assignments', isLoading: assignmentStatus === 'loading', label: 'Computing layer assignments' },
-          { key: 'agg-edges', isLoading: isLoadingAggregatedEdges, label: 'Loading aggregated edges' },
-          { key: 'children', isLoading: isLoadingChildren, label: 'Expanding hierarchy' },
-        ]} />
-
         {/* Warning: containment inheritance violation attempt */}
         {assignmentWarning && (
           <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-xs flex items-center gap-2 z-20">
