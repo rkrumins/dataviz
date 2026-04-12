@@ -23,6 +23,12 @@ export interface ScopeSwitchResult {
 }
 
 /**
+ * @deprecated Since the View Execution Context architecture, views load their
+ * own data via a scoped provider without mutating the global active workspace.
+ * This function should no longer be called during view navigation. It remains
+ * available for legacy code paths that explicitly need to switch workspace scope
+ * (e.g., sidebar workspace selector, admin workspace switching).
+ *
  * Switch the active workspace and datasource context to match a view's scope.
  * No-op if the current context already matches.
  *
