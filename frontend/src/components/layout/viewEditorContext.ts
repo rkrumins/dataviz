@@ -1,7 +1,12 @@
 import { createContext, useContext } from 'react'
 
+export interface ViewEditorOpenOptions {
+  workspaceId?: string
+  dataSourceId?: string
+}
+
 export interface ViewEditorContextType {
-  openViewEditor: (viewId?: string) => void
+  openViewEditor: (viewId?: string, options?: ViewEditorOpenOptions) => void
   closeViewEditor: () => void
 }
 

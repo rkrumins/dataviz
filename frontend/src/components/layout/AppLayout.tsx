@@ -39,14 +39,17 @@ export function AppLayout() {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [viewEditorOpen, setViewEditorOpen] = useState(false)
   const [editingViewId, setEditingViewId] = useState<string | undefined>()
+  const [initialScope, setInitialScope] = useState<{ workspaceId?: string; dataSourceId?: string }>({})
 
-  const openViewEditor = (viewId?: string) => {
+  const openViewEditor = (viewId?: string, options?: { workspaceId?: string; dataSourceId?: string }) => {
     setEditingViewId(viewId)
+    setInitialScope(options ?? {})
     setViewEditorOpen(true)
   }
   const closeViewEditor = () => {
     setViewEditorOpen(false)
     setEditingViewId(undefined)
+    setInitialScope({})
   }
 
   // Sync React Router location with Zustand navigation store
@@ -152,6 +155,8 @@ export function AppLayout() {
           isOpen={viewEditorOpen}
           onClose={closeViewEditor}
           onComplete={() => closeViewEditor()}
+          initialWorkspaceId={initialScope.workspaceId}
+          initialDataSourceId={initialScope.dataSourceId}
         />
 
         {/* Session expired overlay — re-auth without losing page state */}
