@@ -72,6 +72,7 @@ async def list_jobs_global(
     trigger_source: Optional[str] = Query(None, alias="triggerSource"),
     date_from: Optional[str] = Query(None, alias="dateFrom"),
     date_to: Optional[str] = Query(None, alias="dateTo"),
+    search: Optional[str] = Query(None, alias="search"),
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
@@ -85,6 +86,7 @@ async def list_jobs_global(
         trigger_source=trigger_source,
         date_from=date_from,
         date_to=date_to,
+        search=search,
         limit=limit,
         offset=offset,
     )
