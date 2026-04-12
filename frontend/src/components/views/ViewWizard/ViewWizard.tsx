@@ -446,11 +446,22 @@ function ViewWizardScopeResolver(props: ViewWizardProps) {
     )
 }
 
-/** Edit mode resolver — identical to the original implementation. */
+/** Edit mode resolver — resolves scope from the view's own metadata. */
 function ViewWizardEditResolver(props: ViewWizardProps) {
-    const activeDataSourceId = useWorkspacesStore(s => s.activeDataSourceId)
     const workspaces = useWorkspacesStore(s => s.workspaces)
     const meta = useViewMetadata(props.viewId!)
+
+    // Resolve dataSourceId from the view itself. For legacy views without an
+    // explicit dataSourceId, fall back to the view's workspace's primary data
+    // source — NOT the active workspace's data source.
+    // Hook must be called before any early returns (Rules of Hooks).
+    const resolvedDs = useMemo(() => {
+        if (!meta.data) return null
+        if (meta.data.dataSourceId) return meta.data.dataSourceId
+        const ws = workspaces.find(w => w.id === meta.data.workspaceId)
+        const primaryDs = ws?.dataSources?.find(ds => ds.isPrimary) ?? ws?.dataSources?.[0]
+        return primaryDs?.id ?? null
+    }, [meta.data, workspaces])
 
     if (meta.isLoading) {
         return <WizardLoadingShell label="Loading view\u2026" onClose={props.onClose} />
@@ -460,8 +471,6 @@ function ViewWizardEditResolver(props: ViewWizardProps) {
     }
 
     const resolvedWs = meta.data.workspaceId
-    const resolvedDs = meta.data.dataSourceId ?? activeDataSourceId ?? null
-
     const scopeContext = buildScopeContext(workspaces, resolvedWs, resolvedDs)
 
     return (
