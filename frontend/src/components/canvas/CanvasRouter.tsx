@@ -18,6 +18,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
+import { DataLoadingBanner } from '@/components/ui/DataLoadingBanner'
 import { LineageCanvas } from './LineageCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
@@ -48,7 +49,8 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // Single source of truth for initial graph data loading.
   // Only CanvasRouter passes hydrate=true — canvas components use the hook
   // without hydration (loadChildren/searchChildren only).
-  const { hydrationError } = useGraphHydration({ hydrate: true })
+  const { hydrationError, hydrationPhase, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
+  const isInitialLoad = isHydrating && hydrationPhase !== 'complete'
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {
@@ -88,6 +90,16 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
 
       {hydrationError && (
         <ProviderUnavailableOverlay message={hydrationError} />
+      )}
+
+      {!hydrationError && isInitialLoad && (
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 w-auto max-w-sm pointer-events-none">
+          <DataLoadingBanner
+            isLoading
+            label={hydrationPhase === 'roots' ? 'Loading graph data' : hydrationPhase === 'edges' ? 'Loading relationships' : 'Preparing view'}
+            detail={hydrationPhase === 'roots' ? 'Fetching entities from the data source...' : hydrationPhase === 'edges' ? 'Resolving lineage and containment edges...' : 'Building canvas layout...'}
+          />
+        </div>
       )}
 
       {activeView && layoutType !== 'graph' && (
