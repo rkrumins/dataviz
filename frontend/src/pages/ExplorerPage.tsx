@@ -478,7 +478,7 @@ export function ExplorerPage() {
                     onShare={() => handleShare(v)}
                     onPreview={() => setPreviewView(v)}
                     onEdit={() => openViewEditor(v.id)}
-                    editDisabled={v.workspaceId !== activeWorkspaceId}
+                    editDisabled={false}
                     onDelete={() => handleDeleteRequest(v)}
                     onRestore={() => handleRestore(v)}
                     onPermanentDelete={() => handlePermanentDeleteRequest(v)}
@@ -535,7 +535,7 @@ export function ExplorerPage() {
                     onShare={() => handleShare(v)}
                     onPreview={() => setPreviewView(v)}
                     onEdit={() => openViewEditor(v.id)}
-                    editDisabled={v.workspaceId !== activeWorkspaceId}
+                    editDisabled={false}
                     onDelete={() => handleDeleteRequest(v)}
                     onRestore={() => handleRestore(v)}
                     onPermanentDelete={() => handlePermanentDeleteRequest(v)}
@@ -564,7 +564,7 @@ export function ExplorerPage() {
                   onShare={() => handleShare(v)}
                   onPreview={() => setPreviewView(v)}
                   onEdit={() => openViewEditor(v.id)}
-                  editDisabled={v.workspaceId !== activeWorkspaceId}
+                  editDisabled={false}
                   onDelete={() => handleDeleteRequest(v)}
                   healthStatus={healthMap.get(v.id)?.status}
                   isSelected={selectedIds.has(v.id)}
@@ -591,7 +591,7 @@ export function ExplorerPage() {
         onToggleFavourite={() => previewView && toggleFavourite(previewView.id)}
         onShare={() => previewView && handleShareDialog(previewView)}
         onEdit={previewView ? () => { setPreviewView(null); openViewEditor(previewView.id) } : undefined}
-        editDisabled={previewView?.workspaceId !== activeWorkspaceId}
+        editDisabled={false}
         onDelete={() => previewView && handleDeleteRequest(previewView)}
         healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
       />
