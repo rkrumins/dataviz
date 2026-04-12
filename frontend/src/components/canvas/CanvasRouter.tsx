@@ -26,12 +26,24 @@ import { cn } from '@/lib/utils'
 
 interface CanvasRouterProps {
   className?: string
+  /** Override the layout type used for canvas selection.
+   *
+   * ViewPage passes this directly from useViewNavigation() so the correct
+   * canvas renders even when the schema store's activeViewId races with
+   * loadFromBackend during a cross-workspace scope transition.
+   * Without this prop, CanvasRouter falls back to getActiveView()?.layout.type
+   * which may be undefined if loadFromBackend hasn't re-set activeViewId yet.
+   */
+  layoutType?: string
 }
 
-export function CanvasRouter({ className }: CanvasRouterProps) {
+export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRouterProps) {
   const activeView = useSchemaStore((s) => s.getActiveView())
   const { providerVersion } = useGraphProviderContext()
-  const layoutType = activeView?.layout.type ?? 'graph'
+  // Prefer the prop (from navigation pipeline) over the store lookup.
+  // This avoids the race where loadFromBackend resets activeViewId to null
+  // during a cross-workspace transition, causing a 'graph' fallback.
+  const layoutType = layoutTypeProp ?? activeView?.layout.type ?? 'graph'
 
   // Single source of truth for initial graph data loading.
   // Only CanvasRouter passes hydrate=true — canvas components use the hook

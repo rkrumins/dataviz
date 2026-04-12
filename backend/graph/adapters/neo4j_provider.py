@@ -677,6 +677,8 @@ class Neo4jProvider(GraphDataProvider):
         search_query: Optional[str] = None,
         offset: int = 0,
         limit: int = 100,
+        sort_property: Optional[str] = "displayName",
+        cursor: Optional[str] = None,
     ) -> List[GraphNode]:
         ip = self._id_prop()
         name_field = self._mapping.display_name_field

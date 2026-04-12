@@ -39,6 +39,13 @@ export type ViewNavigationStatus =
 export interface UseViewNavigationResult {
   status: ViewNavigationStatus
   view: ViewConfiguration | null
+  /** Layout type resolved from the navigation pipeline.
+   *
+   * This is read directly from the fetched ViewConfiguration — NOT from
+   * schema.views — so it remains correct even when loadFromBackend resets
+   * activeViewId during a cross-workspace scope transition.
+   */
+  layoutType: string
   error: string | null
 }
 
@@ -65,6 +72,12 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
   const [retryCount, setRetryCount] = useState(0)
   // Track which viewId we've already fully navigated to, to avoid re-running
   const completedViewRef = useRef<string | null>(null)
+  // Stores the resolved ViewConfiguration so it can be re-added to the schema
+  // store after cleanupOnWorkspaceSwitch() clears schema.views during a scope
+  // transition. Without this, getActiveView() returns undefined after the switch
+  // and CanvasRouter falls back to 'graph' (LineageCanvas) regardless of the
+  // view's actual layoutType.
+  const pendingViewConfigRef = useRef<ViewConfiguration | null>(null)
   // Track the scope switch result to know if we need to wait
   const pendingSwitchRef = useRef<ScopeSwitchResult | null>(null)
   // Track the provider version at the time of scope switch
@@ -102,6 +115,8 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
         targetWsId = localView.workspaceId
         targetDsId = localView.dataSourceId ?? parseDataSourceId(localView.scopeKey) ?? undefined
         viewConfig = localView
+        // Persist so activateView() can re-add it if cleanupOnWorkspaceSwitch clears it
+        pendingViewConfigRef.current = viewConfig
       } else {
         // 1b. Fetch from API (deep link / shared URL)
         setStatus('resolving')
@@ -112,6 +127,8 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
           targetWsId = data.workspaceId
           targetDsId = data.dataSourceId
           viewConfig = viewToViewConfig(data)
+          // Persist so activateView() can re-add it if cleanupOnWorkspaceSwitch clears it
+          pendingViewConfigRef.current = viewConfig
 
           // Add to schema store for future cache hits
           useSchemaStore.getState().addOrUpdateView(viewConfig)
@@ -218,6 +235,17 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
 
   function activateView() {
     if (!viewId || completedViewRef.current === viewId) return
+
+    // Re-insert the view config if cleanupOnWorkspaceSwitch cleared schema.views
+    // during the scope transition. CanvasRouter reads getActiveView() immediately
+    // after setActiveView() — if the view isn't in schema.views at that moment,
+    // layoutType falls back to 'graph' and LineageCanvas renders instead of the
+    // correct canvas (e.g. ReferenceModelCanvas for 'reference' layout).
+    const pending = pendingViewConfigRef.current
+    if (pending && pending.id === viewId) {
+      useSchemaStore.getState().addOrUpdateView(pending)
+    }
+
     setActiveView(viewId)
     completedViewRef.current = viewId
     setStatus('ready')
@@ -245,8 +273,9 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
   // ─── Step 4: Handle rapid navigation (viewId changes while in progress) ─
 
   useEffect(() => {
-    // When viewId changes, reset the completed ref so the pipeline re-runs
+    // When viewId changes, reset refs so the pipeline re-runs for the new view
     completedViewRef.current = null
+    pendingViewConfigRef.current = null
   }, [viewId])
 
   // ─── Step 5: Auto-retry on backend recovery ───────────────────────────
@@ -268,9 +297,20 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
     return unsubscribe
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Derive layoutType directly from the fetched view config, not from the
+  // schema store. This avoids the race where loadFromBackend resets
+  // activeViewId to null during a cross-workspace scope transition, causing
+  // getActiveView() to return undefined and CanvasRouter to fall back to
+  // 'graph' (LineageCanvas) regardless of the view's actual layout.
+  const layoutType =
+    pendingViewConfigRef.current?.layout?.type ??
+    activeView?.layout?.type ??
+    'graph'
+
   return {
     status,
     view: activeView ?? null,
+    layoutType,
     error,
   }
 }

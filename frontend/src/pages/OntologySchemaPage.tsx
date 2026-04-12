@@ -26,6 +26,7 @@ import type { EntityTypeSummary, EdgeTypeSummary } from '@/providers/GraphDataPr
 
 import { useOntologies, useOntology } from '@/features/ontology/hooks/useOntologies'
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
+import { useInvalidateGraphSchema } from '@/hooks/useGraphSchema'
 import {
   entityDefToSchema,
   entitySchemaToBackend,
@@ -175,6 +176,13 @@ export function OntologySchemaPage() {
   const { data: ontologies = [], isLoading: isLoadingOntologies } = useOntologies()
   const { data: selectedOntology } = useOntology(ontologyId)
   const mutations = useOntologyMutations()
+  // Invalidate the cached graph schema whenever a data-source-to-ontology
+  // assignment changes. useOntologyMutations already does this for ontology
+  // CRUD, but workspaceService.updateDataSource calls below bypass that
+  // hook — they still change which ontology the graph is resolved against,
+  // so the schema cache must be evicted or the next fetcher will serve
+  // stale data.
+  const invalidateGraphSchema = useInvalidateGraphSchema()
 
   // ── Local state ────────────────────────────────────────────────────
   const [editorPanel, setEditorPanel] = useState<EditorPanel>(null)
@@ -358,7 +366,7 @@ export function OntologySchemaPage() {
 
       await mutations.update.mutateAsync({ id: selectedOntology.id, req })
       showToast('success', 'All changes saved')
-      discardChanges()
+      doDiscard()
     } catch (err: unknown) {
       showToast('error', `Failed to save: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
@@ -425,6 +433,7 @@ export function OntologySchemaPage() {
         ontologyId: selectedOntology.id,
       })
       await loadWorkspaces()
+      invalidateGraphSchema()
       showToast('success', 'Schema assigned to data source')
     } catch (err: unknown) {
       showToast('error', `Assignment failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
@@ -439,6 +448,7 @@ export function OntologySchemaPage() {
     try {
       await workspaceService.updateDataSource(workspaceId, dataSourceId, { ontologyId: '' })
       await loadWorkspaces()
+      invalidateGraphSchema()
       showToast('success', 'Schema unassigned from data source')
     } catch (err: unknown) {
       showToast('error', `Unassign failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
@@ -460,6 +470,7 @@ export function OntologySchemaPage() {
         )
       )
       await loadWorkspaces()
+      invalidateGraphSchema()
       showToast('success', `Schema rolled out to all data sources in "${ws.name}"`)
     } catch (err: unknown) {
       showToast('error', `Rollout failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
@@ -477,6 +488,7 @@ export function OntologySchemaPage() {
         ontologyId: assignId ?? '',
       })
       await loadWorkspaces()
+      invalidateGraphSchema()
       if (assignId) navigate(schemaUrl(assignId))
       showToast('success', assignId ? 'Semantic layer assigned to data source' : 'Semantic layer assignment cleared')
     } catch (err: unknown) {
@@ -849,11 +861,86 @@ export function OntologySchemaPage() {
     }
   }
 
-  function handleReparentEntityType(childId: string, newParentId: string | null) {
+  // DAG-aware containment-edge operations.
+  //
+  // Each of the three handlers mutates exactly one parent↔child edge and keeps
+  // both sides (parent.can_contain and child.can_be_contained_by) in sync. They
+  // never stomp on unrelated edges, so a type that lives under multiple parents
+  // stays intact when one edge is added or removed. Self-referential edges
+  // (parentId === childId) are treated as ordinary DAG edges — the backend's
+  // resolver explicitly accepts them.
+
+  function handleAddContainmentEdge(childId: string, parentId: string) {
     if (!selectedOntology || isLocked || !workingEntityDefs) return
 
     const defs = { ...(workingEntityDefs as Record<string, Record<string, unknown>>) }
+    const childDef = defs[childId]
+    const parentDef = defs[parentId]
+    if (!childDef || !parentDef) return
 
+    const childHierarchy = (childDef.hierarchy as Record<string, unknown>) ?? {}
+    const childParents: string[] = (childHierarchy.can_be_contained_by as string[]) ?? []
+    if (!childParents.includes(parentId)) {
+      defs[childId] = {
+        ...childDef,
+        hierarchy: { ...childHierarchy, can_be_contained_by: [...childParents, parentId] },
+      }
+    }
+
+    // When the edge is self-referential, the child and parent point at the
+    // same def object — re-read it after the update above so the next write
+    // doesn't clobber the can_be_contained_by change.
+    const parentDefAfter = defs[parentId]
+    const parentHierarchy = (parentDefAfter.hierarchy as Record<string, unknown>) ?? {}
+    const parentChildren: string[] = (parentHierarchy.can_contain as string[]) ?? []
+    if (!parentChildren.includes(childId)) {
+      defs[parentId] = {
+        ...parentDefAfter,
+        hierarchy: { ...parentHierarchy, can_contain: [...parentChildren, childId] },
+      }
+    }
+
+    setWorkingEntityDefs(defs)
+    hasStagedChangesRef.current = true
+    const msg = parentId === childId
+      ? `"${humanizeId(childId)}" can now contain itself — save to persist`
+      : `"${humanizeId(childId)}" also contained under "${humanizeId(parentId)}" — save to persist`
+    showToast('info', msg)
+  }
+
+  function handleRemoveContainmentEdge(childId: string, parentId: string) {
+    if (!selectedOntology || isLocked || !workingEntityDefs) return
+
+    const defs = { ...(workingEntityDefs as Record<string, Record<string, unknown>>) }
+    const childDef = defs[childId]
+    if (!childDef) return
+
+    const childHierarchy = (childDef.hierarchy as Record<string, unknown>) ?? {}
+    const childParents: string[] = (childHierarchy.can_be_contained_by as string[]) ?? []
+    defs[childId] = {
+      ...childDef,
+      hierarchy: { ...childHierarchy, can_be_contained_by: childParents.filter(p => p !== parentId) },
+    }
+
+    const parentDefAfter = defs[parentId]
+    if (parentDefAfter) {
+      const parentHierarchy = (parentDefAfter.hierarchy as Record<string, unknown>) ?? {}
+      const parentChildren: string[] = (parentHierarchy.can_contain as string[]) ?? []
+      defs[parentId] = {
+        ...parentDefAfter,
+        hierarchy: { ...parentHierarchy, can_contain: parentChildren.filter(c => c !== childId) },
+      }
+    }
+
+    setWorkingEntityDefs(defs)
+    hasStagedChangesRef.current = true
+    showToast('info', `Removed "${humanizeId(childId)}" from "${humanizeId(parentId)}" — save to persist`)
+  }
+
+  function handleMakeRootType(childId: string) {
+    if (!selectedOntology || isLocked || !workingEntityDefs) return
+
+    const defs = { ...(workingEntityDefs as Record<string, Record<string, unknown>>) }
     const childDef = defs[childId]
     if (!childDef) return
     const childHierarchy = (childDef.hierarchy as Record<string, unknown>) ?? {}
@@ -868,20 +955,11 @@ export function OntologySchemaPage() {
       }
     }
 
-    defs[childId] = { ...childDef, hierarchy: { ...childHierarchy, can_be_contained_by: newParentId ? [newParentId] : [] } }
-
-    if (newParentId && defs[newParentId]) {
-      const pDef = defs[newParentId]
-      const pH = (pDef.hierarchy as Record<string, unknown>) ?? {}
-      const pCC: string[] = (pH.can_contain as string[]) ?? []
-      if (!pCC.includes(childId)) {
-        defs[newParentId] = { ...pDef, hierarchy: { ...pH, can_contain: [...pCC, childId] } }
-      }
-    }
+    defs[childId] = { ...defs[childId], hierarchy: { ...((defs[childId].hierarchy as Record<string, unknown>) ?? {}), can_be_contained_by: [] } }
 
     setWorkingEntityDefs(defs)
     hasStagedChangesRef.current = true
-    showToast('info', newParentId ? `Moved under ${humanizeId(newParentId)} — save to persist` : `"${humanizeId(childId)}" is now a root type — save to persist`)
+    showToast('info', `"${humanizeId(childId)}" is now a root type — save to persist`)
   }
 
   function handleUpdateContainmentEdgeTypes(newList: string[]) {
@@ -1078,7 +1156,9 @@ export function OntologySchemaPage() {
                           relTypes={relTypes}
                           isLocked={isLocked}
                           isSaving={isSaving}
-                          onReparent={(childId, newParentId) => { ensureEditMode(); handleReparentEntityType(childId, newParentId) }}
+                          onAddParent={(childId, parentId) => { ensureEditMode(); handleAddContainmentEdge(childId, parentId) }}
+                          onRemoveParent={(childId, parentId) => { ensureEditMode(); handleRemoveContainmentEdge(childId, parentId) }}
+                          onMakeRoot={(childId) => { ensureEditMode(); handleMakeRootType(childId) }}
                           onEditType={et => { ensureEditMode(); setEditorPanel({ kind: 'entity', data: et }) }}
                           onUpdateContainmentEdgeTypes={(newList) => { ensureEditMode(); handleUpdateContainmentEdgeTypes(newList) }}
                         />

@@ -126,9 +126,33 @@ class ChildrenWithEdgesResult(BaseModel):
     lineage_edges: List[GraphEdge] = Field(default_factory=list, alias="lineageEdges")
     total_children: int = Field(alias="totalChildren")
     has_more: bool = Field(alias="hasMore")
+    next_cursor: Optional[str] = Field(None, alias="nextCursor")
 
     class Config:
         populate_by_name = True
+
+
+class TopLevelNodesResult(BaseModel):
+    """Paginated list of instances that have no incoming containment edge.
+
+    "Top-level" is defined structurally: a node n is top-level iff there is no
+    edge of any configured containment type whose target is n. This includes:
+      - Ontology root instances (Domain, Platform, etc.)
+      - Orphan instances of non-root types (e.g. a Table with no parent schema)
+
+    Callers use root_type_count / orphan_count to distinguish the two classes
+    in UI (e.g. an "orphan" badge in the wizard tree).
+    """
+    nodes: List[GraphNode]
+    total_count: int = Field(alias="totalCount")
+    has_more: bool = Field(alias="hasMore")
+    next_cursor: Optional[str] = Field(None, alias="nextCursor")
+    root_type_count: int = Field(0, alias="rootTypeCount")
+    orphan_count: int = Field(0, alias="orphanCount")
+
+    class Config:
+        populate_by_name = True
+
 
 # ============================================
 # Introspection Models
@@ -293,6 +317,13 @@ class GraphSchema(BaseModel):
     root_entity_types: List[str] = Field(default_factory=list, alias="rootEntityTypes")
     containment_edge_types: List[str] = Field(default_factory=list, alias="containmentEdgeTypes")
     lineage_edge_types: List[str] = Field(default_factory=list, alias="lineageEdgeTypes")
+    # Stable SHA-256 digest of the underlying OntologyMetadata projection.
+    # Byte-identical to the value stamped onto ViewORM.ontology_digest when
+    # a view is saved — the ViewWizard compares these two to decide whether
+    # to render <OntologyDriftBanner>. Null when the digest couldn't be
+    # computed (provider down, unresolvable ontology); the wizard silently
+    # skips drift detection in that case instead of crying wolf.
+    ontology_digest: Optional[str] = Field(default=None, alias="ontologyDigest")
 
     class Config:
         populate_by_name = True

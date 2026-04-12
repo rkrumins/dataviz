@@ -9,17 +9,38 @@ import { EmptyState } from '../EmptyState'
 import type { RelTypeWithClassifications } from '../../lib/ontology-types'
 
 // ---------------------------------------------------------------------------
-// HierarchyNode interface
+// HierarchyNode — represents a single occurrence of a type in the DAG render.
+//
+// Containment is a DAG, not a tree: a single entity type may appear under
+// multiple parents (e.g. Attribute under both Object and Group), and a type
+// may reference itself for recursive nesting. Each occurrence gets its own
+// pathKey so the renderer can surface duplicates correctly and React keys
+// stay unique.
 // ---------------------------------------------------------------------------
 
 export interface HierarchyNode {
   id: string
+  pathKey: string
   entityType: EntityTypeSchema
+  parentTypeId: string | null
   children: HierarchyNode[]
+  /** `can_contain` references this type itself — render as a compact "↻ recursive" marker. */
+  isSelfRef?: boolean
+  /** `can_contain` reaches back through a non-self ancestor — render as a cycle warning marker. */
+  isCycleRef?: boolean
 }
 
 // ---------------------------------------------------------------------------
-// buildHierarchyTree — builds a containment tree from entity types
+// buildHierarchyTree — DAG-aware containment builder
+//
+// - `reached` tracks which type ids have been expanded anywhere in the render,
+//   so orphan detection still works when a type appears under multiple parents.
+// - `ancestors` is per-path, so `Object → Attribute` and
+//   `Object → Group → Attribute` coexist cleanly.
+// - Self-references (`can_contain` includes own id) emit a sentinel leaf and
+//   stop recursing, so the visual surfaces the rule without looping.
+// - Non-self cycles (A → B → A) also emit a sentinel so the user sees the
+//   misconfiguration instead of losing the child silently.
 // ---------------------------------------------------------------------------
 
 export function buildHierarchyTree(entityTypes: EntityTypeSchema[]): {
@@ -27,46 +48,76 @@ export function buildHierarchyTree(entityTypes: EntityTypeSchema[]): {
   orphans: EntityTypeSchema[]
 } {
   const byId = new Map(entityTypes.map(et => [et.id, et]))
-  const visited = new Set<string>()
+  const reached = new Set<string>()
 
-  function buildNode(id: string): HierarchyNode | null {
-    if (visited.has(id) || !byId.has(id)) return null
-    visited.add(id)
+  function buildNode(
+    id: string,
+    parentTypeId: string | null,
+    pathPrefix: string,
+    ancestors: ReadonlySet<string>,
+  ): HierarchyNode | null {
+    if (!byId.has(id)) return null
+    reached.add(id)
     const et = byId.get(id)!
+    const pathKey = pathPrefix ? `${pathPrefix}/${id}` : id
+    const nextAncestors = new Set(ancestors)
+    nextAncestors.add(id)
+
     const children: HierarchyNode[] = []
     for (const childId of et.hierarchy.canContain) {
-      const child = buildNode(childId)
+      if (childId === id) {
+        children.push({
+          id: childId,
+          pathKey: `${pathKey}/__self__`,
+          entityType: et,
+          parentTypeId: id,
+          children: [],
+          isSelfRef: true,
+        })
+        continue
+      }
+      if (ancestors.has(childId)) {
+        const cycleEt = byId.get(childId)
+        if (!cycleEt) continue
+        children.push({
+          id: childId,
+          pathKey: `${pathKey}/__cycle__${childId}`,
+          entityType: cycleEt,
+          parentTypeId: id,
+          children: [],
+          isCycleRef: true,
+        })
+        continue
+      }
+      const child = buildNode(childId, id, pathKey, nextAncestors)
       if (child) children.push(child)
     }
-    return { id, entityType: et, children }
+    return { id, pathKey, entityType: et, parentTypeId, children }
   }
 
   const roots: HierarchyNode[] = []
   for (const et of entityTypes) {
     if (et.hierarchy.canBeContainedBy.length === 0) {
-      const node = buildNode(et.id)
+      const node = buildNode(et.id, null, '', new Set())
       if (node) roots.push(node)
     }
   }
-  // Second pass: pick up any canContain-referenced types not yet visited (they have parents set but parent wasn't yet processed)
-  for (const et of entityTypes) {
-    if (!visited.has(et.id)) {
-      // Has parents set but parents not in this ontology or circular — treat as orphan
-    }
-  }
 
-  const orphans = entityTypes.filter(et => !visited.has(et.id))
+  const orphans = entityTypes.filter(et => !reached.has(et.id))
   return { roots, orphans }
 }
 
 // ---------------------------------------------------------------------------
-// computeNodeLevels — compute tree depth for each node
+// computeNodeLevels — compute depth for each rendered occurrence
+//
+// Keyed by pathKey (not id) because the same type can appear at multiple
+// depths in a DAG.
 // ---------------------------------------------------------------------------
 
 export function computeNodeLevels(roots: HierarchyNode[]): Map<string, number> {
   const map = new Map<string, number>()
   function traverse(node: HierarchyNode, level: number) {
-    map.set(node.id, level)
+    map.set(node.pathKey, level)
     for (const child of node.children) traverse(child, level + 1)
   }
   for (const root of roots) traverse(root, 0)
@@ -82,7 +133,9 @@ export function HierarchyTreeNode({
   allEntityTypes,
   computedLevelMap,
   isLocked,
-  onReparent,
+  onAddParent,
+  onRemoveParent,
+  onMakeRoot,
   onEditType,
   depth,
   isLastChild,
@@ -92,19 +145,89 @@ export function HierarchyTreeNode({
   allEntityTypes: EntityTypeSchema[]
   computedLevelMap: Map<string, number>
   isLocked: boolean
-  onReparent: (childId: string, newParentId: string | null) => void
+  onAddParent: (childId: string, parentId: string) => void
+  onRemoveParent: (childId: string, parentId: string) => void
+  onMakeRoot: (childId: string) => void
   onEditType: (et: EntityTypeSchema) => void
   depth: number
   isLastChild?: boolean
   ancestorIsLast?: boolean[]
 }) {
   const [showNestPicker, setShowNestPicker] = useState(false)
-  const computedLevel = computedLevelMap.get(node.id) ?? depth
-  const storedLevel = node.entityType.hierarchy.level
-  const levelMismatch = computedLevel !== storedLevel
 
-  const potentialParents = allEntityTypes.filter(p => p.id !== node.id)
+  // Sentinel rendering: self-ref and cycle-ref nodes are compact, non-editable
+  // markers that surface the rule without recursing.
+  if (node.isSelfRef || node.isCycleRef) {
+    const Icon = node.isSelfRef ? LucideIcons.Repeat : LucideIcons.AlertTriangle
+    const toneClass = node.isSelfRef
+      ? 'text-indigo-600 dark:text-indigo-400'
+      : 'text-amber-600 dark:text-amber-400'
+    const label = node.isSelfRef
+      ? `${node.entityType.name} — recursive`
+      : `${node.entityType.name} — would form a cycle, check containment rules`
+    return (
+      <div className="relative">
+        {depth > 0 && ancestorIsLast && ancestorIsLast.map((isLast, i) => (
+          !isLast && (
+            <div
+              key={i}
+              className="absolute top-0 bottom-0 border-l-2 border-glass-border/40"
+              style={{ left: `${(i + 1) * 24 + 8}px` }}
+            />
+          )
+        ))}
+        {depth > 0 && (
+          <>
+            <div
+              className="absolute border-l-2 border-glass-border/40"
+              style={{
+                left: `${depth * 24 + 8}px`,
+                top: 0,
+                height: isLastChild ? '24px' : '100%',
+              }}
+            />
+            <div
+              className="absolute border-t-2 border-glass-border/40"
+              style={{
+                left: `${depth * 24 + 8}px`,
+                top: '24px',
+                width: '16px',
+              }}
+            />
+          </>
+        )}
+        <div
+          className="flex items-center gap-2 py-1.5 px-3 relative"
+          style={{ paddingLeft: `${depth * 24 + (depth > 0 ? 28 : 12)}px` }}
+        >
+          <Icon className={cn('w-3.5 h-3.5 flex-shrink-0', toneClass)} />
+          <span className={cn('text-xs font-medium italic', toneClass)}>{label}</span>
+          {!isLocked && node.isCycleRef && (
+            <button
+              onClick={() => onEditType(node.entityType)}
+              className="ml-1 p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 text-ink-muted hover:text-ink transition-colors"
+              title="Edit this type"
+            >
+              <LucideIcons.Pencil className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  const computedLevel = computedLevelMap.get(node.pathKey) ?? depth
+  const storedLevel = node.entityType.hierarchy.level
+  // Stored `level` is a single scalar — meaningless for multi-parent types that
+  // legitimately appear at more than one depth. Only flag the mismatch when the
+  // type has a single parent (or none).
+  const hasMultipleParents = node.entityType.hierarchy.canBeContainedBy.length > 1
+  const levelMismatch = !hasMultipleParents && computedLevel !== storedLevel
+
+  const potentialParents = allEntityTypes
+  const currentParents = new Set(node.entityType.hierarchy.canBeContainedBy)
   const isRoot = depth === 0
+  const canRemoveFromHere = !isLocked && node.parentTypeId !== null
 
   return (
     <div className="relative">
@@ -175,6 +298,16 @@ export function HierarchyTreeNode({
         <span className="text-sm font-medium text-ink">{node.entityType.name}</span>
         <code className="text-[10px] text-ink-muted/50 font-mono hidden sm:block">{node.entityType.id}</code>
 
+        {/* Multi-parent badge */}
+        {hasMultipleParents && (
+          <span
+            className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 dark:text-indigo-400 ring-1 ring-indigo-300/30"
+            title={`Shared child — appears under ${node.entityType.hierarchy.canBeContainedBy.length} parents`}
+          >
+            shared
+          </span>
+        )}
+
         {/* Level badge */}
         <span
           className={cn(
@@ -207,11 +340,21 @@ export function HierarchyTreeNode({
 
           {!isLocked && !isRoot && (
             <button
-              onClick={() => onReparent(node.id, null)}
+              onClick={() => onMakeRoot(node.id)}
               className="p-1 rounded hover:bg-amber-100 dark:hover:bg-amber-950/30 text-ink-muted hover:text-amber-600 transition-colors"
-              title="Make root type"
+              title="Make root type (removes all parents)"
             >
               <LucideIcons.Crown className="w-3 h-3" />
+            </button>
+          )}
+
+          {canRemoveFromHere && (
+            <button
+              onClick={() => onRemoveParent(node.id, node.parentTypeId!)}
+              className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-950/30 text-ink-muted hover:text-red-600 transition-colors"
+              title={`Remove from ${node.parentTypeId}`}
+            >
+              <LucideIcons.X className="w-3 h-3" />
             </button>
           )}
 
@@ -220,38 +363,47 @@ export function HierarchyTreeNode({
               <button
                 onClick={() => setShowNestPicker(v => !v)}
                 className="p-1 rounded hover:bg-indigo-100 dark:hover:bg-indigo-950/30 text-ink-muted hover:text-indigo-600 transition-colors"
-                title="Move under a different parent"
+                title="Also contain under another parent"
               >
                 <LucideIcons.CornerDownRight className="w-3 h-3" />
               </button>
               {showNestPicker && (
                 <>
                   <div className="fixed inset-0 z-40" onClick={() => setShowNestPicker(false)} />
-                  <div className="absolute right-0 top-full mt-1 w-52 bg-canvas-elevated border border-glass-border rounded-xl shadow-xl z-50 p-1 max-h-52 overflow-y-auto">
-                    <p className="px-3 py-1 text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Move under...</p>
-                    {!isRoot && (
-                      <button
-                        onClick={() => { onReparent(node.id, null); setShowNestPicker(false) }}
-                        className="w-full text-left px-3 py-2 rounded-lg text-xs hover:bg-black/5 dark:hover:bg-white/5 text-amber-600 dark:text-amber-400"
-                      >
-                        <div className="flex items-center gap-2">
-                          <LucideIcons.Crown className="w-3 h-3" />
-                          Make root type
-                        </div>
-                      </button>
-                    )}
-                    {potentialParents.map(p => (
-                      <button
-                        key={p.id}
-                        onClick={() => { onReparent(node.id, p.id); setShowNestPicker(false) }}
-                        className="w-full text-left px-3 py-2 rounded-lg text-xs hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                      >
-                        <div className="flex items-center gap-2">
-                          <div className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: p.visual.color }} />
-                          <span className="font-medium text-ink">{p.name}</span>
-                        </div>
-                      </button>
-                    ))}
+                  <div className="absolute right-0 top-full mt-1 w-56 bg-canvas-elevated border border-glass-border rounded-xl shadow-xl z-50 p-1 max-h-60 overflow-y-auto">
+                    <p className="px-3 py-1 text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Also contain under...</p>
+                    {potentialParents.map(p => {
+                      const alreadyParent = currentParents.has(p.id)
+                      const isSelf = p.id === node.id
+                      return (
+                        <button
+                          key={p.id}
+                          disabled={alreadyParent}
+                          onClick={() => { onAddParent(node.id, p.id); setShowNestPicker(false) }}
+                          className={cn(
+                            'w-full text-left px-3 py-2 rounded-lg text-xs transition-colors',
+                            alreadyParent
+                              ? 'opacity-50 cursor-not-allowed'
+                              : 'hover:bg-black/5 dark:hover:bg-white/5',
+                          )}
+                        >
+                          <div className="flex items-center gap-2">
+                            <div className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: p.visual.color }} />
+                            <span className="font-medium text-ink truncate">{p.name}</span>
+                            {isSelf && (
+                              <span className="text-[10px] text-indigo-500 dark:text-indigo-400 ml-auto whitespace-nowrap">
+                                (self — recursive)
+                              </span>
+                            )}
+                            {!isSelf && alreadyParent && (
+                              <span className="text-[10px] text-ink-muted ml-auto whitespace-nowrap">
+                                (already a parent)
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      )
+                    })}
                   </div>
                 </>
               )}
@@ -263,12 +415,14 @@ export function HierarchyTreeNode({
       {/* Children */}
       {node.children.map((child, i) => (
         <HierarchyTreeNode
-          key={child.id}
+          key={child.pathKey}
           node={child}
           allEntityTypes={allEntityTypes}
           computedLevelMap={computedLevelMap}
           isLocked={isLocked}
-          onReparent={onReparent}
+          onAddParent={onAddParent}
+          onRemoveParent={onRemoveParent}
+          onMakeRoot={onMakeRoot}
           onEditType={onEditType}
           depth={depth + 1}
           isLastChild={i === node.children.length - 1}
@@ -288,18 +442,18 @@ export function OrphanTypeRow({
   allEntityTypes,
   isLocked,
   onMakeRoot,
-  onNestUnder,
+  onAddParent,
   onEdit,
 }: {
   entityType: EntityTypeSchema
   allEntityTypes: EntityTypeSchema[]
   isLocked: boolean
   onMakeRoot: () => void
-  onNestUnder: (parentId: string) => void
+  onAddParent: (parentId: string) => void
   onEdit: () => void
 }) {
   const [showPicker, setShowPicker] = useState(false)
-  const potentialParents = allEntityTypes.filter(p => p.id !== et.id)
+  const potentialParents = allEntityTypes
 
   return (
     <div className="flex items-center justify-between p-3.5 rounded-xl border border-amber-200 dark:border-amber-800/50 bg-amber-50/30 dark:bg-amber-950/10">
@@ -356,23 +510,31 @@ export function OrphanTypeRow({
               {showPicker && (
                 <>
                   <div className="fixed inset-0 z-40" onClick={() => setShowPicker(false)} />
-                  <div className="absolute right-0 top-full mt-1 w-52 bg-canvas-elevated border border-glass-border rounded-xl shadow-xl z-50 p-1 max-h-52 overflow-y-auto">
+                  <div className="absolute right-0 top-full mt-1 w-56 bg-canvas-elevated border border-glass-border rounded-xl shadow-xl z-50 p-1 max-h-60 overflow-y-auto">
                     <p className="px-3 py-1 text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Choose parent</p>
-                    {potentialParents.map(p => (
-                      <button
-                        key={p.id}
-                        onClick={() => { onNestUnder(p.id); setShowPicker(false) }}
-                        className="w-full text-left px-3 py-2 rounded-lg text-xs hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                      >
-                        <div className="flex items-center gap-2">
-                          <div className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: p.visual.color }} />
-                          <span className="font-medium text-ink">{p.name}</span>
-                          {p.hierarchy.canBeContainedBy.length === 0 && (
-                            <LucideIcons.Crown className="w-2.5 h-2.5 text-amber-400" />
-                          )}
-                        </div>
-                      </button>
-                    ))}
+                    {potentialParents.map(p => {
+                      const isSelf = p.id === et.id
+                      return (
+                        <button
+                          key={p.id}
+                          onClick={() => { onAddParent(p.id); setShowPicker(false) }}
+                          className="w-full text-left px-3 py-2 rounded-lg text-xs hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                        >
+                          <div className="flex items-center gap-2">
+                            <div className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: p.visual.color }} />
+                            <span className="font-medium text-ink truncate">{p.name}</span>
+                            {p.hierarchy.canBeContainedBy.length === 0 && !isSelf && (
+                              <LucideIcons.Crown className="w-2.5 h-2.5 text-amber-400" />
+                            )}
+                            {isSelf && (
+                              <span className="text-[10px] text-indigo-500 dark:text-indigo-400 ml-auto whitespace-nowrap">
+                                (self — recursive)
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      )
+                    })}
                   </div>
                 </>
               )}
@@ -394,7 +556,9 @@ export function HierarchyPanel({
   relTypes,
   isLocked,
   isSaving,
-  onReparent,
+  onAddParent,
+  onRemoveParent,
+  onMakeRoot,
   onEditType,
   onUpdateContainmentEdgeTypes,
 }: {
@@ -403,7 +567,9 @@ export function HierarchyPanel({
   relTypes: RelTypeWithClassifications[]
   isLocked: boolean
   isSaving: boolean
-  onReparent: (childId: string, newParentId: string | null) => void
+  onAddParent: (childId: string, parentId: string) => void
+  onRemoveParent: (childId: string, parentId: string) => void
+  onMakeRoot: (childId: string) => void
   onEditType: (et: EntityTypeSchema) => void
   onUpdateContainmentEdgeTypes: (newList: string[]) => void
 }) {
@@ -506,12 +672,14 @@ export function HierarchyPanel({
               <div className="rounded-xl border border-glass-border overflow-hidden bg-canvas-elevated/30 p-1">
                 {roots.map((root, i) => (
                   <HierarchyTreeNode
-                    key={root.id}
+                    key={root.pathKey}
                     node={root}
                     allEntityTypes={entityTypes}
                     computedLevelMap={computedLevelMap}
                     isLocked={isLocked}
-                    onReparent={onReparent}
+                    onAddParent={onAddParent}
+                    onRemoveParent={onRemoveParent}
+                    onMakeRoot={onMakeRoot}
                     onEditType={onEditType}
                     depth={0}
                     isLastChild={i === roots.length - 1}
@@ -521,19 +689,18 @@ export function HierarchyPanel({
               </div>
 
               {/* Level legend */}
-              <div className="mt-2 flex items-center gap-3 text-[10px] text-ink-muted">
+              <div className="mt-2 flex items-center gap-3 text-[10px] text-ink-muted flex-wrap">
                 <LucideIcons.Crown className="w-3 h-3 text-amber-500" />
                 <span>Root (L0)</span>
                 <span className="opacity-40">|</span>
+                <span className="bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 px-1.5 py-0.5 rounded">shared</span>
+                <span>= appears under multiple parents</span>
+                <span className="opacity-40">|</span>
+                <LucideIcons.Repeat className="w-3 h-3 text-indigo-500" />
+                <span>= recursive self-containment</span>
+                <span className="opacity-40">|</span>
                 <span className="bg-amber-50 dark:bg-amber-950/30 text-amber-600 px-1.5 py-0.5 rounded">L*</span>
                 <span>= stored level differs from computed tree depth</span>
-                {!isLocked && (
-                  <>
-                    <span className="opacity-40">|</span>
-                    <LucideIcons.GripVertical className="w-3 h-3 text-ink-muted/50" />
-                    <span>Drag to reorder (coming soon)</span>
-                  </>
-                )}
               </div>
             </div>
           )}
@@ -556,8 +723,8 @@ export function HierarchyPanel({
                     entityType={et}
                     allEntityTypes={entityTypes}
                     isLocked={isLocked}
-                    onMakeRoot={() => onReparent(et.id, null)}
-                    onNestUnder={(parentId) => onReparent(et.id, parentId)}
+                    onMakeRoot={() => onMakeRoot(et.id)}
+                    onAddParent={(parentId) => onAddParent(et.id, parentId)}
                     onEdit={() => onEditType(et)}
                   />
                 ))}

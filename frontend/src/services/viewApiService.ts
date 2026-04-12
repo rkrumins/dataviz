@@ -24,6 +24,12 @@ export interface View {
     dataSourceId?: string
     dataSourceName?: string
     viewType: string
+    /**
+     * Top-level projection of `config.layoutType` — lets metadata-only
+     * consumers (ViewWizard scope resolver) decide which schema scope to
+     * fetch WITHOUT parsing the full config blob.
+     */
+    layoutType?: string
     config: Record<string, any>    // Full ViewConfiguration shape
     visibility: 'private' | 'workspace' | 'enterprise'
     createdBy?: string
@@ -34,6 +40,13 @@ export interface View {
     createdAt: string
     updatedAt: string
     deletedAt?: string | null
+    /**
+     * Ontology digest captured when the view was last saved. Used by the
+     * wizard to detect ontology drift: if this differs from the current
+     * workspace ontology digest, the UI surfaces a non-blocking warning.
+     * Nullable for views created before drift tracking landed.
+     */
+    ontologyDigest?: string | null
 }
 
 export interface ViewCreateRequest {
