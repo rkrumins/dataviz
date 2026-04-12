@@ -17,7 +17,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 
 export function ViewPage() {
   const { viewId } = useParams<{ viewId: string }>()
-  const { status, view, error } = useViewNavigation(viewId)
+  const { status, view, layoutType, error } = useViewNavigation(viewId)
   const workspaces = useWorkspacesStore(s => s.workspaces)
 
   // Lightweight health check for the active view
@@ -95,8 +95,11 @@ export function ViewPage() {
         </div>
       )}
 
-      {/* Canvas is mounted once we reach 'ready' status */}
-      {status === 'ready' && <CanvasRouter />}
+      {/* Canvas is mounted once we reach 'ready' status.
+          layoutType is passed directly from the navigation pipeline so the
+          correct canvas renders even when the schema store's activeViewId
+          races with loadFromBackend during cross-workspace transitions. */}
+      {status === 'ready' && <CanvasRouter layoutType={layoutType} />}
 
       {/* Loading overlays for in-progress states */}
       {(status === 'resolving' || status === 'scope-switching' || status === 'loading-schema') && (

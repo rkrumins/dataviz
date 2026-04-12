@@ -414,6 +414,11 @@ class DataSourceResponse(BaseModel):
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
     extra_config: Optional[dict] = Field(None, alias="extraConfig")
+    # Aggregation state
+    aggregation_status: str = Field("none", alias="aggregationStatus")
+    last_aggregated_at: Optional[str] = Field(None, alias="lastAggregatedAt")
+    aggregation_edge_count: int = Field(0, alias="aggregationEdgeCount")
+    aggregation_schedule: Optional[str] = Field(None, alias="aggregationSchedule")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 

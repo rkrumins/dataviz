@@ -12,6 +12,7 @@ import {
 import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
+import { AggregationHistory } from './AggregationHistory'
 
 // ─────────────────────────────────────────────────────────────────────
 // Types
@@ -40,6 +41,7 @@ interface DataSourceCardProps {
     onDelete?: () => void
     onSelect?: () => void
     onExplore?: () => void
+    onReaggregate?: () => void
 }
 
 type DetailTab = 'insights' | 'aggregation' | 'views'
@@ -124,6 +126,7 @@ export function DataSourceCard({
     onDelete,
     onSelect,
     onExplore,
+    onReaggregate,
 }: DataSourceCardProps) {
     const navigate = useNavigate()
     const [expanded, setExpanded] = useState(false)
@@ -383,6 +386,22 @@ export function DataSourceCard({
                                     <span>— This data source is not using the provider default.</span>
                                 </div>
                             )}
+
+                            {onReaggregate && (
+                                <div className="mt-4 pt-4 border-t border-glass-border">
+                                    <button 
+                                        onClick={onReaggregate}
+                                        className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-semibold text-sm hover:bg-indigo-500/20 transition-colors"
+                                    >
+                                        <Settings2 className="w-4 h-4" />
+                                        Re-Trigger Aggregation
+                                    </button>
+                                </div>
+                            )}
+
+                            <div className="mt-6 pt-4 border-t border-glass-border">
+                                <AggregationHistory dataSourceId={ds.id} />
+                            </div>
                         </div>
                     )}
 

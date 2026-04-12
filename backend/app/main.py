@@ -119,6 +119,49 @@ async def lifespan(_app: FastAPI):
     else:
         logger.info("No graph host configured — skipping auto-bootstrap (use admin wizard to set up)")
 
+    # 4. Wire up the aggregation service
+    try:
+        from .services.aggregation import (
+            AggregationService, AggregationWorker,
+            InProcessDispatcher, AggregationScheduler,
+        )
+
+        agg_worker = AggregationWorker(get_async_session, provider_registry)
+        agg_dispatcher = InProcessDispatcher(agg_worker)
+
+        # Get ontology service reference for monolith-mode resolution
+        ontology_svc = None
+        try:
+            from .ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+            from .ontology.service import LocalOntologyService
+            ontology_svc = LocalOntologyService(
+                SQLAlchemyOntologyRepository(None)  # session injected per-call
+            )
+        except Exception:
+            logger.warning("Ontology service not available for aggregation — will use DB fallback")
+
+        agg_service = AggregationService(
+            dispatcher=agg_dispatcher,
+            registry=provider_registry,
+            session_factory=get_async_session,
+            ontology_service=ontology_svc,
+        )
+        agg_scheduler = AggregationScheduler(get_async_session, provider_registry)
+
+        # Register as app state for endpoint access
+        _app.state.aggregation_service = agg_service
+
+        # Recover interrupted jobs from previous crash/restart
+        recovered = await agg_service.recover_interrupted_jobs()
+        if recovered:
+            logger.info("Recovered %d interrupted aggregation jobs", recovered)
+
+        # Start background scheduler
+        asyncio.create_task(agg_scheduler.start())
+        logger.info("Aggregation service started (scheduler active)")
+    except Exception as exc:
+        logger.warning("Aggregation service startup warning: %s", exc)
+
     logger.info("Synodic Visualization Service started")
     yield
 

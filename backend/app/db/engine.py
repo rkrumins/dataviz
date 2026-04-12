@@ -195,6 +195,12 @@ async def init_db() -> None:
             "ALTER TABLE views ADD COLUMN deleted_at TEXT",
             # ViewWizard drift detection: ontology digest captured at save time
             "ALTER TABLE views ADD COLUMN ontology_digest TEXT DEFAULT NULL",
+            # Aggregation service: add status columns to workspace_data_sources
+            "ALTER TABLE workspace_data_sources ADD COLUMN aggregation_status TEXT NOT NULL DEFAULT 'none'",
+            "ALTER TABLE workspace_data_sources ADD COLUMN last_aggregated_at TEXT",
+            "ALTER TABLE workspace_data_sources ADD COLUMN aggregation_edge_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE workspace_data_sources ADD COLUMN graph_fingerprint TEXT",
+            "ALTER TABLE workspace_data_sources ADD COLUMN aggregation_schedule TEXT",
         ]
         for stmt in migrations:
             try:
@@ -203,6 +209,49 @@ async def init_db() -> None:
             except Exception:
                 # Column/table already exists — safe to ignore
                 pass
+
+        # ── Aggregation jobs table (separate block — uses CREATE TABLE IF NOT EXISTS) ──
+        agg_jobs_ddl = """
+        CREATE TABLE IF NOT EXISTS aggregation_jobs (
+            id TEXT PRIMARY KEY,
+            data_source_id TEXT NOT NULL REFERENCES workspace_data_sources(id) ON DELETE CASCADE,
+            ontology_id TEXT,
+            projection_mode TEXT NOT NULL DEFAULT 'in_source',
+            status TEXT NOT NULL DEFAULT 'pending',
+            trigger_source TEXT NOT NULL DEFAULT 'manual',
+            containment_edge_types TEXT,
+            lineage_edge_types TEXT,
+            progress INTEGER NOT NULL DEFAULT 0,
+            total_edges INTEGER NOT NULL DEFAULT 0,
+            processed_edges INTEGER NOT NULL DEFAULT 0,
+            created_edges INTEGER NOT NULL DEFAULT 0,
+            last_cursor TEXT,
+            batch_size INTEGER NOT NULL DEFAULT 1000,
+            last_checkpoint_at TEXT,
+            error_message TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            max_retries INTEGER NOT NULL DEFAULT 3,
+            graph_fingerprint_before TEXT,
+            graph_fingerprint_after TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            updated_at TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+        try:
+            await conn.execute(sa_text(agg_jobs_ddl))
+            logger.info("Migration applied: CREATE TABLE aggregation_jobs")
+        except Exception:
+            pass
+        # Index for concurrent job guard + status polling
+        try:
+            await conn.execute(sa_text(
+                "CREATE INDEX IF NOT EXISTS ix_agg_jobs_ds_status "
+                "ON aggregation_jobs (data_source_id, status)"
+            ))
+        except Exception:
+            pass
 
     # ── 3. Backfill schema_id for existing ontologies ─────────────────
     async with engine.begin() as conn:

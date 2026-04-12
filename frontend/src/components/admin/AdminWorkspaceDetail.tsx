@@ -228,6 +228,24 @@ export function AdminWorkspaceDetail() {
         loadWorkspace()
     }
 
+    const handleReaggregate = async (ds: DataSourceResponse) => {
+        if (!wsId) return
+        try {
+            await fetchWithTimeout(`/api/v1/admin/data-sources/${ds.id}/aggregation-jobs?triggerSource=manual`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    projectionMode: ds.projectionMode || 'in_source',
+                    batchSize: 1000
+                })
+            })
+            // Optionally, we could show a toast or auto-refresh
+            loadWorkspace()
+        } catch (err) {
+            console.error('Failed to trigger aggregation', err)
+        }
+    }
+
     const resetAddDs = () => { setAddDsCatalogId(''); setAddDsLabel(''); setAddDsOntologyId('') }
 
     const handleAddDsComplete = async () => {
@@ -405,6 +423,7 @@ export function AdminWorkspaceDetail() {
                             onEdit={() => setEditingDs(ds)}
                             onDelete={workspace.dataSources.length > 1 ? () => handleDeleteDsClick(ds.id, ds.label || ds.catalogItemId) : undefined}
                             onExplore={() => navigate(`/schema?workspaceId=${workspace.id}&dataSourceId=${ds.id}`)}
+                            onReaggregate={() => handleReaggregate(ds)}
                         />
                     ))}
                 </div>

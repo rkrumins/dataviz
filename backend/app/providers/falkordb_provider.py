@@ -1429,11 +1429,26 @@ class FalkorDBProvider(GraphDataProvider):
         batch_size: int = 1000,
         containment_edge_types: Optional[List[str]] = None,
         lineage_edge_types: Optional[List[str]] = None,
+        last_cursor: Optional[str] = None,
+        progress_callback: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """Batch materialization using ancestor-chain approach.
+        """Batch materialization using ancestor-chain approach with cursor-based pagination.
 
         Instead of Cypher variable-length paths with Cartesian products,
         this uses pre-computed ancestor chains stored in Redis Hashes.
+
+        CURSOR-BASED PAGINATION (CRIT-2):
+        - Uses stable cursor on sorted composite key (s.urn + '|' + t.urn)
+        - Eliminates O(n²) degradation from SKIP at large offsets
+        - Safe under concurrent graph mutations
+        - Resume from last_cursor after crash/restart
+
+        Args:
+            batch_size: Number of edges to process per batch
+            containment_edge_types: Structural edge types (from ontology)
+            lineage_edge_types: Functional edge types (from ontology)
+            last_cursor: Resume point — composite key of last processed edge
+            progress_callback: async fn(processed, total, cursor) for checkpointing
         """
         await self._ensure_connected()
 
@@ -1452,28 +1467,38 @@ class FalkorDBProvider(GraphDataProvider):
         count_res = await self._graph.ro_query(count_cypher, params=type_params)
         total = count_res.result_set[0][0] if count_res.result_set else 0
 
-        logger.info(f"Batch materialization: {total} lineage edges to process")
+        logger.info(f"Batch materialization: {total} lineage edges to process (cursor: {last_cursor or 'start'})")
 
         processed = 0
         errors = 0
         created_count = 0
+        current_cursor = last_cursor
 
-        while processed < total:
-            # Fetch a batch of lineage edges
-            batch_cypher = (
-                f"MATCH (s)-[r]->(t) {type_filter} "
-                f"RETURN s.urn, t.urn, type(r), r.id SKIP $skip LIMIT $limit"
-            )
-            batch_params = {**type_params, "skip": processed, "limit": batch_size}
+        while True:
+            # Cursor-based batch fetch — sorted composite key for stable ordering
+            if current_cursor:
+                batch_cypher = (
+                    f"MATCH (s)-[r]->(t) {type_filter} "
+                    f"AND (s.urn + '|' + t.urn) > $cursor "
+                    f"RETURN s.urn, t.urn, type(r), r.id "
+                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
+                )
+                batch_params = {**type_params, "cursor": current_cursor, "limit": batch_size}
+            else:
+                batch_cypher = (
+                    f"MATCH (s)-[r]->(t) {type_filter} "
+                    f"RETURN s.urn, t.urn, type(r), r.id "
+                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
+                )
+                batch_params = {**type_params, "limit": batch_size}
 
             try:
                 res = await self._graph.ro_query(batch_cypher, params=batch_params)
                 rows = res.result_set or []
             except Exception as e:
-                logger.error(f"Batch fetch error at offset {processed}: {e}")
+                logger.error(f"Batch fetch error at cursor {current_cursor}: {e}")
                 errors += 1
-                processed += batch_size
-                continue
+                break
 
             if not rows:
                 break
@@ -1497,10 +1522,25 @@ class FalkorDBProvider(GraphDataProvider):
                     logger.error(f"Materialization error for {s_urn}->{t_urn}: {e}")
                     errors += 1
 
-            processed += batch_size
-            logger.info(f"Batch materialization: {min(processed, total)}/{total} edges processed")
+            processed += len(rows)
+            # Update cursor to last row's composite key
+            last_row = rows[-1]
+            current_cursor = f"{last_row[0]}|{last_row[1]}"
 
-        stats = {"processed": total, "aggregated_edges_affected": created_count, "errors": errors}
+            logger.info(f"Batch materialization: {processed}/{total} edges processed")
+
+            # Checkpoint via callback (for worker DB persistence)
+            if progress_callback:
+                try:
+                    await progress_callback(processed, total, current_cursor)
+                except Exception as e:
+                    logger.error(f"Progress callback failed: {e}")
+
+            # If we got fewer rows than batch_size, we've reached the end
+            if len(rows) < batch_size:
+                break
+
+        stats = {"processed": processed, "aggregated_edges_affected": created_count, "errors": errors}
         logger.info(f"Batch materialization complete: {stats}")
         return stats
 

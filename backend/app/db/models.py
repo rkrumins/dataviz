@@ -481,6 +481,12 @@ class WorkspaceDataSourceORM(Base):
     dedicated_graph_name = Column(Text, nullable=True)  # graph name when projection_mode == "dedicated"
     access_level = Column(Text, nullable=True, default="read")  # read | write | admin
     extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
+    # ── Aggregation state ─────────────────────────────────────
+    aggregation_status = Column(Text, nullable=False, default="none")  # none|pending|running|ready|failed|skipped
+    last_aggregated_at = Column(Text, nullable=True)  # ISO timestamp of last successful aggregation
+    aggregation_edge_count = Column(Integer, nullable=False, default=0)  # count of AGGREGATED edges created
+    graph_fingerprint = Column(Text, nullable=True)  # JSON hash of node/edge counts by type (change detection)
+    aggregation_schedule = Column(Text, nullable=True)  # Cron expression (e.g., "0 */6 * * *") for periodic checks
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
