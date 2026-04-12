@@ -7,7 +7,7 @@ import { useNavigate } from 'react-router-dom'
 import {
     Database, Layers, GitBranch, ChevronDown, ChevronUp,
     Star, Clock, CircleDot, ArrowRightLeft, BarChart3,
-    Settings2, Eye, Edit2, Trash2, ExternalLink,
+    Settings2, Eye, Edit2, Trash2, ExternalLink, Loader2, AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
@@ -42,6 +42,7 @@ interface DataSourceCardProps {
     onSelect?: () => void
     onExplore?: () => void
     onReaggregate?: () => void
+    onPurge?: () => Promise<void>
 }
 
 type DetailTab = 'insights' | 'aggregation' | 'views'
@@ -127,11 +128,14 @@ export function DataSourceCard({
     onSelect,
     onExplore,
     onReaggregate,
+    onPurge,
 }: DataSourceCardProps) {
     const navigate = useNavigate()
     const [expanded, setExpanded] = useState(false)
     const [activeTab, setActiveTab] = useState<DetailTab>('insights')
     const [localDedicatedName, setLocalDedicatedName] = useState(ds.dedicatedGraphName || '')
+    const [purgeConfirm, setPurgeConfirm] = useState(false)
+    const [purgeLoading, setPurgeLoading] = useState(false)
 
     const effectiveMode = ds.projectionMode || 'in_source'
     const isOverridden = !!ds.projectionMode
@@ -387,15 +391,60 @@ export function DataSourceCard({
                                 </div>
                             )}
 
-                            {onReaggregate && (
-                                <div className="mt-4 pt-4 border-t border-glass-border">
-                                    <button 
-                                        onClick={onReaggregate}
-                                        className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-semibold text-sm hover:bg-indigo-500/20 transition-colors"
-                                    >
-                                        <Settings2 className="w-4 h-4" />
-                                        Re-Trigger Aggregation
-                                    </button>
+                            {(onReaggregate || onPurge) && (
+                                <div className="mt-4 pt-4 border-t border-glass-border space-y-2">
+                                    {onReaggregate && (
+                                        <button
+                                            onClick={onReaggregate}
+                                            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-semibold text-sm hover:bg-indigo-500/20 transition-colors"
+                                        >
+                                            <Settings2 className="w-4 h-4" />
+                                            Re-Trigger Aggregation
+                                        </button>
+                                    )}
+                                    {onPurge && ds.aggregationStatus === 'ready' && (
+                                        !purgeConfirm ? (
+                                            <button
+                                                onClick={() => setPurgeConfirm(true)}
+                                                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium text-ink-muted hover:text-red-500 hover:bg-red-500/5 transition-colors"
+                                            >
+                                                <Trash2 className="w-4 h-4" />
+                                                Purge Aggregated Edges
+                                            </button>
+                                        ) : (
+                                            <div className="p-3 rounded-lg border border-red-500/20 bg-red-500/5 space-y-2.5">
+                                                <div className="flex items-start gap-2">
+                                                    <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+                                                    <p className="text-xs text-red-400 leading-relaxed">
+                                                        This will remove all materialized aggregated edges from the graph and reset aggregation status. This cannot be undone.
+                                                    </p>
+                                                </div>
+                                                <div className="flex justify-end gap-2">
+                                                    <button
+                                                        onClick={() => setPurgeConfirm(false)}
+                                                        disabled={purgeLoading}
+                                                        className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                    <button
+                                                        onClick={async () => {
+                                                            setPurgeLoading(true)
+                                                            try { await onPurge!() } finally {
+                                                                setPurgeLoading(false)
+                                                                setPurgeConfirm(false)
+                                                            }
+                                                        }}
+                                                        disabled={purgeLoading}
+                                                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50 shadow-sm shadow-red-500/25"
+                                                    >
+                                                        {purgeLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                                                        Confirm Purge
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )
+                                    )}
                                 </div>
                             )}
 
