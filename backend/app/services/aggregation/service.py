@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .dispatcher import AggregationDispatcher
@@ -322,6 +322,7 @@ class AggregationService:
         trigger_source: Optional[str] = None,
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
+        search: Optional[str] = None,
         limit: int = 25,
         offset: int = 0,
     ) -> PaginatedJobsResponse:
@@ -362,6 +363,14 @@ class AggregationService:
         if date_to:
             # Append end-of-day so jobs on the selected date are included
             base = base.where(AggregationJobORM.created_at <= date_to + "T23:59:59.999999")
+        if search:
+            pattern = f"%{search}%"
+            base = base.where(or_(
+                AggregationJobORM.id.ilike(pattern),
+                AggregationJobORM.error_message.ilike(pattern),
+                WorkspaceDataSourceORM.label.ilike(pattern),
+                WorkspaceORM.name.ilike(pattern),
+            ))
 
         # Count total matching rows
         count_q = select(func.count()).select_from(base.subquery())
