@@ -24,7 +24,8 @@ import {
   computeAllNodeCounts,
   isFinerThan,
 } from '@/lib/projection-engine'
-import { useSchemaEntityTypes, useContainmentEdgeTypes, isContainmentEdgeType } from '@/store/schema'
+import { isContainmentEdgeType } from '@/store/schema'
+import { useViewEntityTypes, useViewContainmentEdgeTypes } from '@/hooks/useViewSchema'
 
 // ============================================
 // EXPLORATION STORE
@@ -759,8 +760,8 @@ import { useEffect } from 'react'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 
 export function useLineageExploration(): UseLineageExplorationResult {
-  const containmentEdgeTypes = useContainmentEdgeTypes()
-  const schemaEntityTypes = useSchemaEntityTypes()
+  const containmentEdgeTypes = useViewContainmentEdgeTypes()
+  const schemaEntityTypes = useViewEntityTypes()
   const provider = useGraphProvider()
   const {
     config,

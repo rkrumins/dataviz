@@ -322,16 +322,24 @@ export const useSchemaStore = create<SchemaState>()(
             }
 
             // Preserve view state (loaded from Context Model API) across
-            // same-scope ontology refreshes, but blow it away on a scope
-            // switch — otherwise a stale view from workspace W1 lingers
-            // after switching to W2.
+            // same-scope ontology refreshes. On a scope switch, only keep
+            // the currently active view — it was inserted by useViewNavigation
+            // and must survive the scope transition so CanvasRouter can read
+            // its layout type. All other stale views from the old scope are
+            // correctly purged.
             const isSameScope = state.lastLoadedScopeKey === incomingScopeKey
-            const preservedViews = isSameScope ? (prevSchema?.views ?? []) : []
+            const preservedViews = isSameScope
+              ? (prevSchema?.views ?? [])
+              : (prevSchema?.views ?? []).filter(v => v.id === state.activeViewId)
             const defaultViewId = isSameScope
               ? (prevSchema?.defaultViewId ?? (preservedViews[0]?.id ?? ''))
-              : ''
+              : (preservedViews[0]?.id ?? '')
+            // The active view is valid if it exists in the preserved views list,
+            // regardless of whether the scope changed. This is critical for the
+            // ViewExecutionContext architecture where a view is activated before
+            // the view-scoped schema loads — the scope transition from
+            // null → view's scope must NOT null out the activeViewId.
             const activeViewStillValid =
-              isSameScope &&
               !!state.activeViewId &&
               preservedViews.some(v => v.id === state.activeViewId)
 
@@ -475,7 +483,27 @@ export const useSchemaStore = create<SchemaState>()(
       }),
 
       addOrUpdateView: (view) => set((state) => {
-        if (!state.schema) return state;
+        // If schema hasn't been created yet (page refresh, ontology not loaded),
+        // create a minimal shell so the view is stored and available via
+        // getActiveView() immediately. The ontology data (entity types, etc.)
+        // will be merged later by loadFromBackend.
+        if (!state.schema) {
+          return {
+            schema: {
+              id: generateId('workspace'),
+              name: 'Dynamic Workspace',
+              version: '0',
+              entityTypes: [],
+              relationshipTypes: [],
+              views: [view],
+              defaultViewId: view.id,
+              globalVisuals: DEFAULT_GLOBAL_VISUALS,
+              containmentEdgeTypes: [],
+              lineageEdgeTypes: [],
+              rootEntityTypes: [],
+            },
+          }
+        }
         const existingIndex = state.schema.views.findIndex((v) => v.id === view.id);
         if (existingIndex >= 0) {
           const updatedViews = [...state.schema.views];

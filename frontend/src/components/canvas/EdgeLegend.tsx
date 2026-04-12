@@ -14,7 +14,7 @@ import { GitBranch, ChevronDown, ChevronUp, Eye, EyeOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
 import { useEdgeFiltersStore } from '@/hooks/useEdgeFilters'
-import { useContainmentEdgeTypes, useRelationshipTypes } from '@/store/schema'
+import { useViewContainmentEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { getAllEdgeTypeDefinitions, normalizeEdgeType } from '@/utils/edgeTypeUtils'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 
@@ -52,8 +52,8 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
     const [isExpanded, setIsExpanded] = useState(defaultExpanded)
 
     const storeEdges = useCanvasStore((s) => s.edges)
-    const relationshipTypes = useRelationshipTypes()
-    const containmentEdgeTypes = useContainmentEdgeTypes()
+    const relationshipTypes = useViewRelationshipTypes()
+    const containmentEdgeTypes = useViewContainmentEdgeTypes()
 
     const {
         highlightedEdgeIds,

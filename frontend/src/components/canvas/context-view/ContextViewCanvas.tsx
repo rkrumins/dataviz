@@ -19,14 +19,16 @@ import { cn } from '@/lib/utils'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import {
   useSchemaStore,
-  useContainmentEdgeTypes,
-  useLineageEdgeTypes,
-  useIsContainmentEdge,
   normalizeEdgeType,
   useEdgeTypeMetadataMap,
-  useRelationshipTypes,
-  useEntityTypes,
 } from '@/store/schema'
+import {
+  useViewContainmentEdgeTypes,
+  useViewLineageEdgeTypes,
+  useViewIsContainmentEdge,
+  useViewRelationshipTypes,
+  useViewEntityTypes,
+} from '@/hooks/useViewSchema'
 import { useCanvasStore, useCanvasVersion } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -90,9 +92,9 @@ export function ContextViewCanvas({
   const activeView = useSchemaStore((s) => s.getActiveView())
   const updateView = useSchemaStore((s) => s.updateView)
   const provider = useGraphProvider()
-  const containmentEdgeTypes = useContainmentEdgeTypes()
-  const lineageEdgeTypes = useLineageEdgeTypes()
-  const isContainmentEdge = useIsContainmentEdge()
+  const containmentEdgeTypes = useViewContainmentEdgeTypes()
+  const lineageEdgeTypes = useViewLineageEdgeTypes()
+  const isContainmentEdge = useViewIsContainmentEdge()
   const edgeTypeMetadata = useEdgeTypeMetadataMap()
 
   // URN resolver for trace
@@ -321,11 +323,11 @@ export function ContextViewCanvas({
   // Edit Mode State (unified with LineageCanvas)
   const [isPaletteOpen, setPaletteOpen] = useState(false)
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
-  const relationshipTypes = useRelationshipTypes()
+  const relationshipTypes = useViewRelationshipTypes()
 
   // Granularity options for the lineage aggregation selector — driven by the
   // active ontology's entity types, sorted coarsest-first (lowest level first).
-  const schemaEntityTypes = useEntityTypes()
+  const schemaEntityTypes = useViewEntityTypes()
   const granularityOptions = useMemo(
     () => schemaEntityTypes
       .filter(et => et.hierarchy?.level !== undefined)
