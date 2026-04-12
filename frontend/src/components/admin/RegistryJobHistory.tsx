@@ -6,6 +6,7 @@
  *   popover + click-outside + free-text search + check marks.
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { useSearchParams } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
@@ -15,6 +16,7 @@ import {
     Search, Database, Users, Zap, Calendar, Check, Settings,
     TrendingUp, Timer, AlertTriangle,
 } from 'lucide-react'
+import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
 import {
     aggregationService,
@@ -98,6 +100,7 @@ function filtersToParams(f: JobHistoryFilters): URLSearchParams {
     if (f.triggerSource) p.set('triggerSource', f.triggerSource)
     if (f.dateFrom) p.set('dateFrom', f.dateFrom)
     if (f.dateTo) p.set('dateTo', f.dateTo)
+    if (f.search) p.set('search', f.search)
     if (f.offset && f.offset > 0) p.set('offset', String(f.offset))
     return p
 }
@@ -113,9 +116,105 @@ function paramsToFilters(p: URLSearchParams): JobHistoryFilters {
         triggerSource: p.get('triggerSource') ?? undefined,
         dateFrom: p.get('dateFrom') ?? undefined,
         dateTo: p.get('dateTo') ?? undefined,
+        search: p.get('search') ?? undefined,
         offset: p.has('offset') ? Number(p.get('offset')) : 0,
         limit: PAGE_SIZE,
     }
+}
+
+// ── Tooltip ──────────────────────────────────────────────────────────
+
+function Tip({ children, label }: { children: React.ReactNode; label: string }) {
+    return (
+        <TooltipPrimitive.Provider delayDuration={300}>
+            <TooltipPrimitive.Root>
+                <TooltipPrimitive.Trigger asChild>{children}</TooltipPrimitive.Trigger>
+                <TooltipPrimitive.Portal>
+                    <TooltipPrimitive.Content
+                        side="top"
+                        sideOffset={6}
+                        className="z-50 px-2.5 py-1.5 rounded-lg bg-ink text-canvas text-[11px] font-medium shadow-lg animate-in fade-in zoom-in-95 duration-150"
+                    >
+                        {label}
+                        <TooltipPrimitive.Arrow className="fill-ink" />
+                    </TooltipPrimitive.Content>
+                </TooltipPrimitive.Portal>
+            </TooltipPrimitive.Root>
+        </TooltipPrimitive.Provider>
+    )
+}
+
+// ── Confirm Dialog ───────────────────────────────────────────────────
+
+function ConfirmDialog({
+    open,
+    title,
+    message,
+    confirmLabel,
+    confirmColor = 'bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/25',
+    confirmIcon: ConfirmIcon,
+    onConfirm,
+    onCancel,
+    loading,
+}: {
+    open: boolean
+    title: string
+    message: string
+    confirmLabel: string
+    confirmColor?: string
+    confirmIcon: typeof Play
+    onConfirm: () => void
+    onCancel: () => void
+    loading?: boolean
+}) {
+    if (!open) return null
+    return createPortal(
+        <AnimatePresence>
+            <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+                onClick={() => !loading && onCancel()}
+                role="dialog"
+                aria-modal="true"
+            >
+                <motion.div
+                    initial={{ scale: 0.96, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    exit={{ scale: 0.96, opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                    onClick={e => e.stopPropagation()}
+                    className="w-full max-w-md rounded-2xl bg-canvas-elevated border border-glass-border shadow-xl overflow-hidden"
+                >
+                    <div className="h-1 bg-gradient-to-r from-red-500 to-red-400" />
+                    <div className="p-6">
+                        <h3 className="text-lg font-bold text-ink mb-2">{title}</h3>
+                        <p className="text-sm text-ink-muted leading-relaxed">{message}</p>
+                    </div>
+                    <div className="flex justify-end gap-3 px-6 pb-6">
+                        <button
+                            onClick={onCancel}
+                            disabled={loading}
+                            className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={onConfirm}
+                            disabled={loading}
+                            className={cn('px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors disabled:opacity-50 flex items-center gap-2', confirmColor)}
+                        >
+                            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ConfirmIcon className="w-4 h-4" />}
+                            {confirmLabel}
+                        </button>
+                    </div>
+                </motion.div>
+            </motion.div>
+        </AnimatePresence>,
+        document.body,
+    )
 }
 
 // ── Date Range Picker ────────────────────────────────────────────────
@@ -400,8 +499,11 @@ export function RegistryJobHistory() {
     const [expandedRowId, setExpandedRowId] = useState<string | null>(null)
     const [actionLoading, setActionLoading] = useState<string | null>(null)
     const [purgeConfirm, setPurgeConfirm] = useState<string | null>(null)
+    const [confirmAction, setConfirmAction] = useState<{ job: AggregationJobResponse; type: 'delete' | 'retrigger' } | null>(null)
+    const [searchInput, setSearchInput] = useState(filters.search ?? '')
     const [, setTick] = useState(0) // for refreshing relative timestamps
     const { showToast } = useToast()
+    const searchTimerRef = useRef<ReturnType<typeof setTimeout>>()
 
     // Sync filters -> URL (preserve the 'tab' param from AdminRegistry)
     const setFilters = useCallback((updater: JobHistoryFilters | ((prev: JobHistoryFilters) => JobHistoryFilters)) => {
@@ -426,6 +528,15 @@ export function RegistryJobHistory() {
         const interval = setInterval(() => setTick(t => t + 1), 30_000)
         return () => clearInterval(interval)
     }, [])
+
+    // Debounced search — 400ms after typing stops
+    const handleSearchInput = (value: string) => {
+        setSearchInput(value)
+        clearTimeout(searchTimerRef.current)
+        searchTimerRef.current = setTimeout(() => {
+            updateFilter({ search: value || undefined })
+        }, 400)
+    }
 
     // Derived dropdown options
     const workspaceOptions = useMemo<DropdownOption[]>(() =>
@@ -477,7 +588,10 @@ export function RegistryJobHistory() {
         updateFilter({ status: next.length > 0 ? next : undefined })
     }
 
-    const clearFilters = () => setFilters({ limit: PAGE_SIZE, offset: 0 })
+    const clearFilters = () => {
+        setFilters({ limit: PAGE_SIZE, offset: 0 })
+        setSearchInput('')
+    }
 
     // Active filter chips for display
     const activeChips = useMemo(() => {
@@ -501,6 +615,7 @@ export function RegistryJobHistory() {
         }
         if (filters.dateFrom) chips.push({ key: 'dateFrom', label: `From ${filters.dateFrom}` })
         if (filters.dateTo) chips.push({ key: 'dateTo', label: `To ${filters.dateTo}` })
+        if (filters.search) chips.push({ key: 'search', label: `"${filters.search}"` })
         return chips
     }, [filters, workspaces, dataSourceOptions])
 
@@ -512,6 +627,7 @@ export function RegistryJobHistory() {
         else if (key.startsWith('status-')) toggleStatusFilter(key.replace('status-', ''))
         else if (key === 'dateFrom') updateFilter({ dateFrom: undefined })
         else if (key === 'dateTo') updateFilter({ dateTo: undefined })
+        else if (key === 'search') { updateFilter({ search: undefined }); setSearchInput('') }
     }
 
     // Job actions — all with toast feedback
@@ -536,13 +652,24 @@ export function RegistryJobHistory() {
         withAction(job.id, () => aggregationService.resumeJob(job.dataSourceId, job.id), 'Job resumed from checkpoint')
 
     const handleRetrigger = (job: AggregationJobResponse) =>
-        withAction(job.id, () => aggregationService.triggerAggregation(job.dataSourceId, {
-            projectionMode: job.projectionMode ?? 'in_source',
-            batchSize: 1000,
-        }, 'manual'), 'Aggregation triggered')
+        setConfirmAction({ job, type: 'retrigger' })
 
     const handleDelete = (job: AggregationJobResponse) =>
-        withAction(job.id, () => aggregationService.deleteJob(job.id), 'Job removed from history')
+        setConfirmAction({ job, type: 'delete' })
+
+    const executeConfirmedAction = () => {
+        if (!confirmAction) return
+        const { job, type } = confirmAction
+        setConfirmAction(null)
+        if (type === 'delete') {
+            withAction(job.id, () => aggregationService.deleteJob(job.id), 'Job removed from history')
+        } else {
+            withAction(job.id, () => aggregationService.triggerAggregation(job.dataSourceId, {
+                projectionMode: job.projectionMode ?? 'in_source',
+                batchSize: 1000,
+            }, 'manual'), 'Aggregation triggered')
+        }
+    }
 
     const handlePurge = async (job: AggregationJobResponse) => {
         setPurgeConfirm(null)
@@ -652,6 +779,23 @@ export function RegistryJobHistory() {
                     </button>
                 </motion.div>
             )}
+
+            {/* Search Box */}
+            <div className="relative">
+                <Search className="w-4 h-4 text-ink-muted absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                    type="text"
+                    placeholder="Search by job ID, data source, workspace, or error message..."
+                    value={searchInput}
+                    onChange={e => handleSearchInput(e.target.value)}
+                    className="w-full pl-9 pr-10 py-2.5 rounded-xl bg-canvas-elevated border border-glass-border focus:ring-2 focus:ring-indigo-500/50 outline-none text-sm text-ink placeholder:text-ink-muted"
+                />
+                {searchInput && (
+                    <button onClick={() => { setSearchInput(''); updateFilter({ search: undefined }) }} className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink">
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                )}
+            </div>
 
             {/* ── Filter bar: single row of popover dropdowns ── */}
             <div className="space-y-2">
@@ -860,6 +1004,23 @@ export function RegistryJobHistory() {
                     )}
                 </div>
             )}
+
+            {/* Confirm Dialog for Delete / Re-trigger */}
+            <ConfirmDialog
+                open={!!confirmAction}
+                title={confirmAction?.type === 'delete' ? 'Delete job from history' : 'Re-trigger aggregation'}
+                message={
+                    confirmAction?.type === 'delete'
+                        ? `Remove job ${confirmAction?.job.id ?? ''} from history? This only deletes the record — aggregated edges in the graph are not affected.`
+                        : `Start a new aggregation job for ${confirmAction?.job.dataSourceLabel || confirmAction?.job.dataSourceId || 'this data source'}? This will re-process all edges.`
+                }
+                confirmLabel={confirmAction?.type === 'delete' ? 'Delete' : 'Re-trigger'}
+                confirmColor={confirmAction?.type === 'delete' ? 'bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/25' : 'bg-indigo-500 hover:bg-indigo-600 shadow-lg shadow-indigo-500/25'}
+                confirmIcon={confirmAction?.type === 'delete' ? Trash2 : Play}
+                onConfirm={executeConfirmedAction}
+                onCancel={() => setConfirmAction(null)}
+                loading={!!actionLoading}
+            />
         </div>
     )
 }
@@ -966,21 +1127,37 @@ function JobRow({ job, expanded, onToggle, onCancel, onResume, onRetrigger, onDe
                 </td>
 
                 <td className="px-4 py-2.5 text-right">
-                    <div className="flex items-center justify-end gap-1" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-end gap-0.5" onClick={e => e.stopPropagation()}>
                         {canCancel && (
-                            <ActionBtn icon={StopCircle} label="Cancel" color="text-red-400 hover:bg-red-500/10"
-                                loading={actionLoading} onClick={() => onCancel(job)} />
+                            <Tip label="Cancel job">
+                                <button onClick={() => onCancel(job)} disabled={actionLoading}
+                                    className="p-1.5 rounded-lg text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40">
+                                    {actionLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <StopCircle className="w-3.5 h-3.5" />}
+                                </button>
+                            </Tip>
                         )}
                         {canResume && (
-                            <ActionBtn icon={RotateCcw} label="Resume" color="text-indigo-400 hover:bg-indigo-500/10"
-                                loading={actionLoading} onClick={() => onResume(job)} />
+                            <Tip label="Resume from checkpoint">
+                                <button onClick={() => onResume(job)} disabled={actionLoading}
+                                    className="p-1.5 rounded-lg text-indigo-400 hover:bg-indigo-500/10 transition-colors disabled:opacity-40">
+                                    {actionLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                                </button>
+                            </Tip>
                         )}
                         {isTerminal && (
                             <>
-                                <ActionBtn icon={Play} label="Re-trigger" color="text-emerald-400 hover:bg-emerald-500/10"
-                                    loading={actionLoading} onClick={() => onRetrigger(job)} />
-                                <ActionBtn icon={Trash2} label="Delete" color="text-ink-muted hover:text-red-400 hover:bg-red-500/10"
-                                    loading={actionLoading} onClick={() => onDelete(job)} />
+                                <Tip label="Re-trigger aggregation">
+                                    <button onClick={() => onRetrigger(job)} disabled={actionLoading}
+                                        className="p-1.5 rounded-lg text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-40">
+                                        {actionLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                                    </button>
+                                </Tip>
+                                <Tip label="Delete from history">
+                                    <button onClick={() => onDelete(job)} disabled={actionLoading}
+                                        className="p-1.5 rounded-lg text-ink-muted hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40">
+                                        {actionLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                                    </button>
+                                </Tip>
                             </>
                         )}
                     </div>
@@ -1056,21 +1233,6 @@ function JobRow({ job, expanded, onToggle, onCancel, onResume, onRetrigger, onDe
 }
 
 // ── Shared sub-components ────────────────────────────────────────────
-
-function ActionBtn({ icon: Icon, label, color, loading, onClick }: {
-    icon: typeof Play; label: string; color: string; loading: boolean; onClick: () => void
-}) {
-    return (
-        <button
-            onClick={onClick}
-            disabled={loading}
-            className={cn('flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium transition-colors disabled:opacity-40', color)}
-        >
-            {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Icon className="w-3 h-3" />}
-            {label}
-        </button>
-    )
-}
 
 function DetailField({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
     return (

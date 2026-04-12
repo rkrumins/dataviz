@@ -57,6 +57,7 @@ export interface JobHistoryFilters {
   triggerSource?: string;
   dateFrom?: string;
   dateTo?: string;
+  search?: string;
   limit?: number;
   offset?: number;
 }
@@ -182,6 +183,7 @@ class AggregationService {
     if (filters.triggerSource) params.set('triggerSource', filters.triggerSource);
     if (filters.dateFrom) params.set('dateFrom', filters.dateFrom);
     if (filters.dateTo) params.set('dateTo', filters.dateTo);
+    if (filters.search) params.set('search', filters.search);
     if (filters.limit) params.set('limit', String(filters.limit));
     if (filters.offset !== undefined) params.set('offset', String(filters.offset));
     const qs = params.toString();
