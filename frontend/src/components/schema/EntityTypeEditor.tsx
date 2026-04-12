@@ -592,8 +592,11 @@ function HierarchyTab({ form, availableEntityTypes, updateForm }: {
     updateForm('hierarchy', { ...form.hierarchy, [key]: value })
   }
 
-  const childCandidates = availableEntityTypes.filter(t => t.id !== form.id)
-  const parentCandidates = availableEntityTypes.filter(t => t.id !== form.id)
+  // DAG-aware: a type may appear in its own can_contain / can_be_contained_by
+  // lists to express recursive nesting (e.g. Domain contains Domain). The
+  // backend treats this as a first-class case; surface it here as well.
+  const childCandidates = availableEntityTypes
+  const parentCandidates = availableEntityTypes
 
   function toggleChild(typeId: string) {
     const current = form.hierarchy.canContain
@@ -626,13 +629,14 @@ function HierarchyTab({ form, availableEntityTypes, updateForm }: {
         {isRoot ? 'Root type — top of hierarchy' : 'Nested — has parent type(s)'}
       </div>
 
-      <Section title="Can Contain" description="Child types this entity can parent in the hierarchy">
+      <Section title="Can Contain" description="Child types this entity can parent. Select this type itself to allow recursive nesting.">
         {childCandidates.length === 0 ? (
-          <p className="text-xs text-ink-muted/60 italic">No other entity types defined</p>
+          <p className="text-xs text-ink-muted/60 italic">No entity types defined</p>
         ) : (
           <div className="flex flex-wrap gap-1.5">
             {childCandidates.map(t => {
               const selected = form.hierarchy.canContain.includes(t.id)
+              const isSelf = t.id === form.id
               return (
                 <button
                   key={t.id}
@@ -646,7 +650,9 @@ function HierarchyTab({ form, availableEntityTypes, updateForm }: {
                   )}
                 >
                   {selected && <LucideIcons.Check className="w-2.5 h-2.5 inline mr-1" />}
+                  {isSelf && <LucideIcons.Repeat className="w-2.5 h-2.5 inline mr-1 opacity-80" />}
                   {t.name}
+                  {isSelf && <span className="ml-1 opacity-70">(self)</span>}
                 </button>
               )
             })}
@@ -654,13 +660,14 @@ function HierarchyTab({ form, availableEntityTypes, updateForm }: {
         )}
       </Section>
 
-      <Section title="Can Be Contained By" description="Parent types. Leave empty for a root type.">
+      <Section title="Can Be Contained By" description="Parent types. Leave empty for a root type. Include this type itself for recursive nesting.">
         {parentCandidates.length === 0 ? (
-          <p className="text-xs text-ink-muted/60 italic">No other entity types defined</p>
+          <p className="text-xs text-ink-muted/60 italic">No entity types defined</p>
         ) : (
           <div className="flex flex-wrap gap-1.5">
             {parentCandidates.map(t => {
               const selected = form.hierarchy.canBeContainedBy.includes(t.id)
+              const isSelf = t.id === form.id
               return (
                 <button
                   key={t.id}
@@ -674,7 +681,9 @@ function HierarchyTab({ form, availableEntityTypes, updateForm }: {
                   )}
                 >
                   {selected && <LucideIcons.Check className="w-2.5 h-2.5 inline mr-1" />}
+                  {isSelf && <LucideIcons.Repeat className="w-2.5 h-2.5 inline mr-1 opacity-80" />}
                   {t.name}
+                  {isSelf && <span className="ml-1 opacity-70">(self)</span>}
                 </button>
               )
             })}

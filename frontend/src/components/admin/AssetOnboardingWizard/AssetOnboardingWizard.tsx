@@ -20,6 +20,7 @@ import { WorkspaceStep } from './steps/WorkspaceStep'
 import { AggregationStep } from './steps/AggregationStep'
 import { SemanticStep } from './steps/SemanticStep'
 import { ReviewStep } from './steps/ReviewStep'
+import { aggregationService } from '@/services/aggregationService'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -248,6 +249,36 @@ export function AssetOnboardingWizard({
                             await workspaceService.setProjectionMode(wsId, ds.id, 'dedicated')
                         }
                     }
+                }
+            }
+
+            // Step 4: Trigger Aggregation for all created Data Sources
+            // This is non-blocking (fire and forget) — the backend returns 202 Accepted.
+            // The user will see progress on the Explorer view.
+            for (const [key, group] of groups) {
+                const wsId = key.startsWith('new:') ? 
+                    (Object.keys(wsNameMap).find(id => wsNameMap[id] === group.alloc.newWorkspaceName) || '') : 
+                    group.alloc.workspaceId
+                
+                if (!wsId) continue
+                
+                // We need the data sources for this workspace to trigger aggregation
+                try {
+                    const ws = await workspaceService.get(wsId)
+                    for (let i = 0; i < group.items.length; i++) {
+                        const catalogId = group.items[i].id
+                        const ds = ws.dataSources.find(d => d.catalogItemId === catalogId)
+                        if (ds) {
+                            await aggregationService.triggerAggregation(ds.id, {
+                                projectionMode: formData.projectionMode,
+                                batchSize: 1000,
+                            }, 'onboarding')
+                        }
+                    }
+                } catch (aggErr) {
+                    console.error('Failed to trigger aggregation:', aggErr)
+                    // We don't fail the whole onboarding if aggregation trigger fails
+                    // The user can re-trigger it from the UI later
                 }
             }
 

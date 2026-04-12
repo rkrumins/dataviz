@@ -16,9 +16,10 @@ from ..models.graph import (
     EntityTypeSummary, EdgeTypeSummary, TagSummary,
     OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy,
     AggregatedEdgeResult, AggregatedEdgeInfo,
-    ChildrenWithEdgesResult,
+    ChildrenWithEdgesResult, TopLevelNodesResult,
 )
 from .base import GraphDataProvider
+from backend.common.interfaces.provider import ProviderConfigurationError
 
 logger = logging.getLogger(__name__)
 
@@ -246,11 +247,19 @@ class FalkorDBProvider(GraphDataProvider):
 
         Resolution chain (first match wins):
         1. Ontology-resolved types injected by ContextEngine (may be empty = no hierarchy)
-        2. CONTAINMENT_EDGE_TYPES env var
-        3. Hardcoded fallback {CONTAINS, BELONGS_TO} — only used before ontology resolves
+        2. CONTAINMENT_EDGE_TYPES env var (explicit operator opt-in)
+        3. Raise ProviderConfigurationError — there is no safe hardcoded fallback
+           in a multi-tenant, custom-ontology system.
+
+        Enterprise tenants may use arbitrary edge type naming (e.g. "HAS_TABLE",
+        "PART_OF", "OWNS"). Silently defaulting to {CONTAINS, BELONGS_TO} produced
+        the "no results" bug in /nodes/top-level because such tenants legitimately
+        have neither type, yet the provider classified everything as "has a parent".
+        The right failure mode is loud and actionable at the API boundary.
         """
         # Prefer ontology-resolved types if they have been explicitly set
-        # (even if the set is empty — empty is a valid resolved state)
+        # (even if the set is empty — empty is a valid resolved state that
+        # indicates a flat graph with no containment hierarchy)
         if getattr(self, "_resolved_containment_types_set", False):
             return self._resolved_containment_types
         if not hasattr(self, "_containment_cache"):
@@ -258,7 +267,12 @@ class FalkorDBProvider(GraphDataProvider):
             if config:
                 self._containment_cache = {t.strip().upper() for t in config.split(",") if t.strip()}
             else:
-                self._containment_cache = {"CONTAINS", "BELONGS_TO"}
+                raise ProviderConfigurationError(
+                    "Containment edge types are not configured for this provider. "
+                    "ContextEngine must call set_containment_edge_types() from a "
+                    "resolved ontology, or the CONTAINMENT_EDGE_TYPES env var must "
+                    "be set. No hardcoded fallback is safe in a multi-tenant system."
+                )
         return self._containment_cache
 
     def _extract_node_from_result(self, row) -> Optional[GraphNode]:
@@ -339,16 +353,22 @@ class FalkorDBProvider(GraphDataProvider):
         params: Dict[str, Any] = {}
         conditions = []
 
-        # Match by entity type (label). Use case-insensitive matching so ontology types
-        # like "Glossary" match graph labels like "glossary" or "GLOSSARY".
-        if query.entity_types:
-            clauses = ["MATCH (n)"]
+        # Label-indexed matching: use per-label MATCH with UNION for O(1) index lookup
+        # instead of MATCH (n) WHERE toLower(labels(n)[0]) IN $types which scans all nodes.
+        use_label_union = bool(query.entity_types) and not query.urns
+        if use_label_union:
             types = [str(t) for t in query.entity_types]
-            types_lower = [t.lower() for t in types]
-            params["entityTypesLower"] = types_lower
-            conditions.append("toLower(labels(n)[0]) IN $entityTypesLower")
+            # Build per-label conditions (shared across all UNION branches)
+            shared_conditions = []
         else:
-            clauses = ["MATCH (n)"]
+            shared_conditions = None  # not used
+
+        if not use_label_union:
+            if query.entity_types:
+                # Fallback for combined entity_types + urns queries
+                types_lower = [t.lower() for t in [str(t) for t in query.entity_types]]
+                params["entityTypesLower"] = types_lower
+                conditions.append("toLower(labels(n)[0]) IN $entityTypesLower")
 
         if query.urns:
             if len(query.urns) == 1:
@@ -361,37 +381,76 @@ class FalkorDBProvider(GraphDataProvider):
         if query.tags:
             # Tags stored as JSON array string - match quoted tag in JSON
             params["tagVal"] = json.dumps(query.tags[0])
-            conditions.append("(n.tags IS NOT NULL AND n.tags CONTAINS $tagVal)")
+            tag_cond = "(n.tags IS NOT NULL AND n.tags CONTAINS $tagVal)"
+            conditions.append(tag_cond)
+            if shared_conditions is not None:
+                shared_conditions.append(tag_cond)
 
         if query.search_query:
             params["search"] = query.search_query.lower()
-            conditions.append("(toLower(toString(n.displayName)) CONTAINS $search OR toLower(toString(n.urn)) CONTAINS $search)")
-
-        if conditions:
-            clauses.append("WHERE " + " AND ".join(conditions))
+            search_cond = "(toLower(toString(n.displayName)) CONTAINS $search OR toLower(toString(n.urn)) CONTAINS $search)"
+            conditions.append(search_cond)
+            if shared_conditions is not None:
+                shared_conditions.append(search_cond)
 
         offset = int(query.offset or 0)
         limit = query.limit or 100
         params["skip"] = offset
         params["limit"] = limit
-        
+
         # Child count: only compute when needed (skip for bulk lineage fetches)
         include_child_count = query.include_child_count
 
-        if include_child_count:
-            containment = list(self._get_containment_edge_types())
-            containment_rel_types = "|".join([_sanitize_label(t) for t in containment])
-            clauses.append("WITH n SKIP $skip LIMIT $limit")
-            if containment_rel_types:
-                clauses.append(f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)")
-                clauses.append("RETURN n, count(child) as childCount")
+        if use_label_union:
+            # Build UNION query with per-label MATCH clauses (uses FalkorDB label indices)
+            where_suffix = (" WHERE " + " AND ".join(shared_conditions)) if shared_conditions else ""
+            union_branches = []
+            for t in types:
+                safe_label = _sanitize_label(t)
+                union_branches.append(f"MATCH (n:{safe_label}){where_suffix} RETURN n")
+            # Wrap in subquery pattern: UNION all branches, then paginate + child count
+            inner = " UNION ".join(union_branches)
+            if include_child_count:
+                containment = list(self._get_containment_edge_types())
+                containment_rel_types = "|".join([_sanitize_label(t) for t in containment])
+                if containment_rel_types:
+                    cypher = (
+                        f"CALL {{ {inner} }} "
+                        f"WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit "
+                        f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child) "
+                        f"RETURN n, count(child) as childCount"
+                    )
+                else:
+                    cypher = (
+                        f"CALL {{ {inner} }} "
+                        f"WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit "
+                        f"RETURN n, 0 as childCount"
+                    )
             else:
-                # No containment types defined — childCount is always 0
-                clauses.append("RETURN n, 0 as childCount")
+                cypher = (
+                    f"CALL {{ {inner} }} "
+                    f"WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit "
+                    f"RETURN n"
+                )
         else:
-            clauses.append("RETURN n SKIP $skip LIMIT $limit")
+            # Original non-UNION path (URN lookups, no entity_types, etc.)
+            clauses = ["MATCH (n)"]
+            if conditions:
+                clauses.append("WHERE " + " AND ".join(conditions))
 
-        cypher = " ".join(clauses)
+            if include_child_count:
+                containment = list(self._get_containment_edge_types())
+                containment_rel_types = "|".join([_sanitize_label(t) for t in containment])
+                clauses.append("WITH n SKIP $skip LIMIT $limit")
+                if containment_rel_types:
+                    clauses.append(f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)")
+                    clauses.append("RETURN n, count(child) as childCount")
+                else:
+                    clauses.append("RETURN n, 0 as childCount")
+            else:
+                clauses.append("RETURN n SKIP $skip LIMIT $limit")
+
+            cypher = " ".join(clauses)
 
         try:
             result = await self._graph.ro_query(cypher, params=params)
@@ -540,6 +599,7 @@ class FalkorDBProvider(GraphDataProvider):
         offset: int = 0,
         limit: int = 100,
         sort_property: Optional[str] = "displayName",
+        cursor: Optional[str] = None,
     ) -> List[GraphNode]:
         await self._ensure_connected()
         # None = caller didn't specify, use ontology/fallback; [] = explicitly no containment
@@ -550,11 +610,21 @@ class FalkorDBProvider(GraphDataProvider):
             return []
 
         search_where = ""
-        params: Dict[str, Any] = {"parent": parent_urn, "skip": offset, "lim": limit, "relTypes": rel_list}
+        params: Dict[str, Any] = {"parent": parent_urn, "lim": limit, "relTypes": rel_list}
 
         if search_query:
             search_where = "AND (toLower(c.displayName) CONTAINS toLower($searchQuery) OR toLower(c.urn) CONTAINS toLower($searchQuery)) "
             params["searchQuery"] = search_query
+
+        # Cursor-based pagination: use WHERE c.displayName > $cursor instead of SKIP
+        # This is O(log N) with FalkorDB indices vs O(N) for SKIP-based pagination.
+        cursor_where = ""
+        if cursor:
+            cursor_where = "AND c.displayName > $cursor "
+            params["cursor"] = cursor
+        else:
+            # Fallback to offset when no cursor (first page or legacy callers)
+            params["skip"] = offset
 
         # Build ORDER BY suffix for the WITH clause
         order_suffix = ""
@@ -562,20 +632,23 @@ class FalkorDBProvider(GraphDataProvider):
             safe_prop = _sanitize_label(sort_property)
             order_suffix = f" ORDER BY c.{safe_prop}"
 
+        # Use SKIP only when no cursor is provided (first page)
+        skip_clause = "" if cursor else " SKIP $skip"
+
         if len(rel_list) == 1:
             rel = _sanitize_label(rel_list[0])
             cypher = (
                 f"MATCH (p)-[r:{rel}]->(c) "
-                f"WHERE p.urn = $parent {search_where}"
-                f"WITH c{order_suffix} SKIP $skip LIMIT $lim "
+                f"WHERE p.urn = $parent {search_where}{cursor_where}"
+                f"WITH c{order_suffix}{skip_clause} LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
                 f"RETURN c, count(gc) as childCount"
             )
         else:
             cypher = (
                 f"MATCH (p)-[r]->(c) "
-                f"WHERE p.urn = $parent AND type(r) IN $relTypes {search_where}"
-                f"WITH c{order_suffix} SKIP $skip LIMIT $lim "
+                f"WHERE p.urn = $parent AND type(r) IN $relTypes {search_where}{cursor_where}"
+                f"WITH c{order_suffix}{skip_clause} LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
                 f"RETURN c, count(gc) as childCount"
             )
@@ -606,8 +679,13 @@ class FalkorDBProvider(GraphDataProvider):
         limit: int = 100,
         include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName",
+        cursor: Optional[str] = None,
     ) -> ChildrenWithEdgesResult:
-        """Optimized single-roundtrip: children + containment edges + cross-child lineage edges."""
+        """Optimized single-roundtrip: children + containment edges + cross-child lineage edges.
+
+        Supports cursor-based pagination for O(log N) performance at any page depth.
+        When `cursor` is provided, it takes precedence over `offset`.
+        """
         await self._ensure_connected()
 
         # --- Step 1: Fetch children with containment edges (returns edge r) ---
@@ -621,11 +699,19 @@ class FalkorDBProvider(GraphDataProvider):
             )
 
         search_where = ""
-        params: Dict[str, Any] = {"parent": parent_urn, "skip": offset, "lim": limit, "relTypes": rel_list}
+        params: Dict[str, Any] = {"parent": parent_urn, "lim": limit, "relTypes": rel_list}
 
         if search_query:
             search_where = "AND (toLower(c.displayName) CONTAINS toLower($searchQuery) OR toLower(c.urn) CONTAINS toLower($searchQuery)) "
             params["searchQuery"] = search_query
+
+        # Cursor-based pagination: WHERE c.displayName > $cursor is O(log N) vs SKIP's O(N)
+        cursor_where = ""
+        if cursor:
+            cursor_where = "AND c.displayName > $cursor "
+            params["cursor"] = cursor
+        else:
+            params["skip"] = offset
 
         # Build ORDER BY suffix for the WITH clause
         order_suffix = ""
@@ -633,21 +719,23 @@ class FalkorDBProvider(GraphDataProvider):
             safe_prop = _sanitize_label(sort_property)
             order_suffix = f" ORDER BY c.{safe_prop}"
 
+        skip_clause = "" if cursor else " SKIP $skip"
+
         # Query returns child node, containment edge properties, and grandchild count
         if len(rel_list) == 1:
             rel = _sanitize_label(rel_list[0])
             cypher = (
                 f"MATCH (p)-[r:{rel}]->(c) "
-                f"WHERE p.urn = $parent {search_where}"
-                f"WITH p, r, c{order_suffix} SKIP $skip LIMIT $lim "
+                f"WHERE p.urn = $parent {search_where}{cursor_where}"
+                f"WITH p, r, c{order_suffix}{skip_clause} LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
                 f"RETURN c, count(gc) as childCount, p.urn as parentUrn, type(r) as relType, properties(r) as rprops"
             )
         else:
             cypher = (
                 f"MATCH (p)-[r]->(c) "
-                f"WHERE p.urn = $parent AND type(r) IN $relTypes {search_where}"
-                f"WITH p, r, c{order_suffix} SKIP $skip LIMIT $lim "
+                f"WHERE p.urn = $parent AND type(r) IN $relTypes {search_where}{cursor_where}"
+                f"WITH p, r, c{order_suffix}{skip_clause} LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
                 f"RETURN c, count(gc) as childCount, p.urn as parentUrn, type(r) as relType, properties(r) as rprops"
             )
@@ -676,32 +764,35 @@ class FalkorDBProvider(GraphDataProvider):
                 # Build containment edge from the matched relationship
                 containment_edges.append(_edge_from_row(parent_u, n.urn, rel_type, rprops))
 
-        # --- Step 2: Fetch cross-child lineage edges (optional) ---
+        # --- Step 2: Fetch cross-child lineage edges (scoped to current page only) ---
+        # Only use the current page's child URNs + parent, NOT cumulative URNs.
+        # This keeps the query O(pageSize²) instead of O(totalLoaded²).
         lineage_edges_list: List[GraphEdge] = []
         if include_lineage_edges and len(child_urns) >= 2:
-            all_urns = [parent_urn] + child_urns
+            page_urns = [parent_urn] + child_urns
             exclude_types = list(target_edge_types) + ["AGGREGATED"]
 
+            lineage_params: Dict[str, Any] = {"pageUrns": page_urns}
             if lineage_edge_types:
                 lineage_where = "AND type(lr) IN $lineageTypes"
-                params["lineageTypes"] = lineage_edge_types
+                lineage_params["lineageTypes"] = lineage_edge_types
             else:
                 lineage_where = "AND NOT type(lr) IN $excludeTypes"
-                params["excludeTypes"] = exclude_types
+                lineage_params["excludeTypes"] = exclude_types
 
-            params["allUrns"] = all_urns
             lineage_cypher = (
                 f"MATCH (a)-[lr]->(b) "
-                f"WHERE a.urn IN $allUrns AND b.urn IN $allUrns {lineage_where} "
+                f"WHERE a.urn IN $pageUrns AND b.urn IN $pageUrns {lineage_where} "
                 f"RETURN a.urn, b.urn, type(lr), properties(lr)"
             )
 
-            lr_result = await self._graph.ro_query(lineage_cypher, params=params)
+            lr_result = await self._graph.ro_query(lineage_cypher, params=lineage_params)
             for row in (lr_result.result_set or []):
                 lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}))
 
         has_more = len(children) >= limit
         total = offset + len(children) + (1 if has_more else 0)
+        next_cursor = children[-1].display_name if children and has_more else None
 
         return ChildrenWithEdgesResult(
             children=children,
@@ -709,6 +800,7 @@ class FalkorDBProvider(GraphDataProvider):
             lineageEdges=lineage_edges_list,
             totalChildren=total,
             hasMore=has_more,
+            nextCursor=next_cursor,
         )
 
     async def get_parent(self, child_urn: str) -> Optional[GraphNode]:
@@ -725,6 +817,169 @@ class FalkorDBProvider(GraphDataProvider):
         if result.result_set and len(result.result_set) > 0:
             return self._extract_node_from_result(result.result_set[0])
         return None
+
+    async def get_top_level_or_orphan_nodes(
+        self,
+        *,
+        root_entity_types: Optional[List[str]] = None,
+        entity_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+        include_child_count: bool = True,
+    ) -> TopLevelNodesResult:
+        """Return structurally top-level nodes (no incoming containment edge).
+
+        Mixes ontology root-type instances and orphan non-root instances so the
+        wizard can show both in one list, with a root/orphan split in the
+        badge text. Classification is done in Python on the returned rows.
+
+        Pagination is cursor-based on displayName for stability under writes:
+        callers pass cursor=None for the first page and the returned
+        next_cursor for subsequent pages.
+        """
+        await self._ensure_connected()
+
+        # Raises ProviderConfigurationError if no types resolvable — surfaced
+        # as HTTP 400 by the endpoint. An empty set is a valid state meaning
+        # "flat graph, every node is top-level".
+        containment = self._get_containment_edge_types()
+        containment_rel_types = "|".join([_sanitize_label(t) for t in sorted(containment)])
+        root_types_set = {str(t) for t in (root_entity_types or [])}
+
+        params: Dict[str, Any] = {"limit": int(limit)}
+
+        # ── Build optional filters ────────────────────────────────────────
+        # Each filter produces a WHERE fragment applied uniformly to both the
+        # page query and the count query.
+        filter_fragments: List[str] = []
+
+        if search_query:
+            params["search"] = search_query.lower()
+            filter_fragments.append(
+                "(toLower(toString(n.displayName)) CONTAINS $search "
+                "OR toLower(toString(n.urn)) CONTAINS $search)"
+            )
+
+        # Structural top-level predicate — the whole point of this method.
+        # Empty containment set = flat graph, skip the predicate entirely.
+        #
+        # IMPORTANT: Use openCypher 1.0 pattern negation `NOT ()-[:T]->(n)`
+        # NOT `NOT EXISTS { MATCH ... }` which is Neo4j 4.x+ / ISO GQL syntax
+        # and is NOT supported by FalkorDB. The subquery form silently throws,
+        # gets caught below, and returns empty — which was the original bug.
+        if containment_rel_types:
+            filter_fragments.append(
+                "NOT ()-[:" + containment_rel_types + "]->(n)"
+            )
+
+        # ── Build MATCH clause: label UNION if entity_types specified ─────
+        use_label_union = bool(entity_types)
+        safe_types: List[str] = []
+        if use_label_union:
+            safe_types = [_sanitize_label(str(t)) for t in entity_types if str(t)]
+            if not safe_types:
+                use_label_union = False
+
+        # Page-query cursor: keyset over displayName for stability under writes.
+        page_filters = list(filter_fragments)
+        if cursor is not None:
+            params["cursor"] = str(cursor)
+            page_filters.append("toString(n.displayName) > $cursor")
+
+        def _build_match(filters: List[str]) -> str:
+            where_clause = (" WHERE " + " AND ".join(filters)) if filters else ""
+            if use_label_union:
+                branches = [
+                    f"MATCH (n:{label}){where_clause} RETURN n"
+                    for label in safe_types
+                ]
+                return "CALL { " + " UNION ".join(branches) + " }"
+            return f"MATCH (n){where_clause}"
+
+        # ── Page query ────────────────────────────────────────────────────
+        if include_child_count and containment_rel_types:
+            page_cypher = (
+                _build_match(page_filters)
+                + " WITH n ORDER BY toString(n.displayName) ASC LIMIT $limit"
+                + f" OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)"
+                + " RETURN n, count(child) as childCount"
+            )
+        else:
+            page_cypher = (
+                _build_match(page_filters)
+                + " WITH n ORDER BY toString(n.displayName) ASC LIMIT $limit"
+                + " RETURN n, 0 as childCount"
+            )
+
+        try:
+            page_result = await self._graph.ro_query(page_cypher, params=params)
+        except Exception as e:
+            logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
+            page_result = None
+
+        nodes: List[GraphNode] = []
+        root_type_count = 0
+        orphan_count = 0
+        if page_result and page_result.result_set:
+            for row in page_result.result_set:
+                node = self._extract_node_from_result(row[0] if isinstance(row, (list, tuple)) else row)
+                if not node:
+                    continue
+                try:
+                    child_count = int(row[1]) if isinstance(row, (list, tuple)) and len(row) > 1 else None
+                except (TypeError, ValueError):
+                    child_count = None
+                if child_count is not None:
+                    node.child_count = child_count
+                    if node.properties is not None:
+                        node.properties["childCount"] = child_count
+                # Classify: root-type instance vs orphan of non-root type
+                if root_types_set and str(node.entity_type) in root_types_set:
+                    root_type_count += 1
+                else:
+                    orphan_count += 1
+                nodes.append(node)
+
+        has_more = len(nodes) >= int(limit)
+        next_cursor = nodes[-1].display_name if (has_more and nodes) else None
+
+        # ── Total count query (no cursor filter) ──────────────────────────
+        # We run this separately so the page result reflects the cursor, but
+        # the total accurately shows how many top-level entities exist.
+        count_params: Dict[str, Any] = {}
+        if "search" in params:
+            count_params["search"] = params["search"]
+
+        if use_label_union:
+            where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
+            count_branches = [
+                f"MATCH (n:{label}){where_clause} RETURN n"
+                for label in safe_types
+            ]
+            count_cypher = "CALL { " + " UNION ".join(count_branches) + " } RETURN count(n) as total"
+        else:
+            where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
+            count_cypher = f"MATCH (n){where_clause} RETURN count(n) as total"
+
+        total_count = 0
+        try:
+            count_result = await self._graph.ro_query(count_cypher, params=count_params)
+            if count_result and count_result.result_set:
+                first = count_result.result_set[0]
+                total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
+        except Exception as e:
+            logger.warning(f"get_top_level_or_orphan_nodes count query failed: {e}")
+            total_count = len(nodes)
+
+        return TopLevelNodesResult(
+            nodes=nodes,
+            totalCount=total_count,
+            hasMore=has_more,
+            nextCursor=next_cursor,
+            rootTypeCount=root_type_count,
+            orphanCount=orphan_count,
+        )
 
     async def _traverse_lineage(
         self,
@@ -1174,11 +1429,26 @@ class FalkorDBProvider(GraphDataProvider):
         batch_size: int = 1000,
         containment_edge_types: Optional[List[str]] = None,
         lineage_edge_types: Optional[List[str]] = None,
+        last_cursor: Optional[str] = None,
+        progress_callback: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """Batch materialization using ancestor-chain approach.
+        """Batch materialization using ancestor-chain approach with cursor-based pagination.
 
         Instead of Cypher variable-length paths with Cartesian products,
         this uses pre-computed ancestor chains stored in Redis Hashes.
+
+        CURSOR-BASED PAGINATION (CRIT-2):
+        - Uses stable cursor on sorted composite key (s.urn + '|' + t.urn)
+        - Eliminates O(n²) degradation from SKIP at large offsets
+        - Safe under concurrent graph mutations
+        - Resume from last_cursor after crash/restart
+
+        Args:
+            batch_size: Number of edges to process per batch
+            containment_edge_types: Structural edge types (from ontology)
+            lineage_edge_types: Functional edge types (from ontology)
+            last_cursor: Resume point — composite key of last processed edge
+            progress_callback: async fn(processed, total, cursor) for checkpointing
         """
         await self._ensure_connected()
 
@@ -1197,28 +1467,38 @@ class FalkorDBProvider(GraphDataProvider):
         count_res = await self._graph.ro_query(count_cypher, params=type_params)
         total = count_res.result_set[0][0] if count_res.result_set else 0
 
-        logger.info(f"Batch materialization: {total} lineage edges to process")
+        logger.info(f"Batch materialization: {total} lineage edges to process (cursor: {last_cursor or 'start'})")
 
         processed = 0
         errors = 0
         created_count = 0
+        current_cursor = last_cursor
 
-        while processed < total:
-            # Fetch a batch of lineage edges
-            batch_cypher = (
-                f"MATCH (s)-[r]->(t) {type_filter} "
-                f"RETURN s.urn, t.urn, type(r), r.id SKIP $skip LIMIT $limit"
-            )
-            batch_params = {**type_params, "skip": processed, "limit": batch_size}
+        while True:
+            # Cursor-based batch fetch — sorted composite key for stable ordering
+            if current_cursor:
+                batch_cypher = (
+                    f"MATCH (s)-[r]->(t) {type_filter} "
+                    f"AND (s.urn + '|' + t.urn) > $cursor "
+                    f"RETURN s.urn, t.urn, type(r), r.id "
+                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
+                )
+                batch_params = {**type_params, "cursor": current_cursor, "limit": batch_size}
+            else:
+                batch_cypher = (
+                    f"MATCH (s)-[r]->(t) {type_filter} "
+                    f"RETURN s.urn, t.urn, type(r), r.id "
+                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
+                )
+                batch_params = {**type_params, "limit": batch_size}
 
             try:
                 res = await self._graph.ro_query(batch_cypher, params=batch_params)
                 rows = res.result_set or []
             except Exception as e:
-                logger.error(f"Batch fetch error at offset {processed}: {e}")
+                logger.error(f"Batch fetch error at cursor {current_cursor}: {e}")
                 errors += 1
-                processed += batch_size
-                continue
+                break
 
             if not rows:
                 break
@@ -1242,10 +1522,25 @@ class FalkorDBProvider(GraphDataProvider):
                     logger.error(f"Materialization error for {s_urn}->{t_urn}: {e}")
                     errors += 1
 
-            processed += batch_size
-            logger.info(f"Batch materialization: {min(processed, total)}/{total} edges processed")
+            processed += len(rows)
+            # Update cursor to last row's composite key
+            last_row = rows[-1]
+            current_cursor = f"{last_row[0]}|{last_row[1]}"
 
-        stats = {"processed": total, "aggregated_edges_affected": created_count, "errors": errors}
+            logger.info(f"Batch materialization: {processed}/{total} edges processed")
+
+            # Checkpoint via callback (for worker DB persistence)
+            if progress_callback:
+                try:
+                    await progress_callback(processed, total, current_cursor)
+                except Exception as e:
+                    logger.error(f"Progress callback failed: {e}")
+
+            # If we got fewer rows than batch_size, we've reached the end
+            if len(rows) < batch_size:
+                break
+
+        stats = {"processed": processed, "aggregated_edges_affected": created_count, "errors": errors}
         logger.info(f"Batch materialization complete: {stats}")
         return stats
 

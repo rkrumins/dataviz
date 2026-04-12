@@ -94,6 +94,13 @@ def _to_response(
     favourite_count: int = 0,
     is_favourited: bool = False,
 ) -> ViewResponse:
+    config_dict = json.loads(row.config or "{}")
+    # Project layoutType from config so metadata-only consumers (e.g. the
+    # ViewWizard scope resolver) don't have to parse the full config blob.
+    layout_type = None
+    if isinstance(config_dict, dict):
+        raw_layout = config_dict.get("layoutType")
+        layout_type = str(raw_layout) if raw_layout is not None else None
     return ViewResponse(
         id=row.id,
         name=row.name,
@@ -105,7 +112,8 @@ def _to_response(
         dataSourceId=row.data_source_id,
         dataSourceName=data_source_name,
         viewType=row.view_type or "graph",
-        config=json.loads(row.config or "{}"),
+        layoutType=layout_type,
+        config=config_dict,
         visibility=row.visibility or "private",
         createdBy=row.created_by,
         tags=json.loads(row.tags) if row.tags else None,
@@ -115,6 +123,7 @@ def _to_response(
         createdAt=row.created_at,
         updatedAt=row.updated_at,
         deletedAt=getattr(row, 'deleted_at', None),
+        ontologyDigest=getattr(row, 'ontology_digest', None),
     )
 
 
@@ -146,10 +155,21 @@ async def _to_enriched_response(
 async def create_view(
     session: AsyncSession,
     req: ViewCreateRequest,
+    *,
+    ontology_digest: Optional[str] = None,
 ) -> ViewResponse:
+    """Persist a new view.
+
+    ``ontology_digest`` should be supplied by the endpoint layer, computed
+    from the currently-resolved ontology for the view's workspace/data
+    source. It is stored verbatim and used later by the wizard's drift
+    detection. Pass None only when the caller has no way to resolve the
+    ontology (e.g. ad-hoc tests, legacy seed scripts).
+    """
     logger.info(
-        "create_view: name=%s workspace_id=%s data_source_id=%s",
+        "create_view: name=%s workspace_id=%s data_source_id=%s digest=%s",
         req.name, req.workspace_id, req.data_source_id,
+        ontology_digest[:12] + "…" if ontology_digest else None,
     )
     row = ViewORM(
         name=req.name,
@@ -162,6 +182,7 @@ async def create_view(
         visibility=req.visibility or "private",
         tags=json.dumps(req.tags) if req.tags else None,
         is_pinned=req.is_pinned,
+        ontology_digest=ontology_digest,
     )
     session.add(row)
     await session.flush()
@@ -196,7 +217,17 @@ async def update_view(
     session: AsyncSession,
     view_id: str,
     req: ViewUpdateRequest,
+    *,
+    ontology_digest: Optional[str] = None,
 ) -> Optional[ViewResponse]:
+    """Update an existing view.
+
+    ``ontology_digest`` — when the endpoint layer can resolve the active
+    ontology, it passes the fresh digest here so the saved view reflects
+    the CURRENT ontology state (not the one it was originally created
+    against). This resets the drift-detection baseline on every explicit
+    save; passing None preserves the existing digest unchanged.
+    """
     result = await session.execute(
         select(ViewORM).where(ViewORM.id == view_id)
     )
@@ -220,6 +251,8 @@ async def update_view(
         row.tags = json.dumps(req.tags)
     if req.is_pinned is not None:
         row.is_pinned = req.is_pinned
+    if ontology_digest is not None:
+        row.ontology_digest = ontology_digest
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()

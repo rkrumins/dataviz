@@ -8,8 +8,24 @@ from typing import List, Optional, Dict, Any
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
     LineageResult, GraphSchemaStats, OntologyMetadata,
-    ChildrenWithEdgesResult,
+    ChildrenWithEdgesResult, TopLevelNodesResult,
 )
+
+
+class ProviderConfigurationError(RuntimeError):
+    """Raised when a provider is asked to perform an operation that requires
+    ontology-driven configuration (e.g. containment edge types) but no such
+    configuration has been injected.
+
+    Producers of this error: provider internals (e.g. FalkorDBProvider) when
+    the ContextEngine has not yet called set_containment_edge_types() and no
+    explicit env-var override is present.
+
+    Consumers: API endpoints should translate this to HTTP 400 with a clear
+    message about ontology configuration — never silently fall back to
+    hardcoded defaults.
+    """
+    pass
 
 
 class GraphDataProvider(ABC):
@@ -63,6 +79,7 @@ class GraphDataProvider(ABC):
         offset: int = 0,
         limit: int = 100,
         sort_property: Optional[str] = "displayName",
+        cursor: Optional[str] = None,
     ) -> List[GraphNode]:
         pass
 
@@ -76,6 +93,7 @@ class GraphDataProvider(ABC):
         limit: int = 100,
         include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName",
+        cursor: Optional[str] = None,
     ) -> ChildrenWithEdgesResult:
         """Get children with containment and optionally lineage edges in one round-trip.
 
@@ -86,7 +104,7 @@ class GraphDataProvider(ABC):
         children = await self.get_children(
             parent_urn, edge_types=edge_types,
             search_query=search_query, offset=offset, limit=limit,
-            sort_property=sort_property,
+            sort_property=sort_property, cursor=cursor,
         )
         child_urns = [c.urn for c in children]
         all_urns = [parent_urn] + child_urns
@@ -111,17 +129,57 @@ class GraphDataProvider(ABC):
         has_more = len(children) >= limit
         total = offset + len(children) + (1 if has_more else 0)
 
+        next_cursor = children[-1].display_name if children and has_more else None
         return ChildrenWithEdgesResult(
             children=children,
             containmentEdges=containment_edges,
             lineageEdges=lineage_edges,
             totalChildren=total,
             hasMore=has_more,
+            nextCursor=next_cursor,
         )
 
     @abstractmethod
     async def get_parent(self, child_urn: str) -> Optional[GraphNode]:
         pass
+
+    async def get_top_level_or_orphan_nodes(
+        self,
+        *,
+        root_entity_types: Optional[List[str]] = None,
+        entity_types: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+        include_child_count: bool = True,
+    ) -> TopLevelNodesResult:
+        """Return instances that have no incoming containment edge.
+
+        Definition: a node n is "top-level or orphan" iff there is no edge
+        (n' -[:CONTAINMENT_TYPE]-> n) for any configured containment type.
+        This is a purely structural predicate — it does NOT depend on the
+        node's entity type. The result therefore mixes:
+          - Instances of ontology root types (Domain, Platform, …)
+          - Orphan instances of non-root types (a Table with no Schema parent,
+            e.g. from a broken import)
+
+        The UI distinguishes them via the root_type_count / orphan_count
+        fields on TopLevelNodesResult.
+
+        Pagination: cursor-based on display_name for stability under writes.
+        Callers pass cursor=None for the first page and cursor=result.next_cursor
+        for subsequent pages.
+
+        Containment edge types are resolved from the ontology injected into
+        the provider by ContextEngine. Providers MUST raise
+        ProviderConfigurationError when no containment edge types are
+        resolvable — do NOT silently default to hardcoded type names, as this
+        breaks enterprise ontologies that use custom edge naming.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement get_top_level_or_orphan_nodes. "
+            "Override this method to support the /nodes/top-level endpoint."
+        )
 
     # ==========================================
     # Lineage Traversal
