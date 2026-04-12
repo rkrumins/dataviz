@@ -39,7 +39,7 @@ import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
 
 import { useEntityBrowser } from '@/hooks/useEntityBrowser'
-import { DataLoadingToasts } from '@/components/ui/DataLoadingBanner'
+import { useLoadingToast } from '@/components/ui/toast'
 
 
 // ============================================
@@ -359,6 +359,8 @@ export function WizardAssignmentTree({
         entityTypeDefinitions,
         enabled: !isSchemaLoading,
     })
+    useLoadingToast('wizard-entities', browser.isLoading, 'Loading entities')
+    useLoadingToast('wizard-schema', isSchemaLoading, 'Loading schema')
 
     // Load top-level entities from API when schema is ready.
     useEffect(() => {
@@ -1066,11 +1068,6 @@ export function WizardAssignmentTree({
                 </p>
             </div>
 
-            {/* Floating loading toasts */}
-            <DataLoadingToasts items={[
-                { key: 'entities', isLoading: browser.isLoading && flattenedNodes.length > 0, label: 'Loading entities' },
-                { key: 'schema', isLoading: isSchemaLoading, label: 'Loading schema' },
-            ]} />
         </div>
     )
 }

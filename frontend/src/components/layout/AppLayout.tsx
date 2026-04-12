@@ -24,6 +24,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { useRouteSync } from '@/hooks/useRouteSync'
 import { useBackendRecovery } from '@/hooks/useBackendRecovery'
 import { ViewEditorContext, useViewEditorModal } from './viewEditorContext'
+import { ToastContainer } from '@/components/ui/toast'
 
 export { useViewEditorModal }
 
@@ -158,6 +159,8 @@ export function AppLayout() {
           initialWorkspaceId={initialScope.workspaceId}
           initialDataSourceId={initialScope.dataSourceId}
         />
+
+        <ToastContainer />
 
         {/* Session expired overlay — re-auth without losing page state */}
         {sessionExpired && (

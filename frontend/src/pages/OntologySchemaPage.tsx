@@ -34,12 +34,12 @@ import {
   relSchemaToBackend,
   humanizeId,
 } from '@/features/ontology/lib/ontology-parsers'
-import type { OntologyTab, EditorPanel, RelTypeWithClassifications, Toast, ToastType } from '@/features/ontology/lib/ontology-types'
+import type { OntologyTab, EditorPanel, RelTypeWithClassifications } from '@/features/ontology/lib/ontology-types'
 
 import { OntologyContextBanner } from '@/features/ontology/components/OntologyContextBanner'
 import { OntologyDetailHeader } from '@/features/ontology/components/OntologyDetailHeader'
 import { OntologySidebar } from '@/features/ontology/components/OntologySidebar'
-import { ToastNotification } from '@/features/ontology/components/ToastNotification'
+import { useToast } from '@/components/ui/toast'
 import { CreateOntologyDialog } from '@/features/ontology/components/dialogs/CreateOntologyDialog'
 import { EditDetailsDialog } from '@/features/ontology/components/dialogs/EditDetailsDialog'
 import { SchemaPanel } from '@/features/ontology/components/panels/SchemaPanel'
@@ -186,7 +186,7 @@ export function OntologySchemaPage() {
 
   // ── Local state ────────────────────────────────────────────────────
   const [editorPanel, setEditorPanel] = useState<EditorPanel>(null)
-  const [toast, setToast] = useState<Toast | null>(null)
+  const { showToast } = useToast()
   const [search, setSearch] = useState('')
   const [isSaving, setIsSaving] = useState(false)
   const [isSuggesting, setIsSuggesting] = useState(false)
@@ -200,7 +200,6 @@ export function OntologySchemaPage() {
     isValid: boolean
     issues: Array<{ severity: string; message: string }>
   } | null>(null)
-  const toastIdRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [importData, setImportData] = useState<Record<string, unknown> | null>(null)
   const [showSuggestDialog, setShowSuggestDialog] = useState(false)
@@ -312,10 +311,6 @@ export function OntologySchemaPage() {
     }
     return m
   }, [workspaces])
-
-  const showToast = useCallback((type: ToastType, message: string, action?: { label: string; onClick: () => void }) => {
-    setToast({ type, message, id: ++toastIdRef.current, action })
-  }, [])
 
   // ── Edit mode helpers ─────────────────────────────────────────────
   /** Lazily create working copies on first edit attempt. Returns false if immutable. */
@@ -1446,10 +1441,6 @@ export function OntologySchemaPage() {
         onChange={handleImportFile}
       />
 
-      {/* Toast */}
-      <AnimatePresence>
-        {toast && <ToastNotification key={toast.id} toast={toast} onDismiss={() => setToast(null)} />}
-      </AnimatePresence>
     </div>
   )
 }
