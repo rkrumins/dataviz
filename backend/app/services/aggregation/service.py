@@ -9,10 +9,10 @@ This class has NO FastAPI imports. No HTTP concepts. Pure domain logic.
 """
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .dispatcher import AggregationDispatcher
@@ -23,6 +23,7 @@ from .schemas import (
     AggregationTriggerRequest,
     DataSourceReadinessResponse,
     DriftCheckResponse,
+    PaginatedJobsResponse,
 )
 from .fingerprint import compute_graph_fingerprint, fingerprints_match
 
@@ -257,6 +258,200 @@ class AggregationService:
         result = await session.execute(query)
         return [self._to_response(j) for j in result.scalars()]
 
+    # ── Global summary (KPI stats) ─────────────────────────────────
+
+    async def get_jobs_summary(self, session: AsyncSession) -> dict:
+        """Return aggregate KPI stats across all aggregation jobs."""
+        # Count by status
+        status_q = (
+            select(
+                AggregationJobORM.status,
+                func.count(AggregationJobORM.id),
+            )
+            .group_by(AggregationJobORM.status)
+        )
+        status_rows = (await session.execute(status_q)).all()
+        by_status = {row[0]: row[1] for row in status_rows}
+        total = sum(by_status.values())
+
+        completed = by_status.get("completed", 0)
+        failed = by_status.get("failed", 0)
+        denominator = completed + failed
+        success_rate = round(completed / denominator * 100, 1) if denominator > 0 else None
+
+        # Average duration for completed jobs (from started_at to completed_at)
+        dur_q = (
+            select(
+                AggregationJobORM.started_at,
+                AggregationJobORM.completed_at,
+            )
+            .where(AggregationJobORM.status == "completed")
+            .where(AggregationJobORM.started_at.isnot(None))
+            .where(AggregationJobORM.completed_at.isnot(None))
+            .order_by(AggregationJobORM.created_at.desc())
+            .limit(50)  # last 50 completed jobs
+        )
+        dur_rows = (await session.execute(dur_q)).all()
+        durations = []
+        for started_at, completed_at in dur_rows:
+            try:
+                s = datetime.fromisoformat(started_at)
+                e = datetime.fromisoformat(completed_at)
+                durations.append((e - s).total_seconds())
+            except Exception:
+                pass
+        avg_duration = round(sum(durations) / len(durations), 1) if durations else None
+
+        return {
+            "total": total,
+            "byStatus": by_status,
+            "successRate": success_rate,
+            "avgDurationSeconds": avg_duration,
+        }
+
+    # ── Global listing (cross-workspace) ─────────────────────────────
+
+    async def list_jobs_global(
+        self,
+        session: AsyncSession,
+        *,
+        status: Optional[List[str]] = None,
+        workspace_id: Optional[str] = None,
+        data_source_ids: Optional[List[str]] = None,
+        projection_mode: Optional[str] = None,
+        trigger_source: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> PaginatedJobsResponse:
+        """List aggregation jobs across all data sources and workspaces."""
+        from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
+
+        # Base query: join through data source to workspace
+        base = (
+            select(
+                AggregationJobORM,
+                WorkspaceDataSourceORM.label.label("ds_label"),
+                WorkspaceDataSourceORM.workspace_id.label("ws_id"),
+                WorkspaceORM.name.label("ws_name"),
+            )
+            .join(
+                WorkspaceDataSourceORM,
+                AggregationJobORM.data_source_id == WorkspaceDataSourceORM.id,
+            )
+            .join(
+                WorkspaceORM,
+                WorkspaceDataSourceORM.workspace_id == WorkspaceORM.id,
+            )
+        )
+
+        # Apply filters conditionally
+        if status:
+            base = base.where(AggregationJobORM.status.in_(status))
+        if workspace_id:
+            base = base.where(WorkspaceDataSourceORM.workspace_id == workspace_id)
+        if data_source_ids:
+            base = base.where(AggregationJobORM.data_source_id.in_(data_source_ids))
+        if projection_mode:
+            base = base.where(AggregationJobORM.projection_mode == projection_mode)
+        if trigger_source:
+            base = base.where(AggregationJobORM.trigger_source == trigger_source)
+        if date_from:
+            base = base.where(AggregationJobORM.created_at >= date_from)
+        if date_to:
+            # Append end-of-day so jobs on the selected date are included
+            base = base.where(AggregationJobORM.created_at <= date_to + "T23:59:59.999999")
+
+        # Count total matching rows
+        count_q = select(func.count()).select_from(base.subquery())
+        total = (await session.execute(count_q)).scalar() or 0
+
+        # Fetch paginated results
+        rows_q = (
+            base
+            .order_by(AggregationJobORM.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await session.execute(rows_q)
+        rows = result.all()
+
+        items = [
+            self._to_global_response(job, ws_id, ws_name, ds_label)
+            for job, ds_label, ws_id, ws_name in rows
+        ]
+
+        return PaginatedJobsResponse(items=items, total=total, limit=limit, offset=offset)
+
+    @staticmethod
+    def _to_global_response(
+        job: AggregationJobORM,
+        workspace_id: str,
+        workspace_name: str,
+        data_source_label: Optional[str],
+    ) -> AggregationJobResponse:
+        """Convert ORM to enriched response for the global listing."""
+        # Compute duration
+        duration = None
+        if job.started_at:
+            try:
+                started = datetime.fromisoformat(job.started_at)
+                if job.completed_at:
+                    ended = datetime.fromisoformat(job.completed_at)
+                else:
+                    ended = datetime.now(timezone.utc)
+                duration = round((ended - started).total_seconds(), 1)
+            except Exception:
+                pass
+
+        # Compute coverage
+        coverage = None
+        if job.total_edges and job.total_edges > 0:
+            coverage = round(job.processed_edges / job.total_edges * 100, 1)
+
+        # Estimate completion (same logic as _to_response)
+        estimated = None
+        if job.status == "running" and job.processed_edges > 0 and job.total_edges > 0:
+            if job.started_at:
+                try:
+                    started = datetime.fromisoformat(job.started_at)
+                    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+                    rate = job.processed_edges / elapsed if elapsed > 0 else 0
+                    remaining = job.total_edges - job.processed_edges
+                    if rate > 0:
+                        eta = datetime.now(timezone.utc) + timedelta(seconds=remaining / rate)
+                        estimated = eta.isoformat()
+                except Exception:
+                    pass
+
+        return AggregationJobResponse(
+            id=job.id,
+            data_source_id=job.data_source_id,
+            status=job.status,
+            trigger_source=job.trigger_source,
+            progress=job.progress,
+            total_edges=job.total_edges,
+            processed_edges=job.processed_edges,
+            created_edges=job.created_edges,
+            batch_size=job.batch_size,
+            last_checkpoint_at=job.last_checkpoint_at,
+            resumable=job.status == "failed" and job.retry_count < job.max_retries,
+            retry_count=job.retry_count,
+            error_message=job.error_message,
+            estimated_completion_at=estimated,
+            started_at=job.started_at,
+            completed_at=job.completed_at,
+            updated_at=job.updated_at,
+            created_at=job.created_at,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            data_source_label=data_source_label,
+            projection_mode=job.projection_mode,
+            duration_seconds=duration,
+            edge_coverage_pct=coverage,
+        )
+
     # ── Resume ────────────────────────────────────────────────────────
 
     async def resume(
@@ -303,9 +498,66 @@ class AggregationService:
         job.updated_at = _now()
         await session.commit()
 
+        # Also cancel the asyncio task as backup (double defence)
+        if hasattr(self._dispatcher, "cancel_task"):
+            self._dispatcher.cancel_task(job_id)
+
         logger.info("Aggregation job %s cancelled", job_id)
 
         return self._to_response(job)
+
+    # ── Delete job record ───────────────────────────────────────────
+
+    async def delete_job(self, job_id: str, session: AsyncSession) -> None:
+        """Delete a terminal aggregation job record from history."""
+        job = await session.get(AggregationJobORM, job_id)
+        if not job:
+            raise NotFoundError(f"Aggregation job {job_id} not found")
+
+        if job.status in ("pending", "running"):
+            raise ValueError(
+                f"Cannot delete job {job_id} while it is {job.status}. Cancel it first."
+            )
+
+        await session.delete(job)
+        await session.commit()
+        logger.info("Aggregation job %s deleted from history", job_id)
+
+    # ── Purge ─────────────────────────────────────────────────────────
+
+    async def purge(self, ds_id: str, session: AsyncSession) -> dict:
+        """Remove all materialized AGGREGATED edges for a data source."""
+        from backend.app.db.models import WorkspaceDataSourceORM
+
+        ds = await session.get(WorkspaceDataSourceORM, ds_id)
+        if not ds:
+            raise NotFoundError(f"Data source {ds_id} not found")
+
+        # Guard: cannot purge while a job is running
+        active = (
+            await session.execute(
+                select(AggregationJobORM)
+                .where(AggregationJobORM.data_source_id == ds_id)
+                .where(AggregationJobORM.status.in_(["pending", "running"]))
+            )
+        ).scalars().first()
+        if active:
+            raise ConflictError(
+                f"Cannot purge while aggregation job {active.id} is active"
+            )
+
+        provider = await self._registry.get_provider_for_data_source(ds_id)
+        deleted = await provider.purge_aggregated_edges()
+
+        # Reset data source aggregation state
+        ds.aggregation_status = "none"
+        ds.last_aggregated_at = None
+        ds.aggregation_edge_count = 0
+        ds.graph_fingerprint = None
+        await session.commit()
+
+        logger.info("Purged %d aggregated edges from data source %s", deleted, ds_id)
+        return {"deletedEdges": deleted, "dataSourceId": ds_id}
 
     # ── Schedule ──────────────────────────────────────────────────────
 
@@ -475,7 +727,7 @@ class AggregationService:
                     remaining = job.total_edges - job.processed_edges
                     if rate > 0:
                         eta_seconds = remaining / rate
-                        eta = datetime.now(timezone.utc) + __import__("datetime").timedelta(seconds=eta_seconds)
+                        eta = datetime.now(timezone.utc) + timedelta(seconds=eta_seconds)
                         estimated = eta.isoformat()
                 except Exception:
                     pass
@@ -499,6 +751,10 @@ class AggregationService:
             completed_at=job.completed_at,
             updated_at=job.updated_at,
             created_at=job.created_at,
+            edge_coverage_pct=(
+                round(job.processed_edges / job.total_edges * 100, 1)
+                if job.total_edges and job.total_edges > 0 else None
+            ),
         )
 
 

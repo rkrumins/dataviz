@@ -5,7 +5,7 @@ This is the ONLY monolith file that imports FROM the aggregation package.
 It translates HTTP request/response to domain service calls.
 """
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +17,7 @@ from backend.app.services.aggregation import (
     AggregationSkipRequest,
     AggregationScheduleRequest,
     AggregationJobResponse,
+    PaginatedJobsResponse,
     DataSourceReadinessResponse,
     DriftCheckResponse,
 )
@@ -38,6 +39,55 @@ def get_aggregation_service(request: Request) -> AggregationService:
             detail="Aggregation service is not available. The server may still be starting up.",
         )
     return svc
+
+
+# ── GET /aggregation-jobs/summary ────────────────────────────────────
+
+@router.get(
+    "/aggregation-jobs/summary",
+    summary="Get aggregation job summary stats (KPIs)",
+)
+async def get_jobs_summary(
+    svc: AggregationService = Depends(get_aggregation_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Return aggregate stats: total count, counts by status, success rate, avg duration."""
+    return await svc.get_jobs_summary(session)
+
+
+# ── GET /aggregation-jobs (global, cross-workspace) ─────────────────
+
+@router.get(
+    "/aggregation-jobs",
+    response_model=PaginatedJobsResponse,
+    summary="List all aggregation jobs (global, cross-workspace)",
+)
+async def list_jobs_global(
+    svc: AggregationService = Depends(get_aggregation_service),
+    session: AsyncSession = Depends(get_db_session),
+    job_status: Optional[List[str]] = Query(None, alias="status"),
+    workspace_id: Optional[str] = Query(None, alias="workspaceId"),
+    data_source_id: Optional[List[str]] = Query(None, alias="dataSourceId"),
+    projection_mode: Optional[str] = Query(None, alias="projectionMode"),
+    trigger_source: Optional[str] = Query(None, alias="triggerSource"),
+    date_from: Optional[str] = Query(None, alias="dateFrom"),
+    date_to: Optional[str] = Query(None, alias="dateTo"),
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """List aggregation jobs across all data sources and workspaces with filtering."""
+    return await svc.list_jobs_global(
+        session,
+        status=job_status,
+        workspace_id=workspace_id,
+        data_source_ids=data_source_id,
+        projection_mode=projection_mode,
+        trigger_source=trigger_source,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset,
+    )
 
 
 # ── POST /data-sources/{ds_id}/aggregation-jobs ──────────────────────
@@ -179,6 +229,53 @@ async def cancel_job(
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+
+# ── DELETE /aggregation-jobs/{job_id} ────────────────────────────────
+
+@router.delete(
+    "/aggregation-jobs/{job_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a terminal aggregation job from history",
+)
+async def delete_job(
+    job_id: str,
+    svc: AggregationService = Depends(get_aggregation_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Delete a completed, failed, or cancelled job record.
+
+    Returns 422 if the job is still pending or running.
+    """
+    try:
+        await svc.delete_job(job_id, session)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+# ── POST /data-sources/{ds_id}/purge-aggregation ────────────────────
+
+@router.post(
+    "/data-sources/{ds_id}/purge-aggregation",
+    summary="Remove all aggregated edges for a data source",
+)
+async def purge_aggregation(
+    ds_id: str,
+    svc: AggregationService = Depends(get_aggregation_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Purge all materialized AGGREGATED edges from the graph.
+
+    Returns 409 if an aggregation job is currently active.
+    """
+    try:
+        return await svc.purge(ds_id, session)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 # ── POST /data-sources/{ds_id}/skip-aggregation ──────────────────────
