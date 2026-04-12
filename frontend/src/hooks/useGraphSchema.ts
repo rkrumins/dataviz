@@ -8,11 +8,10 @@
  *   the active graph-provider context when no explicit scope is supplied.
  * - DB-first: tries the cached-schema endpoint (management DB, no provider
  *   dependency, explicit URL scope).
- * - Provider-live background refresh: if the requested scope matches the
- *   active provider scope, fires `provider.getFullSchema()` in the background;
- *   race-protected via capture-then-commit so a mid-flight response after a
- *   workspace switch is dropped instead of clobbering the new workspace's
- *   schema.
+ * - Provider-live fallback: calls provider.getFullSchema() when the DB cache
+ *   is empty. The provider is always correctly scoped because callers render
+ *   inside a scope boundary (SchemaScope or ViewExecutionProvider) that
+ *   provides the right provider via ProviderOverride.
  * - No silent fallback: errors surface through React Query. Consumers MUST
  *   render under <SchemaScope>, which owns the loading + error UI.
  */
@@ -20,7 +19,6 @@ import { useEffect, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { useSchemaStore } from '@/store/schema'
-import { useWorkspacesStore } from '@/store/workspaces'
 import type { GraphSchema } from '@/providers/GraphDataProvider'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 
@@ -53,15 +51,41 @@ async function fetchCachedSchema(
 }
 
 /**
- * Scope-aware schema fetch. The hook short-circuits (`enabled: false`) when
- * workspaceId/dataSourceId are not set, so this function can assume both are
- * present by the time it runs.
+ * Fetch ontology metadata from the DB (zero provider dependency).
+ * Used as a last-resort fallback when cached-schema is empty and the live
+ * provider is also unavailable.
+ */
+async function fetchCachedOntologyAsSchema(
+  workspaceId: string,
+  dataSourceId: string,
+): Promise<GraphSchema | null> {
+  try {
+    const res = await fetchWithTimeout(
+      `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-ontology`,
+    )
+    if (!res.ok) return null
+    const ontology = await res.json()
+    // Wrap the ontology metadata into a GraphSchema-shaped envelope so
+    // useSchemaStore.loadFromBackend can consume it.
+    return {
+      entityTypes: ontology?.entityTypes ?? [],
+      relationshipTypes: ontology?.relationshipTypes ?? [],
+      ontology,
+    } as unknown as GraphSchema
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Scope-aware schema fetch. Tries DB cache first, then the live provider
+ * (which is always correctly scoped via ProviderOverride), then cached
+ * ontology as a last resort.
  */
 async function fetchGraphSchema(
   provider: ReturnType<typeof useGraphProvider>,
   workspaceId: string,
   dataSourceId: string,
-  providerMatchesScope: boolean,
 ): Promise<GraphSchema> {
   // 1. Try DB cache first (fast, explicit scope, no provider dependency).
   const cached = await fetchCachedSchema(workspaceId, dataSourceId)
@@ -69,20 +93,36 @@ async function fetchGraphSchema(
     return cached
   }
 
-  // 2. Fall back to the live provider ONLY when its configured scope matches
-  //    what we asked for — otherwise the provider would return a DIFFERENT
-  //    workspace's schema and we'd silently serve cross-workspace data.
-  if (providerMatchesScope) {
-    return provider.getFullSchema()
+  // 2. Try the live provider. The provider is always correctly scoped because
+  //    callers render inside SchemaScope or ViewExecutionProvider, both of
+  //    which provide a ProviderOverride matching the requested scope.
+  try {
+    const live = await provider.getFullSchema()
+    if (live && live.entityTypes && live.entityTypes.length > 0) {
+      return live
+    }
+  } catch {
+    // Provider unavailable — continue to fallback
   }
 
-  // 3. No cached schema for this scope and no matching provider — fail loudly
-  //    so <SchemaScope> can render its error UI. The admin cached-schema
-  //    endpoint is the contract for cross-workspace reads; if it's empty, we
-  //    have no safe path to the non-active workspace's schema.
+  // 3. Try the cached-ontology endpoint as a last resort. If the data source
+  //    has an ontology assigned, this builds a minimal but valid schema from
+  //    the ontology definition alone — no provider needed.
+  const ontologySchema = await fetchCachedOntologyAsSchema(workspaceId, dataSourceId)
+  if (ontologySchema) {
+    return ontologySchema
+  }
+
+  // 4. Accept a cached schema even with zero entity types — some data sources
+  //    legitimately have empty schemas (e.g. before ontology assignment).
+  if (cached) {
+    return cached
+  }
+
+  // 5. No cached schema, no ontology, provider failed — fail loudly
+  //    so <SchemaScope> can render its error UI.
   throw new Error(
-    `Graph schema unavailable for workspace="${workspaceId}" dataSource="${dataSourceId}": ` +
-      `no cached schema and the active graph provider is scoped to a different workspace.`,
+    `Graph schema unavailable for workspace="${workspaceId}" dataSource="${dataSourceId}".`,
   )
 }
 
@@ -104,8 +144,6 @@ export function useGraphSchema(options?: UseGraphSchemaOptions) {
   // fetch schema for a workspace other than the currently-active one.
   const workspaceId = options?.workspaceId ?? ctx.workspaceId ?? undefined
   const dataSourceId = options?.dataSourceId ?? ctx.dataSourceId ?? undefined
-  const providerMatchesScope =
-    workspaceId === ctx.workspaceId && dataSourceId === ctx.dataSourceId
 
   const loadFromBackend = useSchemaStore(s => s.loadFromBackend)
   const queryClient = useQueryClient()
@@ -118,7 +156,7 @@ export function useGraphSchema(options?: UseGraphSchemaOptions) {
     // schema is never served for workspace B.
     queryKey: [...GRAPH_SCHEMA_QUERY_KEY, workspaceId, dataSourceId, providerVersion],
     queryFn: () =>
-      fetchGraphSchema(provider, workspaceId!, dataSourceId!, providerMatchesScope),
+      fetchGraphSchema(provider, workspaceId!, dataSourceId!),
     enabled: Boolean(workspaceId && dataSourceId),
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
@@ -136,12 +174,13 @@ export function useGraphSchema(options?: UseGraphSchemaOptions) {
   }, [query.data, loadFromBackend, workspaceId, dataSourceId])
 
   // Background refresh: after the DB-cached schema is loaded, ask the live
-  // provider once per scope to see if it has a fresher copy. Only runs when
-  // the active provider scope matches the requested scope (otherwise we'd be
-  // asking the wrong provider). Capture-then-commit drops late responses
-  // after a workspace switch.
+  // provider once per scope to see if it has a fresher copy. The provider is
+  // always correctly scoped (via ProviderOverride from SchemaScope or
+  // ViewExecutionProvider). Race protection: the `cancelled` flag from the
+  // effect cleanup fires on any dependency change, which is sufficient to
+  // drop late responses after a scope switch.
   useEffect(() => {
-    if (!query.data || !providerMatchesScope) return
+    if (!query.data) return
     const capturedWs = workspaceId
     const capturedDs = dataSourceId
     if (!capturedWs || !capturedDs) return
@@ -155,15 +194,6 @@ export function useGraphSchema(options?: UseGraphSchemaOptions) {
       .getFullSchema()
       .then(liveSchema => {
         if (cancelled) return
-        // Re-read the *current* active scope and drop the write if the user
-        // has switched workspaces while we were awaiting the provider call.
-        const latest = useWorkspacesStore.getState()
-        if (
-          capturedWs !== latest.activeWorkspaceId ||
-          capturedDs !== latest.activeDataSourceId
-        ) {
-          return
-        }
         if (
           liveSchema &&
           liveSchema.entityTypes &&
@@ -190,7 +220,6 @@ export function useGraphSchema(options?: UseGraphSchemaOptions) {
     loadFromBackend,
     workspaceId,
     dataSourceId,
-    providerMatchesScope,
     providerVersion,
   ])
 

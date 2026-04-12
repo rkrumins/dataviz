@@ -1,25 +1,23 @@
 /**
- * ViewWizard — three-layer architecture that solves the bootstrapping
- * chicken-egg problem in the original single-component design.
+ * ViewWizard — three-layer architecture with decoupled scope selection.
  *
  *   ViewWizard              – public shell, gates on isOpen only.
  *
- *   ViewWizardScopeResolver – Phase 1: resolves (workspaceId, dataSourceId)
- *                             for the scope the wizard must operate under.
- *                             In edit mode this comes from the view row via
- *                             useViewMetadata — no schema store is touched.
+ *   ViewWizardScopeResolver – resolves (workspaceId, dataSourceId) for
+ *                             the scope the wizard must operate under.
+ *
+ *                             Edit mode:  reads from useViewMetadata (unchanged).
+ *                             Create mode: interactive ScopeStep lets user pick
+ *                                          workspace + data source WITHOUT
+ *                                          switching the global context.
+ *
  *                             Then mounts <SchemaScope> for that scope.
  *
- *   ViewWizardBody          – Phase 2: schema guaranteed loaded for the
- *                             resolved scope. May freely read useSchemaStore.
- *                             Fetches the full view via useViewFull (shares
- *                             the same React Query cache entry as
- *                             useViewMetadata — one HTTP call per wizard open).
+ *   ViewWizardBody          – schema guaranteed loaded for the resolved scope.
+ *                             May freely read useSchemaStore.
  *
- * Why this fixes the original bug: the old code did
- *   schema.views.find(v => v.id === viewId)
- * which required schema to be loaded before we knew which scope to load
- * the schema for. ViewWizardScopeResolver breaks that cycle.
+ *   WizardShell             – shared modal chrome (header, stepper, footer)
+ *                             used by both the scope phase and body phase.
  */
 
 import React, { useState, useCallback, useMemo, useEffect } from 'react'
@@ -39,6 +37,7 @@ import {
     Loader2,
     ClipboardList,
     AlertCircle,
+    Database,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSchemaStore } from '@/store/schema'
@@ -50,6 +49,7 @@ import { viewToViewConfig } from '@/services/viewApiService'
 import { SchemaScope } from '@/components/schema/SchemaScope'
 import { OntologyDriftBanner, hasOntologyDrifted } from '@/components/schema/OntologyDriftBanner'
 import { useViewMetadata, useViewFull, type ViewMetadata } from '@/hooks/useViewMetadata'
+import { useWizardScope } from '@/hooks/useWizardScope'
 import type { ViewConfiguration, ViewLayerConfig, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
 
 import { BasicsStep } from './steps/BasicsStep'
@@ -57,6 +57,7 @@ import { LayoutStep } from './steps/LayoutStep'
 import { EntitiesStep } from './steps/EntitiesStep'
 import { PreviewStep } from './steps/PreviewStep'
 import { AssignmentStep } from './steps/AssignmentStep'
+import { ScopeStep } from './steps/ScopeStep'
 
 // ============================================
 // Types
@@ -69,6 +70,17 @@ export interface ViewWizardProps {
     onClose: () => void
     onComplete?: (view: ViewConfiguration) => void
     dataSourceId?: string
+    /** Optional pre-selected scope (e.g. from a data source card). */
+    initialWorkspaceId?: string
+    initialDataSourceId?: string
+}
+
+export interface ScopeContext {
+    workspaceId: string
+    workspaceName: string
+    dataSourceId: string
+    dataSourceLabel: string
+    hasOntology: boolean
 }
 
 export interface ActiveFilter {
@@ -94,15 +106,20 @@ export interface WizardFormData {
     isValid: boolean
 }
 
-type WizardStep = 'basics' | 'layout' | 'assignment' | 'entities' | 'preview'
+type WizardStep = 'scope' | 'basics' | 'layout' | 'assignment' | 'entities' | 'preview'
 
-interface ViewWizardBodyProps extends ViewWizardProps {
-    /** Resolved workspace for this wizard session (view's ws in edit, active ws in create). */
+interface StepDef {
+    id: WizardStep
+    label: string
+    icon: React.ReactNode
+}
+
+interface ViewWizardBodyProps extends Omit<ViewWizardProps, 'initialWorkspaceId' | 'initialDataSourceId'> {
     resolvedWorkspaceId: string
-    /** Resolved data source for this wizard session. */
     resolvedDataSourceId: string | null
-    /** Metadata fetched in phase 1 — null in create mode. */
     viewMetadata: ViewMetadata | null
+    scopeContext: ScopeContext
+    onBackToScope?: () => void
 }
 
 const LAYOUT_TYPES = [
@@ -131,7 +148,205 @@ const LAYOUT_TYPES = [
 ]
 
 // ============================================
-// Inline loading / error shells (used before schema is ready)
+// WizardShell — shared modal chrome
+// ============================================
+
+interface WizardShellProps {
+    mode: 'create' | 'edit'
+    currentStep: WizardStep
+    activeSteps: StepDef[]
+    currentStepIndex: number
+    onStepClick: (stepId: WizardStep) => void
+    onBack: () => void
+    onNext: () => void
+    onClose: () => void
+    canProceed: boolean
+    isLastStep: boolean
+    isSubmitting: boolean
+    onSubmit: () => void
+    children: React.ReactNode
+}
+
+function WizardShell({
+    mode,
+    currentStep,
+    activeSteps,
+    currentStepIndex,
+    onStepClick,
+    onBack,
+    onNext,
+    onClose,
+    canProceed,
+    isLastStep,
+    isSubmitting,
+    onSubmit,
+    children,
+}: WizardShellProps) {
+    const isWide = currentStep === 'scope' || currentStep === 'assignment'
+
+    return (
+        <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        >
+            <motion.div
+                initial={{ scale: 0.95, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.95, opacity: 0, y: 20 }}
+                transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+                className={cn(
+                    'relative w-full max-h-[90vh] bg-white dark:bg-slate-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col',
+                    isWide ? 'max-w-[1180px]' : 'max-w-4xl',
+                )}
+            >
+                {/* Header */}
+                <div className="flex items-center justify-between px-8 py-5 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900">
+                    <div className="flex items-center gap-4">
+                        <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/25">
+                            {activeSteps[currentStepIndex]?.icon}
+                        </div>
+                        <div>
+                            <h2 className="text-xl font-bold text-slate-900 dark:text-white">
+                                {mode === 'create' ? 'Create New View' : 'Edit View'}
+                            </h2>
+                            <p className="text-sm text-slate-500">
+                                Step {currentStepIndex + 1} of {activeSteps.length}: {activeSteps[currentStepIndex]?.label}
+                            </p>
+                        </div>
+                    </div>
+                    <button
+                        onClick={onClose}
+                        className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                    >
+                        <X className="w-5 h-5 text-slate-500" />
+                    </button>
+                </div>
+
+                {/* Progress Steps */}
+                <div className="px-8 py-4 bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
+                    <div className="flex items-center gap-2">
+                        {activeSteps.map((step, index) => {
+                            const isActive = step.id === currentStep
+                            const isCompleted = currentStepIndex > index
+                            const isClickable = isCompleted || isActive
+                            return (
+                                <div key={step.id} className="flex items-center">
+                                    <button
+                                        onClick={() => isClickable && onStepClick(step.id)}
+                                        disabled={!isClickable}
+                                        className={cn(
+                                            'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all',
+                                            isActive
+                                                ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-100 dark:ring-blue-900'
+                                                : isCompleted
+                                                    ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400 hover:bg-emerald-100'
+                                                    : 'text-slate-400 cursor-not-allowed',
+                                        )}
+                                    >
+                                        {isCompleted
+                                            ? <Check className="w-4 h-4" />
+                                            : (
+                                                <span className={cn(
+                                                    'w-4 h-4 flex items-center justify-center rounded-full text-[10px] font-bold border',
+                                                    isActive ? 'border-transparent bg-white/20' : 'border-slate-300',
+                                                )}>
+                                                    {index + 1}
+                                                </span>
+                                            )}
+                                        {step.label}
+                                    </button>
+                                    {index < activeSteps.length - 1 && (
+                                        <div className="w-8 h-px bg-slate-200 dark:bg-slate-700 mx-2" />
+                                    )}
+                                </div>
+                            )
+                        })}
+                    </div>
+                </div>
+
+                {/* Step Content */}
+                <div className="flex-1 overflow-y-auto">
+                    <AnimatePresence mode="wait">
+                        <motion.div
+                            key={currentStep}
+                            initial={{ opacity: 0, x: 20 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            exit={{ opacity: 0, x: -20 }}
+                            transition={{ duration: 0.2 }}
+                            className="p-8"
+                        >
+                            {children}
+                        </motion.div>
+                    </AnimatePresence>
+                </div>
+
+                {/* Footer */}
+                <div className="flex items-center justify-between px-8 py-5 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50">
+                    <button
+                        onClick={onBack}
+                        disabled={currentStepIndex === 0}
+                        className={cn(
+                            'flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all',
+                            currentStepIndex > 0
+                                ? 'text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                                : 'text-slate-400 cursor-not-allowed',
+                        )}
+                    >
+                        <ArrowLeft className="w-4 h-4" />
+                        Back
+                    </button>
+
+                    <div className="flex items-center gap-3">
+                        <button
+                            onClick={onClose}
+                            className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all"
+                        >
+                            Cancel
+                        </button>
+
+                        {isLastStep ? (
+                            <button
+                                onClick={onSubmit}
+                                disabled={!canProceed || isSubmitting}
+                                className={cn(
+                                    'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-all',
+                                    canProceed && !isSubmitting
+                                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-lg shadow-blue-500/25'
+                                        : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
+                                )}
+                            >
+                                {isSubmitting ? (
+                                    <><Loader2 className="w-4 h-4 animate-spin" />Saving...</>
+                                ) : (
+                                    <><Save className="w-4 h-4" />{mode === 'create' ? 'Create View' : 'Save Changes'}</>
+                                )}
+                            </button>
+                        ) : (
+                            <button
+                                onClick={onNext}
+                                disabled={!canProceed}
+                                className={cn(
+                                    'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-all',
+                                    canProceed
+                                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-lg shadow-blue-500/25'
+                                        : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
+                                )}
+                            >
+                                Next
+                                <ArrowRight className="w-4 h-4" />
+                            </button>
+                        )}
+                    </div>
+                </div>
+            </motion.div>
+        </motion.div>
+    )
+}
+
+// ============================================
+// Inline loading / error shells
 // ============================================
 
 function WizardLoadingShell({ label, onClose }: { label: string; onClose?: () => void }) {
@@ -192,57 +407,208 @@ export function ViewWizard(props: ViewWizardProps) {
 // Phase 1 — Scope resolution
 // ============================================
 
+/** localStorage key for remembering last-used wizard scope */
+const WIZARD_SCOPE_KEY = 'synodic-wizard-last-scope'
+
+function readLastScope(): { wsId?: string; dsId?: string } {
+    try {
+        const raw = localStorage.getItem(WIZARD_SCOPE_KEY)
+        return raw ? JSON.parse(raw) : {}
+    } catch {
+        return {}
+    }
+}
+
+function saveLastScope(wsId: string, dsId: string) {
+    try {
+        localStorage.setItem(WIZARD_SCOPE_KEY, JSON.stringify({ wsId, dsId }))
+    } catch { /* noop */ }
+}
+
 function ViewWizardScopeResolver(props: ViewWizardProps) {
     const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
     const activeDataSourceId = useWorkspacesStore(s => s.activeDataSourceId)
+    const workspaces = useWorkspacesStore(s => s.workspaces)
 
+    // ── Edit mode — unchanged ──────────────────────────────────
     if (props.mode === 'edit' && props.viewId) {
-        // Fetch just the scope fields — no schema store involved.
-        const meta = useViewMetadata(props.viewId)
-
-        if (meta.isLoading) {
-            return <WizardLoadingShell label="Loading view…" onClose={props.onClose} />
-        }
-        if (meta.isError || !meta.data) {
-            return <WizardErrorShell error={meta.error instanceof Error ? meta.error : null} onClose={props.onClose} />
-        }
-
-        const resolvedWs = meta.data.workspaceId
-        const resolvedDs = meta.data.dataSourceId ?? activeDataSourceId ?? null
-
-        return (
-            <SchemaScope
-                workspaceId={resolvedWs}
-                dataSourceId={resolvedDs}
-                loadingLabel="Loading ontology…"
-                fallback={<WizardLoadingShell label="Loading ontology…" onClose={props.onClose} />}
-            >
-                <ViewWizardBody
-                    {...props}
-                    resolvedWorkspaceId={resolvedWs}
-                    resolvedDataSourceId={resolvedDs}
-                    viewMetadata={meta.data}
-                />
-            </SchemaScope>
-        )
+        return <ViewWizardEditResolver {...props} />
     }
 
-    // Create mode — use active workspace/dataSource.
-    const resolvedWs = activeWorkspaceId ?? ''
-    const resolvedDs = props.dataSourceId ?? activeDataSourceId ?? null
+    // ── Create mode — interactive scope selection ──────────────
+    return (
+        <ViewWizardCreateResolver
+            {...props}
+            activeWorkspaceId={activeWorkspaceId}
+            activeDataSourceId={activeDataSourceId}
+            workspaces={workspaces}
+        />
+    )
+}
+
+/** Edit mode resolver — identical to the original implementation. */
+function ViewWizardEditResolver(props: ViewWizardProps) {
+    const activeDataSourceId = useWorkspacesStore(s => s.activeDataSourceId)
+    const workspaces = useWorkspacesStore(s => s.workspaces)
+    const meta = useViewMetadata(props.viewId!)
+
+    if (meta.isLoading) {
+        return <WizardLoadingShell label="Loading view\u2026" onClose={props.onClose} />
+    }
+    if (meta.isError || !meta.data) {
+        return <WizardErrorShell error={meta.error instanceof Error ? meta.error : null} onClose={props.onClose} />
+    }
+
+    const resolvedWs = meta.data.workspaceId
+    const resolvedDs = meta.data.dataSourceId ?? activeDataSourceId ?? null
+
+    const scopeContext = buildScopeContext(workspaces, resolvedWs, resolvedDs)
 
     return (
         <SchemaScope
             workspaceId={resolvedWs}
             dataSourceId={resolvedDs}
-            loadingLabel="Loading ontology…"
-            fallback={<WizardLoadingShell label="Loading ontology…" onClose={props.onClose} />}
+            loadingLabel="Loading ontology\u2026"
+            fallback={<WizardLoadingShell label="Loading ontology\u2026" onClose={props.onClose} />}
         >
             <ViewWizardBody
                 {...props}
                 resolvedWorkspaceId={resolvedWs}
                 resolvedDataSourceId={resolvedDs}
+                viewMetadata={meta.data}
+                scopeContext={scopeContext}
+            />
+        </SchemaScope>
+    )
+}
+
+/** Create mode resolver — two-phase: ScopeStep then SchemaScope + Body. */
+function ViewWizardCreateResolver(props: ViewWizardProps & {
+    activeWorkspaceId: string | null
+    activeDataSourceId: string | null
+    workspaces: ReturnType<typeof useWorkspacesStore.getState>['workspaces']
+}) {
+    const { activeWorkspaceId, activeDataSourceId, workspaces, ...wizardProps } = props
+    const lastScope = useMemo(() => readLastScope(), [])
+
+    // Determine initial selections: explicit props > active context > last used
+    const initialWs = props.initialWorkspaceId ?? activeWorkspaceId ?? lastScope.wsId ?? null
+    const initialDs = props.initialDataSourceId
+        ?? (initialWs === activeWorkspaceId ? activeDataSourceId : null)
+        ?? (initialWs === lastScope.wsId ? lastScope.dsId : null)
+        ?? null
+
+    const [selectedWsId, setSelectedWsId] = useState<string | null>(initialWs)
+    const [selectedDsId, setSelectedDsId] = useState<string | null>(initialDs)
+    const [scopeConfirmed, setScopeConfirmed] = useState(false)
+
+    // Fetch stats + probe schema while scope step is visible
+    const probeScope = selectedWsId && selectedDsId
+        ? { workspaceId: selectedWsId, dataSourceId: selectedDsId }
+        : null
+    const scopeData = useWizardScope(!scopeConfirmed, probeScope)
+
+    // Reset on wizard reopen
+    useEffect(() => {
+        if (props.isOpen) {
+            setSelectedWsId(initialWs)
+            setSelectedDsId(initialDs)
+            setScopeConfirmed(false)
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [props.isOpen])
+
+    // Clear data source when workspace changes
+    const handleSelectWorkspace = useCallback((wsId: string) => {
+        setSelectedWsId(prev => {
+            if (prev !== wsId) setSelectedDsId(null)
+            return wsId
+        })
+    }, [])
+
+    const handleSelectDataSource = useCallback((dsId: string) => {
+        setSelectedDsId(dsId)
+    }, [])
+
+    const handleScopeConfirm = useCallback(() => {
+        if (selectedWsId && selectedDsId) {
+            saveLastScope(selectedWsId, selectedDsId)
+            setScopeConfirmed(true)
+        }
+    }, [selectedWsId, selectedDsId])
+
+    const handleBackToScope = useCallback(() => {
+        setScopeConfirmed(false)
+    }, [])
+
+    const scopeContext = useMemo(
+        () => buildScopeContext(workspaces, selectedWsId, selectedDsId),
+        [workspaces, selectedWsId, selectedDsId],
+    )
+
+    // ── Build full step list for create mode ───────────────────
+    const allSteps: StepDef[] = useMemo(() => {
+        const steps: StepDef[] = [
+            { id: 'scope', label: 'Scope', icon: <Database className="w-4 h-4" /> },
+            { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
+            { id: 'layout', label: 'Layout', icon: <LayoutTemplate className="w-4 h-4" /> },
+            // assignment is added dynamically by ViewWizardBody
+            { id: 'entities', label: 'Entities', icon: <Network className="w-4 h-4" /> },
+            { id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> },
+        ]
+        return steps
+    }, [])
+
+    // ── Phase A: ScopeStep (no SchemaScope yet) ────────────────
+    if (!scopeConfirmed) {
+        const currentStepIndex = 0
+        const canProceed = !!(selectedWsId && selectedDsId)
+
+        return (
+            <WizardShell
+                mode="create"
+                currentStep="scope"
+                activeSteps={allSteps}
+                currentStepIndex={currentStepIndex}
+                onStepClick={() => {}}
+                onBack={() => {}}
+                onNext={handleScopeConfirm}
+                onClose={props.onClose}
+                canProceed={canProceed}
+                isLastStep={false}
+                isSubmitting={false}
+                onSubmit={() => {}}
+            >
+                <ScopeStep
+                    availableWorkspaces={scopeData.workspaces}
+                    statsMap={scopeData.statsMap}
+                    statsLoading={scopeData.isLoading}
+                    schemaAvailability={scopeData.schemaAvailability}
+                    selectedWorkspaceId={selectedWsId}
+                    selectedDataSourceId={selectedDsId}
+                    activeWorkspaceId={activeWorkspaceId}
+                    onSelectWorkspace={handleSelectWorkspace}
+                    onSelectDataSource={handleSelectDataSource}
+                />
+            </WizardShell>
+        )
+    }
+
+    // ── Phase B: SchemaScope + ViewWizardBody ──────────────────
+    return (
+        <SchemaScope
+            workspaceId={selectedWsId!}
+            dataSourceId={selectedDsId}
+            loadingLabel="Loading ontology\u2026"
+            fallback={<WizardLoadingShell label="Loading ontology\u2026" onClose={props.onClose} />}
+        >
+            <ViewWizardBody
+                {...wizardProps}
+                resolvedWorkspaceId={selectedWsId!}
+                resolvedDataSourceId={selectedDsId}
                 viewMetadata={null}
+                scopeContext={scopeContext}
+                onBackToScope={handleBackToScope}
             />
         </SchemaScope>
     )
@@ -261,15 +627,14 @@ function ViewWizardBody({
     resolvedWorkspaceId,
     resolvedDataSourceId,
     viewMetadata,
+    scopeContext,
+    onBackToScope,
 }: ViewWizardBodyProps) {
     const navigate = useNavigate()
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
     const { clearAssignments, setLayers } = useReferenceModelStore()
 
-    // Fetch the full view config in edit mode. Shares ['view', viewId] cache
-    // entry with useViewMetadata — one HTTP call per wizard open regardless
-    // of how many consumers mount.
     const fullViewQuery = useViewFull(mode === 'edit' ? viewId : null)
     const editingView = useMemo(() => {
         if (mode !== 'edit' || !fullViewQuery.data) return null
@@ -337,20 +702,29 @@ function ViewWizardBody({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isOpen])
 
-    const activeSteps = useMemo(() => {
-        const base: { id: WizardStep; label: string; icon: React.ReactNode }[] = [
+    // Steps for the body phase (scope step is handled by the resolver)
+    const activeSteps: StepDef[] = useMemo(() => {
+        const steps: StepDef[] = []
+        // In create mode, scope is step 0 (handled externally) — include it for the stepper
+        if (mode === 'create') {
+            steps.push({ id: 'scope', label: 'Scope', icon: <Database className="w-4 h-4" /> })
+        }
+        steps.push(
             { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
             { id: 'layout', label: 'Layout', icon: <LayoutTemplate className="w-4 h-4" /> },
-        ]
+        )
         if (formData.layoutType === 'reference') {
-            base.push({ id: 'assignment', label: 'Assignments', icon: <ClipboardList className="w-4 h-4" /> })
+            steps.push({ id: 'assignment', label: 'Assignments', icon: <ClipboardList className="w-4 h-4" /> })
         }
-        return [
-            ...base,
-            { id: 'entities' as WizardStep, label: 'Entities', icon: <Network className="w-4 h-4" /> },
-            { id: 'preview' as WizardStep, label: 'Preview', icon: <Eye className="w-4 h-4" /> },
-        ]
-    }, [formData.layoutType])
+        steps.push(
+            { id: 'entities', label: 'Entities', icon: <Network className="w-4 h-4" /> },
+            { id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> },
+        )
+        return steps
+    }, [formData.layoutType, mode])
+
+    const currentStepIndex = activeSteps.findIndex(s => s.id === currentStep)
+    const isLastStep = currentStepIndex === activeSteps.length - 1
 
     const canProceed = useMemo(() => {
         switch (currentStep) {
@@ -372,20 +746,30 @@ function ViewWizardBody({
     }, [currentStep, activeSteps])
 
     const handleBack = useCallback(() => {
+        // If we're at the first body step in create mode, go back to scope
+        if (currentStep === 'basics' && mode === 'create' && onBackToScope) {
+            onBackToScope()
+            return
+        }
         if (previousSteps.length > 0) {
             const prev = previousSteps[previousSteps.length - 1]
             setPreviousSteps(p => p.slice(0, -1))
             setCurrentStep(prev)
         }
-    }, [previousSteps])
+    }, [previousSteps, currentStep, mode, onBackToScope])
 
     const handleStepClick = useCallback((stepId: WizardStep) => {
+        // Clicking the scope step in create mode goes back to scope
+        if (stepId === 'scope' && mode === 'create' && onBackToScope) {
+            onBackToScope()
+            return
+        }
         const currentIndex = activeSteps.findIndex(s => s.id === currentStep)
         const targetIndex = activeSteps.findIndex(s => s.id === stepId)
         if (targetIndex <= currentIndex && targetIndex !== -1) {
             setCurrentStep(stepId)
         }
-    }, [currentStep, activeSteps])
+    }, [currentStep, activeSteps, mode, onBackToScope])
 
     const buildFieldFilters = useCallback((filters: ActiveFilter[]): FieldFilter[] => {
         return filters.map(af => ({
@@ -455,215 +839,93 @@ function ViewWizardBody({
         setFormData(prev => ({ ...prev, ...updates }))
     }, [])
 
-    const currentStepIndex = activeSteps.findIndex(s => s.id === currentStep)
-    const isLastStep = currentStepIndex === activeSteps.length - 1
-
     // Ontology drift: view's stored digest vs current schema digest.
     const showDriftBanner =
         !driftDismissed &&
         hasOntologyDrifted(viewMetadata?.ontologyDigest, schema?.ontologyDigest)
 
     return (
-        <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        <WizardShell
+            mode={mode}
+            currentStep={currentStep}
+            activeSteps={activeSteps}
+            currentStepIndex={currentStepIndex}
+            onStepClick={handleStepClick}
+            onBack={handleBack}
+            onNext={handleNext}
+            onClose={onClose}
+            canProceed={canProceed}
+            isLastStep={isLastStep}
+            isSubmitting={isSubmitting}
+            onSubmit={handleSubmit}
         >
-            <motion.div
-                initial={{ scale: 0.95, opacity: 0, y: 20 }}
-                animate={{ scale: 1, opacity: 1, y: 0 }}
-                exit={{ scale: 0.95, opacity: 0, y: 20 }}
-                transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-                className={cn(
-                    'relative w-full max-h-[90vh] bg-white dark:bg-slate-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col',
-                    currentStep === 'assignment' ? 'max-w-[1180px]' : 'max-w-4xl',
-                )}
-            >
-                {/* Header */}
-                <div className="flex items-center justify-between px-8 py-5 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900">
-                    <div className="flex items-center gap-4">
-                        <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/25">
-                            {activeSteps[currentStepIndex].icon}
-                        </div>
-                        <div>
-                            <h2 className="text-xl font-bold text-slate-900 dark:text-white">
-                                {mode === 'create' ? 'Create New View' : 'Edit View'}
-                            </h2>
-                            <p className="text-sm text-slate-500">
-                                Step {currentStepIndex + 1} of {activeSteps.length}: {activeSteps[currentStepIndex].label}
-                            </p>
-                        </div>
-                    </div>
-                    <button
-                        onClick={onClose}
-                        className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-                    >
-                        <X className="w-5 h-5 text-slate-500" />
-                    </button>
-                </div>
+            {showDriftBanner && (
+                <OntologyDriftBanner
+                    viewDigest={viewMetadata?.ontologyDigest ?? null}
+                    currentDigest={schema?.ontologyDigest ?? null}
+                    onDismiss={() => setDriftDismissed(true)}
+                    className="mb-6"
+                />
+            )}
 
-                {/* Progress Steps */}
-                <div className="px-8 py-4 bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
-                    <div className="flex items-center gap-2">
-                        {activeSteps.map((step, index) => {
-                            const isActive = step.id === currentStep
-                            const isCompleted = currentStepIndex > index
-                            const isClickable = isCompleted || isActive
-                            return (
-                                <div key={step.id} className="flex items-center">
-                                    <button
-                                        onClick={() => isClickable && handleStepClick(step.id)}
-                                        disabled={!isClickable}
-                                        className={cn(
-                                            'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all',
-                                            isActive
-                                                ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-100 dark:ring-blue-900'
-                                                : isCompleted
-                                                    ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400 hover:bg-emerald-100'
-                                                    : 'text-slate-400 cursor-not-allowed',
-                                        )}
-                                    >
-                                        {isCompleted
-                                            ? <Check className="w-4 h-4" />
-                                            : (
-                                                <span className={cn(
-                                                    'w-4 h-4 flex items-center justify-center rounded-full text-[10px] font-bold border',
-                                                    isActive ? 'border-transparent bg-white/20' : 'border-slate-300',
-                                                )}>
-                                                    {index + 1}
-                                                </span>
-                                            )}
-                                        {step.label}
-                                    </button>
-                                    {index < activeSteps.length - 1 && (
-                                        <div className="w-8 h-px bg-slate-200 dark:bg-slate-700 mx-2" />
-                                    )}
-                                </div>
-                            )
-                        })}
-                    </div>
-                </div>
-
-                {/* Step Content */}
-                <div className="flex-1 overflow-y-auto">
-                    <AnimatePresence mode="wait">
-                        <motion.div
-                            key={currentStep}
-                            initial={{ opacity: 0, x: 20 }}
-                            animate={{ opacity: 1, x: 0 }}
-                            exit={{ opacity: 0, x: -20 }}
-                            transition={{ duration: 0.2 }}
-                            className="p-8"
-                        >
-                            {showDriftBanner && (
-                                <OntologyDriftBanner
-                                    viewDigest={viewMetadata?.ontologyDigest ?? null}
-                                    currentDigest={schema?.ontologyDigest ?? null}
-                                    onDismiss={() => setDriftDismissed(true)}
-                                    className="mb-6"
-                                />
-                            )}
-
-                            {currentStep === 'basics' && (
-                                <BasicsStep formData={formData} updateFormData={updateFormData} mode={mode} />
-                            )}
-                            {currentStep === 'layout' && (
-                                <LayoutStep
-                                    formData={formData}
-                                    updateFormData={updateFormData}
-                                    layoutTypes={LAYOUT_TYPES}
-                                    dataSourceId={formData.dataSourceId}
-                                />
-                            )}
-                            {currentStep === 'assignment' && (
-                                <AssignmentStep
-                                    formData={formData}
-                                    updateFormData={updateFormData}
-                                    linkedContextModelId={linkedContextModelId}
-                                    onDraftSaved={setLinkedContextModelId}
-                                />
-                            )}
-                            {currentStep === 'entities' && (
-                                <EntitiesStep
-                                    formData={formData}
-                                    updateFormData={updateFormData}
-                                    dataSourceId={formData.dataSourceId}
-                                />
-                            )}
-                            {currentStep === 'preview' && (
-                                <PreviewStep formData={formData} />
-                            )}
-                        </motion.div>
-                    </AnimatePresence>
-                </div>
-
-                {/* Footer */}
-                <div className="flex items-center justify-between px-8 py-5 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50">
-                    <button
-                        onClick={handleBack}
-                        disabled={previousSteps.length === 0}
-                        className={cn(
-                            'flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all',
-                            previousSteps.length > 0
-                                ? 'text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
-                                : 'text-slate-400 cursor-not-allowed',
-                        )}
-                    >
-                        <ArrowLeft className="w-4 h-4" />
-                        Back
-                    </button>
-
-                    <div className="flex items-center gap-3">
-                        <button
-                            onClick={onClose}
-                            className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all"
-                        >
-                            Cancel
-                        </button>
-
-                        {isLastStep ? (
-                            <button
-                                onClick={handleSubmit}
-                                disabled={!canProceed || isSubmitting}
-                                className={cn(
-                                    'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-all',
-                                    canProceed && !isSubmitting
-                                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-lg shadow-blue-500/25'
-                                        : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
-                                )}
-                            >
-                                {isSubmitting ? (
-                                    <><Loader2 className="w-4 h-4 animate-spin" />Saving...</>
-                                ) : (
-                                    <><Save className="w-4 h-4" />{mode === 'create' ? 'Create View' : 'Save Changes'}</>
-                                )}
-                            </button>
-                        ) : (
-                            <button
-                                onClick={handleNext}
-                                disabled={!canProceed}
-                                className={cn(
-                                    'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-all',
-                                    canProceed
-                                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-lg shadow-blue-500/25'
-                                        : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
-                                )}
-                            >
-                                Next
-                                <ArrowRight className="w-4 h-4" />
-                            </button>
-                        )}
-                    </div>
-                </div>
-            </motion.div>
-        </motion.div>
+            {currentStep === 'basics' && (
+                <BasicsStep
+                    formData={formData}
+                    updateFormData={updateFormData}
+                    mode={mode}
+                    scopeContext={scopeContext}
+                    onChangeScope={mode === 'create' ? onBackToScope : undefined}
+                />
+            )}
+            {currentStep === 'layout' && (
+                <LayoutStep
+                    formData={formData}
+                    updateFormData={updateFormData}
+                    layoutTypes={LAYOUT_TYPES}
+                    dataSourceId={formData.dataSourceId}
+                />
+            )}
+            {currentStep === 'assignment' && (
+                <AssignmentStep
+                    formData={formData}
+                    updateFormData={updateFormData}
+                    linkedContextModelId={linkedContextModelId}
+                    onDraftSaved={setLinkedContextModelId}
+                />
+            )}
+            {currentStep === 'entities' && (
+                <EntitiesStep
+                    formData={formData}
+                    updateFormData={updateFormData}
+                    dataSourceId={formData.dataSourceId}
+                />
+            )}
+            {currentStep === 'preview' && (
+                <PreviewStep formData={formData} scopeContext={scopeContext} />
+            )}
+        </WizardShell>
     )
 }
 
 // ============================================
 // Helpers
 // ============================================
+
+function buildScopeContext(
+    workspaces: ReturnType<typeof useWorkspacesStore.getState>['workspaces'],
+    wsId: string | null,
+    dsId: string | null,
+): ScopeContext {
+    const ws = workspaces.find(w => w.id === wsId)
+    const ds = ws?.dataSources?.find(d => d.id === dsId)
+    return {
+        workspaceId: wsId ?? '',
+        workspaceName: ws?.name ?? 'Unknown',
+        dataSourceId: dsId ?? '',
+        dataSourceLabel: ds?.label || ds?.catalogItemId || 'Data Source',
+        hasOntology: !!ds?.ontologyId,
+    }
+}
 
 function getInitialFormData(schema: ReturnType<typeof useSchemaStore.getState>['schema']): WizardFormData {
     return {
