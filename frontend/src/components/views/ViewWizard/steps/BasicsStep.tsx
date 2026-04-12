@@ -21,12 +21,12 @@ import {
     Globe,
     X,
     Plus,
-    AlertTriangle
+    AlertTriangle,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
-import type { WizardFormData } from '../ViewWizard'
+import type { WizardFormData, ScopeContext } from '../ViewWizard'
 
 // ============================================
 // Types
@@ -36,6 +36,10 @@ interface BasicsStepProps {
     formData: WizardFormData
     updateFormData: (updates: Partial<WizardFormData>) => void
     mode: 'create' | 'edit'
+    /** Resolved scope context (create: from ScopeStep, edit: from view metadata). */
+    scopeContext?: ScopeContext
+    /** Callback to go back to ScopeStep (create mode only). */
+    onChangeScope?: () => void
 }
 
 const ICON_OPTIONS = [
@@ -83,13 +87,16 @@ const VISIBILITY_OPTIONS = [
     },
 ]
 
-export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) {
+export function BasicsStep({ formData, updateFormData, mode, scopeContext, onChangeScope }: BasicsStepProps) {
     const [showSuggestions, setShowSuggestions] = useState(false)
     const [tagInput, setTagInput] = useState('')
     const navigate = useNavigate()
     const activeWorkspace = useWorkspacesStore(s => s.getActiveWorkspace())
     const activeDataSource = useWorkspacesStore(s => s.getActiveDataSource())
-    const missingOntology = !activeDataSource?.ontologyId
+    // Use scopeContext if available (create mode), fall back to globals (edit mode compat)
+    const missingOntology = scopeContext ? !scopeContext.hasOntology : !activeDataSource?.ontologyId
+    const displayWorkspaceName = scopeContext?.workspaceName ?? activeWorkspace?.name
+    const displayDataSourceLabel = scopeContext?.dataSourceLabel ?? activeDataSource?.label ?? activeDataSource?.catalogItemId
 
     const handleAddTag = useCallback(() => {
         const tag = tagInput.trim()
@@ -124,6 +131,32 @@ export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) 
                 </p>
             </motion.div>
 
+            {/* Scope breadcrumb (shows selected workspace/data source) */}
+            {displayWorkspaceName && displayDataSourceLabel && (
+                <motion.div
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.3 * 0.03, duration: 0.15, ease: 'easeOut' }}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700"
+                >
+                    <Database className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    <span className="text-xs text-slate-500 dark:text-slate-400">
+                        <span className="font-semibold text-slate-700 dark:text-slate-300">{displayWorkspaceName}</span>
+                        {' / '}
+                        <span className="font-semibold text-slate-700 dark:text-slate-300">{displayDataSourceLabel}</span>
+                    </span>
+                    {onChangeScope && (
+                        <button
+                            type="button"
+                            onClick={onChangeScope}
+                            className="ml-auto text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors"
+                        >
+                            Change
+                        </button>
+                    )}
+                </motion.div>
+            )}
+
             {/* Ontology Warning */}
             {missingOntology && (
                 <motion.div
@@ -141,7 +174,7 @@ export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) 
                         </p>
                         <button
                             type="button"
-                            onClick={() => navigate(`/admin/registry?tab=workspaces${activeWorkspace ? `&ws=${activeWorkspace.id}` : ''}`)}
+                            onClick={() => navigate(`/admin/registry?tab=workspaces${scopeContext?.workspaceId ? `&ws=${scopeContext.workspaceId}` : activeWorkspace ? `&ws=${activeWorkspace.id}` : ''}`)}
                             className="mt-2 text-xs font-medium text-amber-400 hover:text-amber-300 transition-colors"
                         >
                             Configure Ontology &rarr;
@@ -338,39 +371,7 @@ export function BasicsStep({ formData, updateFormData, mode }: BasicsStepProps) 
                 </p>
             </motion.div>
 
-            {/* Workspace & Data Source — shown as a single paired context badge */}
-            {activeWorkspace && (
-                <motion.div
-                    initial={{ opacity: 0, y: 4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 6 * 0.03, duration: 0.15, ease: 'easeOut' }}
-                    className="flex items-center gap-4 px-4 py-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700"
-                >
-                    <div className="flex items-center gap-3 flex-1 min-w-0">
-                        <Box className="w-4 h-4 text-slate-400 shrink-0" />
-                        <div className="min-w-0">
-                            <p className="text-xs text-slate-400 uppercase tracking-wide font-medium">Workspace</p>
-                            <p className="text-sm font-medium text-slate-700 dark:text-slate-300 truncate">
-                                {activeWorkspace.name}
-                            </p>
-                        </div>
-                    </div>
-                    {activeDataSource && (
-                        <>
-                            <div className="w-px h-8 bg-slate-200 dark:bg-slate-700 shrink-0" />
-                            <div className="flex items-center gap-3 flex-1 min-w-0">
-                                <Database className="w-4 h-4 text-emerald-400 shrink-0" />
-                                <div className="min-w-0">
-                                    <p className="text-xs text-slate-400 uppercase tracking-wide font-medium">Data Source</p>
-                                    <p className="text-sm font-medium text-slate-700 dark:text-slate-300 truncate">
-                                        {activeDataSource.label || activeDataSource.catalogItemId || 'Data Source'}
-                                    </p>
-                                </div>
-                            </div>
-                        </>
-                    )}
-                </motion.div>
-            )}
+            {/* Workspace/DataSource context is now shown as a breadcrumb at the top */}
 
             {/* Validation Message */}
             {formData.name.trim().length === 0 && (

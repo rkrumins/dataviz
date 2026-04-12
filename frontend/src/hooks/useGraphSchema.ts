@@ -53,6 +53,34 @@ async function fetchCachedSchema(
 }
 
 /**
+ * Fetch ontology metadata from the DB (zero provider dependency).
+ * Used as a last-resort fallback when cached-schema is empty and the active
+ * provider is scoped to a different workspace. If the data source has an
+ * ontology assigned, this returns enough to bootstrap the schema store.
+ */
+async function fetchCachedOntologyAsSchema(
+  workspaceId: string,
+  dataSourceId: string,
+): Promise<GraphSchema | null> {
+  try {
+    const res = await fetchWithTimeout(
+      `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-ontology`,
+    )
+    if (!res.ok) return null
+    const ontology = await res.json()
+    // Wrap the ontology metadata into a GraphSchema-shaped envelope so
+    // useSchemaStore.loadFromBackend can consume it.
+    return {
+      entityTypes: ontology?.entityTypes ?? [],
+      relationshipTypes: ontology?.relationshipTypes ?? [],
+      ontology,
+    } as unknown as GraphSchema
+  } catch {
+    return null
+  }
+}
+
+/**
  * Scope-aware schema fetch. The hook short-circuits (`enabled: false`) when
  * workspaceId/dataSourceId are not set, so this function can assume both are
  * present by the time it runs.
@@ -76,10 +104,24 @@ async function fetchGraphSchema(
     return provider.getFullSchema()
   }
 
-  // 3. No cached schema for this scope and no matching provider — fail loudly
-  //    so <SchemaScope> can render its error UI. The admin cached-schema
-  //    endpoint is the contract for cross-workspace reads; if it's empty, we
-  //    have no safe path to the non-active workspace's schema.
+  // 3. Try the cached-ontology endpoint as a last resort. If the data source
+  //    has an ontology assigned, this builds a minimal but valid schema from
+  //    the ontology definition alone — no provider needed. This enables
+  //    cross-workspace view creation even when the stats poller hasn't cached
+  //    the schema yet.
+  const ontologySchema = await fetchCachedOntologyAsSchema(workspaceId, dataSourceId)
+  if (ontologySchema) {
+    return ontologySchema
+  }
+
+  // 4. Accept a cached schema even with zero entity types — some data sources
+  //    legitimately have empty schemas (e.g. before ontology assignment).
+  if (cached) {
+    return cached
+  }
+
+  // 5. No cached schema, no ontology, no matching provider — fail loudly
+  //    so <SchemaScope> can render its error UI.
   throw new Error(
     `Graph schema unavailable for workspace="${workspaceId}" dataSource="${dataSourceId}": ` +
       `no cached schema and the active graph provider is scoped to a different workspace.`,
