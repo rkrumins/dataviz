@@ -1,12 +1,10 @@
 /**
  * View page: /views/:viewId
  *
- * Uses the central useViewNavigation() hook to orchestrate the full
- * navigation pipeline:
- *   resolve view → switch scope → wait for provider → wait for schema → activate
- *
- * CanvasRouter is ALWAYS mounted once the view is ready so ReactFlow
- * never loses state during view navigation.
+ * Uses the simplified useViewNavigation() hook to resolve the view, then
+ * wraps the canvas in a ViewExecutionProvider that creates an isolated
+ * execution context (provider + schema) scoped to the view's workspace
+ * and data source. No global workspace mutation occurs.
  */
 import { useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
@@ -14,10 +12,11 @@ import { Loader2, AlertTriangle } from 'lucide-react'
 import { CanvasRouter } from '@/components/canvas/CanvasRouter'
 import { useViewNavigation } from '@/hooks/useViewNavigation'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { ViewExecutionProvider } from '@/providers/ViewExecutionContext'
 
 export function ViewPage() {
   const { viewId } = useParams<{ viewId: string }>()
-  const { status, view, layoutType, error } = useViewNavigation(viewId)
+  const { status, view, layoutType, error, viewWorkspaceId, viewDataSourceId } = useViewNavigation(viewId)
   const workspaces = useWorkspacesStore(s => s.workspaces)
 
   // Lightweight health check for the active view
@@ -57,7 +56,7 @@ export function ViewPage() {
     )
   }
 
-  // ─── Ready state — render canvas ────────────────────────────────────
+  // ─── Ready state — render canvas in a view-scoped execution context ──
   return (
     <div className="absolute inset-0">
       {/* View name badge */}
@@ -95,22 +94,26 @@ export function ViewPage() {
         </div>
       )}
 
-      {/* Canvas is mounted once we reach 'ready' status.
-          layoutType is passed directly from the navigation pipeline so the
-          correct canvas renders even when the schema store's activeViewId
-          races with loadFromBackend during cross-workspace transitions. */}
-      {status === 'ready' && <CanvasRouter layoutType={layoutType} />}
+      {/* Canvas wrapped in view-scoped execution context.
+          ViewExecutionProvider creates an isolated provider + schema for the
+          view's workspace/datasource. All downstream hooks (useGraphProvider,
+          useGraphHydration, useViewEntityTypes, etc.) receive view-scoped data.
+          No global workspace mutation occurs. */}
+      {status === 'ready' && viewWorkspaceId && (
+        <ViewExecutionProvider
+          workspaceId={viewWorkspaceId}
+          dataSourceId={viewDataSourceId}
+        >
+          <CanvasRouter layoutType={layoutType} />
+        </ViewExecutionProvider>
+      )}
 
-      {/* Loading overlays for in-progress states */}
-      {(status === 'resolving' || status === 'scope-switching' || status === 'loading-schema') && (
+      {/* Loading overlay */}
+      {status === 'resolving' && (
         <div className="absolute inset-0 flex items-center justify-center bg-canvas/60 backdrop-blur-sm z-10">
           <div className="flex flex-col items-center gap-3">
             <Loader2 className="w-8 h-8 animate-spin text-accent-lineage" />
-            <div className="text-sm text-ink-secondary">
-              {status === 'resolving' && 'Loading view...'}
-              {status === 'scope-switching' && 'Switching workspace...'}
-              {status === 'loading-schema' && 'Loading schema...'}
-            </div>
+            <div className="text-sm text-ink-secondary">Loading view...</div>
           </div>
         </div>
       )}

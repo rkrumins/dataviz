@@ -208,6 +208,31 @@ export function GraphProvider({ children }: GraphProviderProps) {
 }
 
 // ============================================
+// Provider Override (for view-scoped contexts)
+// ============================================
+
+interface ProviderOverrideProps {
+    value: GraphProviderContextValueExtended
+    children: ReactNode
+}
+
+/**
+ * Override the graph provider context for a subtree.
+ *
+ * Used by ViewExecutionContext to provide a view-scoped provider so all
+ * downstream hooks (useGraphProvider, useGraphProviderContext, useGraphHydration)
+ * receive a provider scoped to the view's workspace/datasource — without
+ * changing the global active workspace.
+ */
+export function ProviderOverride({ value, children }: ProviderOverrideProps) {
+    return (
+        <GraphProviderContext.Provider value={value}>
+            {children}
+        </GraphProviderContext.Provider>
+    )
+}
+
+// ============================================
 // Hook
 // ============================================
 

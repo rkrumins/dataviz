@@ -47,12 +47,10 @@ import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 // Stores
 import {
   useSchemaStore,
-  useContainmentEdgeTypes,
-  useIsContainmentEdge,
-  useRelationshipTypes,
   normalizeEdgeType,
   useEdgeTypeMetadataMap,
 } from '@/store/schema'
+import { useViewContainmentEdgeTypes, useViewIsContainmentEdge, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
 
@@ -113,9 +111,9 @@ export function LayeredLineageCanvas({
 
   // ── Schema / ontology ─────────────────────────────────────────────────
   const schema = useSchemaStore((s) => s.schema)
-  const containmentEdgeTypes = useContainmentEdgeTypes()
-  const isContainmentEdge = useIsContainmentEdge()
-  const relationshipTypes = useRelationshipTypes()
+  const containmentEdgeTypes = useViewContainmentEdgeTypes()
+  const isContainmentEdge = useViewIsContainmentEdge()
+  const relationshipTypes = useViewRelationshipTypes()
   const edgeTypeMetadata = useEdgeTypeMetadataMap()
   const { showMinimap, showGrid } = usePreferencesStore()
 

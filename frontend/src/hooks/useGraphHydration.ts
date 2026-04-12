@@ -2,15 +2,17 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import {
-    useContainmentEdgeTypes,
-    useLineageEdgeTypes,
-    useRootEntityTypes,
-    useEntityTypes,
-    useSchemaIsLoading,
     useActiveView,
     isContainmentEdgeType,
     normalizeEdgeType,
 } from '@/store/schema'
+import {
+    useViewContainmentEdgeTypes,
+    useViewLineageEdgeTypes,
+    useViewRootEntityTypes,
+    useViewEntityTypes,
+    useViewSchemaIsReady,
+} from '@/hooks/useViewSchema'
 import type { GraphNode, GraphEdge, EntityTypeDefinition } from '@/providers/GraphDataProvider'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -126,12 +128,12 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const enableHydration = options?.hydrate ?? false
 
     const provider = useGraphProvider()
-    const { workspaceId: ctxWorkspaceId, dataSourceId: ctxDataSourceId, providerVersion } = useGraphProviderContext()
-    const containmentEdgeTypes = useContainmentEdgeTypes()
-    const lineageEdgeTypes = useLineageEdgeTypes()
-    const rootEntityTypes = useRootEntityTypes()
-    const schemaEntityTypes = useEntityTypes()
-    const isSchemaLoading = useSchemaIsLoading()
+    const { providerVersion } = useGraphProviderContext()
+    const containmentEdgeTypes = useViewContainmentEdgeTypes()
+    const lineageEdgeTypes = useViewLineageEdgeTypes()
+    const rootEntityTypes = useViewRootEntityTypes()
+    const schemaEntityTypes = useViewEntityTypes()
+    const isSchemaReady = useViewSchemaIsReady()
     const activeView = useActiveView()
 
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
@@ -167,15 +169,19 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
     useEffect(() => {
         if (!enableHydration) return
-        if (isSchemaLoading) return
+        // Inside ViewExecutionProvider, isSchemaReady is always true because
+        // the provider gates children behind schema readiness. Outside (legacy),
+        // it reflects the global schema loading state.
+        if (!isSchemaReady) return
 
         const layoutType = activeView?.layout.type ?? 'graph'
         const isReferenceView = layoutType === 'reference'
 
-        // Key on workspace, datasource, view ID, AND providerVersion so switching
-        // any dimension triggers re-hydration. providerVersion ensures we re-hydrate
-        // even if workspace/datasource IDs haven't changed (e.g. provider reconnect).
-        const initKey = `${ctxWorkspaceId ?? ''}:${ctxDataSourceId ?? ''}:${activeView?.id ?? 'default'}:${layoutType}:${providerVersion}`
+        // Key on providerVersion + view ID + layout type. The provider IS the
+        // scope (its wsId/dsId are fixed at construction), so we don't need to
+        // include workspace/datasource IDs in the key — changing the view's
+        // scope changes the provider, which changes providerVersion.
+        const initKey = `${providerVersion}:${activeView?.id ?? 'default'}:${layoutType}`
 
         if (initializedKeyRef.current === initKey) return
         initializedKeyRef.current = initKey
@@ -424,7 +430,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootEntityTypes, schemaEntityTypes, isSchemaLoading])
+    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootEntityTypes, schemaEntityTypes, isSchemaReady])
 
     // ─── loadChildren ───────────────────────────────────────────────────
 
@@ -434,7 +440,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         // ── Handle root loading (empty parentId) ────────────────────
         if (!parentId) {
             if (loadingNodes.has('ROOT')) return
-            if (isSchemaLoading) return
+            if (!isSchemaReady) return
 
             const typesToLoad = rootEntityTypes
 
@@ -549,7 +555,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 return next
             })
         }
-    }, [provider, containmentEdgeTypes, lineageEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaLoading, loadingNodes])
+    }, [provider, containmentEdgeTypes, lineageEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaReady, loadingNodes])
 
     // ─── searchChildren ─────────────────────────────────────────────────
 

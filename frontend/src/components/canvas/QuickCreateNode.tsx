@@ -12,7 +12,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useSchemaStore, useEntityTypes } from '@/store/schema'
+import { useViewEntityTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { EntityTypeSchema } from '@/types/schema'
@@ -54,7 +54,7 @@ export function QuickCreateNode({
     
     const provider = useGraphProvider()
     const { addNodes, addEdges } = useCanvasStore()
-    const entityTypes = useEntityTypes()
+    const entityTypes = useViewEntityTypes()
     
     // State
     const [step, setStep] = useState<'type' | 'name'>('type')
