@@ -1409,6 +1409,40 @@ class FalkorDBProvider(GraphDataProvider):
 
         logger.info(f"Invalidated ancestor cache for {len(visited)} nodes under {urn}")
 
+    async def purge_aggregated_edges(self) -> int:
+        """Remove ALL materialized AGGREGATED edges from the graph."""
+        await self._ensure_connected()
+        proj = self._proj
+        try:
+            result = await proj.query(
+                "MATCH ()-[r:AGGREGATED]->() "
+                "WITH r LIMIT 100000 "
+                "DELETE r "
+                "RETURN count(r) as deleted"
+            )
+            deleted = result.result_set[0][0] if result.result_set else 0
+
+            # Clean up Redis tracking keys for this graph
+            pattern = f"{self._graph_name}:agg:sourceEdgeIds:*"
+            cursor = 0
+            cleaned = 0
+            while True:
+                cursor, keys = await self._redis.scan(cursor, match=pattern, count=500)
+                if keys:
+                    await self._redis.delete(*keys)
+                    cleaned += len(keys)
+                if cursor == 0:
+                    break
+
+            logger.info(
+                "Purged %d AGGREGATED edges and %d Redis tracking keys from %s",
+                deleted, cleaned, self._graph_name,
+            )
+            return deleted
+        except Exception as e:
+            logger.error("Failed to purge AGGREGATED edges: %s", e)
+            raise
+
     async def materialize_lineage_for_edge(
         self,
         source_urn: str,

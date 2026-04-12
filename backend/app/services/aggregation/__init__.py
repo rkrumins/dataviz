@@ -27,6 +27,7 @@ from .schemas import (
     AggregationSkipRequest,
     AggregationScheduleRequest,
     AggregationJobResponse,
+    PaginatedJobsResponse,
     DataSourceReadinessResponse,
     DriftCheckResponse,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "AggregationSkipRequest",
     "AggregationScheduleRequest",
     "AggregationJobResponse",
+    "PaginatedJobsResponse",
     "DataSourceReadinessResponse",
     "DriftCheckResponse",
 ]
