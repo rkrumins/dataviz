@@ -41,6 +41,7 @@ import {
 import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useViewFacets } from '@/hooks/useViewFacets'
+import { avatarPaletteFor, initialsOf } from '@/lib/avatar'
 import { FilterDropdown, type FilterOption } from './FilterDropdown'
 
 /* ------------------------------------------------------------------ */
@@ -193,8 +194,14 @@ export function ExplorerFilterBar({
     () => facets.creators.map(c => ({
       id: c.userId,
       label: c.displayName,
-      sublabel: c.email ?? `${c.count} view${c.count !== 1 ? 's' : ''}`,
+      sublabel: c.email ?? undefined,
     })),
+    [facets.creators],
+  )
+
+  /** Fast lookup from userId → full facet row for the custom option renderer. */
+  const creatorById = useMemo(
+    () => new Map(facets.creators.map(c => [c.userId, c])),
     [facets.creators],
   )
 
@@ -421,7 +428,10 @@ export function ExplorerFilterBar({
           emptyMessage="No tags yet"
         />
 
-        {/* Creator — multi-select + search */}
+        {/* Creator — multi-select + search, rendered with avatar + name +
+            email + view-count pill so users can visually pick from a roster
+            rather than scanning plain-text rows. Mirrors the hover card
+            treatment for continuity. */}
         <FilterDropdown
           icon={UserCircle}
           label="Creator"
@@ -430,6 +440,60 @@ export function ExplorerFilterBar({
           selectedIds={creatorIds}
           onChange={onCreatorIdsChange}
           emptyMessage="No creators yet"
+          searchPlaceholder="Search creators..."
+          panelWidthClassName="w-80"
+          activeLabelFormatter={(ids, opts) => {
+            if (ids.length === 1) {
+              const match = opts.find(o => o.id === ids[0])
+              // Truncate very long names so the trigger button stays compact.
+              const name = match?.label ?? ids[0]
+              return name.length > 18 ? `${name.slice(0, 17)}…` : name
+            }
+            return `${ids.length} creators`
+          }}
+          renderOption={(opt, { isSelected }) => {
+            const creator = creatorById.get(opt.id)
+            const displayName = creator?.displayName ?? opt.label
+            const email = creator?.email
+            const count = creator?.count ?? 0
+            const palette = avatarPaletteFor(opt.id)
+            return (
+              <div className="flex items-center gap-3 px-3 py-2">
+                <div
+                  className={cn(
+                    'w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0',
+                    'transition-all duration-150',
+                    palette.bg,
+                    palette.text,
+                    isSelected && cn('ring-2 ring-offset-1 ring-offset-canvas', palette.ring),
+                  )}
+                >
+                  {initialsOf(displayName)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className={cn(
+                    'text-xs truncate',
+                    isSelected ? 'font-semibold text-ink' : 'font-medium text-ink',
+                  )}>
+                    {displayName}
+                  </div>
+                  {email && (
+                    <div className="text-[10px] text-ink-muted/70 truncate">
+                      {email}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className="inline-flex items-center rounded-full bg-black/[0.04] dark:bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-medium text-ink-muted/80">
+                    {count}
+                  </span>
+                  {isSelected && (
+                    <Check className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                  )}
+                </div>
+              </div>
+            )
+          }}
         />
       </div>
 

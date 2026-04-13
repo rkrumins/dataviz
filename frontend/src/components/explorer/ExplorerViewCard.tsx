@@ -476,7 +476,7 @@ export function ExplorerViewCard({
                 userId={view.createdBy ?? null}
                 displayName={view.createdByName ?? null}
                 email={view.createdByEmail ?? null}
-                accentClassName={cn(meta.iconBg, meta.text)}
+                accentClassName={meta.iconBg}
               >
                 <div
                   className={cn(
