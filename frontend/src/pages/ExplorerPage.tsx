@@ -58,6 +58,16 @@ const STAGGER_STYLE = `
   to { opacity: 1; transform: translateY(0); }
 }
 .card-stagger { animation: card-in 0.3s ease-out both; }
+
+/* Typewriter caret: hard on/off blink using steps(), so the cursor
+   feels like a proper terminal cursor rather than a smeared fade. */
+@keyframes typewriter-caret-blink {
+  0%, 49.99% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.typewriter-caret-blink {
+  animation: typewriter-caret-blink 1.05s steps(1, end) infinite;
+}
 `
 
 // ─── URL Param Helpers ──────────────────────────────────────────────────────
@@ -110,7 +120,7 @@ export function ExplorerPage() {
     'a creator name or email…',
     'views in a specific data source…',
   ], [])
-  const typewriterText = useTypewriter({
+  const typewriter = useTypewriter({
     phrases: placeholderPhrases,
     enabled: !searchFocused && !searchInput,
   })
@@ -484,8 +494,16 @@ export function ExplorerPage() {
                   className="pointer-events-none absolute inset-0 px-3 py-2.5 flex items-center text-sm font-medium text-ink-muted/60 overflow-hidden whitespace-nowrap"
                 >
                   <span>Search </span>
-                  <span className="ml-1">{typewriterText}</span>
-                  <span className="ml-[1px] inline-block w-[2px] h-[1em] translate-y-[1px] bg-ink-muted/50 animate-pulse" />
+                  <span className="ml-1">{typewriter.text}</span>
+                  {/* Caret is solid while keys are flying; blinks with
+                      crisp step() timing only when the text is sitting
+                      still. Matches the feel of a terminal prompt. */}
+                  <span
+                    className={cn(
+                      'ml-[2px] inline-block w-[2px] h-[1.1em] translate-y-[1px] bg-accent-lineage/70 rounded-[1px]',
+                      !typewriter.isActive && 'typewriter-caret-blink',
+                    )}
+                  />
                 </div>
               )}
             </div>
