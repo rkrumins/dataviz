@@ -1,14 +1,15 @@
 /**
- * AdminWorkspaceDetail — single workspace detail view at /admin/workspaces/:wsId.
+ * WorkspaceDetailPage — single workspace detail view at /workspaces/:wsId.
  * Modern tabbed dashboard with hero header, data source grid, views,
- * aggregation, and ontology sections.
+ * aggregation, and ontology sections. Also hosts the "Open Canvas" CTA
+ * that launches the workspace canvas view.
  */
 import { useState, useEffect, useMemo } from 'react'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
     ChevronLeft, Plus, Database, Loader2, Settings2, X, Save,
-    Trash2, GitBranch, Eye, Info, Compass, HelpCircle,
+    Trash2, GitBranch, Eye, Info, Compass, HelpCircle, Play,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { ShieldAlert } from 'lucide-react'
@@ -17,14 +18,14 @@ import { workspaceService, type DataSourceResponse, type WorkspaceDataSourceImpa
 import { aggregationService } from '@/services/aggregationService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { useToast } from '@/components/ui/toast'
-import { AdminWizard, type WizardStep } from './AdminWizard'
-import { useWorkspaceDetailData } from './workspace/useWorkspaceDetailData'
-import { WorkspaceHeroHeader } from './workspace/WorkspaceHeroHeader'
-import { DataSourceGridCard } from './workspace/DataSourceGridCard'
-import { DataSourceDetailPanel } from './workspace/DataSourceDetailPanel'
-import WorkspaceViewsSection from './workspace/WorkspaceViewsSection'
-import { WorkspaceAggregationDashboard } from './workspace/WorkspaceAggregationDashboard'
-import { WorkspaceOntologyTimeline } from './workspace/WorkspaceOntologyTimeline'
+import { AdminWizard, type WizardStep } from '@/components/admin/AdminWizard'
+import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspaceDetailData'
+import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
+import { DataSourceGridCard } from '@/components/admin/workspace/DataSourceGridCard'
+import { DataSourceDetailPanel } from '@/components/admin/workspace/DataSourceDetailPanel'
+import WorkspaceViewsSection from '@/components/admin/workspace/WorkspaceViewsSection'
+import { WorkspaceAggregationDashboard } from '@/components/admin/workspace/WorkspaceAggregationDashboard'
+import { WorkspaceOntologyTimeline } from '@/components/admin/workspace/WorkspaceOntologyTimeline'
 
 // ─────────────────────────────────────────────────────────────────────
 // Edit Data Source Modal
@@ -80,10 +81,10 @@ function EditDsModal({ ds, ontologies, onSave, onClose }: {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// AdminWorkspaceDetail
+// WorkspaceDetailPage
 // ─────────────────────────────────────────────────────────────────────
 
-export function AdminWorkspaceDetail() {
+export function WorkspaceDetailPage() {
     const { wsId } = useParams<{ wsId: string }>()
     const navigate = useNavigate()
     const { showToast } = useToast()
@@ -125,6 +126,11 @@ export function AdminWorkspaceDetail() {
             setEditName(workspace.name)
             setEditDesc(workspace.description || '')
         }
+    }, [workspace])
+
+    // ── Document title ────────────────────────────────────
+    useEffect(() => {
+        document.title = workspace ? `${workspace.name} · Workspaces` : 'Workspace · Synodic'
     }, [workspace])
 
     // ── Derived data ───────────────────────────────────────
@@ -323,17 +329,29 @@ export function AdminWorkspaceDetail() {
         return (
             <div className="flex flex-col items-center justify-center h-full">
                 <p className="text-ink-muted">Workspace not found.</p>
-                <button onClick={() => navigate('/admin/registry?tab=workspaces')} className="mt-4 text-indigo-500 hover:underline text-sm">&larr; Back to Workspaces</button>
+                <button onClick={() => navigate('/workspaces')} className="mt-4 text-indigo-500 hover:underline text-sm">&larr; Back to Workspaces</button>
             </div>
         )
     }
 
     return (
-        <div className="p-8 max-w-5xl mx-auto">
-            {/* Back */}
-            <button onClick={() => navigate('/admin/registry?tab=workspaces')} className="flex items-center gap-1.5 text-sm text-ink-muted hover:text-ink transition-colors mb-6">
-                <ChevronLeft className="w-4 h-4" /> Back to Workspaces
-            </button>
+        <div className="p-8 max-w-5xl mx-auto animate-in fade-in duration-500">
+            {/* Breadcrumb + primary action */}
+            <div className="flex items-center justify-between mb-6">
+                <nav aria-label="Breadcrumb" className="flex items-center gap-2 text-sm">
+                    <Link to="/workspaces" className="flex items-center gap-1.5 text-ink-muted hover:text-ink transition-colors">
+                        <ChevronLeft className="w-4 h-4" /> Workspaces
+                    </Link>
+                    <span className="text-ink-muted/60">/</span>
+                    <span className="font-medium text-ink truncate max-w-[32ch]" title={workspace.name}>{workspace.name}</span>
+                </nav>
+                <button
+                    onClick={() => navigate(`/workspaces/${wsId}/canvas`)}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                >
+                    <Play className="w-3.5 h-3.5 fill-current" /> Open Canvas
+                </button>
+            </div>
 
             {/* Hero Header */}
             <WorkspaceHeroHeader
@@ -363,7 +381,7 @@ export function AdminWorkspaceDetail() {
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-ink-muted border border-glass-border hover:text-violet-500 hover:border-violet-500/20 hover:bg-violet-500/5 transition-colors">
                     <GitBranch className="w-3 h-3" /> Schema Editor
                 </Link>
-                <Link to="/admin/registry?tab=jobs"
+                <Link to="/ingestion?tab=jobs"
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-ink-muted border border-glass-border hover:text-emerald-500 hover:border-emerald-500/20 hover:bg-emerald-500/5 transition-colors">
                     <Settings2 className="w-3 h-3" /> Global Jobs
                 </Link>
