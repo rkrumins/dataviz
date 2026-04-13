@@ -3,11 +3,12 @@
  *
  * Presents two options: "In-Source" (write aggregated edges back to the
  * physical graph) or "Dedicated Graph" (sync to a separate cache graph).
- * Each option lists pros and cons to help the user decide.
+ * Each option lists pros and cons. Includes reference to the Admin Console
+ * Jobs dashboard for monitoring progress post-onboarding.
  */
 
 import { motion } from 'framer-motion'
-import { Settings, Check, AlertTriangle } from 'lucide-react'
+import { Settings, Check, AlertTriangle, Clock, Loader2, CheckCircle2, Activity } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OnboardingFormData } from '../AssetOnboardingWizard'
 
@@ -161,24 +162,60 @@ export function AggregationStep({ formData, updateFormData }: AggregationStepPro
                     )
                 })}
             </div>
-            
-            {/* Info Banner */}
+
+            {/* Background Aggregation Info */}
             <motion.div
                 initial={{ opacity: 0, y: 15 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.25 }}
-                className="mt-4 px-4 py-3 rounded-xl border border-indigo-500/20 bg-indigo-500/5 flex items-start gap-3"
+                className="mt-4 rounded-xl border border-indigo-500/20 bg-indigo-500/5 overflow-hidden"
             >
-                <div className="w-8 h-8 rounded-lg bg-indigo-500/10 flex items-center justify-center shrink-0 mt-0.5">
-                    <Settings className="w-4 h-4 text-indigo-500" />
+                {/* Section 1 — What happens */}
+                <div className="px-4 py-3 flex items-start gap-3">
+                    <div className="w-8 h-8 rounded-lg bg-indigo-500/10 flex items-center justify-center shrink-0 mt-0.5">
+                        <Settings className="w-4 h-4 text-indigo-500" />
+                    </div>
+                    <div>
+                        <h4 className="text-sm font-semibold text-ink">Background Aggregation</h4>
+                        <p className="text-xs text-ink-muted mt-0.5 leading-relaxed">
+                            Graph aggregation pre-computes hierarchical topology to optimize deep graph queries.
+                            This process runs safely in the background after onboarding completes.
+                            You'll be able to create Views once aggregation reaches 100%.
+                        </p>
+                    </div>
                 </div>
-                <div>
-                    <h4 className="text-sm font-semibold text-ink">Background Aggregation</h4>
-                    <p className="text-xs text-ink-muted mt-0.5 leading-relaxed">
-                        Graph aggregation pre-computes hierarchical topology to optimize deep graph queries. 
-                        This process runs safely in the background after onboarding completes. 
-                        You'll be able to track progress in the Explorer View and create Views once readiness reaches 100%.
-                    </p>
+
+                {/* Divider */}
+                <div className="h-px bg-indigo-500/10 mx-4" />
+
+                {/* Section 2 — Track Progress */}
+                <div className="px-4 py-3 flex items-start gap-3">
+                    <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center shrink-0 mt-0.5">
+                        <Activity className="w-4 h-4 text-violet-500" />
+                    </div>
+                    <div>
+                        <h4 className="text-sm font-semibold text-ink">Track Progress</h4>
+                        <p className="text-xs text-ink-muted mt-0.5 leading-relaxed">
+                            Monitor aggregation in detail from the <strong className="text-ink-secondary">Admin Console &gt; Jobs</strong> dashboard.
+                            Per-source progress is also visible in each Data Source's detail panel.
+                        </p>
+
+                        {/* Mini status pill preview */}
+                        <div className="flex items-center gap-3 mt-2.5">
+                            <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/20">
+                                <Clock className="w-3 h-3 text-amber-500" />
+                                <span className="text-[10px] font-semibold text-amber-500">Pending</span>
+                            </div>
+                            <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20">
+                                <Loader2 className="w-3 h-3 text-indigo-500 animate-spin" />
+                                <span className="text-[10px] font-semibold text-indigo-500">Running</span>
+                            </div>
+                            <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                                <span className="text-[10px] font-semibold text-emerald-500">Completed</span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </motion.div>
         </div>
