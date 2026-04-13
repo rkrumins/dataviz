@@ -309,7 +309,7 @@ function ScopeBanners({ ds, schemaAvailability }: { ds: DataSourceResponse | nul
                             You can still proceed.
                         </p>
                         <a
-                            href={`/admin/registry?tab=workspaces&ws=${ds.workspaceId}`}
+                            href={`/workspaces/${ds.workspaceId}`}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="inline-flex items-center gap-1 mt-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 transition-colors"
@@ -381,7 +381,7 @@ function NoWorkspacesState() {
                 Create a workspace with at least one data source to start building views.
             </p>
             <a
-                href="/admin/registry?tab=workspaces"
+                href="/workspaces"
                 className="mt-3 text-xs font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 transition-colors"
             >
                 Go to Workspace Settings

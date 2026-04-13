@@ -214,7 +214,7 @@ export function RegistryConnections() {
             setHealthMap(prev => ({ ...prev, [newlyCreated.id]: { status: health.success ? 'healthy' : 'unhealthy', latencyMs: health.latencyMs, error: health.error } }))
 
             if (health.success) {
-                navigate(`/admin/registry?tab=assets&provider=${newlyCreated.id}&onboarding=true`)
+                navigate(`/ingestion?tab=assets&provider=${newlyCreated.id}&onboarding=true`)
             }
         } catch (err) { console.error('Failed to create provider', err) }
         finally { setWizSubmitting(false) }
@@ -532,7 +532,7 @@ export function RegistryConnections() {
             ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {providers.map(p => (
-                        <ConnectionCard key={p.id} provider={p} health={healthMap[p.id] || { status: 'unknown' }} onTest={() => testProvider(p.id)} onEdit={() => handleEditProvider(p)} onDelete={() => handleDeleteClick(p)} onScan={() => navigate(`/admin/registry?tab=assets&provider=${p.id}`)} />
+                        <ConnectionCard key={p.id} provider={p} health={healthMap[p.id] || { status: 'unknown' }} onTest={() => testProvider(p.id)} onEdit={() => handleEditProvider(p)} onDelete={() => handleDeleteClick(p)} onScan={() => navigate(`/ingestion?tab=assets&provider=${p.id}`)} />
                     ))}
                 </div>
             )}

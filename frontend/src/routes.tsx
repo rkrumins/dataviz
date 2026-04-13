@@ -14,11 +14,12 @@ const WorkspaceViewsManager = lazy(() => import('@/pages/WorkspaceViewsManager')
 const ExplorerPage = lazy(() => import('@/pages/ExplorerPage').then(m => ({ default: m.ExplorerPage })))
 const AdminPage = lazy(() => import('@/pages/AdminPage').then(m => ({ default: m.AdminPage })))
 const AdminOverview = lazy(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
-const AdminRegistry = lazy(() => import('@/components/admin/AdminRegistry').then(m => ({ default: m.AdminRegistry })))
 const AdminFeatures = lazy(() => import('@/components/admin/AdminFeatures/index').then(m => ({ default: m.AdminFeatures })))
-const AdminWorkspaceDetail = lazy(() => import('@/components/admin/AdminWorkspaceDetail').then(m => ({ default: m.AdminWorkspaceDetail })))
 const AdminUsers = lazy(() => import('@/components/admin/AdminUsers').then(m => ({ default: m.AdminUsers })))
 const AdminAnnouncements = lazy(() => import('@/components/admin/AdminAnnouncements/index').then(m => ({ default: m.AdminAnnouncements })))
+const IngestionPage = lazy(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
+const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
+const WorkspaceDetailPage = lazy(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
 const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 
 // Auth pages (unauthenticated)
@@ -69,8 +70,15 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: 'dashboard', element: <Lazy><Dashboard /></Lazy> },
-      // CanvasLayout gates these routes behind a schema fetch so the heavy
-      // ontology data only loads when the user navigates to a canvas section.
+
+      // Top-level Ingestion (pipeline control plane: providers, assets, jobs)
+      { path: 'ingestion', element: <Lazy><IngestionPage /></Lazy> },
+
+      // Top-level Workspaces (listing + detail/management). The canvas lives
+      // one level deeper under /canvas — see the CanvasLayout block below.
+      { path: 'workspaces', element: <Lazy><WorkspacesPage /></Lazy> },
+      { path: 'workspaces/:wsId', element: <Lazy><WorkspaceDetailPage /></Lazy> },
+
       // Schema/Semantic Layer pages — independent of workspace context.
       // They manage global ontology resources and read data source context
       // from URL search params (?workspaceId=X&dataSourceId=Y).
@@ -84,7 +92,7 @@ export const router = createBrowserRouter([
           { path: 'explorer', element: <Lazy><ExplorerPage /></Lazy> },
           { path: 'views', element: <Lazy><ViewsGallery /></Lazy> },
           { path: 'views/:viewId', element: <Lazy><ViewPage /></Lazy> },
-          { path: 'workspaces/:workspaceId', element: <Lazy><WorkspaceView /></Lazy> },
+          { path: 'workspaces/:workspaceId/canvas', element: <Lazy><WorkspaceView /></Lazy> },
           { path: 'workspaces/:workspaceId/views', element: <Lazy><WorkspaceViewsManager /></Lazy> },
         ],
       },
@@ -94,11 +102,9 @@ export const router = createBrowserRouter([
         children: [
           { index: true, element: <Navigate to="overview" replace /> },
           { path: 'overview', element: <Lazy><AdminOverview /></Lazy> },
-          { path: 'registry', element: <Lazy><AdminRegistry /></Lazy> },
           { path: 'features', element: <Lazy><AdminFeatures /></Lazy> },
           { path: 'users', element: <Lazy><AdminUsers /></Lazy> },
           { path: 'announcements', element: <Lazy><AdminAnnouncements /></Lazy> },
-          { path: 'registry/workspaces/:wsId', element: <Lazy><AdminWorkspaceDetail /></Lazy> },
         ],
       },
       { path: '*', element: <NotFoundPage /> },

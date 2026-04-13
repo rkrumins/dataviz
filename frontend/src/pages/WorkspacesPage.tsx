@@ -11,13 +11,13 @@ import { catalogService, type CatalogItemResponse, type CatalogItemBindingRespon
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { Link } from 'react-router-dom'
-import { getProviderLogo } from './ProviderLogos'
-import { WorkspaceCard, type WsDataSourceProviderInfo, type WorkspaceSchemaSummary } from './WorkspaceCard'
-import { WorkspaceFilterToolbar, type WorkspaceSortKey, type HealthFilter } from './workspace/WorkspaceFilterToolbar'
-import { WorkspaceListRow } from './workspace/WorkspaceListRow'
-import { WorkspaceCardSkeleton, WorkspaceListRowSkeleton } from './workspace/WorkspaceCardSkeleton'
-import { deriveWorkspaceHealth } from './workspace/WorkspaceHealthBadge'
-import { AdminWizard, type WizardStep } from './AdminWizard'
+import { getProviderLogo } from '@/components/admin/ProviderLogos'
+import { WorkspaceCard, type WsDataSourceProviderInfo, type WorkspaceSchemaSummary } from '@/components/admin/WorkspaceCard'
+import { WorkspaceFilterToolbar, type WorkspaceSortKey, type HealthFilter } from '@/components/admin/workspace/WorkspaceFilterToolbar'
+import { WorkspaceListRow } from '@/components/admin/workspace/WorkspaceListRow'
+import { WorkspaceCardSkeleton, WorkspaceListRowSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
+import { deriveWorkspaceHealth } from '@/components/admin/workspace/WorkspaceHealthBadge'
+import { AdminWizard, type WizardStep } from '@/components/admin/AdminWizard'
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -32,9 +32,13 @@ function providerLabel(type: string): string {
     return type
 }
 
-export function RegistryWorkspaces() {
+export function WorkspacesPage() {
     const navigate = useNavigate()
     const [searchParams, setSearchParams] = useSearchParams()
+
+    useEffect(() => {
+        document.title = 'Workspaces · Synodic'
+    }, [])
 
     /* ── URL-synced state ── */
     const searchQuery = searchParams.get('q') || ''
@@ -47,7 +51,6 @@ export function RegistryWorkspaces() {
             const next = new URLSearchParams(prev)
             if (value === null || value === '') next.delete(key)
             else next.set(key, value)
-            // Preserve the tab param from parent AdminRegistry
             return next
         }, { replace: true })
     }, [setSearchParams])
@@ -86,7 +89,6 @@ export function RegistryWorkspaces() {
 
     /* ── Per-workspace provider info map ── */
     const wsProviderInfoMap = useMemo(() => {
-        // Build lookups
         const catMap: Record<string, CatalogItemResponse> = {}
         for (const c of catalogItems) catMap[c.id] = c
         const provMap: Record<string, ProviderResponse> = {}
@@ -125,7 +127,6 @@ export function RegistryWorkspaces() {
         for (const ws of workspaces) {
             const infos = wsProviderInfoMap[ws.id] || []
 
-            // Deduplicate entity/relationship type names across all DS in this workspace
             const entitySet = new Set<string>()
             const relSet = new Set<string>()
             const ontoSet = new Set<string>()
@@ -163,7 +164,6 @@ export function RegistryWorkspaces() {
     const globalSummary = useMemo(() => {
         let totalDs = 0, totalNodes = 0, totalEdges = 0
         const providerCounts: Record<string, number> = {}
-        // Deduplicate globally across ALL workspaces
         const allEntityTypes = new Set<string>()
         const allRelTypes = new Set<string>()
         const allOntologyNames = new Set<string>()
@@ -212,9 +212,6 @@ export function RegistryWorkspaces() {
             setProviders(provList)
             setOntologies(ontoList)
 
-            // Fetch views (fire-and-forget, used for summary banner + per-ws counts).
-            // Request a full page so per-workspace bucketing is accurate; the
-            // envelope's ``total`` is the authoritative count across all pages.
             listViews({ limit: 200 }).then(({ items, total }) => {
                 setTotalViews(total)
                 const byWs: Record<string, number> = {}
@@ -223,7 +220,6 @@ export function RegistryWorkspaces() {
             }).catch(() => {})
 
             const statsMap: Record<string, { nodes: number; edges: number; types: number }> = {}
-            // Fetch cached stats from management DB (no provider dependency) in parallel
             const statsPromises = wsList.map(async (ws) => {
                 let totalNodes = 0, totalEdges = 0, allTypes = new Set<string>()
                 const dsPromises = (ws.dataSources || []).map(async (ds) => {
@@ -337,18 +333,15 @@ export function RegistryWorkspaces() {
     const filtered = useMemo(() => {
         let result = workspaces
 
-        // Search filter
         if (searchQuery) {
             const q = searchQuery.toLowerCase()
             result = result.filter(ws => ws.name.toLowerCase().includes(q) || ws.description?.toLowerCase().includes(q))
         }
 
-        // Health filter
         if (healthFilter !== 'all') {
             result = result.filter(ws => deriveWorkspaceHealth(ws.dataSources || []) === healthFilter)
         }
 
-        // Sort
         result = [...result].sort((a, b) => {
             switch (sortKey) {
                 case 'newest': return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -364,9 +357,11 @@ export function RegistryWorkspaces() {
         return result
     }, [workspaces, searchQuery, healthFilter, sortKey, dsStats])
 
+    const showPipelineNudge = !isLoading && providers.length === 0
+
     /* ── Render ── */
     return (
-        <div className="space-y-6 animate-in fade-in duration-500">
+        <div className="p-8 max-w-7xl mx-auto space-y-6 animate-in fade-in duration-500">
             <style>{`
 @keyframes card-in {
     from { opacity: 0; transform: translateY(12px); }
@@ -378,13 +373,34 @@ export function RegistryWorkspaces() {
             {/* ── Header ── */}
             <div className="flex items-center justify-between">
                 <div>
-                    <h2 className="text-xl font-bold text-ink">Workspaces</h2>
-                    <p className="text-sm text-ink-muted mt-1">Your data domains — each workspace connects to graph databases and powers views for your team.</p>
+                    <h1 className="text-3xl font-bold tracking-tight text-ink">Workspaces</h1>
+                    <p className="text-sm text-ink-muted mt-2 max-w-2xl">
+                        Your data domains — group sources, govern schemas, and power team views.
+                    </p>
                 </div>
                 <button onClick={() => { resetWizard(); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
                     <Plus className="w-4 h-4" /> Create Workspace
                 </button>
             </div>
+
+            {/* Pipeline nudge when no providers exist */}
+            {showPipelineNudge && (
+                <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] p-4 flex items-start gap-3">
+                    <AlertTriangle className="w-5 h-5 text-amber-500 mt-0.5 shrink-0" />
+                    <div className="flex-1">
+                        <p className="text-sm font-semibold text-ink">No data sources connected yet</p>
+                        <p className="text-xs text-ink-muted mt-0.5">
+                            A workspace groups connected data sources. Set up your ingestion pipeline first, then create a workspace to use it.
+                        </p>
+                    </div>
+                    <Link
+                        to="/ingestion?tab=providers"
+                        className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-500 text-white text-xs font-semibold hover:bg-amber-600 transition-colors"
+                    >
+                        Set up Ingestion →
+                    </Link>
+                </div>
+            )}
 
             {/* ── Summary banner ── */}
             {!isLoading && workspaces.length > 0 && (
@@ -518,7 +534,6 @@ export function RegistryWorkspaces() {
 
             {/* Content */}
             {isLoading ? (
-                // Skeleton loading
                 layout === 'grid' ? (
                     <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
                         {Array.from({ length: 6 }).map((_, i) => <WorkspaceCardSkeleton key={i} />)}
@@ -529,14 +544,12 @@ export function RegistryWorkspaces() {
                     </div>
                 )
             ) : filtered.length === 0 ? (
-                // Empty state
                 <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed border-glass-border rounded-2xl">
                     <Database className="w-12 h-12 text-ink-muted mb-4" />
                     <h3 className="text-lg font-bold text-ink mb-1">{searchQuery ? 'No matching workspaces' : 'No workspaces yet'}</h3>
                     <p className="text-sm text-ink-muted">{searchQuery ? 'Try a different search term' : 'Create a workspace to get started'}</p>
                 </div>
             ) : layout === 'grid' ? (
-                // Grid layout
                 <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
                     {filtered.map((ws, i) => (
                         <div key={ws.id} className="ws-card-stagger" style={{ animationDelay: `${Math.min(i * 40, 300)}ms` }}>
@@ -547,7 +560,7 @@ export function RegistryWorkspaces() {
                                 healthStatus={deriveWorkspaceHealth(ws.dataSources || [])}
                                 dsProviders={wsProviderInfoMap[ws.id] || []}
                                 schemaSummary={wsSchemaSummaryMap[ws.id] || { uniqueEntityTypes: 0, uniqueRelationshipTypes: 0, ontologyNames: [], providerGroups: [], viewCount: 0 }}
-                                onOpen={() => navigate(`/admin/registry/workspaces/${ws.id}`)}
+                                onOpen={() => navigate(`/workspaces/${ws.id}`)}
                                 onDelete={() => handleDelete(ws.id)}
                                 onSetDefault={() => handleSetDefault(ws.id)}
                             />
@@ -555,7 +568,6 @@ export function RegistryWorkspaces() {
                     ))}
                 </div>
             ) : (
-                // List layout
                 <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
                     <div className="grid grid-cols-[16px_32px_minmax(0,2fr)_100px_70px_80px_80px_60px_90px_72px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
                         <span></span><span></span><span>Name</span><span>Providers</span><span>Sources</span><span>Nodes</span><span>Edges</span><span>Types</span><span>Updated</span><span></span>
@@ -568,7 +580,7 @@ export function RegistryWorkspaces() {
                             stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
                             healthStatus={deriveWorkspaceHealth(ws.dataSources || [])}
                             dsProviders={wsProviderInfoMap[ws.id] || []}
-                            onOpen={() => navigate(`/admin/registry/workspaces/${ws.id}`)}
+                            onOpen={() => navigate(`/workspaces/${ws.id}`)}
                             onDelete={() => handleDelete(ws.id)}
                             onSetDefault={() => handleSetDefault(ws.id)}
                         />

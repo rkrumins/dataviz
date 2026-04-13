@@ -388,13 +388,13 @@ export function AssetOnboardingWizard({
                 navigate(`/schema?workspaceId=${createdContext?.wsId}&dataSourceId=${createdContext?.dsId}`)
                 break
             case 'aggregation-jobs':
-                navigate('/admin/registry?tab=jobs')
+                navigate('/ingestion?tab=jobs')
                 break
             case 'configure-more':
-                navigate('/admin/registry?tab=assets')
+                navigate('/ingestion?tab=assets')
                 break
             case 'workspaces':
-                navigate('/admin/registry?tab=workspaces')
+                navigate('/workspaces')
                 break
             case 'dismiss':
                 // Stay on current page — just close
