@@ -1,25 +1,29 @@
 /**
  * AdminWorkspaceDetail — single workspace detail view at /admin/workspaces/:wsId.
- * Full CRUD for workspace properties and data sources, with scoped views.
+ * Modern tabbed dashboard with hero header, data source grid, views,
+ * aggregation, and ontology sections.
  */
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
-    ChevronLeft, Plus, Database, Edit2,
-    Loader2, Settings, X, Save,
-    Tag, Trash2, GitBranch,
+    ChevronLeft, Plus, Database, Loader2, Settings2, X, Save,
+    Trash2, GitBranch, Eye,
 } from 'lucide-react'
 import { ShieldAlert } from 'lucide-react'
-import { workspaceService, type WorkspaceResponse, type DataSourceResponse, type WorkspaceDataSourceImpactResponse } from '@/services/workspaceService'
-import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
-import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
-import type { DataSourceStats } from '@/hooks/useDashboardData'
-import { useSchemaViews } from '@/store/schema'
+import { cn } from '@/lib/utils'
+import { workspaceService, type DataSourceResponse, type WorkspaceDataSourceImpactResponse } from '@/services/workspaceService'
 import { aggregationService } from '@/services/aggregationService'
+import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { useToast } from '@/components/ui/toast'
-import { DataSourceCard } from './DataSourceCard'
 import { AdminWizard, type WizardStep } from './AdminWizard'
+import { useWorkspaceDetailData } from './workspace/useWorkspaceDetailData'
+import { WorkspaceHeroHeader } from './workspace/WorkspaceHeroHeader'
+import { DataSourceGridCard } from './workspace/DataSourceGridCard'
+import { DataSourceDetailPanel } from './workspace/DataSourceDetailPanel'
+import WorkspaceViewsSection from './workspace/WorkspaceViewsSection'
+import { WorkspaceAggregationDashboard } from './workspace/WorkspaceAggregationDashboard'
+import { WorkspaceOntologyTimeline } from './workspace/WorkspaceOntologyTimeline'
 
 // ─────────────────────────────────────────────────────────────────────
 // Edit Data Source Modal
@@ -81,84 +85,54 @@ function EditDsModal({ ds, ontologies, onSave, onClose }: {
 export function AdminWorkspaceDetail() {
     const { wsId } = useParams<{ wsId: string }>()
     const navigate = useNavigate()
-    const allViews = useSchemaViews()
     const { showToast } = useToast()
 
-    const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null)
-    const [catalogItems, setCatalogItems] = useState<CatalogItemResponse[]>([])
-    const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
-    const [dsStatsMap, setDsStatsMap] = useState<Record<string, DataSourceStats>>({})
-    const [isLoading, setIsLoading] = useState(true)
+    // ── Data fetching via custom hook ──────────────────────
+    const {
+        workspace, catalogItems, ontologies, ontologyMap, dsStatsMap,
+        viewsByDs, allWorkspaceViews, readinessMap, healthStatus,
+        aggregateStats, isLoading, reload
+    } = useWorkspaceDetailData(wsId)
 
-    // Edit workspace state
+    // ── Edit header state ──────────────────────────────────
     const [editingHeader, setEditingHeader] = useState(false)
     const [editName, setEditName] = useState('')
     const [editDesc, setEditDesc] = useState('')
 
-    // Add DS wizard
+    // ── Add DS wizard state ────────────────────────────────
     const [showAddDs, setShowAddDs] = useState(false)
     const [addDsCatalogId, setAddDsCatalogId] = useState('')
     const [addDsLabel, setAddDsLabel] = useState('')
     const [addDsOntologyId, setAddDsOntologyId] = useState('')
     const [addDsSubmitting, setAddDsSubmitting] = useState(false)
 
-    // Delete confirm
+    // ── Delete confirm state ───────────────────────────────
     const [deleteTarget, setDeleteTarget] = useState<{ id: string; label: string } | null>(null)
     const [deleteImpact, setDeleteImpact] = useState<WorkspaceDataSourceImpactResponse | null>(null)
     const [loadingImpact, setLoadingImpact] = useState(false)
 
-    // Edit DS modal
+    // ── Edit DS modal state ────────────────────────────────
     const [editingDs, setEditingDs] = useState<DataSourceResponse | null>(null)
 
-    // ── Data loading ────────────────────────────────────────
-    const loadWorkspace = useCallback(async () => {
-        if (!wsId) return
-        setIsLoading(true)
-        try {
-            const [ws, calatogList, ontologyList] = await Promise.all([
-                workspaceService.get(wsId),
-                catalogService.list(),
-                ontologyDefinitionService.list().catch(() => [] as OntologyDefinitionResponse[]),
-            ])
-            setWorkspace(ws)
-            setCatalogItems(calatogList)
-            setOntologies(ontologyList)
-            setEditName(ws.name)
-            setEditDesc(ws.description || '')
+    // ── Selection + tab state ──────────────────────────────
+    const [selectedDsId, setSelectedDsId] = useState<string | null>(null)
+    const [activeSection, setActiveSection] = useState<'sources' | 'views' | 'aggregation' | 'ontology'>('sources')
 
-            const stats: Record<string, DataSourceStats> = {}
-            // Fetch cached stats from management DB (no provider dependency) in parallel
-            await Promise.all((ws.dataSources || []).map(async (ds) => {
-                try {
-                    const res = await fetchWithTimeout(`/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`)
-                    if (res.ok) {
-                        const data = await res.json()
-                        stats[ds.id] = {
-                            nodeCount: data.nodeCount ?? 0,
-                            edgeCount: data.edgeCount ?? 0,
-                            entityTypes: Object.keys(data.entityTypeCounts ?? {}),
-                        }
-                    }
-                } catch { /* no cached stats yet */ }
-            }))
-            setDsStatsMap(stats)
-        } catch (err) {
-            console.error('Failed to load workspace', err)
-        } finally {
-            setIsLoading(false)
+    // ── Sync editName/editDesc when workspace loads ────────
+    useEffect(() => {
+        if (workspace) {
+            setEditName(workspace.name)
+            setEditDesc(workspace.description || '')
         }
-    }, [wsId])
+    }, [workspace])
 
-    useEffect(() => { loadWorkspace() }, [loadWorkspace])
-
-    // Ontology id→name lookup
+    // ── Derived data ───────────────────────────────────────
     const ontologyNameMap = useMemo(() => {
         const map: Record<string, string> = {}
         for (const o of ontologies) map[o.id] = `${o.name} v${o.version}`
         return map
     }, [ontologies])
 
-    // Filter allowed catalog items for this workspace
     const allowedCatalogItems = useMemo(() => {
         if (!wsId || !catalogItems) return []
         return catalogItems.filter(item =>
@@ -166,29 +140,25 @@ export function AdminWorkspaceDetail() {
         )
     }, [wsId, catalogItems])
 
-    // ── Scoped views per data source ────────────────────────
-    const viewsByDs = useMemo(() => {
-        if (!workspace) return {}
-        const map: Record<string, typeof allViews> = {}
-        for (const ds of workspace.dataSources || []) {
-            const scopeKey = `${workspace.id}/${ds.id}`
-            map[ds.id] = allViews.filter(v => v.scopeKey === scopeKey || (!v.scopeKey && ds.isPrimary))
-        }
-        return map
-    }, [workspace, allViews])
+    const primaryOntologyName = useMemo(() => {
+        if (!workspace) return undefined
+        const primaryDs = workspace.dataSources.find(ds => ds.isPrimary)
+        if (primaryDs?.ontologyId) return ontologyNameMap[primaryDs.ontologyId]
+        return undefined
+    }, [workspace, ontologyNameMap])
 
-    // ── Handlers ────────────────────────────────────────────
+    // ── Handlers ───────────────────────────────────────────
     const handleSaveHeader = async () => {
         if (!wsId || !editName.trim()) return
         await workspaceService.update(wsId, { name: editName, description: editDesc || undefined })
         setEditingHeader(false)
-        loadWorkspace()
+        reload()
     }
 
     const handleSetPrimary = async (dsId: string) => {
         if (!wsId) return
         await workspaceService.setPrimaryDataSource(wsId, dsId)
-        loadWorkspace()
+        reload()
     }
 
     const handleDeleteDsClick = async (dsId: string, label: string) => {
@@ -210,13 +180,13 @@ export function AdminWorkspaceDetail() {
         await workspaceService.removeDataSource(wsId, deleteTarget.id)
         setDeleteTarget(null)
         setDeleteImpact(null)
-        loadWorkspace()
+        reload()
     }
 
     const handleProjectionMode = async (dsId: string, mode: string) => {
         if (!wsId) return
         await workspaceService.setProjectionMode(wsId, dsId, mode)
-        loadWorkspace()
+        reload()
     }
 
     const handleDedicatedGraphName = async (dsId: string, name: string) => {
@@ -228,7 +198,7 @@ export function AdminWorkspaceDetail() {
         if (!wsId || !editingDs) return
         await workspaceService.updateDataSource(wsId, editingDs.id, { label, ontologyId })
         setEditingDs(null)
-        loadWorkspace()
+        reload()
     }
 
     const handleReaggregate = async (ds: DataSourceResponse) => {
@@ -242,7 +212,7 @@ export function AdminWorkspaceDetail() {
                     batchSize: 1000
                 })
             })
-            loadWorkspace()
+            reload()
         } catch (err) {
             console.error('Failed to trigger aggregation', err)
         }
@@ -252,7 +222,7 @@ export function AdminWorkspaceDetail() {
         try {
             const result = await aggregationService.purgeAggregation(ds.id)
             showToast('success', `Purged ${result.deletedEdges.toLocaleString()} aggregated edges`)
-            loadWorkspace()
+            reload()
         } catch (err: any) {
             showToast('error', err?.message ?? 'Purge failed')
             throw err
@@ -272,12 +242,13 @@ export function AdminWorkspaceDetail() {
             })
             setShowAddDs(false)
             resetAddDs()
-            loadWorkspace()
+            reload()
         } finally {
             setAddDsSubmitting(false)
         }
     }
 
+    // ── Add DS wizard steps ────────────────────────────────
     const addDsSteps: WizardStep[] = [
         {
             id: 'source',
@@ -321,15 +292,15 @@ export function AdminWorkspaceDetail() {
         {
             id: 'confirm',
             title: 'Confirm',
-            icon: Settings,
+            icon: Settings2,
             validate: () => true,
             content: (
                 <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-5">
                     <h4 className="text-sm font-bold text-ink mb-3">Data Source Summary</h4>
                     <dl className="grid grid-cols-2 gap-3 text-sm">
-                        <div><dt className="text-ink-muted">Catalog Item</dt><dd className="text-ink mt-0.5">{catalogItems.find(c => c.id === addDsCatalogId)?.name || '—'}</dd></div>
-                        <div><dt className="text-ink-muted">Label</dt><dd className="text-ink mt-0.5">{addDsLabel || '—'}</dd></div>
-                        <div><dt className="text-ink-muted">Workspace</dt><dd className="text-ink mt-0.5">{workspace?.name || '—'}</dd></div>
+                        <div><dt className="text-ink-muted">Catalog Item</dt><dd className="text-ink mt-0.5">{catalogItems.find(c => c.id === addDsCatalogId)?.name || '\u2014'}</dd></div>
+                        <div><dt className="text-ink-muted">Label</dt><dd className="text-ink mt-0.5">{addDsLabel || '\u2014'}</dd></div>
+                        <div><dt className="text-ink-muted">Workspace</dt><dd className="text-ink mt-0.5">{workspace?.name || '\u2014'}</dd></div>
                         <div><dt className="text-ink-muted">Ontology</dt><dd className="text-ink mt-0.5">{addDsOntologyId ? ontologies.find(o => o.id === addDsOntologyId)?.name || addDsOntologyId : 'System defaults'}</dd></div>
                     </dl>
                 </div>
@@ -337,7 +308,7 @@ export function AdminWorkspaceDetail() {
         },
     ]
 
-    // ── Render ──────────────────────────────────────────────
+    // ── Render ─────────────────────────────────────────────
     if (isLoading) {
         return <div className="flex items-center justify-center h-full"><Loader2 className="w-6 h-6 animate-spin text-ink-muted" /></div>
     }
@@ -346,7 +317,7 @@ export function AdminWorkspaceDetail() {
         return (
             <div className="flex flex-col items-center justify-center h-full">
                 <p className="text-ink-muted">Workspace not found.</p>
-                <button onClick={() => navigate('/admin/registry?tab=workspaces')} className="mt-4 text-indigo-500 hover:underline text-sm">← Back to Workspaces</button>
+                <button onClick={() => navigate('/admin/registry?tab=workspaces')} className="mt-4 text-indigo-500 hover:underline text-sm">&larr; Back to Workspaces</button>
             </div>
         )
     }
@@ -358,92 +329,140 @@ export function AdminWorkspaceDetail() {
                 <ChevronLeft className="w-4 h-4" /> Back to Workspaces
             </button>
 
-            {/* ── Header ─────────────────────────────────────────── */}
-            <div className="rounded-2xl border border-glass-border bg-canvas-elevated p-6 mb-8">
-                <div className="flex items-start justify-between">
-                    <div className="flex items-center gap-4 flex-1 min-w-0">
-                        <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500/20 to-violet-500/20 border border-indigo-500/20 flex items-center justify-center shrink-0">
-                            <Database className="w-6 h-6 text-indigo-500" />
-                        </div>
+            {/* Hero Header */}
+            <WorkspaceHeroHeader
+                workspace={workspace}
+                healthStatus={healthStatus}
+                aggregateStats={aggregateStats}
+                primaryOntologyName={primaryOntologyName}
+                isEditing={editingHeader}
+                editName={editName}
+                editDesc={editDesc}
+                onEditNameChange={setEditName}
+                onEditDescChange={setEditDesc}
+                onStartEdit={() => setEditingHeader(true)}
+                onSave={handleSaveHeader}
+                onCancel={() => { setEditingHeader(false); setEditName(workspace.name); setEditDesc(workspace.description || '') }}
+            />
 
-                        {editingHeader ? (
-                            <div className="flex-1 space-y-3">
-                                <input value={editName} onChange={e => setEditName(e.target.value)} autoFocus placeholder="Workspace name"
-                                    className="text-xl font-bold text-ink bg-transparent border-b-2 border-indigo-500 outline-none pb-0.5 w-full" />
-                                <textarea value={editDesc} onChange={e => setEditDesc(e.target.value)} placeholder="Description (optional)" rows={2}
-                                    className="w-full text-sm text-ink-secondary bg-black/5 dark:bg-white/5 border border-glass-border rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
-                                <div className="flex gap-2">
-                                    <button onClick={handleSaveHeader} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-500 text-white text-xs font-semibold hover:bg-indigo-600 transition-colors">
-                                        <Save className="w-3 h-3" /> Save
-                                    </button>
-                                    <button onClick={() => { setEditingHeader(false); setEditName(workspace.name); setEditDesc(workspace.description || '') }}
-                                        className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5">Cancel</button>
-                                </div>
-                            </div>
-                        ) : (
-                            <div className="min-w-0">
-                                <div className="flex items-center gap-2 mb-1">
-                                    <h2 className="text-xl font-bold text-ink truncate">{workspace.name}</h2>
-                                    <button onClick={() => setEditingHeader(true)} className="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted"><Edit2 className="w-3.5 h-3.5" /></button>
-                                    {workspace.isDefault && (
-                                        <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-indigo-500/10 text-indigo-500 border border-indigo-500/20">DEFAULT</span>
-                                    )}
-                                </div>
-                                <p className="text-sm text-ink-muted line-clamp-2">{workspace.description || 'No description'}</p>
-                                {/* Quick stats */}
-                                <div className="flex items-center gap-4 mt-3 text-xs text-ink-muted">
-                                    <span className="flex items-center gap-1"><Database className="w-3 h-3" /> {workspace.dataSources.length} sources</span>
-                                    <span className="flex items-center gap-1"><Tag className="w-3 h-3" /> Created {new Date(workspace.createdAt).toLocaleDateString()}</span>
-                                </div>
-                            </div>
-                        )}
+            {/* Section Tabs */}
+            <div className="flex items-center gap-1 border-b border-glass-border mt-8 mb-6">
+                {([
+                    { id: 'sources' as const, label: 'Data Sources', icon: Database, count: workspace.dataSources.length },
+                    { id: 'views' as const, label: 'Views', icon: Eye, count: allWorkspaceViews.length },
+                    { id: 'aggregation' as const, label: 'Aggregation', icon: Settings2 },
+                    { id: 'ontology' as const, label: 'Ontology', icon: GitBranch },
+                ]).map(tab => {
+                    const Icon = tab.icon
+                    const isActive = activeSection === tab.id
+                    return (
+                        <button key={tab.id} onClick={() => setActiveSection(tab.id)}
+                            className={cn(
+                                'flex items-center gap-2 px-5 py-3 text-sm font-semibold transition-all border-b-2',
+                                isActive ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
+                                         : 'border-transparent text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 rounded-t-xl'
+                            )}>
+                            <Icon className="w-4 h-4" />
+                            {tab.label}
+                            {tab.count !== undefined && (
+                                <span className={cn("px-1.5 py-0.5 rounded-full text-[10px] font-bold",
+                                    isActive ? "bg-indigo-500/20 text-indigo-600 dark:text-indigo-400" : "bg-black/5 dark:bg-white/5 text-ink-muted"
+                                )}>{tab.count}</span>
+                            )}
+                        </button>
+                    )
+                })}
+            </div>
+
+            {/* ── Data Sources Tab ─────────────────────────── */}
+            {activeSection === 'sources' && (
+                <>
+                    <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-lg font-bold text-ink">Data Sources</h3>
+                        <button onClick={() => { resetAddDs(); setShowAddDs(true) }}
+                            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 text-indigo-500 text-sm font-semibold hover:bg-indigo-500/20 transition-colors">
+                            <Plus className="w-4 h-4" /> Add Source
+                        </button>
                     </div>
-                </div>
-            </div>
 
-            {/* ── Data Sources ───────────────────────────────────── */}
-            <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-bold text-ink">Data Sources</h3>
-                <button onClick={() => { resetAddDs(); setShowAddDs(true) }}
-                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 text-indigo-500 text-sm font-semibold hover:bg-indigo-500/20 transition-colors">
-                    <Plus className="w-4 h-4" /> Add Source
-                </button>
-            </div>
+                    {workspace.dataSources.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-16 border-2 border-dashed border-glass-border rounded-2xl">
+                            <Database className="w-10 h-10 text-ink-muted mb-3" />
+                            <p className="text-sm text-ink-muted mb-4">No data sources in this workspace</p>
+                            <button onClick={() => { resetAddDs(); setShowAddDs(true) }}
+                                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold">
+                                <Plus className="w-4 h-4" /> Add First Source
+                            </button>
+                        </div>
+                    ) : (
+                        <>
+                            <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+                                {workspace.dataSources.map(ds => {
+                                    const onto = ds.ontologyId ? ontologyMap[ds.ontologyId] : undefined
+                                    return (
+                                        <DataSourceGridCard
+                                            key={ds.id}
+                                            ds={ds}
+                                            stats={dsStatsMap[ds.id]}
+                                            ontologyName={onto?.name}
+                                            ontologyVersion={onto?.version}
+                                            ontologyPublished={onto?.isPublished}
+                                            viewCount={(viewsByDs[ds.id] || []).length}
+                                            isSelected={selectedDsId === ds.id}
+                                            onSelect={() => setSelectedDsId(prev => prev === ds.id ? null : ds.id)}
+                                            onSetPrimary={() => handleSetPrimary(ds.id)}
+                                        />
+                                    )
+                                })}
+                            </div>
 
-            {workspace.dataSources.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-16 border-2 border-dashed border-glass-border rounded-2xl">
-                    <Database className="w-10 h-10 text-ink-muted mb-3" />
-                    <p className="text-sm text-ink-muted mb-4">No data sources in this workspace</p>
-                    <button onClick={() => { resetAddDs(); setShowAddDs(true) }}
-                        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold">
-                        <Plus className="w-4 h-4" /> Add First Source
-                    </button>
-                </div>
-            ) : (
-                <div className="space-y-3">
-                    {workspace.dataSources.map(ds => (
-                        <DataSourceCard
-                            key={ds.id}
-                            ds={ds}
-                            stats={dsStatsMap[ds.id]}
-                            providerName={catalogItems.find(c => c.id === ds.catalogItemId)?.name || ds.catalogItemId}
-                            ontologyName={ds.ontologyId ? ontologyNameMap[ds.ontologyId] : undefined}
-                            isActive={ds.isPrimary}
-                            views={viewsByDs[ds.id] || []}
-                            onSetPrimary={() => handleSetPrimary(ds.id)}
-                            onProjectionModeChange={mode => handleProjectionMode(ds.id, mode)}
-                            onDedicatedGraphNameChange={name => handleDedicatedGraphName(ds.id, name)}
-                            onEdit={() => setEditingDs(ds)}
-                            onDelete={workspace.dataSources.length > 1 ? () => handleDeleteDsClick(ds.id, ds.label || ds.catalogItemId) : undefined}
-                            onExplore={() => navigate(`/schema?workspaceId=${workspace.id}&dataSourceId=${ds.id}`)}
-                            onReaggregate={() => handleReaggregate(ds)}
-                            onPurge={() => handlePurge(ds)}
-                        />
-                    ))}
-                </div>
+                            {/* Detail panel for selected DS */}
+                            {selectedDsId && workspace.dataSources.find(ds => ds.id === selectedDsId) && (
+                                <DataSourceDetailPanel
+                                    ds={workspace.dataSources.find(ds => ds.id === selectedDsId)!}
+                                    wsId={wsId!}
+                                    stats={dsStatsMap[selectedDsId]}
+                                    ontologyName={ontologyNameMap[workspace.dataSources.find(ds => ds.id === selectedDsId)?.ontologyId || '']}
+                                    views={viewsByDs[selectedDsId] || []}
+                                    onEdit={() => setEditingDs(workspace.dataSources.find(ds => ds.id === selectedDsId)!)}
+                                    onDelete={workspace.dataSources.length > 1
+                                        ? () => handleDeleteDsClick(selectedDsId, workspace.dataSources.find(ds => ds.id === selectedDsId)?.label || selectedDsId)
+                                        : undefined}
+                                    onExplore={() => navigate(`/schema?workspaceId=${workspace.id}&dataSourceId=${selectedDsId}`)}
+                                    onReaggregate={() => handleReaggregate(workspace.dataSources.find(ds => ds.id === selectedDsId)!)}
+                                    onPurge={() => handlePurge(workspace.dataSources.find(ds => ds.id === selectedDsId)!)}
+                                    onSetPrimary={() => handleSetPrimary(selectedDsId)}
+                                    onProjectionModeChange={mode => handleProjectionMode(selectedDsId, mode)}
+                                    onDedicatedGraphNameChange={name => handleDedicatedGraphName(selectedDsId, name)}
+                                    onClose={() => setSelectedDsId(null)}
+                                />
+                            )}
+                        </>
+                    )}
+                </>
             )}
 
-            {/* ── Modals ──────────────────────────────────────────── */}
+            {/* ── Views Tab ────────────────────────────────── */}
+            {activeSection === 'views' && (
+                <WorkspaceViewsSection wsId={wsId!} dataSources={workspace.dataSources} views={allWorkspaceViews} />
+            )}
+
+            {/* ── Aggregation Tab ──────────────────────────── */}
+            {activeSection === 'aggregation' && (
+                <WorkspaceAggregationDashboard
+                    dataSources={workspace.dataSources}
+                    readinessMap={readinessMap}
+                    onReaggregate={handleReaggregate}
+                    onPurge={handlePurge}
+                />
+            )}
+
+            {/* ── Ontology Tab ─────────────────────────────── */}
+            {activeSection === 'ontology' && (
+                <WorkspaceOntologyTimeline dataSources={workspace.dataSources} ontologyMap={ontologyMap} />
+            )}
+
+            {/* ── Modals ──────────────────────────────────── */}
             <AdminWizard
                 title="Add Data Source"
                 steps={addDsSteps}
