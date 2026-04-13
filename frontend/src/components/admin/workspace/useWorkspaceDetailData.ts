@@ -4,9 +4,19 @@ import { workspaceService, type WorkspaceResponse } from '@/services/workspaceSe
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService'
+import { providerService, type ProviderResponse } from '@/services/providerService'
 import { listViews, type View } from '@/services/viewApiService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import { deriveWorkspaceHealth } from './WorkspaceHealthBadge'
+
+/** Resolved provider info for a data source (derived from catalogItem → provider). */
+export interface DataSourceProviderInfo {
+  providerId: string
+  providerName: string
+  providerType: string   // 'falkordb' | 'neo4j' | 'datahub' | 'mock'
+  sourceIdentifier?: string
+  catalogItemName?: string
+}
 
 export interface UseWorkspaceDetailDataReturn {
   workspace: WorkspaceResponse | null
@@ -14,6 +24,7 @@ export interface UseWorkspaceDetailDataReturn {
   ontologies: OntologyDefinitionResponse[]
   ontologyMap: Record<string, OntologyDefinitionResponse>
   dsStatsMap: Record<string, DataSourceStats>
+  dsProviderMap: Record<string, DataSourceProviderInfo>
   viewsByDs: Record<string, View[]>
   allWorkspaceViews: View[]
   readinessMap: Record<string, DataSourceReadinessResponse>
@@ -28,6 +39,7 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null)
   const [catalogItems, setCatalogItems] = useState<CatalogItemResponse[]>([])
   const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
+  const [providers, setProviders] = useState<ProviderResponse[]>([])
   const [dsStatsMap, setDsStatsMap] = useState<Record<string, DataSourceStats>>({})
   const [allWorkspaceViews, setAllWorkspaceViews] = useState<View[]>([])
   const [readinessMap, setReadinessMap] = useState<Record<string, DataSourceReadinessResponse>>({})
@@ -40,16 +52,18 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
     setError(null)
     try {
       // Phase 1 — parallel initial fetch
-      const [ws, catalogList, ontologyList] = await Promise.all([
+      const [ws, catalogList, ontologyList, providerList] = await Promise.all([
         workspaceService.get(wsId),
         catalogService.list(),
         ontologyDefinitionService.list().catch(() => [] as OntologyDefinitionResponse[]),
+        providerService.list().catch(() => [] as ProviderResponse[]),
       ])
       if (signal?.cancelled) return
 
       setWorkspace(ws)
       setCatalogItems(catalogList)
       setOntologies(ontologyList)
+      setProviders(providerList)
 
       // Phase 2 — per-DS stats + readiness, plus workspace views
       const stats: Record<string, DataSourceStats> = {}
@@ -103,6 +117,29 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
     return map
   }, [ontologies])
 
+  // Derived: dsProviderMap — resolve DS → catalog item → provider
+  const dsProviderMap = useMemo(() => {
+    const catMap: Record<string, CatalogItemResponse> = {}
+    for (const c of catalogItems) catMap[c.id] = c
+    const provMap: Record<string, ProviderResponse> = {}
+    for (const p of providers) provMap[p.id] = p
+    const result: Record<string, DataSourceProviderInfo> = {}
+    for (const ds of workspace?.dataSources || []) {
+      const cat = catMap[ds.catalogItemId]
+      if (cat) {
+        const prov = provMap[cat.providerId]
+        result[ds.id] = {
+          providerId: cat.providerId,
+          providerName: prov?.name || cat.providerId,
+          providerType: prov?.providerType || 'unknown',
+          sourceIdentifier: cat.sourceIdentifier,
+          catalogItemName: cat.name,
+        }
+      }
+    }
+    return result
+  }, [workspace, catalogItems, providers])
+
   // Derived: viewsByDs
   const viewsByDs = useMemo(() => {
     const map: Record<string, View[]> = {}
@@ -140,6 +177,7 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
     ontologies,
     ontologyMap,
     dsStatsMap,
+    dsProviderMap,
     viewsByDs,
     allWorkspaceViews,
     readinessMap,

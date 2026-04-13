@@ -8,8 +8,9 @@ import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
     ChevronLeft, Plus, Database, Loader2, Settings2, X, Save,
-    Trash2, GitBranch, Eye,
+    Trash2, GitBranch, Eye, Info, Compass, HelpCircle,
 } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { workspaceService, type DataSourceResponse, type WorkspaceDataSourceImpactResponse } from '@/services/workspaceService'
@@ -89,7 +90,7 @@ export function AdminWorkspaceDetail() {
 
     // ── Data fetching via custom hook ──────────────────────
     const {
-        workspace, catalogItems, ontologies, ontologyMap, dsStatsMap,
+        workspace, catalogItems, ontologies, ontologyMap, dsStatsMap, dsProviderMap,
         viewsByDs, allWorkspaceViews, readinessMap, healthStatus,
         aggregateStats, isLoading, reload
     } = useWorkspaceDetailData(wsId)
@@ -340,6 +341,7 @@ export function AdminWorkspaceDetail() {
                 healthStatus={healthStatus}
                 aggregateStats={aggregateStats}
                 primaryOntologyName={primaryOntologyName}
+                providerInfos={Object.values(dsProviderMap)}
                 isEditing={editingHeader}
                 editName={editName}
                 editDesc={editDesc}
@@ -350,18 +352,36 @@ export function AdminWorkspaceDetail() {
                 onCancel={() => { setEditingHeader(false); setEditName(workspace.name); setEditDesc(workspace.description || '') }}
             />
 
+            {/* Quick-links bar */}
+            <div className="flex items-center gap-2 mt-6 mb-2">
+                <span className="text-[10px] font-bold text-ink-muted uppercase tracking-wider mr-1">Quick Links</span>
+                <Link to={`/explorer?workspace=${wsId}`}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-ink-muted border border-glass-border hover:text-indigo-500 hover:border-indigo-500/20 hover:bg-indigo-500/5 transition-colors">
+                    <Compass className="w-3 h-3" /> Explorer
+                </Link>
+                <Link to={`/schema?workspaceId=${wsId}`}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-ink-muted border border-glass-border hover:text-violet-500 hover:border-violet-500/20 hover:bg-violet-500/5 transition-colors">
+                    <GitBranch className="w-3 h-3" /> Schema Editor
+                </Link>
+                <Link to="/admin/registry?tab=jobs"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-ink-muted border border-glass-border hover:text-emerald-500 hover:border-emerald-500/20 hover:bg-emerald-500/5 transition-colors">
+                    <Settings2 className="w-3 h-3" /> Global Jobs
+                </Link>
+            </div>
+
             {/* Section Tabs */}
-            <div className="flex items-center gap-1 border-b border-glass-border mt-8 mb-6">
+            <div className="flex items-center gap-1 border-b border-glass-border mt-4 mb-0">
                 {([
-                    { id: 'sources' as const, label: 'Data Sources', icon: Database, count: workspace.dataSources.length },
-                    { id: 'views' as const, label: 'Views', icon: Eye, count: allWorkspaceViews.length },
-                    { id: 'aggregation' as const, label: 'Aggregation', icon: Settings2 },
-                    { id: 'ontology' as const, label: 'Ontology', icon: GitBranch },
+                    { id: 'sources' as const, label: 'Data Sources', icon: Database, count: workspace.dataSources.length, hint: 'Graph databases connected to this workspace' },
+                    { id: 'views' as const, label: 'Views', icon: Eye, count: allWorkspaceViews.length, hint: 'Saved visual perspectives on your data' },
+                    { id: 'aggregation' as const, label: 'Aggregation', icon: Settings2, hint: 'Edge materialization and job monitoring' },
+                    { id: 'ontology' as const, label: 'Ontology', icon: GitBranch, hint: 'Semantic type system and change history' },
                 ]).map(tab => {
                     const Icon = tab.icon
                     const isActive = activeSection === tab.id
                     return (
                         <button key={tab.id} onClick={() => setActiveSection(tab.id)}
+                            title={tab.hint}
                             className={cn(
                                 'flex items-center gap-2 px-5 py-3 text-sm font-semibold transition-all border-b-2',
                                 isActive ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
@@ -382,6 +402,17 @@ export function AdminWorkspaceDetail() {
             {/* ── Data Sources Tab ─────────────────────────── */}
             {activeSection === 'sources' && (
                 <>
+                    {/* Section intro */}
+                    <div className="flex items-start gap-3 py-4 mb-2">
+                        <Info className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
+                        <div>
+                            <p className="text-sm text-ink-secondary leading-relaxed">
+                                Data sources are the graph databases that feed this workspace. Each source can have its own ontology and aggregation configuration.
+                                <span className="text-ink-muted"> Click on any card below to inspect its details, configure aggregation, or browse associated views.</span>
+                            </p>
+                        </div>
+                    </div>
+
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-lg font-bold text-ink">Data Sources</h3>
                         <button onClick={() => { resetAddDs(); setShowAddDs(true) }}
@@ -393,14 +424,31 @@ export function AdminWorkspaceDetail() {
                     {workspace.dataSources.length === 0 ? (
                         <div className="flex flex-col items-center justify-center py-16 border-2 border-dashed border-glass-border rounded-2xl">
                             <Database className="w-10 h-10 text-ink-muted mb-3" />
-                            <p className="text-sm text-ink-muted mb-4">No data sources in this workspace</p>
+                            <h4 className="text-sm font-bold text-ink mb-2">No data sources connected</h4>
+                            <p className="text-xs text-ink-muted mb-1 max-w-md text-center">
+                                Data sources connect this workspace to your enterprise graph databases. Once connected, you can configure ontologies, run aggregation, and create views.
+                            </p>
+                            <div className="flex items-center gap-4 mt-4 text-[10px] text-ink-muted">
+                                <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-indigo-500/10 text-indigo-500 flex items-center justify-center text-[9px] font-bold">1</span> Add a source</span>
+                                <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-indigo-500/10 text-indigo-500 flex items-center justify-center text-[9px] font-bold">2</span> Assign ontology</span>
+                                <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-indigo-500/10 text-indigo-500 flex items-center justify-center text-[9px] font-bold">3</span> Run aggregation</span>
+                                <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-indigo-500/10 text-indigo-500 flex items-center justify-center text-[9px] font-bold">4</span> Create views</span>
+                            </div>
                             <button onClick={() => { resetAddDs(); setShowAddDs(true) }}
-                                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold">
+                                className="flex items-center gap-2 px-4 py-2 mt-5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold">
                                 <Plus className="w-4 h-4" /> Add First Source
                             </button>
                         </div>
                     ) : (
                         <>
+                            {/* Hint for first-time users */}
+                            {!selectedDsId && workspace.dataSources.length > 0 && (
+                                <div className="flex items-center gap-2 px-3 py-2 mb-3 rounded-lg bg-indigo-500/5 border border-indigo-500/10 text-xs text-indigo-600 dark:text-indigo-400">
+                                    <HelpCircle className="w-3.5 h-3.5 shrink-0" />
+                                    <span>Click on a data source card to open its detail panel with insights, aggregation settings, and views.</span>
+                                </div>
+                            )}
+
                             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
                                 {workspace.dataSources.map(ds => {
                                     const onto = ds.ontologyId ? ontologyMap[ds.ontologyId] : undefined
@@ -409,6 +457,7 @@ export function AdminWorkspaceDetail() {
                                             key={ds.id}
                                             ds={ds}
                                             stats={dsStatsMap[ds.id]}
+                                            providerInfo={dsProviderMap[ds.id]}
                                             ontologyName={onto?.name}
                                             ontologyVersion={onto?.version}
                                             ontologyPublished={onto?.isPublished}
@@ -420,8 +469,6 @@ export function AdminWorkspaceDetail() {
                                     )
                                 })}
                             </div>
-
-                            {/* Detail drawer renders via portal — no scroll impact */}
                         </>
                     )}
                 </>
@@ -429,22 +476,51 @@ export function AdminWorkspaceDetail() {
 
             {/* ── Views Tab ────────────────────────────────── */}
             {activeSection === 'views' && (
-                <WorkspaceViewsSection wsId={wsId!} dataSources={workspace.dataSources} views={allWorkspaceViews} />
+                <>
+                    <div className="flex items-start gap-3 py-4 mb-2">
+                        <Info className="w-4 h-4 text-cyan-500 shrink-0 mt-0.5" />
+                        <p className="text-sm text-ink-secondary leading-relaxed">
+                            Views are saved visual perspectives on your graph data — like dashboards for your knowledge graph. Each view can display data as a hierarchy, lineage map, reference model, or table.
+                            <span className="text-ink-muted"> Filter by data source or search to find specific views. Click any view to open it.</span>
+                        </p>
+                    </div>
+                    <WorkspaceViewsSection wsId={wsId!} dataSources={workspace.dataSources} views={allWorkspaceViews} />
+                </>
             )}
 
             {/* ── Aggregation Tab ──────────────────────────── */}
             {activeSection === 'aggregation' && (
-                <WorkspaceAggregationDashboard
-                    dataSources={workspace.dataSources}
-                    readinessMap={readinessMap}
-                    onReaggregate={handleReaggregate}
-                    onPurge={handlePurge}
-                />
+                <>
+                    <div className="flex items-start gap-3 py-4 mb-2">
+                        <Info className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+                        <p className="text-sm text-ink-secondary leading-relaxed">
+                            Aggregation materializes lineage edges by traversing your graph and computing transitive relationships.
+                            This pre-computation enables fast lineage queries in views.
+                            <span className="text-ink-muted"> Monitor job progress, configure projection modes, and manage aggregation schedules for each data source below.</span>
+                        </p>
+                    </div>
+                    <WorkspaceAggregationDashboard
+                        dataSources={workspace.dataSources}
+                        readinessMap={readinessMap}
+                        onReaggregate={handleReaggregate}
+                        onPurge={handlePurge}
+                    />
+                </>
             )}
 
             {/* ── Ontology Tab ─────────────────────────────── */}
             {activeSection === 'ontology' && (
-                <WorkspaceOntologyTimeline dataSources={workspace.dataSources} ontologyMap={ontologyMap} />
+                <>
+                    <div className="flex items-start gap-3 py-4 mb-2">
+                        <Info className="w-4 h-4 text-violet-500 shrink-0 mt-0.5" />
+                        <p className="text-sm text-ink-secondary leading-relaxed">
+                            Ontologies define the semantic type system — which entity types and relationship types exist in your data.
+                            Each data source can use its own ontology version.
+                            <span className="text-ink-muted"> The timeline below shows all changes across ontologies assigned to this workspace's data sources.</span>
+                        </p>
+                    </div>
+                    <WorkspaceOntologyTimeline dataSources={workspace.dataSources} ontologyMap={ontologyMap} />
+                </>
             )}
 
             {/* ── Modals ──────────────────────────────────── */}
@@ -518,6 +594,7 @@ export function AdminWorkspaceDetail() {
                 isOpen={!!selectedDsId && !!selectedDs}
                 wsId={wsId!}
                 stats={selectedDsId ? dsStatsMap[selectedDsId] : undefined}
+                providerInfo={selectedDsId ? dsProviderMap[selectedDsId] : undefined}
                 ontologyName={selectedDsId ? ontologyNameMap[selectedDs?.ontologyId || ''] : undefined}
                 ontologyId={selectedDs?.ontologyId}
                 views={selectedDsId ? (viewsByDs[selectedDsId] || []) : []}
