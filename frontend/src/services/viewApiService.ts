@@ -139,10 +139,27 @@ export interface ViewFacetCreator {
 }
 
 /**
+ * Catalog stats consumed by the Explorer stats bar.
+ *
+ * Returned by ``GET /api/v1/views/stats`` which accepts the same
+ * filter params as the list endpoint — the numbers always describe
+ * the currently-filtered population so the stats bar stays in sync
+ * as users narrow their query.
+ */
+export interface ViewCatalogStats {
+    total: number
+    recentlyAdded: number
+    needsAttention: number
+    lastActivityAt: string | null
+}
+
+/**
  * Aggregate facets returned by ``GET /api/v1/views/facets``.
  *
  * Used by the Explorer to populate the Tag / View Type / Creator
  * dropdowns from the DB-wide set of values (not just the current page).
+ * Facets are intentionally global so the dropdowns always show the
+ * full option space — see ``getViewStats`` for filter-aware counts.
  */
 export interface ViewFacetsResponse {
     tags: ViewFacetValue[]
@@ -220,6 +237,49 @@ export async function listPopularViews(limit = 20): Promise<View[]> {
  */
 export async function getViewFacets(): Promise<ViewFacetsResponse> {
     return apiFetch<ViewFacetsResponse>('/api/v1/views/facets')
+}
+
+/** Subset of ``ViewListParams`` that applies to the stats endpoint. */
+export type ViewStatsParams = Omit<ViewListParams, 'limit' | 'offset' | 'contextModelId'>
+
+/**
+ * Fetch the Explorer stats-bar numbers for a given filter set.
+ *
+ * The endpoint accepts the same filter params as ``listViews`` so the
+ * stats always describe the currently-filtered population.
+ */
+export async function getViewStats(params?: ViewStatsParams): Promise<ViewCatalogStats> {
+    const sp = new URLSearchParams()
+    if (params?.visibilityIn && params.visibilityIn.length > 0) {
+        params.visibilityIn.forEach(v => sp.append('visibilityIn', v))
+    } else if (params?.visibility) {
+        sp.set('visibility', params.visibility)
+    }
+    if (params?.workspaceIds && params.workspaceIds.length > 0) {
+        params.workspaceIds.forEach(id => sp.append('workspaceIds', id))
+    } else if (params?.workspaceId) {
+        sp.set('workspaceId', params.workspaceId)
+    }
+    if (params?.dataSourceId) sp.set('dataSourceId', params.dataSourceId)
+    if (params?.viewTypes && params.viewTypes.length > 0) {
+        params.viewTypes.forEach(v => sp.append('viewTypes', v))
+    } else if (params?.viewType) {
+        sp.set('viewType', params.viewType)
+    }
+    if (params?.createdByIn && params.createdByIn.length > 0) {
+        params.createdByIn.forEach(id => sp.append('createdByIn', id))
+    } else if (params?.createdBy) {
+        sp.set('createdBy', params.createdBy)
+    }
+    if (params?.createdAfter) sp.set('createdAfter', params.createdAfter)
+    if (params?.search) sp.set('search', params.search)
+    if (params?.tags) params.tags.forEach(t => sp.append('tags', t))
+    if (params?.favouritedOnly) sp.set('favouritedOnly', 'true')
+    if (params?.includeDeleted) sp.set('includeDeleted', 'true')
+    if (params?.deletedOnly) sp.set('deletedOnly', 'true')
+    if (params?.attentionOnly) sp.set('attentionOnly', 'true')
+    const qs = sp.toString()
+    return apiFetch<ViewCatalogStats>(`/api/v1/views/stats${qs ? `?${qs}` : ''}`)
 }
 
 /** Create a new view (workspaceId required) */
