@@ -651,34 +651,101 @@ async def test_list_views_filter_by_tags_multi_is_or(test_client: AsyncClient):
 # ── GET /views/facets ─────────────────────────────────────────────────
 
 async def test_facets_empty(test_client: AsyncClient):
-    """Facets endpoint returns empty lists + zero stats when no views exist."""
+    """Facets endpoint returns empty lists when no views exist."""
     resp = await test_client.get("/api/v1/views/facets")
     assert resp.status_code == 200
     body = resp.json()
     assert body["tags"] == []
     assert body["viewTypes"] == []
     assert body["creators"] == []
-    assert body["stats"]["total"] == 0
-    assert body["stats"]["recentlyAdded"] == 0
-    assert body["stats"]["needsAttention"] == 0
-    assert body["stats"]["lastActivityAt"] is None
 
 
-async def test_facets_stats_populated(test_client: AsyncClient):
+# ── GET /views/stats ───────────────────────────────────────────────────
+
+async def test_stats_empty(test_client: AsyncClient):
+    """Stats endpoint returns zero counts when no views exist."""
+    resp = await test_client.get("/api/v1/views/stats")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 0
+    assert body["recentlyAdded"] == 0
+    assert body["needsAttention"] == 0
+    assert body["lastActivityAt"] is None
+
+
+async def test_stats_populated(test_client: AsyncClient):
     """Stats reflect the catalog: total count, recent count, last activity."""
     ws_id = await _create_workspace(test_client)
     await _create_view(test_client, ws_id, "A")
     await _create_view(test_client, ws_id, "B")
     await _create_view(test_client, ws_id, "C")
 
-    resp = await test_client.get("/api/v1/views/facets")
+    resp = await test_client.get("/api/v1/views/stats")
     assert resp.status_code == 200
-    stats = resp.json()["stats"]
-    assert stats["total"] == 3
+    body = resp.json()
+    assert body["total"] == 3
     # All three views were just created so recently_added should cover them.
-    assert stats["recentlyAdded"] == 3
-    # last_activity_at should be populated (we just created views).
-    assert stats["lastActivityAt"] is not None
+    assert body["recentlyAdded"] == 3
+    assert body["lastActivityAt"] is not None
+
+
+async def test_stats_respect_workspace_filter(test_client: AsyncClient):
+    """Stats narrow when a workspace filter is applied — core of the ask."""
+    ws_a = await _create_workspace(test_client)
+    ws_b = await _create_workspace(test_client)
+    await _create_view(test_client, ws_a, "A1")
+    await _create_view(test_client, ws_a, "A2")
+    await _create_view(test_client, ws_b, "B1")
+
+    # Global: all 3
+    resp = await test_client.get("/api/v1/views/stats")
+    assert resp.json()["total"] == 3
+
+    # Scoped to workspace A: 2
+    resp = await test_client.get(f"/api/v1/views/stats?workspaceId={ws_a}")
+    assert resp.json()["total"] == 2
+
+    # Multi-workspace: union of A + B = 3
+    resp = await test_client.get(
+        f"/api/v1/views/stats?workspaceIds={ws_a}&workspaceIds={ws_b}"
+    )
+    assert resp.json()["total"] == 3
+
+
+async def test_stats_respect_search_filter(test_client: AsyncClient):
+    """Search filter scopes the stats numbers."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "Finance Dashboard")
+    await _create_view(test_client, ws_id, "Engineering Dashboard")
+    await _create_view(test_client, ws_id, "Finance Reports")
+
+    resp = await test_client.get("/api/v1/views/stats?search=Finance")
+    assert resp.json()["total"] == 2
+
+
+async def test_stats_respect_view_type_filter(test_client: AsyncClient):
+    """viewType filter scopes stats to that type."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "G", viewType="graph")
+    await _create_view(test_client, ws_id, "H", viewType="hierarchy")
+    await _create_view(test_client, ws_id, "T", viewType="table")
+
+    resp = await test_client.get("/api/v1/views/stats?viewType=graph")
+    assert resp.json()["total"] == 1
+
+
+async def test_stats_attention_only_matches_category(test_client: AsyncClient):
+    """attentionOnly returns the same count as the Attention category list filter."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "A")
+    await _create_view(test_client, ws_id, "B")
+
+    resp_stats = await test_client.get("/api/v1/views/stats?attentionOnly=true")
+    resp_list = await test_client.get("/api/v1/views/?attentionOnly=true")
+    assert resp_stats.status_code == 200
+    assert resp_list.status_code == 200
+    # The list "total" and the stats "total" must agree.
+    assert resp_stats.json()["total"] == resp_list.json()["total"]
 
 
 async def test_facets_tags_view_types_creators(test_client: AsyncClient, fake_user):

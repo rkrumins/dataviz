@@ -125,8 +125,11 @@ export interface UseExplorerViewsResult {
  * Translate a user-selected category to the concrete API params the backend
  * understands. Centralising this here keeps the hook body simple and makes
  * the client/server contract explicit — no hidden client-side filtering.
+ *
+ * Exported so the stats bar and any future catalog-level consumers can
+ * translate the same way without reimplementing the mapping.
  */
-function resolveCategoryParams(
+export function resolveCategoryParams(
   category: string | null,
   currentUserId: string | null,
 ): Partial<ViewListParams> {
@@ -138,7 +141,16 @@ function resolveCategoryParams(
     case 'my-favourites':
       return { favouritedOnly: true }
     case 'recently-added': {
-      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      // IMPORTANT: quantise the cutoff to a 5-minute bucket so the
+      // string value is stable across re-renders. Without this, every
+      // render produces a fresh ``Date.now()`` → fresh ISO string →
+      // fresh React Query key → refetch → state update → re-render →
+      // infinite fetch loop. The 5-minute window means the "last 7
+      // days" cutoff can drift by at most 5 minutes, which is fine
+      // for a human-facing "recent" filter.
+      const QUANTUM_MS = 5 * 60 * 1000
+      const now = Math.floor(Date.now() / QUANTUM_MS) * QUANTUM_MS
+      const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000)
       return { createdAfter: sevenDaysAgo.toISOString() }
     }
     case 'shared-with-me':

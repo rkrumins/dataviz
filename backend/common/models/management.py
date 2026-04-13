@@ -660,9 +660,9 @@ class ViewFacetCreator(BaseModel):
 class ViewCatalogStats(BaseModel):
     """Aggregate catalog counts surfaced in the Explorer stats bar.
 
-    Computed globally (not filter-scoped) so the stats always describe
-    "the whole catalog at a glance" and stay stable as users narrow
-    their current query — a dashboard summary, not a query refinement.
+    Returned by ``GET /api/v1/views/stats`` which accepts the same
+    filter params as the list endpoint — so the numbers always
+    describe the current query, not a stale "entire catalog" snapshot.
     """
     total: int
     recently_added: int = Field(alias="recentlyAdded")
@@ -679,12 +679,13 @@ class ViewFacetsResponse(BaseModel):
     Used by the Explorer to populate the Tag / View Type / Creator
     dropdowns so users can pick from the real set of values in the
     database rather than a derived-from-current-page approximation.
-    Also carries the catalog stats consumed by the Explorer stats bar.
+    Facets are intentionally GLOBAL (not filter-scoped) so dropdowns
+    always offer the full option space — see ``GET /views/stats`` for
+    filter-aware counts.
     """
     tags: List[ViewFacetValue]
     view_types: List[ViewFacetValue] = Field(alias="viewTypes")
     creators: List[ViewFacetCreator]
-    stats: ViewCatalogStats
 
     class Config:
         populate_by_name = True
