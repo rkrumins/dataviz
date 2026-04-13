@@ -49,8 +49,8 @@ export function useBackendRecovery() {
 
       // Re-fetch views list
       listViews()
-        .then((views) => {
-          useSchemaStore.getState().upsertViews(views.map(viewToViewConfig))
+        .then(({ items }) => {
+          useSchemaStore.getState().upsertViews(items.map(viewToViewConfig))
         })
         .catch((err) => {
           console.warn('[useBackendRecovery] Views reload failed:', err)

@@ -17,6 +17,8 @@ import type { DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import type { View } from '@/services/viewApiService'
 import { AggregationHistory } from '../AggregationHistory'
+import { getProviderLogo } from '../ProviderLogos'
+import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 
 // ─────────────────────────────────────────────────────────────────────
 // Props
@@ -27,6 +29,7 @@ interface DataSourceDetailPanelProps {
     wsId: string
     isOpen: boolean
     stats?: DataSourceStats
+    providerInfo?: DataSourceProviderInfo
     ontologyName?: string
     ontologyId?: string
     views: View[]
@@ -139,6 +142,7 @@ export function DataSourceDetailPanel({
     wsId,
     isOpen,
     stats,
+    providerInfo,
     ontologyName,
     ontologyId,
     views,
@@ -205,19 +209,30 @@ export function DataSourceDetailPanel({
                         <div className="px-6 pt-6 pb-4 border-b border-glass-border/50 shrink-0">
                             <div className="flex items-start justify-between gap-3 mb-4">
                                 <div className="flex items-center gap-3 min-w-0">
-                                    <div className="w-10 h-10 rounded-xl bg-indigo-500/15 text-indigo-500 flex items-center justify-center shrink-0">
-                                        <Database className="w-5 h-5" />
+                                    <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-500/20 flex items-center justify-center shrink-0">
+                                        {providerInfo ? (
+                                            (() => { const Logo = getProviderLogo(providerInfo.providerType); return <Logo className="w-5 h-5" /> })()
+                                        ) : (
+                                            <Database className="w-5 h-5 text-indigo-500" />
+                                        )}
                                     </div>
                                     <div className="min-w-0">
                                         <div className="flex items-center gap-2">
-                                            <h2 className="text-lg font-bold text-ink truncate">{ds.label || 'Unnamed'}</h2>
+                                            <h2 className="text-lg font-bold text-ink truncate">{ds.label || providerInfo?.catalogItemName || 'Unnamed'}</h2>
                                             {ds.isPrimary && (
                                                 <span className="flex items-center gap-1 px-2 py-0.5 text-[9px] font-bold rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0">
                                                     <Star className="w-2.5 h-2.5" /> Primary
                                                 </span>
                                             )}
                                         </div>
-                                        <p className="text-[11px] text-ink-muted font-mono truncate">{ds.catalogItemId}</p>
+                                        {providerInfo ? (
+                                            <p className="text-[11px] text-ink-muted truncate">
+                                                <span className="font-medium">{providerInfo.providerName}</span>
+                                                {providerInfo.sourceIdentifier && <span className="font-mono"> / {providerInfo.sourceIdentifier}</span>}
+                                            </p>
+                                        ) : (
+                                            <p className="text-[11px] text-ink-muted font-mono truncate">{ds.catalogItemId}</p>
+                                        )}
                                     </div>
                                 </div>
                                 <button onClick={onClose} className="p-2 rounded-xl text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors shrink-0">
