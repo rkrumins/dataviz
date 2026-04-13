@@ -19,6 +19,7 @@ from backend.common.models.management import (
     ViewUpdateRequest,
     ViewResponse,
     ViewListResponse,
+    ViewFacetsResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,20 @@ async def list_popular_views(
     )
 
 
+@router.get("/facets", response_model=ViewFacetsResponse)
+async def get_view_facets(
+    session: AsyncSession = Depends(get_db_session),
+) -> ViewFacetsResponse:
+    """Return distinct tags, view types, and creators across non-deleted views.
+
+    Used to populate the Explorer's Tag / View Type / Creator filter
+    dropdowns from the authoritative DB-wide set of values rather than
+    deriving them from the currently-loaded page (which would miss
+    tags/creators beyond the first page at scale).
+    """
+    return await view_repo.get_view_facets(session)
+
+
 @router.get("/", response_model=ViewListResponse)
 async def list_views(
     visibility: Optional[str] = Query(None),
@@ -80,7 +95,10 @@ async def list_views(
     workspace_ids: Optional[List[str]] = Query(None, alias="workspaceIds"),
     context_model_id: Optional[str] = Query(None, alias="contextModelId"),
     data_source_id: Optional[str] = Query(None, alias="dataSourceId"),
+    view_type: Optional[str] = Query(None, alias="viewType"),
+    view_types: Optional[List[str]] = Query(None, alias="viewTypes"),
     created_by: Optional[str] = Query(None, alias="createdBy"),
+    created_by_in: Optional[List[str]] = Query(None, alias="createdByIn"),
     created_after: Optional[str] = Query(None, alias="createdAfter"),
     search: Optional[str] = Query(None),
     tags: Optional[List[str]] = Query(None),
@@ -99,11 +117,15 @@ async def list_views(
     authoritative count of matches so callers never have to infer "is
     there another page?" from array length.
 
-    Filter params:
-    - ``workspaceIds`` — multi-select; wins over single ``workspaceId``.
-    - ``visibilityIn`` — multi-select visibility; wins over single ``visibility``.
-    - ``createdBy`` — restrict to views authored by a specific user.
+    Filter params (single/multi pairs — the multi-value param wins when both are sent):
+    - ``workspaceId`` / ``workspaceIds``
+    - ``visibility`` / ``visibilityIn``
+    - ``viewType`` / ``viewTypes``
+    - ``createdBy`` / ``createdByIn``
+
+    Additional filters:
     - ``createdAfter`` — ISO timestamp; returns views created on or after.
+    - ``tags`` — OR semantics across the supplied tags.
     - ``attentionOnly`` — stale (>90d), inactive workspace/source, or
       broken data source reference. Mirrors the frontend health model
       so pagination stays accurate on large catalogs.
@@ -116,7 +138,10 @@ async def list_views(
         workspace_ids=workspace_ids,
         context_model_id=context_model_id,
         data_source_id=data_source_id,
+        view_type=view_type,
+        view_types=view_types,
         created_by=created_by,
+        created_by_in=created_by_in,
         created_after=created_after,
         search=search,
         tags=tags,
