@@ -1,23 +1,29 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { ChevronDown, Check, ArrowUpDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import type { SortOption } from '@/hooks/useExplorerViews'
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
 
-type SortKey = 'newest' | 'oldest' | 'popular' | 'updated' | 'az' | 'za'
-
+/**
+ * The dropdown only surfaces the global user-facing sorts, not every
+ * valid ``SortOption``. Column-clicks in the list view may produce
+ * column-sort values (``type-az``, ``owner-az``, ``likes-asc`` etc.)
+ * that aren't in this picker — the prop type stays broad so both
+ * worlds round-trip through the URL without type casts.
+ */
 interface ExplorerSortControlProps {
-  sort: SortKey
-  onSortChange: (sort: SortKey) => void
+  sort: SortOption
+  onSortChange: (sort: SortOption) => void
 }
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+const SORT_OPTIONS: { key: SortOption; label: string }[] = [
   { key: 'newest', label: 'Newest First' },
   { key: 'oldest', label: 'Oldest First' },
   { key: 'popular', label: 'Most Popular' },

@@ -27,6 +27,7 @@ from backend.common.models.management import (
     ViewFacetValue,
     ViewFacetCreator,
     ViewFacetsResponse,
+    ViewCatalogStats,
 )
 
 logger = logging.getLogger(__name__)
@@ -655,10 +656,51 @@ async def get_view_facets(
             count=cnt,
         ))
 
+    # 4. Catalog stats — computed with the same ``base_where`` so all four
+    #    numbers describe the same population (non-deleted views). Each
+    #    count is a single aggregate query so the endpoint stays cheap.
+    seven_days_ago = (
+        datetime.now(timezone.utc) - timedelta(days=7)
+    ).isoformat()
+    total_result = await session.execute(
+        select(func.count(ViewORM.id)).where(base_where)
+    )
+    total = total_result.scalar_one() or 0
+
+    recent_result = await session.execute(
+        select(func.count(ViewORM.id))
+        .where(base_where)
+        .where(ViewORM.created_at >= seven_days_ago)
+    )
+    recently_added = recent_result.scalar_one() or 0
+
+    # Reuse the same predicate the ``attentionOnly`` list filter applies so
+    # clicking "5 need attention" in the stats bar and applying the
+    # Attention category surface identical sets.
+    attention_query = _apply_view_filters(
+        select(func.count(func.distinct(ViewORM.id))),
+        attention_only=True,
+    )
+    attention_result = await session.execute(attention_query)
+    needs_attention = attention_result.scalar_one() or 0
+
+    last_activity_result = await session.execute(
+        select(func.max(ViewORM.updated_at)).where(base_where)
+    )
+    last_activity_at = last_activity_result.scalar_one()
+
+    stats = ViewCatalogStats(
+        total=total,
+        recently_added=recently_added,
+        needs_attention=needs_attention,
+        last_activity_at=last_activity_at,
+    )
+
     return ViewFacetsResponse(
         tags=tag_facets,
         view_types=view_type_facets,
         creators=creator_facets,
+        stats=stats,
     )
 
 

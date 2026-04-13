@@ -22,6 +22,7 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
+import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 
 /* ------------------------------------------------------------------ */
 /*  View type icon + themed color mapping                              */
@@ -99,6 +100,8 @@ export interface ExplorerListRowProps {
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
   isSelected?: boolean
   onToggleSelect?: () => void
+  /** Visual density — controls vertical padding. */
+  density?: 'compact' | 'comfortable' | 'spacious'
 }
 
 /* ------------------------------------------------------------------ */
@@ -117,11 +120,19 @@ export function ExplorerListRow({
   onPermanentDelete,
   isSelected,
   onToggleSelect,
+  density = 'comfortable',
 }: ExplorerListRowProps) {
   const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE_META
   const TypeIcon = typeMeta.icon
   const VisIcon = VISIBILITY_ICON[view.visibility] ?? Lock
   const isDeleted = !!view.deletedAt
+
+  // Density → row padding. Comfortable is the visual default from before
+  // the toggle existed, so existing screenshots stay unchanged at default.
+  const densityPaddingClass =
+    density === 'compact' ? 'py-1.5'
+    : density === 'spacious' ? 'py-4'
+    : 'py-2.5'
 
   return (
     <div
@@ -137,7 +148,8 @@ export function ExplorerListRow({
           onToggleSelect
             ? 'grid-cols-[28px_minmax(0,2fr)_160px_90px_36px_110px_70px_80px_140px]'
             : 'grid-cols-[minmax(0,2fr)_160px_90px_36px_110px_70px_80px_140px]',
-          'rounded-xl px-3 py-2.5',
+          'rounded-xl px-3',
+          densityPaddingClass,
           'hover:bg-black/5 dark:hover:bg-white/5',
           isSelected && 'bg-accent-lineage/[0.04]',
           'transition-colors duration-150',
@@ -288,25 +300,11 @@ export function ExplorerListRow({
                   </button>
                 )
               )}
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onToggleFavourite()
-                }}
-                className={cn(
-                  'rounded-lg p-1.5 transition-colors duration-150',
-                  view.isFavourited
-                    ? 'text-red-500 hover:bg-red-500/10'
-                    : 'text-ink-muted hover:text-red-500 hover:bg-black/5 dark:hover:bg-white/5',
-                )}
-                title={view.isFavourited ? 'Unfavorite' : 'Favorite'}
-              >
-                <Heart
-                  className="h-3.5 w-3.5"
-                  fill={view.isFavourited ? 'currentColor' : 'none'}
-                />
-              </button>
+              <HeartBurstButton
+                favourited={view.isFavourited}
+                onToggle={onToggleFavourite}
+                size="sm"
+              />
               <button
                 type="button"
                 onClick={(e) => {

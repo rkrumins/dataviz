@@ -139,15 +139,31 @@ export interface ViewFacetCreator {
 }
 
 /**
+ * Catalog-wide stats consumed by the Explorer stats bar.
+ *
+ * Globally scoped (not filter-scoped) so the numbers describe "the
+ * whole catalog at a glance" and stay stable while users narrow the
+ * current query.
+ */
+export interface ViewCatalogStats {
+    total: number
+    recentlyAdded: number
+    needsAttention: number
+    lastActivityAt: string | null
+}
+
+/**
  * Aggregate facets returned by ``GET /api/v1/views/facets``.
  *
  * Used by the Explorer to populate the Tag / View Type / Creator
- * dropdowns from the DB-wide set of values (not just the current page).
+ * dropdowns from the DB-wide set of values (not just the current page),
+ * and to render the stats bar above the search input.
  */
 export interface ViewFacetsResponse {
     tags: ViewFacetValue[]
     viewTypes: ViewFacetValue[]
     creators: ViewFacetCreator[]
+    stats: ViewCatalogStats
 }
 
 // ============================================

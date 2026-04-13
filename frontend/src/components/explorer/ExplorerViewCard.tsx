@@ -33,41 +33,57 @@ import { timeAgo } from '@/lib/timeAgo'
 import { ViewCardOverflowMenu } from '@/components/explorer/ViewCardOverflowMenu'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
+import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 
 // ─── View type themes ───────────────────────────────────────────
+// ``gradient`` is a subtle whole-card tint keyed to the view type so
+// scanning a grid of mixed types stays effortless. It's very light —
+// 3-4% opacity — so the card still reads as neutral up close but the
+// viewport as a whole becomes colour-coded at a glance.
 const VIEW_TYPE_META: Record<
   string,
-  { icon: React.ElementType; label: string; iconBg: string; hoverBorder: string }
+  {
+    icon: React.ElementType
+    label: string
+    iconBg: string
+    hoverBorder: string
+    gradient: string
+  }
 > = {
   graph: {
     icon: Network,
     label: 'Graph',
     iconBg: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500',
     hoverBorder: 'group-hover:border-indigo-500/30',
+    gradient: 'bg-gradient-to-br from-indigo-500/[0.04] via-transparent to-transparent',
   },
   hierarchy: {
     icon: GitBranch,
     label: 'Hierarchy',
     iconBg: 'bg-violet-500/10 border-violet-500/20 text-violet-500',
     hoverBorder: 'group-hover:border-violet-500/30',
+    gradient: 'bg-gradient-to-br from-violet-500/[0.04] via-transparent to-transparent',
   },
   table: {
     icon: Table2,
     label: 'Table',
     iconBg: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500',
     hoverBorder: 'group-hover:border-emerald-500/30',
+    gradient: 'bg-gradient-to-br from-emerald-500/[0.04] via-transparent to-transparent',
   },
   'layered-lineage': {
     icon: Layers,
     label: 'Lineage',
     iconBg: 'bg-amber-500/10 border-amber-500/20 text-amber-500',
     hoverBorder: 'group-hover:border-amber-500/30',
+    gradient: 'bg-gradient-to-br from-amber-500/[0.04] via-transparent to-transparent',
   },
   reference: {
     icon: Layout,
     label: 'Reference',
     iconBg: 'bg-rose-500/10 border-rose-500/20 text-rose-500',
     hoverBorder: 'group-hover:border-rose-500/30',
+    gradient: 'bg-gradient-to-br from-rose-500/[0.04] via-transparent to-transparent',
   },
 }
 
@@ -76,6 +92,7 @@ const DEFAULT_META = {
   label: 'View',
   iconBg: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500',
   hoverBorder: 'group-hover:border-indigo-500/30',
+  gradient: 'bg-gradient-to-br from-indigo-500/[0.04] via-transparent to-transparent',
 }
 
 // Deterministic tag colors from a curated palette
@@ -164,6 +181,8 @@ export interface ExplorerViewCardProps {
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
   isSelected?: boolean
   onToggleSelect?: () => void
+  /** Visual density — collapses padding, preview, and ancillary sections. */
+  density?: 'compact' | 'comfortable' | 'spacious'
 }
 
 function initials(name?: string): string {
@@ -186,7 +205,22 @@ export function ExplorerViewCard({
   healthStatus,
   isSelected,
   onToggleSelect,
+  density = 'comfortable',
 }: ExplorerViewCardProps) {
+  // Density-derived classes. Compact noticeably reduces vertical rhythm
+  // (padding, section margins, suppressed mini preview) so a dense grid
+  // actually looks dense. Spacious does the inverse.
+  const compact = density === 'compact'
+  const spacious = density === 'spacious'
+  const cardPadding = compact ? 'p-3.5' : spacious ? 'p-6' : 'p-5'
+  const sectionGap = compact ? 'mb-2' : spacious ? 'mb-4' : 'mb-3'
+  const typeBadgeSize = compact ? 'w-8 h-8' : 'w-10 h-10'
+  const typeBadgeRound = compact ? 'rounded-lg' : 'rounded-xl'
+  // In compact mode, suppress the decorative mini preview and description
+  // line so each card collapses to header + badges + footer.
+  const showPreview = !compact
+  const showDescription = !compact
+  const showTags = !compact
   const isDeleted = !!view.deletedAt
   const meta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_META
   const TypeIcon = meta.icon
@@ -210,20 +244,50 @@ export function ExplorerViewCard({
     >
       <div
         className={cn(
-          'relative flex flex-col h-full rounded-2xl border bg-canvas-elevated p-5',
+          'relative flex flex-col h-full rounded-2xl border bg-canvas-elevated overflow-hidden',
+          cardPadding,
           'will-change-transform',
-          'hover:-translate-y-1 hover:shadow-lg',
+          // Deeper lift + stronger, colored shadow for a more tactile hover.
+          'hover:-translate-y-1.5 hover:shadow-xl hover:shadow-black/5 dark:hover:shadow-black/30',
           'hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
           'transition-[transform,box-shadow,border-color,background-color] duration-200 ease-out',
           isSelected
             ? 'border-accent-lineage shadow-[0_0_0_1px_rgba(var(--accent-lineage-rgb,99,102,241),0.3)]'
             : isDeleted
               ? 'border-red-500/20'
-              : 'border-glass-border',
+              : view.isPinned
+                ? 'border-accent-lineage/40 shadow-md shadow-accent-lineage/5'
+                : 'border-glass-border',
           !isDeleted && meta.hoverBorder,
           isDeleted && 'opacity-60',
         )}
       >
+        {/* Subtle view-type gradient wash — sits behind content so it
+            doesn't interfere with text contrast or interactive children. */}
+        {!isDeleted && (
+          <div
+            aria-hidden
+            className={cn(
+              'pointer-events-none absolute inset-0 rounded-2xl',
+              meta.gradient,
+            )}
+          />
+        )}
+
+        {/* Pinned ribbon — compact accent badge in the top-right corner. */}
+        {view.isPinned && !isDeleted && (
+          <div
+            aria-hidden
+            className={cn(
+              'pointer-events-none absolute top-0 right-5 z-10',
+              'inline-flex items-center gap-1 rounded-b-md px-1.5 py-0.5',
+              'bg-accent-lineage text-white text-[9px] font-semibold uppercase tracking-wider',
+              'shadow-sm',
+            )}
+          >
+            Pinned
+          </div>
+        )}
         {/* ── Top-left checkbox ── */}
         {onToggleSelect && (
           <div
@@ -307,18 +371,11 @@ export function ExplorerViewCard({
               </button>
             )
           )}
-          <button
-            type="button"
-            onClick={e => { e.stopPropagation(); onToggleFavourite() }}
-            className={cn(
-              'rounded-lg p-1.5 transition-colors duration-150',
-              view.isFavourited
-                ? 'text-red-500 hover:bg-red-500/10'
-                : 'text-ink-muted hover:text-red-500 hover:bg-black/[0.06] dark:hover:bg-white/[0.08]',
-            )}
-          >
-            <Heart className="h-3.5 w-3.5" fill={view.isFavourited ? 'currentColor' : 'none'} />
-          </button>
+          <HeartBurstButton
+            favourited={view.isFavourited}
+            onToggle={onToggleFavourite}
+            size="sm"
+          />
           <ViewCardOverflowMenu
             viewId={view.id}
             viewName={view.name}
@@ -333,14 +390,16 @@ export function ExplorerViewCard({
         </div>
 
         {/* ── 1. Header: icon + type + name ── */}
-        <div className="flex items-center gap-3 mb-3 pr-6">
-          <div className={cn('w-10 h-10 rounded-xl border flex items-center justify-center shrink-0', meta.iconBg)}>
-            <TypeIcon className="h-[18px] w-[18px]" />
+        <div className={cn('flex items-center gap-3 pr-6', sectionGap)}>
+          <div className={cn('border flex items-center justify-center shrink-0', typeBadgeSize, typeBadgeRound, meta.iconBg)}>
+            <TypeIcon className={cn(compact ? 'h-4 w-4' : 'h-[18px] w-[18px]')} />
           </div>
           <div className="min-w-0 flex-1">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
-              {meta.label}
-            </span>
+            {!compact && (
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
+                {meta.label}
+              </span>
+            )}
             <h3 className="truncate text-sm font-bold text-ink group-hover:text-accent-lineage transition-colors duration-150 leading-tight">
               {view.name}
             </h3>
@@ -348,7 +407,7 @@ export function ExplorerViewCard({
         </div>
 
         {/* ── 2. Badges: workspace + visibility + semantic layer ── */}
-        <div className="flex flex-wrap items-center gap-1.5 mb-3 min-h-[22px]">
+        <div className={cn('flex flex-wrap items-center gap-1.5 min-h-[22px]', sectionGap)}>
           <ViewScopeBadge
             workspaceId={view.workspaceId}
             workspaceName={view.workspaceName}
@@ -387,30 +446,35 @@ export function ExplorerViewCard({
           )}
         </div>
 
-        {/* ── 4. Description (fixed 2-line height) ── */}
-        <div className="mb-3 min-h-[2.5rem]">
-          {view.description ? (
-            <p className="line-clamp-2 text-xs leading-relaxed text-ink-muted">
-              {view.description}
-            </p>
-          ) : (
-            <div />
-          )}
-        </div>
+        {/* ── 4. Description (fixed 2-line height) — hidden in compact ── */}
+        {showDescription && (
+          <div className={cn('min-h-[2.5rem]', sectionGap)}>
+            {view.description ? (
+              <p className="line-clamp-2 text-xs leading-relaxed text-ink-muted">
+                {view.description}
+              </p>
+            ) : (
+              <div />
+            )}
+          </div>
+        )}
 
-        {/* ── 5. Preview area (fixed height for all cards) ── */}
-        <div className="mb-3 h-[3.75rem]">
-          {hasPreview ? (
-            <div className="rounded-lg border border-glass-border/50 bg-black/[0.015] dark:bg-white/[0.015] px-2 py-1 overflow-hidden h-full">
-              <MiniPreview viewType={view.viewType} />
-            </div>
-          ) : (
-            <div className="h-full" />
-          )}
-        </div>
+        {/* ── 5. Preview area — hidden in compact density ── */}
+        {showPreview && (
+          <div className={cn('h-[3.75rem]', sectionGap)}>
+            {hasPreview ? (
+              <div className="rounded-lg border border-glass-border/50 bg-black/[0.015] dark:bg-white/[0.015] px-2 py-1 overflow-hidden h-full">
+                <MiniPreview viewType={view.viewType} />
+              </div>
+            ) : (
+              <div className="h-full" />
+            )}
+          </div>
+        )}
 
-        {/* ── 6. Tags (fixed height) ── */}
-        <div className="mb-3 min-h-[20px]">
+        {/* ── 6. Tags (fixed height) — hidden in compact density ── */}
+        {showTags && (
+        <div className={cn('min-h-[20px]', sectionGap)}>
           {tags.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {visibleTags.map(tag => {
@@ -449,6 +513,7 @@ export function ExplorerViewCard({
             </div>
           )}
         </div>
+        )}
 
         {/* Spacer */}
         <div className="flex-1" />

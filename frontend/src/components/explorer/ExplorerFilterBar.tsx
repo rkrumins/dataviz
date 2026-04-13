@@ -497,7 +497,9 @@ export function ExplorerFilterBar({
         />
       </div>
 
-      {/* ── Active filter chips ── */}
+      {/* ── Active filter chips ──
+          Container animates height; each chip inside uses its own
+          spring for a tactile add/remove feel. */}
       <AnimatePresence>
         {activeFilters.length > 0 && (
           <motion.div
@@ -507,22 +509,29 @@ export function ExplorerFilterBar({
             transition={{ duration: 0.2 }}
             className="flex flex-wrap items-center gap-1.5 overflow-hidden"
           >
-            {activeFilters.map(f => (
-              <span
-                key={f.key}
-                className="inline-flex items-center gap-1.5 rounded-full border border-glass-border bg-canvas-elevated pl-2.5 pr-1 py-1 text-[11px]"
-              >
-                <span className="text-ink-muted/60 font-medium">{f.prefix}:</span>
-                <span className="font-semibold text-ink">{f.value}</span>
-                <button
-                  onClick={() => removeFilter(f.key)}
-                  className="rounded-full p-0.5 text-ink-muted hover:text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors duration-150"
-                  title="Remove filter"
+            <AnimatePresence initial={false}>
+              {activeFilters.map(f => (
+                <motion.span
+                  key={f.key}
+                  layout
+                  initial={{ opacity: 0, scale: 0.7, y: -4 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.7, y: -4 }}
+                  transition={{ type: 'spring', stiffness: 500, damping: 28, mass: 0.6 }}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-glass-border bg-canvas-elevated pl-2.5 pr-1 py-1 text-[11px]"
                 >
-                  <X className="h-2.5 w-2.5" />
-                </button>
-              </span>
-            ))}
+                  <span className="text-ink-muted/60 font-medium">{f.prefix}:</span>
+                  <span className="font-semibold text-ink">{f.value}</span>
+                  <button
+                    onClick={() => removeFilter(f.key)}
+                    className="rounded-full p-0.5 text-ink-muted hover:text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors duration-150"
+                    title="Remove filter"
+                  >
+                    <X className="h-2.5 w-2.5" />
+                  </button>
+                </motion.span>
+              ))}
+            </AnimatePresence>
             <button
               onClick={clearAll}
               className="text-[11px] font-medium text-ink-muted hover:text-ink transition-colors duration-150 underline underline-offset-2"
