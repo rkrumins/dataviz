@@ -1,39 +1,86 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useSearchParams, useNavigate } from 'react-router-dom'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
-import { useNavigate } from 'react-router-dom'
 import {
-    Database, Plus, Edit2, Settings, Loader2, Search, AlertTriangle,
+    Database, Plus, Edit2, Settings, AlertTriangle,
 } from 'lucide-react'
 import { workspaceService, type WorkspaceResponse, type WorkspaceCreateRequest } from '@/services/workspaceService'
 import { catalogService, type CatalogItemResponse, type CatalogItemBindingResponse } from '@/services/catalogService'
+import { providerService, type ProviderResponse } from '@/services/providerService'
 import { WorkspaceCard } from './WorkspaceCard'
+import { WorkspaceFilterToolbar, type WorkspaceSortKey, type HealthFilter } from './workspace/WorkspaceFilterToolbar'
+import { WorkspaceListRow } from './workspace/WorkspaceListRow'
+import { WorkspaceCardSkeleton, WorkspaceListRowSkeleton } from './workspace/WorkspaceCardSkeleton'
+import { deriveWorkspaceHealth } from './workspace/WorkspaceHealthBadge'
 import { AdminWizard, type WizardStep } from './AdminWizard'
 
 export function RegistryWorkspaces() {
     const navigate = useNavigate()
+    const [searchParams, setSearchParams] = useSearchParams()
+
+    /* ── URL-synced state ── */
+    const searchQuery = searchParams.get('q') || ''
+    const sortKey = (searchParams.get('sort') as WorkspaceSortKey) || 'newest'
+    const layout = (searchParams.get('layout') as 'grid' | 'list') || 'grid'
+    const healthFilter = (searchParams.get('health') as HealthFilter) || 'all'
+
+    const setParam = useCallback((key: string, value: string | null) => {
+        setSearchParams(prev => {
+            const next = new URLSearchParams(prev)
+            if (value === null || value === '') next.delete(key)
+            else next.set(key, value)
+            // Preserve the tab param from parent AdminRegistry
+            return next
+        }, { replace: true })
+    }, [setSearchParams])
+
+    /* ── Debounced search ── */
+    const [searchInput, setSearchInput] = useState(searchQuery)
+    const searchTimer = useRef<ReturnType<typeof setTimeout>>(null)
+    useEffect(() => {
+        if (searchTimer.current) clearTimeout(searchTimer.current)
+        searchTimer.current = setTimeout(() => {
+            const current = searchParams.get('q') ?? ''
+            if (searchInput !== current) setParam('q', searchInput || null)
+        }, 300)
+        return () => { if (searchTimer.current) clearTimeout(searchTimer.current) }
+    }, [searchInput])
+
+    /* ── Data fetching state ── */
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([])
     const [catalogItems, setCatalogItems] = useState<CatalogItemResponse[]>([])
-    const [dsStats, setDsStats] = useState<Record<string, { nodes: number; edges: number; types: number }>>({})
     const [catalogBindings, setCatalogBindings] = useState<CatalogItemBindingResponse[]>([])
-    const [searchQuery, setSearchQuery] = useState('')
+    const [dsStats, setDsStats] = useState<Record<string, { nodes: number; edges: number; types: number }>>({})
+    const [providers, setProviders] = useState<ProviderResponse[]>([])
     const [isLoading, setIsLoading] = useState(true)
-    const [showWizard, setShowWizard] = useState(false)
 
+    /* ── Wizard state ── */
+    const [showWizard, setShowWizard] = useState(false)
     const [wizName, setWizName] = useState('')
     const [wizDesc, setWizDesc] = useState('')
     const [wizCatalogItemId, setWizCatalogItemId] = useState('')
     const [wizDsLabel, setWizDsLabel] = useState('')
     const [wizSubmitting, setWizSubmitting] = useState(false)
 
+    /* ── Provider type map ── */
+    const providerTypeMap = useMemo(() => {
+        const map: Record<string, string> = {}
+        for (const p of providers) map[p.id] = p.providerType
+        return map
+    }, [providers])
+
+    /* ── Data loading ── */
     const loadData = useCallback(async () => {
         setIsLoading(true)
         try {
-            const [wsList, catList] = await Promise.all([
+            const [wsList, catList, provList] = await Promise.all([
                 workspaceService.list(),
                 catalogService.list(),
+                providerService.list(),
             ])
             setWorkspaces(wsList)
             setCatalogItems(catList)
+            setProviders(provList)
 
             const statsMap: Record<string, { nodes: number; edges: number; types: number }> = {}
             // Fetch cached stats from management DB (no provider dependency) in parallel
@@ -66,6 +113,7 @@ export function RegistryWorkspaces() {
         catalogService.listWithBindings().then(setCatalogBindings).catch(console.error)
     }, [showWizard])
 
+    /* ── Actions ── */
     const handleDelete = async (wsId: string) => {
         if (!confirm('Delete this workspace and all its data sources?')) return
         await workspaceService.delete(wsId)
@@ -135,9 +183,9 @@ export function RegistryWorkspaces() {
                     <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-5">
                         <h4 className="text-sm font-bold text-ink mb-3">Workspace Summary</h4>
                         <dl className="grid grid-cols-2 gap-3 text-sm">
-                            <div><dt className="text-ink-muted">Name</dt><dd className="font-semibold text-ink mt-0.5">{wizName || '—'}</dd></div>
-                            <div><dt className="text-ink-muted">Description</dt><dd className="text-ink mt-0.5 line-clamp-2">{wizDesc || '—'}</dd></div>
-                            <div><dt className="text-ink-muted">Catalog Item</dt><dd className="text-ink mt-0.5">{catalogItems.find(c => c.id === wizCatalogItemId)?.name || '—'}</dd></div>
+                            <div><dt className="text-ink-muted">Name</dt><dd className="font-semibold text-ink mt-0.5">{wizName || '\u2014'}</dd></div>
+                            <div><dt className="text-ink-muted">Description</dt><dd className="text-ink mt-0.5 line-clamp-2">{wizDesc || '\u2014'}</dd></div>
+                            <div><dt className="text-ink-muted">Catalog Item</dt><dd className="text-ink mt-0.5">{catalogItems.find(c => c.id === wizCatalogItemId)?.name || '\u2014'}</dd></div>
                         </dl>
                     </div>
                 </div>
@@ -145,10 +193,49 @@ export function RegistryWorkspaces() {
         },
     ]
 
-    const filtered = workspaces.filter(ws => !searchQuery || ws.name.toLowerCase().includes(searchQuery.toLowerCase()) || ws.description?.toLowerCase().includes(searchQuery.toLowerCase()))
+    /* ── Client-side filtering + sorting ── */
+    const filtered = useMemo(() => {
+        let result = workspaces
 
+        // Search filter
+        if (searchQuery) {
+            const q = searchQuery.toLowerCase()
+            result = result.filter(ws => ws.name.toLowerCase().includes(q) || ws.description?.toLowerCase().includes(q))
+        }
+
+        // Health filter
+        if (healthFilter !== 'all') {
+            result = result.filter(ws => deriveWorkspaceHealth(ws.dataSources || []) === healthFilter)
+        }
+
+        // Sort
+        result = [...result].sort((a, b) => {
+            switch (sortKey) {
+                case 'newest': return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+                case 'oldest': return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+                case 'az': return a.name.localeCompare(b.name)
+                case 'za': return b.name.localeCompare(a.name)
+                case 'most-sources': return (b.dataSources?.length || 0) - (a.dataSources?.length || 0)
+                case 'most-entities': return (dsStats[b.id]?.nodes || 0) - (dsStats[a.id]?.nodes || 0)
+                default: return 0
+            }
+        })
+
+        return result
+    }, [workspaces, searchQuery, healthFilter, sortKey, dsStats])
+
+    /* ── Render ── */
     return (
         <div className="space-y-6 animate-in fade-in duration-500">
+            <style>{`
+@keyframes card-in {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.ws-card-stagger { animation: card-in 0.3s ease-out both; }
+`}</style>
+
+            {/* Header */}
             <div className="flex items-center justify-between">
                 <div>
                     <h2 className="text-xl font-bold text-ink">Workspaces</h2>
@@ -159,29 +246,79 @@ export function RegistryWorkspaces() {
                 </button>
             </div>
 
-            {workspaces.length > 0 && (
-                <div className="relative">
-                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
-                    <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search workspaces..." className="w-full pl-11 pr-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
-                </div>
-            )}
+            {/* Filter toolbar */}
+            <WorkspaceFilterToolbar
+                search={searchInput}
+                onSearchChange={setSearchInput}
+                sort={sortKey}
+                onSortChange={s => setParam('sort', s === 'newest' ? null : s)}
+                layout={layout}
+                onLayoutChange={l => setParam('layout', l === 'grid' ? null : l)}
+                healthFilter={healthFilter}
+                onHealthFilterChange={h => setParam('health', h === 'all' ? null : h)}
+                totalCount={workspaces.length}
+                filteredCount={filtered.length}
+            />
 
+            {/* Content */}
             {isLoading ? (
-                <div className="flex justify-center py-20"><Loader2 className="w-6 h-6 animate-spin text-ink-muted" /></div>
+                // Skeleton loading
+                layout === 'grid' ? (
+                    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
+                        {Array.from({ length: 6 }).map((_, i) => <WorkspaceCardSkeleton key={i} />)}
+                    </div>
+                ) : (
+                    <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
+                        {Array.from({ length: 6 }).map((_, i) => <WorkspaceListRowSkeleton key={i} />)}
+                    </div>
+                )
             ) : filtered.length === 0 ? (
+                // Empty state
                 <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed border-glass-border rounded-2xl">
                     <Database className="w-12 h-12 text-ink-muted mb-4" />
                     <h3 className="text-lg font-bold text-ink mb-1">{searchQuery ? 'No matching workspaces' : 'No workspaces yet'}</h3>
                     <p className="text-sm text-ink-muted">{searchQuery ? 'Try a different search term' : 'Create a workspace to get started'}</p>
                 </div>
-            ) : (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            ) : layout === 'grid' ? (
+                // Grid layout
+                <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
                     {filtered.map((ws, i) => (
-                        <WorkspaceCard key={ws.id} ws={ws} index={i} stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }} onOpen={() => navigate(`/admin/registry/workspaces/${ws.id}`)} onDelete={() => handleDelete(ws.id)} onSetDefault={() => handleSetDefault(ws.id)} />
+                        <div key={ws.id} className="ws-card-stagger" style={{ animationDelay: `${Math.min(i * 40, 300)}ms` }}>
+                            <WorkspaceCard
+                                ws={ws}
+                                index={i}
+                                stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
+                                healthStatus={deriveWorkspaceHealth(ws.dataSources || [])}
+                                providerType={providerTypeMap[ws.providerId || '']}
+                                onOpen={() => navigate(`/admin/registry/workspaces/${ws.id}`)}
+                                onDelete={() => handleDelete(ws.id)}
+                                onSetDefault={() => handleSetDefault(ws.id)}
+                            />
+                        </div>
+                    ))}
+                </div>
+            ) : (
+                // List layout
+                <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
+                    <div className="grid grid-cols-[16px_32px_minmax(0,2fr)_70px_80px_80px_60px_90px_72px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
+                        <span></span><span></span><span>Name</span><span>Sources</span><span>Nodes</span><span>Edges</span><span>Types</span><span>Updated</span><span></span>
+                    </div>
+                    {filtered.map((ws, i) => (
+                        <WorkspaceListRow
+                            key={ws.id}
+                            ws={ws}
+                            index={i}
+                            stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
+                            healthStatus={deriveWorkspaceHealth(ws.dataSources || [])}
+                            onOpen={() => navigate(`/admin/registry/workspaces/${ws.id}`)}
+                            onDelete={() => handleDelete(ws.id)}
+                            onSetDefault={() => handleSetDefault(ws.id)}
+                        />
                     ))}
                 </div>
             )}
 
+            {/* Create Workspace Wizard */}
             <AdminWizard title="Create Workspace" steps={wizardSteps} isOpen={showWizard} onClose={() => { setShowWizard(false); resetWizard() }} onComplete={handleWizardComplete} isSubmitting={wizSubmitting} completionLabel="Create Workspace" />
         </div>
     )
