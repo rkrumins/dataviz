@@ -1,16 +1,8 @@
 import { Database, FolderOpen, Shield, Trash2, ChevronRight, CircleDot, ArrowRightLeft, Layers } from 'lucide-react'
-import { cn } from '@/lib/utils'
 import { type WorkspaceResponse } from '@/services/workspaceService'
 import { WorkspaceHealthBadge } from './WorkspaceHealthBadge'
-
-const WS_PALETTES = [
-    { icon: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20' },
-    { icon: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' },
-    { icon: 'bg-violet-500/10 text-violet-500 border-violet-500/20' },
-    { icon: 'bg-amber-500/10 text-amber-500 border-amber-500/20' },
-    { icon: 'bg-rose-500/10 text-rose-500 border-rose-500/20' },
-    { icon: 'bg-cyan-500/10 text-cyan-500 border-cyan-500/20' },
-]
+import { getProviderLogo } from '../ProviderLogos'
+import type { WsDataSourceProviderInfo } from '../WorkspaceCard'
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -23,23 +15,24 @@ interface WorkspaceListRowProps {
     index: number
     stats: { nodes: number; edges: number; types: number }
     healthStatus: 'healthy' | 'warning' | 'critical' | 'unknown'
+    dsProviders: WsDataSourceProviderInfo[]
     onOpen: () => void
     onDelete: () => void
     onSetDefault: () => void
 }
 
-export function WorkspaceListRow({ ws, index, stats, healthStatus, onOpen, onDelete, onSetDefault }: WorkspaceListRowProps) {
-    const palette = WS_PALETTES[index % WS_PALETTES.length]
+export function WorkspaceListRow({ ws, index: _index, stats, healthStatus, dsProviders, onOpen, onDelete, onSetDefault }: WorkspaceListRowProps) {
+    const uniqueProviderTypes = Array.from(new Set(dsProviders.map(p => p.providerType).filter(t => t !== 'unknown')))
 
     return (
         <div
             onClick={onOpen}
-            className="group grid grid-cols-[16px_32px_minmax(0,2fr)_70px_80px_80px_60px_90px_72px] gap-3 items-center px-4 py-3 border-b border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02] cursor-pointer transition-colors"
+            className="group grid grid-cols-[16px_32px_minmax(0,2fr)_100px_70px_80px_80px_60px_90px_72px] gap-3 items-center px-4 py-3 border-b border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02] cursor-pointer transition-colors"
         >
             <WorkspaceHealthBadge status={healthStatus} size="sm" />
 
-            <div className={cn('w-8 h-8 rounded-lg border flex items-center justify-center', palette.icon)}>
-                <FolderOpen className="w-4 h-4" />
+            <div className="w-8 h-8 rounded-lg border border-glass-border flex items-center justify-center bg-black/[0.02] dark:bg-white/[0.02]">
+                <FolderOpen className="w-4 h-4 text-ink-muted" />
             </div>
 
             <div className="min-w-0">
@@ -50,6 +43,24 @@ export function WorkspaceListRow({ ws, index, stats, healthStatus, onOpen, onDel
                     )}
                 </div>
                 {ws.description && <p className="text-[11px] text-ink-muted truncate">{ws.description}</p>}
+            </div>
+
+            {/* Provider badges */}
+            <div className="flex items-center gap-1 flex-wrap">
+                {uniqueProviderTypes.slice(0, 2).map(pt => {
+                    const Logo = getProviderLogo(pt)
+                    return (
+                        <span key={pt} className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border">
+                            <Logo className="w-3 h-3" />
+                            <span className="text-[9px] font-medium text-ink-muted">
+                                {pt === 'neo4j' ? 'Neo4j' : pt === 'falkordb' ? 'FDB' : pt === 'datahub' ? 'DH' : pt}
+                            </span>
+                        </span>
+                    )
+                })}
+                {uniqueProviderTypes.length > 2 && (
+                    <span className="text-[9px] text-ink-muted">+{uniqueProviderTypes.length - 2}</span>
+                )}
             </div>
 
             <div className="flex items-center gap-1 text-xs text-ink-secondary">
