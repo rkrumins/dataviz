@@ -6,17 +6,27 @@ Supports CRUD, filtering, favourites, and enterprise discovery.
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from sqlalchemy import select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import ViewORM, ViewFavouriteORM, WorkspaceORM, ContextModelORM, WorkspaceDataSourceORM
+from ..models import (
+    ViewORM,
+    ViewFavouriteORM,
+    WorkspaceORM,
+    ContextModelORM,
+    WorkspaceDataSourceORM,
+    UserORM,
+)
 from backend.common.models.management import (
     ViewCreateRequest,
     ViewUpdateRequest,
     ViewResponse,
     ViewListResponse,
+    ViewFacetValue,
+    ViewFacetCreator,
+    ViewFacetsResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,12 +96,37 @@ async def _is_favourited(
 # ORM → Pydantic conversion                                           #
 # ------------------------------------------------------------------ #
 
+async def _get_creator_info(
+    session: AsyncSession, user_id: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve ``(display_name, email)`` for a view's creator.
+
+    Returns ``(None, None)`` when the user id is NULL, the legacy
+    ``"anonymous"`` sentinel, or the user record no longer exists.
+    Callers fall back to ``created_by`` (the raw id) in that case.
+    """
+    if not user_id or user_id == "anonymous":
+        return None, None
+    result = await session.execute(
+        select(UserORM.first_name, UserORM.last_name, UserORM.email)
+        .where(UserORM.id == user_id)
+    )
+    row = result.one_or_none()
+    if not row:
+        return None, None
+    first, last, email = row
+    display = f"{first or ''} {last or ''}".strip() or email
+    return display, email
+
+
 def _to_response(
     row: ViewORM,
     *,
     workspace_name: Optional[str] = None,
     data_source_name: Optional[str] = None,
     context_model_name: Optional[str] = None,
+    created_by_name: Optional[str] = None,
+    created_by_email: Optional[str] = None,
     favourite_count: int = 0,
     is_favourited: bool = False,
 ) -> ViewResponse:
@@ -117,6 +152,8 @@ def _to_response(
         config=config_dict,
         visibility=row.visibility or "private",
         createdBy=row.created_by,
+        createdByName=created_by_name,
+        createdByEmail=created_by_email,
         tags=json.loads(row.tags) if row.tags else None,
         isPinned=bool(row.is_pinned) if row.is_pinned else False,
         favouriteCount=favourite_count,
@@ -137,6 +174,7 @@ async def _to_enriched_response(
     ws_name = await _get_workspace_name(session, row.workspace_id)
     ds_name = await _get_data_source_name(session, row.data_source_id)
     cm_name = await _get_context_model_name(session, row.context_model_id)
+    creator_name, creator_email = await _get_creator_info(session, row.created_by)
     fav_count = await _get_favourite_count(session, row.id)
     fav = await _is_favourited(session, row.id, user_id)
     return _to_response(
@@ -144,6 +182,8 @@ async def _to_enriched_response(
         workspace_name=ws_name,
         data_source_name=ds_name,
         context_model_name=cm_name,
+        created_by_name=creator_name,
+        created_by_email=creator_email,
         favourite_count=fav_count,
         is_favourited=fav,
     )
@@ -314,9 +354,13 @@ def _apply_view_filters(
     workspace_ids: Optional[List[str]] = None,
     context_model_id: Optional[str] = None,
     data_source_id: Optional[str] = None,
+    view_type: Optional[str] = None,
+    view_types: Optional[List[str]] = None,
     created_by: Optional[str] = None,
+    created_by_in: Optional[List[str]] = None,
     created_after: Optional[str] = None,
     search: Optional[str] = None,
+    tags: Optional[List[str]] = None,
     user_id: Optional[str] = None,
     favourited_only: bool = False,
     include_deleted: bool = False,
@@ -354,8 +398,19 @@ def _apply_view_filters(
         query = query.where(ViewORM.context_model_id == context_model_id)
     if data_source_id:
         query = query.where(ViewORM.data_source_id == data_source_id)
-    if created_by:
+
+    # View type: multi wins over single.
+    if view_types:
+        query = query.where(ViewORM.view_type.in_(view_types))
+    elif view_type:
+        query = query.where(ViewORM.view_type == view_type)
+
+    # Creator: multi wins over single.
+    if created_by_in:
+        query = query.where(ViewORM.created_by.in_(created_by_in))
+    elif created_by:
         query = query.where(ViewORM.created_by == created_by)
+
     if created_after:
         query = query.where(ViewORM.created_at >= created_after)
 
@@ -364,6 +419,16 @@ def _apply_view_filters(
         query = query.where(ViewORM.visibility.in_(visibility_in))
     elif visibility:
         query = query.where(ViewORM.visibility == visibility)
+
+    # Tag filter — OR semantics across the supplied tags. Tags are stored
+    # as a JSON-encoded string (e.g. ``["finance","pii"]``), so we look
+    # for the quoted token. This is a pragmatic match that's safe for
+    # normal tag values (alphanumeric + dashes); more exotic characters
+    # should be normalised upstream.
+    if tags:
+        query = query.where(
+            or_(*[ViewORM.tags.ilike(f'%"{t}"%') for t in tags])
+        )
 
     # Search / attention both need workspace + data source joins; do them once.
     needs_ws_join = bool(search) or attention_only
@@ -423,7 +488,10 @@ async def list_views_filtered(
     workspace_ids: Optional[List[str]] = None,
     context_model_id: Optional[str] = None,
     data_source_id: Optional[str] = None,
+    view_type: Optional[str] = None,
+    view_types: Optional[List[str]] = None,
     created_by: Optional[str] = None,
+    created_by_in: Optional[List[str]] = None,
     created_after: Optional[str] = None,
     search: Optional[str] = None,
     tags: Optional[List[str]] = None,
@@ -450,9 +518,13 @@ async def list_views_filtered(
         workspace_ids=workspace_ids,
         context_model_id=context_model_id,
         data_source_id=data_source_id,
+        view_type=view_type,
+        view_types=view_types,
         created_by=created_by,
+        created_by_in=created_by_in,
         created_after=created_after,
         search=search,
+        tags=tags,
         user_id=user_id,
         favourited_only=favourited_only,
         include_deleted=include_deleted,
@@ -482,26 +554,111 @@ async def list_views_filtered(
     count_result = await session.execute(count_query)
     total = count_result.scalar_one() or 0
 
-    responses: List[ViewResponse] = []
-    for row in rows:
-        resp = await _to_enriched_response(session, row, user_id)
-        # Tag filter is applied in-memory because tags are stored as JSON text.
-        if tags:
-            if not resp.tags or not any(t in resp.tags for t in tags):
-                # When tag filter is active we must also subtract from
-                # total; but since tags aren't SQL-filterable today, total
-                # is "matches before tag filter". Document this caveat
-                # rather than silently mis-count — UI shows "X of Y".
-                continue
-        responses.append(resp)
+    responses = [await _to_enriched_response(session, row, user_id) for row in rows]
 
-    has_more = (offset + len(rows)) < total
-    next_offset = offset + len(rows) if has_more else None
+    has_more = (offset + len(responses)) < total
+    next_offset = offset + len(responses) if has_more else None
     return ViewListResponse(
         items=responses,
         total=total,
         has_more=has_more,
         next_offset=next_offset,
+    )
+
+
+async def get_view_facets(
+    session: AsyncSession,
+) -> ViewFacetsResponse:
+    """Aggregate distinct tags, view types, and creators across non-deleted views.
+
+    Used by the Explorer to populate the Tag / View Type / Creator filter
+    dropdowns. Facets are intentionally GLOBAL (unscoped by other active
+    filters) so users can always pick from the full set of values in the
+    database rather than the intersection of their current filters —
+    matches the behaviour users expect from Explorer-style UIs where the
+    picker is a discovery tool, not a query refinement.
+    """
+    base_where = ViewORM.deleted_at.is_(None)
+
+    # 1. Tags — parsed in Python since the column is a JSON string.
+    tags_query = (
+        select(ViewORM.tags)
+        .where(base_where)
+        .where(ViewORM.tags.isnot(None))
+    )
+    tags_result = await session.execute(tags_query)
+    tag_counts: Dict[str, int] = {}
+    for (tags_json,) in tags_result.all():
+        try:
+            parsed = json.loads(tags_json) if tags_json else []
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(parsed, list):
+            continue
+        for t in parsed:
+            if isinstance(t, str) and t:
+                tag_counts[t] = tag_counts.get(t, 0) + 1
+    tag_facets = [
+        ViewFacetValue(value=v, count=c)
+        for v, c in sorted(tag_counts.items(), key=lambda x: (-x[1], x[0]))
+    ]
+
+    # 2. View types — direct GROUP BY.
+    vt_query = (
+        select(ViewORM.view_type, func.count().label("cnt"))
+        .where(base_where)
+        .group_by(ViewORM.view_type)
+        .order_by(func.count().desc())
+    )
+    vt_result = await session.execute(vt_query)
+    view_type_facets = [
+        ViewFacetValue(value=vt or "graph", count=cnt)
+        for vt, cnt in vt_result.all()
+    ]
+
+    # 3. Creators — GROUP BY created_by + join users for display metadata.
+    creators_query = (
+        select(ViewORM.created_by, func.count(ViewORM.id).label("cnt"))
+        .where(base_where)
+        .where(ViewORM.created_by.isnot(None))
+        .group_by(ViewORM.created_by)
+        .order_by(func.count(ViewORM.id).desc())
+    )
+    creators_result = await session.execute(creators_query)
+    creator_rows = creators_result.all()
+
+    # Batch-resolve display names in a single query.
+    creator_ids = [cid for cid, _ in creator_rows if cid]
+    user_map: Dict[str, UserORM] = {}
+    if creator_ids:
+        users_result = await session.execute(
+            select(UserORM).where(UserORM.id.in_(creator_ids))
+        )
+        for u in users_result.scalars().all():
+            user_map[u.id] = u
+
+    creator_facets: List[ViewFacetCreator] = []
+    for creator_id, cnt in creator_rows:
+        user = user_map.get(creator_id)
+        if user:
+            display_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.email
+            email = user.email
+        else:
+            # Orphaned row — creator id is stored but the user record is
+            # gone or never existed (e.g. legacy "anonymous" sentinel).
+            display_name = creator_id
+            email = None
+        creator_facets.append(ViewFacetCreator(
+            user_id=creator_id,
+            display_name=display_name,
+            email=email,
+            count=cnt,
+        ))
+
+    return ViewFacetsResponse(
+        tags=tag_facets,
+        view_types=view_type_facets,
+        creators=creator_facets,
     )
 
 
@@ -562,12 +719,15 @@ async def list_popular_views(
         ws_name = await _get_workspace_name(session, row.workspace_id)
         ds_name = await _get_data_source_name(session, row.data_source_id)
         cm_name = await _get_context_model_name(session, row.context_model_id)
+        creator_name, creator_email = await _get_creator_info(session, row.created_by)
         is_fav = await _is_favourited(session, row.id, user_id)
         responses.append(_to_response(
             row,
             workspace_name=ws_name,
             data_source_name=ds_name,
             context_model_name=cm_name,
+            created_by_name=creator_name,
+            created_by_email=creator_email,
             favourite_count=fav_count,
             is_favourited=is_fav,
         ))

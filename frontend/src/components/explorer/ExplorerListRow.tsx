@@ -21,6 +21,7 @@ import type { View } from '@/services/viewApiService'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
+import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 
 /* ------------------------------------------------------------------ */
 /*  View type icon + themed color mapping                              */
@@ -201,10 +202,24 @@ export function ExplorerListRow({
         {/* ── Visibility icon ── */}
         <VisIcon className="h-3.5 w-3.5 text-ink-muted" />
 
-        {/* ── Owner ── */}
-        <span className="truncate text-xs text-ink-muted">
-          {view.createdBy ?? '--'}
-        </span>
+        {/* ── Owner ──
+             Prefer the server-resolved display name; fall back to the raw
+             user id (legacy rows). The CreatorHoverCard shows full name +
+             email on hover so power users can disambiguate without taking
+             a round-trip to the view detail drawer. */}
+        {(view.createdByName || view.createdBy) ? (
+          <CreatorHoverCard
+            userId={view.createdBy ?? null}
+            displayName={view.createdByName ?? null}
+            email={view.createdByEmail ?? null}
+          >
+            <span className="truncate text-xs text-ink-muted cursor-default" tabIndex={0}>
+              {view.createdByName ?? view.createdBy}
+            </span>
+          </CreatorHoverCard>
+        ) : (
+          <span className="truncate text-xs text-ink-muted">—</span>
+        )}
 
         {/* ── Favourite count ── */}
         <span className="inline-flex items-center gap-1 text-xs text-ink-muted">

@@ -163,23 +163,13 @@ async def test_change_role(test_client: AsyncClient, db_session):
     assert "Role changed" in resp.json()["detail"]
 
 
-async def test_change_own_role_forbidden(test_client: AsyncClient, db_session):
-    """Admin cannot change their own role — returns 403."""
-    from backend.app.db.repositories import user_repo
-    # The fake admin user (usr_test000000) must exist in the DB for the endpoint
-    # to reach the self-check (it does get_user_by_id first, returning 404 if missing).
-    await user_repo.create_user(
-        db_session, email="admin_self@example.com", password_hash="x",
-        first_name="Admin", last_name="Self",
-    )
-    from backend.app.db.models import UserORM
-    from sqlalchemy import update
-    await db_session.execute(
-        update(UserORM).where(UserORM.email == "admin_self@example.com")
-        .values(id="usr_test000000", status="active")
-    )
-    await db_session.flush()
+async def test_change_own_role_forbidden(test_client: AsyncClient):
+    """Admin cannot change their own role — returns 403.
 
+    The fake admin user (``usr_test000000``) is seeded by the
+    ``test_client`` fixture, so we can hit the endpoint directly
+    without any DB setup.
+    """
     resp = await test_client.put(
         "/api/v1/admin/users/usr_test000000/role",
         json={"role": "viewer"},
@@ -232,22 +222,12 @@ async def test_suspend_user(test_client: AsyncClient, db_session):
     assert resp.json()["detail"] == "User suspended"
 
 
-async def test_suspend_self_forbidden(test_client: AsyncClient, db_session):
-    """Admin cannot suspend themselves — returns 403."""
-    from backend.app.db.repositories import user_repo
-    from backend.app.db.models import UserORM
-    from sqlalchemy import update
-    # Must persist fake admin user in DB for endpoint to reach the self-check.
-    await user_repo.create_user(
-        db_session, email="admin_suspend_self@example.com", password_hash="x",
-        first_name="Admin", last_name="Self",
-    )
-    await db_session.execute(
-        update(UserORM).where(UserORM.email == "admin_suspend_self@example.com")
-        .values(id="usr_test000000", status="active")
-    )
-    await db_session.flush()
+async def test_suspend_self_forbidden(test_client: AsyncClient):
+    """Admin cannot suspend themselves — returns 403.
 
+    Relies on the ``test_client`` fixture seeding the fake admin user
+    (``usr_test000000``) so the endpoint's self-check can fire.
+    """
     resp = await test_client.post("/api/v1/admin/users/usr_test000000/suspend")
     assert resp.status_code == 403
 

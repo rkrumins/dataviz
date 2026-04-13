@@ -551,12 +551,29 @@ export function ExplorerPreviewDrawer({
                     />
                   )}
 
-                  {/* Created by */}
-                  {view.createdBy && (
+                  {/* Created by — prefer the server-resolved display name;
+                      fall back to the raw id for legacy rows. Email renders
+                      as a subtle secondary line so operators can reach out
+                      without leaving the drawer. */}
+                  {(view.createdByName || view.createdBy) && (
                     <DetailRow
                       icon={User}
                       label="Created By"
-                      value={view.createdBy}
+                      value={
+                        <span className="flex flex-col min-w-0">
+                          <span className="font-medium text-ink truncate">
+                            {view.createdByName ?? view.createdBy}
+                          </span>
+                          {view.createdByEmail && (
+                            <a
+                              href={`mailto:${view.createdByEmail}`}
+                              className="text-[11px] text-ink-muted hover:text-accent-lineage transition-colors truncate"
+                            >
+                              {view.createdByEmail}
+                            </a>
+                          )}
+                        </span>
+                      }
                     />
                   )}
 

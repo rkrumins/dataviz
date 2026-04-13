@@ -58,6 +58,9 @@ function parseSearchParams(params: URLSearchParams) {
     visibility: params.get('visibility'),
     workspaceIds: params.getAll('workspace'),
     dataSourceId: params.get('dataSource'),
+    viewTypes: params.getAll('type'),
+    tags: params.getAll('tag'),
+    creatorIds: params.getAll('creator'),
     sort: (params.get('sort') as SortOption) ?? 'newest',
     layout: (params.get('layout') as 'grid' | 'list') ?? 'grid',
     category: params.get('category'),
@@ -97,14 +100,25 @@ export function ExplorerPage() {
     }, { replace: true })
   }, [setSearchParams])
 
-  const setWorkspaceIds = useCallback((ids: string[]) => {
+  /**
+   * Replace all values of a multi-value URL param (e.g. ``workspace``,
+   * ``tag``, ``type``, ``creator``). Generic helper so every multi-select
+   * dropdown in the filter bar uses the same plumbing instead of
+   * re-inventing the delete+append dance.
+   */
+  const setMultiParam = useCallback((key: string, values: string[]) => {
     setSearchParams(prev => {
       const next = new URLSearchParams(prev)
-      next.delete('workspace')
-      ids.forEach(id => next.append('workspace', id))
+      next.delete(key)
+      values.forEach(v => next.append(key, v))
       return next
     }, { replace: true })
   }, [setSearchParams])
+
+  const setWorkspaceIds = useCallback((ids: string[]) => setMultiParam('workspace', ids), [setMultiParam])
+  const setViewTypes = useCallback((types: string[]) => setMultiParam('type', types), [setMultiParam])
+  const setTags = useCallback((tags: string[]) => setMultiParam('tag', tags), [setMultiParam])
+  const setCreatorIds = useCallback((ids: string[]) => setMultiParam('creator', ids), [setMultiParam])
 
   const clearAllFilters = useCallback(() => {
     setSearchParams({}, { replace: true })
@@ -129,6 +143,9 @@ export function ExplorerPage() {
     visibility: parsed.visibility,
     workspaceIds: parsed.workspaceIds,
     dataSourceId: parsed.dataSourceId,
+    viewTypes: parsed.viewTypes,
+    tags: parsed.tags,
+    creatorIds: parsed.creatorIds,
     sort: parsed.sort,
     // Favourites is driven exclusively by the "Favorites" category pill;
     // the server-side resolver maps that category to ``favouritedOnly=true``.
@@ -159,7 +176,9 @@ export function ExplorerPage() {
 
   const hasActiveFilters = !!(
     parsed.search || parsed.visibility || parsed.workspaceIds.length ||
-    parsed.dataSourceId || parsed.category
+    parsed.dataSourceId || parsed.viewTypes.length ||
+    parsed.tags.length || parsed.creatorIds.length ||
+    parsed.category
   )
 
   const layout = parsed.layout
@@ -313,6 +332,20 @@ export function ExplorerPage() {
     }
   }, [selectedIds, showToast, refetch])
 
+  /**
+   * Clicking a tag chip on a card toggles that tag in the tag filter —
+   * a fast "show me more like this" interaction. If the tag is already
+   * active it's removed; otherwise it's added to whatever set is in
+   * the URL.
+   */
+  const handleTagClick = useCallback((tag: string) => {
+    const current = parsed.tags
+    const next = current.includes(tag)
+      ? current.filter(t => t !== tag)
+      : [...current, tag]
+    setTags(next)
+  }, [parsed.tags, setTags])
+
   const handleRestore = useCallback(async (view: View) => {
     try {
       await restoreViewApi(view.id)
@@ -404,6 +437,12 @@ export function ExplorerPage() {
               onWorkspaceIdsChange={setWorkspaceIds}
               dataSourceId={parsed.dataSourceId}
               onDataSourceIdChange={v => setParam('dataSource', v)}
+              viewTypes={parsed.viewTypes}
+              onViewTypesChange={setViewTypes}
+              tags={parsed.tags}
+              onTagsChange={setTags}
+              creatorIds={parsed.creatorIds}
+              onCreatorIdsChange={setCreatorIds}
               category={parsed.category}
               onCategoryChange={v => setParam('category', v)}
             />
@@ -477,6 +516,7 @@ export function ExplorerPage() {
                     onDelete={() => handleDeleteRequest(v)}
                     onRestore={() => handleRestore(v)}
                     onPermanentDelete={() => handlePermanentDeleteRequest(v)}
+                    onTagClick={handleTagClick}
                     healthStatus={healthMap.get(v.id)?.status}
                   />
                 </div>
@@ -534,6 +574,7 @@ export function ExplorerPage() {
                     onDelete={() => handleDeleteRequest(v)}
                     onRestore={() => handleRestore(v)}
                     onPermanentDelete={() => handlePermanentDeleteRequest(v)}
+                    onTagClick={handleTagClick}
                     healthStatus={healthMap.get(v.id)?.status}
                     isSelected={selectedIds.has(v.id)}
                     onToggleSelect={() => setSelectedIds(prev => {
