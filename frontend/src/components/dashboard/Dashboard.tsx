@@ -159,7 +159,7 @@ export function Dashboard() {
     if (isOnboarding) {
         return (
             <div className="w-full h-full bg-canvas overflow-y-auto custom-scrollbar">
-                <div className="max-w-[1440px] mx-auto pb-28">
+                <div className="px-6 md:px-10 lg:px-12 pb-28">
                     <DashboardOnboarding
                         completedSteps={onboardingCompletedSteps}
                         onCreateWorkspace={() => setActiveTab('admin')}

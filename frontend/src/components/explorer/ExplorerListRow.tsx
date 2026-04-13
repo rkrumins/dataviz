@@ -14,6 +14,8 @@ import {
   ExternalLink,
   Pencil,
   Check,
+  Trash2,
+  RotateCcw,
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import { cn } from '@/lib/utils'
@@ -91,6 +93,8 @@ export interface ExplorerListRowProps {
   onEdit?: () => void
   editDisabled?: boolean
   onDelete?: () => void
+  onRestore?: () => void
+  onPermanentDelete?: () => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
   isSelected?: boolean
   onToggleSelect?: () => void
@@ -107,12 +111,16 @@ export function ExplorerListRow({
   onPreview,
   onEdit,
   editDisabled,
+  onDelete,
+  onRestore,
+  onPermanentDelete,
   isSelected,
   onToggleSelect,
 }: ExplorerListRowProps) {
   const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE_META
   const TypeIcon = typeMeta.icon
   const VisIcon = VISIBILITY_ICON[view.visibility] ?? Lock
+  const isDeleted = !!view.deletedAt
 
   return (
     <div
@@ -126,8 +134,8 @@ export function ExplorerListRow({
         className={cn(
           'grid items-center gap-3',
           onToggleSelect
-            ? 'grid-cols-[28px_minmax(0,2fr)_140px_100px_36px_100px_120px_60px_80px_72px]'
-            : 'grid-cols-[minmax(0,2fr)_140px_100px_36px_100px_120px_60px_80px_72px]',
+            ? 'grid-cols-[28px_minmax(0,2fr)_160px_90px_36px_110px_70px_80px_140px]'
+            : 'grid-cols-[minmax(0,2fr)_160px_90px_36px_110px_70px_80px_140px]',
           'rounded-xl px-3 py-2.5',
           'hover:bg-black/5 dark:hover:bg-white/5',
           isSelected && 'bg-accent-lineage/[0.04]',
@@ -210,65 +218,103 @@ export function ExplorerListRow({
         </span>
 
         {/* ── Actions ── */}
-        <div className="flex items-center gap-0.5">
-          <Link
-            to={`/views/${view.id}`}
-            onClick={e => e.stopPropagation()}
-            className="rounded-lg p-1.5 text-ink-muted transition-colors duration-150 hover:text-accent-lineage hover:bg-black/5 dark:hover:bg-white/5"
-            title="Open view"
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-          </Link>
-          {onEdit && (
-            editDisabled ? (
-              <span
-                className="relative rounded-lg p-1.5 text-ink-muted/40 cursor-not-allowed group/edit"
+        <div className="flex items-center justify-end gap-0.5">
+          {isDeleted ? (
+            <>
+              {onRestore && (
+                <button
+                  type="button"
+                  onClick={e => { e.stopPropagation(); onRestore() }}
+                  className="rounded-lg p-1.5 text-ink-muted hover:text-emerald-500 hover:bg-emerald-500/10 transition-colors duration-150"
+                  title="Restore view"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </button>
+              )}
+              {onPermanentDelete && (
+                <button
+                  type="button"
+                  onClick={e => { e.stopPropagation(); onPermanentDelete() }}
+                  className="rounded-lg p-1.5 text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors duration-150"
+                  title="Permanently delete"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <Link
+                to={`/views/${view.id}`}
+                onClick={e => e.stopPropagation()}
+                className="rounded-lg p-1.5 text-ink-muted transition-colors duration-150 hover:text-accent-lineage hover:bg-black/5 dark:hover:bg-white/5"
+                title="Open view"
               >
-                <Pencil className="h-3.5 w-3.5" />
-                <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-max max-w-[200px] rounded-lg bg-slate-900 dark:bg-slate-700 px-3 py-2 text-[11px] text-white leading-snug opacity-0 group-hover/edit:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
-                  Switch to this view's workspace to edit
-                </span>
-              </span>
-            ) : (
+                <ExternalLink className="h-3.5 w-3.5" />
+              </Link>
+              {onEdit && (
+                editDisabled ? (
+                  <span
+                    className="relative rounded-lg p-1.5 text-ink-muted/40 cursor-not-allowed group/edit"
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                    <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-max max-w-[200px] rounded-lg bg-slate-900 dark:bg-slate-700 px-3 py-2 text-[11px] text-white leading-snug opacity-0 group-hover/edit:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
+                      Switch to this view's workspace to edit
+                    </span>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={e => { e.stopPropagation(); onEdit() }}
+                    className="rounded-lg p-1.5 text-ink-muted hover:text-accent-lineage hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
+                    title="Edit view"
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                )
+              )}
               <button
                 type="button"
-                onClick={e => { e.stopPropagation(); onEdit() }}
-                className="rounded-lg p-1.5 text-ink-muted hover:text-accent-lineage hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
-                title="Edit view"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onToggleFavourite()
+                }}
+                className={cn(
+                  'rounded-lg p-1.5 transition-colors duration-150',
+                  view.isFavourited
+                    ? 'text-red-500 hover:bg-red-500/10'
+                    : 'text-ink-muted hover:text-red-500 hover:bg-black/5 dark:hover:bg-white/5',
+                )}
+                title={view.isFavourited ? 'Unfavorite' : 'Favorite'}
               >
-                <Pencil className="h-3.5 w-3.5" />
+                <Heart
+                  className="h-3.5 w-3.5"
+                  fill={view.isFavourited ? 'currentColor' : 'none'}
+                />
               </button>
-            )
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onShare()
+                }}
+                className="rounded-lg p-1.5 text-ink-muted transition-colors duration-150 hover:text-ink hover:bg-black/5 dark:hover:bg-white/5"
+                title="Copy share link"
+              >
+                <Link2 className="h-3.5 w-3.5" />
+              </button>
+              {onDelete && (
+                <button
+                  type="button"
+                  onClick={e => { e.stopPropagation(); onDelete() }}
+                  className="rounded-lg p-1.5 text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors duration-150"
+                  title="Delete view"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </>
           )}
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation()
-              onToggleFavourite()
-            }}
-            className={cn(
-              'rounded-lg p-1.5 transition-colors duration-150',
-              view.isFavourited
-                ? 'text-red-500 hover:bg-red-500/10'
-                : 'text-ink-muted hover:text-red-500 hover:bg-black/5 dark:hover:bg-white/5',
-            )}
-          >
-            <Heart
-              className="h-3.5 w-3.5"
-              fill={view.isFavourited ? 'currentColor' : 'none'}
-            />
-          </button>
-
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation()
-              onShare()
-            }}
-            className="rounded-lg p-1.5 text-ink-muted transition-colors duration-150 hover:text-ink hover:bg-black/5 dark:hover:bg-white/5"
-          >
-            <Link2 className="h-3.5 w-3.5" />
-          </button>
         </div>
       </div>
     </div>

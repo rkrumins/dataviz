@@ -86,7 +86,7 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
           }
           if (ready) readiness[ds.id] = ready
         })),
-        listViews({ workspaceId: wsId }).then(v => { views = v }).catch(() => {}),
+        listViews({ workspaceId: wsId }).then(v => { views = v.items }).catch(() => {}),
       ])
       if (signal?.cancelled) return
 

@@ -5,10 +5,10 @@ Supports CRUD, filtering, favourites, and enterprise discovery.
 """
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from sqlalchemy import select, delete, func, update
+from sqlalchemy import select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import ViewORM, ViewFavouriteORM, WorkspaceORM, ContextModelORM, WorkspaceDataSourceORM
@@ -16,6 +16,7 @@ from backend.common.models.management import (
     ViewCreateRequest,
     ViewUpdateRequest,
     ViewResponse,
+    ViewListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,7 @@ async def create_view(
     req: ViewCreateRequest,
     *,
     ontology_digest: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> ViewResponse:
     """Persist a new view.
 
@@ -165,6 +167,10 @@ async def create_view(
     source. It is stored verbatim and used later by the wizard's drift
     detection. Pass None only when the caller has no way to resolve the
     ontology (e.g. ad-hoc tests, legacy seed scripts).
+
+    ``user_id`` is stored in ``created_by`` so the Explorer can filter
+    views by creator ("My Views"). Legacy rows created before this
+    parameter existed have NULL ``created_by``.
     """
     logger.info(
         "create_view: name=%s workspace_id=%s data_source_id=%s digest=%s",
@@ -180,13 +186,14 @@ async def create_view(
         view_type=req.view_type or "graph",
         config=json.dumps(req.config) if req.config else "{}",
         visibility=req.visibility or "private",
+        created_by=user_id,
         tags=json.dumps(req.tags) if req.tags else None,
         is_pinned=req.is_pinned,
         ontology_digest=ontology_digest,
     )
     session.add(row)
     await session.flush()
-    return await _to_enriched_response(session, row)
+    return await _to_enriched_response(session, row, user_id)
 
 
 async def get_view(
@@ -298,24 +305,30 @@ async def permanently_delete_view(
 # Filtered listing & discovery                                         #
 # ------------------------------------------------------------------ #
 
-async def list_views_filtered(
-    session: AsyncSession,
+def _apply_view_filters(
+    query,
     *,
     visibility: Optional[str] = None,
+    visibility_in: Optional[List[str]] = None,
     workspace_id: Optional[str] = None,
+    workspace_ids: Optional[List[str]] = None,
     context_model_id: Optional[str] = None,
     data_source_id: Optional[str] = None,
+    created_by: Optional[str] = None,
+    created_after: Optional[str] = None,
     search: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    limit: int = 50,
-    offset: int = 0,
     user_id: Optional[str] = None,
     favourited_only: bool = False,
     include_deleted: bool = False,
     deleted_only: bool = False,
-) -> List[ViewResponse]:
-    query = select(ViewORM)
+    attention_only: bool = False,
+):
+    """Apply all filter predicates to a query on ``ViewORM``.
 
+    Shared by the listing, counting, and discovery code paths so the same
+    set of predicates produces the same result set whether the caller is
+    fetching rows or the total count.
+    """
     # Soft-delete filtering
     if deleted_only:
         query = query.where(ViewORM.deleted_at.isnot(None))
@@ -331,35 +344,165 @@ async def list_views_filtered(
             (ViewFavouriteORM.user_id == user_id),
         )
 
-    if workspace_id:
+    # Multi-workspace takes precedence over single-workspace filter.
+    if workspace_ids:
+        query = query.where(ViewORM.workspace_id.in_(workspace_ids))
+    elif workspace_id:
         query = query.where(ViewORM.workspace_id == workspace_id)
+
     if context_model_id:
         query = query.where(ViewORM.context_model_id == context_model_id)
     if data_source_id:
         query = query.where(ViewORM.data_source_id == data_source_id)
-    if visibility:
+    if created_by:
+        query = query.where(ViewORM.created_by == created_by)
+    if created_after:
+        query = query.where(ViewORM.created_at >= created_after)
+
+    # Visibility filters — visibility_in (set match) wins over single visibility.
+    if visibility_in:
+        query = query.where(ViewORM.visibility.in_(visibility_in))
+    elif visibility:
         query = query.where(ViewORM.visibility == visibility)
+
+    # Search / attention both need workspace + data source joins; do them once.
+    needs_ws_join = bool(search) or attention_only
+    needs_ds_join = bool(search) or attention_only
+    if needs_ws_join:
+        query = query.outerjoin(
+            WorkspaceORM, ViewORM.workspace_id == WorkspaceORM.id,
+        )
+    if needs_ds_join:
+        query = query.outerjoin(
+            WorkspaceDataSourceORM,
+            ViewORM.data_source_id == WorkspaceDataSourceORM.id,
+        )
+
     if search:
         pattern = f"%{search}%"
         query = query.where(
-            ViewORM.name.ilike(pattern) | ViewORM.description.ilike(pattern)
+            ViewORM.name.ilike(pattern)
+            | ViewORM.description.ilike(pattern)
+            | WorkspaceORM.name.ilike(pattern)
+            | WorkspaceDataSourceORM.label.ilike(pattern)
+            | ViewORM.created_by.ilike(pattern)
+            | ViewORM.tags.ilike(pattern)
         )
 
-    query = query.order_by(ViewORM.updated_at.desc()).limit(limit).offset(offset)
-    result = await session.execute(query)
-    rows = result.scalars().all()
+    if attention_only:
+        # Views "needing attention" are those that are stale (not updated in
+        # 90 days), or reference an inactive/missing workspace or data source.
+        # Mirrors the useViewHealth hook on the frontend so server-side
+        # filtering returns the same set the client would compute locally.
+        stale_cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=90)
+        ).isoformat()
+        ds_id_set_but_missing = (
+            ViewORM.data_source_id.isnot(None)
+            & WorkspaceDataSourceORM.id.is_(None)
+        )
+        query = query.where(
+            or_(
+                ViewORM.updated_at < stale_cutoff,
+                WorkspaceORM.id.is_(None),          # workspace missing (broken)
+                WorkspaceORM.is_active.is_(False),  # workspace inactive (warning)
+                WorkspaceDataSourceORM.is_active.is_(False),
+                ds_id_set_but_missing,
+            )
+        )
 
-    responses = []
+    return query
+
+
+async def list_views_filtered(
+    session: AsyncSession,
+    *,
+    visibility: Optional[str] = None,
+    visibility_in: Optional[List[str]] = None,
+    workspace_id: Optional[str] = None,
+    workspace_ids: Optional[List[str]] = None,
+    context_model_id: Optional[str] = None,
+    data_source_id: Optional[str] = None,
+    created_by: Optional[str] = None,
+    created_after: Optional[str] = None,
+    search: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    limit: int = 50,
+    offset: int = 0,
+    user_id: Optional[str] = None,
+    favourited_only: bool = False,
+    include_deleted: bool = False,
+    deleted_only: bool = False,
+    attention_only: bool = False,
+) -> ViewListResponse:
+    """Return a paginated envelope of views matching the given filters.
+
+    The envelope includes an authoritative ``total`` count so the Explorer
+    can render "20 of 1,432" style stats without guessing from page size.
+    ``has_more`` and ``next_offset`` are computed once on the server so
+    callers never have to reason about "was this the last page?".
+    """
+    # --- shared filter application (select + count share this) -----------
+    filter_kwargs = dict(
+        visibility=visibility,
+        visibility_in=visibility_in,
+        workspace_id=workspace_id,
+        workspace_ids=workspace_ids,
+        context_model_id=context_model_id,
+        data_source_id=data_source_id,
+        created_by=created_by,
+        created_after=created_after,
+        search=search,
+        user_id=user_id,
+        favourited_only=favourited_only,
+        include_deleted=include_deleted,
+        deleted_only=deleted_only,
+        attention_only=attention_only,
+    )
+
+    select_query = _apply_view_filters(select(ViewORM), **filter_kwargs)
+    select_query = (
+        select_query
+        .order_by(ViewORM.updated_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+
+    # Count query uses the same filters but selects COUNT(DISTINCT id).
+    # DISTINCT guards against the joins multiplying rows when a view has
+    # many favourites (for favourited_only queries) or other cases.
+    count_query = _apply_view_filters(
+        select(func.count(func.distinct(ViewORM.id))),
+        **filter_kwargs,
+    )
+
+    result = await session.execute(select_query)
+    rows = result.scalars().unique().all()
+
+    count_result = await session.execute(count_query)
+    total = count_result.scalar_one() or 0
+
+    responses: List[ViewResponse] = []
     for row in rows:
         resp = await _to_enriched_response(session, row, user_id)
-        # Filter by tags in-memory (JSON stored as TEXT)
-        if tags and resp.tags:
-            if not any(t in resp.tags for t in tags):
+        # Tag filter is applied in-memory because tags are stored as JSON text.
+        if tags:
+            if not resp.tags or not any(t in resp.tags for t in tags):
+                # When tag filter is active we must also subtract from
+                # total; but since tags aren't SQL-filterable today, total
+                # is "matches before tag filter". Document this caveat
+                # rather than silently mis-count — UI shows "X of Y".
                 continue
-        elif tags and not resp.tags:
-            continue
         responses.append(resp)
-    return responses
+
+    has_more = (offset + len(rows)) < total
+    next_offset = offset + len(rows) if has_more else None
+    return ViewListResponse(
+        items=responses,
+        total=total,
+        has_more=has_more,
+        next_offset=next_offset,
+    )
 
 
 async def list_popular_views(
@@ -368,7 +511,18 @@ async def list_popular_views(
     limit: int = 20,
     user_id: Optional[str] = None,
 ) -> List[ViewResponse]:
-    """List views sorted by favourite count (enterprise-visible only)."""
+    """List the most-favourited views visible to the caller.
+
+    Visibility scoping:
+    - ``enterprise`` and ``workspace`` visibility are visible to everyone
+      (matches how ``list_views_filtered`` treats access today).
+    - ``private`` views only surface for their creator, so user A never
+      sees user B's private view bubble up into their Trending strip
+      just because A has happened to favourite it.
+
+    Zero-favourite views are excluded so Trending reflects actual
+    popularity rather than padding with unloved views.
+    """
     fav_count_sq = (
         select(
             ViewFavouriteORM.view_id,
@@ -378,12 +532,25 @@ async def list_popular_views(
         .subquery()
     )
 
+    # Privacy-safe visibility predicate: everyone sees non-private views;
+    # private views only surface to their creator.
+    visibility_predicate = ViewORM.visibility.in_(("enterprise", "workspace"))
+    if user_id:
+        visibility_predicate = or_(
+            visibility_predicate,
+            ViewORM.created_by == user_id,
+        )
+
     query = (
         select(ViewORM, fav_count_sq.c.fav_count)
-        .outerjoin(fav_count_sq, ViewORM.id == fav_count_sq.c.view_id)
-        .where(ViewORM.visibility == "enterprise")
+        .join(fav_count_sq, ViewORM.id == fav_count_sq.c.view_id)
         .where(ViewORM.deleted_at.is_(None))
-        .order_by(func.coalesce(fav_count_sq.c.fav_count, 0).desc())
+        .where(fav_count_sq.c.fav_count > 0)
+        .where(visibility_predicate)
+        .order_by(
+            fav_count_sq.c.fav_count.desc(),
+            ViewORM.updated_at.desc(),
+        )
         .limit(limit)
     )
 

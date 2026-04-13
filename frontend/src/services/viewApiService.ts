@@ -7,7 +7,7 @@
  * API scope: /api/v1/views (top-level, cross-workspace)
  */
 import type { ViewConfiguration } from '@/types/schema'
-import { fetchWithTimeout } from './fetchWithTimeout'
+import { authFetch } from './apiClient'
 
 // ============================================
 // Types
@@ -75,9 +75,17 @@ export interface ViewUpdateRequest {
 
 export interface ViewListParams {
     visibility?: string
+    /** Multi-visibility filter; wins over single ``visibility`` when both are set. */
+    visibilityIn?: string[]
     workspaceId?: string
+    /** Multi-workspace filter; wins over single ``workspaceId`` when both are set. */
+    workspaceIds?: string[]
     contextModelId?: string
     dataSourceId?: string
+    /** Restrict to views authored by a specific user (used by "My Views"). */
+    createdBy?: string
+    /** ISO timestamp — returns views created on or after this time. */
+    createdAfter?: string
     search?: string
     tags?: string[]
     limit?: number
@@ -88,45 +96,70 @@ export interface ViewListParams {
     includeDeleted?: boolean
     /** Return only soft-deleted views. */
     deletedOnly?: boolean
+    /** Return only views that need attention (stale, broken, or inactive). */
+    attentionOnly?: boolean
+}
+
+/**
+ * Paginated envelope returned by ``GET /api/v1/views/``.
+ *
+ * ``total`` is the authoritative count of matches; ``hasMore`` and
+ * ``nextOffset`` are pre-computed on the server so callers don't have
+ * to infer pagination state from ``items.length >= limit``.
+ */
+export interface ViewListResponse {
+    items: View[]
+    total: number
+    hasMore: boolean
+    nextOffset: number | null
 }
 
 // ============================================
 // API Client
 // ============================================
 
-async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
-    const response = await fetchWithTimeout(url, {
-        headers: { 'Content-Type': 'application/json', ...options?.headers },
-        ...options,
-    })
-    if (!response.ok) {
-        const errorText = await response.text()
-        throw new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
-    }
-    if (response.status === 204) return undefined as T
-    return response.json()
-}
+// Use authFetch so the JWT access token is attached to every view API
+// call. Without this, the backend treats every request as anonymous,
+// which breaks created_by attribution and per-user favourite flags.
+const apiFetch = authFetch
 
 // ============================================
 // CRUD
 // ============================================
 
-/** List accessible views with optional filtering */
-export async function listViews(params?: ViewListParams): Promise<View[]> {
+/**
+ * List views matching the given filters.
+ *
+ * Returns a paginated envelope with ``items`` + ``total`` + ``hasMore`` +
+ * ``nextOffset``. Callers that don't need pagination metadata should
+ * read ``.items`` directly rather than guessing from array length.
+ */
+export async function listViews(params?: ViewListParams): Promise<ViewListResponse> {
     const sp = new URLSearchParams()
-    if (params?.visibility) sp.set('visibility', params.visibility)
-    if (params?.workspaceId) sp.set('workspaceId', params.workspaceId)
+    if (params?.visibilityIn && params.visibilityIn.length > 0) {
+        params.visibilityIn.forEach(v => sp.append('visibilityIn', v))
+    } else if (params?.visibility) {
+        sp.set('visibility', params.visibility)
+    }
+    if (params?.workspaceIds && params.workspaceIds.length > 0) {
+        params.workspaceIds.forEach(id => sp.append('workspaceIds', id))
+    } else if (params?.workspaceId) {
+        sp.set('workspaceId', params.workspaceId)
+    }
     if (params?.contextModelId) sp.set('contextModelId', params.contextModelId)
     if (params?.dataSourceId) sp.set('dataSourceId', params.dataSourceId)
+    if (params?.createdBy) sp.set('createdBy', params.createdBy)
+    if (params?.createdAfter) sp.set('createdAfter', params.createdAfter)
     if (params?.search) sp.set('search', params.search)
     if (params?.tags) params.tags.forEach(t => sp.append('tags', t))
-    if (params?.limit) sp.set('limit', String(params.limit))
-    if (params?.offset) sp.set('offset', String(params.offset))
+    if (params?.limit != null) sp.set('limit', String(params.limit))
+    if (params?.offset != null) sp.set('offset', String(params.offset))
     if (params?.favouritedOnly) sp.set('favouritedOnly', 'true')
     if (params?.includeDeleted) sp.set('includeDeleted', 'true')
     if (params?.deletedOnly) sp.set('deletedOnly', 'true')
+    if (params?.attentionOnly) sp.set('attentionOnly', 'true')
     const qs = sp.toString()
-    return apiFetch<View[]>(`/api/v1/views/${qs ? `?${qs}` : ''}`)
+    return apiFetch<ViewListResponse>(`/api/v1/views/${qs ? `?${qs}` : ''}`)
 }
 
 /** List the most-favourited enterprise-visible views */

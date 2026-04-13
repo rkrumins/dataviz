@@ -34,8 +34,8 @@ export function WorkspaceViewsManager() {
     if (!workspaceId) return
     setLoading(true)
     try {
-      const data = await listViews({ workspaceId })
-      setViews(data)
+      const { items } = await listViews({ workspaceId })
+      setViews(items)
     } catch (err) {
       console.error('[WorkspaceViewsManager] Failed to load views:', err)
     } finally {

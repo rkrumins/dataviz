@@ -60,7 +60,6 @@ function parseSearchParams(params: URLSearchParams) {
     dataSourceId: params.get('dataSource'),
     sort: (params.get('sort') as SortOption) ?? 'newest',
     layout: (params.get('layout') as 'grid' | 'list') ?? 'grid',
-    favouritedOnly: params.get('favourites') === 'true',
     category: params.get('category'),
   }
 }
@@ -131,31 +130,36 @@ export function ExplorerPage() {
     workspaceIds: parsed.workspaceIds,
     dataSourceId: parsed.dataSourceId,
     sort: parsed.sort,
-    favouritedOnly: parsed.favouritedOnly || parsed.category === 'my-favourites',
+    // Favourites is driven exclusively by the "Favorites" category pill;
+    // the server-side resolver maps that category to ``favouritedOnly=true``.
+    favouritedOnly: false,
     category: parsed.category,
-    currentUserName: currentUser?.displayName ?? currentUser?.email ?? null,
+    currentUserId: currentUser?.id ?? null,
     limit: PAGE_SIZE,
     offset: 0,
   }
 
-  const { views: allFilteredViews, totalCount: rawTotalCount, popularViews, isLoading, toggleFavourite, removeView: removeViewFromList, refetch, loadMore, hasMore } = useExplorerViews(filters)
-  const healthMap = useViewHealth(allFilteredViews)
-
-  // Apply needs-attention filter after health map is computed
-  const views = useMemo(() => {
-    if (parsed.category !== 'needs-attention') return allFilteredViews
-    return allFilteredViews.filter(v => {
-      const h = healthMap.get(v.id)
-      return h && h.status !== 'healthy'
-    })
-  }, [allFilteredViews, healthMap, parsed.category])
-  const totalCount = parsed.category === 'needs-attention' ? views.length : rawTotalCount
+  const {
+    views,
+    totalCount,
+    popularViews,
+    isLoading,
+    toggleFavourite,
+    removeView: removeViewFromList,
+    refetch,
+    loadMore,
+    hasMore,
+  } = useExplorerViews(filters)
+  // Health map still drives the per-card health badge, but the
+  // needs-attention filter itself runs server-side now, so the Explorer
+  // no longer post-filters the loaded page.
+  const healthMap = useViewHealth(views)
 
   const pinnedViews = useMemo(() => views.filter(v => v.isPinned), [views])
 
   const hasActiveFilters = !!(
     parsed.search || parsed.visibility || parsed.workspaceIds.length ||
-    parsed.dataSourceId || parsed.favouritedOnly || parsed.category
+    parsed.dataSourceId || parsed.category
   )
 
   const layout = parsed.layout
@@ -324,7 +328,7 @@ export function ExplorerPage() {
   return (
     <div className="absolute inset-0 overflow-y-auto bg-canvas custom-scrollbar">
       <style>{STAGGER_STYLE}</style>
-      <div className="max-w-[1440px] mx-auto px-4 md:px-8 pb-28">
+      <div className="px-6 md:px-10 lg:px-12 pb-28">
 
         {/* ── Header ──────────────────────────────────────────── */}
         <header className="pt-8 pb-6">
@@ -400,8 +404,6 @@ export function ExplorerPage() {
               onWorkspaceIdsChange={setWorkspaceIds}
               dataSourceId={parsed.dataSourceId}
               onDataSourceIdChange={v => setParam('dataSource', v)}
-              favouritedOnly={parsed.favouritedOnly}
-              onFavouritedOnlyChange={v => setParam('favourites', v ? 'true' : null)}
               category={parsed.category}
               onCategoryChange={v => setParam('category', v)}
             />
@@ -464,7 +466,7 @@ export function ExplorerPage() {
             </div>
             <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-none [&::-webkit-scrollbar]:hidden">
               {popularViews.slice(0, 6).map(v => (
-                <div key={v.id} className="flex-shrink-0 w-[280px]">
+                <div key={v.id} className="flex-shrink-0 w-[300px]">
                   <ExplorerViewCard
                     view={v}
                     onToggleFavourite={() => toggleFavourite(v.id)}
@@ -497,7 +499,7 @@ export function ExplorerPage() {
 
           {isLoading ? (
             layout === 'grid' ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 min-[1920px]:grid-cols-6 gap-4">
                 {Array.from({ length: 8 }).map((_, i) => <ExplorerCardSkeleton key={i} />)}
               </div>
             ) : (
@@ -515,7 +517,7 @@ export function ExplorerPage() {
               onCreateView={() => openViewEditor()}
             />
           ) : layout === 'grid' ? (
-            <div ref={gridRef} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            <div ref={gridRef} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 min-[1920px]:grid-cols-6 gap-4">
               {views.map((v, i) => (
                 <div
                   key={v.id}
@@ -546,8 +548,16 @@ export function ExplorerPage() {
             </div>
           ) : (
             <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
-              <div className="grid grid-cols-[28px_minmax(0,2fr)_140px_100px_36px_100px_120px_60px_80px_72px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
-                <span></span><span>Name</span><span>Workspace</span><span>Type</span><span>Vis</span><span>Source</span><span>Owner</span><span>Likes</span><span>Updated</span><span></span>
+              <div className="grid grid-cols-[28px_minmax(0,2fr)_160px_90px_36px_110px_70px_80px_140px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
+                <span></span>
+                <span>Name</span>
+                <span>Scope</span>
+                <span>Type</span>
+                <span>Vis</span>
+                <span>Owner</span>
+                <span>Likes</span>
+                <span>Updated</span>
+                <span className="text-right">Actions</span>
               </div>
               {views.map(v => (
                 <ExplorerListRow
@@ -559,6 +569,8 @@ export function ExplorerPage() {
                   onEdit={() => openViewEditor(v.id)}
                   editDisabled={false}
                   onDelete={() => handleDeleteRequest(v)}
+                  onRestore={() => handleRestore(v)}
+                  onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                   healthStatus={healthMap.get(v.id)?.status}
                   isSelected={selectedIds.has(v.id)}
                   onToggleSelect={() => setSelectedIds(prev => {
