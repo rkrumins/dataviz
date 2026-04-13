@@ -140,6 +140,11 @@ export function AdminWorkspaceDetail() {
         )
     }, [wsId, catalogItems])
 
+    const selectedDs = useMemo(() => {
+        if (!workspace || !selectedDsId) return null
+        return workspace.dataSources.find(ds => ds.id === selectedDsId) || null
+    }, [workspace, selectedDsId])
+
     const primaryOntologyName = useMemo(() => {
         if (!workspace) return undefined
         const primaryDs = workspace.dataSources.find(ds => ds.isPrimary)
@@ -416,27 +421,7 @@ export function AdminWorkspaceDetail() {
                                 })}
                             </div>
 
-                            {/* Detail panel for selected DS */}
-                            {selectedDsId && workspace.dataSources.find(ds => ds.id === selectedDsId) && (
-                                <DataSourceDetailPanel
-                                    ds={workspace.dataSources.find(ds => ds.id === selectedDsId)!}
-                                    wsId={wsId!}
-                                    stats={dsStatsMap[selectedDsId]}
-                                    ontologyName={ontologyNameMap[workspace.dataSources.find(ds => ds.id === selectedDsId)?.ontologyId || '']}
-                                    views={viewsByDs[selectedDsId] || []}
-                                    onEdit={() => setEditingDs(workspace.dataSources.find(ds => ds.id === selectedDsId)!)}
-                                    onDelete={workspace.dataSources.length > 1
-                                        ? () => handleDeleteDsClick(selectedDsId, workspace.dataSources.find(ds => ds.id === selectedDsId)?.label || selectedDsId)
-                                        : undefined}
-                                    onExplore={() => navigate(`/schema?workspaceId=${workspace.id}&dataSourceId=${selectedDsId}`)}
-                                    onReaggregate={() => handleReaggregate(workspace.dataSources.find(ds => ds.id === selectedDsId)!)}
-                                    onPurge={() => handlePurge(workspace.dataSources.find(ds => ds.id === selectedDsId)!)}
-                                    onSetPrimary={() => handleSetPrimary(selectedDsId)}
-                                    onProjectionModeChange={mode => handleProjectionMode(selectedDsId, mode)}
-                                    onDedicatedGraphNameChange={name => handleDedicatedGraphName(selectedDsId, name)}
-                                    onClose={() => setSelectedDsId(null)}
-                                />
-                            )}
+                            {/* Detail drawer renders via portal — no scroll impact */}
                         </>
                     )}
                 </>
@@ -526,6 +511,28 @@ export function AdminWorkspaceDetail() {
                     onClose={() => setEditingDs(null)}
                 />
             )}
+
+            {/* Data source detail drawer (renders via portal — no scroll impact) */}
+            <DataSourceDetailPanel
+                ds={selectedDs}
+                isOpen={!!selectedDsId && !!selectedDs}
+                wsId={wsId!}
+                stats={selectedDsId ? dsStatsMap[selectedDsId] : undefined}
+                ontologyName={selectedDsId ? ontologyNameMap[selectedDs?.ontologyId || ''] : undefined}
+                ontologyId={selectedDs?.ontologyId}
+                views={selectedDsId ? (viewsByDs[selectedDsId] || []) : []}
+                onEdit={() => { if (selectedDs) setEditingDs(selectedDs) }}
+                onDelete={workspace.dataSources.length > 1 && selectedDs
+                    ? () => handleDeleteDsClick(selectedDs.id, selectedDs.label || selectedDs.id)
+                    : undefined}
+                onExplore={() => navigate(`/schema?workspaceId=${workspace.id}&dataSourceId=${selectedDsId}`)}
+                onReaggregate={() => { if (selectedDs) handleReaggregate(selectedDs) }}
+                onPurge={async () => { if (selectedDs) await handlePurge(selectedDs) }}
+                onSetPrimary={() => { if (selectedDsId) handleSetPrimary(selectedDsId) }}
+                onProjectionModeChange={mode => { if (selectedDsId) handleProjectionMode(selectedDsId, mode) }}
+                onDedicatedGraphNameChange={name => { if (selectedDsId) handleDedicatedGraphName(selectedDsId, name) }}
+                onClose={() => setSelectedDsId(null)}
+            />
         </div>
     )
 }
