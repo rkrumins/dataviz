@@ -16,7 +16,8 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth'
-import { useExplorerViews, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
+import { useExplorerViews, resolveCategoryParams, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
+import { useViewStats } from '@/hooks/useViewStats'
 import { useViewHealth } from '@/hooks/useViewHealth'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
@@ -26,7 +27,6 @@ import { ExplorerStatsBar } from '@/components/explorer/ExplorerStatsBar'
 import { DensityToggle } from '@/components/explorer/DensityToggle'
 import { ExplorerSearchSuggestions } from '@/components/explorer/ExplorerSearchSuggestions'
 import { KeyboardShortcutsDialog } from '@/components/explorer/KeyboardShortcutsDialog'
-import { useViewFacets } from '@/hooks/useViewFacets'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
 import { useTypewriter } from '@/hooks/useTypewriter'
 import { usePreferencesStore } from '@/store/preferences'
@@ -95,8 +95,37 @@ export function ExplorerPage() {
   const currentUser = useAuthStore(s => s.user)
   const { openViewEditor } = useViewEditorModal()
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
-  const { facets: explorerFacets, isLoading: facetsLoading } = useViewFacets()
   const density = usePreferencesStore(s => s.explorerDensity)
+
+  // Filter-aware stats for the summary bar. Mirrors the same filter
+  // params that drive ``useExplorerViews`` so the numbers describe the
+  // exact population the user is currently looking at. ``parsed.search``
+  // (URL-debounced) is used rather than the raw ``searchInput`` so the
+  // endpoint isn't hit on every keystroke.
+  const statsParams = useMemo(() => {
+    const categoryParams = resolveCategoryParams(parsed.category, currentUser?.id ?? null)
+    return {
+      search: parsed.search || undefined,
+      visibility: parsed.visibility || undefined,
+      workspaceIds: parsed.workspaceIds.length > 0 ? parsed.workspaceIds : undefined,
+      dataSourceId: parsed.dataSourceId || undefined,
+      viewTypes: parsed.viewTypes.length > 0 ? parsed.viewTypes : undefined,
+      tags: parsed.tags.length > 0 ? parsed.tags : undefined,
+      createdByIn: parsed.creatorIds.length > 0 ? parsed.creatorIds : undefined,
+      ...categoryParams,
+    }
+  }, [
+    parsed.search,
+    parsed.visibility,
+    parsed.workspaceIds,
+    parsed.dataSourceId,
+    parsed.viewTypes,
+    parsed.tags,
+    parsed.creatorIds,
+    parsed.category,
+    currentUser?.id,
+  ])
+  const { stats: catalogStats, isFetching: statsFetching } = useViewStats(statsParams)
 
   // Tailwind gap class for the grid layout, driven by density preference.
   const gridGapClass =
@@ -452,8 +481,8 @@ export function ExplorerPage() {
 
         {/* ── Stats summary bar ───────────────────────────────── */}
         <ExplorerStatsBar
-          stats={explorerFacets.stats}
-          isLoading={facetsLoading}
+          stats={catalogStats}
+          isLoading={statsFetching}
           onShowAll={() => setParam('category', null)}
           onShowRecent={() => setParam('category', 'recently-added')}
           onShowAttention={() => setParam('category', 'needs-attention')}
