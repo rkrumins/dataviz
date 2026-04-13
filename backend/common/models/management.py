@@ -616,6 +616,24 @@ class ViewResponse(BaseModel):
         populate_by_name = True
 
 
+class ViewListResponse(BaseModel):
+    """Paginated view listing envelope.
+
+    Returned by GET /api/v1/views/ so callers get an authoritative
+    ``total`` count and a pre-computed ``has_more`` flag instead of
+    guessing from ``len(items) >= limit``. ``next_offset`` is the
+    offset to pass for the next page, or None when ``has_more`` is
+    False.
+    """
+    items: List[ViewResponse]
+    total: int
+    has_more: bool = Field(alias="hasMore")
+    next_offset: Optional[int] = Field(None, alias="nextOffset")
+
+    class Config:
+        populate_by_name = True
+
+
 # ─── Impact / Blast-radius models ─────────────────────────────────────────────
 
 class ImpactedEntity(BaseModel):

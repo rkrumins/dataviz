@@ -40,10 +40,14 @@ async def _create_view(client: AsyncClient, workspace_id: str, name: str = "Test
 # ── GET /views (empty) ─────────────────────────────────────────────────
 
 async def test_list_views_empty(test_client: AsyncClient):
-    """Initially the view list is empty."""
+    """Initially the view list is empty and envelope reports total=0."""
     resp = await test_client.get("/api/v1/views/")
     assert resp.status_code == 200
-    assert resp.json() == []
+    body = resp.json()
+    assert body["items"] == []
+    assert body["total"] == 0
+    assert body["hasMore"] is False
+    assert body["nextOffset"] is None
 
 
 # ── POST /views ────────────────────────────────────────────────────────
@@ -302,29 +306,42 @@ async def test_list_views_filter_by_workspace(test_client: AsyncClient):
 
     resp = await test_client.get(f"/api/v1/views/?workspaceId={ws_id}")
     assert resp.status_code == 200
-    views = resp.json()
-    assert len(views) >= 1
-    assert all(v["workspaceId"] == ws_id for v in views)
+    body = resp.json()
+    assert len(body["items"]) >= 1
+    assert body["total"] >= 1
+    assert all(v["workspaceId"] == ws_id for v in body["items"])
 
 
 async def test_list_views_with_search(test_client: AsyncClient):
-    """List views with search query."""
+    """List views with search query returns matching items."""
     ws_id = await _create_workspace(test_client)
     await _create_view(test_client, ws_id, "Unique Search Name XYZ")
 
     resp = await test_client.get("/api/v1/views/?search=Unique Search Name XYZ")
     assert resp.status_code == 200
+    body = resp.json()
+    assert any("Unique Search Name" in v["name"] for v in body["items"])
 
 
 async def test_list_views_pagination(test_client: AsyncClient):
-    """List views with limit and offset."""
+    """List views with limit and offset returns a properly-populated envelope."""
     ws_id = await _create_workspace(test_client)
     for i in range(3):
         await _create_view(test_client, ws_id, f"Page View {i}")
 
     resp = await test_client.get("/api/v1/views/?limit=2&offset=0")
     assert resp.status_code == 200
-    assert len(resp.json()) <= 2
+    body = resp.json()
+    assert len(body["items"]) == 2
+    assert body["total"] >= 3
+    assert body["hasMore"] is True
+    assert body["nextOffset"] == 2
+
+    # Fetch the next page using the server-advertised offset.
+    resp = await test_client.get(f"/api/v1/views/?limit=2&offset={body['nextOffset']}")
+    assert resp.status_code == 200
+    page2 = resp.json()
+    assert page2["total"] == body["total"]
 
 
 # ── Full CRUD round-trip ──────────────────────────────────────────────
@@ -366,3 +383,176 @@ async def test_view_crud_roundtrip(test_client: AsyncClient):
     # Gone
     r = await test_client.get(f"/api/v1/views/{view_id}")
     assert r.status_code == 404
+
+
+# ── created_by attribution ────────────────────────────────────────────
+
+async def test_create_view_records_created_by(test_client: AsyncClient, fake_user):
+    """POST /views records the authenticated user as created_by."""
+    ws_id = await _create_workspace(test_client)
+    body = await _create_view(test_client, ws_id, "Attributed View")
+    assert body["createdBy"] == fake_user.id
+
+
+async def test_list_views_filter_by_created_by(test_client: AsyncClient, fake_user):
+    """createdBy filter returns only views authored by the given user."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "Mine 1")
+    await _create_view(test_client, ws_id, "Mine 2")
+
+    resp = await test_client.get(f"/api/v1/views/?createdBy={fake_user.id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] >= 2
+    assert all(v["createdBy"] == fake_user.id for v in body["items"])
+
+    # A different user id filter yields no results.
+    resp = await test_client.get("/api/v1/views/?createdBy=usr_nobody")
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 0
+
+
+# ── workspaceIds (multi) ──────────────────────────────────────────────
+
+async def test_list_views_filter_by_multi_workspaces(test_client: AsyncClient):
+    """workspaceIds returns the union across multiple workspaces."""
+    ws_a = await _create_workspace(test_client)
+    ws_b = await _create_workspace(test_client)
+    ws_c = await _create_workspace(test_client)
+    await _create_view(test_client, ws_a, "In A")
+    await _create_view(test_client, ws_b, "In B")
+    await _create_view(test_client, ws_c, "In C")
+
+    resp = await test_client.get(
+        f"/api/v1/views/?workspaceIds={ws_a}&workspaceIds={ws_b}"
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    ws_ids = {v["workspaceId"] for v in body["items"]}
+    assert ws_a in ws_ids
+    assert ws_b in ws_ids
+    assert ws_c not in ws_ids
+
+
+async def test_workspace_ids_wins_over_workspace_id(test_client: AsyncClient):
+    """When both workspaceId and workspaceIds are sent, the multi-value param wins."""
+    ws_a = await _create_workspace(test_client)
+    ws_b = await _create_workspace(test_client)
+    await _create_view(test_client, ws_a, "A")
+    await _create_view(test_client, ws_b, "B")
+
+    resp = await test_client.get(
+        f"/api/v1/views/?workspaceId={ws_a}&workspaceIds={ws_b}"
+    )
+    assert resp.status_code == 200
+    ws_ids = {v["workspaceId"] for v in resp.json()["items"]}
+    assert ws_ids == {ws_b}
+
+
+# ── createdAfter ──────────────────────────────────────────────────────
+
+async def test_list_views_filter_by_created_after(test_client: AsyncClient):
+    """createdAfter returns views whose created_at >= cutoff."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "Recent")
+
+    # Past cutoff — should match.
+    resp = await test_client.get(
+        "/api/v1/views/?createdAfter=2000-01-01T00:00:00Z"
+    )
+    assert resp.status_code == 200
+    assert resp.json()["total"] >= 1
+
+    # Far-future cutoff — should not match anything.
+    resp = await test_client.get(
+        "/api/v1/views/?createdAfter=2999-01-01T00:00:00Z"
+    )
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 0
+
+
+# ── visibilityIn ──────────────────────────────────────────────────────
+
+async def test_list_views_filter_by_visibility_in(test_client: AsyncClient):
+    """visibilityIn returns the union of the specified visibilities."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "Priv", visibility="private")
+    await _create_view(test_client, ws_id, "Work", visibility="workspace")
+    await _create_view(test_client, ws_id, "Ent", visibility="enterprise")
+
+    resp = await test_client.get(
+        "/api/v1/views/?visibilityIn=workspace&visibilityIn=enterprise"
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    visibilities = {v["visibility"] for v in body["items"]}
+    assert visibilities == {"workspace", "enterprise"}
+
+
+# ── Popular view privacy scope ────────────────────────────────────────
+
+async def test_list_popular_views_includes_non_private_with_favs(test_client: AsyncClient):
+    """Workspace- and enterprise-visible favourited views appear in popular."""
+    ws_id = await _create_workspace(test_client)
+    w = await _create_view(test_client, ws_id, "WS-Vis", visibility="workspace")
+    e = await _create_view(test_client, ws_id, "Ent-Vis", visibility="enterprise")
+
+    for v in (w, e):
+        resp = await test_client.post(f"/api/v1/views/{v['id']}/favourite")
+        assert resp.status_code == 201
+
+    resp = await test_client.get("/api/v1/views/popular")
+    assert resp.status_code == 200
+    ids = {v["id"] for v in resp.json()}
+    assert w["id"] in ids
+    assert e["id"] in ids
+
+
+async def test_list_popular_views_owner_sees_own_private(test_client: AsyncClient):
+    """A private view surfaces in popular for its creator when favourited."""
+    ws_id = await _create_workspace(test_client)
+    priv = await _create_view(test_client, ws_id, "Secret", visibility="private")
+
+    resp = await test_client.post(f"/api/v1/views/{priv['id']}/favourite")
+    assert resp.status_code == 201
+
+    resp = await test_client.get("/api/v1/views/popular")
+    assert resp.status_code == 200
+    assert priv["id"] in {v["id"] for v in resp.json()}
+
+
+async def test_list_popular_views_excludes_others_private(
+    test_client: AsyncClient, db_session
+):
+    """A private view belonging to someone else never appears in popular."""
+    from sqlalchemy import update as _sa_update
+    from backend.app.db.models import ViewORM as _V
+
+    ws_id = await _create_workspace(test_client)
+    created = await _create_view(test_client, ws_id, "NotMine", visibility="private")
+    vid = created["id"]
+
+    # Favourite to qualify for popular.
+    resp = await test_client.post(f"/api/v1/views/{vid}/favourite")
+    assert resp.status_code == 201
+
+    # Reattribute to a different creator directly via the DB so we can
+    # simulate user B trying to see user A's private favourited view.
+    await db_session.execute(
+        _sa_update(_V).where(_V.id == vid).values(created_by="usr_other")
+    )
+    await db_session.commit()
+
+    resp = await test_client.get("/api/v1/views/popular")
+    assert resp.status_code == 200
+    assert vid not in {v["id"] for v in resp.json()}
+
+
+async def test_list_popular_views_excludes_zero_fav(test_client: AsyncClient):
+    """Views with zero favourites are excluded from popular."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "Unloved", visibility="enterprise")
+
+    resp = await test_client.get("/api/v1/views/popular")
+    assert resp.status_code == 200
+    assert resp.json() == []
