@@ -556,3 +556,149 @@ async def test_list_popular_views_excludes_zero_fav(test_client: AsyncClient):
     resp = await test_client.get("/api/v1/views/popular")
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+# ── viewType / viewTypes filter ───────────────────────────────────────
+
+async def test_list_views_filter_by_view_type(test_client: AsyncClient):
+    """viewType filter returns only views of the given type."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "G", viewType="graph")
+    await _create_view(test_client, ws_id, "H", viewType="hierarchy")
+    await _create_view(test_client, ws_id, "T", viewType="table")
+
+    resp = await test_client.get("/api/v1/views/?viewType=hierarchy")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["viewType"] == "hierarchy"
+
+
+async def test_list_views_filter_by_view_types_multi(test_client: AsyncClient):
+    """viewTypes returns the union of supplied types and wins over single viewType."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "G", viewType="graph")
+    await _create_view(test_client, ws_id, "H", viewType="hierarchy")
+    await _create_view(test_client, ws_id, "T", viewType="table")
+
+    resp = await test_client.get(
+        "/api/v1/views/?viewTypes=graph&viewTypes=table&viewType=hierarchy"
+    )
+    assert resp.status_code == 200
+    types = {v["viewType"] for v in resp.json()["items"]}
+    # Multi wins over single; hierarchy is excluded.
+    assert types == {"graph", "table"}
+
+
+# ── createdByIn filter ────────────────────────────────────────────────
+
+async def test_list_views_filter_by_created_by_in(test_client: AsyncClient, fake_user, db_session):
+    """createdByIn returns the union of creators."""
+    from sqlalchemy import update as _sa_update
+    from backend.app.db.models import ViewORM as _V
+
+    ws_id = await _create_workspace(test_client)
+    mine = await _create_view(test_client, ws_id, "Mine")
+    other = await _create_view(test_client, ws_id, "Other")
+
+    # Reattribute "other" to a synthetic user id.
+    await db_session.execute(
+        _sa_update(_V).where(_V.id == other["id"]).values(created_by="usr_other")
+    )
+    await db_session.commit()
+
+    resp = await test_client.get(
+        f"/api/v1/views/?createdByIn={fake_user.id}&createdByIn=usr_other"
+    )
+    assert resp.status_code == 200
+    ids = {v["id"] for v in resp.json()["items"]}
+    assert mine["id"] in ids
+    assert other["id"] in ids
+
+
+# ── Tag filter (SQL) ──────────────────────────────────────────────────
+
+async def test_list_views_filter_by_tags(test_client: AsyncClient):
+    """tags returns views whose JSON tag array contains any of the supplied tags."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "Fin", tags=["finance", "pii"])
+    await _create_view(test_client, ws_id, "Eng", tags=["engineering"])
+    await _create_view(test_client, ws_id, "Both", tags=["engineering", "finance"])
+    await _create_view(test_client, ws_id, "None")
+
+    resp = await test_client.get("/api/v1/views/?tags=finance")
+    assert resp.status_code == 200
+    body = resp.json()
+    names = {v["name"] for v in body["items"]}
+    # Total must be SQL-accurate, not "all views minus post-filtered".
+    assert body["total"] == 2
+    assert names == {"Fin", "Both"}
+
+
+async def test_list_views_filter_by_tags_multi_is_or(test_client: AsyncClient):
+    """Multiple tags use OR semantics (match if any tag is present)."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "Fin", tags=["finance"])
+    await _create_view(test_client, ws_id, "Eng", tags=["engineering"])
+    await _create_view(test_client, ws_id, "None")
+
+    resp = await test_client.get("/api/v1/views/?tags=finance&tags=engineering")
+    assert resp.status_code == 200
+    names = {v["name"] for v in resp.json()["items"]}
+    assert names == {"Fin", "Eng"}
+
+
+# ── GET /views/facets ─────────────────────────────────────────────────
+
+async def test_facets_empty(test_client: AsyncClient):
+    """Facets endpoint returns empty lists when no views exist."""
+    resp = await test_client.get("/api/v1/views/facets")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"tags": [], "viewTypes": [], "creators": []}
+
+
+async def test_facets_tags_view_types_creators(test_client: AsyncClient, fake_user):
+    """Facets aggregate tags, view types, and creators with counts."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "A", viewType="graph", tags=["finance", "pii"])
+    await _create_view(test_client, ws_id, "B", viewType="graph", tags=["finance"])
+    await _create_view(test_client, ws_id, "C", viewType="hierarchy")
+
+    resp = await test_client.get("/api/v1/views/facets")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # Tags sorted by count desc, then alpha.
+    tag_map = {t["value"]: t["count"] for t in body["tags"]}
+    assert tag_map == {"finance": 2, "pii": 1}
+
+    # View types sorted by count desc.
+    vt_map = {t["value"]: t["count"] for t in body["viewTypes"]}
+    assert vt_map == {"graph": 2, "hierarchy": 1}
+
+    # Creators — single fake_user authored all three.
+    assert len(body["creators"]) == 1
+    creator = body["creators"][0]
+    assert creator["userId"] == fake_user.id
+    assert creator["count"] == 3
+    assert creator["displayName"] == f"{fake_user.first_name} {fake_user.last_name}"
+
+
+async def test_facets_ignores_soft_deleted_views(test_client: AsyncClient):
+    """Facets exclude soft-deleted views so dropdowns don't surface ghost values."""
+    ws_id = await _create_workspace(test_client)
+    alive = await _create_view(test_client, ws_id, "Alive", tags=["keep"])
+    dead = await _create_view(test_client, ws_id, "Dead", tags=["gone"])
+
+    # Soft-delete the "Dead" view.
+    r = await test_client.delete(f"/api/v1/views/{dead['id']}")
+    assert r.status_code == 204
+
+    resp = await test_client.get("/api/v1/views/facets")
+    assert resp.status_code == 200
+    tag_values = {t["value"] for t in resp.json()["tags"]}
+    assert "keep" in tag_values
+    assert "gone" not in tag_values
+    # Silence unused-var lint.
+    assert alive["id"]

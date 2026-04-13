@@ -4,6 +4,7 @@
  */
 import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Megaphone, Plus, Pencil, Trash2, X, Check, AlertCircle,
   Info, AlertTriangle, CheckCircle, ExternalLink, Loader2, Settings, PauseCircle,
@@ -13,9 +14,12 @@ import {
   type AnnouncementResponse,
   type AnnouncementCreateRequest,
   type AnnouncementUpdateRequest,
-  type AnnouncementConfigResponse,
 } from '@/services/announcementService'
 import { useAnnouncementStore } from '@/store/announcements'
+import { useAuthStore } from '@/store/auth'
+
+const ANN_LIST_QUERY_KEY = ['admin', 'announcements', 'list'] as const
+const ANN_CONFIG_QUERY_KEY = ['admin', 'announcements', 'config'] as const
 
 type BannerType = 'info' | 'warning' | 'success'
 
@@ -69,9 +73,33 @@ function refreshBanner() {
 }
 
 export function AdminAnnouncements() {
-  const [announcements, setAnnouncements] = useState<AnnouncementResponse[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
+  const isAuthenticated = useAuthStore(s => s.isAuthenticated)
+
+  // Admin listing — React Query dedupes so HMR / concurrent mounts don't
+  // barrage the server with duplicate requests, and retry is disabled so
+  // 401s don't cascade into rapid reattempts. staleTime lets navigation
+  // in and out of the page reuse the cached result.
+  const listQuery = useQuery({
+    queryKey: ANN_LIST_QUERY_KEY,
+    queryFn: () => announcementService.listAll(),
+    enabled: isAuthenticated,
+    staleTime: 30_000,
+    retry: false,
+  })
+  const announcements = listQuery.data ?? []
+  const isLoading = listQuery.isLoading
+  const error = listQuery.error ? (listQuery.error as Error).message : null
+
+  // Config query — same caching strategy. Failures are swallowed as
+  // before (the UI falls back to sane defaults).
+  const configQuery = useQuery({
+    queryKey: ANN_CONFIG_QUERY_KEY,
+    queryFn: () => announcementService.getAdminConfig(),
+    enabled: isAuthenticated,
+    staleTime: 30_000,
+    retry: false,
+  })
 
   // Form state
   const [formOpen, setFormOpen] = useState(false)
@@ -86,39 +114,24 @@ export function AdminAnnouncements() {
   // Toast
   const [toast, setToast] = useState<{ message: string; variant: 'success' | 'error' } | null>(null)
 
-  // Global config state
-  const [, setConfig] = useState<AnnouncementConfigResponse | null>(null)
+  // Global config state — form values derived from the config query.
   const [configOpen, setConfigOpen] = useState(false)
   const [configPoll, setConfigPoll] = useState(15)
   const [configSnooze, setConfigSnooze] = useState(30)
   const [configSaving, setConfigSaving] = useState(false)
 
+  // Mirror config values into the local form state when the query resolves.
+  useEffect(() => {
+    if (configQuery.data) {
+      setConfigPoll(configQuery.data.pollIntervalSeconds)
+      setConfigSnooze(configQuery.data.defaultSnoozeMinutes)
+    }
+  }, [configQuery.data])
+
+  /** Invalidate the list cache so a subsequent render refetches fresh data. */
   const load = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const data = await announcementService.listAll()
-      setAnnouncements(data)
-    } catch (err: any) {
-      setError(err.message)
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
-
-  const loadConfig = useCallback(async () => {
-    try {
-      const cfg = await announcementService.getAdminConfig()
-      setConfig(cfg)
-      setConfigPoll(cfg.pollIntervalSeconds)
-      setConfigSnooze(cfg.defaultSnoozeMinutes)
-    } catch {
-      // ignore
-    }
-  }, [])
-
-  useEffect(() => { load() }, [load])
-  useEffect(() => { loadConfig() }, [loadConfig])
+    await queryClient.invalidateQueries({ queryKey: ANN_LIST_QUERY_KEY })
+  }, [queryClient])
 
   // Auto-dismiss toast
   useEffect(() => {
@@ -208,8 +221,10 @@ export function AdminAnnouncements() {
         pollIntervalSeconds: Math.max(5, configPoll),
         defaultSnoozeMinutes: Math.max(0, configSnooze),
       })
-      setConfig(updated)
-      // Refresh the banner store so it picks up the new polling interval
+      // Seed the query cache with the response so the UI reflects the new
+      // values immediately instead of waiting for the next refetch.
+      queryClient.setQueryData(ANN_CONFIG_QUERY_KEY, updated)
+      // Refresh the banner store so it picks up the new polling interval.
       useAnnouncementStore.getState().fetchConfig()
       setToast({ message: 'Banner settings saved', variant: 'success' })
       setConfigOpen(false)

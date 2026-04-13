@@ -97,7 +97,8 @@ async def test_delete_view_soft_deletes(db_session: AsyncSession):
 
     # Not included in default filtered listing
     listed = await view_repo.list_views_filtered(db_session)
-    assert len(listed) == 0
+    assert listed.total == 0
+    assert listed.items == []
 
 
 async def test_restore_view(db_session: AsyncSession):
@@ -110,7 +111,8 @@ async def test_restore_view(db_session: AsyncSession):
 
     # Now shows up in listing
     listed = await view_repo.list_views_filtered(db_session)
-    assert len(listed) == 1
+    assert listed.total == 1
+    assert len(listed.items) == 1
 
 
 async def test_restore_non_deleted_returns_false(db_session: AsyncSession):
@@ -134,14 +136,14 @@ async def test_list_views_filtered_by_visibility(db_session: AsyncSession):
     private_views = await view_repo.list_views_filtered(
         db_session, visibility="private"
     )
-    assert len(private_views) == 1
-    assert private_views[0].name == "Private"
+    assert private_views.total == 1
+    assert private_views.items[0].name == "Private"
 
     enterprise_views = await view_repo.list_views_filtered(
         db_session, visibility="enterprise"
     )
-    assert len(enterprise_views) == 1
-    assert enterprise_views[0].name == "Enterprise"
+    assert enterprise_views.total == 1
+    assert enterprise_views.items[0].name == "Enterprise"
 
 
 async def test_favourite_view(db_session: AsyncSession):

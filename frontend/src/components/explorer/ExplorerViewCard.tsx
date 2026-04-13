@@ -32,6 +32,7 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { ViewCardOverflowMenu } from '@/components/explorer/ViewCardOverflowMenu'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
+import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 
 // ─── View type themes ───────────────────────────────────────────
 const VIEW_TYPE_META: Record<
@@ -158,6 +159,8 @@ export interface ExplorerViewCardProps {
   onDelete?: () => void
   onRestore?: () => void
   onPermanentDelete?: () => void
+  /** When provided, tag chips become clickable → toggle the tag filter. */
+  onTagClick?: (tag: string) => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
   isSelected?: boolean
   onToggleSelect?: () => void
@@ -179,6 +182,7 @@ export function ExplorerViewCard({
   onDelete,
   onRestore,
   onPermanentDelete,
+  onTagClick,
   healthStatus,
   isSelected,
   onToggleSelect,
@@ -411,8 +415,28 @@ export function ExplorerViewCard({
             <div className="flex flex-wrap gap-1">
               {visibleTags.map(tag => {
                 const tc = tagColor(tag)
+                const commonClasses = cn(
+                  'rounded-full border px-2 py-0.5 text-[10px] font-medium',
+                  tc.bg, tc.text, tc.border,
+                )
+                if (onTagClick) {
+                  return (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={e => { e.stopPropagation(); onTagClick(tag) }}
+                      className={cn(
+                        commonClasses,
+                        'cursor-pointer hover:brightness-110 hover:-translate-y-[1px] active:translate-y-0 transition-transform duration-75',
+                      )}
+                      title={`Filter by tag: ${tag}`}
+                    >
+                      {tag}
+                    </button>
+                  )
+                }
                 return (
-                  <span key={tag} className={cn('rounded-full border px-2 py-0.5 text-[10px] font-medium', tc.bg, tc.text, tc.border)}>
+                  <span key={tag} className={commonClasses}>
                     {tag}
                   </span>
                 )
@@ -440,20 +464,33 @@ export function ExplorerViewCard({
             {view.favouriteCount}
           </span>
 
-          {/* Creator — middle */}
-          {view.createdBy && (
-            <div className="flex items-center gap-1.5 min-w-0">
-              <div
-                className={cn('w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold shrink-0', meta.iconBg)}
-                title={view.createdBy}
+          {/* Creator — middle.
+              Compact initials-only avatar; hover reveals the
+              CreatorHoverCard with full name + email + user id so the
+              card footer stays uncluttered next to favourite / sync
+              indicators. */}
+          {(view.createdByName || view.createdBy) && (() => {
+            const displayName = view.createdByName ?? view.createdBy ?? ''
+            return (
+              <CreatorHoverCard
+                userId={view.createdBy ?? null}
+                displayName={view.createdByName ?? null}
+                email={view.createdByEmail ?? null}
+                accentClassName={meta.iconBg}
               >
-                {initials(view.createdBy)}
-              </div>
-              <span className="text-[11px] text-ink-muted truncate max-w-[70px]">
-                {view.createdBy}
-              </span>
-            </div>
-          )}
+                <div
+                  className={cn(
+                    'w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold shrink-0 cursor-default',
+                    meta.iconBg,
+                  )}
+                  aria-label={`Creator: ${displayName}`}
+                  tabIndex={0}
+                >
+                  {initials(displayName)}
+                </div>
+              </CreatorHoverCard>
+            )
+          })()}
 
           {/* Sync indicator — right */}
           {(() => {
