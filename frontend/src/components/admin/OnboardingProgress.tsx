@@ -14,7 +14,7 @@ interface OnboardingProgressProps {
 const STORAGE_KEY = 'synodic-onboarding-complete'
 
 const stages = [
-  { label: 'Provider', tab: 'connections', icon: Server },
+  { label: 'Provider', tab: 'providers', icon: Server },
   { label: 'Assets', tab: 'assets', icon: Layers },
   { label: 'Workspace', tab: 'workspaces', icon: Database },
   { label: 'Semantics', tab: 'workspaces', icon: BookOpen },

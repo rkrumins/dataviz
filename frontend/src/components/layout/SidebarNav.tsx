@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom'
 import {
   LayoutDashboard,
   Network,
+  Boxes,
+  DatabaseZap,
   Layers,
   ChevronsUpDown,
   Check,
@@ -42,7 +44,8 @@ interface NavItem {
 const baseNavItems: Omit<NavItem, 'badge'>[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'explore', label: 'Explore', icon: Network },
-  { id: 'lenses', label: 'Context Lenses', icon: Layers },
+  { id: 'workspaces', label: 'Workspaces', icon: Boxes },
+  { id: 'ingestion', label: 'Ingestion', icon: DatabaseZap },
   { id: 'schema', label: 'Semantic Layers', icon: Layers },
   { id: 'admin', label: 'Administration', icon: Settings },
 ]
@@ -524,7 +527,6 @@ export function SidebarNav() {
   const { activeTab } = useNavigationStore()
   const { sidebarCollapsed, toggleSidebar } = usePreferencesStore()
   const activeLensId = useCanvasStore((s) => s.activeLensId)
-  const { activeWorkspaceId } = useWorkspaces()
 
   const { viewCount, viewCountsByWorkspace, viewCountsByScope, openView } = useWorkspaceContext()
 
@@ -570,7 +572,8 @@ export function SidebarNav() {
     switch (tabId) {
       case 'dashboard': navigate('/dashboard'); break
       case 'explore': navigate('/explorer'); break
-      case 'lenses': navigate(activeWorkspaceId ? `/workspaces/${activeWorkspaceId}` : '/dashboard'); break
+      case 'workspaces': navigate('/workspaces'); break
+      case 'ingestion': navigate('/ingestion'); break
       case 'schema': navigate('/schema'); break
       case 'admin': navigate('/admin/overview'); break
     }
@@ -593,7 +596,7 @@ export function SidebarNav() {
       <nav className="flex-1 flex flex-col overflow-y-auto custom-scrollbar pb-3">
         <EnvironmentSwitcher
           collapsed={sidebarCollapsed}
-          onManageWorkspaces={() => navigate('/admin/registry?tab=workspaces')}
+          onManageWorkspaces={() => navigate('/workspaces')}
           onToggleSidebar={toggleSidebar}
           viewCountsByWorkspace={viewCountsByWorkspace}
           viewCountsByScope={viewCountsByScope}
