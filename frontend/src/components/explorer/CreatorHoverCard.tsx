@@ -160,15 +160,24 @@ export function CreatorHoverCard({
               role="tooltip"
             >
               <div className="p-3 flex items-start gap-3">
-                <div
-                  className={cn(
-                    'w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold shrink-0',
-                    accentClassName ?? 'bg-accent-lineage/10 text-accent-lineage',
-                  )}
-                  aria-hidden
-                >
-                  {initialsOf(name)}
-                </div>
+                {(() => {
+                  // Deterministic swatch per user id when no override is
+                  // passed — keeps the avatar identical across the filter
+                  // dropdown, hover card, and card footer for recognition.
+                  const palette = avatarPaletteFor(userId ?? name)
+                  const avatarClass = accentClassName ?? cn(palette.bg, palette.text)
+                  return (
+                    <div
+                      className={cn(
+                        'w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold shrink-0',
+                        avatarClass,
+                      )}
+                      aria-hidden
+                    >
+                      {initialsOf(name)}
+                    </div>
+                  )
+                })()}
                 <div className="flex-1 min-w-0">
                   <div className="text-sm font-semibold text-ink truncate">
                     {name}
