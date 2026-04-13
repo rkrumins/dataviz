@@ -123,13 +123,13 @@ export function AdminOverview() {
 
                 <div className="flex gap-3">
                     <button
-                        onClick={() => navigate('/admin/registry?tab=connections')}
+                        onClick={() => navigate('/ingestion?tab=providers')}
                         className="px-4 py-2 border border-glass-border bg-canvas-elevated hover:bg-black/5 dark:hover:bg-white/5 rounded-xl font-medium text-sm text-ink transition-colors flex items-center gap-2"
                     >
                         <Server className="w-4 h-4" /> Register Connection
                     </button>
                     <button
-                        onClick={() => navigate('/admin/registry?tab=workspaces')}
+                        onClick={() => navigate('/workspaces')}
                         className="px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded-xl font-medium text-sm transition-colors flex items-center gap-2"
                     >
                         <Plus className="w-4 h-4" /> Create Workspace
@@ -188,7 +188,7 @@ export function AdminOverview() {
                         </thead>
                         <tbody>
                             {insights.sort((a, b) => b.nodes - a.nodes).map((insight, i) => (
-                                <tr key={insight.ws.id} onClick={() => navigate(`/admin/registry/workspaces/${insight.ws.id}`)} className={cn("border-b last:border-b-0 border-glass-border hover:bg-black/[0.05] dark:hover:bg-white/[0.05] cursor-pointer transition-colors", i % 2 === 0 && "bg-black/[0.01] dark:bg-white/[0.01]")}>
+                                <tr key={insight.ws.id} onClick={() => navigate(`/workspaces/${insight.ws.id}`)} className={cn("border-b last:border-b-0 border-glass-border hover:bg-black/[0.05] dark:hover:bg-white/[0.05] cursor-pointer transition-colors", i % 2 === 0 && "bg-black/[0.01] dark:bg-white/[0.01]")}>
                                     <td className="px-5 py-3">
                                         <div className="flex items-center gap-2">
                                             <span className="text-sm font-semibold text-ink">{insight.ws.name}</span>

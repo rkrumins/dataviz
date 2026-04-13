@@ -20,8 +20,11 @@ export function useRouteSync() {
       nextTab = 'dashboard'
     } else if (path.startsWith('/views') || path.startsWith('/explorer')) {
       nextTab = 'explore'
+    } else if (path.startsWith('/ingestion')) {
+      nextTab = 'ingestion'
     } else if (path.startsWith('/workspaces')) {
-      nextTab = 'lenses'
+      // Covers /workspaces (listing), /workspaces/:id (detail), /workspaces/:id/canvas
+      nextTab = 'workspaces'
     } else if (path.startsWith('/schema')) {
       nextTab = 'schema'
     } else if (path.startsWith('/admin')) {

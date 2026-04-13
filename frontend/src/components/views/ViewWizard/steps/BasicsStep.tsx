@@ -174,7 +174,10 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                         </p>
                         <button
                             type="button"
-                            onClick={() => navigate(`/admin/registry?tab=workspaces${scopeContext?.workspaceId ? `&ws=${scopeContext.workspaceId}` : activeWorkspace ? `&ws=${activeWorkspace.id}` : ''}`)}
+                            onClick={() => {
+                                const wsId = scopeContext?.workspaceId || activeWorkspace?.id
+                                navigate(wsId ? `/workspaces/${wsId}` : '/workspaces')
+                            }}
                             className="mt-2 text-xs font-medium text-amber-400 hover:text-amber-300 transition-colors"
                         >
                             Configure Ontology &rarr;
