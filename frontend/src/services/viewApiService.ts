@@ -33,6 +33,10 @@ export interface View {
     config: Record<string, any>    // Full ViewConfiguration shape
     visibility: 'private' | 'workspace' | 'enterprise'
     createdBy?: string
+    /** Human-readable creator name resolved server-side from the users table. */
+    createdByName?: string
+    /** Creator's email, surfaced for tooltip / hover detail. */
+    createdByEmail?: string
     tags?: string[]
     isPinned: boolean
     favouriteCount: number
@@ -82,11 +86,17 @@ export interface ViewListParams {
     workspaceIds?: string[]
     contextModelId?: string
     dataSourceId?: string
+    viewType?: string
+    /** Multi-viewType filter; wins over single ``viewType`` when both are set. */
+    viewTypes?: string[]
     /** Restrict to views authored by a specific user (used by "My Views"). */
     createdBy?: string
+    /** Multi-creator filter; wins over single ``createdBy`` when both are set. */
+    createdByIn?: string[]
     /** ISO timestamp — returns views created on or after this time. */
     createdAfter?: string
     search?: string
+    /** OR semantics: match views whose tags array contains ANY of these. */
     tags?: string[]
     limit?: number
     offset?: number
@@ -112,6 +122,32 @@ export interface ViewListResponse {
     total: number
     hasMore: boolean
     nextOffset: number | null
+}
+
+/** A single facet value with its row count. */
+export interface ViewFacetValue {
+    value: string
+    count: number
+}
+
+/** A creator facet row with display metadata. */
+export interface ViewFacetCreator {
+    userId: string
+    displayName: string
+    email?: string
+    count: number
+}
+
+/**
+ * Aggregate facets returned by ``GET /api/v1/views/facets``.
+ *
+ * Used by the Explorer to populate the Tag / View Type / Creator
+ * dropdowns from the DB-wide set of values (not just the current page).
+ */
+export interface ViewFacetsResponse {
+    tags: ViewFacetValue[]
+    viewTypes: ViewFacetValue[]
+    creators: ViewFacetCreator[]
 }
 
 // ============================================
@@ -148,7 +184,16 @@ export async function listViews(params?: ViewListParams): Promise<ViewListRespon
     }
     if (params?.contextModelId) sp.set('contextModelId', params.contextModelId)
     if (params?.dataSourceId) sp.set('dataSourceId', params.dataSourceId)
-    if (params?.createdBy) sp.set('createdBy', params.createdBy)
+    if (params?.viewTypes && params.viewTypes.length > 0) {
+        params.viewTypes.forEach(v => sp.append('viewTypes', v))
+    } else if (params?.viewType) {
+        sp.set('viewType', params.viewType)
+    }
+    if (params?.createdByIn && params.createdByIn.length > 0) {
+        params.createdByIn.forEach(id => sp.append('createdByIn', id))
+    } else if (params?.createdBy) {
+        sp.set('createdBy', params.createdBy)
+    }
     if (params?.createdAfter) sp.set('createdAfter', params.createdAfter)
     if (params?.search) sp.set('search', params.search)
     if (params?.tags) params.tags.forEach(t => sp.append('tags', t))
@@ -165,6 +210,16 @@ export async function listViews(params?: ViewListParams): Promise<ViewListRespon
 /** List the most-favourited enterprise-visible views */
 export async function listPopularViews(limit = 20): Promise<View[]> {
     return apiFetch<View[]>(`/api/v1/views/popular?limit=${limit}`)
+}
+
+/**
+ * Aggregate distinct tags, view types, and creators across non-deleted views.
+ *
+ * Used to populate Explorer filter dropdowns from the authoritative
+ * DB-wide set rather than deriving from the currently-loaded page.
+ */
+export async function getViewFacets(): Promise<ViewFacetsResponse> {
+    return apiFetch<ViewFacetsResponse>('/api/v1/views/facets')
 }
 
 /** Create a new view (workspaceId required) */

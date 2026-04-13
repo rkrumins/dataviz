@@ -598,6 +598,12 @@ class ViewResponse(BaseModel):
     config: Dict[str, Any] = Field(default_factory=dict)
     visibility: str = "private"
     created_by: Optional[str] = Field(None, alias="createdBy")
+    # Human-readable display for the creator, resolved server-side so
+    # every UI surface can show "Alex Smith" rather than "usr_abc123".
+    # Nullable for legacy rows where the user record has since been
+    # deleted — callers fall back to ``created_by`` in that case.
+    created_by_name: Optional[str] = Field(None, alias="createdByName")
+    created_by_email: Optional[str] = Field(None, alias="createdByEmail")
     tags: Optional[List[str]] = None
     is_pinned: bool = Field(False, alias="isPinned")
     favourite_count: int = Field(0, alias="favouriteCount")
@@ -629,6 +635,38 @@ class ViewListResponse(BaseModel):
     total: int
     has_more: bool = Field(alias="hasMore")
     next_offset: Optional[int] = Field(None, alias="nextOffset")
+
+    class Config:
+        populate_by_name = True
+
+
+class ViewFacetValue(BaseModel):
+    """A single facet value with its row count."""
+    value: str
+    count: int
+
+
+class ViewFacetCreator(BaseModel):
+    """A creator facet row, enriched with display metadata."""
+    user_id: str = Field(alias="userId")
+    display_name: str = Field(alias="displayName")
+    email: Optional[str] = None
+    count: int
+
+    class Config:
+        populate_by_name = True
+
+
+class ViewFacetsResponse(BaseModel):
+    """Aggregate facets across the views table.
+
+    Used by the Explorer to populate the Tag / View Type / Creator
+    dropdowns so users can pick from the real set of values in the
+    database rather than a derived-from-current-page approximation.
+    """
+    tags: List[ViewFacetValue]
+    view_types: List[ViewFacetValue] = Field(alias="viewTypes")
+    creators: List[ViewFacetCreator]
 
     class Config:
         populate_by_name = True

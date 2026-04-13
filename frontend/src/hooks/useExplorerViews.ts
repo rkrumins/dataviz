@@ -60,6 +60,9 @@ export interface ExplorerFilters {
   visibility: string | null         // 'enterprise' | 'workspace' | 'private' | null (all)
   workspaceIds: string[]            // Multi-select — sent as ``workspaceIds`` on API
   dataSourceId: string | null
+  viewTypes: string[]               // Multi-select — sent as ``viewTypes`` on API
+  tags: string[]                    // Multi-select — sent as ``tags`` on API (OR semantics)
+  creatorIds: string[]              // Multi-select — sent as ``createdByIn`` on API
   sort: SortOption
   favouritedOnly: boolean
   /** 'my-views' | 'my-favourites' | 'recently-added' | 'shared-with-me' | 'needs-attention' | 'deleted' | null */
@@ -141,6 +144,9 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
 
   // Stabilise array deps so the fetch effect doesn't loop on identical values.
   const workspaceIdsKey = useStableKey(filters.workspaceIds)
+  const viewTypesKey = useStableKey(filters.viewTypes)
+  const tagsKey = useStableKey(filters.tags)
+  const creatorIdsKey = useStableKey(filters.creatorIds)
   const stableVisibility = filters.visibility
   const stableDataSourceId = filters.dataSourceId
   const stableFavouritedOnly = filters.favouritedOnly
@@ -153,6 +159,9 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
   // ``deleted`` category sets ``deletedOnly: true``).
   const buildParams = useCallback((pageOffset: number): ViewListParams => {
     const wsIds: string[] = JSON.parse(workspaceIdsKey)
+    const vTypes: string[] = JSON.parse(viewTypesKey)
+    const tagList: string[] = JSON.parse(tagsKey)
+    const creators: string[] = JSON.parse(creatorIdsKey)
     const categoryParams = resolveCategoryParams(stableCategory, stableCurrentUserId)
 
     const params: ViewListParams = {
@@ -161,6 +170,9 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
       favouritedOnly: stableFavouritedOnly || undefined,
       dataSourceId: stableDataSourceId || undefined,
       workspaceIds: wsIds.length > 0 ? wsIds : undefined,
+      viewTypes: vTypes.length > 0 ? vTypes : undefined,
+      tags: tagList.length > 0 ? tagList : undefined,
+      createdByIn: creators.length > 0 ? creators : undefined,
       limit: stableLimit,
       offset: pageOffset,
       ...categoryParams,
@@ -169,8 +181,8 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     return params
   }, [
     debouncedSearch, stableVisibility, stableFavouritedOnly,
-    stableDataSourceId, workspaceIdsKey, stableLimit,
-    stableCategory, stableCurrentUserId,
+    stableDataSourceId, workspaceIdsKey, viewTypesKey, tagsKey,
+    creatorIdsKey, stableLimit, stableCategory, stableCurrentUserId,
   ])
 
   // ─── Initial fetch + filter-change reload ───────────────────────────

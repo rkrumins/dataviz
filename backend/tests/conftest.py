@@ -69,7 +69,10 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
     Per-test async session.
 
     Creates all tables before each test and rolls back after, so every test
-    starts with a clean database.
+    starts with a clean database. Repo-level tests use this fixture
+    directly and so do not see any "authenticated user" — that's only
+    seeded by ``test_client`` below, since it simulates a real HTTP
+    request where the user exists.
     """
     async with db_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -116,6 +119,25 @@ async def test_client(
     from backend.app.main import app
 
     # --- dependency overrides ---
+
+    # Persist the fake user row so endpoints that resolve creator /
+    # author metadata (e.g. GET /views/facets) can look them up,
+    # mirroring production where the authenticated user has a matching
+    # row in the ``users`` table. Kept out of the ``db_session`` fixture
+    # so raw-DB tests aren't polluted with an extra user they didn't
+    # create.
+    db_session.add(_models.UserORM(
+        id=_FAKE_USER.id,
+        email=_FAKE_USER.email,
+        password_hash=_FAKE_USER.password_hash,
+        first_name=_FAKE_USER.first_name,
+        last_name=_FAKE_USER.last_name,
+        status=_FAKE_USER.status,
+        auth_provider=_FAKE_USER.auth_provider,
+        created_at=_FAKE_USER.created_at,
+        updated_at=_FAKE_USER.updated_at,
+    ))
+    await db_session.commit()
 
     async def _override_get_db_session():
         yield db_session
