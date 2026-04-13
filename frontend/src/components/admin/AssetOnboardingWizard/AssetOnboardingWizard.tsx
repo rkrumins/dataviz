@@ -5,22 +5,27 @@
  *
  * Architecture mirrors ViewWizard.tsx: centralized formData, canProceed via useMemo,
  * spring animations, AnimatePresence step transitions, previousSteps stack.
+ *
+ * Enhancements: keyboard navigation, step summary pills, toast micro-feedback,
+ * unsaved changes warning, structured error recovery, live aggregation tracking.
  */
-import { useState, useMemo, useCallback, useEffect } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Database, Settings, BookOpen, Check, ChevronLeft, ChevronRight, Loader2, X, Wand2 } from 'lucide-react'
+import { Database, Settings, BookOpen, Check, ChevronLeft, ChevronRight, Loader2, X, Wand2, AlertTriangle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { workspaceService } from '@/services/workspaceService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import type { ProviderResponse } from '@/services/providerService'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useToast } from '@/components/ui/toast'
 
 import { WorkspaceStep } from './steps/WorkspaceStep'
 import { AggregationStep } from './steps/AggregationStep'
 import { SemanticStep } from './steps/SemanticStep'
-import { ReviewStep } from './steps/ReviewStep'
+import { ReviewStep, type NavigationDestination } from './steps/ReviewStep'
 import { aggregationService } from '@/services/aggregationService'
+import { useWizardKeyboard } from './hooks/useWizardKeyboard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -68,6 +73,8 @@ export function AssetOnboardingWizard({
 }: AssetOnboardingWizardProps) {
     const navigate = useNavigate()
     const { setActiveWorkspace, setActiveDataSource } = useWorkspacesStore()
+    const { showToast } = useToast()
+    const modalRef = useRef<HTMLDivElement>(null)
 
     // ─── Form State ───────────────────────────────────────────────────────────
     const [formData, setFormData] = useState<OnboardingFormData>(() => ({
@@ -86,13 +93,26 @@ export function AssetOnboardingWizard({
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [submitError, setSubmitError] = useState<string | null>(null)
     const [wizardPhase, setWizardPhase] = useState<'steps' | 'success'>('steps')
+    const [showCloseConfirm, setShowCloseConfirm] = useState(false)
 
     // Track created workspace/ds IDs for success screen navigation
     const [createdContext, setCreatedContext] = useState<{ wsId: string; dsId: string } | null>(null)
+    const [createdDataSourceIds, setCreatedDataSourceIds] = useState<string[]>([])
 
-    // Workspace + ontology name maps for ReviewStep display
+    // Workspace + ontology name maps for ReviewStep / SemanticStep display
     const [workspaceNames, setWorkspaceNames] = useState<Record<string, string>>({})
-    const [ontologyNames, _setOntologyNames] = useState<Record<string, string>>({})
+    const [ontologyNames, setOntologyNames] = useState<Record<string, string>>({})
+
+    // Loaded workspace names (from WorkspaceStep's API call) — used throughout wizard
+    const [loadedWorkspaceNames, setLoadedWorkspaceNames] = useState<Record<string, string>>({})
+
+    // ─── Dirty tracking for unsaved changes warning ───────────────────────────
+    const isDirty = useMemo(() => {
+        const hasAllocations = Object.values(formData.allocations).some(a => a.workspaceId !== '')
+        const hasOntologies = Object.values(formData.ontologySelections).some(s => s.ontologyId !== '')
+        const changedProjection = formData.projectionMode !== 'in_source'
+        return hasAllocations || hasOntologies || changedProjection
+    }, [formData])
 
     // Reset state when wizard opens
     useEffect(() => {
@@ -103,6 +123,8 @@ export function AssetOnboardingWizard({
             setSubmitError(null)
             setWizardPhase('steps')
             setCreatedContext(null)
+            setCreatedDataSourceIds([])
+            setShowCloseConfirm(false)
             setFormData({
                 allocations: Object.fromEntries(
                     catalogItems.map(c => [c.id, { workspaceId: '', newWorkspaceName: '', newWorkspaceDescription: '' }])
@@ -130,12 +152,32 @@ export function AssetOnboardingWizard({
             case 'aggregation':
                 return true // default 'in_source' always selected
             case 'semantic':
-                // At minimum the primary ontology must be set; per-item overrides are optional
-                return Object.values(formData.ontologySelections).some(s => s.ontologyId !== '')
+                // Allow proceeding if at least one ontology is set OR all are explicitly left empty (skipped)
+                return Object.values(formData.ontologySelections).some(s => s.ontologyId !== '') ||
+                    Object.values(formData.ontologySelections).every(s => s.ontologyId === '')
             case 'review':
                 return true
         }
     }, [currentStep, formData])
+
+    // ─── Step Warnings (inline validation) ────────────────────────────────────
+    const stepWarnings = useMemo((): string[] => {
+        switch (currentStep) {
+            case 'workspace':
+                return catalogItems
+                    .filter(c => {
+                        const a = formData.allocations[c.id]
+                        return !a || a.workspaceId === '' || (a.workspaceId === 'new' && !a.newWorkspaceName.trim())
+                    })
+                    .map(c => `"${c.name}" is not yet assigned`)
+            case 'semantic':
+                return catalogItems
+                    .filter(c => !formData.ontologySelections[c.id]?.ontologyId)
+                    .map(c => `"${c.name}" has no ontology selected`)
+            default:
+                return []
+        }
+    }, [currentStep, formData, catalogItems])
 
     // ─── Navigation ───────────────────────────────────────────────────────────
     const currentStepIndex = STEPS.findIndex(s => s.id === currentStep)
@@ -144,10 +186,21 @@ export function AssetOnboardingWizard({
         if (!canProceed) return
         const nextIndex = currentStepIndex + 1
         if (nextIndex < STEPS.length) {
+            // Toast micro-feedback for completed step
+            const stepId = currentStep
+            if (stepId === 'workspace') {
+                showToast('success', 'Workspace allocation saved')
+            } else if (stepId === 'aggregation') {
+                showToast('success', `Aggregation: ${formData.projectionMode === 'in_source' ? 'In-source' : 'Dedicated'} selected`)
+            } else if (stepId === 'semantic') {
+                const count = Object.values(formData.ontologySelections).filter(s => s.ontologyId !== '').length
+                showToast('success', `Semantic layer configured for ${count} source${count !== 1 ? 's' : ''}`)
+            }
+
             setPreviousSteps(prev => [...prev, currentStep])
             setCurrentStep(STEPS[nextIndex].id)
         }
-    }, [canProceed, currentStepIndex, currentStep])
+    }, [canProceed, currentStepIndex, currentStep, formData, showToast])
 
     const goBack = useCallback(() => {
         if (previousSteps.length > 0) {
@@ -165,11 +218,28 @@ export function AssetOnboardingWizard({
         }
     }, [currentStepIndex])
 
+    // ─── Close with unsaved changes warning ───────────────────────────────────
+    const handleClose = useCallback(() => {
+        if (wizardPhase === 'success') {
+            onComplete()
+            return
+        }
+        if (isDirty) {
+            setShowCloseConfirm(true)
+        } else {
+            onClose()
+        }
+    }, [wizardPhase, isDirty, onClose, onComplete])
+
+    const confirmClose = useCallback(() => {
+        setShowCloseConfirm(false)
+        onClose()
+    }, [onClose])
+
     // ─── Submit ───────────────────────────────────────────────────────────────
-    // Registration + workspace allocation happen atomically here (not before).
-    // If the user cancels the wizard, nothing is persisted.
     const handleSubmit = useCallback(async () => {
         setIsSubmitting(true)
+        setSubmitError(null)
         try {
             // Step 1: Register catalog items (idempotent — backend returns existing if duplicate)
             const realCatalogItems: CatalogItemResponse[] = await Promise.all(
@@ -204,6 +274,7 @@ export function AssetOnboardingWizard({
             let firstWsId = ''
             let firstDsId = ''
             const wsNameMap: Record<string, string> = {}
+            const allCreatedDsIds: string[] = []
 
             // Step 3: Create workspaces / add data sources
             for (const [key, group] of groups) {
@@ -222,6 +293,9 @@ export function AssetOnboardingWizard({
                     })
                     wsId = ws.id
                     wsNameMap[wsId] = ws.name
+                    for (const ds of ws.dataSources) {
+                        allCreatedDsIds.push(ds.id)
+                    }
                     if (!firstWsId) {
                         firstWsId = ws.id
                         firstDsId = ws.dataSources[0]?.id || ''
@@ -233,6 +307,10 @@ export function AssetOnboardingWizard({
                     }
                 } else {
                     wsId = group.alloc.workspaceId
+                    // Resolve name for existing workspaces (from loaded names or fetch)
+                    if (!wsNameMap[wsId] && loadedWorkspaceNames[wsId]) {
+                        wsNameMap[wsId] = loadedWorkspaceNames[wsId]
+                    }
                     for (let i = 0; i < group.items.length; i++) {
                         const c = group.items[i]
                         const placeholderId = group.placeholderIds[i]
@@ -241,6 +319,7 @@ export function AssetOnboardingWizard({
                             ontologyId: formData.ontologySelections[placeholderId]?.ontologyId || undefined,
                             label: c.name || c.sourceIdentifier || undefined,
                         })
+                        allCreatedDsIds.push(ds.id)
                         if (!firstWsId) {
                             firstWsId = wsId
                             firstDsId = ds.id
@@ -252,17 +331,14 @@ export function AssetOnboardingWizard({
                 }
             }
 
-            // Step 4: Trigger Aggregation for all created Data Sources
-            // This is non-blocking (fire and forget) — the backend returns 202 Accepted.
-            // The user will see progress on the Explorer view.
+            // Step 4: Trigger Aggregation (fire and forget)
             for (const [key, group] of groups) {
-                const wsId = key.startsWith('new:') ? 
-                    (Object.keys(wsNameMap).find(id => wsNameMap[id] === group.alloc.newWorkspaceName) || '') : 
-                    group.alloc.workspaceId
-                
+                const wsId = key.startsWith('new:')
+                    ? (Object.keys(wsNameMap).find(id => wsNameMap[id] === group.alloc.newWorkspaceName) || '')
+                    : group.alloc.workspaceId
+
                 if (!wsId) continue
-                
-                // We need the data sources for this workspace to trigger aggregation
+
                 try {
                     const ws = await workspaceService.get(wsId)
                     for (let i = 0; i < group.items.length; i++) {
@@ -277,44 +353,67 @@ export function AssetOnboardingWizard({
                     }
                 } catch (aggErr) {
                     console.error('Failed to trigger aggregation:', aggErr)
-                    // We don't fail the whole onboarding if aggregation trigger fails
-                    // The user can re-trigger it from the UI later
                 }
             }
 
             setCreatedContext({ wsId: firstWsId, dsId: firstDsId })
+            setCreatedDataSourceIds(allCreatedDsIds)
             setWorkspaceNames(wsNameMap)
             setWizardPhase('success')
         } catch (err) {
             console.error('Onboarding failed:', err)
             const message = err instanceof Error ? err.message : 'Unknown error'
-            // Extract detail from JSON error body if present
             const detailMatch = message.match(/\{"detail":"(.+?)"\}/)
             setSubmitError(detailMatch ? detailMatch[1] : message)
         } finally {
             setIsSubmitting(false)
         }
-    }, [catalogItems, formData, provider.id])
+    }, [catalogItems, formData, provider.id, loadedWorkspaceNames])
 
     // ─── Success Navigation ───────────────────────────────────────────────────
-    const handleNavigate = useCallback((destination: 'explore' | 'create-view' | 'configure-more') => {
+    const handleNavigate = useCallback((destination: NavigationDestination) => {
         if (createdContext) {
-            setActiveWorkspace(createdContext.wsId)
-            setActiveDataSource(createdContext.dsId)
+            if (destination === 'explorer' || destination === 'schema') {
+                setActiveWorkspace(createdContext.wsId)
+                setActiveDataSource(createdContext.dsId)
+            }
         }
         onComplete()
+
         switch (destination) {
-            case 'explore':
+            case 'explorer':
+                navigate(`/explorer?workspace=${createdContext?.wsId}`)
+                break
+            case 'schema':
                 navigate(`/schema?workspaceId=${createdContext?.wsId}&dataSourceId=${createdContext?.dsId}`)
                 break
-            case 'create-view':
-                navigate(`/explorer?workspace=${createdContext?.wsId}`)
+            case 'aggregation-jobs':
+                navigate('/admin/registry?tab=jobs')
                 break
             case 'configure-more':
                 navigate('/admin/registry?tab=assets')
                 break
+            case 'workspaces':
+                navigate('/admin/registry?tab=workspaces')
+                break
+            case 'dismiss':
+                // Stay on current page — just close
+                break
         }
     }, [createdContext, navigate, onComplete, setActiveWorkspace, setActiveDataSource])
+
+    // ─── Keyboard Navigation ──────────────────────────────────────────────────
+    useWizardKeyboard({
+        containerRef: modalRef,
+        onClose: handleClose,
+        onNext: goNext,
+        onSubmit: handleSubmit,
+        canProceed: !!canProceed,
+        isLastStep: currentStepIndex === STEPS.length - 1,
+        isSubmitting,
+        isSuccess: wizardPhase === 'success',
+        isOpen,
+    })
 
     // ─── Render ───────────────────────────────────────────────────────────────
     if (!isOpen) return null
@@ -330,77 +429,87 @@ export function AssetOnboardingWizard({
                 className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm"
             >
                 <motion.div
+                    ref={modalRef}
                     initial={{ scale: 0.95, opacity: 0, y: 20 }}
                     animate={{ scale: 1, opacity: 1, y: 0 }}
                     exit={{ scale: 0.95, opacity: 0, y: 20 }}
                     transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-                    className="w-full max-w-3xl mx-4 bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl flex flex-col max-h-[85vh]"
+                    className="w-full max-w-4xl mx-4 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
                 >
-                    {/* Header */}
-                    <div className="flex items-center justify-between px-6 py-4 border-b border-glass-border shrink-0">
-                        <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center flex-shrink-0">
-                                <Wand2 className="w-5 h-5 text-indigo-400" />
+                    {/* Header — aligned with ViewWizard */}
+                    <div className="flex items-center justify-between px-8 py-5 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900 shrink-0">
+                        <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white shadow-lg shadow-indigo-500/25 flex-shrink-0">
+                                <Wand2 className="w-6 h-6" />
                             </div>
                             <div>
-                                <h2 className="text-lg font-bold text-ink">Asset Onboarding</h2>
-                                <p className="text-sm text-ink-muted mt-0.5">
-                                    {catalogItems.length} data source{catalogItems.length !== 1 ? 's' : ''} from {provider.name}
+                                <h2 className="text-xl font-bold text-slate-900 dark:text-white">Asset Onboarding</h2>
+                                <p className="text-sm text-slate-500">
+                                    {wizardPhase === 'steps'
+                                        ? `Step ${currentStepIndex + 1} of ${STEPS.length}: ${STEPS[currentStepIndex]?.title}`
+                                        : `${catalogItems.length} data source${catalogItems.length !== 1 ? 's' : ''} from ${provider.name}`
+                                    }
                                 </p>
                             </div>
                         </div>
-                        {wizardPhase === 'steps' && (
-                            <button
-                                onClick={onClose}
-                                className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                                title="Cancel onboarding"
-                            >
-                                <X className="w-5 h-5" />
-                            </button>
-                        )}
+                        <button
+                            onClick={handleClose}
+                            className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                            title={wizardPhase === 'success' ? 'Close' : 'Cancel onboarding'}
+                        >
+                            <X className="w-5 h-5 text-slate-500" />
+                        </button>
                     </div>
 
-                    {/* Step Progress — following ViewWizard pattern */}
+                    {/* Progress Steps — aligned with ViewWizard */}
                     {wizardPhase === 'steps' && (
-                        <div className="px-6 py-3 border-b border-glass-border flex items-center gap-2 shrink-0">
-                            {STEPS.map((step, i) => {
-                                const StepIcon = step.icon
-                                const isComplete = i < currentStepIndex
-                                const isCurrent = i === currentStepIndex
-                                return (
-                                    <div key={step.id} className="flex items-center gap-2">
-                                        {i > 0 && (
-                                            <div className={cn(
-                                                "w-8 h-0.5 rounded-full",
-                                                isComplete ? "bg-emerald-500" : "bg-glass-border"
-                                            )} />
-                                        )}
-                                        <button
-                                            onClick={() => isComplete ? goToStep(step.id) : undefined}
-                                            disabled={!isComplete}
-                                            className={cn(
-                                                "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all",
-                                                isComplete
-                                                    ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 cursor-pointer hover:bg-emerald-500/20"
-                                                    : isCurrent
-                                                        ? "bg-indigo-500 text-white shadow-md shadow-indigo-500/25"
-                                                        : "bg-black/5 dark:bg-white/5 text-ink-muted cursor-default"
+                        <div className="px-8 py-4 bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700 shrink-0">
+                            <div className="flex items-center gap-2">
+                                {STEPS.map((step, i) => {
+                                    const isComplete = i < currentStepIndex
+                                    const isCurrent = i === currentStepIndex
+                                    const isClickable = isComplete || isCurrent
+                                    return (
+                                        <div key={step.id} className="flex items-center">
+                                            <button
+                                                onClick={() => isComplete ? goToStep(step.id) : undefined}
+                                                disabled={!isClickable}
+                                                className={cn(
+                                                    "flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all",
+                                                    isCurrent
+                                                        ? "bg-indigo-600 text-white shadow-md ring-2 ring-indigo-100 dark:ring-indigo-900"
+                                                        : isComplete
+                                                            ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/30 cursor-pointer"
+                                                            : "text-slate-400 dark:text-slate-500 cursor-not-allowed",
+                                                )}
+                                            >
+                                                {isComplete
+                                                    ? <Check className="w-4 h-4" />
+                                                    : (
+                                                        <span className={cn(
+                                                            "w-4 h-4 flex items-center justify-center rounded-full text-[10px] font-bold border",
+                                                            isCurrent ? "border-transparent bg-white/20" : "border-slate-300 dark:border-slate-600",
+                                                        )}>
+                                                            {i + 1}
+                                                        </span>
+                                                    )}
+                                                {step.title}
+                                            </button>
+                                            {i < STEPS.length - 1 && (
+                                                <div className={cn(
+                                                    "w-8 h-px mx-2",
+                                                    isComplete ? "bg-emerald-400" : "bg-slate-200 dark:bg-slate-700",
+                                                )} />
                                             )}
-                                        >
-                                            {isComplete
-                                                ? <Check className="w-3 h-3" />
-                                                : <StepIcon className="w-3 h-3" />
-                                            }
-                                            <span className="hidden sm:inline">{step.title}</span>
-                                        </button>
-                                    </div>
-                                )
-                            })}
+                                        </div>
+                                    )
+                                })}
+                            </div>
                         </div>
                     )}
 
-                    {/* Content with step transitions */}
-                    <div className="flex-1 overflow-y-auto px-6 py-5">
+                    {/* Step Content */}
+                    <div className="flex-1 overflow-y-auto">
                         <AnimatePresence mode="wait">
                             <motion.div
                                 key={wizardPhase === 'success' ? 'success' : currentStep}
@@ -408,6 +517,7 @@ export function AssetOnboardingWizard({
                                 animate={{ opacity: 1, x: 0 }}
                                 exit={{ opacity: 0, x: -20 }}
                                 transition={{ duration: 0.2 }}
+                                className="p-8"
                             >
                                 {wizardPhase === 'success' ? (
                                     <ReviewStep
@@ -415,14 +525,16 @@ export function AssetOnboardingWizard({
                                         catalogItems={catalogItems}
                                         phase="success"
                                         onNavigate={handleNavigate}
-                                        workspaceNames={workspaceNames}
+                                        workspaceNames={{ ...loadedWorkspaceNames, ...workspaceNames }}
                                         ontologyNames={ontologyNames}
+                                        createdDataSourceIds={createdDataSourceIds}
                                     />
                                 ) : currentStep === 'workspace' ? (
                                     <WorkspaceStep
                                         formData={formData}
                                         updateFormData={updateFormData}
                                         catalogItems={catalogItems}
+                                        onWorkspacesLoaded={setLoadedWorkspaceNames}
                                     />
                                 ) : currentStep === 'aggregation' ? (
                                     <AggregationStep
@@ -435,6 +547,8 @@ export function AssetOnboardingWizard({
                                         updateFormData={updateFormData}
                                         catalogItems={catalogItems}
                                         providerId={provider.id}
+                                        workspaceNames={loadedWorkspaceNames}
+                                        onOntologiesLoaded={setOntologyNames}
                                     />
                                 ) : currentStep === 'review' ? (
                                     <ReviewStep
@@ -442,7 +556,7 @@ export function AssetOnboardingWizard({
                                         catalogItems={catalogItems}
                                         phase="review"
                                         onNavigate={handleNavigate}
-                                        workspaceNames={workspaceNames}
+                                        workspaceNames={{ ...loadedWorkspaceNames, ...workspaceNames }}
                                         ontologyNames={ontologyNames}
                                     />
                                 ) : null}
@@ -450,62 +564,131 @@ export function AssetOnboardingWizard({
                         </AnimatePresence>
                     </div>
 
-                    {/* Error banner */}
-                    {submitError && wizardPhase === 'steps' && (
-                        <div className="mx-6 mb-2 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400 flex items-center justify-between">
-                            <span>{submitError}</span>
-                            <button
-                                onClick={() => setSubmitError(null)}
-                                className="ml-3 text-red-400 hover:text-red-600 dark:hover:text-red-300"
-                            >
-                                <X className="w-4 h-4" />
-                            </button>
+                    {/* Step warnings (inline validation) */}
+                    {wizardPhase === 'steps' && stepWarnings.length > 0 && stepWarnings.length <= 3 && (
+                        <div className="mx-8 mb-2 px-4 py-2.5 rounded-lg bg-amber-500/[0.06] border border-amber-500/15 space-y-1">
+                            {stepWarnings.map((w, i) => (
+                                <div key={i} className="flex items-center gap-2 text-[11px] text-amber-500">
+                                    <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                                    <span>{w}</span>
+                                </div>
+                            ))}
                         </div>
                     )}
 
-                    {/* Footer — hidden during success phase */}
-                    {wizardPhase === 'steps' && (
-                        <div className="flex items-center justify-between px-6 py-4 border-t border-glass-border shrink-0">
-                            {currentStepIndex > 0 ? (
+                    {/* Error banner */}
+                    {submitError && wizardPhase === 'steps' && (
+                        <div className="mx-8 mb-2 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400 flex items-center justify-between">
+                            <span>{submitError}</span>
+                            <div className="flex items-center gap-2 ml-3">
                                 <button
-                                    onClick={goBack}
-                                    className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-ink-secondary hover:text-ink rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                    onClick={handleSubmit}
+                                    className="text-xs font-medium text-red-400 hover:text-red-300 underline transition-colors"
                                 >
-                                    <ChevronLeft className="w-4 h-4" />
-                                    Back
+                                    Retry
                                 </button>
-                            ) : (
                                 <button
-                                    onClick={onClose}
-                                    className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-ink-secondary hover:text-ink rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                    onClick={() => setSubmitError(null)}
+                                    className="text-red-400 hover:text-red-600 dark:hover:text-red-300"
+                                >
+                                    <X className="w-4 h-4" />
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Footer — aligned with ViewWizard */}
+                    {wizardPhase === 'steps' && (
+                        <div className="flex items-center justify-between px-8 py-5 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 shrink-0">
+                            <button
+                                onClick={goBack}
+                                disabled={currentStepIndex === 0}
+                                className={cn(
+                                    "flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all",
+                                    currentStepIndex > 0
+                                        ? "text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
+                                        : "text-slate-400 dark:text-slate-500 cursor-not-allowed",
+                                )}
+                            >
+                                <ChevronLeft className="w-4 h-4" />
+                                Back
+                            </button>
+
+                            <div className="flex items-center gap-3">
+                                <button
+                                    onClick={handleClose}
+                                    className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all"
                                 >
                                     Cancel
                                 </button>
-                            )}
 
-                            <button
-                                onClick={isLast ? handleSubmit : goNext}
-                                disabled={!canProceed || isSubmitting}
-                                className={cn(
-                                    "flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all",
-                                    isLast
-                                        ? "bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:shadow-indigo-500/30 disabled:opacity-50"
-                                        : canProceed
-                                            ? "bg-indigo-500/10 text-indigo-500 hover:bg-indigo-500/20"
-                                            : "bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed"
-                                )}
-                            >
-                                {isSubmitting ? (
-                                    <><Loader2 className="w-4 h-4 animate-spin" /> Setting up...</>
-                                ) : isLast ? (
-                                    <><Check className="w-4 h-4" /> Complete Setup</>
-                                ) : (
-                                    <>Next <ChevronRight className="w-4 h-4" /></>
-                                )}
-                            </button>
+                                <button
+                                    onClick={isLast ? handleSubmit : goNext}
+                                    disabled={!canProceed || isSubmitting}
+                                    className={cn(
+                                        "flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-all",
+                                        canProceed && !isSubmitting
+                                            ? "bg-gradient-to-r from-indigo-600 to-violet-600 text-white hover:from-indigo-700 hover:to-violet-700 shadow-lg shadow-indigo-500/25"
+                                            : "bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed",
+                                    )}
+                                >
+                                    {isSubmitting ? (
+                                        <><Loader2 className="w-4 h-4 animate-spin" /> Setting up...</>
+                                    ) : isLast ? (
+                                        <><Check className="w-4 h-4" /> Complete Setup</>
+                                    ) : (
+                                        <>Next <ChevronRight className="w-4 h-4" /></>
+                                    )}
+                                </button>
+                            </div>
                         </div>
                     )}
                 </motion.div>
+
+                {/* Unsaved changes confirmation overlay */}
+                <AnimatePresence>
+                    {showCloseConfirm && (
+                        <motion.div
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40"
+                        >
+                            <motion.div
+                                initial={{ scale: 0.95, opacity: 0 }}
+                                animate={{ scale: 1, opacity: 1 }}
+                                exit={{ scale: 0.95, opacity: 0 }}
+                                className="bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl p-6 max-w-sm mx-4 space-y-4"
+                            >
+                                <div className="flex items-start gap-3">
+                                    <div className="w-9 h-9 rounded-lg bg-amber-500/10 flex items-center justify-center flex-shrink-0">
+                                        <AlertTriangle className="w-5 h-5 text-amber-500" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-sm font-semibold text-ink">Discard onboarding progress?</h3>
+                                        <p className="text-xs text-ink-muted mt-1 leading-relaxed">
+                                            You have unsaved onboarding progress. Closing will discard all selections.
+                                        </p>
+                                    </div>
+                                </div>
+                                <div className="flex items-center justify-end gap-3">
+                                    <button
+                                        onClick={() => setShowCloseConfirm(false)}
+                                        className="px-4 py-2 rounded-lg text-sm font-medium text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                    >
+                                        Continue Editing
+                                    </button>
+                                    <button
+                                        onClick={confirmClose}
+                                        className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-red-500 hover:bg-red-600 transition-colors"
+                                    >
+                                        Discard & Close
+                                    </button>
+                                </div>
+                            </motion.div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
             </motion.div>
         </AnimatePresence>
     )

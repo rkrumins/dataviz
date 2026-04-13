@@ -183,8 +183,8 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
       transition={{ type: 'spring', damping: 20, stiffness: 300 }}
       className={cn(
         'w-80 max-w-sm rounded-xl overflow-hidden',
-        'backdrop-blur-xl bg-canvas-elevated/90 dark:bg-canvas-elevated/95',
-        'border border-glass-border shadow-2xl shadow-black/10 dark:shadow-black/30',
+        'bg-white dark:bg-slate-800',
+        'border border-slate-200 dark:border-slate-700 shadow-2xl shadow-black/15 dark:shadow-black/40',
       )}
     >
       <div className="flex items-center gap-3 px-4 py-3.5">
@@ -250,7 +250,7 @@ export function ToastContainer() {
   const removeToast = useToastStore(s => s.removeToast)
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 flex flex-col-reverse gap-2 pointer-events-none">
+    <div className="fixed bottom-6 right-6 z-[80] flex flex-col-reverse gap-2 pointer-events-none">
       <AnimatePresence>
         {toasts.map(toast => (
           <ToastItem
