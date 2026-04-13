@@ -21,6 +21,12 @@ const EMPTY_FACETS: ViewFacetsResponse = {
   tags: [],
   viewTypes: [],
   creators: [],
+  stats: {
+    total: 0,
+    recentlyAdded: 0,
+    needsAttention: 0,
+    lastActivityAt: null,
+  },
 }
 
 const FACETS_QUERY_KEY = ['views', 'facets'] as const

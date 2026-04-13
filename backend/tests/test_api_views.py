@@ -651,11 +651,34 @@ async def test_list_views_filter_by_tags_multi_is_or(test_client: AsyncClient):
 # ── GET /views/facets ─────────────────────────────────────────────────
 
 async def test_facets_empty(test_client: AsyncClient):
-    """Facets endpoint returns empty lists when no views exist."""
+    """Facets endpoint returns empty lists + zero stats when no views exist."""
     resp = await test_client.get("/api/v1/views/facets")
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"tags": [], "viewTypes": [], "creators": []}
+    assert body["tags"] == []
+    assert body["viewTypes"] == []
+    assert body["creators"] == []
+    assert body["stats"]["total"] == 0
+    assert body["stats"]["recentlyAdded"] == 0
+    assert body["stats"]["needsAttention"] == 0
+    assert body["stats"]["lastActivityAt"] is None
+
+
+async def test_facets_stats_populated(test_client: AsyncClient):
+    """Stats reflect the catalog: total count, recent count, last activity."""
+    ws_id = await _create_workspace(test_client)
+    await _create_view(test_client, ws_id, "A")
+    await _create_view(test_client, ws_id, "B")
+    await _create_view(test_client, ws_id, "C")
+
+    resp = await test_client.get("/api/v1/views/facets")
+    assert resp.status_code == 200
+    stats = resp.json()["stats"]
+    assert stats["total"] == 3
+    # All three views were just created so recently_added should cover them.
+    assert stats["recentlyAdded"] == 3
+    # last_activity_at should be populated (we just created views).
+    assert stats["lastActivityAt"] is not None
 
 
 async def test_facets_tags_view_types_creators(test_client: AsyncClient, fake_user):

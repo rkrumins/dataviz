@@ -31,10 +31,31 @@ function useStableKey(value: unknown): string {
 
 // ─── Sort Options ───────────────────────────────────────────────────────────
 
-export type SortOption = 'newest' | 'oldest' | 'popular' | 'updated' | 'az' | 'za'
+/**
+ * Sort options. The first six are the user-selectable global sorts
+ * shown in the sort dropdown; the column-sorts below are applied when
+ * the user clicks a header in the list view. Every option has a single
+ * canonical string so the URL (``?sort=az``) stays stable and
+ * human-readable.
+ */
+export type SortOption =
+  | 'newest'
+  | 'oldest'
+  | 'popular'
+  | 'updated'
+  | 'az'
+  | 'za'
+  // Column-sorts (list view header clicks)
+  | 'updated-asc'
+  | 'likes-asc'
+  | 'type-az'
+  | 'type-za'
+  | 'owner-az'
+  | 'owner-za'
 
 function sortViews(views: View[], sort: SortOption): View[] {
   const sorted = [...views]
+  const byStr = (a: string, b: string) => a.localeCompare(b)
   switch (sort) {
     case 'newest':
       return sorted.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
@@ -44,10 +65,22 @@ function sortViews(views: View[], sort: SortOption): View[] {
       return sorted.sort((a, b) => b.favouriteCount - a.favouriteCount || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
     case 'updated':
       return sorted.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+    case 'updated-asc':
+      return sorted.sort((a, b) => new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime())
+    case 'likes-asc':
+      return sorted.sort((a, b) => a.favouriteCount - b.favouriteCount || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
     case 'az':
-      return sorted.sort((a, b) => a.name.localeCompare(b.name))
+      return sorted.sort((a, b) => byStr(a.name, b.name))
     case 'za':
-      return sorted.sort((a, b) => b.name.localeCompare(a.name))
+      return sorted.sort((a, b) => byStr(b.name, a.name))
+    case 'type-az':
+      return sorted.sort((a, b) => byStr(a.viewType ?? '', b.viewType ?? '') || byStr(a.name, b.name))
+    case 'type-za':
+      return sorted.sort((a, b) => byStr(b.viewType ?? '', a.viewType ?? '') || byStr(a.name, b.name))
+    case 'owner-az':
+      return sorted.sort((a, b) => byStr(a.createdByName ?? a.createdBy ?? '', b.createdByName ?? b.createdBy ?? '') || byStr(a.name, b.name))
+    case 'owner-za':
+      return sorted.sort((a, b) => byStr(b.createdByName ?? b.createdBy ?? '', a.createdByName ?? a.createdBy ?? '') || byStr(a.name, b.name))
     default:
       return sorted
   }
