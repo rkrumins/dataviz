@@ -20,6 +20,7 @@ from backend.common.models.management import (
     ViewResponse,
     ViewListResponse,
     ViewFacetsResponse,
+    ViewCatalogStats,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,56 @@ async def get_view_facets(
     tags/creators beyond the first page at scale).
     """
     return await view_repo.get_view_facets(session)
+
+
+@router.get("/stats", response_model=ViewCatalogStats)
+async def get_view_stats(
+    visibility: Optional[str] = Query(None),
+    visibility_in: Optional[List[str]] = Query(None, alias="visibilityIn"),
+    workspace_id: Optional[str] = Query(None, alias="workspaceId"),
+    workspace_ids: Optional[List[str]] = Query(None, alias="workspaceIds"),
+    context_model_id: Optional[str] = Query(None, alias="contextModelId"),
+    data_source_id: Optional[str] = Query(None, alias="dataSourceId"),
+    view_type: Optional[str] = Query(None, alias="viewType"),
+    view_types: Optional[List[str]] = Query(None, alias="viewTypes"),
+    created_by: Optional[str] = Query(None, alias="createdBy"),
+    created_by_in: Optional[List[str]] = Query(None, alias="createdByIn"),
+    created_after: Optional[str] = Query(None, alias="createdAfter"),
+    search: Optional[str] = Query(None),
+    tags: Optional[List[str]] = Query(None),
+    favourited_only: bool = Query(False, alias="favouritedOnly"),
+    include_deleted: bool = Query(False, alias="includeDeleted"),
+    deleted_only: bool = Query(False, alias="deletedOnly"),
+    attention_only: bool = Query(False, alias="attentionOnly"),
+    user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> ViewCatalogStats:
+    """Aggregate counts for the Explorer stats bar, scoped to the same
+    filters the list endpoint accepts. All four numbers describe the
+    currently-filtered population so the stats bar stays in sync as
+    users narrow their query.
+    """
+    return await view_repo.get_view_stats(
+        session,
+        visibility=visibility,
+        visibility_in=visibility_in,
+        workspace_id=workspace_id,
+        workspace_ids=workspace_ids,
+        context_model_id=context_model_id,
+        data_source_id=data_source_id,
+        view_type=view_type,
+        view_types=view_types,
+        created_by=created_by,
+        created_by_in=created_by_in,
+        created_after=created_after,
+        search=search,
+        tags=tags,
+        user_id=_user_id(user),
+        favourited_only=favourited_only,
+        include_deleted=include_deleted,
+        deleted_only=deleted_only,
+        attention_only=attention_only,
+    )
 
 
 @router.get("/", response_model=ViewListResponse)

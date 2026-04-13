@@ -27,6 +27,7 @@ from backend.common.models.management import (
     ViewFacetValue,
     ViewFacetCreator,
     ViewFacetsResponse,
+    ViewCatalogStats,
 )
 
 logger = logging.getLogger(__name__)
@@ -659,6 +660,112 @@ async def get_view_facets(
         tags=tag_facets,
         view_types=view_type_facets,
         creators=creator_facets,
+    )
+
+
+async def get_view_stats(
+    session: AsyncSession,
+    *,
+    visibility: Optional[str] = None,
+    visibility_in: Optional[List[str]] = None,
+    workspace_id: Optional[str] = None,
+    workspace_ids: Optional[List[str]] = None,
+    context_model_id: Optional[str] = None,
+    data_source_id: Optional[str] = None,
+    view_type: Optional[str] = None,
+    view_types: Optional[List[str]] = None,
+    created_by: Optional[str] = None,
+    created_by_in: Optional[List[str]] = None,
+    created_after: Optional[str] = None,
+    search: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    user_id: Optional[str] = None,
+    favourited_only: bool = False,
+    include_deleted: bool = False,
+    deleted_only: bool = False,
+    attention_only: bool = False,
+) -> ViewCatalogStats:
+    """Compute the Explorer stats bar numbers for a given filter set.
+
+    Accepts the same filter params as ``list_views_filtered`` and
+    reuses ``_apply_view_filters`` so the stats always describe the
+    exact same population the list endpoint would return. Four cheap
+    aggregate queries — no row materialisation.
+    """
+    filter_kwargs = dict(
+        visibility=visibility,
+        visibility_in=visibility_in,
+        workspace_id=workspace_id,
+        workspace_ids=workspace_ids,
+        context_model_id=context_model_id,
+        data_source_id=data_source_id,
+        view_type=view_type,
+        view_types=view_types,
+        created_by=created_by,
+        created_by_in=created_by_in,
+        created_after=created_after,
+        search=search,
+        tags=tags,
+        user_id=user_id,
+        favourited_only=favourited_only,
+        include_deleted=include_deleted,
+        deleted_only=deleted_only,
+        # Respect an incoming ``attention_only`` on the base queries so
+        # total/recent/last-activity all describe the same population.
+        # The needs_attention query below always overlays True — when
+        # both resolve to True the numbers line up as expected.
+        attention_only=attention_only,
+    )
+
+    # Total — matches list ``total`` for identical filters.
+    total_query = _apply_view_filters(
+        select(func.count(func.distinct(ViewORM.id))),
+        **filter_kwargs,
+    )
+    total_result = await session.execute(total_query)
+    total = total_result.scalar_one() or 0
+
+    # Recently added — same filters plus a created_after overlay.
+    seven_days_ago = (
+        datetime.now(timezone.utc) - timedelta(days=7)
+    ).isoformat()
+    # Caller may already have a stricter created_after; use the later
+    # of the two so we never broaden what they asked for.
+    effective_created_after = (
+        max(created_after, seven_days_ago)
+        if created_after
+        else seven_days_ago
+    )
+    recent_kwargs = {**filter_kwargs, "created_after": effective_created_after}
+    recent_query = _apply_view_filters(
+        select(func.count(func.distinct(ViewORM.id))),
+        **recent_kwargs,
+    )
+    recent_result = await session.execute(recent_query)
+    recently_added = recent_result.scalar_one() or 0
+
+    # Needs attention — matches the ``attentionOnly`` list filter exactly.
+    attention_kwargs = {**filter_kwargs, "attention_only": True}
+    attention_query = _apply_view_filters(
+        select(func.count(func.distinct(ViewORM.id))),
+        **attention_kwargs,
+    )
+    attention_result = await session.execute(attention_query)
+    needs_attention = attention_result.scalar_one() or 0
+
+    # Last activity — MAX(updated_at) across the same filtered set.
+    last_activity_query = _apply_view_filters(
+        select(func.max(ViewORM.updated_at)),
+        **filter_kwargs,
+    )
+    last_activity_result = await session.execute(last_activity_query)
+    last_activity_at = last_activity_result.scalar_one()
+
+    return ViewCatalogStats(
+        total=total,
+        recently_added=recently_added,
+        needs_attention=needs_attention,
+        last_activity_at=last_activity_at,
     )
 
 

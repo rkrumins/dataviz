@@ -9,17 +9,27 @@
  * - Unified filter toolbar (no duplicate rows)
  */
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useSearchParams } from 'react-router-dom'
 import {
   Compass, Search, LayoutGrid, List, X, TrendingUp, Plus,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth'
-import { useExplorerViews, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
+import { useExplorerViews, resolveCategoryParams, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
+import { useViewStats } from '@/hooks/useViewStats'
 import { useViewHealth } from '@/hooks/useViewHealth'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
+import { ExplorerListHeader } from '@/components/explorer/ExplorerListHeader'
 import { ExplorerFilterBar } from '@/components/explorer/ExplorerFilterBar'
+import { ExplorerStatsBar } from '@/components/explorer/ExplorerStatsBar'
+import { DensityToggle } from '@/components/explorer/DensityToggle'
+import { ExplorerSearchSuggestions } from '@/components/explorer/ExplorerSearchSuggestions'
+import { KeyboardShortcutsDialog } from '@/components/explorer/KeyboardShortcutsDialog'
+import { useRecentSearches } from '@/hooks/useRecentSearches'
+import { useTypewriter } from '@/hooks/useTypewriter'
+import { usePreferencesStore } from '@/store/preferences'
 import { ExplorerSortControl } from '@/components/explorer/ExplorerSortControl'
 import { ExplorerHero } from '@/components/explorer/ExplorerHero'
 import { ExplorerRecentStrip } from '@/components/explorer/ExplorerRecentStrip'
@@ -48,6 +58,16 @@ const STAGGER_STYLE = `
   to { opacity: 1; transform: translateY(0); }
 }
 .card-stagger { animation: card-in 0.3s ease-out both; }
+
+/* Typewriter caret: hard on/off blink using steps(), so the cursor
+   feels like a proper terminal cursor rather than a smeared fade. */
+@keyframes typewriter-caret-blink {
+  0%, 49.99% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.typewriter-caret-blink {
+  animation: typewriter-caret-blink 1.05s steps(1, end) infinite;
+}
 `
 
 // ─── URL Param Helpers ──────────────────────────────────────────────────────
@@ -75,16 +95,71 @@ export function ExplorerPage() {
   const currentUser = useAuthStore(s => s.user)
   const { openViewEditor } = useViewEditorModal()
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
+  const density = usePreferencesStore(s => s.explorerDensity)
+
+  // Filter-aware stats for the summary bar. Mirrors the same filter
+  // params that drive ``useExplorerViews`` so the numbers describe the
+  // exact population the user is currently looking at. ``parsed.search``
+  // (URL-debounced) is used rather than the raw ``searchInput`` so the
+  // endpoint isn't hit on every keystroke.
+  const statsParams = useMemo(() => {
+    const categoryParams = resolveCategoryParams(parsed.category, currentUser?.id ?? null)
+    return {
+      search: parsed.search || undefined,
+      visibility: parsed.visibility || undefined,
+      workspaceIds: parsed.workspaceIds.length > 0 ? parsed.workspaceIds : undefined,
+      dataSourceId: parsed.dataSourceId || undefined,
+      viewTypes: parsed.viewTypes.length > 0 ? parsed.viewTypes : undefined,
+      tags: parsed.tags.length > 0 ? parsed.tags : undefined,
+      createdByIn: parsed.creatorIds.length > 0 ? parsed.creatorIds : undefined,
+      ...categoryParams,
+    }
+  }, [
+    parsed.search,
+    parsed.visibility,
+    parsed.workspaceIds,
+    parsed.dataSourceId,
+    parsed.viewTypes,
+    parsed.tags,
+    parsed.creatorIds,
+    parsed.category,
+    currentUser?.id,
+  ])
+  const { stats: catalogStats, isFetching: statsFetching } = useViewStats(statsParams)
+
+  // Tailwind gap class for the grid layout, driven by density preference.
+  const gridGapClass =
+    density === 'compact' ? 'gap-2.5'
+    : density === 'spacious' ? 'gap-6'
+    : 'gap-4'
 
   const [searchInput, setSearchInput] = useState(parsed.search)
   const searchRef = useRef<HTMLInputElement>(null)
   const [searchFocused, setSearchFocused] = useState(false)
+  const { recents, record: recordRecent, remove: removeRecent, clear: clearRecents } = useRecentSearches()
+
+  // Typewriter placeholder — cycles tips while the field is empty + not
+  // focused so new users discover the search surface passively, with a
+  // live "someone is typing" feel rather than a jarring snap-replace.
+  // The hook pauses itself when ``enabled`` flips to false.
+  const placeholderPhrases = useMemo(() => [
+    'views by name, tag, or workspace…',
+    'a workspace — "production", "analytics"…',
+    'a tag — "finance", "pii", "kpi"…',
+    'a creator name or email…',
+    'views in a specific data source…',
+  ], [])
+  const typewriter = useTypewriter({
+    phrases: placeholderPhrases,
+    enabled: !searchFocused && !searchInput,
+  })
 
   const [previewView, setPreviewView] = useState<View | null>(null)
   const [shareView, setShareView] = useState<{ id: string; name: string; visibility: 'private' | 'workspace' | 'enterprise' } | null>(null)
   const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number; permanent?: boolean } | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showBulkDelete, setShowBulkDelete] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
   
   // no-op callback for aggregation banner (informational only — no longer gates view creation)
   const onAggregationStatus = useCallback((_isReady: boolean) => {}, [])
@@ -135,6 +210,12 @@ export function ExplorerPage() {
     }, 350)
     return () => { if (searchSyncTimer.current) clearTimeout(searchSyncTimer.current) }
   }, [searchInput]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Record a search once it's been committed to the URL — only persist
+  // real queries, not transient typing.
+  useEffect(() => {
+    if (parsed.search) recordRecent(parsed.search)
+  }, [parsed.search, recordRecent])
 
   // ─── Data fetching ──────────────────────────────────────────────────
 
@@ -207,6 +288,14 @@ export function ExplorerPage() {
       if (e.key === '/' && !inInput) {
         e.preventDefault()
         searchRef.current?.focus()
+        return
+      }
+      // ? → show keyboard shortcuts cheat-sheet. ``?`` is a Shift+/ on
+      // most layouts; use the resolved key rather than a shift+slash
+      // combo so it works regardless of locale.
+      if (e.key === '?' && !inInput) {
+        e.preventDefault()
+        setShortcutsOpen(true)
         return
       }
       // Escape → clear search / blur / deselect focus
@@ -390,8 +479,17 @@ export function ExplorerPage() {
           </div>
         </header>
 
+        {/* ── Stats summary bar ───────────────────────────────── */}
+        <ExplorerStatsBar
+          stats={catalogStats}
+          isLoading={statsFetching}
+          onShowAll={() => setParam('category', null)}
+          onShowRecent={() => setParam('category', 'recently-added')}
+          onShowAttention={() => setParam('category', 'needs-attention')}
+        />
+
         {/* ── Search bar ──────────────────────────────────────── */}
-        <div className="mb-5">
+        <div className="mb-5 relative">
           <div className={cn(
             'relative flex items-center rounded-xl border bg-canvas-elevated overflow-hidden',
             'transition-[border-color,box-shadow] duration-200',
@@ -403,16 +501,41 @@ export function ExplorerPage() {
               'w-4.5 h-4.5 ml-4 shrink-0 transition-colors duration-150',
               searchFocused ? 'text-accent-lineage' : 'text-ink-muted'
             )} />
-            <input
-              ref={searchRef}
-              type="text"
-              placeholder="Search views by name, tag, workspace..."
-              value={searchInput}
-              onChange={e => setSearchInput(e.target.value)}
-              onFocus={() => setSearchFocused(true)}
-              onBlur={() => setSearchFocused(false)}
-              className="flex-1 bg-transparent py-2.5 px-3 text-sm text-ink outline-none placeholder:text-ink-muted/50 font-medium"
-            />
+            {/* Input wrapper — lets the typewriter overlay sit atop the
+                input without blocking pointer events. The real input is
+                still the focus/typing surface; the overlay only paints
+                the animated placeholder. */}
+            <div className="flex-1 relative">
+              <input
+                ref={searchRef}
+                type="text"
+                /* Fallback for no-JS / reduced-motion: a static prompt. */
+                placeholder={(!searchFocused && !searchInput) ? '' : 'Search views by name, tag, workspace...'}
+                value={searchInput}
+                onChange={e => setSearchInput(e.target.value)}
+                onFocus={() => setSearchFocused(true)}
+                onBlur={() => setSearchFocused(false)}
+                className="w-full bg-transparent py-2.5 px-3 text-sm text-ink outline-none placeholder:text-ink-muted/50 font-medium"
+              />
+              {!searchFocused && !searchInput && (
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 px-3 py-2.5 flex items-center text-sm font-medium text-ink-muted/60 overflow-hidden whitespace-nowrap"
+                >
+                  <span>Search </span>
+                  <span className="ml-1">{typewriter.text}</span>
+                  {/* Caret is solid while keys are flying; blinks with
+                      crisp step() timing only when the text is sitting
+                      still. Matches the feel of a terminal prompt. */}
+                  <span
+                    className={cn(
+                      'ml-[2px] inline-block w-[2px] h-[1.1em] translate-y-[1px] bg-accent-lineage/70 rounded-[1px]',
+                      !typewriter.isActive && 'typewriter-caret-blink',
+                    )}
+                  />
+                </div>
+              )}
+            </div>
             {searchInput && (
               <button
                 onClick={() => setSearchInput('')}
@@ -425,6 +548,22 @@ export function ExplorerPage() {
               /
             </kbd>
           </div>
+
+          {/* Search suggestions dropdown — recent + examples. Only
+              visible while the input is focused and empty so it never
+              competes with live results. */}
+          {searchFocused && !searchInput && (
+            <ExplorerSearchSuggestions
+              recentSearches={recents}
+              onPick={q => {
+                setSearchInput(q)
+                setSearchFocused(false)
+                searchRef.current?.blur()
+              }}
+              onClearRecents={clearRecents}
+              onRemoveRecent={removeRecent}
+            />
+          )}
         </div>
 
         {/* ── Unified toolbar: filters + sort + layout ─────────── */}
@@ -473,6 +612,7 @@ export function ExplorerPage() {
                 <List className="w-3.5 h-3.5" />
               </button>
             </div>
+            <DensityToggle />
           </div>
         </div>
 
@@ -518,6 +658,7 @@ export function ExplorerPage() {
                     onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                     onTagClick={handleTagClick}
                     healthStatus={healthMap.get(v.id)?.status}
+                    density={density}
                   />
                 </div>
               ))}
@@ -537,69 +678,98 @@ export function ExplorerPage() {
             <span className="text-[11px] text-ink-muted">{totalCount}</span>
           </div>
 
+          {/* Results slot with layout-swap crossfade. Each possible
+              branch is wrapped in a motion.div with a distinct key so
+              AnimatePresence sees the swap and animates between them. */}
+          <AnimatePresence mode="wait" initial={false}>
           {isLoading ? (
-            layout === 'grid' ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 min-[1920px]:grid-cols-6 gap-4">
-                {Array.from({ length: 8 }).map((_, i) => <ExplorerCardSkeleton key={i} />)}
-              </div>
-            ) : (
-              <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
-                {Array.from({ length: 8 }).map((_, i) => <ExplorerListRowSkeleton key={i} />)}
-              </div>
-            )
-          ) : views.length === 0 ? (
-            <ExplorerEmptyState
-              type={totalCount === 0 && !hasActiveFilters ? 'no-views' : 'no-results'}
-              searchTerm={parsed.search}
-              hasFilters={hasActiveFilters}
-              activeCategory={parsed.category}
-              onClearFilters={clearAllFilters}
-              onCreateView={() => openViewEditor()}
-            />
-          ) : layout === 'grid' ? (
-            <div ref={gridRef} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 min-[1920px]:grid-cols-6 gap-4">
-              {views.map((v, i) => (
-                <div
-                  key={v.id}
-                  className={cn('card-stagger', i === focusedIndex && 'ring-2 ring-accent-lineage/50 rounded-2xl')}
-                  style={{ animationDelay: `${Math.min(i * 30, 300)}ms` }}
-                >
-                  <ExplorerViewCard
-                    view={v}
-                    onToggleFavourite={() => toggleFavourite(v.id)}
-                    onShare={() => handleShare(v)}
-                    onPreview={() => setPreviewView(v)}
-                    onEdit={() => openViewEditor(v.id)}
-                    editDisabled={false}
-                    onDelete={() => handleDeleteRequest(v)}
-                    onRestore={() => handleRestore(v)}
-                    onPermanentDelete={() => handlePermanentDeleteRequest(v)}
-                    onTagClick={handleTagClick}
-                    healthStatus={healthMap.get(v.id)?.status}
-                    isSelected={selectedIds.has(v.id)}
-                    onToggleSelect={() => setSelectedIds(prev => {
-                      const next = new Set(prev)
-                      if (next.has(v.id)) next.delete(v.id)
-                      else next.add(v.id)
-                      return next
-                    })}
-                  />
+            <motion.div
+              key={`skeleton-${layout}`}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+            >
+              {layout === 'grid' ? (
+                <div className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 min-[1920px]:grid-cols-6', gridGapClass)}>
+                  {Array.from({ length: 8 }).map((_, i) => <ExplorerCardSkeleton key={i} />)}
                 </div>
-              ))}
-            </div>
-          ) : (
-            <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
-              <div className="grid grid-cols-[28px_minmax(0,2fr)_160px_90px_36px_110px_70px_80px_140px] gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold">
-                <span></span>
-                <span>Name</span>
-                <span>Scope</span>
-                <span>Type</span>
-                <span>Vis</span>
-                <span>Owner</span>
-                <span>Likes</span>
-                <span>Updated</span>
-                <span className="text-right">Actions</span>
+              ) : (
+                <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
+                  {Array.from({ length: 8 }).map((_, i) => <ExplorerListRowSkeleton key={i} />)}
+                </div>
+              )}
+            </motion.div>
+          ) : views.length === 0 ? (
+            <motion.div
+              key="empty"
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.2 }}
+            >
+              <ExplorerEmptyState
+                type={totalCount === 0 && !hasActiveFilters ? 'no-views' : 'no-results'}
+                searchTerm={parsed.search}
+                hasFilters={hasActiveFilters}
+                activeCategory={parsed.category}
+                onClearFilters={clearAllFilters}
+                onCreateView={() => openViewEditor()}
+              />
+            </motion.div>
+          ) : layout === 'grid' ? (
+            <motion.div
+              key="results-grid"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+            >
+              <div ref={gridRef} className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 min-[1920px]:grid-cols-6', gridGapClass)}>
+                {views.map((v, i) => (
+                  <div
+                    key={v.id}
+                    className={cn('card-stagger', i === focusedIndex && 'ring-2 ring-accent-lineage/50 rounded-2xl')}
+                    style={{ animationDelay: `${Math.min(i * 30, 300)}ms` }}
+                  >
+                    <ExplorerViewCard
+                      view={v}
+                      onToggleFavourite={() => toggleFavourite(v.id)}
+                      onShare={() => handleShare(v)}
+                      onPreview={() => setPreviewView(v)}
+                      onEdit={() => openViewEditor(v.id)}
+                      editDisabled={false}
+                      onDelete={() => handleDeleteRequest(v)}
+                      onRestore={() => handleRestore(v)}
+                      onPermanentDelete={() => handlePermanentDeleteRequest(v)}
+                      onTagClick={handleTagClick}
+                      healthStatus={healthMap.get(v.id)?.status}
+                      isSelected={selectedIds.has(v.id)}
+                      density={density}
+                      onToggleSelect={() => setSelectedIds(prev => {
+                        const next = new Set(prev)
+                        if (next.has(v.id)) next.delete(v.id)
+                        else next.add(v.id)
+                        return next
+                      })}
+                    />
+                  </div>
+                ))}
               </div>
+            </motion.div>
+          ) : (
+            <motion.div
+              key="results-list"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+            >
+            <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
+              <ExplorerListHeader
+                sort={parsed.sort}
+                onSortChange={v => setParam('sort', v)}
+              />
               {views.map(v => (
                 <ExplorerListRow
                   key={v.id}
@@ -614,6 +784,7 @@ export function ExplorerPage() {
                   onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                   healthStatus={healthMap.get(v.id)?.status}
                   isSelected={selectedIds.has(v.id)}
+                  density={density}
                   onToggleSelect={() => setSelectedIds(prev => {
                     const next = new Set(prev)
                     if (next.has(v.id)) next.delete(v.id)
@@ -623,7 +794,9 @@ export function ExplorerPage() {
                 />
               ))}
             </div>
+            </motion.div>
           )}
+          </AnimatePresence>
 
           {hasMore && <div ref={sentinelRef} className="h-4" />}
         </section>
@@ -659,6 +832,10 @@ export function ExplorerPage() {
         onClose={() => setShowBulkDelete(false)}
         onDeleted={handleBulkDeleted}
         permanent={parsed.category === 'deleted'}
+      />
+      <KeyboardShortcutsDialog
+        isOpen={shortcutsOpen}
+        onClose={() => setShortcutsOpen(false)}
       />
 
     </div>

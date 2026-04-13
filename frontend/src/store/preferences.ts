@@ -3,6 +3,9 @@ import { persist } from 'zustand/middleware'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
+/** Visual density of list/grid items in the Explorer page. */
+export type ExplorerDensity = 'compact' | 'comfortable' | 'spacious'
+
 export interface NodeStyleConfig {
   color: string
   icon?: string
@@ -66,6 +69,10 @@ interface PreferencesState {
   completeOnboardingStep: (step: string) => void
   dismissOnboarding: () => void
   resetOnboarding: () => void
+
+  // Explorer density (affects grid gaps + list row padding)
+  explorerDensity: ExplorerDensity
+  setExplorerDensity: (density: ExplorerDensity) => void
 }
 
 const DEFAULT_SHORTCUTS: ShortcutConfig[] = [
@@ -150,6 +157,10 @@ export const usePreferencesStore = create<PreferencesState>()(
       }),
       dismissOnboarding: () => set({ onboardingDismissedAt: new Date().toISOString() }),
       resetOnboarding: () => set({ onboardingCompletedSteps: [], onboardingDismissedAt: null }),
+
+      // Explorer density
+      explorerDensity: 'comfortable',
+      setExplorerDensity: (explorerDensity) => set({ explorerDensity }),
     }),
     {
       name: 'nexus-preferences',
