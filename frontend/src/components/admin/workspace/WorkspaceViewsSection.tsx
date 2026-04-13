@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Eye, Search, Plus } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Eye, Search, Plus, ExternalLink, Compass } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { View } from '@/services/viewApiService'
@@ -12,7 +12,6 @@ interface WorkspaceViewsSectionProps {
 }
 
 export default function WorkspaceViewsSection({ wsId, dataSources, views }: WorkspaceViewsSectionProps) {
-    const navigate = useNavigate()
     const [dsFilter, setDsFilter] = useState<string>('all')
     const [searchQuery, setSearchQuery] = useState('')
 
@@ -36,12 +35,12 @@ export default function WorkspaceViewsSection({ wsId, dataSources, views }: Work
                         {views.length}
                     </span>
                 </div>
-                <button
-                    onClick={() => navigate(`/explorer?workspace=${wsId}`)}
+                <Link
+                    to={`/explorer?workspace=${wsId}`}
                     className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors"
                 >
                     <Plus className="w-4 h-4" /> Create View
-                </button>
+                </Link>
             </div>
 
             {/* Filter bar */}
@@ -71,10 +70,10 @@ export default function WorkspaceViewsSection({ wsId, dataSources, views }: Work
             {filteredViews.length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                     {filteredViews.map(view => (
-                        <button
+                        <Link
                             key={view.id}
-                            onClick={() => navigate(`/views/${view.id}`)}
-                            className="text-left p-4 rounded-xl border border-glass-border bg-canvas-elevated hover:border-indigo-500/20 hover:shadow-sm transition-all group"
+                            to={`/views/${view.id}`}
+                            className="block p-4 rounded-xl border border-glass-border bg-canvas-elevated hover:border-indigo-500/20 hover:shadow-sm transition-all group"
                         >
                             <div className="flex items-center gap-3 mb-2">
                                 <div className="w-8 h-8 rounded-lg bg-cyan-500/10 text-cyan-500 flex items-center justify-center shrink-0">
@@ -86,6 +85,7 @@ export default function WorkspaceViewsSection({ wsId, dataSources, views }: Work
                                 {view.isPinned && (
                                     <span className="px-1.5 py-0.5 text-[8px] font-bold rounded bg-amber-500/10 text-amber-500">PINNED</span>
                                 )}
+                                <ExternalLink className="w-3 h-3 text-ink-muted opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
                             </div>
 
                             {view.description && (
@@ -120,7 +120,7 @@ export default function WorkspaceViewsSection({ wsId, dataSources, views }: Work
                                     <span className="ml-auto truncate max-w-[120px]">{view.createdBy}</span>
                                 )}
                             </div>
-                        </button>
+                        </Link>
                     ))}
                 </div>
             ) : (
@@ -132,12 +132,12 @@ export default function WorkspaceViewsSection({ wsId, dataSources, views }: Work
                     <p className="text-xs text-ink-muted mb-4">
                         {searchQuery || dsFilter !== 'all' ? 'Try different filters' : 'Create a view to get started'}
                     </p>
-                    <button
-                        onClick={() => navigate(`/explorer?workspace=${wsId}`)}
+                    <Link
+                        to={`/explorer?workspace=${wsId}`}
                         className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors"
                     >
-                        <Plus className="w-4 h-4" /> Create View
-                    </button>
+                        <Compass className="w-4 h-4" /> Open Explorer
+                    </Link>
                 </div>
             )}
         </section>
