@@ -174,8 +174,8 @@ class ViewServiceImpl {
      */
     async listViews(params?: viewApi.ViewListParams): Promise<ViewServiceResult<ViewConfiguration[]>> {
         try {
-            const results = await viewApi.listViews(params)
-            return { success: true, data: results.map(viewApi.viewToViewConfig) }
+            const { items } = await viewApi.listViews(params)
+            return { success: true, data: items.map(viewApi.viewToViewConfig) }
         } catch (error) {
             return { success: false, error: (error as Error).message }
         }

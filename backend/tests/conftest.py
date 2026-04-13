@@ -24,7 +24,11 @@ from sqlalchemy.ext.asyncio import (
 
 from backend.app.db.engine import Base, get_db_session
 from backend.app.db import models as _models  # noqa: F401 — register ORM models
-from backend.app.auth.dependencies import get_current_user, require_admin
+from backend.app.auth.dependencies import (
+    get_current_user,
+    get_optional_user,
+    require_admin,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -119,11 +123,20 @@ async def test_client(
     async def _override_get_current_user():
         return _FAKE_USER
 
+    async def _override_get_optional_user():
+        # Tests always "have" an authenticated user, so get_optional_user
+        # returns the same stub as get_current_user. Without this override,
+        # endpoints that use get_optional_user (e.g. create_view) would see
+        # a None token and fall back to the anonymous sentinel, breaking
+        # created_by attribution in test assertions.
+        return _FAKE_USER
+
     async def _override_require_admin():
         return _FAKE_USER
 
     app.dependency_overrides[get_db_session] = _override_get_db_session
     app.dependency_overrides[get_current_user] = _override_get_current_user
+    app.dependency_overrides[get_optional_user] = _override_get_optional_user
     app.dependency_overrides[require_admin] = _override_require_admin
 
     transport = ASGITransport(app=app, raise_app_exceptions=False)

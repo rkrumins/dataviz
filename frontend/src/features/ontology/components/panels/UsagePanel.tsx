@@ -67,8 +67,8 @@ export function UsagePanel({ ontology, workspaces, ontologies }: UsagePanelProps
     Promise.all(
       uniqueWorkspaces.map(async (a) => {
         try {
-          const views = await listViews({ workspaceId: a.workspaceId })
-          return { wsId: a.workspaceId, views }
+          const { items } = await listViews({ workspaceId: a.workspaceId })
+          return { wsId: a.workspaceId, views: items }
         } catch {
           return { wsId: a.workspaceId, views: [] as View[] }
         }
@@ -163,8 +163,10 @@ export function UsagePanel({ ontology, workspaces, ontologies }: UsagePanelProps
 
       let viewCountForDs: number | null = null
       try {
-        const views = await listViews({ workspaceId: ds.workspaceId })
-        viewCountForDs = views.length
+        // Use the envelope's authoritative ``total`` so the count is
+        // correct even when the first page doesn't include all views.
+        const { total } = await listViews({ workspaceId: ds.workspaceId, limit: 1 })
+        viewCountForDs = total
       } catch {
         viewCountForDs = null
       }

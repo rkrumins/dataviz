@@ -212,11 +212,13 @@ export function RegistryWorkspaces() {
             setProviders(provList)
             setOntologies(ontoList)
 
-            // Fetch views (fire-and-forget, used for summary banner + per-ws counts)
-            listViews({}).then(views => {
-                setTotalViews(views.length)
+            // Fetch views (fire-and-forget, used for summary banner + per-ws counts).
+            // Request a full page so per-workspace bucketing is accurate; the
+            // envelope's ``total`` is the authoritative count across all pages.
+            listViews({ limit: 200 }).then(({ items, total }) => {
+                setTotalViews(total)
                 const byWs: Record<string, number> = {}
-                for (const v of views) { byWs[v.workspaceId] = (byWs[v.workspaceId] || 0) + 1 }
+                for (const v of items) { byWs[v.workspaceId] = (byWs[v.workspaceId] || 0) + 1 }
                 setViewCountByWs(byWs)
             }).catch(() => {})
 

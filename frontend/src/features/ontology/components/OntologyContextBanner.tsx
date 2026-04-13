@@ -123,8 +123,8 @@ function QuickAssignmentBar({
     }
     setConfirmTarget(target)
     try {
-      const views = await listViews({ workspaceId: wsId })
-      setConfirmTarget(prev => prev ? { ...prev, viewCount: views.length, loading: false } : null)
+      const { total } = await listViews({ workspaceId: wsId, limit: 1 })
+      setConfirmTarget(prev => prev ? { ...prev, viewCount: total, loading: false } : null)
     } catch {
       setConfirmTarget(prev => prev ? { ...prev, viewCount: null, loading: false } : null)
     }
@@ -489,8 +489,8 @@ export function OntologyContextBanner({
       setLoadingImpact(true)
       setConfirmTarget({ ontologyId, ontologyName })
       try {
-        const views = await listViews({ workspaceId: workspace.id })
-        setImpactedViews(views.map((v: View) => ({ id: v.id, name: v.name, type: v.viewType ?? 'view' })))
+        const { items } = await listViews({ workspaceId: workspace.id })
+        setImpactedViews(items.map((v: View) => ({ id: v.id, name: v.name, type: v.viewType ?? 'view' })))
       } catch {
         setImpactedViews([])
       } finally {

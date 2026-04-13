@@ -18,6 +18,7 @@ from backend.common.models.management import (
     ViewCreateRequest,
     ViewUpdateRequest,
     ViewResponse,
+    ViewListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,12 +72,16 @@ async def list_popular_views(
     )
 
 
-@router.get("/", response_model=List[ViewResponse])
+@router.get("/", response_model=ViewListResponse)
 async def list_views(
     visibility: Optional[str] = Query(None),
+    visibility_in: Optional[List[str]] = Query(None, alias="visibilityIn"),
     workspace_id: Optional[str] = Query(None, alias="workspaceId"),
+    workspace_ids: Optional[List[str]] = Query(None, alias="workspaceIds"),
     context_model_id: Optional[str] = Query(None, alias="contextModelId"),
     data_source_id: Optional[str] = Query(None, alias="dataSourceId"),
+    created_by: Optional[str] = Query(None, alias="createdBy"),
+    created_after: Optional[str] = Query(None, alias="createdAfter"),
     search: Optional[str] = Query(None),
     tags: Optional[List[str]] = Query(None),
     limit: int = Query(50, le=200),
@@ -84,16 +89,35 @@ async def list_views(
     favourited_only: bool = Query(False, alias="favouritedOnly"),
     include_deleted: bool = Query(False, alias="includeDeleted"),
     deleted_only: bool = Query(False, alias="deletedOnly"),
+    attention_only: bool = Query(False, alias="attentionOnly"),
     user=Depends(get_optional_user),
     session: AsyncSession = Depends(get_db_session),
-):
-    """List accessible views with optional filtering."""
+) -> ViewListResponse:
+    """List accessible views as a paginated envelope.
+
+    Returns ``{ items, total, hasMore, nextOffset }``. ``total`` is the
+    authoritative count of matches so callers never have to infer "is
+    there another page?" from array length.
+
+    Filter params:
+    - ``workspaceIds`` — multi-select; wins over single ``workspaceId``.
+    - ``visibilityIn`` — multi-select visibility; wins over single ``visibility``.
+    - ``createdBy`` — restrict to views authored by a specific user.
+    - ``createdAfter`` — ISO timestamp; returns views created on or after.
+    - ``attentionOnly`` — stale (>90d), inactive workspace/source, or
+      broken data source reference. Mirrors the frontend health model
+      so pagination stays accurate on large catalogs.
+    """
     return await view_repo.list_views_filtered(
         session,
         visibility=visibility,
+        visibility_in=visibility_in,
         workspace_id=workspace_id,
+        workspace_ids=workspace_ids,
         context_model_id=context_model_id,
         data_source_id=data_source_id,
+        created_by=created_by,
+        created_after=created_after,
         search=search,
         tags=tags,
         limit=limit,
@@ -102,23 +126,28 @@ async def list_views(
         favourited_only=favourited_only,
         include_deleted=include_deleted,
         deleted_only=deleted_only,
+        attention_only=attention_only,
     )
 
 
 @router.post("/", response_model=ViewResponse, status_code=201)
 async def create_view(
     req: ViewCreateRequest = Body(...),
+    user=Depends(get_optional_user),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Create a new view. workspaceId is required.
 
     Captures the current ontology digest on the new row so later edits
-    can detect ontology drift.
+    can detect ontology drift. Records created_by as the authenticated
+    user's ID so views can be filtered by creator in the Explorer.
     """
     digest = await _compute_ontology_digest(
         session, req.workspace_id, req.data_source_id,
     )
-    return await view_repo.create_view(session, req, ontology_digest=digest)
+    return await view_repo.create_view(
+        session, req, ontology_digest=digest, user_id=_user_id(user),
+    )
 
 
 @router.get("/{view_id}", response_model=ViewResponse)

@@ -71,10 +71,10 @@ export function AppLayout() {
 
     const loadViews = async () => {
       try {
-        const views = await listViews()
+        const { items } = await listViews()
         // Single set() call — avoids N sequential Zustand updates that can
         // overwhelm useSyncExternalStore subscribers during mount.
-        useSchemaStore.getState().upsertViews(views.map(viewToViewConfig))
+        useSchemaStore.getState().upsertViews(items.map(viewToViewConfig))
       } catch (err) {
         console.error('[AppLayout] Failed to load views from API:', err)
       }

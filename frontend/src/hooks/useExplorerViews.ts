@@ -1,14 +1,19 @@
 /**
  * useExplorerViews — Data fetching hook for the Explorer page.
  *
- * Handles:
- * - API calls with filter params (visibility, workspace, datasource, search, favourites)
- * - Debounced search (300ms)
- * - Client-side sorting (API only sorts by updated_at DESC)
- * - Client-side workspace multi-select filtering (API only accepts single workspaceId)
- * - Optimistic favourite toggles
- * - Popular/trending views
- * - Pagination via limit/offset
+ * Strategic server-driven design:
+ * - Every filter is a query param on ``GET /api/v1/views/`` — the backend
+ *   is the single source of truth and returns a ``{ items, total, hasMore,
+ *   nextOffset }`` envelope. No client-side residual filtering.
+ * - ``total`` is the authoritative count shown in the UI; ``hasMore``
+ *   drives the infinite-scroll sentinel.
+ * - ``loadMore()`` fetches the server-advertised ``nextOffset`` and
+ *   appends (deduped) to the loaded page.
+ * - Filter changes reset pagination and refetch from offset 0.
+ * - Search is debounced 300ms before it hits the wire.
+ * - Sort is client-side over the assembled list; we keep the API in
+ *   ``updated_at desc`` order so pagination stays deterministic.
+ * - Optimistic favourite toggles.
  */
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import {
@@ -53,21 +58,23 @@ function sortViews(views: View[], sort: SortOption): View[] {
 export interface ExplorerFilters {
   search: string
   visibility: string | null         // 'enterprise' | 'workspace' | 'private' | null (all)
-  workspaceIds: string[]            // Multi-select — filtered client-side
+  workspaceIds: string[]            // Multi-select — sent as ``workspaceIds`` on API
   dataSourceId: string | null
   sort: SortOption
   favouritedOnly: boolean
-  category: string | null           // 'my-views' | 'my-favourites' | 'recently-added' | 'shared-with-me' | 'needs-attention' | null
-  currentUserName: string | null    // For 'my-views' category filtering
-  limit: number
-  offset: number
+  /** 'my-views' | 'my-favourites' | 'recently-added' | 'shared-with-me' | 'needs-attention' | 'deleted' | null */
+  category: string | null
+  currentUserId: string | null      // For 'my-views' — sent as ``createdBy`` on API
+  limit: number                     // Page size
+  offset: number                    // Unused externally; hook manages offset internally
 }
 
 export interface UseExplorerViewsResult {
-  views: View[]
-  totalCount: number
+  views: View[]                     // Sorted + paginated display slice
+  totalCount: number                // Authoritative server total across all pages
   popularViews: View[]
-  isLoading: boolean
+  isLoading: boolean                // Initial fetch
+  isLoadingMore: boolean            // Subsequent page fetch
   error: string | null
   toggleFavourite: (viewId: string) => void
   removeView: (viewId: string) => void
@@ -76,14 +83,49 @@ export interface UseExplorerViewsResult {
   hasMore: boolean
 }
 
+// ─── Category → server params resolver ─────────────────────────────────────
+
+/**
+ * Translate a user-selected category to the concrete API params the backend
+ * understands. Centralising this here keeps the hook body simple and makes
+ * the client/server contract explicit — no hidden client-side filtering.
+ */
+function resolveCategoryParams(
+  category: string | null,
+  currentUserId: string | null,
+): Partial<ViewListParams> {
+  switch (category) {
+    case 'my-views':
+      // If we have no user id the Explorer page falls back to showing
+      // nothing (not "all") so the filter label stays truthful.
+      return currentUserId ? { createdBy: currentUserId } : { createdBy: '__no_user__' }
+    case 'my-favourites':
+      return { favouritedOnly: true }
+    case 'recently-added': {
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      return { createdAfter: sevenDaysAgo.toISOString() }
+    }
+    case 'shared-with-me':
+      return { visibilityIn: ['workspace', 'enterprise'] }
+    case 'needs-attention':
+      return { attentionOnly: true }
+    case 'deleted':
+      return { deletedOnly: true }
+    default:
+      return {}
+  }
+}
+
 // ─── Hook ───────────────────────────────────────────────────────────────────
 
 export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResult {
   const [allViews, setAllViews] = useState<View[]>([])
   const [popularViews, setPopularViews] = useState<View[]>([])
+  const [total, setTotal] = useState(0)
+  const [nextOffset, setNextOffset] = useState<number | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [displayCount, setDisplayCount] = useState(filters.limit)
   const [refetchKey, setRefetchKey] = useState(0)
 
   // Debounce search — only make API call after 300ms of no typing
@@ -97,50 +139,60 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     return () => { if (debounceTimer.current) clearTimeout(debounceTimer.current) }
   }, [filters.search])
 
-  // ─── Fetch views ────────────────────────────────────────────────────
-
-  // Stabilize array deps to prevent infinite loops from new array refs
+  // Stabilise array deps so the fetch effect doesn't loop on identical values.
   const workspaceIdsKey = useStableKey(filters.workspaceIds)
   const stableVisibility = filters.visibility
   const stableDataSourceId = filters.dataSourceId
   const stableFavouritedOnly = filters.favouritedOnly
   const stableCategory = filters.category
+  const stableCurrentUserId = filters.currentUserId
   const stableLimit = filters.limit
+
+  // Build the full set of API params for a given page offset. Category
+  // params are merged last so they can override defaults (e.g. the
+  // ``deleted`` category sets ``deletedOnly: true``).
+  const buildParams = useCallback((pageOffset: number): ViewListParams => {
+    const wsIds: string[] = JSON.parse(workspaceIdsKey)
+    const categoryParams = resolveCategoryParams(stableCategory, stableCurrentUserId)
+
+    const params: ViewListParams = {
+      search: debouncedSearch || undefined,
+      visibility: stableVisibility || undefined,
+      favouritedOnly: stableFavouritedOnly || undefined,
+      dataSourceId: stableDataSourceId || undefined,
+      workspaceIds: wsIds.length > 0 ? wsIds : undefined,
+      limit: stableLimit,
+      offset: pageOffset,
+      ...categoryParams,
+    }
+
+    return params
+  }, [
+    debouncedSearch, stableVisibility, stableFavouritedOnly,
+    stableDataSourceId, workspaceIdsKey, stableLimit,
+    stableCategory, stableCurrentUserId,
+  ])
+
+  // ─── Initial fetch + filter-change reload ───────────────────────────
 
   useEffect(() => {
     let cancelled = false
 
-    const fetchViews = async () => {
+    const fetchInitial = async () => {
       setIsLoading(true)
       setError(null)
 
       try {
-        const params: ViewListParams = {
-          search: debouncedSearch || undefined,
-          visibility: stableVisibility || undefined,
-          favouritedOnly: stableFavouritedOnly || undefined,
-          deletedOnly: stableCategory === 'deleted' || undefined,
-        }
-
-        // Single workspace filter can be sent to API; multi-workspace is client-side
-        const wsIds: string[] = JSON.parse(workspaceIdsKey)
-        if (wsIds.length === 1) {
-          params.workspaceId = wsIds[0]
-        }
-
-        if (stableDataSourceId) {
-          params.dataSourceId = stableDataSourceId
-        }
-
-        const [viewsResult, popular] = await Promise.all([
-          listViews(params),
+        const [envelope, popular] = await Promise.all([
+          listViews(buildParams(0)),
           listPopularViews(10),
         ])
 
         if (!cancelled) {
-          setAllViews(viewsResult)
+          setAllViews(envelope.items)
           setPopularViews(popular)
-          setDisplayCount(stableLimit)
+          setTotal(envelope.total)
+          setNextOffset(envelope.hasMore ? envelope.nextOffset : null)
         }
       } catch (err) {
         if (!cancelled) {
@@ -154,43 +206,37 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
       }
     }
 
-    fetchViews()
+    fetchInitial()
     return () => { cancelled = true }
-  }, [debouncedSearch, stableVisibility, workspaceIdsKey, stableDataSourceId, stableFavouritedOnly, stableCategory, stableLimit, refetchKey])
+  }, [buildParams, refetchKey])
 
-  // ─── Client-side filtering + sorting ────────────────────────────────
+  // ─── Load next page (append) ───────────────────────────────────────
 
-  const processedViews = useMemo(() => {
-    let result = [...allViews]
+  const loadMore = useCallback(async () => {
+    if (isLoading || isLoadingMore || nextOffset == null) return
 
-    // Multi-workspace client-side filter (API only supports single workspaceId)
-    if (filters.workspaceIds.length > 1) {
-      const wsSet = new Set(filters.workspaceIds)
-      result = result.filter(v => wsSet.has(v.workspaceId))
+    setIsLoadingMore(true)
+    try {
+      const envelope = await listViews(buildParams(nextOffset))
+      setAllViews(prev => {
+        // Defensive de-dupe in case rows moved between pages.
+        const seen = new Set(prev.map(v => v.id))
+        const fresh = envelope.items.filter(v => !seen.has(v.id))
+        return [...prev, ...fresh]
+      })
+      setTotal(envelope.total)
+      setNextOffset(envelope.hasMore ? envelope.nextOffset : null)
+    } catch (err) {
+      console.error('[useExplorerViews] loadMore failed:', err)
+    } finally {
+      setIsLoadingMore(false)
     }
+  }, [isLoading, isLoadingMore, nextOffset, buildParams])
 
-    // Category filters (client-side — API doesn't support these)
-    if (filters.category === 'my-views' && filters.currentUserName) {
-      const userName = filters.currentUserName.toLowerCase()
-      result = result.filter(v => v.createdBy?.toLowerCase() === userName)
-    } else if (filters.category === 'recently-added') {
-      const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
-      result = result.filter(v => new Date(v.createdAt).getTime() > sevenDaysAgo)
-    } else if (filters.category === 'shared-with-me') {
-      result = result.filter(v => v.visibility === 'workspace' || v.visibility === 'enterprise')
-    }
-    // 'my-favourites' is handled via favouritedOnly API param
-    // 'needs-attention' is handled downstream via useViewHealth
+  // ─── Sort ──────────────────────────────────────────────────────────
+  // All filtering happens server-side; we only re-sort the loaded slice.
 
-    // Sort
-    result = sortViews(result, filters.sort)
-
-    return result
-  }, [allViews, filters.workspaceIds, filters.category, filters.sort])
-
-  // Paginated slice for display
-  const views = useMemo(() => processedViews.slice(0, displayCount), [processedViews, displayCount])
-  const hasMore = displayCount < processedViews.length
+  const views = useMemo(() => sortViews(allViews, filters.sort), [allViews, filters.sort])
 
   // ─── Optimistic favourite toggle ────────────────────────────────────
 
@@ -200,7 +246,6 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
 
     const wasFavourited = view.isFavourited
 
-    // Optimistic update
     setAllViews(prev => prev.map(v =>
       v.id === viewId
         ? { ...v, isFavourited: !wasFavourited, favouriteCount: v.favouriteCount + (wasFavourited ? -1 : 1) }
@@ -212,7 +257,6 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
         : v
     ))
 
-    // API call — revert on error
     const apiCall = wasFavourited ? unfavouriteView(viewId) : favouriteView(viewId)
     apiCall.catch(() => {
       setAllViews(prev => prev.map(v =>
@@ -228,35 +272,27 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     })
   }, [allViews])
 
-  // ─── Remove view (optimistic, after delete) ────────────────────────
-
   const removeView = useCallback((viewId: string) => {
     setAllViews(prev => prev.filter(v => v.id !== viewId))
     setPopularViews(prev => prev.filter(v => v.id !== viewId))
+    setTotal(t => Math.max(0, t - 1))
   }, [])
-
-  // ─── Refetch (trigger full reload from API) ────────────────────────
 
   const refetch = useCallback(() => {
     setRefetchKey(k => k + 1)
   }, [])
 
-  // ─── Load more (infinite scroll) ───────────────────────────────────
-
-  const loadMore = useCallback(() => {
-    setDisplayCount(prev => prev + filters.limit)
-  }, [filters.limit])
-
   return {
     views,
-    totalCount: processedViews.length,
+    totalCount: total,
     popularViews,
     isLoading,
+    isLoadingMore,
     error,
     toggleFavourite,
     removeView,
     refetch,
     loadMore,
-    hasMore,
+    hasMore: nextOffset != null,
   }
 }

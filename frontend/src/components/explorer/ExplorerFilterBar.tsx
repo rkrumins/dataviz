@@ -1,8 +1,12 @@
 /**
  * ExplorerFilterBar — Unified single-row toolbar combining category tabs
- * and filter dropdowns. No duplication between rows.
+ * and filter dropdowns.
  *
- * Layout: [Category pills] | [Workspace ▾] [DataSource ▾] [Visibility ▾] [♥ Fav]
+ * Layout: [Category pills] | [Workspace ▾] [DataSource ▾] [Visibility ▾]
+ *
+ * Favourites is exposed only as the "Favorites" category pill — there is
+ * no separate toggle because the two controls were functionally identical
+ * and confused users who applied one and expected the other to change.
  *
  * Performance: no transition-all, no backdrop-blur on persistent elements.
  */
@@ -23,6 +27,7 @@ import {
   Check,
   Database,
   Trash2,
+  Search,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -38,8 +43,6 @@ interface ExplorerFilterBarProps {
   onWorkspaceIdsChange: (ids: string[]) => void
   dataSourceId: string | null
   onDataSourceIdChange: (id: string | null) => void
-  favouritedOnly: boolean
-  onFavouritedOnlyChange: (v: boolean) => void
   category: string | null
   onCategoryChange: (c: string | null) => void
 }
@@ -90,8 +93,6 @@ export function ExplorerFilterBar({
   onWorkspaceIdsChange,
   dataSourceId,
   onDataSourceIdChange,
-  favouritedOnly,
-  onFavouritedOnlyChange,
   category,
   onCategoryChange,
 }: ExplorerFilterBarProps) {
@@ -101,13 +102,26 @@ export function ExplorerFilterBar({
   const [dsOpen, setDsOpen] = useState(false)
   const [visOpen, setVisOpen] = useState(false)
 
+  const [wsSearch, setWsSearch] = useState('')
+  const [dsSearch, setDsSearch] = useState('')
+  const wsSearchRef = useRef<HTMLInputElement>(null)
+  const dsSearchRef = useRef<HTMLInputElement>(null)
+
   const wsRef = useRef<HTMLDivElement>(null)
   const dsRef = useRef<HTMLDivElement>(null)
   const visRef = useRef<HTMLDivElement>(null)
 
-  useClickOutside(wsRef, useCallback(() => setWsOpen(false), []))
-  useClickOutside(dsRef, useCallback(() => setDsOpen(false), []))
-  useClickOutside(visRef, useCallback(() => setVisOpen(false), []))
+  const closeWs = useCallback(() => { setWsOpen(false); setWsSearch('') }, [])
+  const closeDs = useCallback(() => { setDsOpen(false); setDsSearch('') }, [])
+  const closeVis = useCallback(() => setVisOpen(false), [])
+
+  useClickOutside(wsRef, closeWs)
+  useClickOutside(dsRef, closeDs)
+  useClickOutside(visRef, closeVis)
+
+  // Auto-focus search inputs when dropdowns open
+  useEffect(() => { if (wsOpen) wsSearchRef.current?.focus() }, [wsOpen])
+  useEffect(() => { if (dsOpen) dsSearchRef.current?.focus() }, [dsOpen])
 
   const availableDataSources = useMemo(() => {
     const selected = workspaceIds.length > 0
@@ -116,39 +130,49 @@ export function ExplorerFilterBar({
     return selected.flatMap(w => w.dataSources ?? [])
   }, [workspaces, workspaceIds])
 
-  // Active filter chips
+  const filteredWorkspaces = useMemo(() => {
+    if (!wsSearch.trim()) return workspaces
+    const q = wsSearch.toLowerCase()
+    return workspaces.filter(w => w.name.toLowerCase().includes(q))
+  }, [workspaces, wsSearch])
+
+  const filteredDataSources = useMemo(() => {
+    if (!dsSearch.trim()) return availableDataSources
+    const q = dsSearch.toLowerCase()
+    return availableDataSources.filter(d => (d.label ?? d.id).toLowerCase().includes(q))
+  }, [availableDataSources, dsSearch])
+
+  // Active filter chips — each chip is labeled with its filter type so users
+  // can see where the value comes from (e.g. "Workspace: Production").
+  // Categories (including "Favorites") render as pills above, not chips, so
+  // they aren't duplicated here.
   const activeFilters = useMemo(() => {
-    const chips: { key: string; label: string }[] = []
+    const chips: { key: string; prefix: string; value: string }[] = []
     if (visibility) {
       const opt = VISIBILITY_OPTIONS.find(o => o.key === visibility)
-      chips.push({ key: 'visibility', label: opt?.label ?? visibility })
+      chips.push({ key: 'visibility', prefix: 'Visibility', value: opt?.label ?? visibility })
     }
     for (const wsId of workspaceIds) {
       const ws = workspaces.find(w => w.id === wsId)
-      chips.push({ key: `ws-${wsId}`, label: ws?.name ?? wsId })
+      chips.push({ key: `ws-${wsId}`, prefix: 'Workspace', value: ws?.name ?? wsId })
     }
     if (dataSourceId) {
       const ds = availableDataSources.find(d => d.id === dataSourceId)
-      chips.push({ key: 'ds', label: ds?.label ?? dataSourceId })
-    }
-    if (favouritedOnly) {
-      chips.push({ key: 'fav', label: 'Favorites' })
+      chips.push({ key: 'ds', prefix: 'Source', value: ds?.label ?? dataSourceId })
     }
     return chips
-  }, [visibility, workspaceIds, dataSourceId, favouritedOnly, workspaces, availableDataSources])
+  }, [visibility, workspaceIds, dataSourceId, workspaces, availableDataSources])
 
   function removeFilter(key: string) {
     if (key === 'visibility') onVisibilityChange(null)
     else if (key.startsWith('ws-')) onWorkspaceIdsChange(workspaceIds.filter(w => w !== key.replace('ws-', '')))
     else if (key === 'ds') onDataSourceIdChange(null)
-    else if (key === 'fav') onFavouritedOnlyChange(false)
   }
 
   function clearAll() {
     onVisibilityChange(null)
     onWorkspaceIdsChange([])
     onDataSourceIdChange(null)
-    onFavouritedOnlyChange(false)
   }
 
   function toggleWorkspace(id: string) {
@@ -196,7 +220,7 @@ export function ExplorerFilterBar({
         {/* Workspace dropdown */}
         <div ref={wsRef} className="relative">
           <button
-            onClick={() => { setWsOpen(p => !p); setDsOpen(false); setVisOpen(false) }}
+            onClick={() => { if (wsOpen) closeWs(); else setWsOpen(true); closeDs(); closeVis() }}
             className={cn(
               'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium',
               'transition-colors duration-150',
@@ -211,33 +235,50 @@ export function ExplorerFilterBar({
           </button>
 
           {wsOpen && (
-            <div className="absolute left-0 top-full z-50 mt-1.5 w-56 p-1 bg-canvas border border-glass-border rounded-xl shadow-xl">
-              {workspaces.length === 0 && (
-                <p className="px-3 py-2 text-xs text-ink-muted">No workspaces</p>
-              )}
-              {workspaces.map(ws => {
-                const checked = workspaceIds.includes(ws.id)
-                return (
-                  <button
-                    key={ws.id}
-                    onClick={() => toggleWorkspace(ws.id)}
-                    className={cn(
-                      'w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-xs',
-                      'transition-colors duration-150',
-                      checked ? 'bg-indigo-500/8 text-indigo-600 dark:text-indigo-400' : 'text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
-                    )}
-                  >
-                    <span className={cn(
-                      'w-4 h-4 rounded border flex items-center justify-center shrink-0',
-                      'transition-colors duration-150',
-                      checked ? 'bg-indigo-500 border-indigo-500 text-white' : 'border-glass-border',
-                    )}>
-                      {checked && <Check className="h-3 w-3" />}
-                    </span>
-                    <span className="font-medium truncate">{ws.name}</span>
-                  </button>
-                )
-              })}
+            <div className="absolute left-0 top-full z-50 mt-1.5 w-64 bg-canvas border border-glass-border rounded-xl shadow-xl overflow-hidden">
+              <div className="relative border-b border-glass-border/50 p-2">
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-3 w-3 text-ink-muted/60 pointer-events-none" />
+                <input
+                  ref={wsSearchRef}
+                  type="text"
+                  value={wsSearch}
+                  onChange={e => setWsSearch(e.target.value)}
+                  placeholder="Search workspaces..."
+                  className="w-full rounded-lg bg-black/[0.03] dark:bg-white/[0.04] pl-7 pr-2 py-1.5 text-xs text-ink outline-none placeholder:text-ink-muted/50 focus:bg-black/[0.05] dark:focus:bg-white/[0.06]"
+                  onKeyDown={e => e.stopPropagation()}
+                />
+              </div>
+              <div className="max-h-60 overflow-y-auto p-1">
+                {workspaces.length === 0 && (
+                  <p className="px-3 py-2 text-xs text-ink-muted">No workspaces</p>
+                )}
+                {workspaces.length > 0 && filteredWorkspaces.length === 0 && (
+                  <p className="px-3 py-2 text-xs text-ink-muted">No matches</p>
+                )}
+                {filteredWorkspaces.map(ws => {
+                  const checked = workspaceIds.includes(ws.id)
+                  return (
+                    <button
+                      key={ws.id}
+                      onClick={() => toggleWorkspace(ws.id)}
+                      className={cn(
+                        'w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-xs',
+                        'transition-colors duration-150',
+                        checked ? 'bg-indigo-500/8 text-indigo-600 dark:text-indigo-400' : 'text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
+                      )}
+                    >
+                      <span className={cn(
+                        'w-4 h-4 rounded border flex items-center justify-center shrink-0',
+                        'transition-colors duration-150',
+                        checked ? 'bg-indigo-500 border-indigo-500 text-white' : 'border-glass-border',
+                      )}>
+                        {checked && <Check className="h-3 w-3" />}
+                      </span>
+                      <span className="font-medium truncate">{ws.name}</span>
+                    </button>
+                  )
+                })}
+              </div>
             </div>
           )}
         </div>
@@ -245,7 +286,7 @@ export function ExplorerFilterBar({
         {/* Data Source dropdown */}
         <div ref={dsRef} className="relative">
           <button
-            onClick={() => { setDsOpen(p => !p); setWsOpen(false); setVisOpen(false) }}
+            onClick={() => { if (dsOpen) closeDs(); else setDsOpen(true); closeWs(); closeVis() }}
             className={cn(
               'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium',
               'transition-colors duration-150',
@@ -262,31 +303,48 @@ export function ExplorerFilterBar({
           </button>
 
           {dsOpen && (
-            <div className="absolute left-0 top-full z-50 mt-1.5 w-56 p-1 bg-canvas border border-glass-border rounded-xl shadow-xl">
-              <button
-                onClick={() => { onDataSourceIdChange(null); setDsOpen(false) }}
-                className={cn(
-                  'w-full rounded-lg px-3 py-2 text-left text-xs transition-colors duration-150',
-                  !dataSourceId ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-ink-muted hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
-                )}
-              >
-                All sources
-              </button>
-              {availableDataSources.length === 0 && (
-                <p className="px-3 py-2 text-xs text-ink-muted">No data sources</p>
-              )}
-              {availableDataSources.map(ds => (
+            <div className="absolute left-0 top-full z-50 mt-1.5 w-64 bg-canvas border border-glass-border rounded-xl shadow-xl overflow-hidden">
+              <div className="relative border-b border-glass-border/50 p-2">
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-3 w-3 text-ink-muted/60 pointer-events-none" />
+                <input
+                  ref={dsSearchRef}
+                  type="text"
+                  value={dsSearch}
+                  onChange={e => setDsSearch(e.target.value)}
+                  placeholder="Search sources..."
+                  className="w-full rounded-lg bg-black/[0.03] dark:bg-white/[0.04] pl-7 pr-2 py-1.5 text-xs text-ink outline-none placeholder:text-ink-muted/50 focus:bg-black/[0.05] dark:focus:bg-white/[0.06]"
+                  onKeyDown={e => e.stopPropagation()}
+                />
+              </div>
+              <div className="max-h-60 overflow-y-auto p-1">
                 <button
-                  key={ds.id}
-                  onClick={() => { onDataSourceIdChange(ds.id); setDsOpen(false) }}
+                  onClick={() => { onDataSourceIdChange(null); closeDs() }}
                   className={cn(
                     'w-full rounded-lg px-3 py-2 text-left text-xs transition-colors duration-150',
-                    dataSourceId === ds.id ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
+                    !dataSourceId ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-ink-muted hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
                   )}
                 >
-                  {ds.label ?? ds.id}
+                  All sources
                 </button>
-              ))}
+                {availableDataSources.length === 0 && (
+                  <p className="px-3 py-2 text-xs text-ink-muted">No data sources</p>
+                )}
+                {availableDataSources.length > 0 && filteredDataSources.length === 0 && (
+                  <p className="px-3 py-2 text-xs text-ink-muted">No matches</p>
+                )}
+                {filteredDataSources.map(ds => (
+                  <button
+                    key={ds.id}
+                    onClick={() => { onDataSourceIdChange(ds.id); closeDs() }}
+                    className={cn(
+                      'w-full rounded-lg px-3 py-2 text-left text-xs transition-colors duration-150 truncate',
+                      dataSourceId === ds.id ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
+                    )}
+                  >
+                    {ds.label ?? ds.id}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -294,7 +352,7 @@ export function ExplorerFilterBar({
         {/* Visibility dropdown */}
         <div ref={visRef} className="relative">
           <button
-            onClick={() => { setVisOpen(p => !p); setWsOpen(false); setDsOpen(false) }}
+            onClick={() => { setVisOpen(p => !p); closeWs(); closeDs() }}
             className={cn(
               'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium',
               'transition-colors duration-150',
@@ -332,20 +390,6 @@ export function ExplorerFilterBar({
           )}
         </div>
 
-        {/* Favorites toggle */}
-        <button
-          onClick={() => onFavouritedOnlyChange(!favouritedOnly)}
-          className={cn(
-            'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium',
-            'transition-colors duration-150',
-            favouritedOnly
-              ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
-              : 'text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
-          )}
-        >
-          <Star className={cn('h-3.5 w-3.5', favouritedOnly && 'fill-current')} />
-          Favorites
-        </button>
       </div>
 
       {/* ── Active filter chips ── */}
@@ -361,12 +405,14 @@ export function ExplorerFilterBar({
             {activeFilters.map(f => (
               <span
                 key={f.key}
-                className="inline-flex items-center gap-1 rounded-full bg-black/[0.05] dark:bg-white/[0.08] px-2.5 py-1 text-[11px] font-medium text-ink-muted"
+                className="inline-flex items-center gap-1.5 rounded-full border border-glass-border bg-canvas-elevated pl-2.5 pr-1 py-1 text-[11px]"
               >
-                {f.label}
+                <span className="text-ink-muted/60 font-medium">{f.prefix}:</span>
+                <span className="font-semibold text-ink">{f.value}</span>
                 <button
                   onClick={() => removeFilter(f.key)}
-                  className="rounded-full p-0.5 hover:bg-black/10 dark:hover:bg-white/10 transition-colors duration-150"
+                  className="rounded-full p-0.5 text-ink-muted hover:text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors duration-150"
+                  title="Remove filter"
                 >
                   <X className="h-2.5 w-2.5" />
                 </button>
