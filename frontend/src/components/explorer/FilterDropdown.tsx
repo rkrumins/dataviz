@@ -87,6 +87,19 @@ export interface FilterDropdownProps {
   emptyMessage?: string
   /** Custom trigger label when something is selected. */
   activeLabelFormatter?: (selectedIds: string[], options: FilterOption[]) => string
+  /**
+   * Optional custom row renderer. When supplied, replaces the default
+   * checkbox + icon + label + sublabel layout with arbitrary content.
+   * The renderer owns visuals only; the dropdown still owns selection
+   * state and dispatches ``onChange`` when the row is clicked.
+   */
+  renderOption?: (option: FilterOption, state: { isSelected: boolean }) => React.ReactNode
+  /**
+   * Tailwind width override for the dropdown panel. Defaults to ``w-64``
+   * which works for short labels; creator-style panels that need room
+   * for avatar + name + email should pass something wider.
+   */
+  panelWidthClassName?: string
 }
 
 function useClickOutside(ref: React.RefObject<HTMLElement | null>, onClose: () => void) {
@@ -110,6 +123,8 @@ export function FilterDropdown({
   searchPlaceholder,
   emptyMessage = 'No options',
   activeLabelFormatter,
+  renderOption,
+  panelWidthClassName = 'w-64',
 }: FilterDropdownProps) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -172,7 +187,10 @@ export function FilterDropdown({
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-50 mt-1.5 w-64 bg-canvas border border-glass-border rounded-xl shadow-xl overflow-hidden">
+        <div className={cn(
+          'absolute left-0 top-full z-50 mt-1.5 bg-canvas border border-glass-border rounded-xl shadow-xl overflow-hidden',
+          panelWidthClassName,
+        )}>
           {!disableSearch && (
             <div className="relative border-b border-glass-border/50 p-2">
               <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-3 w-3 text-ink-muted/60 pointer-events-none" />
@@ -196,6 +214,27 @@ export function FilterDropdown({
             )}
             {filteredOptions.map(opt => {
               const checked = selectedSet.has(opt.id)
+              // Custom renderer: caller owns layout; dropdown still owns
+              // the click → toggle wiring and selected-state background.
+              if (renderOption) {
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => toggle(opt.id)}
+                    className={cn(
+                      'w-full rounded-lg text-left',
+                      'transition-colors duration-150',
+                      checked
+                        ? accentClasses.optionActive
+                        : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
+                    )}
+                  >
+                    {renderOption(opt, { isSelected: checked })}
+                  </button>
+                )
+              }
+
               const OptIcon = opt.icon ?? null
               return (
                 <button

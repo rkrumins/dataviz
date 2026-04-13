@@ -18,6 +18,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { cn } from '@/lib/utils'
+import { avatarPaletteFor, initialsOf } from '@/lib/avatar'
 
 interface CreatorHoverCardProps {
   /** The raw user id recorded on the view — used as a tertiary fallback. */
@@ -34,15 +35,6 @@ interface CreatorHoverCardProps {
   openDelayMs?: number
   /** Milliseconds after the pointer leaves before the card hides. */
   closeDelayMs?: number
-}
-
-function initialsOf(name: string): string {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map(w => w[0]?.toUpperCase() ?? '')
-    .join('') || '?'
 }
 
 export function CreatorHoverCard({
