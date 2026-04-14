@@ -85,50 +85,55 @@ class AggregationService:
         """
         from backend.app.db.models import WorkspaceDataSourceORM
 
-        # ── Concurrent job guard (CRIT-1) ──────────────────────────
-        existing = await session.execute(
-            select(AggregationJobORM)
-            .where(AggregationJobORM.data_source_id == ds_id)
-            .where(AggregationJobORM.status.in_(["pending", "running"]))
-        )
-        if existing.scalar_one_or_none():
-            raise ConflictError(
-                "An aggregation job is already active for this data source"
+        # ── Atomic check-and-create (CRIT-1, Phase 0) ──────────────
+        # Wrap the existence check + job insert in a single explicit
+        # transaction so the whole sequence commits or rolls back as
+        # one unit. Phase 2 upgrades this to a dialect-aware claim
+        # (SELECT ... FOR UPDATE on Postgres, BEGIN IMMEDIATE + per-DS
+        # asyncio mutex on SQLite) to close the multi-worker race.
+        async with session.begin():
+            existing = await session.execute(
+                select(AggregationJobORM)
+                .where(AggregationJobORM.data_source_id == ds_id)
+                .where(AggregationJobORM.status.in_(["pending", "running"]))
             )
+            if existing.scalar_one_or_none():
+                raise ConflictError(
+                    "An aggregation job is already active for this data source"
+                )
 
-        # ── Resolve ontology via direct service call (CRIT-5) ──────
-        ontology_data = await self._resolve_ontology(ds_id, session)
-        containment_types = ontology_data.get("containment_edge_types", [])
-        lineage_types = ontology_data.get("lineage_edge_types", [])
+            # Resolve ontology via direct service call (CRIT-5)
+            ontology_data = await self._resolve_ontology(ds_id, session)
+            containment_types = ontology_data.get("containment_edge_types", [])
+            lineage_types = ontology_data.get("lineage_edge_types", [])
 
-        if not lineage_types:
-            raise ValueError(
-                "Aggregation requires an assigned ontology with lineage edge types. "
-                "Please configure an ontology for this data source first."
+            if not lineage_types:
+                raise ValueError(
+                    "Aggregation requires an assigned ontology with lineage edge types. "
+                    "Please configure an ontology for this data source first."
+                )
+
+            # Create job with frozen edge types
+            job = AggregationJobORM(
+                id=_generate_id(),
+                data_source_id=ds_id,
+                ontology_id=ontology_data.get("ontology_id"),
+                projection_mode=request.projection_mode,
+                containment_edge_types=json.dumps(containment_types),
+                lineage_edge_types=json.dumps(lineage_types),
+                status="pending",
+                trigger_source=trigger_source,
+                batch_size=request.batch_size,
+                created_at=_now(),
             )
+            session.add(job)
 
-        # ── Create job with frozen edge types ──────────────────────
-        job = AggregationJobORM(
-            id=_generate_id(),
-            data_source_id=ds_id,
-            ontology_id=ontology_data.get("ontology_id"),
-            projection_mode=request.projection_mode,
-            containment_edge_types=json.dumps(containment_types),
-            lineage_edge_types=json.dumps(lineage_types),
-            status="pending",
-            trigger_source=trigger_source,
-            batch_size=request.batch_size,
-            created_at=_now(),
-        )
-        session.add(job)
+            ds = await session.get(WorkspaceDataSourceORM, ds_id)
+            if ds:
+                ds.aggregation_status = "pending"
+            # session.begin() commits on context exit
 
-        # Update data source status
-        ds = await session.get(WorkspaceDataSourceORM, ds_id)
-        if ds:
-            ds.aggregation_status = "pending"
-        await session.commit()
-
-        # Dispatch to worker
+        # Dispatch AFTER commit so the worker sees the persisted row
         await self._dispatcher.dispatch(job.id)
 
         logger.info(

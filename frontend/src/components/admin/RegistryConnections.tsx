@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService, type ProviderResponse, type ProviderCreateRequest, type ProviderUpdateRequest, type ProviderImpactResponse, type SchemaDiscoveryResult } from '@/services/providerService'
+import { useProviderHealthSweep } from '@/hooks/useProviderHealthSweep'
 import { AdminWizard, type WizardStep } from './AdminWizard'
 import { DeleteProviderDialog } from './DeleteProviderDialog'
 import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
@@ -86,7 +87,7 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
 export function RegistryConnections() {
     const navigate = useNavigate()
     const [providers, setProviders] = useState<ProviderResponse[]>([])
-    const [healthMap, setHealthMap] = useState<Record<string, ProviderHealth>>({})
+    const { healthMap, testOne, refresh: refreshHealth, setHealth } = useProviderHealthSweep(providers)
     const [isLoading, setIsLoading] = useState(true)
     const [showWizard, setShowWizard] = useState(false)
 
@@ -133,20 +134,6 @@ export function RegistryConnections() {
     }, [])
 
     useEffect(() => { loadProviders() }, [loadProviders])
-    useEffect(() => {
-        if (!providers.length) return
-        providers.forEach(p => testProvider(p.id))
-    }, [providers.length]) // eslint-disable-line react-hooks/exhaustive-deps
-
-    const testProvider = async (id: string) => {
-        setHealthMap(prev => ({ ...prev, [id]: { status: 'checking' } }))
-        try {
-            const result = await providerService.test(id)
-            setHealthMap(prev => ({ ...prev, [id]: { status: result.success ? 'healthy' : 'unhealthy', latencyMs: result.latencyMs, error: result.error } }))
-        } catch {
-            setHealthMap(prev => ({ ...prev, [id]: { status: 'unhealthy', error: 'Provider health check failed' } }))
-        }
-    }
 
     const handleDeleteClick = async (p: ProviderResponse) => {
         setDeleteTarget(p)
@@ -211,7 +198,11 @@ export function RegistryConnections() {
 
             // Health gate: test connection before navigating
             const health = await providerService.test(newlyCreated.id)
-            setHealthMap(prev => ({ ...prev, [newlyCreated.id]: { status: health.success ? 'healthy' : 'unhealthy', latencyMs: health.latencyMs, error: health.error } }))
+            setHealth(newlyCreated.id, {
+                status: health.success ? 'healthy' : 'unhealthy',
+                latencyMs: health.latencyMs,
+                error: health.error,
+            })
 
             if (health.success) {
                 navigate(`/ingestion?tab=assets&provider=${newlyCreated.id}&onboarding=true`)
@@ -514,7 +505,7 @@ export function RegistryConnections() {
                             <WifiOff className="w-3 h-3" /> {unhealthyCount} Disconnected
                         </div>
                     )}
-                    <button onClick={() => providers.forEach(p => testProvider(p.id))} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium text-ink-muted hover:text-ink transition-colors ml-auto">
+                    <button onClick={() => { void refreshHealth() }} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium text-ink-muted hover:text-ink transition-colors ml-auto">
                         <RefreshCw className="w-3 h-3" /> Re-test All
                     </button>
                 </div>
@@ -532,7 +523,7 @@ export function RegistryConnections() {
             ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {providers.map(p => (
-                        <ConnectionCard key={p.id} provider={p} health={healthMap[p.id] || { status: 'unknown' }} onTest={() => testProvider(p.id)} onEdit={() => handleEditProvider(p)} onDelete={() => handleDeleteClick(p)} onScan={() => navigate(`/ingestion?tab=assets&provider=${p.id}`)} />
+                        <ConnectionCard key={p.id} provider={p} health={healthMap[p.id] || { status: 'unknown' }} onTest={() => { void testOne(p.id) }} onEdit={() => handleEditProvider(p)} onDelete={() => handleDeleteClick(p)} onScan={() => navigate(`/ingestion?tab=assets&provider=${p.id}`)} />
                     ))}
                 </div>
             )}
