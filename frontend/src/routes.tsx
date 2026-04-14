@@ -9,7 +9,6 @@ import { NotFoundPage } from '@/pages/NotFoundPage'
 const Dashboard = lazy(() => import('@/components/dashboard/Dashboard').then(m => ({ default: m.Dashboard })))
 const ViewPage = lazy(() => import('@/pages/ViewPage').then(m => ({ default: m.ViewPage })))
 const ViewsGallery = lazy(() => import('@/pages/ViewsGallery').then(m => ({ default: m.ViewsGallery })))
-const WorkspaceView = lazy(() => import('@/pages/WorkspaceView').then(m => ({ default: m.WorkspaceView })))
 const WorkspaceViewsManager = lazy(() => import('@/pages/WorkspaceViewsManager').then(m => ({ default: m.WorkspaceViewsManager })))
 const ExplorerPage = lazy(() => import('@/pages/ExplorerPage').then(m => ({ default: m.ExplorerPage })))
 const AdminPage = lazy(() => import('@/pages/AdminPage').then(m => ({ default: m.AdminPage })))
@@ -74,8 +73,8 @@ export const router = createBrowserRouter([
       // Top-level Ingestion (pipeline control plane: providers, assets, jobs)
       { path: 'ingestion', element: <Lazy><IngestionPage /></Lazy> },
 
-      // Top-level Workspaces (listing + detail/management). The canvas lives
-      // one level deeper under /canvas — see the CanvasLayout block below.
+      // Top-level Workspaces (listing + detail/management). Workspace visuals
+      // are view-driven — see /views and /explorer; there is no standalone canvas.
       { path: 'workspaces', element: <Lazy><WorkspacesPage /></Lazy> },
       { path: 'workspaces/:wsId', element: <Lazy><WorkspaceDetailPage /></Lazy> },
 
@@ -92,7 +91,6 @@ export const router = createBrowserRouter([
           { path: 'explorer', element: <Lazy><ExplorerPage /></Lazy> },
           { path: 'views', element: <Lazy><ViewsGallery /></Lazy> },
           { path: 'views/:viewId', element: <Lazy><ViewPage /></Lazy> },
-          { path: 'workspaces/:workspaceId/canvas', element: <Lazy><WorkspaceView /></Lazy> },
           { path: 'workspaces/:workspaceId/views', element: <Lazy><WorkspaceViewsManager /></Lazy> },
         ],
       },
