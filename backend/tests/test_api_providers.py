@@ -4,8 +4,12 @@ Phase 4 — API endpoint tests for /api/v1/admin/providers/*.
 Tests the provider CRUD admin endpoints using the test_client fixture
 which overrides auth and DB session.
 """
+import time
+
 import pytest
 from httpx import AsyncClient
+
+from backend.app.registry.provider_registry import provider_registry
 
 
 # ── Helper ────────────────────────────────────────────────────────────
@@ -25,6 +29,13 @@ def _provider_payload(name: str = "Test Provider", provider_type: str = "falkord
 async def test_list_providers_empty(test_client: AsyncClient):
     """Initially the provider list is empty."""
     resp = await test_client.get("/api/v1/admin/providers")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_provider_status_endpoint_returns_empty_list(test_client: AsyncClient):
+    resp = await test_client.get("/api/v1/admin/providers/status")
+
     assert resp.status_code == 200
     assert resp.json() == []
 
@@ -161,3 +172,26 @@ async def test_provider_crud_roundtrip(test_client: AsyncClient):
     # Gone
     r = await test_client.get(f"/api/v1/admin/providers/{prov_id}")
     assert r.status_code == 404
+
+
+async def test_provider_status_endpoint_uses_negative_cache(test_client: AsyncClient):
+    create_resp = await test_client.post(
+        "/api/v1/admin/providers",
+        json=_provider_payload("Cached Failure"),
+    )
+    provider_id = create_resp.json()["id"]
+    provider_registry._failed_cache[(provider_id, "")] = time.monotonic()
+
+    try:
+        resp = await test_client.get("/api/v1/admin/providers/status")
+    finally:
+        provider_registry._failed_cache.pop((provider_id, ""), None)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["id"] == provider_id
+    assert body[0]["name"] == "Cached Failure"
+    assert body[0]["status"] == "unavailable"
+    assert body[0]["lastCheckedAt"] is not None
+    assert body[0]["error"]

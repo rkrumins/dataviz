@@ -3,7 +3,7 @@
  * recovers from an outage.
  *
  * Subscribes to the health store. When status transitions from
- * unreachable/degraded → recovered, it triggers:
+ * unreachable → recovered, it triggers:
  *   - Workspace list reload (populates sidebar, active workspace selection)
  *   - Connection list reload (legacy compat)
  *   - Views list reload (populates sidebar & view gallery)
@@ -33,7 +33,7 @@ export function useBackendRecovery() {
       prevStatus.current = curr
 
       // Only trigger on recovery transitions
-      const wasDown = prev === 'unreachable' || prev === 'degraded'
+      const wasDown = prev === 'unreachable'
       const isBack = curr === 'recovered' || (curr === 'healthy' && wasDown)
 
       if (!isBack) return

@@ -17,10 +17,10 @@
  */
 import { useEffect, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
-import { useSchemaStore } from '@/store/schema'
 import type { GraphSchema } from '@/providers/GraphDataProvider'
+import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { useSchemaStore } from '@/store/schema'
 
 export const GRAPH_SCHEMA_QUERY_KEY = ['graph', 'schema'] as const
 
@@ -83,7 +83,7 @@ async function fetchCachedOntologyAsSchema(
  * ontology as a last resort.
  */
 async function fetchGraphSchema(
-  provider: ReturnType<typeof useGraphProvider>,
+  provider: import('@/providers/GraphDataProvider').GraphDataProvider | null,
   workspaceId: string,
   dataSourceId: string,
 ): Promise<GraphSchema> {
@@ -96,13 +96,15 @@ async function fetchGraphSchema(
   // 2. Try the live provider. The provider is always correctly scoped because
   //    callers render inside SchemaScope or ViewExecutionProvider, both of
   //    which provide a ProviderOverride matching the requested scope.
-  try {
-    const live = await provider.getFullSchema()
-    if (live && live.entityTypes && live.entityTypes.length > 0) {
-      return live
+  if (provider) {
+    try {
+      const live = await provider.getFullSchema()
+      if (live && live.entityTypes && live.entityTypes.length > 0) {
+        return live
+      }
+    } catch {
+      // Provider unavailable — continue to fallback
     }
-  } catch {
-    // Provider unavailable — continue to fallback
   }
 
   // 3. Try the cached-ontology endpoint as a last resort. If the data source
@@ -136,8 +138,8 @@ async function fetchGraphSchema(
  * inherit scope from the active graph-provider context.
  */
 export function useGraphSchema(options?: UseGraphSchemaOptions) {
-  const provider = useGraphProvider()
   const ctx = useGraphProviderContext()
+  const provider = ctx.provider
   const { providerVersion } = ctx
 
   // Explicit scope (from options) overrides the active context so callers can
@@ -190,6 +192,8 @@ export function useGraphSchema(options?: UseGraphSchemaOptions) {
     backgroundRefreshDone.current = scopeKey
 
     let cancelled = false
+    if (!provider) return
+
     provider
       .getFullSchema()
       .then(liveSchema => {

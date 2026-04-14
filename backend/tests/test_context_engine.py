@@ -155,6 +155,11 @@ class _StubOntologyService:
         return self._resolved
 
 
+class _StubRegistry:
+    async def get_provider(self, connection_id, session):
+        return _StubProvider()
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -181,6 +186,10 @@ class TestContextEngineInit:
         stub = _StubProvider()
         engine = ContextEngine(provider=stub)
         assert engine.provider is stub
+
+    async def test_for_connection_requires_connection_id(self):
+        with pytest.raises(ValueError, match="connection_id is required"):
+            await ContextEngine.for_connection(None, _StubRegistry(), session=object())  # type: ignore[arg-type]
 
 
 class TestContextEngineNodeOps:

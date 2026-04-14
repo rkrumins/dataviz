@@ -19,7 +19,7 @@ from backend.app.models.graph import (
     ChildrenWithEdgesResult, TopLevelNodesResult,
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
-from backend.app.services.context_engine import context_engine, ContextEngine
+from backend.app.services.context_engine import ContextEngine
 from backend.app.db.engine import get_db_session
 from backend.app.registry.provider_registry import provider_registry
 
@@ -43,7 +43,7 @@ async def get_context_engine(
     - `ws_id` (path param from /v1/{ws_id}/graph routes) → workspace-scoped engine
       - `dataSourceId` (optional query param) → targets specific data source within workspace
     - `connectionId` (query param, legacy) → connection-scoped engine
-    - Neither → module-level singleton (primary connection)
+    - Neither → rejected; graph scope must be explicit
     """
     if ws_id:
         return await ContextEngine.for_workspace(
@@ -51,7 +51,10 @@ async def get_context_engine(
         )
     if connectionId:
         return await ContextEngine.for_connection(connectionId, provider_registry, session)
-    return context_engine
+    raise HTTPException(
+        status_code=400,
+        detail="scope_required: workspace_id or connection_id is required",
+    )
 
 
 # ------------------------------------------------------------------ #

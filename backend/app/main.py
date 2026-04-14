@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -25,6 +24,13 @@ from backend.auth_service.providers import LocalIdentityProvider, register_provi
 from backend.auth_service.service import LocalIdentityService
 
 logger = logging.getLogger(__name__)
+
+try:
+    from redis.exceptions import ConnectionError as _RedisConnectionError
+    from redis.exceptions import TimeoutError as _RedisTimeoutError
+except Exception:  # pragma: no cover - redis is part of runtime deps
+    _RedisConnectionError = ConnectionError
+    _RedisTimeoutError = TimeoutError
 
 
 # ------------------------------------------------------------------ #
@@ -217,15 +223,32 @@ async def _db_operational_error_handler(_request, exc):
         content={"detail": "Management database is temporarily unavailable. Please try again."},
     )
 
-# Provider connectivity failures — return 503 (Service Unavailable) so the
-# frontend can distinguish provider-down (503) from bugs (500) and timeouts (504).
-@app.exception_handler(ConnectionError)
-async def _connection_error_handler(_request, exc):
-    logger.warning("Provider connection error: %s", exc)
-    return JSONResponse(
-        status_code=503,
-        content={"detail": str(exc)},
-    )
+def _provider_unavailable_payload(request, exc) -> dict:
+    provider_id = request.query_params.get("connectionId")
+    return {
+        "detail": {
+            "code": "PROVIDER_UNAVAILABLE",
+            "providerId": provider_id,
+            "reason": str(exc),
+        }
+    }
+
+
+async def _provider_error_handler(request, exc):
+    logger.warning("Provider connectivity error on %s: %s", request.url.path, exc)
+    if "/graph" in request.url.path:
+        return JSONResponse(
+            status_code=503,
+            content=_provider_unavailable_payload(request, exc),
+        )
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+app.add_exception_handler(ConnectionError, _provider_error_handler)
+app.add_exception_handler(OSError, _provider_error_handler)
+app.add_exception_handler(asyncio.TimeoutError, _provider_error_handler)
+app.add_exception_handler(_RedisConnectionError, _provider_error_handler)
+app.add_exception_handler(_RedisTimeoutError, _provider_error_handler)
 
 # ------------------------------------------------------------------ #
 # Timeout middleware (raw ASGI — avoids BaseHTTPMiddleware streaming   #
@@ -313,7 +336,8 @@ app.include_router(db_metrics_router)
 @app.get("/api/v1/health", tags=["health"], include_in_schema=False)
 async def health_check():
     """
-    Enhanced health check — returns management DB + primary provider status.
+    Management-plane health check — only the management DB is required for the
+    application to be considered healthy.
     """
     from .db.engine import get_engine
     from sqlalchemy import text
@@ -328,33 +352,7 @@ async def health_check():
         result["dependencies"]["management_db"] = "healthy"
     except Exception as exc:
         result["dependencies"]["management_db"] = f"unhealthy: {exc}"
-        result["status"] = "degraded"
-
-    # Primary provider ping (with timeout so a hung provider doesn't block the
-    # entire health endpoint — which in turn blocks the frontend login flow).
-    try:
-        async with get_async_session() as session:
-            primary_id = await asyncio.wait_for(
-                provider_registry._resolve_primary_id(session), timeout=5
-            )
-            provider = await asyncio.wait_for(
-                provider_registry.get_provider(primary_id, session), timeout=5
-            )
-            t0 = time.perf_counter()
-            await asyncio.wait_for(provider.get_stats(), timeout=10)
-            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-            result["dependencies"]["primary_provider"] = {
-                "id": primary_id,
-                "type": provider.name,
-                "status": "healthy",
-                "latencyMs": latency_ms,
-            }
-    except asyncio.TimeoutError:
-        result["dependencies"]["primary_provider"] = {"status": "unhealthy: timeout"}
-        result["status"] = "degraded"
-    except Exception as exc:
-        result["dependencies"]["primary_provider"] = {"status": f"unhealthy: {exc}"}
-        result["status"] = "degraded"
+        result["status"] = "unhealthy"
 
     return result
 

@@ -42,7 +42,6 @@ class GraphConnectionORM(Base):
     graph_name = Column(Text, nullable=True)
     credentials = Column(Text, nullable=True)         # Fernet-encrypted JSON blob
     tls_enabled = Column(Boolean, nullable=False, default=False)
-    is_primary = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
     extra_config = Column(Text, nullable=True)        # JSON blob
     created_at = Column(Text, nullable=False, default=_now)
@@ -55,11 +54,7 @@ class GraphConnectionORM(Base):
     )
 
     __table_args__ = (
-        # Only one row may have is_primary=True (partial unique index).
-        # SQLite doesn't support partial indexes in SQLAlchemy easily;
-        # we enforce uniqueness at the application layer in the repository.
         Index("idx_connections_provider_type", "provider_type"),
-        Index("idx_connections_is_primary", "is_primary"),
     )
 
     def __repr__(self) -> str:

@@ -209,7 +209,7 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
 
   useEffect(() => {
     const unsubscribe = useHealthStore.subscribe((state, prev) => {
-      const wasDown = prev.status === 'unreachable' || prev.status === 'degraded'
+      const wasDown = prev.status === 'unreachable'
       const isBack = state.status === 'recovered' || (state.status === 'healthy' && wasDown)
       if (!isBack) return
       if (statusRef.current !== 'error') return

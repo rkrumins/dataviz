@@ -26,6 +26,8 @@ export function IngestionPage() {
     const activeTab: IngestionTab = TABS.some(t => t.id === rawTab) ? (rawTab as IngestionTab) : 'providers'
 
     const [counts, setCounts] = useState({ providers: -1, catalogs: 0, workspaces: 0, hasOntology: false })
+    const [loadError, setLoadError] = useState<string | null>(null)
+    const [startProviderOnboarding, setStartProviderOnboarding] = useState(false)
 
     useEffect(() => {
         document.title = 'Ingestion · Synodic'
@@ -33,26 +35,45 @@ export function IngestionPage() {
 
     useEffect(() => {
         let cancelled = false
-        Promise.all([
+        setLoadError(null)
+        Promise.allSettled([
             providerService.list(),
             catalogService.list(),
             workspaceService.list(),
-        ]).then(([providers, catalogs, workspaces]) => {
+        ]).then(([providersResult, catalogsResult, workspacesResult]) => {
             if (cancelled) return
+            const providers = providersResult.status === 'fulfilled' ? providersResult.value : null
+            const catalogs = catalogsResult.status === 'fulfilled' ? catalogsResult.value : []
+            const workspaces = workspacesResult.status === 'fulfilled' ? workspacesResult.value : []
+
+            const errors: string[] = []
+            if (providersResult.status === 'rejected') errors.push('providers')
+            if (catalogsResult.status === 'rejected') errors.push('catalog items')
+            if (workspacesResult.status === 'rejected') errors.push('workspaces')
+
             const hasOntology = workspaces.some(ws =>
                 ws.dataSources?.some(ds => !!ds.ontologyId)
             )
             setCounts({
-                providers: providers.length,
+                providers: providers ? providers.length : -1,
                 catalogs: catalogs.length,
                 workspaces: workspaces.length,
                 hasOntology,
             })
-        }).catch(() => {
-            if (!cancelled) setCounts(prev => ({ ...prev, providers: 0 }))
+            setLoadError(
+                errors.length > 0
+                    ? `Could not load ${errors.join(', ')}.`
+                    : null,
+            )
         })
         return () => { cancelled = true }
     }, [activeTab])
+
+    useEffect(() => {
+        if (counts.providers > 0 && startProviderOnboarding) {
+            setStartProviderOnboarding(false)
+        }
+    }, [counts.providers, startProviderOnboarding])
 
     const handleStageClick = (tab: string) => {
         if (tab === 'workspaces') {
@@ -64,10 +85,13 @@ export function IngestionPage() {
         }
     }
 
-    if (counts.providers === 0) {
+    if (counts.providers === 0 && !loadError && !startProviderOnboarding) {
         return (
             <FirstRunHero
-                onGetStarted={() => setSearchParams({ tab: 'providers' })}
+                onGetStarted={() => {
+                    setStartProviderOnboarding(true)
+                    setSearchParams({ tab: 'providers' })
+                }}
             />
         )
     }
@@ -86,9 +110,15 @@ export function IngestionPage() {
                 </p>
             </div>
 
+            {loadError && (
+                <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100">
+                    {loadError}
+                </div>
+            )}
+
             {/* Onboarding Progress */}
             <OnboardingProgress
-                providerCount={counts.providers}
+                providerCount={Math.max(counts.providers, 0)}
                 catalogItemCount={counts.catalogs}
                 workspaceCount={counts.workspaces}
                 hasOntology={counts.hasOntology}
@@ -134,7 +164,11 @@ export function IngestionPage() {
                 aria-labelledby={`ingestion-tab-${activeTab}`}
                 className="flex-1 min-h-0"
             >
-                {activeTab === 'providers' && <RegistryConnections />}
+                {activeTab === 'providers' && (
+                    <RegistryConnections
+                        autoOpenWizard={startProviderOnboarding}
+                    />
+                )}
                 {activeTab === 'assets' && <RegistryAssets />}
                 {activeTab === 'jobs' && <RegistryJobHistory />}
             </div>
