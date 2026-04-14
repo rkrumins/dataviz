@@ -23,7 +23,7 @@ export function useRouteSync() {
     } else if (path.startsWith('/ingestion')) {
       nextTab = 'ingestion'
     } else if (path.startsWith('/workspaces')) {
-      // Covers /workspaces (listing), /workspaces/:id (detail), /workspaces/:id/canvas
+      // Covers /workspaces (listing) and /workspaces/:id (detail)
       nextTab = 'workspaces'
     } else if (path.startsWith('/schema')) {
       nextTab = 'schema'

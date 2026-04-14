@@ -30,7 +30,10 @@ export interface UseWorkspaceDetailDataReturn {
   readinessMap: Record<string, DataSourceReadinessResponse>
   healthStatus: 'healthy' | 'warning' | 'critical' | 'unknown'
   aggregateStats: { totalNodes: number; totalEdges: number; totalTypes: number; totalViews: number }
+  /** True only before the first successful fetch (or while navigating to a different wsId). */
   isLoading: boolean
+  /** True while a background refresh is in flight after the page has already rendered. */
+  isRefreshing: boolean
   error: string | null
   reload: () => void
 }
@@ -43,12 +46,18 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
   const [dsStatsMap, setDsStatsMap] = useState<Record<string, DataSourceStats>>({})
   const [allWorkspaceViews, setAllWorkspaceViews] = useState<View[]>([])
   const [readinessMap, setReadinessMap] = useState<Record<string, DataSourceReadinessResponse>>({})
-  const [isLoading, setIsLoading] = useState(true)
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Derived: the page is "loading" (full-screen spinner) only when no workspace
+  // has been loaded yet for this wsId. Subsequent reloads keep the rendered
+  // page mounted and flip `isRefreshing` instead — callers should render a
+  // subtle indicator rather than unmounting the tree.
+  const isLoading = !workspace || workspace.id !== wsId
 
   const loadWorkspace = useCallback(async (signal?: { cancelled: boolean }) => {
     if (!wsId) return
-    setIsLoading(true)
+    setIsRefreshing(true)
     setError(null)
     try {
       // Phase 1 — parallel initial fetch
@@ -98,7 +107,7 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
       console.error('Failed to load workspace', err)
       setError(err instanceof Error ? err.message : 'Failed to load workspace')
     } finally {
-      if (!signal?.cancelled) setIsLoading(false)
+      if (!signal?.cancelled) setIsRefreshing(false)
     }
   }, [wsId])
 
@@ -184,6 +193,7 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
     healthStatus,
     aggregateStats,
     isLoading,
+    isRefreshing,
     error,
     reload,
   }
