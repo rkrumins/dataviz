@@ -2,13 +2,13 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
     Server, Plus, RefreshCw, Wifi, WifiOff, Edit2, Trash2, Zap,
-    Shield, Globe, ChevronDown, ChevronUp, Loader2, Scan, ArrowRight, AlertTriangle
+    Shield, Globe, ChevronDown, ChevronUp, Loader2, AlertTriangle, Sparkles
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { providerService, type ProviderResponse, type ProviderCreateRequest, type ProviderUpdateRequest, type ProviderImpactResponse, type SchemaDiscoveryResult } from '@/services/providerService'
+import { providerService, type ConnectionTestResult, type ProviderImpactResponse, type ProviderResponse } from '@/services/providerService'
 import { useProviderHealthSweep } from '@/hooks/useProviderHealthSweep'
-import { AdminWizard, type WizardStep } from './AdminWizard'
 import { DeleteProviderDialog } from './DeleteProviderDialog'
+import { ProviderOnboardingWizard } from './ProviderOnboardingWizard'
 import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
 
 const PROVIDER_TYPES = [
@@ -84,49 +84,16 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
     )
 }
 
-interface RegistryConnectionsProps {
-    autoOpenWizard?: boolean
-}
-
-export function RegistryConnections({ autoOpenWizard = false }: RegistryConnectionsProps) {
+export function RegistryConnections() {
     const navigate = useNavigate()
     const [providers, setProviders] = useState<ProviderResponse[]>([])
     const { healthMap, testOne, refresh: refreshHealth, setHealth } = useProviderHealthSweep(providers)
     const [isLoading, setIsLoading] = useState(true)
     const [showWizard, setShowWizard] = useState(false)
-
-    // Wizard form state
-    const [wizType, setWizType] = useState<string>('')
-    const [wizName, setWizName] = useState('')
-    const [wizHost, setWizHost] = useState('')
-    const [wizPort, setWizPort] = useState<number>(6379)
-    const [wizTls, setWizTls] = useState(false)
-    const [wizUsername, setWizUsername] = useState('')
-    const [wizPassword, setWizPassword] = useState('')
-    const [wizSubmitting, setWizSubmitting] = useState(false)
     const [editingProvider, setEditingProvider] = useState<ProviderResponse | null>(null)
     const [deleteTarget, setDeleteTarget] = useState<ProviderResponse | null>(null)
     const [deleteImpact, setDeleteImpact] = useState<ProviderImpactResponse | null>(null)
     const [loadingImpact, setLoadingImpact] = useState(false)
-
-    const wizNameDuplicate = providers.some(p =>
-        p.name.toLowerCase() === wizName.trim().toLowerCase() && p.id !== editingProvider?.id
-    )
-
-    // Schema mapping state (Neo4j / external DBs)
-    const [schemaDiscovery, setSchemaDiscovery] = useState<SchemaDiscoveryResult | null>(null)
-    const [schemaLoading, setSchemaLoading] = useState(false)
-    const [schemaError, setSchemaError] = useState('')
-    const [schemaMapping, setSchemaMapping] = useState<Record<string, string>>({
-        identityField: 'urn',
-        displayNameField: 'displayName',
-        qualifiedNameField: 'qualifiedName',
-        descriptionField: 'description',
-        tagsField: 'tags',
-        entityTypeStrategy: 'label',
-        entityTypeField: 'entityType',
-    })
-    const [schemaMappingEnabled, setSchemaMappingEnabled] = useState(false)
 
     const loadProviders = useCallback(async () => {
         setIsLoading(true)
@@ -138,13 +105,6 @@ export function RegistryConnections({ autoOpenWizard = false }: RegistryConnecti
     }, [])
 
     useEffect(() => { loadProviders() }, [loadProviders])
-
-    useEffect(() => {
-        if (!autoOpenWizard) return
-        resetWizard()
-        setEditingProvider(null)
-        setShowWizard(true)
-    }, [autoOpenWizard])
 
     const handleDeleteClick = async (p: ProviderResponse) => {
         setDeleteTarget(p)
@@ -167,327 +127,26 @@ export function RegistryConnections({ autoOpenWizard = false }: RegistryConnecti
         loadProviders()
     }
 
-    const resetWizard = () => {
-        setWizType(''); setWizName(''); setWizHost(''); setWizPort(6379)
-        setWizTls(false); setWizUsername(''); setWizPassword('')
-        setSchemaDiscovery(null); setSchemaLoading(false); setSchemaError('')
-        setSchemaMappingEnabled(false)
-        setSchemaMapping({
-            identityField: 'urn', displayNameField: 'displayName', qualifiedNameField: 'qualifiedName',
-            descriptionField: 'description', tagsField: 'tags', entityTypeStrategy: 'label', entityTypeField: 'entityType',
-        })
-    }
-
-
-    const buildExtraConfig = () => {
-        if (!schemaMappingEnabled) return undefined
-        return {
-            schemaMapping: {
-                identity_field: schemaMapping.identityField,
-                display_name_field: schemaMapping.displayNameField,
-                qualified_name_field: schemaMapping.qualifiedNameField,
-                description_field: schemaMapping.descriptionField,
-                tags_field: schemaMapping.tagsField,
-                entity_type_strategy: schemaMapping.entityTypeStrategy,
-                entity_type_field: schemaMapping.entityTypeField,
-            },
-        }
-    }
-
-    const handleWizardComplete = async () => {
-        setWizSubmitting(true)
-        try {
-            const req: ProviderCreateRequest = {
-                name: wizName, providerType: wizType as any, host: wizHost || undefined, port: wizPort || undefined, tlsEnabled: wizTls,
-                credentials: (wizUsername || wizPassword) ? { username: wizUsername || undefined, password: wizPassword || undefined } : undefined,
-                extraConfig: buildExtraConfig(),
-            }
-            const newlyCreated = await providerService.create(req)
-            setShowWizard(false)
-            resetWizard()
-            loadProviders()
-
-            // Health gate: test connection before navigating
-            const health = await providerService.test(newlyCreated.id)
-            setHealth(newlyCreated.id, {
-                status: health.success ? 'healthy' : 'unhealthy',
-                latencyMs: health.latencyMs,
-                error: health.error,
-            })
-
-            if (health.success) {
-                navigate(`/ingestion?tab=assets&provider=${newlyCreated.id}&onboarding=true`)
-            }
-        } catch (err) { console.error('Failed to create provider', err) }
-        finally { setWizSubmitting(false) }
-    }
-
-    const handleEditComplete = async () => {
-        if (!editingProvider) return
-        setWizSubmitting(true)
-        try {
-            const req: ProviderUpdateRequest = {
-                name: wizName, host: wizHost || undefined, port: wizPort || undefined, tlsEnabled: wizTls,
-                credentials: (wizUsername || wizPassword) ? { username: wizUsername || undefined, password: wizPassword || undefined } : undefined,
-                extraConfig: buildExtraConfig(),
-            }
-            await providerService.update(editingProvider.id, req)
-            setShowWizard(false); setEditingProvider(null); resetWizard(); loadProviders()
-        } catch (err) { console.error('Failed to update provider', err) }
-        finally { setWizSubmitting(false) }
-    }
-
     const handleEditProvider = (p: ProviderResponse) => {
-        setEditingProvider(p); setWizType(p.providerType); setWizName(p.name); setWizHost(p.host || ''); setWizPort(p.port || 6379)
-        setWizTls(p.tlsEnabled); setWizUsername(''); setWizPassword('')
-        // Restore schema mapping from extraConfig if present
-        const existingMapping = p.extraConfig?.schemaMapping
-        if (existingMapping) {
-            setSchemaMappingEnabled(true)
-            setSchemaMapping({
-                identityField: existingMapping.identity_field || 'urn',
-                displayNameField: existingMapping.display_name_field || 'displayName',
-                qualifiedNameField: existingMapping.qualified_name_field || 'qualifiedName',
-                descriptionField: existingMapping.description_field || 'description',
-                tagsField: existingMapping.tags_field || 'tags',
-                entityTypeStrategy: existingMapping.entity_type_strategy || 'label',
-                entityTypeField: existingMapping.entity_type_field || 'entityType',
-            })
-        }
+        setEditingProvider(p)
         setShowWizard(true)
     }
 
-    const wizardSteps: WizardStep[] = [
-        {
-            id: 'type', title: 'Provider Type', icon: Server, validate: () => wizType ? true : 'Please select a provider type.',
-            content: (
-                <div className="grid grid-cols-2 gap-3">
-                    {PROVIDER_TYPES.map(pt => (
-                        <button key={pt.type} onClick={() => { setWizType(pt.type); if (pt.type === 'falkordb') setWizPort(6379); else if (pt.type === 'neo4j') setWizPort(7687); }}
-                            className={cn("p-5 rounded-xl border-2 text-left transition-all duration-200 hover:shadow-md", wizType === pt.type ? "border-indigo-500 bg-indigo-500/5 shadow-md shadow-indigo-500/10" : "border-glass-border hover:border-indigo-500/30")}
-                        >
-                            <pt.Logo className="w-7 h-7 mb-2" /><h4 className="text-sm font-bold text-ink">{pt.label}</h4><p className="text-xs text-ink-muted mt-1">{pt.desc}</p>
-                        </button>
-                    ))}
-                </div>
-            ),
-        },
-        {
-            id: 'connection', title: 'Provider Details', icon: Globe, validate: () => wizName && !wizNameDuplicate ? true : !wizName ? 'Please enter a name for this provider.' : 'A provider with this name already exists.',
-            content: (
-                <div className="space-y-4">
-                    <div>
-                        <label className="block text-sm font-medium text-ink mb-1.5">Provider Name *</label>
-                        <input value={wizName} onChange={e => setWizName(e.target.value)} placeholder="e.g. Production Data Warehouse" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50" />
-                        {wizNameDuplicate && (
-                            <p className="mt-1.5 text-xs text-amber-500 flex items-center gap-1">
-                                <AlertTriangle className="w-3 h-3" />
-                                A provider named "{wizName.trim()}" already exists
-                            </p>
-                        )}
-                    </div>
-                    <div className="grid grid-cols-3 gap-3">
-                        <div className="col-span-2"><label className="block text-sm font-medium text-ink mb-1.5">Host</label><input value={wizHost} onChange={e => setWizHost(e.target.value)} placeholder="localhost" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50" /></div>
-                        <div><label className="block text-sm font-medium text-ink mb-1.5">Port</label><input type="number" value={wizPort} onChange={e => setWizPort(Number(e.target.value))} className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50" /></div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                        <div><label className="block text-sm font-medium text-ink mb-1.5">Username</label><input value={wizUsername} onChange={e => setWizUsername(e.target.value)} placeholder="optional" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50" /></div>
-                        <div><label className="block text-sm font-medium text-ink mb-1.5">Password</label><input type="password" value={wizPassword} onChange={e => setWizPassword(e.target.value)} placeholder="optional" className="w-full px-4 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50" /></div>
-                    </div>
-                </div>
-            ),
-        },
-        // Schema Mapping step — only for Neo4j and external databases
-        ...(wizType === 'neo4j' ? [{
-            id: 'schema-mapping',
-            title: 'Schema Mapping',
-            icon: Scan,
-            validate: () => true as boolean | string,
-            content: (
-                <div className="space-y-5">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <h4 className="text-sm font-bold text-ink">Property Schema Mapping</h4>
-                            <p className="text-xs text-ink-muted mt-1">
-                                Map your Neo4j property names to Synodic's canonical model. Skip this if your database already uses Synodic's schema.
-                            </p>
-                        </div>
-                        <label className="relative inline-flex items-center cursor-pointer">
-                            <input type="checkbox" checked={schemaMappingEnabled} onChange={e => setSchemaMappingEnabled(e.target.checked)} className="sr-only peer" />
-                            <div className="w-9 h-5 bg-black/10 dark:bg-white/10 peer-checked:bg-indigo-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] peer-checked:after:translate-x-full after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all" />
-                        </label>
-                    </div>
+    const handleProviderCreated = async (
+        createdProvider: ProviderResponse,
+        health: ConnectionTestResult,
+    ) => {
+        await loadProviders()
+        setHealth(createdProvider.id, {
+            status: health.success ? 'healthy' : 'unhealthy',
+            latencyMs: health.latencyMs,
+            error: health.error,
+        })
+    }
 
-                    {schemaMappingEnabled && (
-                        <>
-                            {/* Discover button */}
-                            <button
-                                onClick={async () => {
-                                    setSchemaLoading(true); setSchemaError('')
-                                    try {
-                                        // Create a temporary provider to discover schema
-                                        const tempReq: ProviderCreateRequest = {
-                                            name: `_temp_discovery_${Date.now()}`, providerType: 'neo4j',
-                                            host: wizHost || 'localhost', port: wizPort || 7687, tlsEnabled: wizTls,
-                                            credentials: { username: wizUsername || undefined, password: wizPassword || undefined },
-                                        }
-                                        const temp = await providerService.create(tempReq)
-                                        try {
-                                            const result = await providerService.discoverSchema(temp.id)
-                                            setSchemaDiscovery(result)
-                                            // Auto-apply suggested mapping if available
-                                            if (result.suggestedMapping) {
-                                                const s = result.suggestedMapping
-                                                setSchemaMapping(prev => ({
-                                                    ...prev,
-                                                    identityField: s.identity_field || prev.identityField,
-                                                    displayNameField: s.display_name_field || prev.displayNameField,
-                                                    qualifiedNameField: s.qualified_name_field || prev.qualifiedNameField,
-                                                    descriptionField: s.description_field || prev.descriptionField,
-                                                    entityTypeStrategy: s.entity_type_strategy || prev.entityTypeStrategy,
-                                                }))
-                                            }
-                                        } finally {
-                                            // Clean up temp provider
-                                            await providerService.delete(temp.id).catch(() => {})
-                                        }
-                                    } catch (err: any) {
-                                        setSchemaError(err.message || 'Failed to discover schema')
-                                    } finally {
-                                        setSchemaLoading(false)
-                                    }
-                                }}
-                                disabled={schemaLoading || !wizHost}
-                                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-sm font-semibold hover:bg-indigo-500/20 transition-colors disabled:opacity-50 w-full justify-center"
-                            >
-                                {schemaLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Scan className="w-4 h-4" />}
-                                {schemaLoading ? 'Introspecting Database...' : 'Auto-Discover Schema'}
-                            </button>
-
-                            {schemaError && (
-                                <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-500">{schemaError}</div>
-                            )}
-
-                            {/* Discovery results preview */}
-                            {schemaDiscovery && (
-                                <div className="p-4 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] space-y-2">
-                                    <h5 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Discovered Schema</h5>
-                                    <div className="flex flex-wrap gap-1.5">
-                                        {schemaDiscovery.labels.map(l => (
-                                            <span key={l} className="px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 text-[11px] font-medium border border-blue-500/20">{l}</span>
-                                        ))}
-                                    </div>
-                                    <div className="flex flex-wrap gap-1.5 mt-1">
-                                        {schemaDiscovery.relationshipTypes.map(r => (
-                                            <span key={r} className="px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-600 dark:text-violet-400 text-[11px] font-medium border border-violet-500/20">{r}</span>
-                                        ))}
-                                    </div>
-                                    {schemaDiscovery.labelDetails && Object.keys(schemaDiscovery.labelDetails).length > 0 && (
-                                        <div className="mt-2 text-xs text-ink-muted">
-                                            {Object.entries(schemaDiscovery.labelDetails).slice(0, 3).map(([label, detail]) => (
-                                                <div key={label} className="mt-1">
-                                                    <span className="font-semibold text-ink">{label}</span>
-                                                    <span className="ml-1">({detail.count} nodes)</span>
-                                                    <span className="ml-1 text-ink-muted">— props: {detail.propertyKeys.join(', ')}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-
-                            {/* Mapping fields */}
-                            <div className="space-y-3">
-                                <h5 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Field Mapping</h5>
-                                {([
-                                    ['identityField', 'Identity (URN)', 'The property used as unique identifier'],
-                                    ['displayNameField', 'Display Name', 'Human-readable name property'],
-                                    ['qualifiedNameField', 'Qualified Name', 'Fully qualified path name'],
-                                    ['descriptionField', 'Description', 'Description / notes property'],
-                                    ['tagsField', 'Tags', 'Tags array property (JSON string or list)'],
-                                ] as const).map(([key, label, hint]) => (
-                                    <div key={key} className="grid grid-cols-5 gap-2 items-center">
-                                        <div className="col-span-2">
-                                            <label className="text-xs font-medium text-ink">{label}</label>
-                                            <p className="text-[10px] text-ink-muted leading-tight">{hint}</p>
-                                        </div>
-                                        <div className="col-span-1 flex items-center justify-center text-ink-muted">
-                                            <ArrowRight className="w-3 h-3" />
-                                        </div>
-                                        <div className="col-span-2">
-                                            <input
-                                                value={schemaMapping[key]}
-                                                onChange={e => setSchemaMapping(prev => ({ ...prev, [key]: e.target.value }))}
-                                                className="w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-xs font-mono text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-                                            />
-                                        </div>
-                                    </div>
-                                ))}
-
-                                {/* Entity type strategy */}
-                                <div className="pt-2 border-t border-glass-border">
-                                    <label className="text-xs font-medium text-ink block mb-2">Entity Type Resolution</label>
-                                    <div className="flex gap-2">
-                                        <button
-                                            onClick={() => setSchemaMapping(prev => ({ ...prev, entityTypeStrategy: 'label' }))}
-                                            className={cn("flex-1 px-3 py-2 rounded-lg border text-xs font-semibold transition-colors",
-                                                schemaMapping.entityTypeStrategy === 'label' ? "bg-indigo-500/10 border-indigo-500/30 text-indigo-600" : "border-glass-border text-ink-muted hover:text-ink")}
-                                        >
-                                            From Neo4j Label
-                                        </button>
-                                        <button
-                                            onClick={() => setSchemaMapping(prev => ({ ...prev, entityTypeStrategy: 'property' }))}
-                                            className={cn("flex-1 px-3 py-2 rounded-lg border text-xs font-semibold transition-colors",
-                                                schemaMapping.entityTypeStrategy === 'property' ? "bg-indigo-500/10 border-indigo-500/30 text-indigo-600" : "border-glass-border text-ink-muted hover:text-ink")}
-                                        >
-                                            From Property
-                                        </button>
-                                    </div>
-                                    {schemaMapping.entityTypeStrategy === 'property' && (
-                                        <input
-                                            value={schemaMapping.entityTypeField}
-                                            onChange={e => setSchemaMapping(prev => ({ ...prev, entityTypeField: e.target.value }))}
-                                            placeholder="entityType"
-                                            className="mt-2 w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-xs font-mono text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-                                        />
-                                    )}
-                                </div>
-                            </div>
-                        </>
-                    )}
-
-                    {!schemaMappingEnabled && (
-                        <div className="p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20 text-sm text-emerald-600 dark:text-emerald-400">
-                            Using default Synodic schema. Your Neo4j database should use properties like <code className="font-mono text-xs bg-emerald-500/10 px-1 py-0.5 rounded">urn</code>, <code className="font-mono text-xs bg-emerald-500/10 px-1 py-0.5 rounded">displayName</code>, <code className="font-mono text-xs bg-emerald-500/10 px-1 py-0.5 rounded">entityType</code>.
-                        </div>
-                    )}
-                </div>
-            ),
-        }] : []),
-        {
-            id: 'review', title: 'Review & Save', icon: Shield, validate: () => true as boolean | string,
-            content: (
-                <div className="space-y-4">
-                    <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-5">
-                        <h4 className="text-sm font-bold text-ink mb-3">Provider Summary</h4>
-                        <dl className="grid grid-cols-2 gap-3 text-sm">
-                            <div><dt className="text-ink-muted">Type</dt><dd className="font-semibold text-ink mt-0.5">{getProviderConfig(wizType).label}</dd></div>
-                            <div><dt className="text-ink-muted">Name</dt><dd className="font-semibold text-ink mt-0.5">{wizName || '—'}</dd></div>
-                            <div><dt className="text-ink-muted">Host</dt><dd className="font-mono text-ink mt-0.5">{wizHost || 'localhost'}:{wizPort}</dd></div>
-                            {schemaMappingEnabled && (
-                                <div className="col-span-2">
-                                    <dt className="text-ink-muted">Schema Mapping</dt>
-                                    <dd className="font-mono text-ink mt-0.5 text-xs">
-                                        {schemaMapping.identityField} → urn, {schemaMapping.displayNameField} → displayName
-                                    </dd>
-                                </div>
-                            )}
-                        </dl>
-                    </div>
-                </div>
-            ),
-        },
-    ]
+    const handleProviderUpdated = async () => {
+        await loadProviders()
+    }
 
     const healthyCount = Object.values(healthMap).filter(h => h.status === 'healthy').length
     const unhealthyCount = Object.values(healthMap).filter(h => h.status === 'unhealthy').length
@@ -500,7 +159,7 @@ export function RegistryConnections({ autoOpenWizard = false }: RegistryConnecti
                     <h2 className="text-xl font-bold text-ink">Providers</h2>
                     <p className="text-sm text-ink-muted mt-1">Manage database providers and catalog availability.</p>
                 </div>
-                <button onClick={() => { resetWizard(); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-semibold transition-colors">
+                <button onClick={() => { setEditingProvider(null); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-semibold transition-colors">
                     <Plus className="w-4 h-4" /> Register Provider
                 </button>
             </div>
@@ -526,10 +185,66 @@ export function RegistryConnections({ autoOpenWizard = false }: RegistryConnecti
             {isLoading ? (
                 <div className="flex justify-center py-20"><Loader2 className="w-6 h-6 animate-spin text-ink-muted" /></div>
             ) : providers.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed border-glass-border rounded-2xl">
-                    <Server className="w-12 h-12 text-ink-muted mb-4" />
-                    <h3 className="text-lg font-bold text-ink mb-1">No providers</h3>
-                    <p className="text-sm text-ink-muted">Register your first database provider to begin.</p>
+                <div className="overflow-hidden rounded-3xl border border-glass-border bg-gradient-to-br from-slate-50 via-white to-indigo-50/60 dark:from-slate-900 dark:via-slate-900 dark:to-indigo-950/20">
+                    <div className="grid gap-0 md:grid-cols-[1.3fr,0.9fr]">
+                        <div className="p-8 md:p-10">
+                            <div className="mb-4 inline-flex items-center gap-2 rounded-full bg-indigo-500/10 px-4 py-2 text-sm font-medium text-indigo-600 dark:text-indigo-400">
+                                <Sparkles className="h-4 w-4" />
+                                Provider onboarding
+                            </div>
+                            <h3 className="text-2xl font-bold text-ink">Connect your first provider</h3>
+                            <p className="mt-3 max-w-xl text-sm leading-relaxed text-ink-muted">
+                                Providers are the infrastructure layer behind data source onboarding. Once a provider is connected,
+                                you can discover assets, scope them into workspaces, and keep outages isolated to only the places
+                                that use that connection.
+                            </p>
+                            <div className="mt-6 flex flex-wrap items-center gap-3">
+                                <button
+                                    onClick={() => {
+                                        setEditingProvider(null)
+                                        setShowWizard(true)
+                                    }}
+                                    className="flex items-center gap-2 rounded-xl bg-indigo-500 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-indigo-600"
+                                >
+                                    <Plus className="h-4 w-4" />
+                                    Start provider onboarding
+                                </button>
+                                <span className="text-xs text-ink-muted">You can test the connection before moving to data sources.</span>
+                            </div>
+                        </div>
+
+                        <div className="border-t border-glass-border bg-black/[0.02] p-8 dark:bg-white/[0.02] md:border-l md:border-t-0">
+                            <div className="space-y-4">
+                                <div className="flex items-start gap-3">
+                                    <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-500">
+                                        <Server className="h-4 w-4" />
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-semibold text-ink">1. Register infrastructure</p>
+                                        <p className="mt-1 text-sm text-ink-muted">Choose FalkorDB, Neo4j, or DataHub and add connection details.</p>
+                                    </div>
+                                </div>
+                                <div className="flex items-start gap-3">
+                                    <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-500">
+                                        <Zap className="h-4 w-4" />
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-semibold text-ink">2. Validate connectivity</p>
+                                        <p className="mt-1 text-sm text-ink-muted">Synodic checks the provider before you continue into asset discovery.</p>
+                                    </div>
+                                </div>
+                                <div className="flex items-start gap-3">
+                                    <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-xl bg-violet-500/10 text-violet-500">
+                                        <Globe className="h-4 w-4" />
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-semibold text-ink">3. Discover sources</p>
+                                        <p className="mt-1 text-sm text-ink-muted">Move straight into asset onboarding with the new provider selected.</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -539,7 +254,18 @@ export function RegistryConnections({ autoOpenWizard = false }: RegistryConnecti
                 </div>
             )}
 
-            <AdminWizard title={editingProvider ? `Edit ${editingProvider.name}` : 'Register Provider'} steps={wizardSteps} isOpen={showWizard} onClose={() => { setShowWizard(false); setEditingProvider(null); resetWizard() }} onComplete={editingProvider ? handleEditComplete : handleWizardComplete} isSubmitting={wizSubmitting} completionLabel={editingProvider ? 'Save Changes' : 'Connect'} />
+            <ProviderOnboardingWizard
+                isOpen={showWizard}
+                mode={editingProvider ? 'edit' : 'create'}
+                provider={editingProvider}
+                providers={providers}
+                onClose={() => {
+                    setShowWizard(false)
+                    setEditingProvider(null)
+                }}
+                onCreated={handleProviderCreated}
+                onUpdated={handleProviderUpdated}
+            />
 
             <DeleteProviderDialog
                 provider={deleteTarget}

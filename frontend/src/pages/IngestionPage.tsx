@@ -8,7 +8,6 @@ import { workspaceService } from '@/services/workspaceService'
 import { RegistryConnections } from '@/components/admin/RegistryConnections'
 import { RegistryAssets } from '@/components/admin/RegistryAssets'
 import { RegistryJobHistory } from '@/components/admin/RegistryJobHistory'
-import { FirstRunHero } from '@/components/admin/FirstRunHero'
 import { OnboardingProgress } from '@/components/admin/OnboardingProgress'
 
 type IngestionTab = 'providers' | 'assets' | 'jobs'
@@ -27,7 +26,6 @@ export function IngestionPage() {
 
     const [counts, setCounts] = useState({ providers: -1, catalogs: 0, workspaces: 0, hasOntology: false })
     const [loadError, setLoadError] = useState<string | null>(null)
-    const [startProviderOnboarding, setStartProviderOnboarding] = useState(false)
 
     useEffect(() => {
         document.title = 'Ingestion · Synodic'
@@ -69,12 +67,6 @@ export function IngestionPage() {
         return () => { cancelled = true }
     }, [activeTab])
 
-    useEffect(() => {
-        if (counts.providers > 0 && startProviderOnboarding) {
-            setStartProviderOnboarding(false)
-        }
-    }, [counts.providers, startProviderOnboarding])
-
     const handleStageClick = (tab: string) => {
         if (tab === 'workspaces') {
             navigate('/workspaces')
@@ -83,17 +75,6 @@ export function IngestionPage() {
         if (tab === 'providers' || tab === 'assets') {
             setSearchParams({ tab })
         }
-    }
-
-    if (counts.providers === 0 && !loadError && !startProviderOnboarding) {
-        return (
-            <FirstRunHero
-                onGetStarted={() => {
-                    setStartProviderOnboarding(true)
-                    setSearchParams({ tab: 'providers' })
-                }}
-            />
-        )
     }
 
     if (counts.providers === -1) return null
@@ -164,11 +145,7 @@ export function IngestionPage() {
                 aria-labelledby={`ingestion-tab-${activeTab}`}
                 className="flex-1 min-h-0"
             >
-                {activeTab === 'providers' && (
-                    <RegistryConnections
-                        autoOpenWizard={startProviderOnboarding}
-                    />
-                )}
+                {activeTab === 'providers' && <RegistryConnections />}
                 {activeTab === 'assets' && <RegistryAssets />}
                 {activeTab === 'jobs' && <RegistryJobHistory />}
             </div>
