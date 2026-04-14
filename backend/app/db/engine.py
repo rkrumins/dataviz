@@ -13,6 +13,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -51,19 +52,55 @@ DATABASE_URL: str = _build_db_url()
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+_pragmas_logged: bool = False
+
+
+def _install_sqlite_pragmas(engine: AsyncEngine) -> None:
+    """Attach a connect-time listener that applies WAL + concurrency pragmas.
+
+    Addresses the reader-vs-writer contention that caused `database is
+    locked` errors under sustained aggregation load: WAL turns SQLite into
+    MVCC so readiness polls no longer block on the aggregation worker's
+    checkpoint commits; `busy_timeout` makes contended writers wait instead
+    of failing immediately.
+    """
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, _connection_record):
+        global _pragmas_logged
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            journal_mode_row = cursor.fetchone()
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA temp_store=MEMORY")
+            if not _pragmas_logged:
+                mode = journal_mode_row[0] if journal_mode_row else "?"
+                logger.info(
+                    "SQLite pragmas applied (journal_mode=%s, synchronous=NORMAL, "
+                    "busy_timeout=5000ms, foreign_keys=ON, temp_store=MEMORY)",
+                    mode,
+                )
+                _pragmas_logged = True
+        finally:
+            cursor.close()
 
 
 def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         connect_args = {}
-        if DATABASE_URL.startswith("sqlite"):
+        is_sqlite = DATABASE_URL.startswith("sqlite")
+        if is_sqlite:
             connect_args["check_same_thread"] = False
         _engine = create_async_engine(
             DATABASE_URL,
             echo=os.getenv("DB_ECHO", "false").lower() == "true",
             connect_args=connect_args,
         )
+        if is_sqlite:
+            _install_sqlite_pragmas(_engine)
     return _engine
 
 

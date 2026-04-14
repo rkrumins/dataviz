@@ -45,6 +45,27 @@ function ensureStoreSubscribed() {
     })
 }
 
+/**
+ * Merge multiple AbortSignals into one that aborts if any input aborts.
+ * Prefers the native AbortSignal.any() when available; falls back to a
+ * manual listener chain for older runtimes.
+ */
+function mergeSignals(signals: AbortSignal[]): AbortSignal {
+    const filtered = signals.filter((s): s is AbortSignal => !!s)
+    if (filtered.length === 1) return filtered[0]
+    const anyFn = (AbortSignal as { any?: (sigs: AbortSignal[]) => AbortSignal }).any
+    if (typeof anyFn === 'function') return anyFn(filtered)
+    const controller = new AbortController()
+    for (const s of filtered) {
+        if (s.aborted) {
+            controller.abort((s as { reason?: unknown }).reason)
+            break
+        }
+        s.addEventListener('abort', () => controller.abort((s as { reason?: unknown }).reason), { once: true })
+    }
+    return controller.signal
+}
+
 export async function authFetch<T>(url: string, init?: RequestInit): Promise<T> {
     ensureStoreSubscribed()
 
@@ -60,10 +81,13 @@ export async function authFetch<T>(url: string, init?: RequestInit): Promise<T> 
 
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), 6_000)
+        const signal = init?.signal
+            ? mergeSignals([controller.signal, init.signal])
+            : controller.signal
 
         let res: Response
         try {
-            res = await fetch(url, { ...init, headers, signal: controller.signal })
+            res = await fetch(url, { ...init, headers, signal })
         } catch (err) {
             clearTimeout(timer)
             if (err instanceof DOMException && err.name === 'AbortError') {

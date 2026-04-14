@@ -160,10 +160,17 @@ export const providerService = {
         return request<void>(`${ADMIN_API}/${id}`, { method: 'DELETE' })
     },
 
-    async test(id: string): Promise<ConnectionTestResult> {
+    async test(
+        id: string,
+        opts?: { signal?: AbortSignal; timeoutMs?: number },
+    ): Promise<ConnectionTestResult> {
         const result = await request<ConnectionTestResult>(
             `${ADMIN_API}/${id}/test`,
-            { method: 'POST' },
+            {
+                method: 'POST',
+                ...(opts?.signal ? { signal: opts.signal } : {}),
+                ...(opts?.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+            } as RequestInit,
         )
         // Clean up raw driver errors in the response
         if (!result.success && result.error) {
