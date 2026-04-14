@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { providerService, type ConnectionTestResult, type ProviderImpactResponse, type ProviderResponse } from '@/services/providerService'
 import { useProviderHealthSweep } from '@/hooks/useProviderHealthSweep'
 import { DeleteProviderDialog } from './DeleteProviderDialog'
+import { FirstRunHero } from './FirstRunHero'
 import { ProviderOnboardingWizard } from './ProviderOnboardingWizard'
 import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
 
@@ -63,7 +64,13 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
                     </button>
                     <button onClick={onScan} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 transition-colors"><RefreshCw className="w-3 h-3" /> Discover Sources</button>
                     <button onClick={onEdit} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-ink-secondary hover:text-ink transition-colors"><Edit2 className="w-3 h-3" /> Edit</button>
-                    <button onClick={onDelete} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 transition-colors ml-auto"><Trash2 className="w-3 h-3" /></button>
+                    <button
+                        onClick={onDelete}
+                        aria-label={`Delete provider ${provider.name}`}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 transition-colors ml-auto"
+                    >
+                        <Trash2 className="w-3 h-3" />
+                    </button>
                     <button onClick={() => setExpanded(!expanded)} className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors">
                         {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                     </button>
@@ -121,10 +128,8 @@ export function RegistryConnections() {
 
     const deleteProvider = async () => {
         if (!deleteTarget) return
-        try { await providerService.delete(deleteTarget.id) } catch (err) { console.error('Failed to delete provider', err) }
-        setDeleteTarget(null)
-        setDeleteImpact(null)
-        loadProviders()
+        await providerService.delete(deleteTarget.id)
+        await loadProviders()
     }
 
     const handleEditProvider = (p: ProviderResponse) => {
@@ -185,61 +190,71 @@ export function RegistryConnections() {
             {isLoading ? (
                 <div className="flex justify-center py-20"><Loader2 className="w-6 h-6 animate-spin text-ink-muted" /></div>
             ) : providers.length === 0 ? (
-                <div className="overflow-hidden rounded-3xl border border-glass-border bg-gradient-to-br from-slate-50 via-white to-indigo-50/60 dark:from-slate-900 dark:via-slate-900 dark:to-indigo-950/20">
-                    <div className="grid gap-0 md:grid-cols-[1.3fr,0.9fr]">
-                        <div className="p-8 md:p-10">
-                            <div className="mb-4 inline-flex items-center gap-2 rounded-full bg-indigo-500/10 px-4 py-2 text-sm font-medium text-indigo-600 dark:text-indigo-400">
-                                <Sparkles className="h-4 w-4" />
-                                Provider onboarding
-                            </div>
-                            <h3 className="text-2xl font-bold text-ink">Connect your first provider</h3>
-                            <p className="mt-3 max-w-xl text-sm leading-relaxed text-ink-muted">
-                                Providers are the infrastructure layer behind data source onboarding. Once a provider is connected,
-                                you can discover assets, scope them into workspaces, and keep outages isolated to only the places
-                                that use that connection.
-                            </p>
-                            <div className="mt-6 flex flex-wrap items-center gap-3">
-                                <button
-                                    onClick={() => {
-                                        setEditingProvider(null)
-                                        setShowWizard(true)
-                                    }}
-                                    className="flex items-center gap-2 rounded-xl bg-indigo-500 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-indigo-600"
-                                >
-                                    <Plus className="h-4 w-4" />
-                                    Start provider onboarding
-                                </button>
-                                <span className="text-xs text-ink-muted">You can test the connection before moving to data sources.</span>
-                            </div>
-                        </div>
+                <div className="space-y-6">
+                    <FirstRunHero
+                        embedded
+                        onGetStarted={() => {
+                            setEditingProvider(null)
+                            setShowWizard(true)
+                        }}
+                    />
 
-                        <div className="border-t border-glass-border bg-black/[0.02] p-8 dark:bg-white/[0.02] md:border-l md:border-t-0">
-                            <div className="space-y-4">
-                                <div className="flex items-start gap-3">
-                                    <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-500">
-                                        <Server className="h-4 w-4" />
-                                    </div>
-                                    <div>
-                                        <p className="text-sm font-semibold text-ink">1. Register infrastructure</p>
-                                        <p className="mt-1 text-sm text-ink-muted">Choose FalkorDB, Neo4j, or DataHub and add connection details.</p>
-                                    </div>
+                    <div className="overflow-hidden rounded-3xl border border-glass-border bg-gradient-to-br from-slate-50 via-white to-indigo-50/60 dark:from-slate-900 dark:via-slate-900 dark:to-indigo-950/20">
+                        <div className="grid gap-0 md:grid-cols-[1.3fr,0.9fr]">
+                            <div className="p-8 md:p-10">
+                                <div className="mb-4 inline-flex items-center gap-2 rounded-full bg-indigo-500/10 px-4 py-2 text-sm font-medium text-indigo-600 dark:text-indigo-400">
+                                    <Sparkles className="h-4 w-4" />
+                                    Provider onboarding
                                 </div>
-                                <div className="flex items-start gap-3">
-                                    <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-500">
-                                        <Zap className="h-4 w-4" />
-                                    </div>
-                                    <div>
-                                        <p className="text-sm font-semibold text-ink">2. Validate connectivity</p>
-                                        <p className="mt-1 text-sm text-ink-muted">Synodic checks the provider before you continue into asset discovery.</p>
-                                    </div>
+                                <h3 className="text-2xl font-bold text-ink">Connect your first provider</h3>
+                                <p className="mt-3 max-w-xl text-sm leading-relaxed text-ink-muted">
+                                    Providers are the infrastructure layer behind data source onboarding. Once a provider is connected,
+                                    you can discover assets, scope them into workspaces, and keep outages isolated to only the places
+                                    that use that connection.
+                                </p>
+                                <div className="mt-6 flex flex-wrap items-center gap-3">
+                                    <button
+                                        onClick={() => {
+                                            setEditingProvider(null)
+                                            setShowWizard(true)
+                                        }}
+                                        className="flex items-center gap-2 rounded-xl bg-indigo-500 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-indigo-600"
+                                    >
+                                        <Plus className="h-4 w-4" />
+                                        Start provider onboarding
+                                    </button>
+                                    <span className="text-xs text-ink-muted">You can test the connection before moving to data sources.</span>
                                 </div>
-                                <div className="flex items-start gap-3">
-                                    <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-xl bg-violet-500/10 text-violet-500">
-                                        <Globe className="h-4 w-4" />
+                            </div>
+
+                            <div className="border-t border-glass-border bg-black/[0.02] p-8 dark:bg-white/[0.02] md:border-l md:border-t-0">
+                                <div className="space-y-4">
+                                    <div className="flex items-start gap-3">
+                                        <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-500">
+                                            <Server className="h-4 w-4" />
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-semibold text-ink">1. Register infrastructure</p>
+                                            <p className="mt-1 text-sm text-ink-muted">Choose FalkorDB, Neo4j, or DataHub and add connection details.</p>
+                                        </div>
                                     </div>
-                                    <div>
-                                        <p className="text-sm font-semibold text-ink">3. Discover sources</p>
-                                        <p className="mt-1 text-sm text-ink-muted">Move straight into asset onboarding with the new provider selected.</p>
+                                    <div className="flex items-start gap-3">
+                                        <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-500">
+                                            <Zap className="h-4 w-4" />
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-semibold text-ink">2. Validate connectivity</p>
+                                            <p className="mt-1 text-sm text-ink-muted">Synodic checks the provider before you continue into asset discovery.</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-start gap-3">
+                                        <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-xl bg-violet-500/10 text-violet-500">
+                                            <Globe className="h-4 w-4" />
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-semibold text-ink">3. Discover sources</p>
+                                            <p className="mt-1 text-sm text-ink-muted">Move straight into asset onboarding with the new provider selected.</p>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
