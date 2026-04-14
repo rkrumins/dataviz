@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 
 interface FirstRunHeroProps {
     onGetStarted: () => void
+    embedded?: boolean
 }
 
 const STAGES = [
@@ -37,9 +38,16 @@ const STAGES = [
     },
 ] as const
 
-export function FirstRunHero({ onGetStarted }: FirstRunHeroProps) {
+export function FirstRunHero({ onGetStarted, embedded = false }: FirstRunHeroProps) {
     return (
-        <div className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-canvas px-6">
+        <div
+            className={cn(
+                'relative overflow-hidden bg-canvas px-6',
+                embedded
+                    ? 'rounded-3xl border border-glass-border bg-gradient-to-br from-canvas-elevated via-canvas to-indigo-50/40 py-10'
+                    : 'flex min-h-screen flex-col items-center justify-center',
+            )}
+        >
             {/* ── Animated background blobs ── */}
             <div
                 className="pointer-events-none absolute -left-40 -top-40 h-[500px] w-[500px] rounded-full bg-indigo-500/10 blur-3xl"
@@ -52,7 +60,10 @@ export function FirstRunHero({ onGetStarted }: FirstRunHeroProps) {
 
             {/* ── Heading ── */}
             <motion.h1
-                className="relative z-10 text-center text-3xl font-bold text-ink"
+                className={cn(
+                    'relative z-10 text-center font-bold text-ink',
+                    embedded ? 'text-2xl md:text-3xl' : 'text-3xl',
+                )}
                 initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.5 }}
@@ -62,7 +73,10 @@ export function FirstRunHero({ onGetStarted }: FirstRunHeroProps) {
 
             {/* ── Subheading ── */}
             <motion.p
-                className="relative z-10 mx-auto mt-3 max-w-md text-center text-sm text-ink-secondary"
+                className={cn(
+                    'relative z-10 mx-auto mt-3 text-center text-sm text-ink-secondary',
+                    embedded ? 'max-w-2xl' : 'max-w-md',
+                )}
                 initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.5, delay: 0.1 }}
@@ -72,13 +86,29 @@ export function FirstRunHero({ onGetStarted }: FirstRunHeroProps) {
             </motion.p>
 
             {/* ── Stage cards row ── */}
-            <div className="relative z-10 mt-10 flex items-center gap-3">
+            <div
+                className={cn(
+                    'relative z-10 mt-10',
+                    embedded
+                        ? 'grid gap-3 md:grid-cols-4'
+                        : 'flex items-center gap-3',
+                )}
+            >
                 {STAGES.map((stage, index) => {
                     const Icon = stage.icon
                     return (
-                        <div key={stage.title} className="flex items-center gap-3">
+                        <div
+                            key={stage.title}
+                            className={cn(
+                                'flex items-center gap-3',
+                                embedded && 'min-w-0',
+                            )}
+                        >
                             <motion.div
-                                className="glass-panel-subtle flex w-40 flex-col items-center rounded-2xl p-5 text-center"
+                                className={cn(
+                                    'glass-panel-subtle flex flex-col items-center rounded-2xl p-5 text-center',
+                                    embedded ? 'w-full' : 'w-40',
+                                )}
                                 initial={{ opacity: 0, y: 20 }}
                                 animate={{ opacity: 1, y: 0 }}
                                 transition={{ duration: 0.4, delay: index * 0.15 }}
@@ -99,7 +129,7 @@ export function FirstRunHero({ onGetStarted }: FirstRunHeroProps) {
                                 </span>
                             </motion.div>
 
-                            {index < STAGES.length - 1 && (
+                            {!embedded && index < STAGES.length - 1 && (
                                 <ChevronRight className="h-4 w-4 shrink-0 animate-pulse text-ink-muted" />
                             )}
                         </div>
@@ -125,7 +155,7 @@ export function FirstRunHero({ onGetStarted }: FirstRunHeroProps) {
             </motion.button>
 
             <motion.span
-                className="relative z-10 mt-3 text-[10px] uppercase tracking-wider text-ink-muted"
+                className="relative z-10 mt-3 block text-center text-[10px] uppercase tracking-wider text-ink-muted"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 transition={{ duration: 0.5, delay: 0.9 }}
