@@ -195,3 +195,89 @@ async def test_provider_status_endpoint_uses_negative_cache(test_client: AsyncCl
     assert body[0]["status"] == "unavailable"
     assert body[0]["lastCheckedAt"] is not None
     assert body[0]["error"]
+
+
+async def test_test_connection_checks_unsaved_provider_details_without_persisting(
+    test_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _HealthyProvider:
+        async def get_stats(self):
+            return {"node_count": 1}
+
+    created: dict[str, object] = {}
+
+    def _create_provider_instance(provider_type, host, port, asset_name, tls_enabled, creds):
+        created.update({
+            "provider_type": provider_type,
+            "host": host,
+            "port": port,
+            "asset_name": asset_name,
+            "tls_enabled": tls_enabled,
+            "creds": creds,
+        })
+        return _HealthyProvider()
+
+    monkeypatch.setattr(provider_registry, "_create_provider_instance", _create_provider_instance)
+
+    resp = await test_client.post(
+        "/api/v1/admin/providers/test-connection",
+        json={
+            "name": "Unsaved Provider",
+            "providerType": "falkordb",
+            "host": "graph.internal",
+            "port": 6379,
+            "tlsEnabled": True,
+            "credentials": {"username": "demo", "password": "secret"},
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+    assert resp.json()["latencyMs"] is not None
+    assert created == {
+        "provider_type": "falkordb",
+        "host": "graph.internal",
+        "port": 6379,
+        "asset_name": None,
+        "tls_enabled": True,
+        "creds": {"username": "demo", "password": "secret", "token": None},
+    }
+
+    providers_resp = await test_client.get("/api/v1/admin/providers")
+    assert providers_resp.status_code == 200
+    assert providers_resp.json() == []
+
+
+async def test_test_connection_returns_failure_payload_for_unreachable_provider(
+    test_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _BrokenProvider:
+        async def get_stats(self):
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(
+        provider_registry,
+        "_create_provider_instance",
+        lambda *args, **kwargs: _BrokenProvider(),
+    )
+
+    resp = await test_client.post(
+        "/api/v1/admin/providers/test-connection",
+        json={
+            "name": "Unreachable Provider",
+            "providerType": "falkordb",
+            "host": "graph.internal",
+            "port": 6379,
+            "tlsEnabled": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "success": False,
+        "latencyMs": None,
+        "error": "connection refused",
+        "providerVersion": None,
+    }

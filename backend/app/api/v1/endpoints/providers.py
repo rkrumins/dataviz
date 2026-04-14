@@ -66,6 +66,37 @@ def _negative_cache_error(provider_id: str) -> str | None:
     return f"Provider recently failed. Retrying in {retry_in:.0f}s."
 
 
+def _provider_type_value(provider_type) -> str:
+    return provider_type.value if hasattr(provider_type, "value") else str(provider_type)
+
+
+async def _run_connectivity_probe(
+    *,
+    provider_type,
+    host: str | None,
+    port: int | None,
+    tls_enabled: bool,
+    creds: dict | None,
+) -> ConnectionTestResult:
+    instance = provider_registry._create_provider_instance(
+        _provider_type_value(provider_type),
+        host,
+        port,
+        None,
+        tls_enabled,
+        creds,
+    )
+    try:
+        t0 = time.monotonic()
+        await asyncio.wait_for(instance.get_stats(), timeout=10)
+        latency = (time.monotonic() - t0) * 1000
+        return ConnectionTestResult(success=True, latencyMs=round(latency, 1))
+    except asyncio.TimeoutError:
+        return ConnectionTestResult(success=False, error="Connection timed out after 10s")
+    except Exception as exc:
+        return ConnectionTestResult(success=False, error=str(exc))
+
+
 @router.get("/status")
 async def list_provider_statuses(
     session: AsyncSession = Depends(get_db_session),
@@ -124,6 +155,20 @@ async def list_providers(
 ):
     """List all registered providers."""
     return await provider_repo.list_providers(session)
+
+
+@router.post("/test-connection", response_model=ConnectionTestResult)
+async def test_unsaved_provider_connection(
+    req: ProviderCreateRequest = Body(...),
+):
+    creds = req.credentials.model_dump() if req.credentials else None
+    return await _run_connectivity_probe(
+        provider_type=req.provider_type,
+        host=req.host,
+        port=req.port,
+        tls_enabled=req.tls_enabled,
+        creds=creds,
+    )
 
 
 @router.post("", response_model=ProviderResponse, status_code=201)
@@ -233,18 +278,13 @@ async def test_provider(provider_id: str = Path(...)):
     _test_inflight[provider_id] = future
     try:
         # 3. Outbound provider call — no DB session held during these 10s.
-        instance = provider_registry._create_provider_instance(
-            ptype, host, port, None, tls, creds,
+        result = await _run_connectivity_probe(
+            provider_type=ptype,
+            host=host,
+            port=port,
+            tls_enabled=tls,
+            creds=creds,
         )
-        try:
-            t0 = time.monotonic()
-            await asyncio.wait_for(instance.get_stats(), timeout=10)
-            latency = (time.monotonic() - t0) * 1000
-            result = ConnectionTestResult(success=True, latencyMs=round(latency, 1))
-        except asyncio.TimeoutError:
-            result = ConnectionTestResult(success=False, error="Connection timed out after 10s")
-        except Exception as exc:
-            result = ConnectionTestResult(success=False, error=str(exc))
 
         _test_cache[provider_id] = (time.monotonic(), fingerprint, result)
         if not future.done():

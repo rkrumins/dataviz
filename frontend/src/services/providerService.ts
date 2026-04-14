@@ -128,7 +128,7 @@ function friendlyError(raw: string): string {
     return detail
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+async function request<T>(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
         headers: { 'Content-Type': 'application/json', ...init?.headers },
@@ -159,6 +159,22 @@ export const providerService = {
             method: 'POST',
             body: JSON.stringify(req),
         })
+    },
+
+    async testConnection(
+        req: ProviderCreateRequest,
+        opts?: { signal?: AbortSignal; timeoutMs?: number },
+    ): Promise<ConnectionTestResult> {
+        const result = await request<ConnectionTestResult>(`${ADMIN_API}/test-connection`, {
+            method: 'POST',
+            body: JSON.stringify(req),
+            ...(opts?.signal ? { signal: opts.signal } : {}),
+            ...(opts?.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+        })
+        if (!result.success && result.error) {
+            result.error = friendlyError(result.error)
+        }
+        return result
     },
 
     update(id: string, req: ProviderUpdateRequest): Promise<ProviderResponse> {
