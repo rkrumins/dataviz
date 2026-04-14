@@ -26,10 +26,13 @@ class AggregationDispatcher(Protocol):
 class InProcessDispatcher:
     """Runs worker in-process via asyncio with full task lifecycle management.
 
-    Key guarantees (CRIT-3):
-    - Tasks are stored in _active_tasks to prevent GC collection
-    - done_callback logs unhandled exceptions (safety net)
-    - Worker's run() handles DB status updates; this is the last-resort guard
+    Cross-process duplicate-dispatch protection comes from the upstream
+    Postgres advisory lock in `reservation.claim_exclusive` — by the time
+    a job_id reaches `dispatch()`, exactly one caller has the right to
+    create it. We don't need a per-DS asyncio.Lock here on top.
+
+    Tasks are stored in _active_tasks to prevent GC collection; done_callback
+    logs unhandled exceptions (safety net).
     """
 
     def __init__(self, worker: "AggregationWorker") -> None:

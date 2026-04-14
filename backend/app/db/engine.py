@@ -64,14 +64,64 @@ _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
+def _pool_kwargs() -> dict:
+    """Resolve pool-sizing knobs from env (Phase 2.5 §2.5.1).
+
+    Defaults are sized for the web tier (`SYNODIC_ROLE=web`, ~4 uvicorn
+    workers per replica). Worker / control-plane tiers should override
+    these in their deployment manifests — see plan §6.7. Reading via env
+    keeps deployment-time tuning out of the codebase.
+    """
+    return {
+        "pool_size": int(os.getenv("DB_POOL_SIZE", "20")),
+        "max_overflow": int(os.getenv("DB_POOL_MAX_OVERFLOW", "10")),
+        "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT_SECS", "10")),
+        "pool_recycle": int(os.getenv("DB_POOL_RECYCLE_SECS", "1800")),
+        "pool_pre_ping": os.getenv("DB_POOL_PRE_PING", "true").lower() == "true",
+    }
+
+
 def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
+        kw = _pool_kwargs()
         _engine = create_async_engine(
             DATABASE_URL,
             echo=os.getenv("DB_ECHO", "false").lower() == "true",
+            **kw,
+        )
+        # Self-documenting startup line so deployments can verify the
+        # effective config without grepping env vars in the host.
+        logger.info(
+            "Engine pool: size=%d, max_overflow=%d, timeout=%ds, "
+            "recycle=%ds, pre_ping=%s",
+            kw["pool_size"], kw["max_overflow"], kw["pool_timeout"],
+            kw["pool_recycle"], kw["pool_pre_ping"],
         )
     return _engine
+
+
+@asynccontextmanager
+async def with_short_session() -> AsyncGenerator[AsyncSession, None]:
+    """Short-lived session — for endpoints that make outbound graph calls.
+
+    Phase 2.5 §2.5.2: the rule is `never hold a DB session across an
+    outbound network call`. Use this in any endpoint that follows the
+    pattern: open session → fetch row(s) → close session → make outbound
+    call → optionally reopen session for the result write.
+
+    Functionally identical to `get_async_session()`; named separately so
+    `grep with_short_session` produces an audit list of endpoints that
+    have committed to the discipline.
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:

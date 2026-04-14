@@ -15,6 +15,15 @@ class AggregationTriggerRequest(BaseModel):
     ontology_id: Optional[str] = Field(None, alias="ontologyId")
     projection_mode: str = Field("in_source", alias="projectionMode")
     batch_size: int = Field(1000, alias="batchSize", ge=100, le=50000)
+    # Phase 2 §2.2 — caller-supplied idempotency token. Two POSTs sharing
+    # this key for the same data source within the past 60 minutes
+    # collapse to the original job (200 OK with the existing job ID).
+    # No key supplied → unique-per-call semantics, may 409 on dup.
+    idempotency_key: Optional[str] = Field(
+        None,
+        alias="idempotencyKey",
+        max_length=255,
+    )
 
     class Config:
         populate_by_name = True

@@ -949,12 +949,18 @@ class OutboxEventORM(Base):
 
     id = Column(Text, primary_key=True, default=lambda: f"evt_{uuid.uuid4().hex[:12]}")
     event_type = Column(Text, nullable=False)         # e.g. user.created, user.approved
+    # Phase 1.5 §1.5.6 — domain-prefixed event payload contract.
+    event_version = Column(Integer, nullable=False, default=1, server_default="1")  # payload schema version
+    aggregate_type = Column(Text, nullable=True)      # e.g. "workspace", "ontology"
+    aggregate_id = Column(Text, nullable=True)        # the entity id this event refers to
     payload = Column(Text, nullable=False, default="{}")  # JSON
     processed = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)
 
     __table_args__ = (
         Index("idx_outbox_processed_created", "processed", "created_at"),
+        Index("idx_outbox_aggregate", "aggregate_type", "aggregate_id"),
+        Index("idx_outbox_event_type", "event_type"),
     )
 
     def __repr__(self) -> str:
