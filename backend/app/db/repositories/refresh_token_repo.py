@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import insert, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import RevokedRefreshJtiORM
@@ -64,30 +64,40 @@ class SQLAlchemyRefreshStore:
         )
         return result.scalar_one_or_none() is not None
 
+    async def _insert_ignore(self, *, jti: str, family_id: str, expires_at_iso: str) -> None:
+        """Insert a revocation row, swallowing duplicates.
+
+        Implemented as INSERT + IntegrityError catch so the same code
+        runs on SQLite (dev/tests) and Postgres (prod) without a
+        dialect-specific dispatch. A duplicate is benign — the jti is
+        already revoked, which is exactly the state we wanted.
+        """
+        try:
+            await self._session.execute(
+                insert(RevokedRefreshJtiORM).values(
+                    jti=jti,
+                    family_id=family_id,
+                    revoked_at=_now_iso(),
+                    expires_at=expires_at_iso,
+                )
+            )
+            await self._session.flush()
+        except IntegrityError:
+            await self._session.rollback()
+
     async def revoke_jti(
         self, jti: str, family_id: str, expires_at_iso: str,
     ) -> None:
-        # Use INSERT OR IGNORE so a benign retry doesn't blow up.
-        # Postgres parity will need ON CONFLICT DO NOTHING when the
-        # backend moves off SQLite.
-        stmt = sqlite_insert(RevokedRefreshJtiORM).values(
-            jti=jti,
-            family_id=family_id,
-            revoked_at=_now_iso(),
-            expires_at=expires_at_iso,
-        ).prefix_with("OR IGNORE")
-        await self._session.execute(stmt)
-        await self._session.flush()
+        await self._insert_ignore(
+            jti=jti, family_id=family_id, expires_at_iso=expires_at_iso,
+        )
 
     async def revoke_family(self, family_id: str) -> None:
-        stmt = sqlite_insert(RevokedRefreshJtiORM).values(
+        await self._insert_ignore(
             jti=_family_sentinel(family_id),
             family_id=family_id,
-            revoked_at=_now_iso(),
-            expires_at=_far_future_iso(),
-        ).prefix_with("OR IGNORE")
-        await self._session.execute(stmt)
-        await self._session.flush()
+            expires_at_iso=_far_future_iso(),
+        )
 
 
 def make_refresh_store(session: AsyncSession) -> SQLAlchemyRefreshStore:

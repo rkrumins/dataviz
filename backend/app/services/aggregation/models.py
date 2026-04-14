@@ -7,7 +7,7 @@ batch materialization. The worker reads everything from this record.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, Column, ForeignKey, Index, Integer, Text
+from sqlalchemy import CheckConstraint, Column, ForeignKey, Index, Integer, Text, text
 from backend.app.db.engine import Base
 
 
@@ -51,6 +51,13 @@ class AggregationJobORM(Base):
     graph_fingerprint_before = Column(Text, nullable=True)
     graph_fingerprint_after = Column(Text, nullable=True)
 
+    # ── Idempotency (Phase 2 §2.2) ───────────────────────────────────
+    # Optional caller-supplied key. Two triggers within 60 min sharing a key
+    # for the same data_source_id collapse to the original job (returns 200,
+    # not 409). Partial unique index lets the column be null for the vast
+    # majority of jobs without enforcing uniqueness on NULL.
+    idempotency_key = Column(Text, nullable=True)
+
     # ── Timestamps ───────────────────────────────────────────────────
     started_at = Column(Text, nullable=True)
     completed_at = Column(Text, nullable=True)
@@ -61,6 +68,13 @@ class AggregationJobORM(Base):
     __table_args__ = (
         Index("ix_agg_jobs_ds_status", "data_source_id", "status"),
         Index("ix_agg_jobs_created_at", "created_at"),
+        Index(
+            "ix_agg_jobs_idem_active",
+            "data_source_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
         CheckConstraint(
             "status IN ('pending', 'running', 'completed', 'failed', 'cancelled')",
             name="ck_agg_jobs_status",

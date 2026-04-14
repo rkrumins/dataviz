@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import ReactDOM from 'react-dom/client'
 import { RouterProvider } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -6,6 +6,7 @@ import { router } from './routes'
 import './styles/globals.css'
 import { GraphProvider } from '@/providers/GraphProviderContext'
 import { BackendHealthBanner } from '@/components/layout/BackendHealthBanner'
+import { useAuthStore } from '@/store/auth'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -24,6 +25,21 @@ export function getQueryClient(): QueryClient | null {
   return queryClient
 }
 
+/**
+ * Validate the access cookie against the server exactly once on app boot
+ * and again whenever the auth store is reset to ``idle`` (e.g. by tests).
+ * The store is the only source of truth for ``isAuthenticated``; route
+ * guards read from it. Children render normally — components that want
+ * to gate on the resolved status check ``status === 'loading'`` themselves.
+ */
+function AuthBootstrap({ children }: { children: React.ReactNode }) {
+  const bootstrap = useAuthStore((s) => s.bootstrap)
+  useEffect(() => {
+    void bootstrap()
+  }, [bootstrap])
+  return <>{children}</>
+}
+
 // GraphProvider manages the RemoteGraphProvider lifecycle internally,
 // creating a workspace-scoped instance whenever the active workspace changes.
 // RouterProvider handles URL-based navigation; AppLayout (inside routes)
@@ -31,14 +47,16 @@ export function getQueryClient(): QueryClient | null {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <div className="h-screen w-screen flex flex-col overflow-hidden">
-        <BackendHealthBanner />
-        <div className="flex-1 overflow-hidden">
-          <GraphProvider>
-            <RouterProvider router={router} />
-          </GraphProvider>
+      <AuthBootstrap>
+        <div className="h-screen w-screen flex flex-col overflow-hidden">
+          <BackendHealthBanner />
+          <div className="flex-1 overflow-hidden">
+            <GraphProvider>
+              <RouterProvider router={router} />
+            </GraphProvider>
+          </div>
         </div>
-      </div>
+      </AuthBootstrap>
     </QueryClientProvider>
   </React.StrictMode>,
 )

@@ -117,6 +117,12 @@ class TestMergeExtraConfig:
 
 
 class TestCacheBehavior:
+    async def test_get_provider_requires_connection_id(self):
+        reg = ProviderRegistry()
+
+        with pytest.raises(ValueError, match="connection_id is required"):
+            await reg.get_provider(None, session=None)
+
     async def test_evict_all_clears_all_caches(self):
         reg = ProviderRegistry()
         stub = _StubProvider()

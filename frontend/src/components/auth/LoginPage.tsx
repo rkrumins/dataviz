@@ -10,7 +10,7 @@ export function LoginPage() {
     const [password, setPassword] = useState('')
     const navigate = useNavigate()
 
-    const { login, error, clearError, isLoading, isAuthenticated } = useAuthStore()
+    const { login, error, clearError, isLoading, isAuthenticated, status } = useAuthStore()
 
     // If already authenticated, redirect to dashboard
     useEffect(() => {
@@ -26,6 +26,16 @@ export function LoginPage() {
         if (!email || !password || isLoading) return
         const ok = await login(email, password)
         if (ok) navigate('/', { replace: true })
+    }
+
+    // Avoid flashing the form to a user who's about to be redirected to
+    // the dashboard because their cookie is still valid.
+    if (status === 'idle' || status === 'loading') {
+        return (
+            <div className="min-h-screen w-full flex items-center justify-center bg-canvas">
+                <div className="w-8 h-8 border-2 border-ink-muted/30 border-t-accent-lineage rounded-full animate-spin" />
+            </div>
+        )
     }
 
     return (

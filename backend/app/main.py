@@ -299,6 +299,11 @@ app.add_middleware(CSRFMiddleware)
 
 app.include_router(api_router, prefix="/api/v1")
 
+# Internal pool-pressure metrics (Phase 2.5 §2.5.3) — opt-in via
+# INTERNAL_METRICS_ENABLED=true. Restrict at ingress in production.
+from .middleware.db_metrics import router as db_metrics_router  # noqa: E402
+app.include_router(db_metrics_router)
+
 
 # ------------------------------------------------------------------ #
 # Health endpoint                                                       #
@@ -360,9 +365,19 @@ async def provider_health_check():
     Per-workspace provider health — returns status for each data source.
     The frontend uses this to show health badges and warn users before
     navigating to a workspace with a dead provider.
+
+    Phase 2 §2.4: bounded fan-out so one hung provider can't take the
+    whole endpoint down. Concurrency cap of 5, per-probe timeout of 4s,
+    overall wall-clock cap of 12s. Probes that exceed the wall clock are
+    returned as `{"status": "unknown"}` — the endpoint is always 200 OK
+    with partial results, never a 5xx because of slow upstreams.
     """
     from .db.repositories.workspace_repo import list_workspaces
     from .db.repositories.data_source_repo import list_data_sources
+
+    PROBE_CONCURRENCY = 5
+    PER_PROBE_TIMEOUT = 4.0     # seconds — tightened from 5s
+    OVERALL_TIMEOUT = 12.0      # seconds — partial results returned past this
 
     providers: dict = {}
 
@@ -370,32 +385,53 @@ async def provider_health_check():
         async with get_async_session() as session:
             workspaces = await list_workspaces(session)
 
-            # Build tasks for concurrent health checks
-            async def check_provider(ws_id: str, ds_id: str, ds_provider_id: str):
-                key = f"{ws_id}:{ds_id}"
-                try:
-                    provider = await asyncio.wait_for(
-                        provider_registry.get_provider_for_workspace(ws_id, session, ds_id),
-                        timeout=5,
-                    )
-                    await asyncio.wait_for(provider.get_stats(), timeout=5)
-                    return key, {"status": "healthy", "providerId": ds_provider_id}
-                except Exception as exc:
-                    return key, {"status": "unhealthy", "error": str(exc)[:200]}
-
-            tasks = []
+            sem = asyncio.Semaphore(PROBE_CONCURRENCY)
+            ds_meta: list[tuple[str, str, str]] = []
             for ws in workspaces:
                 sources = await list_data_sources(session, ws.id)
                 for ds in sources:
-                    tasks.append(check_provider(ws.id, ds.id, ds.provider_id))
+                    ds_meta.append((ws.id, ds.id, ds.provider_id))
 
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for item in results:
-                    if isinstance(item, Exception):
+            async def check_provider(ws_id: str, ds_id: str, ds_provider_id: str):
+                key = f"{ws_id}:{ds_id}"
+                async with sem:
+                    try:
+                        provider = await asyncio.wait_for(
+                            provider_registry.get_provider_for_workspace(ws_id, session, ds_id),
+                            timeout=PER_PROBE_TIMEOUT,
+                        )
+                        await asyncio.wait_for(provider.get_stats(), timeout=PER_PROBE_TIMEOUT)
+                        return key, {"status": "healthy", "providerId": ds_provider_id}
+                    except Exception as exc:
+                        return key, {"status": "unhealthy", "error": str(exc)[:200]}
+
+            if ds_meta:
+                tasks = [
+                    asyncio.create_task(check_provider(ws_id, ds_id, prov_id))
+                    for ws_id, ds_id, prov_id in ds_meta
+                ]
+                done, pending = await asyncio.wait(tasks, timeout=OVERALL_TIMEOUT)
+
+                for task in done:
+                    try:
+                        key, status = task.result()
+                        providers[key] = status
+                    except Exception:
+                        # Per-task failure already encoded by check_provider's
+                        # try/except — anything reaching here is unexpected.
                         continue
-                    key, status = item
-                    providers[key] = status
+
+                # Probes that exceeded the wall clock — cancel and surface
+                # as "unknown" so the UI can distinguish "broken" from
+                # "we don't know yet".
+                for i, task in enumerate(tasks):
+                    if task in pending:
+                        task.cancel()
+                        ws_id, ds_id, _ = ds_meta[i]
+                        providers[f"{ws_id}:{ds_id}"] = {
+                            "status": "unknown",
+                            "error": f"Probe exceeded {OVERALL_TIMEOUT:.0f}s wall clock",
+                        }
 
     except Exception as exc:
         return {"providers": {}, "error": str(exc)[:200]}

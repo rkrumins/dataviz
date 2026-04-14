@@ -1,48 +1,60 @@
 /**
- * Shared authenticated fetch wrapper.
+ * Authenticated fetch wrapper.
  *
- * Attaches the JWT access token from the auth store to every request.
- * On 401, marks the session as expired so the UI can prompt re-auth
- * without nuking the current page state.
+ * Session lives in HttpOnly cookies set by the backend, so every call
+ * uses ``credentials: 'include'`` (the cookies are otherwise stripped
+ * for cross-origin requests). For state-changing methods we forward
+ * the CSRF token from the readable ``nx_csrf`` cookie as the
+ * ``X-CSRF-Token`` header — the double-submit comparison is what proves
+ * the request was initiated by a same-origin script.
  *
- * Concurrent 401s (e.g. admin page mount with parallel fetches + the banner
- * poll) are queued: only one overlay shows, and each failed request is
- * transparently retried with the fresh token once the user re-authenticates.
- * This prevents the double-prompt where a stale in-flight 401 re-triggers the
- * overlay after a successful re-auth.
+ * On 401 we attempt a single transparent ``POST /auth/refresh``. If it
+ * succeeds the original request is retried with the rotated cookies;
+ * if it fails the auth store is moved to ``unauthenticated`` and the
+ * caller's promise rejects with ``Error("Session expired")``. Concurrent
+ * 401s share a single in-flight refresh — the other requests wait on
+ * the same promise rather than spawning duplicate refreshes.
  */
 
 import { useAuthStore } from '@/store/auth'
 import { useHealthStore } from '@/store/health'
+import { authService } from '@/services/authService'
 
-type Waiter = { resolve: () => void; reject: (err: unknown) => void }
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+const CSRF_COOKIE = 'nx_csrf'
+const CSRF_HEADER = 'X-CSRF-Token'
 
-let reauthWaiters: Waiter[] = []
-let storeSubscribed = false
-
-function ensureStoreSubscribed() {
-    if (storeSubscribed) return
-    storeSubscribed = true
-    useAuthStore.subscribe((state, prev) => {
-        // Re-auth succeeded: flush queued requests to retry with the new token.
-        if (
-            prev.sessionExpired &&
-            !state.sessionExpired &&
-            state.isAuthenticated &&
-            state.accessToken
-        ) {
-            const waiters = reauthWaiters
-            reauthWaiters = []
-            waiters.forEach(w => w.resolve())
+function readCookie(name: string): string | null {
+    if (typeof document === 'undefined') return null
+    const prefix = `${name}=`
+    for (const part of document.cookie.split(';')) {
+        const trimmed = part.trim()
+        if (trimmed.startsWith(prefix)) {
+            return decodeURIComponent(trimmed.slice(prefix.length))
         }
-        // User signed out (either from the overlay or elsewhere): reject queued
-        // requests so callers can unwind cleanly instead of hanging forever.
-        if (prev.isAuthenticated && !state.isAuthenticated) {
-            const waiters = reauthWaiters
-            reauthWaiters = []
-            waiters.forEach(w => w.reject(new Error('Signed out')))
+    }
+    return null
+}
+
+/** Single in-flight refresh promise — concurrent 401s wait on it instead
+ *  of each spawning their own refresh. Cleared when the refresh resolves. */
+let refreshInFlight: Promise<boolean> | null = null
+
+async function tryRefresh(): Promise<boolean> {
+    if (refreshInFlight) return refreshInFlight
+    refreshInFlight = (async () => {
+        try {
+            await authService.refresh()
+            return true
+        } catch {
+            return false
+        } finally {
+            // Run on the next tick so concurrent waiters share this result
+            // before a brand-new refresh can start.
+            queueMicrotask(() => { refreshInFlight = null })
         }
-    })
+    })()
+    return refreshInFlight
 }
 
 /**
@@ -67,16 +79,16 @@ function mergeSignals(signals: AbortSignal[]): AbortSignal {
 }
 
 export async function authFetch<T>(url: string, init?: RequestInit): Promise<T> {
-    ensureStoreSubscribed()
+    const method = (init?.method ?? 'GET').toUpperCase()
 
-    const doRequest = async (): Promise<T> => {
-        const requestToken = useAuthStore.getState().accessToken
+    const doRequest = async (allowRefreshRetry: boolean): Promise<T> => {
         const headers: Record<string, string> = {
             'Content-Type': 'application/json',
             ...(init?.headers as Record<string, string>),
         }
-        if (requestToken) {
-            headers['Authorization'] = `Bearer ${requestToken}`
+        if (!SAFE_METHODS.has(method)) {
+            const csrf = readCookie(CSRF_COOKIE)
+            if (csrf) headers[CSRF_HEADER] = csrf
         }
 
         const controller = new AbortController()
@@ -87,7 +99,13 @@ export async function authFetch<T>(url: string, init?: RequestInit): Promise<T> 
 
         let res: Response
         try {
-            res = await fetch(url, { ...init, headers, signal })
+            res = await fetch(url, {
+                ...init,
+                method,
+                headers,
+                credentials: 'include',
+                signal,
+            })
         } catch (err) {
             clearTimeout(timer)
             if (err instanceof DOMException && err.name === 'AbortError') {
@@ -100,26 +118,11 @@ export async function authFetch<T>(url: string, init?: RequestInit): Promise<T> 
         }
         clearTimeout(timer)
 
-        if (res.status === 401) {
-            const store = useAuthStore.getState()
-
-            // Stale 401: the token rotated while this request was in flight,
-            // so the user already re-authenticated. Retry silently.
-            if (store.accessToken && store.accessToken !== requestToken) {
-                return doRequest()
-            }
-
-            // Genuine expiry. Show the overlay at most once regardless of how
-            // many concurrent requests are currently failing.
-            if (!store.sessionExpired) {
-                store.expireSession()
-            }
-
-            // Wait for the user to re-authenticate (or sign out), then retry.
-            await new Promise<void>((resolve, reject) => {
-                reauthWaiters.push({ resolve, reject })
-            })
-            return doRequest()
+        if (res.status === 401 && allowRefreshRetry) {
+            const refreshed = await tryRefresh()
+            if (refreshed) return doRequest(false)
+            useAuthStore.getState().handleSessionLost()
+            throw new Error('Session expired')
         }
 
         if (!res.ok) {
@@ -138,5 +141,5 @@ export async function authFetch<T>(url: string, init?: RequestInit): Promise<T> 
         return res.json()
     }
 
-    return doRequest()
+    return doRequest(true)
 }

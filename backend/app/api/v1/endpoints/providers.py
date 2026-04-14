@@ -8,7 +8,7 @@ from typing import List, Tuple
 from fastapi import APIRouter, Body, Depends, HTTPException, Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.engine import get_db_session
+from backend.app.db.engine import get_db_session, with_short_session
 from backend.app.db.repositories import provider_repo
 from backend.app.registry.provider_registry import provider_registry
 from backend.common.models.management import (
@@ -111,22 +111,31 @@ async def get_provider_impact(
 
 
 @router.post("/{provider_id}/test", response_model=ConnectionTestResult)
-async def test_provider(
-    provider_id: str = Path(...),
-    session: AsyncSession = Depends(get_db_session),
-):
+async def test_provider(provider_id: str = Path(...)):
     """Test connectivity to a registered provider.
+
+    Phase 2.5 §2.5.2 — short-session pattern: open a session only long
+    enough to fetch the provider row + credentials, close it, then
+    perform the (potentially slow) outbound call WITHOUT holding a DB
+    connection. Keeps the pool drained even when many providers are
+    being probed against unreachable hosts.
 
     Caches the last result for 60s keyed on the provider's updated_at so
     any config change instantly invalidates; concurrent probes of the
     same provider collapse onto a single in-flight awaitable.
     """
-    prov_row = await provider_repo.get_provider_orm(session, provider_id)
-    if not prov_row:
-        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
-
-    fingerprint = str(prov_row.updated_at or "")
-
+    # 1. Short DB read — close the session before the outbound call.
+    async with with_short_session() as session:
+        prov_row = await provider_repo.get_provider_orm(session, provider_id)
+        if not prov_row:
+            raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+        fingerprint = str(prov_row.updated_at or "")
+        ptype = prov_row.provider_type
+        host = prov_row.host
+        port = prov_row.port
+        tls = prov_row.tls_enabled
+        creds = await provider_repo.get_credentials(session, provider_id)
+    # 2. Cache + in-flight dedup — pure in-memory, no DB.
     cached = _test_cache.get(provider_id)
     if cached is not None:
         cached_at, cached_fp, cached_result = cached
@@ -141,10 +150,9 @@ async def test_provider(
     future: "asyncio.Future[ConnectionTestResult]" = loop.create_future()
     _test_inflight[provider_id] = future
     try:
-        creds = await provider_repo.get_credentials(session, provider_id)
+        # 3. Outbound provider call — no DB session held during these 10s.
         instance = provider_registry._create_provider_instance(
-            prov_row.provider_type, prov_row.host, prov_row.port,
-            None, prov_row.tls_enabled, creds,
+            ptype, host, port, None, tls, creds,
         )
         try:
             t0 = time.monotonic()
@@ -168,22 +176,28 @@ async def test_provider(
             future.set_exception(RuntimeError("Provider test aborted"))
 
 
-@router.get("/{provider_id}/assets", response_model=AssetListResponse)
-async def list_assets(
-    provider_id: str = Path(...),
-    session: AsyncSession = Depends(get_db_session),
-):
-    """List available assets (e.g. graphs, databases, topics) on this provider."""
-    prov_row = await provider_repo.get_provider_orm(session, provider_id)
-    if not prov_row:
-        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+async def _load_provider_for_outbound(provider_id: str, asset_name: str | None):
+    """Short-session helper: fetch the row + creds, snapshot fields, close session.
 
-    try:
+    Centralises the Phase 2.5 §2.5.2 pattern shared by every endpoint
+    below this comment. Returns a ready-to-instantiate provider object.
+    """
+    async with with_short_session() as session:
+        prov_row = await provider_repo.get_provider_orm(session, provider_id)
+        if not prov_row:
+            raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
         creds = await provider_repo.get_credentials(session, provider_id)
-        instance = provider_registry._create_provider_instance(
-            prov_row.provider_type, prov_row.host, prov_row.port,
-            None, prov_row.tls_enabled, creds,
+        ptype, host, port, tls = (
+            prov_row.provider_type, prov_row.host, prov_row.port, prov_row.tls_enabled,
         )
+    return provider_registry._create_provider_instance(ptype, host, port, asset_name, tls, creds)
+
+
+@router.get("/{provider_id}/assets", response_model=AssetListResponse)
+async def list_assets(provider_id: str = Path(...)):
+    """List available assets on this provider. Short-session pattern."""
+    instance = await _load_provider_for_outbound(provider_id, None)
+    try:
         graphs = await asyncio.wait_for(instance.list_graphs(), timeout=10)
         return AssetListResponse(assets=graphs)
     except asyncio.TimeoutError:
@@ -196,20 +210,10 @@ async def list_assets(
 async def get_asset_stats(
     provider_id: str = Path(...),
     asset_name: str = Path(...),
-    session: AsyncSession = Depends(get_db_session),
 ):
-    """Get raw physical metadata (node/edge counts) for a specific asset."""
-    prov_row = await provider_repo.get_provider_orm(session, provider_id)
-    if not prov_row:
-        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
-
+    """Get raw physical metadata (node/edge counts). Short-session pattern."""
+    instance = await _load_provider_for_outbound(provider_id, asset_name)
     try:
-        creds = await provider_repo.get_credentials(session, provider_id)
-        # Instantiate with asset_name as the target graph/database key
-        instance = provider_registry._create_provider_instance(
-            prov_row.provider_type, prov_row.host, prov_row.port,
-            asset_name, prov_row.tls_enabled, creds,
-        )
         raw = await asyncio.wait_for(instance.get_stats(), timeout=10)
         return PhysicalGraphStatsResponse(
             nodeCount=raw.get("node_count", raw.get("nodeCount", 0)),
@@ -227,19 +231,10 @@ async def get_asset_stats(
 async def discover_schema(
     provider_id: str = Path(...),
     asset_name: str = Body(None, embed=True),
-    session: AsyncSession = Depends(get_db_session),
 ):
-    """Introspect an asset's schema to discover labels, property keys, and suggest a mapping."""
-    prov_row = await provider_repo.get_provider_orm(session, provider_id)
-    if not prov_row:
-        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
-
+    """Introspect an asset's schema. Short-session pattern."""
+    instance = await _load_provider_for_outbound(provider_id, asset_name)
     try:
-        creds = await provider_repo.get_credentials(session, provider_id)
-        instance = provider_registry._create_provider_instance(
-            prov_row.provider_type, prov_row.host, prov_row.port,
-            asset_name, prov_row.tls_enabled, creds,
-        )
         schema = await asyncio.wait_for(instance.discover_schema(), timeout=15)
         return schema
     except asyncio.TimeoutError:
