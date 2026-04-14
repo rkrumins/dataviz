@@ -1,0 +1,60 @@
+# docker-compose.dev.yml — Postgres v16 for local development.
+#
+# Standalone from docker-compose.yml / docker-compose.quickstart.yml.
+# Brings up only the management Postgres so you can run `uvicorn` /
+# `alembic` against it from your terminal.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d
+#   export MANAGEMENT_DB_URL='postgresql+asyncpg://synodic:synodic@localhost:5432/synodic'
+#   cd backend && alembic upgrade head
+#   uvicorn backend.app.main:app --reload --port 8000
+#
+# Restart (data preserved — the named volume below survives `down`):
+#   docker compose -f docker-compose.dev.yml down
+#   docker compose -f docker-compose.dev.yml up -d
+#
+# Wipe and rebuild (DESTROYS data — opt-in only when iterating on schema
+# changes that need a clean baseline):
+#   docker compose -f docker-compose.dev.yml down -v
+#
+# Credentials are dev-only — never reuse for production.
+
+services:
+  postgres-dev:
+    image: postgres:16-alpine
+    container_name: synodic-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: synodic
+      POSTGRES_PASSWORD: synodic
+      POSTGRES_DB: synodic
+      # Tuned for dev: fast restart, no fsync penalty. NEVER use in prod.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - synchronous_commit=off       # dev only — sacrifices durability for speed
+      - -c
+      - fsync=off                    # dev only — same caveat
+      - -c
+      - log_statement=none
+      - -c
+      - log_min_duration_statement=200
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synodic -d synodic"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres_dev_data:
+    name: synodic-postgres-dev-data

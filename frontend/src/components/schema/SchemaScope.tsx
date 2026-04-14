@@ -137,6 +137,7 @@ function SchemaScopeBody({
       provider: scopedProvider,
       isLoading: false,
       error: null,
+      scopeKind: 'ready',
       workspaceId,
       dataSourceId: dataSourceId ?? null,
       providerReady: true,

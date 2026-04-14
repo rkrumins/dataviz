@@ -8,7 +8,7 @@ import os
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import GraphConnectionORM
@@ -71,7 +71,7 @@ def _to_response(row: GraphConnectionORM) -> ConnectionResponse:
         port=row.port,
         graphName=row.graph_name,
         tlsEnabled=bool(row.tls_enabled),
-        isPrimary=bool(row.is_primary),
+        isPrimary=bool(getattr(row, "is_primary", False)),
         isActive=bool(row.is_active),
         extraConfig=json.loads(row.extra_config) if row.extra_config else None,
         createdAt=row.created_at,
@@ -110,23 +110,14 @@ async def get_connection_orm(
     return result.scalar_one_or_none()
 
 
-async def get_primary_connection(
-    session: AsyncSession,
-) -> Optional[GraphConnectionORM]:
-    result = await session.execute(
-        select(GraphConnectionORM).where(
-            GraphConnectionORM.is_primary == True,  # noqa: E712
-            GraphConnectionORM.is_active == True,
-        )
-    )
-    return result.scalar_one_or_none()
-
-
 async def create_connection(
     session: AsyncSession,
     req: ConnectionCreateRequest,
     make_primary: bool = False,
 ) -> ConnectionResponse:
+    # Global "primary connection" semantics were removed. Keep the argument for
+    # backward compatibility with older call sites, but ignore it at runtime.
+    _ = make_primary
     creds_blob = _encrypt(req.credentials.model_dump() if req.credentials else {})
     row = GraphConnectionORM(
         name=req.name,
@@ -136,7 +127,6 @@ async def create_connection(
         graph_name=req.graph_name,
         credentials=creds_blob,
         tls_enabled=req.tls_enabled,
-        is_primary=make_primary,
         is_active=True,
         extra_config=json.dumps(req.extra_config) if req.extra_config else None,
     )
@@ -181,21 +171,6 @@ async def delete_connection(
 ) -> bool:
     result = await session.execute(
         delete(GraphConnectionORM).where(GraphConnectionORM.id == connection_id)
-    )
-    return result.rowcount > 0
-
-
-async def set_primary(
-    session: AsyncSession, connection_id: str
-) -> bool:
-    """Demote all others, then promote target."""
-    await session.execute(
-        update(GraphConnectionORM).values(is_primary=False)
-    )
-    result = await session.execute(
-        update(GraphConnectionORM)
-        .where(GraphConnectionORM.id == connection_id)
-        .values(is_primary=True, updated_at=datetime.now(timezone.utc).isoformat())
     )
     return result.rowcount > 0
 

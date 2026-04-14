@@ -10,7 +10,6 @@ from ..models.graph import (
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
     CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult, TopLevelNodesResult,
 )
-import os
 
 from ..providers.base import GraphDataProvider
 
@@ -19,20 +18,6 @@ if TYPE_CHECKING:
     from ..ontology.protocols import OntologyServiceProtocol
 
 logger = logging.getLogger(__name__)
-
-
-def _create_provider() -> GraphDataProvider:
-    """Create graph provider based on GRAPH_PROVIDER env var."""
-    provider_name = os.getenv("GRAPH_PROVIDER", "falkordb").lower()
-    if provider_name == "falkordb":
-        from ..providers.falkordb_provider import FalkorDBProvider
-        return FalkorDBProvider(
-            host=os.getenv("FALKORDB_HOST", "localhost"),
-            port=int(os.getenv("FALKORDB_PORT", "6379")),
-            graph_name=os.getenv("FALKORDB_GRAPH_NAME", "nexus_lineage"),
-            seed_file=os.getenv("FALKORDB_SEED_FILE"),
-        )
-    raise ValueError(f"Unknown GRAPH_PROVIDER: {provider_name!r}")
 
 
 # Granularity is now expressed as an entity type ID string (e.g. "dataset", "term").
@@ -104,8 +89,9 @@ class ContextEngine:
     ) -> "ContextEngine":
         """
         Create a ContextEngine backed by the specified connection.
-        When connection_id is None, uses the primary connection from registry.
         """
+        if connection_id is None:
+            raise ValueError("connection_id is required")
         provider = await registry.get_provider(connection_id, session)
         engine = cls(provider=provider)
         engine._connection_id = connection_id
@@ -1354,5 +1340,3 @@ class ContextEngine:
             ))
         return sorted(result, key=lambda o: (not o.allowed, o.edge_type))
 
-# Singleton instance - provider selected via GRAPH_PROVIDER env (mock | falkordb)
-context_engine = ContextEngine(provider=_create_provider())

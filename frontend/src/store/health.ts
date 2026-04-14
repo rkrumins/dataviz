@@ -3,7 +3,7 @@
  *
  * Polls /api/v1/health periodically and accepts failure reports from authFetch.
  * Drives the BackendHealthBanner with four states:
- *   healthy → degraded → unreachable → recovered → healthy
+ *   healthy → unreachable → recovered → healthy
  *
  * Anti-flapping: requires 2 consecutive failures before surfacing the banner.
  * Adaptive polling: 30s when healthy, 5s when unhealthy.
@@ -11,8 +11,8 @@
 import { create } from 'zustand'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 
-export type HealthStatus = 'healthy' | 'degraded' | 'unreachable' | 'recovered'
-export type HealthReason = 'none' | 'network-offline' | 'backend-down' | 'backend-degraded'
+export type HealthStatus = 'healthy' | 'unreachable' | 'recovered'
+export type HealthReason = 'none' | 'network-offline' | 'backend-down'
 
 interface HealthState {
   status: HealthStatus
@@ -100,46 +100,31 @@ export const useHealthStore = create<HealthState>()((set, get) => ({
       const body = await res.json()
       const prevStatus = get().status
 
-      if (body.status === 'degraded') {
-        // Parse dependency details for a helpful message
-        let detail = 'Some backend services are experiencing issues.'
-        const deps = body.dependencies
-        if (deps) {
-          const unhealthy: string[] = []
-          for (const [name, val] of Object.entries(deps)) {
-            const s = typeof val === 'string' ? val : (val as any)?.status ?? ''
-            if (String(s).startsWith('unhealthy')) unhealthy.push(name)
-          }
-          if (unhealthy.length > 0) {
-            detail = `Degraded: ${unhealthy.join(', ')} ${unhealthy.length === 1 ? 'is' : 'are'} unhealthy.`
-          }
-        }
+      if (body.status === 'unhealthy') {
+        const detail = typeof body.dependencies?.management_db === 'string'
+          ? body.dependencies.management_db
+          : 'The backend management database is unavailable.'
+        applyFailure(get, set, 'backend-down', detail)
+        return
+      }
+
+      // Healthy response
+      if (prevStatus === 'unreachable') {
         set({
-          status: 'degraded',
-          reason: 'backend-degraded',
-          detail,
+          status: 'recovered',
+          reason: 'none',
+          detail: 'Backend services are back online.',
           consecutiveFailures: 0,
           lastCheckedAt: Date.now(),
         })
-      } else {
-        // Healthy response
-        if (prevStatus === 'unreachable' || prevStatus === 'degraded') {
-          set({
-            status: 'recovered',
-            reason: 'none',
-            detail: 'Backend services are back online.',
-            consecutiveFailures: 0,
-            lastCheckedAt: Date.now(),
-          })
-        } else if (prevStatus !== 'recovered') {
-          set({
-            status: 'healthy',
-            reason: 'none',
-            detail: null,
-            consecutiveFailures: 0,
-            lastCheckedAt: Date.now(),
-          })
-        }
+      } else if (prevStatus !== 'recovered') {
+        set({
+          status: 'healthy',
+          reason: 'none',
+          detail: null,
+          consecutiveFailures: 0,
+          lastCheckedAt: Date.now(),
+        })
       }
     } catch (err) {
       const classified = classifyError(err)

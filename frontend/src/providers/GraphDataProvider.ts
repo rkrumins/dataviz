@@ -748,7 +748,7 @@ export interface GraphDataProvider {
 // ============================================
 
 export interface GraphProviderContextValue {
-    provider: GraphDataProvider
+    provider: GraphDataProvider | null
     isLoading: boolean
     error: Error | null
 }

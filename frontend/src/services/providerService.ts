@@ -78,6 +78,14 @@ export interface ProviderResponse {
     updatedAt: string
 }
 
+export interface ProviderStatusResponse {
+    id: string
+    name: string
+    status: 'ready' | 'unavailable' | 'unknown'
+    lastCheckedAt: string | null
+    error?: string
+}
+
 export interface SchemaDiscoveryResult {
     labels: string[]
     relationshipTypes: string[]
@@ -136,6 +144,10 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 export const providerService = {
     list(): Promise<ProviderResponse[]> {
         return request<ProviderResponse[]>(ADMIN_API)
+    },
+
+    listStatus(): Promise<ProviderStatusResponse[]> {
+        return request<ProviderStatusResponse[]>(`${ADMIN_API}/status`)
     },
 
     get(id: string): Promise<ProviderResponse> {

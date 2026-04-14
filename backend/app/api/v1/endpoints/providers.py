@@ -4,6 +4,7 @@ Providers are pure infrastructure: host/port/credentials, no graph or ontology.
 """
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import List, Tuple
 from fastapi import APIRouter, Body, Depends, HTTPException, Path
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +35,87 @@ router = APIRouter()
 _TEST_CACHE_TTL_SECS: float = 60.0
 _test_cache: dict[str, Tuple[float, str, ConnectionTestResult]] = {}
 _test_inflight: dict[str, "asyncio.Future[ConnectionTestResult]"] = {}
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _negative_cache_error(provider_id: str) -> str | None:
+    now = time.monotonic()
+    freshest_age: float | None = None
+    expired_keys: list[tuple[str, str]] = []
+
+    for cache_key, failed_at in list(provider_registry._failed_cache.items()):
+        failed_provider_id, _graph_name = cache_key
+        if failed_provider_id != provider_id:
+            continue
+        age = now - failed_at
+        if age < provider_registry.NEGATIVE_CACHE_TTL:
+            freshest_age = age if freshest_age is None else min(freshest_age, age)
+        else:
+            expired_keys.append(cache_key)
+
+    for cache_key in expired_keys:
+        provider_registry._failed_cache.pop(cache_key, None)
+
+    if freshest_age is None:
+        return None
+
+    retry_in = max(0, provider_registry.NEGATIVE_CACHE_TTL - freshest_age)
+    return f"Provider recently failed. Retrying in {retry_in:.0f}s."
+
+
+@router.get("/status")
+async def list_provider_statuses(
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Return provider readiness without affecting overall app health."""
+    providers = await provider_repo.list_providers(session)
+    if not providers:
+        return []
+
+    async def _probe(provider) -> dict:
+        negative_cache_error = _negative_cache_error(provider.id)
+        if negative_cache_error:
+            return {
+                "id": provider.id,
+                "name": provider.name,
+                "status": "unavailable",
+                "lastCheckedAt": _iso_now(),
+                "error": negative_cache_error,
+            }
+
+        if not provider.is_active:
+            return {
+                "id": provider.id,
+                "name": provider.name,
+                "status": "unknown",
+                "lastCheckedAt": None,
+            }
+
+        try:
+            instance = await _load_provider_for_outbound(provider.id, None)
+            await asyncio.wait_for(instance.get_stats(), timeout=1.5)
+            provider_registry._failed_cache.pop((provider.id, ""), None)
+            return {
+                "id": provider.id,
+                "name": provider.name,
+                "status": "ready",
+                "lastCheckedAt": _iso_now(),
+            }
+        except Exception as exc:
+            provider_registry._failed_cache[(provider.id, "")] = time.monotonic()
+            return {
+                "id": provider.id,
+                "name": provider.name,
+                "status": "unavailable",
+                "lastCheckedAt": _iso_now(),
+                "error": str(exc),
+            }
+
+    results = await asyncio.gather(*[_probe(provider) for provider in providers])
+    return results
 
 
 @router.get("", response_model=List[ProviderResponse])

@@ -84,7 +84,11 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
     )
 }
 
-export function RegistryConnections() {
+interface RegistryConnectionsProps {
+    autoOpenWizard?: boolean
+}
+
+export function RegistryConnections({ autoOpenWizard = false }: RegistryConnectionsProps) {
     const navigate = useNavigate()
     const [providers, setProviders] = useState<ProviderResponse[]>([])
     const { healthMap, testOne, refresh: refreshHealth, setHealth } = useProviderHealthSweep(providers)
@@ -134,6 +138,13 @@ export function RegistryConnections() {
     }, [])
 
     useEffect(() => { loadProviders() }, [loadProviders])
+
+    useEffect(() => {
+        if (!autoOpenWizard) return
+        resetWizard()
+        setEditingProvider(null)
+        setShowWizard(true)
+    }, [autoOpenWizard])
 
     const handleDeleteClick = async (p: ProviderResponse) => {
         setDeleteTarget(p)
