@@ -7,7 +7,7 @@ batch materialization. The worker reads everything from this record.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, ForeignKey, Index, Integer, Text
+from sqlalchemy import CheckConstraint, Column, ForeignKey, Index, Integer, Text
 from backend.app.db.engine import Base
 
 
@@ -60,4 +60,17 @@ class AggregationJobORM(Base):
     # ── Index for concurrent job guard + status polling ───────────────
     __table_args__ = (
         Index("ix_agg_jobs_ds_status", "data_source_id", "status"),
+        Index("ix_agg_jobs_created_at", "created_at"),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed', 'cancelled')",
+            name="ck_agg_jobs_status",
+        ),
+        CheckConstraint(
+            "trigger_source IN ('onboarding', 'manual', 'schedule', 'drift', 'api')",
+            name="ck_agg_jobs_trigger_source",
+        ),
+        CheckConstraint(
+            "projection_mode IN ('in_source', 'dedicated')",
+            name="ck_agg_jobs_projection_mode",
+        ),
     )

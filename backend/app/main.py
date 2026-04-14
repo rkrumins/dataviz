@@ -12,12 +12,17 @@ from starlette.responses import JSONResponse
 from .api.v1.api import api_router
 from .db.engine import init_db, close_db, get_async_session
 from .db.seed_templates import seed_templates
+from .db.repositories import user_repo
+from .db.repositories.refresh_token_repo import make_refresh_store
 from .middleware.request_id import RequestIdMiddleware
 from .middleware.logging import StructuredLoggingMiddleware, configure_json_logging
 from .middleware.security_headers import SecurityHeadersMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from .registry.provider_registry import provider_registry
+from backend.auth_service.csrf import CSRFMiddleware
+from backend.auth_service.providers import LocalIdentityProvider, register_provider
+from backend.auth_service.service import LocalIdentityService
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +115,24 @@ async def lifespan(_app: FastAPI):
         "admin wizard handles production onboarding."
     )
 
-    # 4. Wire up the aggregation service
+    # 4. Wire up the auth service. The IdentityService is the single
+    #    boundary every consumer crosses; today it's an in-process
+    #    LocalIdentityService, tomorrow (post-extraction) a remote HTTP
+    #    client implementing the same protocol.
+    register_provider("local", LocalIdentityProvider())
+
+    async def _emit_user_event(session, event_type: str, payload: dict) -> None:
+        await user_repo.create_outbox_event(session, event_type=event_type, payload=payload)
+
+    _app.state.identity_service = LocalIdentityService(
+        session_factory=get_async_session,
+        user_repo=user_repo,
+        refresh_store_factory=make_refresh_store,
+        outbox_emit=_emit_user_event,
+    )
+    logger.info("Auth service initialised (provider=local)")
+
+    # 5. Wire up the aggregation service
     try:
         from .services.aggregation import (
             AggregationService, AggregationWorker,
@@ -251,7 +273,7 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token"],
 )
 
 # GZip compression for responses > 1 KB
@@ -265,6 +287,11 @@ app.add_middleware(RequestIdMiddleware)
 
 # Security headers (X-Content-Type-Options, X-Frame-Options, CSP, HSTS, etc.)
 app.add_middleware(SecurityHeadersMiddleware)
+
+# CSRF double-submit. Innermost so it runs closest to the route — the
+# preceding middleware (CORS, security headers) must complete first so
+# that browser preflight checks succeed before we enforce the CSRF rule.
+app.add_middleware(CSRFMiddleware)
 
 # ------------------------------------------------------------------ #
 # Routers                                                              #

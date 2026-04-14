@@ -144,10 +144,16 @@ Same URLs as Option A. Login credentials are the same unless you changed them in
 If you want to run the backends locally (e.g., with hot-reload) but still use the Dockerized databases:
 
 ```bash
-# Start only the databases
-docker compose up falkordb postgres
+# Start the management Postgres (v16) — dev-only credentials baked in
+docker compose -f docker-compose.dev.yml up -d
 
-# Run viz-service locally
+# Optionally start FalkorDB if you want a graph backend running locally
+docker compose up -d falkordb
+
+# Configure the management DB URL for the local processes
+export MANAGEMENT_DB_URL='postgresql+asyncpg://synodic:synodic@localhost:5432/synodic'
+
+# Run viz-service locally (init_db calls `alembic upgrade head` on startup)
 cd backend
 pip install -r requirements.txt
 uvicorn backend.app.main:app --reload --port 8000
@@ -161,7 +167,58 @@ npm install
 npm run dev    # Vite dev server on http://localhost:5173
 ```
 
-### 6. Stop and clean up
+> **Postgres-only.** Synodic dropped SQLite as of the schema-optimization branch. The management DB is Postgres v16+ in every environment — dev, CI, prod. Trying to start with a non-Postgres `MANAGEMENT_DB_URL` fails fast with a clear error.
+
+### 6. Schema migrations (Alembic)
+
+Synodic uses Alembic to own all schema lifecycle. The application's `init_db()` invokes `alembic upgrade head` automatically on startup, so a regular `uvicorn` boot is enough to migrate the dev DB. For manual control:
+
+```bash
+cd backend
+
+# Apply all pending migrations (idempotent — safe to re-run)
+alembic upgrade head
+
+# Show current revision
+alembic current
+
+# Show history
+alembic history
+
+# Roll back one revision
+alembic downgrade -1
+```
+
+**Stopping vs wiping the dev Postgres:**
+
+The named volume in `docker-compose.dev.yml` survives `down` so your dev data persists across normal restarts:
+
+```bash
+# Stop, keep data (default — your workspaces, ontologies, etc. are preserved)
+docker compose -f docker-compose.dev.yml down
+
+# Bring it back up exactly as you left it
+docker compose -f docker-compose.dev.yml up -d
+```
+
+**Iterating on schema during P1 / P1.5:**
+
+While the baseline migration is `Base.metadata.create_all`, additive ORM changes (new tables, indexes that don't already exist) are picked up by re-running `alembic upgrade head` against the existing DB. Column **additions** to existing tables are *not* — `create_all` only touches missing tables.
+
+For changes that require a clean baseline (renamed columns, dropped constraints, anything that mutates an existing table), wipe the volume explicitly:
+
+```bash
+# DESTROYS dev data — opt-in only
+docker compose -f docker-compose.dev.yml down -v
+docker compose -f docker-compose.dev.yml up -d
+cd backend && alembic upgrade head
+```
+
+Constraints (`CHECK`, `FOREIGN KEY`, `UNIQUE`), soft-delete columns (`deleted_at`, `deleted_by`), and indexes all live on the ORM model declarations and land in the baseline on a fresh DB.
+
+**For real schema evolution (post-baseline):** add a new revision file under `backend/alembic/versions/` with explicit `op.add_column` / `op.create_index` / etc. Production data-preserving migrations are out of scope until the first real production deployment exists.
+
+### 7. Stop and clean up
 
 ```bash
 # Stop (keep data volumes)

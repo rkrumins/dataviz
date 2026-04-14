@@ -1,12 +1,10 @@
 """
-Phase 4 — API endpoint tests for /api/v1/auth/*.
+API endpoint tests for /api/v1/auth/* — the no-cookie subset.
 
-Auth endpoints are public (no get_current_user dependency), so the
-test_client's auth override does not interfere.  Rate limiting (slowapi)
-may trigger 429 responses on repeated calls; tests are kept minimal to
-avoid hitting the limit.
+Cookie-issuing endpoints (/login, /logout, /refresh, /me) are covered in
+``test_auth_cookie_flow.py``. The endpoints exercised here are public
+and rate-limited (slowapi); tests stay minimal to avoid 429s.
 """
-import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,9 +12,11 @@ from backend.app.auth.password import hash_password
 from backend.app.db.repositories import user_repo
 
 
-# ── helpers ────────────────────────────────────────────────────────────
-
-async def _seed_active_user(session: AsyncSession, email: str = "alice@example.com", password: str = "Str0ng!Pass#2026") -> str:
+async def _seed_active_user(
+    session: AsyncSession,
+    email: str = "alice@example.com",
+    password: str = "Str0ng!Pass#2026",
+) -> str:
     """Insert an active user directly via the repo and return the user id."""
     hashed = hash_password(password)
     user = await user_repo.create_user(
@@ -27,6 +27,7 @@ async def _seed_active_user(session: AsyncSession, email: str = "alice@example.c
         last_name="Tester",
         status="active",
     )
+    await user_repo.assign_role(session, user.id, "user")
     await session.commit()
     return user.id
 
@@ -80,42 +81,6 @@ async def test_signup_duplicate_email(test_client: AsyncClient, db_session: Asyn
     assert resp.status_code == 201
 
 
-# ── POST /login ───────────────────────────────────────────────────────
-
-async def test_login_valid(test_client: AsyncClient, db_session: AsyncSession):
-    """Login with correct credentials returns 200 with an access token."""
-    password = "C0mpl3x!Passw0rd#"
-    await _seed_active_user(db_session, email="login@example.com", password=password)
-    resp = await test_client.post(
-        "/api/v1/auth/login",
-        json={"email": "login@example.com", "password": password},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "accessToken" in body
-    assert "user" in body
-    assert body["user"]["email"] == "login@example.com"
-
-
-async def test_login_wrong_password(test_client: AsyncClient, db_session: AsyncSession):
-    """Login with wrong password returns 401."""
-    await _seed_active_user(db_session, email="wrong@example.com")
-    resp = await test_client.post(
-        "/api/v1/auth/login",
-        json={"email": "wrong@example.com", "password": "TotallyWr0ng!"},
-    )
-    assert resp.status_code == 401
-
-
-async def test_login_nonexistent_user(test_client: AsyncClient):
-    """Login for a non-existent email returns 401 (same as wrong password)."""
-    resp = await test_client.post(
-        "/api/v1/auth/login",
-        json={"email": "ghost@example.com", "password": "Whatever1!"},
-    )
-    assert resp.status_code == 401
-
-
 # ── POST /forgot-password ────────────────────────────────────────────
 
 async def test_forgot_password_always_200(test_client: AsyncClient):
@@ -144,7 +109,7 @@ async def test_reset_password_invalid_token(test_client: AsyncClient):
 async def test_protected_endpoint_works_with_override(test_client: AsyncClient):
     """
     Confirm the test_client's auth override lets us reach a protected
-    endpoint (e.g. list providers) without a real JWT.
+    endpoint (e.g. list providers) without a real cookie.
     """
     resp = await test_client.get("/api/v1/admin/providers")
     assert resp.status_code == 200
