@@ -8,9 +8,16 @@ import os
 # Add the workspace root (parent of 'backend') to sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+# Cookie config is read at module-import time. Tests run over plain HTTP
+# (the ASGI transport has no TLS), so disable the Secure flag here before
+# anything in backend.auth_service is loaded — otherwise httpx would
+# refuse to send the cookies back on subsequent requests.
+os.environ.setdefault("AUTH_COOKIE_SECURE", "false")
+
 # ---------------------------------------------------------------------------
 # Imports
 # ---------------------------------------------------------------------------
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 import pytest
@@ -24,27 +31,50 @@ from sqlalchemy.ext.asyncio import (
 
 from backend.app.db.engine import Base, get_db_session
 from backend.app.db import models as _models  # noqa: F401 — register ORM models
+from backend.app.db.repositories import user_repo as _user_repo
+from backend.app.db.repositories.refresh_token_repo import make_refresh_store
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
     require_admin,
 )
+from backend.auth_service.csrf import CSRF_HEADER_NAME
+from backend.auth_service.cookies import CSRF_COOKIE_NAME
+from backend.auth_service.interface import User
+from backend.auth_service.providers import LocalIdentityProvider, register_provider
+from backend.auth_service.service import LocalIdentityService
+
+
+# Process-wide provider registry: register the local provider once for
+# any test that hits /auth/login (or other identity-service code paths).
+register_provider("local", LocalIdentityProvider())
 
 
 # ---------------------------------------------------------------------------
 # Fake user returned by auth overrides
+#
+# Endpoints now receive a ``User`` DTO from ``get_current_user`` (the
+# cross-service identity contract — no more SQLAlchemy ORM leaking into
+# handlers). A separate ``UserORM`` row is still inserted in the test DB
+# so endpoints that resolve creator/author metadata can look the user up.
 # ---------------------------------------------------------------------------
-_FAKE_USER = _models.UserORM(
+_FAKE_USER = User(
     id="usr_test000000",
     email="test@example.com",
-    password_hash="not-a-real-hash",
     first_name="Test",
     last_name="User",
+    role="admin",
     status="active",
     auth_provider="local",
     created_at="2024-01-01T00:00:00Z",
     updated_at="2024-01-01T00:00:00Z",
 )
+
+# Fixed CSRF token used for every request the test client makes. Real
+# clients mint this server-side on /login; here we pre-set it on both
+# sides of the double-submit so handlers that POST/PUT/DELETE pass the
+# CSRF middleware without each test having to log in first.
+_TEST_CSRF_TOKEN = "test-csrf-token"
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +127,7 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def fake_user() -> _models.UserORM:
+def fake_user() -> User:
     """The stub user object injected by auth overrides."""
     return _FAKE_USER
 
@@ -129,13 +159,17 @@ async def test_client(
     db_session.add(_models.UserORM(
         id=_FAKE_USER.id,
         email=_FAKE_USER.email,
-        password_hash=_FAKE_USER.password_hash,
+        password_hash="not-a-real-hash",
         first_name=_FAKE_USER.first_name,
         last_name=_FAKE_USER.last_name,
         status=_FAKE_USER.status,
         auth_provider=_FAKE_USER.auth_provider,
-        created_at=_FAKE_USER.created_at,
-        updated_at=_FAKE_USER.updated_at,
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-01T00:00:00Z",
+    ))
+    db_session.add(_models.UserRoleORM(
+        user_id=_FAKE_USER.id,
+        role_name=_FAKE_USER.role,
     ))
     await db_session.commit()
 
@@ -161,12 +195,30 @@ async def test_client(
     app.dependency_overrides[get_optional_user] = _override_get_optional_user
     app.dependency_overrides[require_admin] = _override_require_admin
 
+    # Wire a real IdentityService against the per-test session so
+    # /api/v1/auth/* endpoints can be exercised end-to-end.
+    @asynccontextmanager
+    async def _test_session_factory():
+        yield db_session
+
+    previous_identity_service = getattr(app.state, "identity_service", None)
+    app.state.identity_service = LocalIdentityService(
+        session_factory=_test_session_factory,
+        user_repo=_user_repo,
+        refresh_store_factory=make_refresh_store,
+    )
+
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(
         transport=transport,
         base_url="http://testserver",
+        # Pre-load the CSRF double-submit so non-GET requests pass the
+        # middleware without each test having to walk through /login.
+        cookies={CSRF_COOKIE_NAME: _TEST_CSRF_TOKEN},
+        headers={CSRF_HEADER_NAME: _TEST_CSRF_TOKEN},
     ) as client:
         yield client
 
     # Clean up overrides so they don't leak between test modules
     app.dependency_overrides.clear()
+    app.state.identity_service = previous_identity_service

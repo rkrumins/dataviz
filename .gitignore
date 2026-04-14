@@ -223,7 +223,15 @@ __marimo__/
 .streamlit/secrets.toml
 
 
+# SQLite was retired in favor of Postgres v16. These patterns keep stray
+# *.db / *-wal / *-shm files out of the working tree on branches that
+# pre-date the cutover.
 nexus_lineage.db
 nexus_core.db
+nexus_core.db-wal
+nexus_core.db-shm
+nexus_core.db.bkp
 backend/nexus_core.db
+backend/nexus_core.db-wal
+backend/nexus_core.db-shm
 backend/nexus_lineage.db

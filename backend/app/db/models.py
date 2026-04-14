@@ -269,6 +269,10 @@ class ProviderORM(Base):
 
     __table_args__ = (
         Index("idx_providers_type", "provider_type"),
+        CheckConstraint(
+            "provider_type IN ('falkordb', 'neo4j', 'datahub', 'mock')",
+            name="ck_providers_provider_type",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -325,6 +329,14 @@ class OntologyORM(Base):
         Index("idx_ontologies_is_system", "is_system"),
         Index("idx_ontologies_schema_id", "schema_id"),
         Index("idx_ontologies_deleted", "deleted_at"),
+        CheckConstraint(
+            "scope IN ('universal', 'workspace')",
+            name="ck_ontologies_scope",
+        ),
+        CheckConstraint(
+            "evolution_policy IN ('reject', 'deprecate', 'migrate')",
+            name="ck_ontologies_evolution_policy",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -406,6 +418,7 @@ class OntologySourceMappingORM(Base):
 
     __table_args__ = (
         Index("idx_osm_data_source", "data_source_id"),
+        Index("idx_osm_ontology", "ontology_id"),
     )
 
     def __repr__(self) -> str:
@@ -426,6 +439,9 @@ class WorkspaceORM(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    # Soft delete (Phase 1 policy: user-visible + cross-referenced → soft)
+    deleted_at = Column(Text, nullable=True, default=None)
+    deleted_by = Column(Text, nullable=True, default=None)
 
     # Relationships
     data_sources = relationship(
@@ -439,6 +455,7 @@ class WorkspaceORM(Base):
 
     __table_args__ = (
         Index("idx_workspaces_is_default", "is_default"),
+        Index("idx_workspaces_deleted_at", "deleted_at"),
     )
 
     def __repr__(self) -> str:
@@ -489,6 +506,9 @@ class WorkspaceDataSourceORM(Base):
     aggregation_schedule = Column(Text, nullable=True)  # Cron expression (e.g., "0 */6 * * *") for periodic checks
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    # Soft delete (Phase 1 policy: user-visible + cross-referenced → soft)
+    deleted_at = Column(Text, nullable=True, default=None)
+    deleted_by = Column(Text, nullable=True, default=None)
 
     # Relationships
     workspace = relationship("WorkspaceORM", back_populates="data_sources")
@@ -507,6 +527,20 @@ class WorkspaceDataSourceORM(Base):
         Index("idx_ds_workspace", "workspace_id"),
         Index("idx_ds_provider", "provider_id"),
         Index("idx_ds_catalog_item", "catalog_item_id"),
+        Index("idx_ds_ontology", "ontology_id"),
+        Index("idx_ds_deleted_at", "deleted_at"),
+        CheckConstraint(
+            "aggregation_status IN ('none', 'pending', 'running', 'ready', 'failed', 'skipped')",
+            name="ck_ds_aggregation_status",
+        ),
+        CheckConstraint(
+            "access_level IS NULL OR access_level IN ('read', 'write', 'admin')",
+            name="ck_ds_access_level",
+        ),
+        CheckConstraint(
+            "projection_mode IS NULL OR projection_mode IN ('in_source', 'dedicated')",
+            name="ck_ds_projection_mode",
+        ),
     )
 
 
@@ -556,6 +590,10 @@ class ContextModelORM(Base):
     __table_args__ = (
         Index("idx_cm_workspace", "workspace_id"),
         Index("idx_cm_template", "is_template"),
+        CheckConstraint(
+            "visibility IN ('private', 'workspace', 'public')",
+            name="ck_context_models_visibility",
+        ),
     )
 
 
@@ -612,6 +650,10 @@ class ViewORM(Base):
         Index("idx_view_visibility", "visibility"),
         Index("idx_view_data_source", "data_source_id"),
         Index("idx_view_deleted_at", "deleted_at"),
+        CheckConstraint(
+            "visibility IN ('private', 'workspace', 'public')",
+            name="ck_views_visibility",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -661,11 +703,18 @@ class DataSourcePollingConfigORM(Base):
     is_enabled = Column(Boolean, nullable=False, default=True)
     interval_seconds = Column(Integer, nullable=False, default=300)
     last_polled_at = Column(Text, nullable=True)                     # ISO string
-    last_status = Column(Text, nullable=False, default="pending")    # pending | success | error 
+    last_status = Column(Text, nullable=False, default="pending")    # pending | success | error
     last_error = Column(Text, nullable=True)
 
     # Relationships
     data_source = relationship("WorkspaceDataSourceORM", back_populates="polling_config")
+
+    __table_args__ = (
+        CheckConstraint(
+            "last_status IN ('pending', 'success', 'error')",
+            name="ck_polling_last_status",
+        ),
+    )
 
     def __repr__(self) -> str:
         return f"<DataSourcePollingConfig ds_id={self.data_source_id!r} enabled={self.is_enabled}>"
@@ -704,6 +753,10 @@ class CatalogItemORM(Base):
         UniqueConstraint("provider_id", "source_identifier", name="uq_catalog_provider_source"),
         Index("idx_catalog_provider", "provider_id"),
         Index("idx_catalog_status", "status"),
+        CheckConstraint(
+            "status IN ('active', 'archived', 'deprecated')",
+            name="ck_catalog_status",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -738,6 +791,14 @@ class UserORM(Base):
     __table_args__ = (
         UniqueConstraint("email", name="uq_users_email"),
         Index("idx_users_status_created", "status", "created_at"),
+        CheckConstraint(
+            "status IN ('pending', 'active', 'suspended')",
+            name="ck_users_status",
+        ),
+        CheckConstraint(
+            "auth_provider IN ('local', 'saml2', 'oidc')",
+            name="ck_users_auth_provider",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -761,6 +822,10 @@ class UserRoleORM(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "role_name", name="uq_user_role"),
         Index("idx_user_roles_user", "user_id"),
+        CheckConstraint(
+            "role_name IN ('admin', 'user', 'viewer')",
+            name="ck_user_roles_role_name",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -784,10 +849,41 @@ class UserApprovalORM(Base):
 
     __table_args__ = (
         Index("idx_user_approvals_user_status", "user_id", "status"),
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected')",
+            name="ck_user_approvals_status",
+        ),
     )
 
     def __repr__(self) -> str:
         return f"<UserApproval user={self.user_id!r} status={self.status!r}>"
+
+
+# ------------------------------------------------------------------ #
+# revoked_refresh_jti  (refresh-token rotation tracking)               #
+# ------------------------------------------------------------------ #
+# Each row records a refresh-token jti that has been consumed (rotated)
+# or revoked (logout / reuse-detection). The auth service consults this
+# table to:
+#   1. Detect refresh-token replay (presented jti already recorded → kill family)
+#   2. Honour explicit revocations (whole-family entries from logout)
+# Owned by the auth service; will move with it during extraction.
+
+class RevokedRefreshJtiORM(Base):
+    __tablename__ = "revoked_refresh_jti"
+
+    jti = Column(Text, primary_key=True)
+    family_id = Column(Text, nullable=False)
+    revoked_at = Column(Text, nullable=False, default=_now)
+    expires_at = Column(Text, nullable=False)  # ISO; rows past this can be GC'd
+
+    __table_args__ = (
+        Index("idx_revoked_refresh_family", "family_id"),
+        Index("idx_revoked_refresh_expires", "expires_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<RevokedRefreshJti jti={self.jti!r} family={self.family_id!r}>"
 
 
 # ------------------------------------------------------------------ #
@@ -813,6 +909,10 @@ class AnnouncementORM(Base):
 
     __table_args__ = (
         Index("idx_announcements_is_active", "is_active"),
+        CheckConstraint(
+            "banner_type IN ('info', 'warning', 'success')",
+            name="ck_announcements_banner_type",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -870,4 +970,14 @@ class SchemaMigrationORM(Base):
 
     key = Column(Text, primary_key=True)
     applied_at = Column(Text, nullable=False, default=_now)
+
+
+# ------------------------------------------------------------------ #
+# Cross-domain registration                                             #
+# ------------------------------------------------------------------ #
+# Domain-owned ORM modules live next to their service code (e.g.,
+# AggregationJobORM under services/aggregation/). Import them here so
+# `Base.metadata` is fully populated whenever this module is imported —
+# Alembic, tests, and any consumer all see the complete schema.
+from backend.app.services.aggregation import models as _aggregation_models  # noqa: E402,F401
 

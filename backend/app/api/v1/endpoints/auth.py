@@ -1,10 +1,17 @@
 """
-Public authentication endpoints: signup, login, forgot-password, reset-password.
+Public authentication endpoints — the no-cookie subset: signup,
+forgot-password, reset-password, verify-invite.
+
+The cookie-issuing endpoints (/login, /logout, /refresh, /me) live in
+``backend.auth_service.api.router`` and are mounted alongside this
+router under /api/v1/auth/. They will follow into the extracted auth
+service in a later move; the flows here remain because they don't yet
+have a clean home in the new module.
 
 POST /api/v1/auth/signup            → 201 + message
-POST /api/v1/auth/login             → 200 + LoginResponse (JWT + user)
 POST /api/v1/auth/forgot-password   → 200 + message (always succeeds)
 POST /api/v1/auth/reset-password    → 200 + message
+GET  /api/v1/auth/verify-invite     → 200 + InviteVerifyResponse
 """
 import logging
 
@@ -13,15 +20,12 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.auth.password import hash_password, verify_password
-from backend.app.auth.jwt import create_access_token
+from backend.app.auth.password import hash_password
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
 from backend.common.models.auth import (
     SignUpRequest,
     SignUpResponse,
-    LoginRequest,
-    LoginResponse,
     UserPublicResponse,
     ForgotPasswordRequest,
     ResetPasswordRequest,
@@ -33,12 +37,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 limiter = Limiter(key_func=get_remote_address)
-
-# Pre-computed Argon2id hash used for constant-time login responses when
-# the user doesn't exist.  The actual plaintext doesn't matter — it just
-# needs to be a valid Argon2id hash so verify_password runs in the same
-# time as a real check.
-_DUMMY_HASH = hash_password("__timing_dummy_do_not_use__")
 
 
 # ── helpers ────────────────────────────────────────────────────────────
@@ -169,48 +167,7 @@ async def signup(
         return SignUpResponse(message="Account created. Awaiting administrator approval.")
 
 
-# ── POST /auth/login ──────────────────────────────────────────────────
-
-@router.post("/login", response_model=LoginResponse)
-@limiter.limit("10/minute")
-async def login(
-    request: Request,
-    body: LoginRequest,
-    session: AsyncSession = Depends(get_db_session),
-):
-    _invalid = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid email or password",
-    )
-
-    # 1. Find user
-    user = await user_repo.get_user_by_email(session, body.email)
-
-    # 2. Verify password — always run a hash comparison to prevent timing
-    #    side-channels that reveal whether an email exists.
-    if user is None:
-        # Dummy verify so the response time is indistinguishable from a real
-        # user with a wrong password (Argon2id is deliberately slow).
-        verify_password(body.password, _DUMMY_HASH)
-        raise _invalid
-
-    if not verify_password(body.password, user.password_hash):
-        raise _invalid
-
-    # 3. Check status — use a single generic message to avoid leaking
-    #    whether an email exists and what state the account is in.
-    if user.status != "active":
-        raise _invalid
-
-    # 4. Build JWT
-    roles = await user_repo.get_user_roles(session, user.id)
-    role = roles[0] if roles else "user"
-    token = create_access_token(user_id=user.id, email=user.email, role=role)
-
-    # 5. Build response
-    user_resp = await _build_user_response(session, user)
-    logger.info("User logged in: %s", user.id)
-    return LoginResponse(accessToken=token, user=user_resp)
+# /auth/login lives in backend.auth_service.api.router (cookie-based).
 
 
 # ── POST /auth/forgot-password ──────────────────────────────────────
