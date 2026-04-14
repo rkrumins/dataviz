@@ -6,10 +6,19 @@ This class has NO dependency on FastAPI, HTTP, the API layer,
 or the ontology module. It is a pure executor.
 
 CRASH RECOVERY CONTRACT:
-- All progress state is checkpointed to DB after each batch
+- Progress state is checkpointed to DB on a coalesced cadence: commit
+  whenever ≥2s has elapsed since the last commit OR ≥5 batches have
+  accumulated, whichever comes first. The outer run()'s finally block
+  always commits on completion/failure, so no progress is ever lost
+  beyond the ≤2s window.
 - Worker reads `last_cursor` on start — resumes from checkpoint
-- MERGE-based writes are idempotent — replaying a partial batch is safe
+- MERGE-based writes are idempotent — replaying the ≤2s gap is safe
 - Recovery is handled by AggregationService (not this class)
+
+WHY COALESCED COMMITS: previously committed per batch, which under
+SQLite with 1000+ batches created sustained write pressure that blocked
+readiness polling. Coalescing cuts write volume ~5× without weakening
+recovery (MERGE idempotency absorbs the replay window).
 
 CURSOR-BASED PAGINATION (CRIT-2):
 - Uses stable cursor on sorted edge identifiers, NOT SKIP/OFFSET
@@ -18,6 +27,7 @@ CURSOR-BASED PAGINATION (CRIT-2):
 """
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -28,6 +38,9 @@ from .models import AggregationJobORM
 from .fingerprint import compute_graph_fingerprint
 
 logger = logging.getLogger(__name__)
+
+_CHECKPOINT_MAX_INTERVAL_SECS: float = 2.0
+_CHECKPOINT_MAX_BATCHES: int = 5
 
 
 def _now() -> str:
@@ -159,26 +172,35 @@ class AggregationWorker:
         containment_types: list[str],
         lineage_types: list[str],
     ) -> dict:
-        """Run batch materialization with DB checkpointing after each batch.
+        """Run batch materialization with coalesced DB checkpointing.
 
         Delegates the actual graph work to the provider's
         materialize_aggregated_edges_batch() method, passing a
-        progress_callback that writes checkpoints to the DB.
+        progress_callback that updates ORM state every batch and commits
+        on a coalesced cadence (see module docstring). The outer run()'s
+        finally block performs the definitive final commit.
         """
+        last_commit_monotonic = time.monotonic()
+        batches_since_commit = 0
 
         async def checkpoint(processed: int, total: int, cursor: Optional[str]) -> None:
-            """Write progress to DB after each batch — the crash recovery point."""
+            nonlocal last_commit_monotonic, batches_since_commit
             job.processed_edges = processed
             job.total_edges = total
             job.last_cursor = cursor
             job.progress = int((processed / total) * 100) if total > 0 else 0
             job.updated_at = _now()
             job.last_checkpoint_at = _now()
-            await session.commit()
-            logger.debug(
-                "Aggregation job %s: %d/%d edges (%d%%)",
-                job.id, processed, total, job.progress,
-            )
+            batches_since_commit += 1
+            elapsed = time.monotonic() - last_commit_monotonic
+            if elapsed >= _CHECKPOINT_MAX_INTERVAL_SECS or batches_since_commit >= _CHECKPOINT_MAX_BATCHES:
+                await session.commit()
+                last_commit_monotonic = time.monotonic()
+                batches_since_commit = 0
+                logger.debug(
+                    "Aggregation job %s: %d/%d edges (%d%%) [committed]",
+                    job.id, processed, total, job.progress,
+                )
 
         result = await provider.materialize_aggregated_edges_batch(
             containment_edge_types=containment_types,

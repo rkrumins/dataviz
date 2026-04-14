@@ -3,7 +3,8 @@ Admin Provider endpoints — CRUD for physical database server registrations.
 Providers are pure infrastructure: host/port/credentials, no graph or ontology.
 """
 import asyncio
-from typing import List
+import time
+from typing import List, Tuple
 from fastapi import APIRouter, Body, Depends, HTTPException, Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,18 @@ from backend.common.models.management import (
 )
 
 router = APIRouter()
+
+# ── Provider test cache + in-flight dedup ──────────────────────────
+# Reason: the frontend "Test All" sweep can fan out N probes against
+# the same provider within seconds. Without a cache, each probe opens
+# a fresh driver connection and (on a dead provider) holds a DB session
+# for 10s. The cache collapses duplicates to the last real result, and
+# the in-flight map collapses concurrent probes to a single awaitable.
+# Keyed on (provider_id, provider.updated_at) so any credential or host
+# change instantly invalidates stale entries without explicit eviction.
+_TEST_CACHE_TTL_SECS: float = 60.0
+_test_cache: dict[str, Tuple[float, str, ConnectionTestResult]] = {}
+_test_inflight: dict[str, "asyncio.Future[ConnectionTestResult]"] = {}
 
 
 @router.get("", response_model=List[ProviderResponse])
@@ -102,27 +115,57 @@ async def test_provider(
     provider_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Test connectivity to a registered provider."""
-    import time
+    """Test connectivity to a registered provider.
+
+    Caches the last result for 60s keyed on the provider's updated_at so
+    any config change instantly invalidates; concurrent probes of the
+    same provider collapse onto a single in-flight awaitable.
+    """
     prov_row = await provider_repo.get_provider_orm(session, provider_id)
     if not prov_row:
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
 
+    fingerprint = str(prov_row.updated_at or "")
+
+    cached = _test_cache.get(provider_id)
+    if cached is not None:
+        cached_at, cached_fp, cached_result = cached
+        if cached_fp == fingerprint and (time.monotonic() - cached_at) < _TEST_CACHE_TTL_SECS:
+            return cached_result
+
+    existing = _test_inflight.get(provider_id)
+    if existing is not None:
+        return await existing
+
+    loop = asyncio.get_running_loop()
+    future: "asyncio.Future[ConnectionTestResult]" = loop.create_future()
+    _test_inflight[provider_id] = future
     try:
-        # Instantiate a temporary provider for testing
         creds = await provider_repo.get_credentials(session, provider_id)
         instance = provider_registry._create_provider_instance(
             prov_row.provider_type, prov_row.host, prov_row.port,
             None, prov_row.tls_enabled, creds,
         )
-        t0 = time.monotonic()
-        await asyncio.wait_for(instance.get_stats(), timeout=10)
-        latency = (time.monotonic() - t0) * 1000
-        return ConnectionTestResult(success=True, latencyMs=round(latency, 1))
-    except asyncio.TimeoutError:
-        return ConnectionTestResult(success=False, error="Connection timed out after 10s")
-    except Exception as exc:
-        return ConnectionTestResult(success=False, error=str(exc))
+        try:
+            t0 = time.monotonic()
+            await asyncio.wait_for(instance.get_stats(), timeout=10)
+            latency = (time.monotonic() - t0) * 1000
+            result = ConnectionTestResult(success=True, latencyMs=round(latency, 1))
+        except asyncio.TimeoutError:
+            result = ConnectionTestResult(success=False, error="Connection timed out after 10s")
+        except Exception as exc:
+            result = ConnectionTestResult(success=False, error=str(exc))
+
+        _test_cache[provider_id] = (time.monotonic(), fingerprint, result)
+        if not future.done():
+            future.set_result(result)
+        return result
+    finally:
+        _test_inflight.pop(provider_id, None)
+        if not future.done():
+            # Guard: if an uncaught exception ever bubbles, don't leave
+            # awaiters hanging forever.
+            future.set_exception(RuntimeError("Provider test aborted"))
 
 
 @router.get("/{provider_id}/assets", response_model=AssetListResponse)
