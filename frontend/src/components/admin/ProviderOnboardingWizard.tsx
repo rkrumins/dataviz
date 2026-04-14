@@ -521,8 +521,8 @@ export function ProviderOnboardingWizard({
   }, [connectivityFingerprint, formData])
 
   const handleSubmit = useCallback(async () => {
-    if (mode === 'create' && connectivityCheck.state !== 'success') {
-      setSubmitError('Run a successful connection test before creating the provider.')
+    if (mode === 'create' && connectivityCheck.state === 'idle') {
+      setSubmitError('Run a connection test before creating the provider.')
       return
     }
 
@@ -554,7 +554,7 @@ export function ProviderOnboardingWizard({
       }
 
       const created = await providerService.create(req)
-      const health = connectivityCheck.result && connectivityCheck.state === 'success'
+      const health = connectivityCheck.result && connectivityCheck.state !== 'idle'
         ? connectivityCheck.result
         : await providerService.test(created.id)
       await onCreated?.(created, health)
@@ -575,8 +575,8 @@ export function ProviderOnboardingWizard({
     }
   }, [connectivityCheck.result, connectivityCheck.state, formData, mode, onClose, onCreated, onUpdated, provider, showToast])
 
-  const requiresSuccessfulConnectivityTest = mode === 'create' && currentStep === 'review'
-  const shouldRunConnectivityTest = requiresSuccessfulConnectivityTest && connectivityCheck.state !== 'success'
+  const requiresConnectivityTest = mode === 'create' && currentStep === 'review'
+  const shouldRunConnectivityTest = requiresConnectivityTest && connectivityCheck.state === 'idle'
   const primaryAction = shouldRunConnectivityTest ? handleTestConnection : handleSubmit
 
   useWizardKeyboard({
@@ -957,7 +957,7 @@ export function ProviderOnboardingWizard({
   )
 
   const renderReviewStep = () => (
-    <div className="max-w-2xl space-y-8">
+    <div className="mx-auto w-full max-w-2xl space-y-8">
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
@@ -979,12 +979,12 @@ export function ProviderOnboardingWizard({
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.08 }}
-        className="overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white dark:border-slate-700 dark:from-slate-800 dark:to-slate-900"
+        className="mx-auto w-full overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white shadow-sm dark:border-slate-700 dark:from-slate-800 dark:to-slate-900"
       >
         <div className="divide-y divide-slate-200 dark:divide-slate-700">
-          <div className="p-5">
-            <div className="mb-3 flex items-center gap-3">
-              <div className={cn('flex h-10 w-10 items-center justify-center rounded-lg border', currentConfig.color)}>
+          <div className="p-6">
+            <div className="mb-4 flex items-center gap-3">
+              <div className={cn('flex h-11 w-11 items-center justify-center rounded-xl border shadow-sm', currentConfig.color)}>
                 <currentConfig.Logo className="h-5 w-5" />
               </div>
               <div className="flex-1">
@@ -993,7 +993,7 @@ export function ProviderOnboardingWizard({
               </div>
               <Check className="h-5 w-5 text-green-500" />
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800">
                 {currentConfig.label}
               </span>
@@ -1008,9 +1008,9 @@ export function ProviderOnboardingWizard({
             </div>
           </div>
 
-          <div className="p-5">
-            <div className="mb-3 flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+          <div className="p-6">
+            <div className="mb-4 flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-indigo-100 text-indigo-600 shadow-sm dark:bg-indigo-900/30 dark:text-indigo-400">
                 <Globe className="h-5 w-5" />
               </div>
               <div className="flex-1">
@@ -1028,10 +1028,10 @@ export function ProviderOnboardingWizard({
             </p>
           </div>
 
-          <div className="p-5">
-            <div className="mb-3 flex items-center gap-3">
+          <div className="p-6">
+            <div className="mb-4 flex items-center gap-3">
               <div className={cn(
-                'flex h-10 w-10 items-center justify-center rounded-lg',
+                'flex h-11 w-11 items-center justify-center rounded-xl shadow-sm',
                 connectivityCheck.state === 'success'
                   ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400'
                   : connectivityCheck.state === 'failure'
@@ -1067,7 +1067,7 @@ export function ProviderOnboardingWizard({
               )}
             </div>
             <div className={cn(
-              'rounded-xl border px-4 py-3 text-sm',
+              'rounded-xl border px-4 py-3.5 text-sm leading-relaxed',
               connectivityCheck.state === 'success'
                 ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
                 : connectivityCheck.state === 'failure'
@@ -1084,12 +1084,29 @@ export function ProviderOnboardingWizard({
                       ? 'Run a live connection test before creating the provider so you know these settings are reachable.'
                       : 'Save changes as-is, or re-test later from the provider management flow if you need to validate connectivity.'}
             </div>
+            {mode === 'create' && connectivityCheck.state !== 'idle' && (
+              <div className="mt-3 flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleTestConnection}
+                  disabled={connectivityCheck.state === 'checking'}
+                  className="inline-flex items-center gap-2 rounded-lg border border-glass-border bg-white/70 px-3 py-2 text-sm font-medium text-ink-secondary transition-colors hover:bg-white dark:bg-slate-900/40 dark:hover:bg-slate-900/70"
+                >
+                  {connectivityCheck.state === 'checking' ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4" />
+                  )}
+                  {connectivityCheck.state === 'failure' ? 'Retry connection test' : 'Test again'}
+                </button>
+              </div>
+            )}
           </div>
 
           {formData.providerType === 'neo4j' && (
-            <div className="p-5">
-              <div className="mb-3 flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400">
+            <div className="p-6">
+              <div className="mb-4 flex items-center gap-3">
+                <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-violet-100 text-violet-600 shadow-sm dark:bg-violet-900/30 dark:text-violet-400">
                   <BookOpen className="h-5 w-5" />
                 </div>
                 <div className="flex-1">
@@ -1319,7 +1336,7 @@ export function ProviderOnboardingWizard({
                 <button
                   type="button"
                   onClick={isLastStep ? primaryAction : goNext}
-                  disabled={!canProceed || isSubmitting || connectivityCheck.state === 'checking'}
+                  disabled={!canProceed || isSubmitting || (shouldRunConnectivityTest && connectivityCheck.state === 'checking')}
                   className={cn(
                     'flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold transition-all',
                     isLastStep
@@ -1343,9 +1360,7 @@ export function ProviderOnboardingWizard({
                       {mode === 'edit'
                         ? 'Save changes'
                         : shouldRunConnectivityTest
-                          ? connectivityCheck.state === 'failure'
-                            ? 'Retry connection test'
-                            : 'Test connection'
+                          ? 'Test connection'
                           : 'Create provider'}
                     </>
                   ) : (

@@ -79,7 +79,7 @@ describe('ProviderOnboardingWizard connectivity checks', () => {
     expect(screen.getByRole('button', { name: /create provider/i })).toBeInTheDocument()
   })
 
-  it('shows a failed connectivity state and keeps creation gated', async () => {
+  it('shows a failed connectivity warning but still allows provider creation', async () => {
     vi.mocked((providerService as any).testConnection).mockResolvedValue({
       success: false,
       error: 'Connection refused',
@@ -92,7 +92,6 @@ describe('ProviderOnboardingWizard connectivity checks', () => {
       expect(screen.getByText(/unable to connect/i)).toBeInTheDocument()
     })
     expect(screen.getByText(/connection refused/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /retry connection test/i })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /create provider/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /create provider/i })).toBeInTheDocument()
   })
 })
