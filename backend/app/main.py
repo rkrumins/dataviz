@@ -100,24 +100,15 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("Admin bootstrap warning: %s", exc)
 
-    # 3. Optionally bootstrap a default provider + workspace from env vars.
-    #    Only bootstraps when FALKORDB_HOST (or equivalent) is explicitly set,
-    #    so a fresh empty deployment can start clean and let users configure
-    #    everything through the admin wizard.
-    import os as _os
-    _auto_bootstrap = _os.getenv("FALKORDB_HOST") or _os.getenv("NEO4J_HOST")
-    if _auto_bootstrap:
-        async with get_async_session() as session:
-            try:
-                await asyncio.wait_for(
-                    provider_registry._resolve_primary_id(session), timeout=10
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Primary connection bootstrap timed out after 10s — provider may be unreachable")
-            except Exception as exc:
-                logger.warning("Primary connection bootstrap warning: %s", exc)
-    else:
-        logger.info("No graph host configured — skipping auto-bootstrap (use admin wizard to set up)")
+    # 3. Environment bootstrap is no longer auto-invoked on startup.
+    #    Fresh installs go through the admin wizard; Docker quickstart /
+    #    CI fixtures invoke `python -m backend.scripts.seed_default_environment`
+    #    explicitly. Startup must never mutate user data.
+    logger.info(
+        "Startup is side-effect-free. Run "
+        "`python -m backend.scripts.seed_default_environment` for dev seed; "
+        "admin wizard handles production onboarding."
+    )
 
     # 4. Wire up the aggregation service
     try:
