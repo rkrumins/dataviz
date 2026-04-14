@@ -3,14 +3,14 @@
  * Renders as a right-side panel via portal (same pattern as ExplorerPreviewDrawer).
  * Tabs: Insights · Aggregation · Views
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Database, Edit2, Trash2, X, ExternalLink, Settings2, Plus, Eye,
     CircleDot, ArrowRightLeft, Layers, BarChart3, AlertTriangle, Loader2,
-    GitBranch, Star, Clock, Compass,
+    GitBranch, Star, Clock, Compass, Save, RotateCcw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
@@ -23,6 +23,11 @@ import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 // ─────────────────────────────────────────────────────────────────────
 // Props
 // ─────────────────────────────────────────────────────────────────────
+
+export interface AggregationConfigSnapshot {
+    projectionMode: string
+    dedicatedGraphName: string
+}
 
 interface DataSourceDetailPanelProps {
     ds: DataSourceResponse | null
@@ -39,8 +44,15 @@ interface DataSourceDetailPanelProps {
     onReaggregate: () => void
     onPurge: () => Promise<void>
     onSetPrimary: () => void
-    onProjectionModeChange: (mode: string) => void
-    onDedicatedGraphNameChange: (name: string) => void
+    /**
+     * Persist the Aggregation tab as a single transaction. Receives both the
+     * pending edits (local) and the original snapshot (server) so the parent
+     * can compute a minimal PATCH.
+     */
+    onSaveAggregationConfig: (
+        pending: AggregationConfigSnapshot,
+        original: AggregationConfigSnapshot,
+    ) => Promise<void>
     onClose: () => void
 }
 
@@ -151,30 +163,60 @@ export function DataSourceDetailPanel({
     onExplore,
     onReaggregate,
     onPurge,
-    onProjectionModeChange,
-    onDedicatedGraphNameChange,
+    onSaveAggregationConfig,
     onClose,
 }: DataSourceDetailPanelProps) {
     const [activeTab, setActiveTab] = useState<'insights' | 'aggregation' | 'views'>('insights')
-    const [localDedicatedName, setLocalDedicatedName] = useState(ds?.dedicatedGraphName || '')
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
 
-    const effectiveMode = ds?.projectionMode || 'in_source'
-    const isOverridden = !!ds?.projectionMode
+    // ── Aggregation tab: pending edits live entirely in local state until the
+    //    user clicks Save. This avoids per-keystroke API calls and full-page
+    //    reloads that would unmount this drawer mid-interaction.
+    const originalMode = ds?.projectionMode ?? ''
+    const originalDedicatedName = ds?.dedicatedGraphName ?? ''
+    const [pendingMode, setPendingMode] = useState(originalMode)
+    const [pendingDedicatedName, setPendingDedicatedName] = useState(originalDedicatedName)
+    const [isSaving, setIsSaving] = useState(false)
 
-    const handleDedicatedModeSelect = () => {
-        onProjectionModeChange('dedicated')
-        if (!localDedicatedName && ds) {
-            const suggestion = `${ds.label || ds.catalogItemId}_aggregated`
-            setLocalDedicatedName(suggestion)
-            onDedicatedGraphNameChange(suggestion)
+    // Reset pending state whenever the drawer points at a different DS, or when
+    // a reload has brought fresh server values (originals) for the same DS.
+    useEffect(() => {
+        setPendingMode(originalMode)
+        setPendingDedicatedName(originalDedicatedName)
+        setIsSaving(false)
+    }, [ds?.id, originalMode, originalDedicatedName])
+
+    const isDirty = pendingMode !== originalMode || pendingDedicatedName !== originalDedicatedName
+    const isOverridden = !!pendingMode
+
+    const handleSelectInherit = () => setPendingMode('')
+    const handleSelectInSource = () => setPendingMode('in_source')
+    const handleSelectDedicated = () => {
+        setPendingMode('dedicated')
+        if (!pendingDedicatedName && ds) {
+            setPendingDedicatedName(`${ds.label || ds.catalogItemId}_aggregated`)
         }
     }
 
-    const handleDedicatedNameChange = (name: string) => {
-        setLocalDedicatedName(name)
-        onDedicatedGraphNameChange(name)
+    const handleSaveConfig = async () => {
+        if (!ds || !isDirty || isSaving) return
+        setIsSaving(true)
+        try {
+            await onSaveAggregationConfig(
+                { projectionMode: pendingMode, dedicatedGraphName: pendingDedicatedName },
+                { projectionMode: originalMode, dedicatedGraphName: originalDedicatedName },
+            )
+            // The parent triggers a reload after save. The useEffect above will
+            // resync pending state when the new originals arrive.
+        } finally {
+            setIsSaving(false)
+        }
+    }
+
+    const handleDiscardConfig = () => {
+        setPendingMode(originalMode)
+        setPendingDedicatedName(originalDedicatedName)
     }
 
     const aggMeta = AGG_STATUS_META[ds?.aggregationStatus || 'none'] || AGG_STATUS_META.none
@@ -367,9 +409,24 @@ export function DataSourceDetailPanel({
                             {/* ─── Aggregation Tab ──────────────────────── */}
                             {activeTab === 'aggregation' && (
                                 <div className="space-y-3">
-                                    <label className="flex items-start gap-3 p-3 rounded-lg border border-glass-border cursor-pointer hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors">
-                                        <input type="radio" name={`proj-${ds.id}`} checked={effectiveMode === 'in_source' && !isOverridden}
-                                            onChange={() => onProjectionModeChange('')} className="mt-1 accent-indigo-500" />
+                                    <div className="flex items-center justify-between">
+                                        <h6 className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">
+                                            Projection Mode
+                                        </h6>
+                                        {isDirty && (
+                                            <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                                                Unsaved
+                                            </span>
+                                        )}
+                                    </div>
+
+                                    <label className={cn(
+                                        "flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors",
+                                        pendingMode === '' ? "border-indigo-500/40 bg-indigo-500/[0.04]" : "border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
+                                    )}>
+                                        <input type="radio" name={`proj-${ds.id}`} checked={pendingMode === ''}
+                                            onChange={handleSelectInherit} className="mt-1 accent-indigo-500" />
                                         <div>
                                             <span className="text-sm font-medium text-ink">Inherit from Provider</span>
                                             <span className="inline-flex items-center gap-1 ml-2 px-1.5 py-0.5 text-[9px] font-bold rounded bg-emerald-500/10 text-emerald-500">DEFAULT</span>
@@ -377,25 +434,32 @@ export function DataSourceDetailPanel({
                                         </div>
                                     </label>
 
-                                    <label className="flex items-start gap-3 p-3 rounded-lg border border-glass-border cursor-pointer hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors">
-                                        <input type="radio" name={`proj-${ds.id}`} checked={effectiveMode === 'in_source' && isOverridden}
-                                            onChange={() => onProjectionModeChange('in_source')} className="mt-1 accent-indigo-500" />
+                                    <label className={cn(
+                                        "flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors",
+                                        pendingMode === 'in_source' ? "border-indigo-500/40 bg-indigo-500/[0.04]" : "border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
+                                    )}>
+                                        <input type="radio" name={`proj-${ds.id}`} checked={pendingMode === 'in_source'}
+                                            onChange={handleSelectInSource} className="mt-1 accent-indigo-500" />
                                         <div>
                                             <span className="text-sm font-medium text-ink">In Source</span>
                                             <p className="text-xs text-ink-muted mt-0.5">Store aggregated edges in the same graph</p>
                                         </div>
                                     </label>
 
-                                    <label className="flex items-start gap-3 p-3 rounded-lg border border-glass-border cursor-pointer hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors">
-                                        <input type="radio" name={`proj-${ds.id}`} checked={effectiveMode === 'dedicated'}
-                                            onChange={handleDedicatedModeSelect} className="mt-1 accent-indigo-500" />
+                                    <label className={cn(
+                                        "flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors",
+                                        pendingMode === 'dedicated' ? "border-indigo-500/40 bg-indigo-500/[0.04]" : "border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
+                                    )}>
+                                        <input type="radio" name={`proj-${ds.id}`} checked={pendingMode === 'dedicated'}
+                                            onChange={handleSelectDedicated} className="mt-1 accent-indigo-500" />
                                         <div className="flex-1">
                                             <span className="text-sm font-medium text-ink">Dedicated Graph</span>
                                             <p className="text-xs text-ink-muted mt-0.5">Store in a separate projection graph for isolation</p>
-                                            {effectiveMode === 'dedicated' && (
+                                            {pendingMode === 'dedicated' && (
                                                 <div className="mt-3 animate-in slide-in-from-top-2 fade-in duration-200">
                                                     <label className="block text-[11px] font-medium text-ink-secondary mb-1">Dedicated Graph Name</label>
-                                                    <input type="text" value={localDedicatedName} onChange={e => handleDedicatedNameChange(e.target.value)}
+                                                    <input type="text" value={pendingDedicatedName}
+                                                        onChange={e => setPendingDedicatedName(e.target.value)}
                                                         placeholder={`e.g. ${ds.label || ds.catalogItemId}_aggregated`}
                                                         onClick={e => e.stopPropagation()}
                                                         className="w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/50" />
@@ -404,16 +468,40 @@ export function DataSourceDetailPanel({
                                         </div>
                                     </label>
 
-                                    {isOverridden && (
+                                    {isOverridden && !isDirty && (
                                         <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-600 dark:text-amber-400">
                                             <span className="font-semibold">&#x26A0; Override active</span>
                                             <span>— This data source is not using the provider default.</span>
                                         </div>
                                     )}
 
+                                    {/* Save / Discard bar — sticky feel, only when dirty */}
+                                    {isDirty && (
+                                        <div className="flex items-center justify-end gap-2 p-3 rounded-lg bg-amber-500/[0.06] border border-amber-500/20 animate-in slide-in-from-top-1 fade-in duration-150">
+                                            <button
+                                                onClick={handleDiscardConfig}
+                                                disabled={isSaving}
+                                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                                            >
+                                                <RotateCcw className="w-3 h-3" /> Discard
+                                            </button>
+                                            <button
+                                                onClick={handleSaveConfig}
+                                                disabled={isSaving || (pendingMode === 'dedicated' && !pendingDedicatedName.trim())}
+                                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors disabled:opacity-50 shadow-sm"
+                                            >
+                                                {isSaving
+                                                    ? <Loader2 className="w-3 h-3 animate-spin" />
+                                                    : <Save className="w-3 h-3" />}
+                                                {isSaving ? 'Saving…' : 'Save Changes'}
+                                            </button>
+                                        </div>
+                                    )}
+
                                     <div className="mt-4 pt-4 border-t border-glass-border space-y-2">
-                                        <button onClick={onReaggregate}
-                                            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-semibold text-sm hover:bg-indigo-500/20 transition-colors">
+                                        <button onClick={onReaggregate} disabled={isDirty}
+                                            title={isDirty ? 'Save your config changes before re-triggering aggregation.' : undefined}
+                                            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-semibold text-sm hover:bg-indigo-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                                             <Settings2 className="w-4 h-4" /> Re-Trigger Aggregation
                                         </button>
 

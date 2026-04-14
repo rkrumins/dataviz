@@ -1,15 +1,14 @@
 /**
  * WorkspaceDetailPage — single workspace detail view at /workspaces/:wsId.
  * Modern tabbed dashboard with hero header, data source grid, views,
- * aggregation, and ontology sections. Also hosts the "Open Canvas" CTA
- * that launches the workspace canvas view.
+ * aggregation, and ontology sections.
  */
 import { useState, useEffect, useMemo } from 'react'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
     ChevronLeft, Plus, Database, Loader2, Settings2, X, Save,
-    Trash2, GitBranch, Eye, Info, Compass, HelpCircle, Play,
+    Trash2, GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { ShieldAlert } from 'lucide-react'
@@ -93,7 +92,7 @@ export function WorkspaceDetailPage() {
     const {
         workspace, catalogItems, ontologies, ontologyMap, dsStatsMap, dsProviderMap,
         viewsByDs, allWorkspaceViews, readinessMap, healthStatus,
-        aggregateStats, isLoading, reload
+        aggregateStats, isLoading, isRefreshing, reload
     } = useWorkspaceDetailData(wsId)
 
     // ── Edit header state ──────────────────────────────────
@@ -195,15 +194,31 @@ export function WorkspaceDetailPage() {
         reload()
     }
 
-    const handleProjectionMode = async (dsId: string, mode: string) => {
+    /**
+     * Persist the Aggregation tab as a single transaction. Only fields that
+     * actually changed are written, so we avoid spurious updateDataSource calls
+     * when the user only toggled the projection mode.
+     */
+    const handleSaveAggregationConfig = async (
+        dsId: string,
+        pending: { projectionMode: string; dedicatedGraphName: string },
+        original: { projectionMode: string; dedicatedGraphName: string },
+    ) => {
         if (!wsId) return
-        await workspaceService.setProjectionMode(wsId, dsId, mode)
-        reload()
-    }
-
-    const handleDedicatedGraphName = async (dsId: string, name: string) => {
-        if (!wsId) return
-        await workspaceService.updateDataSource(wsId, dsId, { dedicatedGraphName: name })
+        const modeChanged = pending.projectionMode !== original.projectionMode
+        const nameChanged = pending.dedicatedGraphName !== original.dedicatedGraphName
+        if (modeChanged) {
+            await workspaceService.setProjectionMode(wsId, dsId, pending.projectionMode)
+        }
+        if (nameChanged) {
+            await workspaceService.updateDataSource(wsId, dsId, {
+                dedicatedGraphName: pending.dedicatedGraphName || undefined,
+            })
+        }
+        if (modeChanged || nameChanged) {
+            showToast('success', 'Aggregation settings saved')
+            reload()
+        }
     }
 
     const handleEditDsSave = async (label: string, ontologyId: string | undefined) => {
@@ -336,7 +351,7 @@ export function WorkspaceDetailPage() {
 
     return (
         <div className="p-8 max-w-5xl mx-auto animate-in fade-in duration-500">
-            {/* Breadcrumb + primary action */}
+            {/* Breadcrumb */}
             <div className="flex items-center justify-between mb-6">
                 <nav aria-label="Breadcrumb" className="flex items-center gap-2 text-sm">
                     <Link to="/workspaces" className="flex items-center gap-1.5 text-ink-muted hover:text-ink transition-colors">
@@ -345,12 +360,16 @@ export function WorkspaceDetailPage() {
                     <span className="text-ink-muted/60">/</span>
                     <span className="font-medium text-ink truncate max-w-[32ch]" title={workspace.name}>{workspace.name}</span>
                 </nav>
-                <button
-                    onClick={() => navigate(`/workspaces/${wsId}/canvas`)}
-                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
-                >
-                    <Play className="w-3.5 h-3.5 fill-current" /> Open Canvas
-                </button>
+                {/* Subtle refresh indicator — in-place, never unmounts the page */}
+                {isRefreshing && (
+                    <span
+                        className="flex items-center gap-1.5 text-[11px] text-ink-muted"
+                        aria-live="polite"
+                        role="status"
+                    >
+                        <RefreshCw className="w-3 h-3 animate-spin" /> Refreshing
+                    </span>
+                )}
             </div>
 
             {/* Hero Header */}
@@ -624,8 +643,10 @@ export function WorkspaceDetailPage() {
                 onReaggregate={() => { if (selectedDs) handleReaggregate(selectedDs) }}
                 onPurge={async () => { if (selectedDs) await handlePurge(selectedDs) }}
                 onSetPrimary={() => { if (selectedDsId) handleSetPrimary(selectedDsId) }}
-                onProjectionModeChange={mode => { if (selectedDsId) handleProjectionMode(selectedDsId, mode) }}
-                onDedicatedGraphNameChange={name => { if (selectedDsId) handleDedicatedGraphName(selectedDsId, name) }}
+                onSaveAggregationConfig={(pending, original) => {
+                    if (selectedDsId) return handleSaveAggregationConfig(selectedDsId, pending, original)
+                    return Promise.resolve()
+                }}
                 onClose={() => setSelectedDsId(null)}
             />
         </div>
