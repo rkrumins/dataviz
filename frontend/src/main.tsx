@@ -36,6 +36,12 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const bootstrap = useAuthStore((s) => s.bootstrap)
   useEffect(() => {
     void bootstrap()
+    // fetchWithTimeout emits this event when a 401 cannot be recovered
+    // via the silent /auth/refresh path. That's the signal the session
+    // is actually gone — flip the store so route guards redirect.
+    const onSessionLost = () => useAuthStore.getState().handleSessionLost()
+    window.addEventListener('auth:session-lost', onSessionLost)
+    return () => window.removeEventListener('auth:session-lost', onSessionLost)
   }, [bootstrap])
   return <>{children}</>
 }

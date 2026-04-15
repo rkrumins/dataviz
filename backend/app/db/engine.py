@@ -81,22 +81,46 @@ def _pool_kwargs() -> dict:
     }
 
 
+def _asyncpg_connect_args() -> dict:
+    """Per-connection knobs passed through to asyncpg.
+
+    `timeout` = TCP connection-establishment deadline. Without this,
+    Postgres going down results in the uvicorn worker hanging on the
+    kernel's default TCP SYN timeout (~75s on Linux), which both
+    starves other coroutines and blocks request threads. 5s is short
+    enough to fail fast and let `pool_pre_ping` retry via a fresh
+    connection; long enough to tolerate typical handshake latency.
+
+    `command_timeout` caps per-query execution on the protocol layer.
+    Paired with FastAPI's per-request timeout middleware, a runaway
+    query cannot pin a connection forever.
+    """
+    return {
+        "timeout": float(os.getenv("DB_CONNECT_TIMEOUT_SECS", "5")),
+        "command_timeout": float(os.getenv("DB_COMMAND_TIMEOUT_SECS", "30")),
+    }
+
+
 def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         kw = _pool_kwargs()
+        connect_args = _asyncpg_connect_args()
         _engine = create_async_engine(
             DATABASE_URL,
             echo=os.getenv("DB_ECHO", "false").lower() == "true",
+            connect_args=connect_args,
             **kw,
         )
         # Self-documenting startup line so deployments can verify the
         # effective config without grepping env vars in the host.
         logger.info(
             "Engine pool: size=%d, max_overflow=%d, timeout=%ds, "
-            "recycle=%ds, pre_ping=%s",
+            "recycle=%ds, pre_ping=%s, connect_timeout=%.1fs, "
+            "command_timeout=%.1fs",
             kw["pool_size"], kw["max_overflow"], kw["pool_timeout"],
             kw["pool_recycle"], kw["pool_pre_ping"],
+            connect_args["timeout"], connect_args["command_timeout"],
         )
     return _engine
 
@@ -204,25 +228,101 @@ def _run_alembic_upgrade() -> None:
     command.upgrade(cfg, "head")
 
 
+def _is_transient_db_error(exc: BaseException) -> bool:
+    """Classify startup errors: transient (retry) vs permanent (give up).
+
+    Transient = Postgres not yet reachable: connection refused, TCP
+    timeout, unreachable host, SQLAlchemy's OperationalError with a
+    psycopg2 cause. Permanent = authentication failure, missing DB,
+    schema/SQL bug in a migration — retrying those just burns time.
+    """
+    import socket
+    from sqlalchemy.exc import OperationalError, InterfaceError, DBAPIError
+
+    if isinstance(exc, (ConnectionError, TimeoutError, socket.gaierror, socket.timeout)):
+        return True
+    if isinstance(exc, OSError):
+        return True
+    if isinstance(exc, (OperationalError, InterfaceError, DBAPIError)):
+        msg = str(exc).lower()
+        # Retry on "could not connect" / "connection refused" / "server closed"
+        # family. Explicit auth errors surface in the message too and we don't
+        # retry those.
+        if any(tok in msg for tok in (
+            "could not connect",
+            "connection refused",
+            "connection reset",
+            "server closed the connection",
+            "timeout expired",
+            "timed out",
+            "no route to host",
+            "name or service not known",
+            "could not translate host name",
+        )):
+            return True
+    return False
+
+
 async def init_db() -> None:
     """Apply Alembic migrations and seed minimal singleton rows.
+
+    Boot resilience: if Postgres is not yet reachable (docker-compose
+    start order, pod init-ordering, etc.), retry the Alembic upgrade
+    with exponential backoff up to `DB_STARTUP_RETRY_TIMEOUT_SECS`
+    total wall clock (default 60s). On budget exhaustion or a
+    non-transient error (auth, bad migration), raise — the orchestrator
+    restarts the pod and we try again fresh. Hanging forever on a
+    blocked `psycopg2.connect()` is what the pre-fix behaviour did.
 
     Schema lifecycle is owned by Alembic from Phase 1 onward — the
     inline `ALTER TABLE` block that previously lived here has been
     removed. The dev workflow when iterating on the schema is:
 
-        rm nexus_core.db nexus_core.db-wal nexus_core.db-shm 2>/dev/null
-        # restart the app, or:
+        docker compose -f docker-compose.dev.yml down -v
+        docker compose -f docker-compose.dev.yml up -d
         cd backend && alembic upgrade head
     """
     import asyncio as _asyncio
+    import time as _time
     from datetime import datetime as _dt, timezone as _tz
     sa_text = __import__("sqlalchemy").text
 
-    # Alembic loads env.py, which imports every ORM module; this also
-    # ensures Base.metadata is fully populated for the rest of the app.
-    await _asyncio.to_thread(_run_alembic_upgrade)
-    logger.info("Alembic upgrade complete (head reached)")
+    # ── Alembic upgrade with bounded retry ──────────────────────────
+    budget = float(os.getenv("DB_STARTUP_RETRY_TIMEOUT_SECS", "60"))
+    deadline = _time.monotonic() + budget
+    delay = 1.0
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            # Alembic loads env.py, which imports every ORM module; this
+            # also ensures Base.metadata is fully populated.
+            await _asyncio.to_thread(_run_alembic_upgrade)
+            if attempt > 1:
+                logger.info(
+                    "Alembic upgrade succeeded on attempt %d (Postgres became reachable)",
+                    attempt,
+                )
+            logger.info("Alembic upgrade complete (head reached)")
+            break
+        except Exception as exc:
+            remaining = deadline - _time.monotonic()
+            if not _is_transient_db_error(exc) or remaining <= 0:
+                if remaining <= 0:
+                    logger.error(
+                        "Giving up on Alembic upgrade after %.0fs / %d attempts "
+                        "— Postgres unreachable. Last error: %s",
+                        budget, attempt, str(exc)[:300],
+                    )
+                raise
+            sleep_for = min(delay, remaining)
+            logger.warning(
+                "Alembic upgrade attempt %d failed (%.0fs budget left, "
+                "retrying in %.1fs): %s",
+                attempt, remaining, sleep_for, str(exc)[:200],
+            )
+            await _asyncio.sleep(sleep_for)
+            delay = min(delay * 2, 10.0)
 
     # ── Seed singleton rows that aren't covered by ORM defaults ──────
     # announcement_config has a CHECK(id=1) constraint and needs an
