@@ -58,10 +58,17 @@ def set_session_cookies(response: Response, tokens: SessionTokens) -> None:
         path=REFRESH_COOKIE_PATH,
         **common,
     )
+    # CSRF lifetime follows the refresh cookie, NOT the access cookie.
+    # If the two matched, a user whose access cookie just expired would
+    # lose the CSRF cookie at the same moment — the next write would
+    # 403 on CSRF before the 401-triggered silent refresh could run,
+    # forcing a re-login every ``JWT_EXPIRY_MINUTES``. While refresh is
+    # still valid we want every state-changing request to be able to
+    # mint the double-submit header.
     response.set_cookie(
         key=CSRF_COOKIE_NAME,
         value=tokens.csrf_token,
-        max_age=tokens.access_max_age_seconds,
+        max_age=tokens.refresh_max_age_seconds,
         httponly=False,
         path="/",
         **common,

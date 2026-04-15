@@ -7,7 +7,6 @@ import { Server, Layers, Database, BookOpen, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface FirstRunHeroProps {
-    onGetStarted: () => void
     embedded?: boolean
 }
 
@@ -38,7 +37,7 @@ const STAGES = [
     },
 ] as const
 
-export function FirstRunHero({ onGetStarted, embedded = false }: FirstRunHeroProps) {
+export function FirstRunHero({ embedded = false }: FirstRunHeroProps) {
     return (
         <div
             className={cn(
@@ -137,25 +136,8 @@ export function FirstRunHero({ onGetStarted, embedded = false }: FirstRunHeroPro
                 })}
             </div>
 
-            {/* ── CTA ── */}
-            <motion.button
-                onClick={onGetStarted}
-                className={cn(
-                    'relative z-10 mt-10 rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-500',
-                    'px-8 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/20',
-                    'transition-colors hover:from-indigo-500 hover:to-indigo-400',
-                )}
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.5, delay: 0.7 }}
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-            >
-                Get Started
-            </motion.button>
-
             <motion.span
-                className="relative z-10 mt-3 block text-center text-[10px] uppercase tracking-wider text-ink-muted"
+                className="relative z-10 mt-10 block text-center text-[10px] uppercase tracking-wider text-ink-muted"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 transition={{ duration: 0.5, delay: 0.9 }}
