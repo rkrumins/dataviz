@@ -727,7 +727,7 @@ class AggregationService:
         # Use the ontology service if available (monolith direct call)
         if self._ontology_service:
             try:
-                ontology = await self._ontology_service.resolve_for_data_source(
+                ontology = await self._ontology_service.resolve(
                     workspace_id=ds.workspace_id,
                     data_source_id=ds_id,
                 )

@@ -103,15 +103,37 @@ function notifySessionLost(): void {
 }
 
 /**
- * Build the Headers object for a request, injecting CSRF on writes.
+ * Build the Headers object for a request, injecting CSRF on writes and
+ * defaulting ``Content-Type: application/json`` when the body is a
+ * JSON-stringified payload.
+ *
+ * Why the Content-Type default: every service module here calls
+ * ``authFetch(url, { method: 'POST', body: JSON.stringify(data) })`` —
+ * i.e., the body is already a JSON string — and none of them set the
+ * header explicitly. Without this default, ``fetch`` infers
+ * ``text/plain;charset=UTF-8`` from the string body, FastAPI parses the
+ * entire body as a single string field, and every Pydantic model in the
+ * backend rejects it with *"Input should be a valid dictionary or object
+ * to extract fields from"*. Defaulting here fixes every POST/PUT/PATCH
+ * at once. FormData / Blob / URLSearchParams bodies skip this branch so
+ * the browser's auto-detected multipart/octet-stream boundaries are
+ * preserved.
+ *
  * Factored out so both the original attempt and the post-refresh retry
  * re-read a possibly-rotated ``nx_csrf`` cookie.
  */
-function buildHeaders(method: string, raw: HeadersInit | undefined): Headers {
+function buildHeaders(
+  method: string,
+  raw: HeadersInit | undefined,
+  body: BodyInit | null | undefined,
+): Headers {
   const headers = new Headers(raw)
   if (!SAFE_METHODS.has(method) && !headers.has(CSRF_HEADER)) {
     const csrf = readCookie(CSRF_COOKIE)
     if (csrf) headers.set(CSRF_HEADER, csrf)
+  }
+  if (typeof body === 'string' && body.length > 0 && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
   }
   return headers
 }
@@ -133,7 +155,7 @@ async function runOnce(
     return await fetch(input, {
       credentials: 'include',
       ...fetchInit,
-      headers: buildHeaders(method, fetchInit.headers),
+      headers: buildHeaders(method, fetchInit.headers, fetchInit.body),
       signal: controller.signal,
     })
   } finally {
