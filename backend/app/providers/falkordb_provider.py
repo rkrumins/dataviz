@@ -109,26 +109,30 @@ class FalkorDBProvider(GraphDataProvider):
         if self._graph is not None:
             return
         try:
-            from redis.asyncio import BlockingConnectionPool, Redis
+            # Non-blocking ConnectionPool: on exhaustion raises ConnectionError
+            # immediately instead of blocking the caller (and, for asyncio
+            # BlockingConnectionPool, stalling the event loop while waiting
+            # on a semaphore inside the loop itself). The circuit-breaker
+            # proxy around this provider translates the failure into
+            # ProviderUnavailable before it reaches the web tier.
+            from redis.asyncio import ConnectionPool, Redis
             from falkordb.asyncio import FalkorDB
 
             # Pool for graph (Cypher) queries — used by FalkorDB client
-            self._pool = BlockingConnectionPool(
+            self._pool = ConnectionPool(
                 host=self._host,
                 port=self._port,
                 max_connections=12,
-                timeout=2,
                 socket_connect_timeout=1.0,
                 socket_timeout=3.0,
                 decode_responses=True,
             )
             # Separate pool for Redis data-structure ops (caching, SADD, HSET, etc.)
             # Prevents cache/materialization ops from starving graph query connections
-            self._redis_pool = BlockingConnectionPool(
+            self._redis_pool = ConnectionPool(
                 host=self._host,
                 port=self._port,
                 max_connections=8,
-                timeout=2,
                 socket_connect_timeout=1.0,
                 socket_timeout=3.0,
                 decode_responses=True,

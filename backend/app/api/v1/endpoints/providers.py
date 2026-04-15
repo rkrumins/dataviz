@@ -41,29 +41,25 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _negative_cache_error(provider_id: str) -> str | None:
-    now = time.monotonic()
-    freshest_age: float | None = None
-    expired_keys: list[tuple[str, str]] = []
+def _breaker_open_error(provider_id: str) -> str | None:
+    """Inspect the registry's cached proxies for any open circuit breakers
+    on *provider_id*. Returns a user-facing reason string when the breaker
+    is tripped; otherwise ``None``.
 
-    for cache_key, failed_at in list(provider_registry._failed_cache.items()):
-        failed_provider_id, _graph_name = cache_key
-        if failed_provider_id != provider_id:
+    Replaces the hand-rolled negative cache — the pybreaker state machine
+    inside each :class:`CircuitBreakerProxy` is the authoritative source of
+    "recently failed" and is race-free under concurrency.
+    """
+    for cache_key, proxy in list(provider_registry._providers.items()):
+        if cache_key[0] != provider_id:
             continue
-        age = now - failed_at
-        if age < provider_registry.NEGATIVE_CACHE_TTL:
-            freshest_age = age if freshest_age is None else min(freshest_age, age)
-        else:
-            expired_keys.append(cache_key)
-
-    for cache_key in expired_keys:
-        provider_registry._failed_cache.pop(cache_key, None)
-
-    if freshest_age is None:
-        return None
-
-    retry_in = max(0, provider_registry.NEGATIVE_CACHE_TTL - freshest_age)
-    return f"Provider recently failed. Retrying in {retry_in:.0f}s."
+        state = getattr(proxy, "breaker_state", None)
+        if state != "open":
+            continue
+        breaker = getattr(proxy, "breaker", None)
+        reset_timeout = int(getattr(breaker, "reset_timeout", 30)) if breaker else 30
+        return f"Provider circuit open. Will probe downstream again in ~{reset_timeout}s."
+    return None
 
 
 def _provider_type_value(provider_type) -> str:
@@ -107,14 +103,17 @@ async def list_provider_statuses(
         return []
 
     async def _probe(provider) -> dict:
-        negative_cache_error = _negative_cache_error(provider.id)
-        if negative_cache_error:
+        # Fast path: if the registry already has an open breaker for this
+        # provider, don't probe — report unavailable and let the breaker's
+        # reset_timeout gate the next real attempt.
+        breaker_error = _breaker_open_error(provider.id)
+        if breaker_error:
             return {
                 "id": provider.id,
                 "name": provider.name,
                 "status": "unavailable",
                 "lastCheckedAt": _iso_now(),
-                "error": negative_cache_error,
+                "error": breaker_error,
             }
 
         if not provider.is_active:
@@ -128,7 +127,6 @@ async def list_provider_statuses(
         try:
             instance = await _load_provider_for_outbound(provider.id, None)
             await asyncio.wait_for(instance.get_stats(), timeout=1.5)
-            provider_registry._failed_cache.pop((provider.id, ""), None)
             return {
                 "id": provider.id,
                 "name": provider.name,
@@ -136,7 +134,11 @@ async def list_provider_statuses(
                 "lastCheckedAt": _iso_now(),
             }
         except Exception as exc:
-            provider_registry._failed_cache[(provider.id, "")] = time.monotonic()
+            # Breaker state on cached proxies is updated automatically when
+            # they're used from the main request path. This probe uses a raw
+            # instance (short-session pattern), so failures here don't update
+            # a breaker — but they also don't need to: the main request path
+            # will observe and trip the breaker on real traffic.
             return {
                 "id": provider.id,
                 "name": provider.name,

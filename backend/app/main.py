@@ -244,6 +244,37 @@ async def _provider_error_handler(request, exc):
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
+# Primary handler for provider failures: raised by the CircuitBreakerProxy
+# around every graph-provider instance. Carries a retry-after hint and a
+# sanitized reason (no redis.exceptions details leak to the client). When
+# the breaker is open, this handler fires in <1ms with no network I/O.
+from backend.common.adapters import ProviderUnavailable as _ProviderUnavailable
+
+
+@app.exception_handler(_ProviderUnavailable)
+async def _provider_unavailable_handler(request, exc: _ProviderUnavailable):
+    logger.warning(
+        "Provider unavailable on %s: provider=%s reason=%s retry_after=%ds",
+        request.url.path, exc.provider_name, exc.reason, exc.retry_after_seconds,
+    )
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "PROVIDER_UNAVAILABLE",
+                "providerName": exc.provider_name,
+                "reason": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
+# Fallback handlers for raw connectivity errors that bypass the breaker
+# (e.g. errors raised during provider instantiation, before the proxy is in
+# place). In steady state these should be rare because every cached provider
+# is breaker-wrapped.
 app.add_exception_handler(ConnectionError, _provider_error_handler)
 app.add_exception_handler(OSError, _provider_error_handler)
 app.add_exception_handler(asyncio.TimeoutError, _provider_error_handler)
