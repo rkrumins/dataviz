@@ -53,14 +53,19 @@ export function IngestionPage() {
                 ws.dataSources?.some(ds => !!ds.ontologyId)
             )
             setCounts({
-                providers: providers ? providers.length : -1,
+                // Treat a failed providers load as "zero known providers" so
+                // the page still renders with the amber banner + tabs; the
+                // previous ``providers: -1`` sentinel kept counts.providers
+                // at -1 on error, which the gate below turned into an
+                // indefinite blank screen.
+                providers: providers ? providers.length : 0,
                 catalogs: catalogs.length,
                 workspaces: workspaces.length,
                 hasOntology,
             })
             setLoadError(
                 errors.length > 0
-                    ? `Could not load ${errors.join(', ')}.`
+                    ? `Could not load ${errors.join(', ')}. Showing partial data.`
                     : null,
             )
         })
@@ -77,7 +82,11 @@ export function IngestionPage() {
         }
     }
 
-    if (counts.providers === -1) return null
+    // Initial-load gate: render nothing only while the first load is in
+    // flight AND hasn't produced any result (neither data nor error). Once
+    // any of those three things is set, render the page so partial data
+    // and the error banner become visible.
+    if (counts.providers === -1 && !loadError) return null
 
     const setTab = (id: IngestionTab) => setSearchParams({ tab: id })
 

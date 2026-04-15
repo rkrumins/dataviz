@@ -247,7 +247,9 @@ class AggregationService:
         drift = False
         if is_ready and ds.graph_fingerprint:
             try:
-                provider = await self._registry.get_provider_for_data_source(ds_id)
+                provider = await self._registry.get_provider_for_workspace(
+                    ds.workspace_id, session, data_source_id=ds_id,
+                )
                 current_fp = await compute_graph_fingerprint(provider)
                 drift = not fingerprints_match(ds.graph_fingerprint, current_fp)
             except Exception:
@@ -600,7 +602,9 @@ class AggregationService:
                 f"Cannot purge while aggregation job {active.id} is active"
             )
 
-        provider = await self._registry.get_provider_for_data_source(ds_id)
+        provider = await self._registry.get_provider_for_workspace(
+            ds.workspace_id, session, data_source_id=ds_id,
+        )
         deleted = await provider.purge_aggregated_edges()
 
         # Reset data source aggregation state
@@ -643,7 +647,9 @@ class AggregationService:
             raise NotFoundError(f"Data source {ds_id} not found")
 
         try:
-            provider = await self._registry.get_provider_for_data_source(ds_id)
+            provider = await self._registry.get_provider_for_workspace(
+                ds.workspace_id, session, data_source_id=ds_id,
+            )
             current_fp = await compute_graph_fingerprint(provider)
         except Exception as e:
             logger.warning("Failed to compute fingerprint for drift check: %s", e)
