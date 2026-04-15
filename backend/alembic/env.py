@@ -43,7 +43,11 @@ target_metadata = Base.metadata
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers=False` is critical: when `init_db()` retries
+    # this env module (Postgres not yet reachable at boot), the first run's
+    # fileConfig would otherwise silence every logger already set up by the
+    # app — including `backend.app.db.engine`'s own retry-warning logger.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 logger = logging.getLogger("alembic.env")
 
 
@@ -84,11 +88,21 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Apply migrations against a live Postgres."""
+    """Apply migrations against a live Postgres.
+
+    ``connect_args['connect_timeout']`` is the psycopg2 TCP deadline. Without
+    it, a Postgres that's down or behind a filtered port hangs the process
+    on the kernel's default ~75s SYN timeout — the exact symptom we hit
+    pre-fix. Retry backoff around this call lives in
+    `backend.app.db.engine.init_db` so dev startup tolerates a Postgres
+    that comes up a few seconds late.
+    """
+    connect_timeout = int(os.getenv("DB_CONNECT_TIMEOUT_SECS", "5"))
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args={"connect_timeout": connect_timeout},
     )
     with connectable.connect() as connection:
         context.configure(

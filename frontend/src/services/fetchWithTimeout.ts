@@ -1,28 +1,34 @@
 /**
- * Fetch wrapper with AbortController timeout, session cookies, and
- * CSRF header propagation.
+ * Fetch wrapper with AbortController timeout, session cookies, CSRF,
+ * and transparent refresh-on-401.
  *
- * Why these concerns live in one place: the codebase has ~20 service
- * modules, most with their own local ``request()`` helper that calls
- * this function. Centralising cookie + CSRF behaviour here means every
- * service gets it for free — the alternative was patching all 20.
+ * One wrapper carries four cross-cutting concerns because the codebase
+ * has ~20 service modules that each call ``fetchWithTimeout`` directly.
+ * Centralising here means every service inherits the full session
+ * behaviour; the alternative is patching all of them.
  *
  * Behaviour:
- *   * ``credentials: 'include'`` by default so the HttpOnly session
- *     cookies are sent on every request (works in dev where the front-
- *     end proxies to the API and in production where the two are on
- *     different origins).
+ *   * ``credentials: 'include'`` — HttpOnly session cookies on every call.
  *   * On non-GET/HEAD/OPTIONS methods the value of the ``nx_csrf``
- *     cookie is mirrored into the ``X-CSRF-Token`` header — the double-
- *     submit comparison the backend's CSRFMiddleware enforces.
- *   * Default 5 s timeout via AbortController; callers may override
- *     with ``timeoutMs`` and/or pass their own ``signal``.
+ *     cookie is mirrored into the ``X-CSRF-Token`` header.
+ *   * On 401 for non-auth routes, a single silent ``POST /auth/refresh``
+ *     is attempted; on success the original request is retried once
+ *     with the rotated cookies. Concurrent 401s share the same in-flight
+ *     refresh. If refresh fails we dispatch ``'auth:session-lost'`` on
+ *     ``window`` so the auth store can transition to unauthenticated.
+ *   * Default 5 s timeout via AbortController; overridable per call.
+ *
+ * /auth/* URLs are exempt from the refresh-on-401 dance — /auth/refresh
+ * itself returning 401 means the session really is gone, and /auth/me
+ * returning 401 is handled by the bootstrap flow directly.
  */
 
 const DEFAULT_TIMEOUT_MS = 5_000
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 const CSRF_COOKIE = 'nx_csrf'
 const CSRF_HEADER = 'X-CSRF-Token'
+const REFRESH_URL = '/api/v1/auth/refresh'
+const SESSION_LOST_EVENT = 'auth:session-lost'
 
 function readCookie(name: string): string | null {
   if (typeof document === 'undefined') return null
@@ -36,6 +42,105 @@ function readCookie(name: string): string | null {
   return null
 }
 
+function urlPath(input: RequestInfo | URL): string {
+  const raw =
+    typeof input === 'string'
+      ? input
+      : input instanceof URL
+      ? input.toString()
+      : input.url
+  try {
+    return new URL(raw, 'http://local').pathname
+  } catch {
+    return raw
+  }
+}
+
+function isRefreshEndpoint(input: RequestInfo | URL): boolean {
+  // Only /auth/refresh is exempt from the silent-refresh retry loop —
+  // bouncing it off itself would just recurse. Every other endpoint,
+  // including /auth/me called on boot, benefits from the silent refresh
+  // so a still-valid refresh cookie can resurrect an expired access
+  // cookie without ever logging the user out.
+  return urlPath(input) === REFRESH_URL
+}
+
+/**
+ * Single in-flight refresh promise — concurrent 401s share one network
+ * call instead of each spawning its own. Cleared on the next microtask
+ * after resolution so subsequent unrelated 401s can start a new one.
+ */
+let refreshInFlight: Promise<boolean> | null = null
+
+async function tryRefresh(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight
+  refreshInFlight = (async () => {
+    try {
+      // Bare fetch — avoids the circular import that would exist if this
+      // module pulled in authService, and avoids recursing through the
+      // refresh-on-401 logic above (the isAuthEndpoint guard would catch
+      // it anyway, but going direct is cheaper).
+      const res = await fetch(REFRESH_URL, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      return res.ok
+    } catch {
+      return false
+    } finally {
+      queueMicrotask(() => {
+        refreshInFlight = null
+      })
+    }
+  })()
+  return refreshInFlight
+}
+
+function notifySessionLost(): void {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new CustomEvent(SESSION_LOST_EVENT))
+}
+
+/**
+ * Build the Headers object for a request, injecting CSRF on writes.
+ * Factored out so both the original attempt and the post-refresh retry
+ * re-read a possibly-rotated ``nx_csrf`` cookie.
+ */
+function buildHeaders(method: string, raw: HeadersInit | undefined): Headers {
+  const headers = new Headers(raw)
+  if (!SAFE_METHODS.has(method) && !headers.has(CSRF_HEADER)) {
+    const csrf = readCookie(CSRF_COOKIE)
+    if (csrf) headers.set(CSRF_HEADER, csrf)
+  }
+  return headers
+}
+
+async function runOnce(
+  input: RequestInfo | URL,
+  fetchInit: RequestInit,
+  method: string,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController()
+  if (fetchInit.signal) {
+    fetchInit.signal.addEventListener('abort', () =>
+      controller.abort((fetchInit.signal as AbortSignal).reason),
+    )
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(input, {
+      credentials: 'include',
+      ...fetchInit,
+      headers: buildHeaders(method, fetchInit.headers),
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function fetchWithTimeout(
   input: RequestInfo | URL,
   init?: RequestInit & { timeoutMs?: number },
@@ -43,35 +148,34 @@ export async function fetchWithTimeout(
   const { timeoutMs = DEFAULT_TIMEOUT_MS, ...fetchInit } = init ?? {}
   const method = (fetchInit.method ?? 'GET').toUpperCase()
 
-  const headers = new Headers(fetchInit.headers)
-  if (!SAFE_METHODS.has(method) && !headers.has(CSRF_HEADER)) {
-    const csrf = readCookie(CSRF_COOKIE)
-    if (csrf) headers.set(CSRF_HEADER, csrf)
-  }
-
-  const controller = new AbortController()
-
-  // If the caller already provided a signal, chain it
-  if (fetchInit.signal) {
-    fetchInit.signal.addEventListener('abort', () => controller.abort(fetchInit.signal!.reason))
-  }
-
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-
+  let res: Response
   try {
-    const res = await fetch(input, {
-      credentials: 'include',
-      ...fetchInit,
-      headers,
-      signal: controller.signal,
-    })
-    return res
+    res = await runOnce(input, fetchInit, method, timeoutMs)
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
       throw new TypeError('Request timed out (backend may be unavailable)')
     }
     throw err
-  } finally {
-    clearTimeout(timer)
   }
+
+  // Silent refresh: access cookie expired (or missing) but the refresh
+  // cookie may still be good. Attempt exactly one refresh + retry before
+  // giving up. /auth/refresh itself is exempt so its own 401 doesn't
+  // recurse into another refresh.
+  if (res.status === 401 && !isRefreshEndpoint(input)) {
+    const refreshed = await tryRefresh()
+    if (refreshed) {
+      try {
+        return await runOnce(input, fetchInit, method, timeoutMs)
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          throw new TypeError('Request timed out (backend may be unavailable)')
+        }
+        throw err
+      }
+    }
+    notifySessionLost()
+  }
+
+  return res
 }
