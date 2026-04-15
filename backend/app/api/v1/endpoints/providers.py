@@ -44,6 +44,15 @@ _TEST_CACHE_TTL_SECS: float = 10.0
 _test_cache: dict[str, Tuple[float, str, ConnectionTestResult]] = {}
 _test_inflight: dict[str, "asyncio.Future[ConnectionTestResult]"] = {}
 
+# ── /status bounded fan-out ─────────────────────────────────────────
+# Resilience mandate: N providers should never mean N concurrent driver
+# instantiations + N concurrent DB session opens. Cap concurrency so the
+# management-DB pool (20 + 10 overflow) stays drained even when the
+# operator has dozens of providers registered.
+_STATUS_PROBE_CONCURRENCY: int = 5
+_STATUS_PROBE_TIMEOUT_SECS: float = 1.5
+_STATUS_OVERALL_TIMEOUT_SECS: float = 6.0
+
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -105,15 +114,28 @@ async def _run_connectivity_probe(
 async def list_provider_statuses(
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Return provider readiness without affecting overall app health."""
+    """Return provider readiness without affecting overall app health.
+
+    Resilience: bounded fan-out so one hung provider cannot stall the
+    whole response or exhaust the DB pool when many providers exist.
+
+    * ``_STATUS_PROBE_CONCURRENCY`` probes run at once (DB-pool-friendly)
+    * Each probe is capped at ``_STATUS_PROBE_TIMEOUT_SECS``
+    * Overall wall-clock capped at ``_STATUS_OVERALL_TIMEOUT_SECS`` —
+      probes still pending beyond that are reported as ``unknown`` with
+      a note (never blocks the UI, never 5xx)
+    """
     providers = await provider_repo.list_providers(session)
     if not providers:
         return []
 
+    sem = asyncio.Semaphore(_STATUS_PROBE_CONCURRENCY)
+
     async def _probe(provider) -> dict:
         # Fast path: if the registry already has an open breaker for this
         # provider, don't probe — report unavailable and let the breaker's
-        # reset_timeout gate the next real attempt.
+        # reset_timeout gate the next real attempt. No network I/O, no
+        # semaphore slot consumed beyond the context entry.
         breaker_error = _breaker_open_error(provider.id)
         if breaker_error:
             return {
@@ -132,30 +154,59 @@ async def list_provider_statuses(
                 "lastCheckedAt": None,
             }
 
-        try:
-            instance = await _load_provider_for_outbound(provider.id, None)
-            await asyncio.wait_for(instance.get_stats(), timeout=1.5)
-            return {
-                "id": provider.id,
-                "name": provider.name,
-                "status": "ready",
-                "lastCheckedAt": _iso_now(),
-            }
-        except Exception as exc:
-            # Breaker state on cached proxies is updated automatically when
-            # they're used from the main request path. This probe uses a raw
-            # instance (short-session pattern), so failures here don't update
-            # a breaker — but they also don't need to: the main request path
-            # will observe and trip the breaker on real traffic.
-            return {
-                "id": provider.id,
-                "name": provider.name,
-                "status": "unavailable",
-                "lastCheckedAt": _iso_now(),
-                "error": str(exc),
-            }
+        async with sem:
+            try:
+                instance = await _load_provider_for_outbound(provider.id, None)
+                await asyncio.wait_for(
+                    instance.get_stats(), timeout=_STATUS_PROBE_TIMEOUT_SECS,
+                )
+                return {
+                    "id": provider.id,
+                    "name": provider.name,
+                    "status": "ready",
+                    "lastCheckedAt": _iso_now(),
+                }
+            except Exception as exc:
+                # Breaker state on cached proxies is updated automatically when
+                # they're used from the main request path. This probe uses a
+                # raw instance (short-session pattern), so failures here don't
+                # update a breaker — but they also don't need to: the main
+                # request path will observe and trip the breaker on real
+                # traffic.
+                return {
+                    "id": provider.id,
+                    "name": provider.name,
+                    "status": "unavailable",
+                    "lastCheckedAt": _iso_now(),
+                    "error": str(exc)[:200],
+                }
 
-    results = await asyncio.gather(*[_probe(provider) for provider in providers])
+    tasks = [asyncio.create_task(_probe(p)) for p in providers]
+    done, pending = await asyncio.wait(tasks, timeout=_STATUS_OVERALL_TIMEOUT_SECS)
+
+    results: list[dict] = []
+    for task in done:
+        try:
+            results.append(task.result())
+        except Exception:
+            continue
+
+    # Probes that exceeded the overall wall clock — surface each as
+    # ``unknown`` so the UI can distinguish "we know it's broken" from
+    # "we don't know yet" and the user doesn't see a hung response.
+    for i, task in enumerate(tasks):
+        if task in pending:
+            task.cancel()
+            p = providers[i]
+            results.append({
+                "id": p.id,
+                "name": p.name,
+                "status": "unknown",
+                "lastCheckedAt": _iso_now(),
+                "error": (
+                    f"Probe exceeded {_STATUS_OVERALL_TIMEOUT_SECS:.0f}s wall clock"
+                ),
+            })
     return results
 
 
