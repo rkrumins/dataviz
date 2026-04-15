@@ -1214,7 +1214,7 @@ class FalkorDBProvider(GraphDataProvider):
         target_urn: str,
         edge_id: str,
         edge_type: str,
-    ) -> None:
+    ) -> int:
         """Materialize AGGREGATED edges when a lineage edge is written.
 
         Uses pre-computed ancestor chains instead of Cypher variable-length
@@ -1225,6 +1225,13 @@ class FalkorDBProvider(GraphDataProvider):
 
         Batching: Collects all new pairs, then issues a single UNWIND+MERGE
         instead of one Cypher call per ancestor pair.
+
+        Returns the number of AGGREGATED pairs whose graph edge was
+        newly created or had its weight/sourceEdgeTypes updated as a
+        result of this call. Returns 0 if every pair was already
+        recorded in the Redis idempotency set (nothing to do). Callers
+        sum this across the batch to report *actual graph edges
+        affected* rather than *input edges processed*.
         """
         await self._ensure_connected()
 
@@ -1244,7 +1251,7 @@ class FalkorDBProvider(GraphDataProvider):
                     pairs_to_check.append((s_urn, t_urn))
 
         if not pairs_to_check:
-            return
+            return 0
 
         # Pipeline: SADD for all pairs
         try:
@@ -1259,7 +1266,7 @@ class FalkorDBProvider(GraphDataProvider):
         # Phase 2: SCARD pipeline for pairs that were newly added
         new_pairs = [(pairs_to_check[i], sadd_results[i]) for i in range(len(pairs_to_check)) if sadd_results[i] != 0]
         if not new_pairs:
-            return
+            return 0
 
         try:
             pipe = self._redis.pipeline(transaction=False)
@@ -1292,8 +1299,10 @@ class FalkorDBProvider(GraphDataProvider):
                 "r.latestUpdate = timestamp()",
                 params={"batch": merge_batch, "edgeType": edge_type},
             )
+            return len(merge_batch)
         except Exception as e:
             logger.error(f"Batched AGGREGATED MERGE failed: {e}")
+            return 0
 
     async def on_lineage_edge_deleted(
         self,
@@ -1418,7 +1427,24 @@ class FalkorDBProvider(GraphDataProvider):
         logger.info(f"Invalidated ancestor cache for {len(visited)} nodes under {urn}")
 
     async def purge_aggregated_edges(self) -> int:
-        """Remove ALL materialized AGGREGATED edges from the graph."""
+        """Remove ALL materialized AGGREGATED edges from the graph.
+
+        Also deletes the Redis ``{graph_name}:agg_members:*`` tracking
+        sets. These sets are the idempotency state used by
+        :meth:`on_lineage_edge_written` (SADD returns 0 when an edge_id
+        is already a member, short-circuiting the MERGE). If they are
+        NOT purged together with the graph edges, the next materialize
+        run silently no-ops — the source edges appear "already
+        contributed" even though the AGGREGATED edges they produced are
+        gone from the graph, and the caller sees
+        ``aggregated_edges_affected`` numbers that match the input
+        count but 0 edges actually written to the graph.
+
+        The Redis key prefix was renamed from ``agg:sourceEdgeIds:`` to
+        ``agg_members:`` in an earlier refactor of
+        :meth:`on_lineage_edge_written`; this method's scan pattern was
+        not updated and so cleaned nothing until this fix.
+        """
         await self._ensure_connected()
         proj = self._proj
         try:
@@ -1430,8 +1456,9 @@ class FalkorDBProvider(GraphDataProvider):
             )
             deleted = result.result_set[0][0] if result.result_set else 0
 
-            # Clean up Redis tracking keys for this graph
-            pattern = f"{self._graph_name}:agg:sourceEdgeIds:*"
+            # Clean up Redis tracking keys for this graph. Must match the
+            # prefix used by on_lineage_edge_written exactly (see docstring).
+            pattern = f"{self._graph_name}:agg_members:*"
             cursor = 0
             cleaned = 0
             while True:
@@ -1497,9 +1524,27 @@ class FalkorDBProvider(GraphDataProvider):
         containment = containment_edge_types or list(self._get_containment_edge_types())
         exclude_types = list(containment) + ["AGGREGATED"]
 
+        # Filter AGGREGATED out of any explicit lineage whitelist. The
+        # ontology can legitimately list AGGREGATED as a lineage-category
+        # relationship (it is the *result* of aggregation), but feeding
+        # existing AGGREGATED edges back into this loop produces new
+        # AGGREGATED edges from ancestor chains of the previously-
+        # aggregated pairs, compounding on every re-run. This was the
+        # cause of the API vs seed_falkordb count divergence: after the
+        # first materialization, each API run multiplied the AGGREGATED
+        # count whereas the seed-script fallback branch (``NOT IN
+        # exclude_types``) already excluded AGGREGATED correctly.
         if lineage_edge_types:
+            effective_lineage_types = [t for t in lineage_edge_types if t != "AGGREGATED"]
+            if not effective_lineage_types:
+                logger.warning(
+                    "materialize_aggregated_edges_batch: lineage_edge_types contained "
+                    "only AGGREGATED after filtering; no leaf lineage edges to process. "
+                    "Check the ontology's is_lineage flags."
+                )
+                return {"processed": 0, "aggregated_edges_affected": 0, "errors": 0}
             type_filter = "WHERE type(r) IN $lineageEdges"
-            type_params: Dict[str, Any] = {"lineageEdges": lineage_edge_types}
+            type_params: Dict[str, Any] = {"lineageEdges": effective_lineage_types}
         else:
             type_filter = "WHERE NOT type(r) IN $excludeTypes"
             type_params = {"excludeTypes": exclude_types}
@@ -1557,14 +1602,23 @@ class FalkorDBProvider(GraphDataProvider):
                 all_urns.add(row[1])
             await self._compute_and_store_ancestors_bulk(list(all_urns))
 
-            # Now materialize each edge using cached ancestor chains
+            # Now materialize each edge using cached ancestor chains. The
+            # returned count is the number of AGGREGATED graph edges
+            # actually created or weight-updated by this call — not the
+            # number of input edges processed. Sum these so the caller
+            # sees the real graph effect; a count of 0 means the Redis
+            # idempotency sets already recorded every ancestor pair for
+            # these input edges (e.g. after a repeat run that produced
+            # no new AGGREGATED state).
             for row in rows:
                 s_urn, t_urn, edge_type, edge_id = row[0], row[1], row[2], row[3]
                 if not edge_id:
                     edge_id = f"{s_urn}|{edge_type}|{t_urn}"
                 try:
-                    await self.on_lineage_edge_written(s_urn, t_urn, edge_id, edge_type)
-                    created_count += 1
+                    affected = await self.on_lineage_edge_written(
+                        s_urn, t_urn, edge_id, edge_type,
+                    )
+                    created_count += int(affected or 0)
                 except Exception as e:
                     logger.error(f"Materialization error for {s_urn}->{t_urn}: {e}")
                     errors += 1
@@ -1587,7 +1641,21 @@ class FalkorDBProvider(GraphDataProvider):
             if len(rows) < batch_size:
                 break
 
-        stats = {"processed": processed, "aggregated_edges_affected": created_count, "errors": errors}
+        stats = {
+            "processed": processed,
+            # Historical key name — kept for back-compat with
+            # aggregation_jobs.created_edges; now correctly counts the
+            # number of AGGREGATED graph edges created or updated, not
+            # the number of input lineage edges iterated.
+            "aggregated_edges_affected": created_count,
+            # New stat so callers + dashboards can distinguish
+            # "touched N input edges" from "wrote M aggregated edges".
+            # On a clean run these two are typically proportional; when
+            # they diverge the operator has a clear signal that the
+            # Redis idempotency sets are in a surprising state.
+            "input_edges_processed": processed,
+            "errors": errors,
+        }
         logger.info(f"Batch materialization complete: {stats}")
         return stats
 
