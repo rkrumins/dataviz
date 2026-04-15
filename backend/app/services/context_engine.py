@@ -61,6 +61,20 @@ class ContextEngine:
         """
         Create a ContextEngine scoped to a workspace data source.
         If data_source_id is given, uses that specific source; otherwise the primary.
+
+        Ontology is resolved and pushed into the provider *eagerly* so
+        that endpoints which call ``engine.provider.*`` directly (e.g.
+        ``POST /nodes/query`` bypassing ``engine.get_nodes``) observe a
+        correctly configured provider. Without eager injection, those
+        direct call sites hit ``ProviderConfigurationError`` on the
+        first query after the provider is instantiated because the
+        provider's ``_resolved_containment_types_set`` flag is only set
+        from inside ``_resolve_ontology()``.
+
+        Resolution failure is NOT fatal — the engine still returns so
+        the endpoint can surface a cleaner error (and ``_resolve_ontology``
+        will retry on subsequent calls once the cache TTL rolls, or when
+        the engine is rebuilt on the next request).
         """
         from ..ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
         from ..ontology.service import LocalOntologyService
@@ -74,6 +88,24 @@ class ContextEngine:
         engine._workspace_id = workspace_id
         engine._data_source_id = data_source_id
         engine._db_session = session
+
+        # Eagerly resolve ontology so the provider is configured before
+        # any request handler touches ``engine.provider`` directly.
+        # ``_resolve_ontology`` handles provider-introspection failure
+        # internally (graceful fallback to DB ontology + empty
+        # introspection); we only need to catch catastrophic errors here
+        # so engine construction can still succeed for diagnostics
+        # (status endpoints, provider listing, etc.).
+        try:
+            await engine._resolve_ontology()
+        except Exception as exc:
+            logger.warning(
+                "Eager ontology resolution failed for workspace=%s ds=%s: %s — "
+                "provider will remain unconfigured; endpoints that call "
+                "engine.provider.* directly may fail until the next request.",
+                workspace_id, data_source_id, exc,
+            )
+
         return engine
 
     # ------------------------------------------------------------------ #
