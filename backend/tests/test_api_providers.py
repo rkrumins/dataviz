@@ -172,6 +172,77 @@ async def test_provider_crud_roundtrip(test_client: AsyncClient):
     assert r.status_code == 404
 
 
+async def test_provider_status_endpoint_bounded_when_one_provider_hangs(
+    test_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Scenario 1 — one provider out of N hangs must NOT stall the others.
+
+    Concretely: three providers, one of which takes longer than the
+    endpoint's overall wall-clock. The endpoint must still return 200
+    within the overall timeout + a small slack window, the healthy
+    providers must be reported as ``ready``, and the hung one must be
+    reported as ``unknown`` (not cause a 5xx, not block the response).
+    """
+    import asyncio
+    import time
+
+    from backend.app.api.v1.endpoints import providers as providers_module
+
+    # Keep the test fast.
+    monkeypatch.setattr(providers_module, "_STATUS_PROBE_TIMEOUT_SECS", 0.5)
+    monkeypatch.setattr(providers_module, "_STATUS_OVERALL_TIMEOUT_SECS", 1.0)
+
+    create_resp_a = await test_client.post(
+        "/api/v1/admin/providers", json=_provider_payload("Fast-A"),
+    )
+    create_resp_b = await test_client.post(
+        "/api/v1/admin/providers", json=_provider_payload("Hung-B"),
+    )
+    create_resp_c = await test_client.post(
+        "/api/v1/admin/providers", json=_provider_payload("Fast-C"),
+    )
+    id_a = create_resp_a.json()["id"]
+    id_b = create_resp_b.json()["id"]
+    id_c = create_resp_c.json()["id"]
+
+    class _FastProvider:
+        async def get_stats(self):
+            return {"node_count": 1}
+
+    class _HungProvider:
+        async def get_stats(self):
+            # Block longer than the overall wall-clock; cancellation
+            # should interrupt us.
+            await asyncio.sleep(10)
+            return {"node_count": 0}
+
+    async def _fake_load(provider_id: str, asset_name):
+        if provider_id == id_b:
+            return _HungProvider()
+        return _FastProvider()
+
+    monkeypatch.setattr(providers_module, "_load_provider_for_outbound", _fake_load)
+
+    t0 = time.monotonic()
+    resp = await test_client.get("/api/v1/admin/providers/status")
+    elapsed = time.monotonic() - t0
+
+    assert resp.status_code == 200
+    body = resp.json()
+    by_id = {row["id"]: row for row in body}
+
+    # The hung provider must not have taken the whole response with it.
+    assert elapsed < 3.0, f"Response took {elapsed:.2f}s — bounded fan-out is broken"
+
+    assert by_id[id_a]["status"] == "ready"
+    assert by_id[id_c]["status"] == "ready"
+    assert by_id[id_b]["status"] in ("unknown", "unavailable"), by_id[id_b]
+    # ``unknown`` is the expected wall-clock outcome; ``unavailable`` is
+    # a legitimate alternative if cancellation surfaced as an error —
+    # either way it's NOT "ready" and NOT missing from the response.
+
+
 async def test_provider_status_endpoint_reports_unavailable_when_circuit_open(
     test_client: AsyncClient,
 ):

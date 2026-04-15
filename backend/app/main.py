@@ -411,56 +411,71 @@ async def provider_health_check():
     providers: dict = {}
 
     try:
+        # Resilience: enumerate data sources under a SHORT session, then
+        # close it before spawning concurrent probes. Each probe opens its
+        # own short session for its DB portion — SQLAlchemy AsyncSession
+        # is not concurrency-safe, so sharing one session across the fan-
+        # out could silently corrupt state or deadlock under a slow
+        # provider. Closing the outer session first also keeps the
+        # management-DB pool drained during the outbound probe storm.
+        ds_meta: list[tuple[str, str, str]] = []
         async with get_async_session() as session:
             workspaces = await list_workspaces(session)
-
-            sem = asyncio.Semaphore(PROBE_CONCURRENCY)
-            ds_meta: list[tuple[str, str, str]] = []
             for ws in workspaces:
                 sources = await list_data_sources(session, ws.id)
                 for ds in sources:
                     ds_meta.append((ws.id, ds.id, ds.provider_id))
 
-            async def check_provider(ws_id: str, ds_id: str, ds_provider_id: str):
-                key = f"{ws_id}:{ds_id}"
-                async with sem:
-                    try:
+        if not ds_meta:
+            return {"providers": {}}
+
+        sem = asyncio.Semaphore(PROBE_CONCURRENCY)
+
+        async def check_provider(ws_id: str, ds_id: str, ds_provider_id: str):
+            key = f"{ws_id}:{ds_id}"
+            async with sem:
+                try:
+                    # Each probe owns its own session for the DB portion of
+                    # get_provider_for_workspace; the outbound provider call
+                    # that follows does NOT hold a session.
+                    async with get_async_session() as probe_session:
                         provider = await asyncio.wait_for(
-                            provider_registry.get_provider_for_workspace(ws_id, session, ds_id),
+                            provider_registry.get_provider_for_workspace(
+                                ws_id, probe_session, ds_id,
+                            ),
                             timeout=PER_PROBE_TIMEOUT,
                         )
-                        await asyncio.wait_for(provider.get_stats(), timeout=PER_PROBE_TIMEOUT)
-                        return key, {"status": "healthy", "providerId": ds_provider_id}
-                    except Exception as exc:
-                        return key, {"status": "unhealthy", "error": str(exc)[:200]}
+                    await asyncio.wait_for(provider.get_stats(), timeout=PER_PROBE_TIMEOUT)
+                    return key, {"status": "healthy", "providerId": ds_provider_id}
+                except Exception as exc:
+                    return key, {"status": "unhealthy", "error": str(exc)[:200]}
 
-            if ds_meta:
-                tasks = [
-                    asyncio.create_task(check_provider(ws_id, ds_id, prov_id))
-                    for ws_id, ds_id, prov_id in ds_meta
-                ]
-                done, pending = await asyncio.wait(tasks, timeout=OVERALL_TIMEOUT)
+        tasks = [
+            asyncio.create_task(check_provider(ws_id, ds_id, prov_id))
+            for ws_id, ds_id, prov_id in ds_meta
+        ]
+        done, pending = await asyncio.wait(tasks, timeout=OVERALL_TIMEOUT)
 
-                for task in done:
-                    try:
-                        key, status = task.result()
-                        providers[key] = status
-                    except Exception:
-                        # Per-task failure already encoded by check_provider's
-                        # try/except — anything reaching here is unexpected.
-                        continue
+        for task in done:
+            try:
+                key, status = task.result()
+                providers[key] = status
+            except Exception:
+                # Per-task failure already encoded by check_provider's
+                # try/except — anything reaching here is unexpected.
+                continue
 
-                # Probes that exceeded the wall clock — cancel and surface
-                # as "unknown" so the UI can distinguish "broken" from
-                # "we don't know yet".
-                for i, task in enumerate(tasks):
-                    if task in pending:
-                        task.cancel()
-                        ws_id, ds_id, _ = ds_meta[i]
-                        providers[f"{ws_id}:{ds_id}"] = {
-                            "status": "unknown",
-                            "error": f"Probe exceeded {OVERALL_TIMEOUT:.0f}s wall clock",
-                        }
+        # Probes that exceeded the wall clock — cancel and surface
+        # as "unknown" so the UI can distinguish "broken" from
+        # "we don't know yet".
+        for i, task in enumerate(tasks):
+            if task in pending:
+                task.cancel()
+                ws_id, ds_id, _ = ds_meta[i]
+                providers[f"{ws_id}:{ds_id}"] = {
+                    "status": "unknown",
+                    "error": f"Probe exceeded {OVERALL_TIMEOUT:.0f}s wall clock",
+                }
 
     except Exception as exc:
         return {"providers": {}, "error": str(exc)[:200]}

@@ -69,7 +69,9 @@ class AggregationScheduler:
                 try:
                     # TODO: Check if this schedule is actually due (parse cron expression)
                     # For MVP, we just check every time the scheduler ticks
-                    provider = await self._registry.get_provider_for_data_source(ds.id)
+                    provider = await self._registry.get_provider_for_workspace(
+                        ds.workspace_id, session, data_source_id=ds.id,
+                    )
                     current_fp = await compute_graph_fingerprint(provider)
 
                     if not fingerprints_match(ds.graph_fingerprint, current_fp):
@@ -82,6 +84,14 @@ class AggregationScheduler:
                         # The frontend polls for drift via the readiness endpoint.
                         # The user decides whether to re-aggregate.
                 except Exception as e:
-                    logger.debug(
+                    # Bump from debug → warning: the previous method call
+                    # (get_provider_for_data_source) didn't exist, so every
+                    # tick threw AttributeError silently. Now that the method
+                    # name is correct, repeated failures here mean a real
+                    # provider outage that operators should see. The
+                    # registry's per-provider circuit breaker keeps this
+                    # loop cheap even under total provider outage — once
+                    # tripped it fast-fails in <5ms per data source.
+                    logger.warning(
                         "Drift check failed for data source %s: %s", ds.id, e
                     )
