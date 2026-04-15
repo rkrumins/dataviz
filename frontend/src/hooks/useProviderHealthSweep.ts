@@ -48,9 +48,15 @@ export function useProviderHealthSweep(
     const inflightControllers = useRef<Map<string, AbortController>>(new Map())
     const initialSweepDone = useRef(false)
 
-    const runProbe = useCallback(async (id: string): Promise<void> => {
+    const runProbe = useCallback(async (id: string, fresh: boolean = false): Promise<void> => {
         const breaker = getCircuitBreaker('provider', id)
-        if (!breaker.canRequest()) {
+        // Explicit user action (fresh=true) always gets through. Without
+        // this reset, a breaker opened by 3 prior failures would silently
+        // suppress the user's click for up to 15s, adding to the perceived
+        // "UI is stuck" lag when the provider recovers.
+        if (fresh) {
+            breaker.reset()
+        } else if (!breaker.canRequest()) {
             setHealthMap(prev => ({
                 ...prev,
                 [id]: { status: 'unhealthy', error: 'Circuit open — skipping probe until provider recovers' },
@@ -73,6 +79,7 @@ export function useProviderHealthSweep(
             const result = await providerService.test(id, {
                 signal: controller.signal,
                 timeoutMs: perCallTimeoutMs,
+                fresh,
             })
             if (controller.signal.aborted) return
             if (result.success) breaker.recordSuccess()
@@ -98,14 +105,14 @@ export function useProviderHealthSweep(
         }
     }, [perCallTimeoutMs])
 
-    const runSweep = useCallback(async (ids: string[]): Promise<void> => {
+    const runSweep = useCallback(async (ids: string[], fresh: boolean = false): Promise<void> => {
         // Simple in-file semaphore — avoids pulling in p-limit for ~15 lines.
         const queue = [...ids]
         const workers: Promise<void>[] = []
         const next = async (): Promise<void> => {
             while (queue.length > 0) {
                 const id = queue.shift()!
-                await runProbe(id)
+                await runProbe(id, fresh)
             }
         }
         for (let i = 0; i < Math.min(concurrency, queue.length); i++) {
@@ -114,16 +121,25 @@ export function useProviderHealthSweep(
         await Promise.allSettled(workers)
     }, [concurrency, runProbe])
 
+    // refresh() = user clicked "Re-test All" → bypass server cache + breaker.
     const refresh = useCallback((): Promise<void> => {
-        return runSweep(providers.map(p => p.id))
+        return runSweep(providers.map(p => p.id), true)
     }, [providers, runSweep])
 
+    // testOne() exposed to callers is the manual Test button handler →
+    // always fresh so the cached last result cannot mask the current truth.
+    const testOne = useCallback((id: string): Promise<void> => {
+        return runProbe(id, true)
+    }, [runProbe])
+
     // Initial sweep — fires once per mount when providers first arrive.
+    // Uses the 10s cache (fresh=false) so simultaneous mounts collapse
+    // onto one real probe per provider.
     useEffect(() => {
         if (initialSweepDone.current) return
         if (providers.length === 0) return
         initialSweepDone.current = true
-        void runSweep(providers.map(p => p.id))
+        void runSweep(providers.map(p => p.id), false)
     }, [providers, runSweep])
 
     // Cleanup — abort anything in flight on unmount.
@@ -140,7 +156,7 @@ export function useProviderHealthSweep(
 
     return {
         healthMap,
-        testOne: runProbe,
+        testOne,
         refresh,
         setHealth,
     }

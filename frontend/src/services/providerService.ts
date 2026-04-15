@@ -190,10 +190,14 @@ export const providerService = {
 
     async test(
         id: string,
-        opts?: { signal?: AbortSignal; timeoutMs?: number },
+        opts?: { signal?: AbortSignal; timeoutMs?: number; fresh?: boolean },
     ): Promise<ConnectionTestResult> {
+        // `fresh=true` bypasses the 10s server-side cache. Use it on
+        // explicit user clicks so a dead/recovered provider is reflected
+        // immediately instead of returning a cached prior result.
+        const qs = opts?.fresh ? '?fresh=true' : ''
         const result = await request<ConnectionTestResult>(
-            `${ADMIN_API}/${id}/test`,
+            `${ADMIN_API}/${id}/test${qs}`,
             {
                 method: 'POST',
                 ...(opts?.signal ? { signal: opts.signal } : {}),

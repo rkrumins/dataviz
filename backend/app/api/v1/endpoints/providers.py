@@ -6,7 +6,7 @@ import asyncio
 import time
 from datetime import datetime, timezone
 from typing import List, Tuple
-from fastapi import APIRouter, Body, Depends, HTTPException, Path
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.engine import get_db_session, with_short_session
@@ -25,14 +25,22 @@ from backend.common.models.management import (
 router = APIRouter()
 
 # ── Provider test cache + in-flight dedup ──────────────────────────
-# Reason: the frontend "Test All" sweep can fan out N probes against
-# the same provider within seconds. Without a cache, each probe opens
-# a fresh driver connection and (on a dead provider) holds a DB session
-# for 10s. The cache collapses duplicates to the last real result, and
-# the in-flight map collapses concurrent probes to a single awaitable.
-# Keyed on (provider_id, provider.updated_at) so any credential or host
-# change instantly invalidates stale entries without explicit eviction.
-_TEST_CACHE_TTL_SECS: float = 60.0
+# Reason: multiple hook instances may mount simultaneously and each kick
+# off an initial probe sweep. The cache collapses duplicate simultaneous
+# probes to the last real result, and the in-flight map collapses
+# concurrent probes to a single awaitable. Keyed on
+# (provider_id, provider.updated_at) so any credential or host change
+# instantly invalidates stale entries without explicit eviction.
+#
+# TTL kept tight (10s) because an explicit user click on "Test" wants
+# the current truth, not stale state. The old 60s TTL was written for a
+# frontend stampede that ``useProviderHealthSweep`` already bounds
+# (concurrency=3 + one-sweep-per-mount), so the longer window was
+# vestigial and produced the "service is down but UI still says healthy"
+# UX for up to a minute on both failure AND recovery transitions.
+# Callers that want to force-bypass the cache (manual user click, post-
+# edit revalidation, etc.) pass ``?fresh=true``.
+_TEST_CACHE_TTL_SECS: float = 10.0
 _test_cache: dict[str, Tuple[float, str, ConnectionTestResult]] = {}
 _test_inflight: dict[str, "asyncio.Future[ConnectionTestResult]"] = {}
 
@@ -240,7 +248,17 @@ async def get_provider_impact(
 
 
 @router.post("/{provider_id}/test", response_model=ConnectionTestResult)
-async def test_provider(provider_id: str = Path(...)):
+async def test_provider(
+    provider_id: str = Path(...),
+    fresh: bool = Query(
+        False,
+        description=(
+            "Bypass the 10s cached result and run a fresh probe. Set by "
+            "the UI on manual 'Test' button clicks so the user sees the "
+            "current truth (not a stale cached success/failure)."
+        ),
+    ),
+):
     """Test connectivity to a registered provider.
 
     Phase 2.5 §2.5.2 — short-session pattern: open a session only long
@@ -249,9 +267,11 @@ async def test_provider(provider_id: str = Path(...)):
     connection. Keeps the pool drained even when many providers are
     being probed against unreachable hosts.
 
-    Caches the last result for 60s keyed on the provider's updated_at so
-    any config change instantly invalidates; concurrent probes of the
-    same provider collapse onto a single in-flight awaitable.
+    Caches the last result for 10s keyed on the provider's updated_at
+    (config change → instant invalidation). Concurrent probes of the
+    same provider collapse onto a single in-flight awaitable. ``fresh``
+    bypasses the cache read *and* write so a dead/recovered transition
+    is reflected immediately on the next user click.
     """
     # 1. Short DB read — close the session before the outbound call.
     async with with_short_session() as session:
@@ -264,22 +284,28 @@ async def test_provider(provider_id: str = Path(...)):
         port = prov_row.port
         tls = prov_row.tls_enabled
         creds = await provider_repo.get_credentials(session, provider_id)
-    # 2. Cache + in-flight dedup — pure in-memory, no DB.
-    cached = _test_cache.get(provider_id)
-    if cached is not None:
-        cached_at, cached_fp, cached_result = cached
-        if cached_fp == fingerprint and (time.monotonic() - cached_at) < _TEST_CACHE_TTL_SECS:
-            return cached_result
+    # 2. Cache + in-flight dedup — pure in-memory, no DB. Explicit user
+    #    clicks (fresh=True) bypass entirely and also invalidate the
+    #    cache entry so subsequent background polls see the new truth.
+    if fresh:
+        _test_cache.pop(provider_id, None)
+    else:
+        cached = _test_cache.get(provider_id)
+        if cached is not None:
+            cached_at, cached_fp, cached_result = cached
+            if cached_fp == fingerprint and (time.monotonic() - cached_at) < _TEST_CACHE_TTL_SECS:
+                return cached_result
 
-    existing = _test_inflight.get(provider_id)
-    if existing is not None:
-        return await existing
+        existing = _test_inflight.get(provider_id)
+        if existing is not None:
+            return await existing
 
     loop = asyncio.get_running_loop()
     future: "asyncio.Future[ConnectionTestResult]" = loop.create_future()
-    _test_inflight[provider_id] = future
+    if not fresh:
+        _test_inflight[provider_id] = future
     try:
-        # 3. Outbound provider call — no DB session held during these 10s.
+        # 3. Outbound provider call — no DB session held during this window.
         result = await _run_connectivity_probe(
             provider_type=ptype,
             host=host,
@@ -288,6 +314,10 @@ async def test_provider(provider_id: str = Path(...)):
             creds=creds,
         )
 
+        # Always write the freshest result so any in-flight callers and
+        # subsequent cached reads reflect current truth — including the
+        # fresh=True path, which updates the cache for future non-fresh
+        # callers rather than skipping the write.
         _test_cache[provider_id] = (time.monotonic(), fingerprint, result)
         if not future.done():
             future.set_result(result)
