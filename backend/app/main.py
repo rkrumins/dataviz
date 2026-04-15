@@ -427,7 +427,15 @@ async def provider_health_check():
                     ds_meta.append((ws.id, ds.id, ds.provider_id))
 
         if not ds_meta:
-            return {"providers": {}}
+            # Explicit "nothing configured" signal so the frontend can
+            # render a first-run CTA instead of interpreting ``{}`` as
+            # "all healthy" (which would be wrong for both observability
+            # dashboards and new-install UX).
+            return {
+                "providers": {},
+                "dataSourceCount": 0,
+                "configured": False,
+            }
 
         sem = asyncio.Semaphore(PROBE_CONCURRENCY)
 
@@ -480,4 +488,8 @@ async def provider_health_check():
     except Exception as exc:
         return {"providers": {}, "error": str(exc)[:200]}
 
-    return {"providers": providers}
+    return {
+        "providers": providers,
+        "dataSourceCount": len(ds_meta),
+        "configured": True,
+    }

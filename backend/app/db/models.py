@@ -569,7 +569,7 @@ class ContextModelORM(Base):
     # Columns added during context-model → view unification
     view_type = Column(Text, nullable=True)                            # graph | table | lineage | ...
     config = Column(Text, nullable=True)                               # JSON: full ViewConfiguration
-    visibility = Column(Text, nullable=False, default="private")       # private | workspace | public
+    visibility = Column(Text, nullable=False, default="private")       # private | workspace | enterprise
     created_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                                 # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
@@ -586,7 +586,7 @@ class ContextModelORM(Base):
         Index("idx_cm_workspace", "workspace_id"),
         Index("idx_cm_template", "is_template"),
         CheckConstraint(
-            "visibility IN ('private', 'workspace', 'public')",
+            "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_context_models_visibility",
         ),
     )
@@ -646,7 +646,7 @@ class ViewORM(Base):
         Index("idx_view_data_source", "data_source_id"),
         Index("idx_view_deleted_at", "deleted_at"),
         CheckConstraint(
-            "visibility IN ('private', 'workspace', 'public')",
+            "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_views_visibility",
         ),
     )

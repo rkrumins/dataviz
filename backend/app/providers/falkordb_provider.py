@@ -1534,13 +1534,18 @@ class FalkorDBProvider(GraphDataProvider):
                 )
                 batch_params = {**type_params, "limit": batch_size}
 
-            try:
-                res = await self._graph.ro_query(batch_cypher, params=batch_params)
-                rows = res.result_set or []
-            except Exception as e:
-                logger.error(f"Batch fetch error at cursor {current_cursor}: {e}")
-                errors += 1
-                break
+            # Do NOT silently break on batch-fetch failure — that path
+            # lets a provider outage mid-aggregation flow through the
+            # worker as if the job completed successfully (the worker
+            # reads our ``stats`` dict, sees no exception, and marks
+            # status=completed with whatever ``processed`` count we
+            # managed before the failure). Re-raise so the worker's
+            # outer try/except transitions the job to ``failed`` and
+            # preserves ``last_cursor`` for crash-resume. The provider
+            # is either back (resume succeeds) or still down (breaker
+            # opens and triggers 503 upstream).
+            res = await self._graph.ro_query(batch_cypher, params=batch_params)
+            rows = res.result_set or []
 
             if not rows:
                 break

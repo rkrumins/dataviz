@@ -7,11 +7,11 @@
  *         lazy stats, blast-radius unregister, and inline route step
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, Link } from 'react-router-dom'
 import {
     Database, Search, Filter, Loader2, Trash2,
     CheckCircle2, RefreshCw, Layers,
-    AlertTriangle, Zap, X, ChevronRight
+    AlertTriangle, Zap, X, ChevronRight, Plus
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -24,6 +24,7 @@ import { workspaceService } from '@/services/workspaceService'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
 import { AssetOnboardingWizard } from './AssetOnboardingWizard'
+import { FirstRunHero } from './FirstRunHero'
 
 // ─── Provider type helpers ────────────────────────────────────────────────────
 const PROVIDER_TYPES = [
@@ -729,8 +730,14 @@ export function RegistryAssets() {
                         <span>Loading...</span>
                     </div>
                 ) : providers.length === 0 ? (
-                    <div className="p-4 rounded-xl border border-glass-border text-center text-ink-muted text-sm">
-                        No providers registered yet.
+                    <div className="p-4 rounded-xl border border-glass-border text-center">
+                        <p className="text-ink-muted text-sm mb-3">No providers registered yet.</p>
+                        <Link
+                            to="/ingestion?tab=connections"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 text-xs font-semibold transition-colors"
+                        >
+                            <Plus className="w-3 h-3" /> Register a provider
+                        </Link>
                     </div>
                 ) : (
                     providers.map(p => {
@@ -794,7 +801,9 @@ export function RegistryAssets() {
 
             {/* ─── Right: Asset Panel ─────────────────────────────────────────── */}
             <div className="flex-1 flex flex-col min-h-0 min-w-0">
-                {!selectedProvider ? (
+                {!providersLoading && providers.length === 0 ? (
+                    <FirstRunHero embedded />
+                ) : !selectedProvider ? (
                     <div className="flex flex-col items-center justify-center h-full text-ink-muted gap-4">
                         <Layers className="w-12 h-12 opacity-20" />
                         <p className="text-sm font-semibold">Select a provider to view its assets</p>
