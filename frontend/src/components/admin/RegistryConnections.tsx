@@ -191,13 +191,7 @@ export function RegistryConnections() {
                 <div className="flex justify-center py-20"><Loader2 className="w-6 h-6 animate-spin text-ink-muted" /></div>
             ) : providers.length === 0 ? (
                 <div className="space-y-6">
-                    <FirstRunHero
-                        embedded
-                        onGetStarted={() => {
-                            setEditingProvider(null)
-                            setShowWizard(true)
-                        }}
-                    />
+                    <FirstRunHero embedded />
 
                     <div className="overflow-hidden rounded-3xl border border-glass-border bg-gradient-to-br from-slate-50 via-white to-indigo-50/60 dark:from-slate-900 dark:via-slate-900 dark:to-indigo-950/20">
                         <div className="grid gap-0 md:grid-cols-[1.3fr,0.9fr]">

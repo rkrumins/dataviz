@@ -94,7 +94,7 @@ describe('RegistryConnections', () => {
 
     expect(screen.getByText(/connect your graph databases, register data sources, and configure semantic layers/i)).toBeInTheDocument()
     expect(screen.getByText(/connect your first provider/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /get started/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /get started/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /start provider onboarding/i })).toBeInTheDocument()
   })
 
