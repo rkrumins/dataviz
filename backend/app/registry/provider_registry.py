@@ -3,32 +3,52 @@ ProviderRegistry — lazy-initialised, async-safe registry of GraphDataProvider 
 
 Workspace-centric: providers are cached by (provider_id, graph_name) tuple.
 Legacy connection-based access is preserved for backward compatibility.
+
+Every provider instance handed out is wrapped in a
+:class:`CircuitBreakerProxy` so that a failing downstream (FalkorDB
+unreachable, Neo4j hung, DataHub 5xx, …) fails fast with
+:class:`ProviderUnavailable` instead of stalling the event loop or holding
+operational-DB sessions open. The previously hand-rolled 30s negative cache
+is removed — the breaker's per-instance state machine subsumes it correctly
+under concurrency.
 """
 import asyncio
 import json
 import logging
-import time
 from typing import Dict, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.common.adapters import CircuitBreakerProxy
 from backend.common.interfaces.provider import GraphDataProvider
 
 logger = logging.getLogger(__name__)
 
 
-class ProviderRegistry:
-    # How long to remember a failed provider instantiation (seconds).
-    # During this window, requests fail fast instead of re-trying the full
-    # connection timeout.  Cleared on eviction or manual reset.
-    NEGATIVE_CACHE_TTL = 30
+# Circuit-breaker defaults for graph-provider adapters. Tunable via env vars
+# if operators need to adjust for a particularly flaky downstream.
+import os as _os
 
+_BREAKER_FAIL_MAX = int(_os.getenv("PROVIDER_BREAKER_FAIL_MAX", "5"))
+_BREAKER_RESET_TIMEOUT = int(_os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_SECS", "30"))
+
+
+def _wrap_in_breaker(provider: GraphDataProvider, name: str) -> GraphDataProvider:
+    """Wrap a raw provider in a CircuitBreakerProxy. Returned object is
+    type-compatible with :class:`GraphDataProvider` via attribute-forwarding."""
+    return CircuitBreakerProxy(  # type: ignore[return-value]
+        target=provider,
+        name=name,
+        fail_max=_BREAKER_FAIL_MAX,
+        reset_timeout=_BREAKER_RESET_TIMEOUT,
+    )
+
+
+class ProviderRegistry:
     def __init__(self) -> None:
-        # Workspace-centric cache: (provider_id, graph_name) → provider
+        # Workspace-centric cache: (provider_id, graph_name) → CircuitBreakerProxy-wrapped provider
         self._providers: Dict[Tuple[str, str], GraphDataProvider] = {}
         self._locks: Dict[Tuple[str, str], asyncio.Lock] = {}
-        # Negative cache: (provider_id, graph_name) → monotonic timestamp of last failure
-        self._failed_cache: Dict[Tuple[str, str], float] = {}
         # Legacy connection-based cache (kept during migration)
         self._legacy_providers: Dict[str, GraphDataProvider] = {}
         self._legacy_locks: Dict[str, asyncio.Lock] = {}
@@ -60,18 +80,6 @@ class ProviderRegistry:
 
         cache_key = (ds.provider_id, ds.graph_name or "")
 
-        # Fail fast if this provider recently failed (negative cache)
-        failed_at = self._failed_cache.get(cache_key)
-        if failed_at is not None:
-            age = time.monotonic() - failed_at
-            if age < self.NEGATIVE_CACHE_TTL:
-                raise ConnectionError(
-                    f"Provider {cache_key} recently failed ({age:.0f}s ago). "
-                    f"Will retry in {self.NEGATIVE_CACHE_TTL - age:.0f}s."
-                )
-            else:
-                del self._failed_cache[cache_key]
-
         if cache_key not in self._locks:
             self._locks[cache_key] = asyncio.Lock()
 
@@ -83,7 +91,7 @@ class ProviderRegistry:
                 )
                 ds_extra = json.loads(ds.extra_config) if getattr(ds, "extra_config", None) else None
                 try:
-                    self._providers[cache_key] = await asyncio.wait_for(
+                    raw_provider = await asyncio.wait_for(
                         self._instantiate_from_provider(
                             ds.provider_id, ds.graph_name, session,
                             ds_extra_config=ds_extra,
@@ -91,13 +99,20 @@ class ProviderRegistry:
                         timeout=10,
                     )
                 except asyncio.TimeoutError:
-                    self._failed_cache[cache_key] = time.monotonic()
+                    # Instantiation timed out — no provider to cache. The next
+                    # caller retries; if the downstream is still unreachable,
+                    # the breaker (wrapping the eventually-cached instance)
+                    # will open after a few failures and fast-fail subsequent
+                    # calls. We deliberately do not cache a "sick" provider.
                     raise ConnectionError(
                         f"Provider instantiation timed out for {cache_key}"
                     )
-                except Exception:
-                    self._failed_cache[cache_key] = time.monotonic()
-                    raise
+                # Wrap in per-instance circuit breaker before caching. After
+                # this point every method call on the cached provider flows
+                # through the breaker; a dead downstream cannot stall the
+                # event loop or hold operational-DB sessions open.
+                breaker_name = f"{ds.provider_id}:{ds.graph_name or ''}"
+                self._providers[cache_key] = _wrap_in_breaker(raw_provider, breaker_name)
 
         return self._providers[cache_key]
 
@@ -126,7 +141,7 @@ class ProviderRegistry:
             if resolved_id not in self._legacy_providers:
                 logger.info("Instantiating provider for connection_id=%s", resolved_id)
                 try:
-                    self._legacy_providers[resolved_id] = await asyncio.wait_for(
+                    raw_provider = await asyncio.wait_for(
                         self._instantiate_from_connection(
                             resolved_id, session
                         ),
@@ -136,6 +151,9 @@ class ProviderRegistry:
                     raise ConnectionError(
                         f"Provider instantiation timed out for connection {resolved_id}"
                     )
+                self._legacy_providers[resolved_id] = _wrap_in_breaker(
+                    raw_provider, f"legacy:{resolved_id}"
+                )
 
         return self._legacy_providers[resolved_id]
 
@@ -153,7 +171,6 @@ class ProviderRegistry:
             except Exception as exc:
                 logger.warning("Error closing provider %s: %s", cache_key, exc)
         self._locks.pop(cache_key, None)
-        self._failed_cache.pop(cache_key, None)
         logger.info("Evicted provider for key=%s", cache_key)
 
     async def evict_workspace(self, workspace_id: str, session: AsyncSession) -> None:
@@ -185,7 +202,6 @@ class ProviderRegistry:
             await self.evict_data_source(key[0], key[1])
         for conn_id in list(self._legacy_providers.keys()):
             await self.evict(conn_id)
-        self._failed_cache.clear()
 
     # ------------------------------------------------------------------ #
     # Provider instantiation                                               #

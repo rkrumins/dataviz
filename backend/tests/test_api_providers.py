@@ -4,8 +4,6 @@ Phase 4 — API endpoint tests for /api/v1/admin/providers/*.
 Tests the provider CRUD admin endpoints using the test_client fixture
 which overrides auth and DB session.
 """
-import time
-
 import pytest
 from httpx import AsyncClient
 
@@ -174,27 +172,42 @@ async def test_provider_crud_roundtrip(test_client: AsyncClient):
     assert r.status_code == 404
 
 
-async def test_provider_status_endpoint_uses_negative_cache(test_client: AsyncClient):
+async def test_provider_status_endpoint_reports_unavailable_when_circuit_open(
+    test_client: AsyncClient,
+):
+    """When a provider's circuit breaker is open, /status must short-circuit
+    to 'unavailable' without probing the downstream. Replaces the previous
+    negative-cache test — pybreaker is now the authoritative 'recently
+    failed' state."""
+    from backend.common.adapters import CircuitBreakerProxy
+
     create_resp = await test_client.post(
         "/api/v1/admin/providers",
-        json=_provider_payload("Cached Failure"),
+        json=_provider_payload("Circuit Open"),
     )
     provider_id = create_resp.json()["id"]
-    provider_registry._failed_cache[(provider_id, "")] = time.monotonic()
+
+    class _StubTarget:
+        async def close(self) -> None:
+            return None
+
+    proxy = CircuitBreakerProxy(_StubTarget(), name=f"{provider_id}:test")
+    proxy.breaker.open()
+    provider_registry._providers[(provider_id, "")] = proxy  # type: ignore[assignment]
 
     try:
         resp = await test_client.get("/api/v1/admin/providers/status")
     finally:
-        provider_registry._failed_cache.pop((provider_id, ""), None)
+        provider_registry._providers.pop((provider_id, ""), None)
 
     assert resp.status_code == 200
     body = resp.json()
     assert len(body) == 1
     assert body[0]["id"] == provider_id
-    assert body[0]["name"] == "Cached Failure"
+    assert body[0]["name"] == "Circuit Open"
     assert body[0]["status"] == "unavailable"
     assert body[0]["lastCheckedAt"] is not None
-    assert body[0]["error"]
+    assert "circuit open" in body[0]["error"].lower()
 
 
 async def test_test_connection_checks_unsaved_provider_details_without_persisting(
