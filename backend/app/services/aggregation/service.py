@@ -122,9 +122,6 @@ class AggregationService:
         # ever observes "no active job" for a given data_source_id.
         async with session.begin():
             if not await claim_exclusive(session, ds_id):
-                # Race window: another caller with the same idempotency_key
-                # may have just inserted between our early-return check and
-                # the lock attempt. Re-check before raising 409.
                 if idem_key:
                     replay = (
                         await session.execute(
@@ -144,6 +141,33 @@ class AggregationService:
 
             # Resolve ontology via direct service call (CRIT-5)
             ontology_data = await self._resolve_ontology(ds_id, session)
+
+            # ── Graph-level guard ──────────────────────────────────
+            # Multiple data sources can point to the same FalkorDB graph.
+            # Running parallel jobs on the same graph is wasteful: the
+            # Redis idempotency sets (keyed by graph_name) mean only the
+            # first job creates AGGREGATED edges — subsequent jobs process
+            # edges but produce nothing because SADD returns 0.
+            # Block the trigger if another data source on the same graph
+            # already has an active job.
+            graph_name = ontology_data.get("graph_name")
+            if graph_name:
+                conflicting_job = (
+                    await session.execute(
+                        select(AggregationJobORM)
+                        .where(AggregationJobORM.graph_name == graph_name)
+                        .where(AggregationJobORM.data_source_id != ds_id)
+                        .where(AggregationJobORM.status.in_(["pending", "running"]))
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if conflicting_job:
+                    raise ConflictError(
+                        f"Another aggregation job ({conflicting_job.id}) is already "
+                        f"active on graph '{graph_name}' via data source "
+                        f"{conflicting_job.data_source_id}. Wait for it to complete "
+                        f"or cancel it first."
+                    )
             containment_types = ontology_data.get("containment_edge_types", [])
             lineage_types = ontology_data.get("lineage_edge_types", [])
 
@@ -153,10 +177,14 @@ class AggregationService:
                     "Please configure an ontology for this data source first."
                 )
 
-            # Create job with frozen edge types
+            # Create job with frozen edge types + denormalized graph metadata
             job = AggregationJobORM(
                 id=_generate_id(),
                 data_source_id=ds_id,
+                workspace_id=ontology_data.get("workspace_id"),
+                provider_id=ontology_data.get("provider_id"),
+                graph_name=ontology_data.get("graph_name"),
+                data_source_label=ontology_data.get("data_source_label"),
                 ontology_id=ontology_data.get("ontology_id"),
                 projection_mode=request.projection_mode,
                 containment_edge_types=json.dumps(containment_types),
@@ -795,6 +823,15 @@ class AggregationService:
                 "Please configure an ontology for this data source first."
             )
 
+        # Common metadata from the data source (for denormalization + guards)
+        ds_meta = {
+            "ontology_id": ds.ontology_id,
+            "workspace_id": ds.workspace_id,
+            "provider_id": ds.provider_id,
+            "graph_name": ds.graph_name,
+            "data_source_label": getattr(ds, "label", None),
+        }
+
         # Use the ontology service if available (monolith direct call)
         if self._ontology_service:
             try:
@@ -803,7 +840,7 @@ class AggregationService:
                     data_source_id=ds_id,
                 )
                 return {
-                    "ontology_id": ds.ontology_id,
+                    **ds_meta,
                     "containment_edge_types": ontology.containment_edge_types,
                     "lineage_edge_types": ontology.lineage_edge_types,
                 }
@@ -828,7 +865,7 @@ class AggregationService:
             )
             flat = derive_flat_lists(entity_defs, rel_defs)
             return {
-                "ontology_id": ds.ontology_id,
+                **ds_meta,
                 "containment_edge_types": flat.containment_edge_types,
                 "lineage_edge_types": flat.lineage_edge_types,
             }

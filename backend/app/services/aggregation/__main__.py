@@ -276,20 +276,34 @@ class _JobConsumer:
                 # Postgres IS the retry state.
 
     async def _get_graph_key(self, job_id: str) -> str | None:
-        """Look up the graph key for a job from the DB record."""
+        """Look up the actual graph key (provider_id:graph_name) for a job.
+
+        Multiple data sources can point to the same FalkorDB graph.
+        The per-graph semaphore must use the real graph identity, not
+        data_source_id, otherwise three data sources on the same graph
+        bypass the concurrency limit entirely.
+        """
         from sqlalchemy import text as sa_text
 
         try:
             async with self._session_factory() as session:
                 result = await session.execute(
                     sa_text(
-                        "SELECT data_source_id FROM aggregation.aggregation_jobs "
+                        "SELECT provider_id, graph_name, data_source_id "
+                        "FROM aggregation.aggregation_jobs "
                         "WHERE id = :job_id"
                     ),
                     {"job_id": job_id},
                 )
                 row = result.first()
-                return row[0] if row else None
+                if not row:
+                    return None
+                provider_id, graph_name, ds_id = row[0], row[1], row[2]
+                # Use the real graph identity if available (denormalized columns)
+                if provider_id and graph_name:
+                    return f"{provider_id}:{graph_name}"
+                # Fallback to data_source_id (pre-migration jobs)
+                return ds_id
         except Exception as e:
             logger.warning("Failed to look up graph key for job %s: %s", job_id, e)
             return None
