@@ -1,0 +1,69 @@
+{
+    "entities": {
+        "7a084eaa-ea3e-48ba-8817-f5b61caf1c29": {
+            "name": "Reports",
+            "properties": {},
+            "children": [
+                "7394df9c-6254-44f7-a74f-10f9b0635d8a"
+            ]
+        },
+        "7394df9c-6254-44f7-a74f-10f9b0635d8a": {
+            "name": "Report1",
+            "properties": {},
+            "children": [
+                "e6bd043f-1f59-4ddd-92b7-8f7028df8bc1",
+                "543d7e78-61b3-48c6-9765-98399d88d7ee",
+                "084e2896-39b0-4d0a-bf75-ceb5611babbf",
+                "ead65423-3c49-4d4d-88b6-c3ca284e3de6"
+            ]
+        },
+        "e6bd043f-1f59-4ddd-92b7-8f7028df8bc1": {
+            "name": "PnL Date",
+            "properties": {
+                "COLUMN_NAME": "PnL Date",
+                "DATA_TYPE": "datetime",
+                "DataOwnerDepartment": "Financial Reporting",
+                "DataElement": "Posting Date",
+                "DataConcept": "Date / Time",
+                "DataElementDefinition": "Date time of transaction posting."
+            }
+        },
+        "543d7e78-61b3-48c6-9765-98399d88d7ee": {
+            "name": "Account",
+            "properties": {
+                "COLUMN_NAME": "Account",
+                "DATA_TYPE": "float",
+                "DataOwnerDepartment": "Financial Reporting",
+                "DataElement": "Trial Balance Account",
+                "DataConcept": "Account",
+                "DataElementDefinition": "Account to which the transaction is posted."
+            }
+        },
+        "084e2896-39b0-4d0a-bf75-ceb5611babbf": {
+            "name": "Country",
+            "properties": {
+                "COLUMN_NAME": "Country",
+                "DATA_TYPE": "nvarchar",
+                "DataOwnerDepartment": "Financial Reporting",
+                "DataElement": "Country Of Transaction",
+                "DataConcept": "Country of operations",
+                "DataElementDefinition": "Country in which the transaction was received."
+            }
+        },
+        "ead65423-3c49-4d4d-88b6-c3ca284e3de6": {
+            "name": "Entity",
+            "properties": {
+                "COLUMN_NAME": "Entity",
+                "DATA_TYPE": "nvarchar",
+                "DataOwnerDepartment": "Group Finance",
+                "DataElement": "Trial Balance Entity",
+                "DataConcept": "Legal Entity",
+                "DataElementDefinition": "Entity to which the transaction is posted."
+            }
+        }
+    },
+    "transitions": {},
+    "roots": [
+        "7a084eaa-ea3e-48ba-8817-f5b61caf1c29"
+    ]
+}

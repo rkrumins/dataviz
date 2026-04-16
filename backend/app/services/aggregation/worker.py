@@ -25,8 +25,11 @@ CURSOR-BASED PAGINATION (CRIT-2):
 - Eliminates O(n²) performance degradation for multi-million edge graphs
 - Safe under concurrent graph mutations
 """
+import asyncio
 import json
 import logging
+import os
+import random
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -41,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 _CHECKPOINT_MAX_INTERVAL_SECS: float = 2.0
 _CHECKPOINT_MAX_BATCHES: int = 5
+_JOB_TIMEOUT_SECS: int = int(os.getenv("AGGREGATION_JOB_TIMEOUT_SECS", "7200"))
 
 
 def _now() -> str:
@@ -116,13 +120,19 @@ class AggregationWorker:
                 job.graph_fingerprint_before = await compute_graph_fingerprint(provider)
                 await session.commit()
 
-                # Run cursor-based batch materialization
-                result = await self._materialize_with_checkpoints(
-                    session=session,
-                    job=job,
-                    provider=provider,
-                    containment_types=containment_types,
-                    lineage_types=lineage_types,
+                # Run cursor-based batch materialization with retry + timeout.
+                # On transient provider failures (AggregationBatchAbort, connection
+                # errors), retry up to max_retries times with exponential backoff.
+                # The overall job is wrapped in a timeout to catch hung queries.
+                result = await asyncio.wait_for(
+                    self._materialize_with_retries(
+                        session=session,
+                        job=job,
+                        provider=provider,
+                        containment_types=containment_types,
+                        lineage_types=lineage_types,
+                    ),
+                    timeout=_JOB_TIMEOUT_SECS,
                 )
 
                 # Success
@@ -146,6 +156,23 @@ class AggregationWorker:
                     job_id, job.processed_edges, job.created_edges,
                 )
 
+            except asyncio.TimeoutError:
+                job.status = "failed"
+                job.error_message = (
+                    f"Job timed out after {_JOB_TIMEOUT_SECS}s. "
+                    f"Progress: {job.processed_edges}/{job.total_edges} edges. "
+                    f"Resume from last_cursor is possible."
+                )
+                logger.error("Aggregation job %s timed out after %ds", job_id, _JOB_TIMEOUT_SECS)
+
+                try:
+                    from backend.app.db.models import WorkspaceDataSourceORM
+                    ds = await session.get(WorkspaceDataSourceORM, job.data_source_id)
+                    if ds:
+                        ds.aggregation_status = "failed"
+                except Exception:
+                    pass
+
             except Exception as e:
                 job.status = "failed"
                 job.error_message = str(e)[:2000]
@@ -163,6 +190,60 @@ class AggregationWorker:
             finally:
                 job.updated_at = _now()
                 await session.commit()
+
+    async def _materialize_with_retries(
+        self,
+        session: AsyncSession,
+        job: AggregationJobORM,
+        provider: Any,
+        containment_types: list[str],
+        lineage_types: list[str],
+    ) -> dict:
+        """Retry wrapper around _materialize_with_checkpoints.
+
+        On transient failures (provider timeout, connection error,
+        AggregationBatchAbort), retries up to ``job.max_retries`` times
+        with exponential backoff + jitter.  Each retry resumes from
+        ``job.last_cursor`` (set by the checkpoint callback), so no
+        work is repeated beyond the ≤2s coalescing window.
+
+        The retry count and error message are persisted to the job
+        record on each attempt so the frontend can display progress.
+        """
+        max_attempts = (job.max_retries or 3) + 1
+        last_error: Exception | None = None
+
+        for attempt in range(max_attempts):
+            try:
+                return await self._materialize_with_checkpoints(
+                    session=session,
+                    job=job,
+                    provider=provider,
+                    containment_types=containment_types,
+                    lineage_types=lineage_types,
+                )
+            except Exception as e:
+                last_error = e
+                job.retry_count = attempt + 1
+
+                if attempt < max_attempts - 1:
+                    delay = min(5.0 * (2 ** attempt), 120.0) + random.uniform(0, 2)
+                    job.error_message = (
+                        f"Retry {attempt + 1}/{job.max_retries}: {e}"
+                    )[:2000]
+                    job.updated_at = _now()
+                    await session.commit()
+                    logger.warning(
+                        "Aggregation job %s: retry %d/%d after %.0fs — %s",
+                        job.id, attempt + 1, job.max_retries, delay, e,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    # Final attempt exhausted — let the caller handle it
+                    raise
+
+        # Unreachable, but satisfies the type checker
+        raise last_error  # type: ignore[misc]
 
     async def _materialize_with_checkpoints(
         self,
@@ -183,11 +264,15 @@ class AggregationWorker:
         last_commit_monotonic = time.monotonic()
         batches_since_commit = 0
 
-        async def checkpoint(processed: int, total: int, cursor: Optional[str]) -> None:
+        async def checkpoint(
+            processed: int, total: int, cursor: Optional[str], aggregated: int = 0,
+        ) -> None:
             nonlocal last_commit_monotonic, batches_since_commit
             job.processed_edges = processed
             job.total_edges = total
             job.last_cursor = cursor
+            if aggregated > 0:
+                job.created_edges = aggregated
             job.progress = int((processed / total) * 100) if total > 0 else 0
             job.updated_at = _now()
             job.last_checkpoint_at = _now()
@@ -198,8 +283,8 @@ class AggregationWorker:
                 last_commit_monotonic = time.monotonic()
                 batches_since_commit = 0
                 logger.debug(
-                    "Aggregation job %s: %d/%d edges (%d%%) [committed]",
-                    job.id, processed, total, job.progress,
+                    "Aggregation job %s: %d/%d edges (%d%%, %d materialized) [committed]",
+                    job.id, processed, total, job.progress, job.created_edges,
                 )
 
         result = await provider.materialize_aggregated_edges_batch(
