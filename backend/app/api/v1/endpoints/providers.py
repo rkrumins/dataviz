@@ -9,7 +9,7 @@ from typing import List, Tuple
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.engine import get_db_session, with_short_session
+from backend.app.db.engine import get_db_session, get_readonly_db_session, with_short_session
 from backend.app.db.repositories import provider_repo
 from backend.app.registry.provider_registry import provider_registry
 from backend.common.models.management import (
@@ -112,7 +112,7 @@ async def _run_connectivity_probe(
 
 @router.get("/status")
 async def list_provider_statuses(
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_readonly_db_session),
 ):
     """Return provider readiness without affecting overall app health.
 
