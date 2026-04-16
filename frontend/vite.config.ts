@@ -46,7 +46,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8004',
+        target: `http://127.0.0.1:${process.env.VIZ_PORT || '8000'}`,
         changeOrigin: true,
       },
     },

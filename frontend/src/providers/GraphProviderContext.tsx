@@ -15,6 +15,7 @@ import { RemoteGraphProvider } from './RemoteGraphProvider'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useCanvasStore } from '@/store/canvas'
 import { useHealthStore } from '@/store/health'
+import { useAuthStore } from '@/store/auth'
 
 // ============================================
 // Extended context value
@@ -71,10 +72,11 @@ export function GraphProvider({ children }: GraphProviderProps) {
     // Track previous IDs so we only rebuild the provider when it changes
     const prevWorkspaceId = useRef<string | null | undefined>(undefined)
     const prevDataSourceId = useRef<string | null | undefined>(undefined)
-    // Load workspace list on mount
+    // Load workspace list on mount — only when authenticated
+    const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
     useEffect(() => {
-        loadWorkspaces()
-    }, [loadWorkspaces])
+        if (isAuthenticated) loadWorkspaces()
+    }, [isAuthenticated, loadWorkspaces])
 
     // Rebuild provider when workspace or data source changes
     useEffect(() => {
