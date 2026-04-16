@@ -80,7 +80,7 @@ class AggregationJobORM(Base):
             name="ck_agg_jobs_status",
         ),
         CheckConstraint(
-            "trigger_source IN ('onboarding', 'manual', 'schedule', 'drift', 'api')",
+            "trigger_source IN ('onboarding', 'manual', 'schedule', 'drift', 'api', 'purge')",
             name="ck_agg_jobs_trigger_source",
         ),
         CheckConstraint(

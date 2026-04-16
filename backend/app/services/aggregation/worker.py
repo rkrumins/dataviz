@@ -183,11 +183,15 @@ class AggregationWorker:
         last_commit_monotonic = time.monotonic()
         batches_since_commit = 0
 
-        async def checkpoint(processed: int, total: int, cursor: Optional[str]) -> None:
+        async def checkpoint(
+            processed: int, total: int, cursor: Optional[str], aggregated: int = 0,
+        ) -> None:
             nonlocal last_commit_monotonic, batches_since_commit
             job.processed_edges = processed
             job.total_edges = total
             job.last_cursor = cursor
+            if aggregated > 0:
+                job.created_edges = aggregated
             job.progress = int((processed / total) * 100) if total > 0 else 0
             job.updated_at = _now()
             job.last_checkpoint_at = _now()
@@ -198,8 +202,8 @@ class AggregationWorker:
                 last_commit_monotonic = time.monotonic()
                 batches_since_commit = 0
                 logger.debug(
-                    "Aggregation job %s: %d/%d edges (%d%%) [committed]",
-                    job.id, processed, total, job.progress,
+                    "Aggregation job %s: %d/%d edges (%d%%, %d materialized) [committed]",
+                    job.id, processed, total, job.progress, job.created_edges,
                 )
 
         result = await provider.materialize_aggregated_edges_batch(
