@@ -57,11 +57,18 @@ class AggregationWorker:
     Args:
         session_factory: Async context manager yielding AsyncSession
         registry: ProviderRegistry to look up graph providers
+        event_publisher: Optional AggregationEventPublisher for status events
     """
 
-    def __init__(self, session_factory: Any, registry: Any) -> None:
+    def __init__(
+        self,
+        session_factory: Any,
+        registry: Any,
+        event_publisher: Any = None,
+    ) -> None:
         self._session_factory = session_factory
         self._registry = registry
+        self._events = event_publisher
 
     async def run(self, job_id: str) -> None:
         """Full materialization pipeline.
@@ -124,6 +131,9 @@ class AggregationWorker:
                 # On transient provider failures (AggregationBatchAbort, connection
                 # errors), retry up to max_retries times with exponential backoff.
                 # The overall job is wrapped in a timeout to catch hung queries.
+                # Use per-job timeout if set, otherwise global default
+                job_timeout = job.timeout_secs or _JOB_TIMEOUT_SECS
+
                 result = await asyncio.wait_for(
                     self._materialize_with_retries(
                         session=session,
@@ -132,7 +142,7 @@ class AggregationWorker:
                         containment_types=containment_types,
                         lineage_types=lineage_types,
                     ),
-                    timeout=_JOB_TIMEOUT_SECS,
+                    timeout=job_timeout,
                 )
 
                 # Success
@@ -142,14 +152,25 @@ class AggregationWorker:
                 job.created_edges = result.get("aggregated_edges_affected", 0)
                 job.graph_fingerprint_after = await compute_graph_fingerprint(provider)
 
-                # Update parent data source
-                from backend.app.db.models import WorkspaceDataSourceORM
-                ds = await session.get(WorkspaceDataSourceORM, job.data_source_id)
-                if ds:
-                    ds.aggregation_status = "ready"
-                    ds.last_aggregated_at = job.completed_at
-                    ds.aggregation_edge_count = job.created_edges
-                    ds.graph_fingerprint = job.graph_fingerprint_after
+                # Update aggregation-owned data source state
+                await self._update_ds_state(
+                    session,
+                    job.data_source_id,
+                    aggregation_status="ready",
+                    last_aggregated_at=job.completed_at,
+                    aggregation_edge_count=job.created_edges,
+                    graph_fingerprint=job.graph_fingerprint_after,
+                )
+
+                # Publish event for viz-service to sync its own tables
+                if self._events:
+                    await self._events.job_completed(
+                        job_id=job_id,
+                        data_source_id=job.data_source_id,
+                        edge_count=job.created_edges,
+                        fingerprint=job.graph_fingerprint_after,
+                        completed_at=job.completed_at,
+                    )
 
                 logger.info(
                     "Aggregation job %s completed: %d edges processed, %d AGGREGATED created",
@@ -157,39 +178,66 @@ class AggregationWorker:
                 )
 
             except asyncio.TimeoutError:
+                timeout = job.timeout_secs or _JOB_TIMEOUT_SECS
                 job.status = "failed"
                 job.error_message = (
-                    f"Job timed out after {_JOB_TIMEOUT_SECS}s. "
+                    f"Job timed out after {timeout}s. "
                     f"Progress: {job.processed_edges}/{job.total_edges} edges. "
                     f"Resume from last_cursor is possible."
                 )
-                logger.error("Aggregation job %s timed out after %ds", job_id, _JOB_TIMEOUT_SECS)
+                logger.error("Aggregation job %s timed out after %ds", job_id, timeout)
 
-                try:
-                    from backend.app.db.models import WorkspaceDataSourceORM
-                    ds = await session.get(WorkspaceDataSourceORM, job.data_source_id)
-                    if ds:
-                        ds.aggregation_status = "failed"
-                except Exception:
-                    pass
+                await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
+                if self._events:
+                    await self._events.job_failed(
+                        job_id=job_id,
+                        data_source_id=job.data_source_id,
+                        error_message=job.error_message,
+                    )
 
             except Exception as e:
                 job.status = "failed"
                 job.error_message = str(e)[:2000]
                 logger.error("Aggregation job %s failed: %s", job_id, e, exc_info=True)
 
-                # Update parent data source status
-                try:
-                    from backend.app.db.models import WorkspaceDataSourceORM
-                    ds = await session.get(WorkspaceDataSourceORM, job.data_source_id)
-                    if ds:
-                        ds.aggregation_status = "failed"
-                except Exception:
-                    pass
+                await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
+                if self._events:
+                    await self._events.job_failed(
+                        job_id=job_id,
+                        data_source_id=job.data_source_id,
+                        error_message=job.error_message,
+                    )
 
             finally:
                 job.updated_at = _now()
                 await session.commit()
+
+    async def _update_ds_state(
+        self,
+        session: AsyncSession,
+        data_source_id: str,
+        **fields: Any,
+    ) -> None:
+        """Update the aggregation-owned data source state table.
+
+        Uses AggregationDataSourceStateORM (in the aggregation schema)
+        instead of WorkspaceDataSourceORM (in the public schema).
+        Creates the row if it doesn't exist (upsert).
+        """
+        from .models import AggregationDataSourceStateORM
+
+        try:
+            state = await session.get(AggregationDataSourceStateORM, data_source_id)
+            if state is None:
+                state = AggregationDataSourceStateORM(data_source_id=data_source_id)
+                # workspace_id is required — try to read from the job
+                state.workspace_id = fields.pop("workspace_id", "")
+                session.add(state)
+            for key, value in fields.items():
+                if value is not None and hasattr(state, key):
+                    setattr(state, key, value)
+        except Exception as e:
+            logger.warning("Failed to update data source state for %s: %s", data_source_id, e)
 
     async def _materialize_with_retries(
         self,

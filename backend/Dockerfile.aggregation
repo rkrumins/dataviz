@@ -1,0 +1,37 @@
+# ── Synodic Aggregation Worker (Data Plane) ────────────────────────────
+# Headless batch executor for aggregation jobs.  Fully decoupled from
+# the viz-service and Control Plane — own FalkorDB connection pools, own
+# circuit breakers, own timeouts.  Provider failures here CANNOT affect
+# the web tier or Control Plane API.
+#
+# Consumes jobs via Redis Streams (XREADGROUP with consumer groups).
+# Health endpoint on port 8090.  No HTTP API — pure job execution.
+# Scale horizontally: docker compose up --scale aggregation-worker=3
+# ──────────────────────────────────────────────────────────────────────
+FROM python:3.13-slim AS base
+
+WORKDIR /app
+
+# Runtime libs for pre-built wheels (no compiler needed)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libffi-dev libpq-dev curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies (same requirements.txt — no extra deps)
+COPY backend/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY backend/ /app/backend/
+
+# Non-root user
+RUN addgroup --system synodic && adduser --system --ingroup synodic synodic
+USER synodic
+
+EXPOSE 8090
+
+HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
+  CMD curl -sf http://localhost:8090/health || exit 1
+
+# No HTTP server — just the standalone worker process
+CMD ["python", "-m", "backend.app.services.aggregation"]

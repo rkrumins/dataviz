@@ -2,29 +2,27 @@
 
 Revision ID: 0001_baseline
 Revises:
-Create Date: 2026-04-14
+Create Date: 2026-04-16
 
-This is the fresh-start baseline introduced when Alembic was adopted.
-The dev/test workflow per the approved plan is:
+Single baseline migration that creates ALL tables from the current ORM
+state.  Public-schema tables (workspaces, providers, views, etc.) and
+aggregation-schema tables (aggregation_jobs, data_source_state) are all
+created in one pass.
 
-    rm nexus_core.db nexus_core.db-wal nexus_core.db-shm 2>/dev/null
-    alembic upgrade head
+The ``aggregation`` Postgres schema is created first so that
+``Base.metadata.create_all`` can place tables there.
 
-Subsequent migrations (0002_..., 0003_...) use explicit `op.*` DDL so
-that schema evolution is reviewable per change. The baseline uses
-`Base.metadata.create_all()` because there is no preceding state to
-diff against — the ORM is the source of truth for what "head" means
-at this point in history.
+Dev workflow:
+    docker compose down -v          # wipe volumes
+    docker compose up --build       # fresh start, Alembic creates everything
 """
 from __future__ import annotations
 
 from typing import Sequence, Union
 
 from alembic import op
+import sqlalchemy as sa
 
-# Importing env.py's metadata target indirectly: Base is populated by
-# env.py before this revision runs, so we can just reach it back through
-# the same import chain.
 from backend.app.db.engine import Base
 from backend.app.db import models as _management_models  # noqa: F401
 from backend.app.services.aggregation import models as _aggregation_models  # noqa: F401
@@ -36,28 +34,18 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-# Tables introduced AFTER the baseline cutover. Each forward migration
-# that adds a new ORM table must register its table name here so the
-# baseline's `create_all` skips it — otherwise the new migration's
-# `op.create_table` would race the baseline and fail on second-table-create.
-#
-# FIXME (pre-prod): convert this baseline to explicit `op.create_table`
-# calls per the standard Alembic pattern. The filter approach is a P1
-# convenience that becomes brittle once many forward migrations exist.
-_POST_BASELINE_TABLES = {
-    "revoked_refresh_jti",  # added in 0002_revoked_refresh_jti
-}
-
-
-def _baseline_tables():
-    return [t for t in Base.metadata.sorted_tables if t.name not in _POST_BASELINE_TABLES]
-
-
 def upgrade() -> None:
     bind = op.get_bind()
-    Base.metadata.create_all(bind=bind, tables=_baseline_tables())
+
+    # Create the aggregation schema before create_all so ORM tables
+    # with schema="aggregation" can be placed there.
+    bind.execute(sa.text("CREATE SCHEMA IF NOT EXISTS aggregation"))
+
+    # Create ALL tables from current ORM state (both public + aggregation)
+    Base.metadata.create_all(bind=bind)
 
 
 def downgrade() -> None:
     bind = op.get_bind()
-    Base.metadata.drop_all(bind=bind, tables=_baseline_tables())
+    Base.metadata.drop_all(bind=bind)
+    bind.execute(sa.text("DROP SCHEMA IF EXISTS aggregation CASCADE"))

@@ -5,12 +5,14 @@ The Dispatcher is the ONLY seam that changes when migrating from
 in-process (asyncio) to standalone-process (Postgres NOTIFY) to
 message-queue-based (Redis Streams) deployment.
 
-    dev / single-process:  InProcessDispatcher  → asyncio.create_task()
-    standalone worker:     PostgresDispatcher    → NOTIFY aggregation_jobs
-    future (K8s scale):    RedisStreamDispatcher → XADD aggregation.jobs
+    dev / single-process:  InProcessDispatcher    → asyncio.create_task()
+    legacy standalone:     PostgresDispatcher      → NOTIFY aggregation_jobs
+    production:            RedisStreamDispatcher   → XADD aggregation.jobs
+    migration:             DualDispatcher          → NOTIFY + XADD (zero-downtime)
 """
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
 from sqlalchemy import text
@@ -19,6 +21,10 @@ if TYPE_CHECKING:
     from .worker import AggregationWorker
 
 logger = logging.getLogger(__name__)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class AggregationDispatcher(Protocol):
@@ -93,10 +99,63 @@ class PostgresDispatcher:
         logger.info("PostgresDispatcher: notified channel 'aggregation_jobs' for job %s", job_id)
 
 
-# Future (K8s scale):
-# class RedisStreamDispatcher:
-#     """Publishes job_id to a Redis Stream — consumed by worker pods."""
-#     def __init__(self, redis_client):
-#         self._redis = redis_client
-#     async def dispatch(self, job_id: str) -> None:
-#         await self._redis.xadd("aggregation.jobs", {"job_id": job_id}, maxlen=10000)
+class RedisStreamDispatcher:
+    """Dispatches jobs via Redis Streams — consumed by worker pods.
+
+    The job row in ``aggregation_jobs`` IS the source of truth. The stream
+    entry is a lightweight wake-up signal containing only ``{job_id}``.
+    ``maxlen`` trims acknowledged entries; losing old entries is safe
+    because the data lives in Postgres.
+
+    Consumer groups (XREADGROUP) distribute messages across worker replicas.
+    The Pending Entry List (PEL) handles crash recovery — unACKed messages
+    are re-claimed by surviving workers via XAUTOCLAIM.
+
+    Used when ``AGGREGATION_DISPATCH_MODE=redis``.
+    """
+
+    def __init__(self, redis_client: Any) -> None:
+        self._redis = redis_client
+
+    async def dispatch(self, job_id: str) -> None:
+        from .redis_client import JOBS_STREAM
+
+        await self._redis.xadd(
+            JOBS_STREAM,
+            {"job_id": job_id, "dispatched_at": _now()},
+            maxlen=50000,
+        )
+        logger.info(
+            "RedisStreamDispatcher: published job %s to stream '%s'",
+            job_id, JOBS_STREAM,
+        )
+
+
+class DualDispatcher:
+    """Zero-downtime migration dispatcher — writes to BOTH Postgres NOTIFY
+    and Redis Streams simultaneously.
+
+    Use during the transition period when old workers may still be listening
+    on Postgres NOTIFY while new workers consume from Redis Streams.
+    Once all workers are migrated to Redis, switch to RedisStreamDispatcher.
+    """
+
+    def __init__(
+        self,
+        postgres_dispatcher: PostgresDispatcher,
+        redis_dispatcher: RedisStreamDispatcher,
+    ) -> None:
+        self._postgres = postgres_dispatcher
+        self._redis = redis_dispatcher
+
+    async def dispatch(self, job_id: str) -> None:
+        # Redis first (primary), Postgres second (fallback for legacy workers)
+        await self._redis.dispatch(job_id)
+        try:
+            await self._postgres.dispatch(job_id)
+        except Exception as e:
+            # Postgres failure is non-fatal during migration — Redis is primary
+            logger.warning(
+                "DualDispatcher: Postgres NOTIFY failed for job %s (non-fatal): %s",
+                job_id, e,
+            )
