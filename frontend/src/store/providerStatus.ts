@@ -42,6 +42,7 @@ export function useAllProviderStatuses(): ProviderStatusEntry[] {
 }
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+let authReady = false
 
 function stopPolling() {
   if (pollTimer) {
@@ -51,7 +52,7 @@ function stopPolling() {
 }
 
 function startPolling() {
-  if (pollTimer || typeof document === 'undefined' || document.hidden) return
+  if (pollTimer || !authReady || typeof document === 'undefined' || document.hidden) return
 
   const poll = async () => {
     await useProviderStatusStore.getState().refresh()
@@ -59,6 +60,12 @@ function startPolling() {
   }
 
   void poll()
+}
+
+/** Call once after auth resolves to enable polling. */
+export function enableProviderStatusPolling() {
+  authReady = true
+  startPolling()
 }
 
 if (typeof document !== 'undefined') {
@@ -69,6 +76,4 @@ if (typeof document !== 'undefined') {
       startPolling()
     }
   })
-
-  startPolling()
 }

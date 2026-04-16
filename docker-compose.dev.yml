@@ -1,27 +1,26 @@
-# docker-compose.dev.yml — Postgres v16 for local development.
+# ══════════════════════════════════════════════════════════════════════
+# Synodic — Infrastructure Only (for local development)
+# ══════════════════════════════════════════════════════════════════════
 #
-# Standalone from docker-compose.yml / docker-compose.quickstart.yml.
-# Brings up only the management Postgres so you can run `uvicorn` /
-# `alembic` against it from your terminal.
+# Runs ONLY the infrastructure: Postgres, FalkorDB, Redis.
+# All application services run locally from source (hot-reload).
 #
-# Usage:
+# Start infrastructure:
 #   docker compose -f docker-compose.dev.yml up -d
-#   export MANAGEMENT_DB_URL='postgresql+asyncpg://synodic:synodic@localhost:5432/synodic'
-#   cd backend && alembic upgrade head
-#   uvicorn backend.app.main:app --reload --port 8000
 #
-# Restart (data preserved — the named volume below survives `down`):
+# Stop infrastructure (data preserved):
 #   docker compose -f docker-compose.dev.yml down
-#   docker compose -f docker-compose.dev.yml up -d
 #
-# Wipe and rebuild (DESTROYS data — opt-in only when iterating on schema
-# changes that need a clean baseline):
+# Wipe all data (fresh start):
 #   docker compose -f docker-compose.dev.yml down -v
 #
-# Credentials are dev-only — never reuse for production.
+# Then run services locally — see ./dev.sh or the commands below.
+# ══════════════════════════════════════════════════════════════════════
 
 services:
-  postgres-dev:
+
+  # ── PostgreSQL 16 ────────────────────────────────────────────────
+  postgres:
     image: postgres:16-alpine
     container_name: synodic-postgres-dev
     restart: unless-stopped
@@ -29,7 +28,6 @@ services:
       POSTGRES_USER: synodic
       POSTGRES_PASSWORD: synodic
       POSTGRES_DB: synodic
-      # Tuned for dev: fast restart, no fsync penalty. NEVER use in prod.
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
     command:
       - postgres
@@ -55,6 +53,50 @@ services:
       timeout: 3s
       retries: 20
 
+  # ── FalkorDB (Graph Database) ────────────────────────────────────
+  falkordb:
+    build:
+      context: ./data/quickstart
+      dockerfile: Dockerfile.falkordb
+    container_name: synodic-falkordb-dev
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+      - "3000:3000"       # FalkorDB Browser UI
+    environment:
+      FALKORDB_ARGS: THREAD_COUNT 4
+    volumes:
+      - falkordb_dev_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # ── Redis 7 (Message Broker) ─────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: synodic-redis-dev
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_dev_data:/data
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
 volumes:
   postgres_dev_data:
     name: synodic-postgres-dev-data
+  falkordb_dev_data:
+    name: synodic-falkordb-dev-data
+  redis_dev_data:
+    name: synodic-redis-dev-data

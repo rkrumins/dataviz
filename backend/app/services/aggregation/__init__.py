@@ -17,7 +17,12 @@ Forbidden imports:
     ✗ app/main.py       (FastAPI app instance)
     ✗ app/graphql/      (GraphQL layer)
 """
-from .dispatcher import AggregationDispatcher, InProcessDispatcher
+from .dispatcher import (
+    AggregationDispatcher,
+    InProcessDispatcher,
+    RedisStreamDispatcher,
+    DualDispatcher,
+)
 from .service import AggregationService
 from .worker import AggregationWorker
 from .scheduler import AggregationScheduler
@@ -35,6 +40,8 @@ from .schemas import (
 __all__ = [
     "AggregationDispatcher",
     "InProcessDispatcher",
+    "RedisStreamDispatcher",
+    "DualDispatcher",
     "AggregationService",
     "AggregationWorker",
     "AggregationScheduler",

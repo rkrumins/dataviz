@@ -6,9 +6,9 @@ FROM python:3.13-slim AS base
 
 WORKDIR /app
 
-# System deps for argon2-cffi (libffi), asyncpg (libpq), and general build
+# Runtime libs for pre-built wheels (no compiler needed)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc libffi-dev libpq-dev curl \
+        libffi-dev libpq-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies (cached layer)

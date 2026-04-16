@@ -66,7 +66,7 @@ async def claim_exclusive(session: AsyncSession, data_source_id: str) -> bool:
     active_id = (
         await session.execute(
             text(
-                "SELECT id FROM aggregation_jobs "
+                "SELECT id FROM aggregation.aggregation_jobs "
                 "WHERE data_source_id = :ds "
                 "  AND status IN ('pending', 'running') "
                 "LIMIT 1 FOR UPDATE SKIP LOCKED"
