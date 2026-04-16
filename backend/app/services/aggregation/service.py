@@ -85,7 +85,7 @@ class AggregationService:
         4. DISPATCH: dispatcher.dispatch(job_id)
         5. RETURN: AggregationJobResponse
         """
-        from backend.app.db.models import WorkspaceDataSourceORM
+        from .models import AggregationDataSourceStateORM
 
         # ── Phase 2.2 — idempotency early-return (read-only fast path) ──
         # Two POSTs sharing a key for the same data source within 60 min
@@ -122,9 +122,6 @@ class AggregationService:
         # ever observes "no active job" for a given data_source_id.
         async with session.begin():
             if not await claim_exclusive(session, ds_id):
-                # Race window: another caller with the same idempotency_key
-                # may have just inserted between our early-return check and
-                # the lock attempt. Re-check before raising 409.
                 if idem_key:
                     replay = (
                         await session.execute(
@@ -144,6 +141,33 @@ class AggregationService:
 
             # Resolve ontology via direct service call (CRIT-5)
             ontology_data = await self._resolve_ontology(ds_id, session)
+
+            # ── Graph-level guard ──────────────────────────────────
+            # Multiple data sources can point to the same FalkorDB graph.
+            # Running parallel jobs on the same graph is wasteful: the
+            # Redis idempotency sets (keyed by graph_name) mean only the
+            # first job creates AGGREGATED edges — subsequent jobs process
+            # edges but produce nothing because SADD returns 0.
+            # Block the trigger if another data source on the same graph
+            # already has an active job.
+            graph_name = ontology_data.get("graph_name")
+            if graph_name:
+                conflicting_job = (
+                    await session.execute(
+                        select(AggregationJobORM)
+                        .where(AggregationJobORM.graph_name == graph_name)
+                        .where(AggregationJobORM.data_source_id != ds_id)
+                        .where(AggregationJobORM.status.in_(["pending", "running"]))
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if conflicting_job:
+                    raise ConflictError(
+                        f"Another aggregation job ({conflicting_job.id}) is already "
+                        f"active on graph '{graph_name}' via data source "
+                        f"{conflicting_job.data_source_id}. Wait for it to complete "
+                        f"or cancel it first."
+                    )
             containment_types = ontology_data.get("containment_edge_types", [])
             lineage_types = ontology_data.get("lineage_edge_types", [])
 
@@ -153,10 +177,14 @@ class AggregationService:
                     "Please configure an ontology for this data source first."
                 )
 
-            # Create job with frozen edge types
+            # Create job with frozen edge types + denormalized graph metadata
             job = AggregationJobORM(
                 id=_generate_id(),
                 data_source_id=ds_id,
+                workspace_id=ontology_data.get("workspace_id"),
+                provider_id=ontology_data.get("provider_id"),
+                graph_name=ontology_data.get("graph_name"),
+                data_source_label=ontology_data.get("data_source_label"),
                 ontology_id=ontology_data.get("ontology_id"),
                 projection_mode=request.projection_mode,
                 containment_edge_types=json.dumps(containment_types),
@@ -169,9 +197,8 @@ class AggregationService:
             )
             session.add(job)
 
-            ds = await session.get(WorkspaceDataSourceORM, ds_id)
-            if ds:
-                ds.aggregation_status = "pending"
+            # Update aggregation-owned state table
+            await self._upsert_ds_state(session, ds_id, aggregation_status="pending")
             # session.begin() commits on context exit
 
         # Dispatch AFTER commit so the worker sees the persisted row
@@ -198,13 +225,13 @@ class AggregationService:
                 "You must confirm skipping aggregation by setting confirmed=true"
             )
 
-        from backend.app.db.models import WorkspaceDataSourceORM
+        from .models import AggregationDataSourceStateORM
 
-        ds = await session.get(WorkspaceDataSourceORM, ds_id)
-        if not ds:
-            raise NotFoundError(f"Data source {ds_id} not found")
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if not state:
+            raise NotFoundError(f"Data source {ds_id} not found in aggregation state")
 
-        ds.aggregation_status = "skipped"
+        state.aggregation_status = "skipped"
         await session.commit()
 
         logger.info("Aggregation skipped for data source %s", ds_id)
@@ -217,11 +244,22 @@ class AggregationService:
         self, ds_id: str, session: AsyncSession
     ) -> DataSourceReadinessResponse:
         """Get the aggregation readiness status for a data source."""
-        from backend.app.db.models import WorkspaceDataSourceORM
+        from .models import AggregationDataSourceStateORM
 
-        ds = await session.get(WorkspaceDataSourceORM, ds_id)
-        if not ds:
-            raise NotFoundError(f"Data source {ds_id} not found")
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if not state:
+            # No state row yet — data source exists but aggregation never configured
+            return DataSourceReadinessResponse(
+                data_source_id=ds_id,
+                is_ready=False,
+                aggregation_status="none",
+                can_create_views=False,
+                active_job=None,
+                drift_detected=False,
+                last_aggregated_at=None,
+                aggregation_edge_count=0,
+                message="Aggregation has not been configured. Aggregate or skip to create views.",
+            )
 
         # Find active job (if any)
         active_result = await session.execute(
@@ -232,27 +270,20 @@ class AggregationService:
         )
         active_job = active_result.scalar_one_or_none()
 
-        status = ds.aggregation_status or "none"
+        status = state.aggregation_status or "none"
 
-        # canCreateViews logic:
-        # - none: no (must aggregate or skip first)
-        # - pending/running: no (in progress)
-        # - ready/skipped: yes
-        # - failed: no (must retry or skip)
         can_create = status in ("ready", "skipped")
-
-        # Ready means aggregation completed successfully
         is_ready = status == "ready"
 
-        # Check for drift
+        # Check for drift using the aggregation-owned fingerprint
         drift = False
-        if is_ready and ds.graph_fingerprint:
+        if is_ready and state.graph_fingerprint:
             try:
                 provider = await self._registry.get_provider_for_workspace(
-                    ds.workspace_id, session, data_source_id=ds_id,
+                    state.workspace_id, session, data_source_id=ds_id,
                 )
                 current_fp = await compute_graph_fingerprint(provider)
-                drift = not fingerprints_match(ds.graph_fingerprint, current_fp)
+                drift = not fingerprints_match(state.graph_fingerprint, current_fp)
             except Exception:
                 pass  # Can't check drift — don't block
 
@@ -272,8 +303,8 @@ class AggregationService:
             can_create_views=can_create,
             active_job=self._to_response(active_job) if active_job else None,
             drift_detected=drift,
-            last_aggregated_at=ds.last_aggregated_at,
-            aggregation_edge_count=ds.aggregation_edge_count or 0,
+            last_aggregated_at=state.last_aggregated_at,
+            aggregation_edge_count=state.aggregation_edge_count or 0,
             message=messages.get(status, "Unknown status."),
         )
 
@@ -374,32 +405,20 @@ class AggregationService:
         limit: int = 25,
         offset: int = 0,
     ) -> PaginatedJobsResponse:
-        """List aggregation jobs across all data sources and workspaces."""
-        from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
+        """List aggregation jobs across all data sources and workspaces.
 
-        # Base query: join through data source to workspace
-        base = (
-            select(
-                AggregationJobORM,
-                WorkspaceDataSourceORM.label.label("ds_label"),
-                WorkspaceDataSourceORM.workspace_id.label("ws_id"),
-                WorkspaceORM.name.label("ws_name"),
-            )
-            .join(
-                WorkspaceDataSourceORM,
-                AggregationJobORM.data_source_id == WorkspaceDataSourceORM.id,
-            )
-            .join(
-                WorkspaceORM,
-                WorkspaceDataSourceORM.workspace_id == WorkspaceORM.id,
-            )
-        )
+        Uses denormalized columns on AggregationJobORM (workspace_id,
+        data_source_label) instead of JOINing to the public schema.
+        No cross-schema dependency.
+        """
+        # Base query: AggregationJobORM only (denormalized columns)
+        base = select(AggregationJobORM)
 
         # Apply filters conditionally
         if status:
             base = base.where(AggregationJobORM.status.in_(status))
         if workspace_id:
-            base = base.where(WorkspaceDataSourceORM.workspace_id == workspace_id)
+            base = base.where(AggregationJobORM.workspace_id == workspace_id)
         if data_source_ids:
             base = base.where(AggregationJobORM.data_source_id.in_(data_source_ids))
         if projection_mode:
@@ -409,15 +428,13 @@ class AggregationService:
         if date_from:
             base = base.where(AggregationJobORM.created_at >= date_from)
         if date_to:
-            # Append end-of-day so jobs on the selected date are included
             base = base.where(AggregationJobORM.created_at <= date_to + "T23:59:59.999999")
         if search:
             pattern = f"%{search}%"
             base = base.where(or_(
                 AggregationJobORM.id.ilike(pattern),
                 AggregationJobORM.error_message.ilike(pattern),
-                WorkspaceDataSourceORM.label.ilike(pattern),
-                WorkspaceORM.name.ilike(pattern),
+                AggregationJobORM.data_source_label.ilike(pattern),
             ))
 
         # Count total matching rows
@@ -432,11 +449,11 @@ class AggregationService:
             .offset(offset)
         )
         result = await session.execute(rows_q)
-        rows = result.all()
+        jobs = result.scalars().all()
 
         items = [
-            self._to_global_response(job, ws_id, ws_name, ds_label)
-            for job, ds_label, ws_id, ws_name in rows
+            self._to_global_response(job, job.workspace_id, None, job.data_source_label)
+            for job in jobs
         ]
 
         return PaginatedJobsResponse(items=items, total=total, limit=limit, offset=offset)
@@ -584,11 +601,11 @@ class AggregationService:
 
     async def purge(self, ds_id: str, session: AsyncSession) -> dict:
         """Remove all materialized AGGREGATED edges for a data source."""
-        from backend.app.db.models import WorkspaceDataSourceORM
+        from .models import AggregationDataSourceStateORM
 
-        ds = await session.get(WorkspaceDataSourceORM, ds_id)
-        if not ds:
-            raise NotFoundError(f"Data source {ds_id} not found")
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if not state:
+            raise NotFoundError(f"Data source {ds_id} not found in aggregation state")
 
         # Guard: cannot purge while a job is running
         active = (
@@ -604,24 +621,25 @@ class AggregationService:
             )
 
         provider = await self._registry.get_provider_for_workspace(
-            ds.workspace_id, session, data_source_id=ds_id,
+            state.workspace_id, session, data_source_id=ds_id,
         )
         deleted = await provider.purge_aggregated_edges()
 
-        # Reset data source aggregation state
-        ds.aggregation_status = "none"
-        ds.last_aggregated_at = None
-        ds.aggregation_edge_count = 0
-        ds.graph_fingerprint = None
+        # Reset aggregation-owned state
+        state.aggregation_status = "none"
+        state.last_aggregated_at = None
+        state.aggregation_edge_count = 0
+        state.graph_fingerprint = None
 
         # Create audit trail record so purge appears in job history
         now = _now()
         purge_job = AggregationJobORM(
             id=_generate_id(),
             data_source_id=ds_id,
+            workspace_id=state.workspace_id,
             status="completed",
             trigger_source="purge",
-            projection_mode=ds.projection_mode or "in_source",
+            projection_mode="in_source",
             progress=100,
             total_edges=deleted,
             processed_edges=deleted,
@@ -646,13 +664,13 @@ class AggregationService:
         self, ds_id: str, cron: Optional[str], session: AsyncSession
     ) -> None:
         """Set or clear the aggregation schedule for a data source."""
-        from backend.app.db.models import WorkspaceDataSourceORM
+        from .models import AggregationDataSourceStateORM
 
-        ds = await session.get(WorkspaceDataSourceORM, ds_id)
-        if not ds:
-            raise NotFoundError(f"Data source {ds_id} not found")
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if not state:
+            raise NotFoundError(f"Data source {ds_id} not found in aggregation state")
 
-        ds.aggregation_schedule = cron
+        state.aggregation_schedule = cron
         await session.commit()
 
         logger.info("Aggregation schedule %s for data source %s", cron or "cleared", ds_id)
@@ -663,15 +681,15 @@ class AggregationService:
         self, ds_id: str, session: AsyncSession
     ) -> DriftCheckResponse:
         """Check if the underlying graph has changed since last aggregation."""
-        from backend.app.db.models import WorkspaceDataSourceORM
+        from .models import AggregationDataSourceStateORM
 
-        ds = await session.get(WorkspaceDataSourceORM, ds_id)
-        if not ds:
-            raise NotFoundError(f"Data source {ds_id} not found")
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if not state:
+            raise NotFoundError(f"Data source {ds_id} not found in aggregation state")
 
         try:
             provider = await self._registry.get_provider_for_workspace(
-                ds.workspace_id, session, data_source_id=ds_id,
+                state.workspace_id, session, data_source_id=ds_id,
             )
             current_fp = await compute_graph_fingerprint(provider)
         except Exception as e:
@@ -679,16 +697,16 @@ class AggregationService:
             return DriftCheckResponse(
                 drift_detected=False,
                 current_fingerprint=None,
-                stored_fingerprint=ds.graph_fingerprint,
+                stored_fingerprint=state.graph_fingerprint,
                 last_checked_at=_now(),
             )
 
-        drift = not fingerprints_match(ds.graph_fingerprint, current_fp)
+        drift = not fingerprints_match(state.graph_fingerprint, current_fp)
 
         return DriftCheckResponse(
             drift_detected=drift,
             current_fingerprint=current_fp,
-            stored_fingerprint=ds.graph_fingerprint,
+            stored_fingerprint=state.graph_fingerprint,
             last_checked_at=_now(),
         )
 
@@ -774,13 +792,26 @@ class AggregationService:
     async def _resolve_ontology(self, ds_id: str, session: AsyncSession) -> dict:
         """Resolve ontology edge types for a data source.
 
-        In monolith mode: uses direct service reference.
-        In microservice mode: would use HTTP API call.
+        DEV MODE ONLY — in the decoupled architecture, ontology resolution
+        happens in the viz-service BEFORE proxying to the Control Plane
+        (via InternalTriggerRequest with pre-resolved edge types).
+
+        This method is retained for backward compatibility when running
+        in dev/monolith mode (AGGREGATION_PROXY_ENABLED=false).
 
         Returns dict with:
             ontology_id, containment_edge_types, lineage_edge_types
         """
-        from backend.app.db.models import WorkspaceDataSourceORM
+        # In dev mode, we still need access to WorkspaceDataSourceORM for
+        # the ontology_id lookup. This import is acceptable because dev
+        # mode runs all services in one process with shared DB access.
+        try:
+            from backend.app.db.models import WorkspaceDataSourceORM
+        except ImportError:
+            raise ValueError(
+                "Ontology resolution requires monolith DB models. "
+                "In microservice mode, use InternalTriggerRequest with pre-resolved edge types."
+            )
 
         ds = await session.get(WorkspaceDataSourceORM, ds_id)
         if not ds:
@@ -792,6 +823,15 @@ class AggregationService:
                 "Please configure an ontology for this data source first."
             )
 
+        # Common metadata from the data source (for denormalization + guards)
+        ds_meta = {
+            "ontology_id": ds.ontology_id,
+            "workspace_id": ds.workspace_id,
+            "provider_id": ds.provider_id,
+            "graph_name": ds.graph_name,
+            "data_source_label": getattr(ds, "label", None),
+        }
+
         # Use the ontology service if available (monolith direct call)
         if self._ontology_service:
             try:
@@ -800,7 +840,7 @@ class AggregationService:
                     data_source_id=ds_id,
                 )
                 return {
-                    "ontology_id": ds.ontology_id,
+                    **ds_meta,
                     "containment_edge_types": ontology.containment_edge_types,
                     "lineage_edge_types": ontology.lineage_edge_types,
                 }
@@ -815,7 +855,6 @@ class AggregationService:
         if not ontology_orm:
             raise NotFoundError(f"Ontology {ds.ontology_id} not found")
 
-        # Parse relationship definitions to extract edge type classifications
         from backend.app.ontology.resolver import parse_relationship_definitions, derive_flat_lists, parse_entity_definitions
         try:
             entity_defs = parse_entity_definitions(
@@ -826,14 +865,37 @@ class AggregationService:
             )
             flat = derive_flat_lists(entity_defs, rel_defs)
             return {
-                "ontology_id": ds.ontology_id,
+                **ds_meta,
                 "containment_edge_types": flat.containment_edge_types,
                 "lineage_edge_types": flat.lineage_edge_types,
             }
         except Exception as e:
             raise ValueError(f"Failed to parse ontology definitions: {e}") from e
 
-    # ── Helpers ───────────────────────────────────────────────────────
+    # ── State Management Helpers ────────────────────────────────────────
+
+    async def _upsert_ds_state(
+        self, session: AsyncSession, ds_id: str, **fields,
+    ) -> None:
+        """Create or update the aggregation-owned data source state row.
+
+        Uses AggregationDataSourceStateORM in the aggregation schema.
+        Creates the row if it doesn't exist (e.g., first trigger for a DS).
+        """
+        from .models import AggregationDataSourceStateORM
+
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if state is None:
+            state = AggregationDataSourceStateORM(
+                data_source_id=ds_id,
+                workspace_id=fields.pop("workspace_id", ""),
+            )
+            session.add(state)
+        for key, value in fields.items():
+            if hasattr(state, key):
+                setattr(state, key, value)
+
+    # ── Response Helpers ─────────────────────────────────────────────
 
     @staticmethod
     def _to_response(job: AggregationJobORM) -> AggregationJobResponse:

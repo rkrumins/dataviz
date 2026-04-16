@@ -1,185 +1,361 @@
 """
-Standalone aggregation worker — runs as its own process, fully decoupled
-from the viz-service (web tier).
+Standalone aggregation worker (Data Plane) — runs as its own process,
+fully decoupled from the viz-service (web tier) and Control Plane.
 
 Usage:
     python -m backend.app.services.aggregation
 
 Architecture:
-    - OWN ProviderManager → own FalkorDB connection pools, own circuit
+    - OWN ProviderManager -> own FalkorDB connection pools, own circuit
       breakers.  Provider failures here CANNOT affect the web tier.
-    - OWN Postgres session factory (JOBS pool) → checkpoint commits
+    - OWN Postgres session factory (JOBS pool) -> checkpoint commits
       never contend with API request sessions.
-    - Consumes jobs via Postgres LISTEN/NOTIFY with 5s polling fallback.
+    - Consumes jobs via Redis Streams XREADGROUP with consumer groups.
+      At-least-once delivery with automatic PEL-based crash recovery.
+    - Per-graph concurrency limiting prevents write lock contention.
     - Configurable concurrency via WORKER_CONCURRENCY env var.
     - Graceful shutdown on SIGTERM: stops accepting new jobs, waits for
       active jobs to checkpoint, then exits.
 
 Environment variables:
     MANAGEMENT_DB_URL          Postgres connection string (required)
+    REDIS_URL                  Redis broker URL (default: redis://localhost:6380/0)
     FALKORDB_HOST              FalkorDB host (default: localhost)
     FALKORDB_PORT              FalkorDB port (default: 6379)
-    FALKORDB_SOCKET_TIMEOUT    Socket timeout in seconds (default: 30 for worker)
-    FALKORDB_GRAPH_POOL_SIZE   Graph connection pool size (default: 8)
-    FALKORDB_REDIS_POOL_SIZE   Redis pool size (default: 8)
+    FALKORDB_SOCKET_TIMEOUT    Socket timeout in seconds (default: 60 for worker)
     WORKER_CONCURRENCY         Max parallel jobs (default: 4)
+    MAX_CONCURRENT_PER_GRAPH   Max parallel jobs per graph (default: 2)
     AGGREGATION_JOB_TIMEOUT_SECS  Per-job timeout (default: 7200)
-    WORKER_POLL_INTERVAL_SECS  Polling fallback interval (default: 5)
     WORKER_HEALTH_PORT         Health endpoint port (default: 8090)
     LOG_LEVEL                  Logging level (default: INFO)
 """
 import asyncio
 import logging
 import os
+import platform
 import signal
 import time
-from contextlib import suppress
 
 logger = logging.getLogger(__name__)
 
-# Standalone worker uses longer socket timeout than the web tier.
-# The web tier defaults to 10s; the worker defaults to 30s because
-# batch MERGE operations legitimately take longer.
+# ── Worker-specific defaults (set BEFORE any provider imports) ──────
+# The worker uses longer socket timeout than the web tier (10s) because
+# batch MERGE operations legitimately take longer under load.
 if "FALKORDB_SOCKET_TIMEOUT" not in os.environ:
-    os.environ["FALKORDB_SOCKET_TIMEOUT"] = "30"
+    os.environ["FALKORDB_SOCKET_TIMEOUT"] = "60"
 
-# Smaller connection pools — worker only does aggregation, not API traffic
+# Auto-scale FalkorDB pool sizes from WORKER_CONCURRENCY.
+# Each concurrent job needs ~4 graph pool slots (count + fetch + 2 MERGE)
+# and ~3 redis pool slots (HGET pipeline + SADD pipeline + SCARD pipeline).
+_concurrency = int(os.getenv("WORKER_CONCURRENCY", "4"))
 if "FALKORDB_GRAPH_POOL_SIZE" not in os.environ:
-    os.environ["FALKORDB_GRAPH_POOL_SIZE"] = "8"
+    os.environ["FALKORDB_GRAPH_POOL_SIZE"] = str(_concurrency * 4 + 8)
 if "FALKORDB_REDIS_POOL_SIZE" not in os.environ:
-    os.environ["FALKORDB_REDIS_POOL_SIZE"] = "8"
+    os.environ["FALKORDB_REDIS_POOL_SIZE"] = str(_concurrency * 3 + 8)
 
 
 class _JobConsumer:
-    """Polls Postgres for pending aggregation jobs and executes them.
+    """Consumes aggregation jobs from a Redis Stream via XREADGROUP.
 
-    Uses LISTEN/NOTIFY for instant wake-up with a polling fallback
-    every ``poll_interval`` seconds (catches missed notifications,
-    e.g. if the worker was restarting when NOTIFY fired).
+    Uses Redis Streams consumer groups for:
+    - Automatic distribution across worker replicas
+    - At-least-once delivery via XACK
+    - Crash recovery via Pending Entry List (PEL) + XAUTOCLAIM
+    - Natural backpressure (BLOCK until messages available)
 
-    Concurrency is bounded by ``max_concurrency`` — at most N jobs
-    run simultaneously via asyncio tasks.
+    Per-graph concurrency is enforced via asyncio.Semaphore keyed by
+    (provider_id, graph_name). This prevents FalkorDB write lock
+    contention when multiple jobs target the same graph.
     """
 
     def __init__(
         self,
         worker,
         session_factory,
+        redis_client,
         max_concurrency: int = 4,
-        poll_interval: float = 5.0,
+        max_per_graph: int = 2,
     ):
         self._worker = worker
         self._session_factory = session_factory
+        self._redis = redis_client
         self._max_concurrency = max_concurrency
-        self._poll_interval = poll_interval
+        self._max_per_graph = max_per_graph
         self._active_tasks: dict[str, asyncio.Task] = {}
+        self._message_ids: dict[str, str] = {}  # job_id -> stream message_id
         self._shutdown_event = asyncio.Event()
-        self._notify_event = asyncio.Event()
+        self._consumer_name = f"worker-{platform.node()}-{os.getpid()}"
+
+        # Per-graph concurrency limiters
+        self._graph_semaphores: dict[str, asyncio.Semaphore] = {}
 
     async def start(self) -> None:
-        """Main consumer loop.  Runs until shutdown is signalled."""
+        """Main consumer loop. Runs until shutdown is signalled."""
+        from .redis_client import JOBS_STREAM, CONSUMER_GROUP, ensure_consumer_group
+
+        await ensure_consumer_group()
+
         logger.info(
-            "Job consumer started (concurrency=%d, poll_interval=%.0fs)",
-            self._max_concurrency, self._poll_interval,
+            "Job consumer started (consumer=%s, concurrency=%d, per_graph=%d)",
+            self._consumer_name, self._max_concurrency, self._max_per_graph,
         )
 
-        # Start the LISTEN listener in the background
-        listener_task = asyncio.create_task(self._listen_for_notifications())
-
-        try:
-            while not self._shutdown_event.is_set():
-                await self._poll_and_claim()
-
-                # Wait for either a NOTIFY or the poll interval
-                with suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(
-                        self._notify_event.wait(),
-                        timeout=self._poll_interval,
-                    )
-                self._notify_event.clear()
-        finally:
-            listener_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await listener_task
-
-    async def _listen_for_notifications(self) -> None:
-        """Background task: LISTEN on 'aggregation_jobs' channel."""
-        import asyncpg
-
-        dsn = os.environ.get("MANAGEMENT_DB_URL", "")
-        # Convert SQLAlchemy URL to asyncpg format
-        dsn = dsn.replace("postgresql+asyncpg://", "postgresql://")
+        # Recover unACKed messages from previous crashes (PEL recovery)
+        await self._recover_pending()
 
         while not self._shutdown_event.is_set():
-            try:
-                conn = await asyncpg.connect(dsn)
-                try:
-                    await conn.add_listener(
-                        "aggregation_jobs",
-                        lambda conn, pid, channel, payload: self._notify_event.set(),
-                    )
-                    logger.info("LISTEN on channel 'aggregation_jobs' established")
+            # Clean up completed tasks
+            self._reap_done_tasks()
 
-                    # Keep the connection alive until shutdown
-                    while not self._shutdown_event.is_set():
-                        await asyncio.sleep(1)
-                finally:
-                    await conn.close()
+            available_slots = self._max_concurrency - len(self._active_tasks)
+            if available_slots <= 0:
+                # All slots busy — wait briefly for a task to complete
+                await asyncio.sleep(0.5)
+                continue
+
+            try:
+                # XREADGROUP: block up to 5s waiting for new messages
+                entries = await self._redis.xreadgroup(
+                    CONSUMER_GROUP,
+                    self._consumer_name,
+                    {JOBS_STREAM: ">"},
+                    count=available_slots,
+                    block=5000,
+                )
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                logger.warning("LISTEN connection failed: %s (retrying in 5s)", e)
-                await asyncio.sleep(5)
+                logger.error("XREADGROUP failed: %s (retrying in 2s)", e)
+                await asyncio.sleep(2)
+                continue
 
-    async def _poll_and_claim(self) -> None:
-        """Poll for pending jobs, claim up to max_concurrency slots."""
-        # Clean up completed tasks
-        done_ids = [jid for jid, t in self._active_tasks.items() if t.done()]
-        for jid in done_ids:
-            task = self._active_tasks.pop(jid)
-            if exc := task.exception():
-                logger.error("Job %s failed with unhandled error: %s", jid, exc)
+            if not entries:
+                continue
 
-        available_slots = self._max_concurrency - len(self._active_tasks)
-        if available_slots <= 0:
-            return
+            # entries = [(stream_name, [(msg_id, {field: value}), ...])]
+            for _stream_name, messages in entries:
+                for msg_id, fields in messages:
+                    job_id = fields.get("job_id")
+                    if not job_id:
+                        logger.warning("Stream message %s has no job_id — ACKing", msg_id)
+                        await self._ack(msg_id)
+                        continue
 
-        from sqlalchemy import text
+                    if job_id in self._active_tasks:
+                        logger.debug("Job %s already active — skipping duplicate", job_id)
+                        await self._ack(msg_id)
+                        continue
 
-        async with self._session_factory() as session:
-            # Claim pending jobs using FOR UPDATE SKIP LOCKED to prevent
-            # duplicate processing across multiple worker replicas.
-            result = await session.execute(
-                text(
-                    "SELECT id FROM aggregation_jobs "
-                    "WHERE status = 'pending' "
-                    "ORDER BY created_at "
-                    "LIMIT :limit "
-                    "FOR UPDATE SKIP LOCKED"
-                ),
-                {"limit": available_slots},
+                    self._message_ids[job_id] = msg_id
+                    task = asyncio.create_task(
+                        self._run_with_limits(job_id),
+                        name=f"aggregation-{job_id}",
+                    )
+                    self._active_tasks[job_id] = task
+
+    async def _recover_pending(self) -> None:
+        """Recover unACKed messages from the Pending Entry List (PEL).
+
+        On startup, claim any messages that were delivered to consumers
+        that crashed (idle > 60s). This replaces the old Postgres-based
+        recover_interrupted_jobs() scan for the dispatch side of recovery.
+        """
+        from .redis_client import (
+            JOBS_STREAM, CONSUMER_GROUP, DLQ_STREAM, MAX_DELIVERY_ATTEMPTS,
+        )
+
+        try:
+            # XAUTOCLAIM: claim messages idle > 60s from any consumer in the group
+            result = await self._redis.xautoclaim(
+                JOBS_STREAM,
+                CONSUMER_GROUP,
+                self._consumer_name,
+                min_idle_time=60000,  # 60 seconds
+                start_id="0-0",
+                count=self._max_concurrency,
             )
-            job_ids = [row[0] for row in result.fetchall()]
 
-            if not job_ids:
+            if not result or len(result) < 2:
                 return
 
-            logger.info("Claimed %d pending jobs: %s", len(job_ids), job_ids)
-            await session.commit()
+            # result = (next_start_id, [(msg_id, fields), ...], [deleted_ids])
+            claimed_messages = result[1] if len(result) > 1 else []
 
-        # Launch each job as an asyncio task
-        for job_id in job_ids:
-            if job_id not in self._active_tasks:
+            for msg_id, fields in claimed_messages:
+                job_id = fields.get("job_id")
+                if not job_id:
+                    await self._ack(msg_id)
+                    continue
+
+                # Check delivery count via XPENDING for this message
+                try:
+                    pending_info = await self._redis.xpending_range(
+                        JOBS_STREAM, CONSUMER_GROUP,
+                        min=msg_id, max=msg_id, count=1,
+                    )
+                    delivery_count = pending_info[0]["times_delivered"] if pending_info else 1
+                except Exception:
+                    delivery_count = 1
+
+                if delivery_count > MAX_DELIVERY_ATTEMPTS:
+                    # Move to dead letter queue
+                    logger.warning(
+                        "Job %s exceeded %d delivery attempts — moving to DLQ",
+                        job_id, MAX_DELIVERY_ATTEMPTS,
+                    )
+                    await self._redis.xadd(
+                        DLQ_STREAM,
+                        {
+                            "job_id": job_id,
+                            "original_msg_id": msg_id,
+                            "delivery_count": str(delivery_count),
+                            "reason": "max_delivery_attempts_exceeded",
+                        },
+                    )
+                    await self._ack(msg_id)
+                    # Mark job as permanently failed
+                    await self._mark_job_failed(
+                        job_id,
+                        f"Permanently failed: exceeded {MAX_DELIVERY_ATTEMPTS} delivery attempts",
+                    )
+                    continue
+
+                logger.info(
+                    "PEL recovery: claimed job %s (delivery_count=%d, msg_id=%s)",
+                    job_id, delivery_count, msg_id,
+                )
+                self._message_ids[job_id] = msg_id
                 task = asyncio.create_task(
-                    self._worker.run(job_id),
+                    self._run_with_limits(job_id),
                     name=f"aggregation-{job_id}",
                 )
                 self._active_tasks[job_id] = task
 
+        except Exception as e:
+            logger.warning("PEL recovery failed: %s (will retry on next cycle)", e)
+
+    async def _run_with_limits(self, job_id: str) -> None:
+        """Run a job with per-graph concurrency limiting.
+
+        Looks up the graph key from the job record, then acquires the
+        per-graph semaphore before executing. Jobs targeting different
+        graphs run in full parallelism.
+        """
+        graph_key = await self._get_graph_key(job_id)
+
+        if graph_key:
+            sem = self._graph_semaphores.setdefault(
+                graph_key, asyncio.Semaphore(self._max_per_graph),
+            )
+            async with sem:
+                await self._execute_job(job_id)
+        else:
+            # No graph key found — run without per-graph limit
+            await self._execute_job(job_id)
+
+    async def _execute_job(self, job_id: str) -> None:
+        """Execute a job and ACK/NACK based on outcome."""
+        msg_id = self._message_ids.get(job_id)
+        try:
+            await self._worker.run(job_id)
+            # Success — ACK the message
+            if msg_id:
+                await self._ack(msg_id)
+            logger.info("Job %s completed and ACKed", job_id)
+        except Exception as e:
+            logger.error("Job %s failed with unhandled error: %s", job_id, e)
+            # Don't ACK — the message stays in PEL for redelivery.
+            # The worker.run() already marks the job as 'failed' in the DB
+            # and preserves last_cursor for resume. The PEL recovery will
+            # pick it up on next startup or via XAUTOCLAIM.
+            if msg_id:
+                await self._ack(msg_id)
+                # We ACK even on failure because the job-level retry logic
+                # (resume from checkpoint) is handled by the Control Plane,
+                # not by redelivering the stream message. The job record in
+                # Postgres IS the retry state.
+
+    async def _get_graph_key(self, job_id: str) -> str | None:
+        """Look up the actual graph key (provider_id:graph_name) for a job.
+
+        Multiple data sources can point to the same FalkorDB graph.
+        The per-graph semaphore must use the real graph identity, not
+        data_source_id, otherwise three data sources on the same graph
+        bypass the concurrency limit entirely.
+        """
+        from sqlalchemy import text as sa_text
+
+        try:
+            async with self._session_factory() as session:
+                result = await session.execute(
+                    sa_text(
+                        "SELECT provider_id, graph_name, data_source_id "
+                        "FROM aggregation.aggregation_jobs "
+                        "WHERE id = :job_id"
+                    ),
+                    {"job_id": job_id},
+                )
+                row = result.first()
+                if not row:
+                    return None
+                provider_id, graph_name, ds_id = row[0], row[1], row[2]
+                # Use the real graph identity if available (denormalized columns)
+                if provider_id and graph_name:
+                    return f"{provider_id}:{graph_name}"
+                # Fallback to data_source_id (pre-migration jobs)
+                return ds_id
+        except Exception as e:
+            logger.warning("Failed to look up graph key for job %s: %s", job_id, e)
+            return None
+
+    async def _ack(self, msg_id: str) -> None:
+        """ACK a message in the consumer group."""
+        from .redis_client import JOBS_STREAM, CONSUMER_GROUP
+
+        try:
+            await self._redis.xack(JOBS_STREAM, CONSUMER_GROUP, msg_id)
+        except Exception as e:
+            logger.warning("XACK failed for msg %s: %s", msg_id, e)
+
+    async def _mark_job_failed(self, job_id: str, error_message: str) -> None:
+        """Mark a job as permanently failed in the database."""
+        from datetime import datetime, timezone
+        from sqlalchemy import text as sa_text
+
+        try:
+            async with self._session_factory() as session:
+                await session.execute(
+                    sa_text(
+                        "UPDATE aggregation.aggregation_jobs "
+                        "SET status = 'failed', "
+                        "    error_message = :error, "
+                        "    updated_at = :now "
+                        "WHERE id = :job_id AND status IN ('pending', 'running')"
+                    ),
+                    {
+                        "job_id": job_id,
+                        "error": error_message[:2000],
+                        "now": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                await session.commit()
+        except Exception as e:
+            logger.error("Failed to mark job %s as failed: %s", job_id, e)
+
+    def _reap_done_tasks(self) -> None:
+        """Clean up completed tasks and their message ID mappings."""
+        done_ids = [jid for jid, t in self._active_tasks.items() if t.done()]
+        for jid in done_ids:
+            task = self._active_tasks.pop(jid)
+            self._message_ids.pop(jid, None)
+            if not task.cancelled():
+                exc = task.exception()
+                if exc:
+                    logger.error("Job %s task exception: %s", jid, exc)
+
     def request_shutdown(self) -> None:
         """Signal the consumer to stop accepting new jobs."""
         self._shutdown_event.set()
-        self._notify_event.set()  # Wake the poll loop
 
     async def drain(self, timeout: float = 60.0) -> None:
         """Wait for active jobs to checkpoint and complete."""
@@ -226,6 +402,7 @@ async def _run_health_server(consumer: _JobConsumer, port: int) -> None:
             "activeJobs": len(consumer._active_tasks),
             "uptime": int(time.monotonic() - start_time),
             "role": "aggregation-worker",
+            "consumer": consumer._consumer_name,
         })
         response = (
             f"HTTP/1.1 200 OK\r\n"
@@ -244,56 +421,56 @@ async def _run_health_server(consumer: _JobConsumer, port: int) -> None:
 
 async def main() -> None:
     """Standalone worker entrypoint."""
-    from backend.app.db.engine import get_jobs_session, init_db
+    from backend.app.db.engine import get_jobs_session
     from backend.app.providers.manager import ProviderManager
     from .worker import AggregationWorker
-    from .service import AggregationService
-    from .dispatcher import InProcessDispatcher
+    from .db_init import init_aggregation_db
+    from .redis_client import get_redis, close_redis
 
     logging.basicConfig(
         level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    concurrency = int(os.getenv("WORKER_CONCURRENCY", "4"))
+    max_per_graph = int(os.getenv("MAX_CONCURRENT_PER_GRAPH", "2"))
+
     logger.info("=== Aggregation Worker (standalone) starting ===")
     logger.info(
-        "Config: FALKORDB_SOCKET_TIMEOUT=%s, GRAPH_POOL=%s, REDIS_POOL=%s, CONCURRENCY=%s",
+        "Config: FALKORDB_SOCKET_TIMEOUT=%s, GRAPH_POOL=%s, REDIS_POOL=%s, "
+        "CONCURRENCY=%d, MAX_PER_GRAPH=%d, REDIS_URL=%s",
         os.getenv("FALKORDB_SOCKET_TIMEOUT"),
         os.getenv("FALKORDB_GRAPH_POOL_SIZE"),
         os.getenv("FALKORDB_REDIS_POOL_SIZE"),
-        os.getenv("WORKER_CONCURRENCY", "4"),
+        concurrency, max_per_graph,
+        os.getenv("REDIS_URL", "redis://localhost:6380/0"),
     )
 
-    # Initialize DB (creates tables if needed)
-    await init_db()
+    # Initialize aggregation DB (schema + tables, no Alembic needed)
+    await init_aggregation_db()
 
     # OWN ProviderManager — completely separate from viz-service.
     # Own connection pools, own circuit breakers, own timeouts.
     # Provider failures here CANNOT affect the web tier.
     registry = ProviderManager()
 
-    # Create worker on the JOBS pool
-    worker = AggregationWorker(get_jobs_session, registry)
+    # Initialize Redis client
+    redis_client = get_redis()
 
-    # Recover any interrupted jobs from a previous crash
-    dispatcher = InProcessDispatcher(worker)
-    service = AggregationService(
-        dispatcher=dispatcher,
-        registry=registry,
-        session_factory=get_jobs_session,
-    )
-    recovered = await service.recover_interrupted_jobs()
-    if recovered:
-        logger.info("Recovered %d interrupted aggregation jobs", recovered)
+    # Create event publisher for status events
+    from .events import AggregationEventPublisher
+    event_publisher = AggregationEventPublisher(redis_client)
 
-    # Create the job consumer
-    concurrency = int(os.getenv("WORKER_CONCURRENCY", "4"))
-    poll_interval = float(os.getenv("WORKER_POLL_INTERVAL_SECS", "5"))
+    # Create worker on the JOBS pool with event publisher
+    worker = AggregationWorker(get_jobs_session, registry, event_publisher=event_publisher)
+
+    # Create the job consumer (Redis Streams based)
     consumer = _JobConsumer(
         worker=worker,
         session_factory=get_jobs_session,
+        redis_client=redis_client,
         max_concurrency=concurrency,
-        poll_interval=poll_interval,
+        max_per_graph=max_per_graph,
     )
 
     # Start health endpoint
@@ -320,6 +497,7 @@ async def main() -> None:
         logger.info("Consumer stopped — draining active jobs...")
         await consumer.drain(timeout=60.0)
         await registry.evict_all()
+        await close_redis()
         logger.info("=== Aggregation Worker shutdown complete ===")
 
 

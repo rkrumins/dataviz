@@ -7,6 +7,8 @@ import './styles/globals.css'
 import { GraphProvider } from '@/providers/GraphProviderContext'
 import { BackendHealthBanner } from '@/components/layout/BackendHealthBanner'
 import { useAuthStore } from '@/store/auth'
+import { enableProviderStatusPolling } from '@/store/providerStatus'
+import { enableProviderHealthPolling } from '@/store/providerHealth'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -29,20 +31,33 @@ export function getQueryClient(): QueryClient | null {
  * Validate the access cookie against the server exactly once on app boot
  * and again whenever the auth store is reset to ``idle`` (e.g. by tests).
  * The store is the only source of truth for ``isAuthenticated``; route
- * guards read from it. Children render normally — components that want
- * to gate on the resolved status check ``status === 'loading'`` themselves.
+ * guards read from it.
+ *
+ * Children are NOT rendered until bootstrap resolves (status leaves
+ * ``idle``/``loading``). This prevents GraphProvider, polling stores,
+ * and workspace loaders from firing requests before we know whether the
+ * user is authenticated — eliminating the startup request storm on the
+ * login page.
  */
 function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const bootstrap = useAuthStore((s) => s.bootstrap)
+  const status = useAuthStore((s) => s.status)
   useEffect(() => {
     void bootstrap()
-    // fetchWithTimeout emits this event when a 401 cannot be recovered
-    // via the silent /auth/refresh path. That's the signal the session
-    // is actually gone — flip the store so route guards redirect.
     const onSessionLost = () => useAuthStore.getState().handleSessionLost()
     window.addEventListener('auth:session-lost', onSessionLost)
     return () => window.removeEventListener('auth:session-lost', onSessionLost)
   }, [bootstrap])
+
+  // Block rendering until auth resolves — prevents premature API calls
+  if (status === 'idle' || status === 'loading') return null
+
+  // Start background pollers only once auth confirms user is logged in
+  if (status === 'authenticated') {
+    enableProviderStatusPolling()
+    enableProviderHealthPolling()
+  }
+
   return <>{children}</>
 }
 

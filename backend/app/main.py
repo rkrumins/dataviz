@@ -142,76 +142,153 @@ async def lifespan(_app: FastAPI):
     from .runtime.role import current_role, runs_scheduler, runs_recovery
     role = current_role()
 
-    try:
-        from .services.aggregation import (
-            AggregationService, AggregationWorker,
-            InProcessDispatcher, AggregationScheduler,
+    # Proxy mode: when AGGREGATION_PROXY_ENABLED=true, the viz-service
+    # does NOT instantiate any aggregation objects locally. All 13
+    # aggregation endpoints are proxied to the Control Plane (port 8091).
+    # No dispatcher, no worker, no scheduler, no recovery.
+    aggregation_proxy_enabled = os.getenv(
+        "AGGREGATION_PROXY_ENABLED", "false"
+    ).lower() == "true"
+
+    if aggregation_proxy_enabled:
+        logger.info(
+            "Aggregation: proxy mode enabled — all endpoints forwarded to %s",
+            os.getenv("AGGREGATION_SERVICE_URL", "http://localhost:8091"),
         )
-        from .services.aggregation.dispatcher import PostgresDispatcher
-        from .runtime.role import runs_worker
-
-        # Choose dispatcher based on role.
-        # - DEV: InProcessDispatcher (all-in-one, current behaviour)
-        # - WEB: PostgresDispatcher (job runs in standalone worker process)
-        # - WORKER/CONTROLPLANE: should not reach this code path
-        dispatch_mode = os.getenv("AGGREGATION_DISPATCH_MODE", "auto")
-        if dispatch_mode == "auto":
-            use_postgres_dispatch = not runs_worker()
-        else:
-            use_postgres_dispatch = dispatch_mode == "postgres"
-
-        if use_postgres_dispatch:
-            agg_dispatcher = PostgresDispatcher(get_jobs_session)
-            logger.info("Aggregation dispatch: PostgresDispatcher (jobs run in standalone worker)")
-        else:
-            # Aggregation subsystem uses the JOBS pool exclusively (plan Gap 3):
-            # checkpoint commits every ~2s cannot drain the WEB pool that
-            # serves user requests.
-            agg_worker = AggregationWorker(get_jobs_session, provider_manager)
-            agg_dispatcher = InProcessDispatcher(agg_worker)
-            logger.info("Aggregation dispatch: InProcessDispatcher (all-in-one dev mode)")
-
-        # Get ontology service reference for monolith-mode resolution
-        ontology_svc = None
+        # Start event listener to sync aggregation status from Control Plane
+        # into local workspace_data_sources table.
+        _agg_event_listener = None
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            try:
+                from .services.aggregation.redis_client import get_redis
+                from .services.aggregation.event_listener import AggregationEventListener
+                _agg_event_listener = AggregationEventListener(
+                    redis_client=get_redis(),
+                    session_factory=get_jobs_session,
+                )
+                _app.state._agg_event_listener = _agg_event_listener
+                _app.state._agg_event_listener_task = asyncio.create_task(
+                    _agg_event_listener.start()
+                )
+                logger.info("Aggregation event listener started (syncs status from Control Plane)")
+            except Exception as exc:
+                logger.warning("Aggregation event listener startup failed: %s", exc)
+    else:
         try:
-            from .ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
-            from .ontology.service import LocalOntologyService
-            ontology_svc = LocalOntologyService(
-                SQLAlchemyOntologyRepository(None)  # session injected per-call
+            from .services.aggregation import (
+                AggregationService, AggregationWorker,
+                InProcessDispatcher, AggregationScheduler,
             )
-        except Exception:
-            logger.warning("Ontology service not available for aggregation — will use DB fallback")
+            from .services.aggregation.dispatcher import PostgresDispatcher
+            from .runtime.role import runs_worker
 
-        agg_service = AggregationService(
-            dispatcher=agg_dispatcher,
-            registry=provider_manager,
-            session_factory=get_jobs_session,
-            ontology_service=ontology_svc,
-        )
+            # Choose dispatcher based on role + dispatch mode.
+            # - redis:     RedisStreamDispatcher  (production — workers consume via XREADGROUP)
+            # - postgres:  PostgresDispatcher     (legacy — workers consume via LISTEN/NOTIFY)
+            # - dual:      DualDispatcher         (migration — writes to both Redis + Postgres)
+            # - inprocess: InProcessDispatcher    (dev — all-in-one single process)
+            # - auto:      auto-detect from SYNODIC_ROLE + REDIS_URL presence
+            dispatch_mode = os.getenv("AGGREGATION_DISPATCH_MODE", "auto")
 
-        # Register as app state for endpoint access
-        _app.state.aggregation_service = agg_service
+            if dispatch_mode == "redis":
+                from .services.aggregation.redis_client import get_redis
+                from .services.aggregation.dispatcher import RedisStreamDispatcher
+                agg_dispatcher = RedisStreamDispatcher(get_redis())
+                logger.info("Aggregation dispatch: RedisStreamDispatcher (workers consume via Redis Streams)")
+            elif dispatch_mode == "dual":
+                from .services.aggregation.redis_client import get_redis
+                from .services.aggregation.dispatcher import RedisStreamDispatcher, DualDispatcher
+                agg_dispatcher = DualDispatcher(
+                    postgres_dispatcher=PostgresDispatcher(get_jobs_session),
+                    redis_dispatcher=RedisStreamDispatcher(get_redis()),
+                )
+                logger.info("Aggregation dispatch: DualDispatcher (Redis + Postgres for zero-downtime migration)")
+            elif dispatch_mode == "postgres":
+                agg_dispatcher = PostgresDispatcher(get_jobs_session)
+                logger.info("Aggregation dispatch: PostgresDispatcher (legacy standalone worker)")
+            elif dispatch_mode == "auto":
+                # Auto-detect: if REDIS_URL is set and role is not worker, use Redis
+                if os.getenv("REDIS_URL") and not runs_worker():
+                    from .services.aggregation.redis_client import get_redis
+                    from .services.aggregation.dispatcher import RedisStreamDispatcher
+                    agg_dispatcher = RedisStreamDispatcher(get_redis())
+                    logger.info("Aggregation dispatch: RedisStreamDispatcher (auto-detected from REDIS_URL)")
+                elif not runs_worker():
+                    agg_dispatcher = PostgresDispatcher(get_jobs_session)
+                    logger.info("Aggregation dispatch: PostgresDispatcher (auto — no REDIS_URL)")
+                else:
+                    agg_worker = AggregationWorker(get_jobs_session, provider_manager)
+                    agg_dispatcher = InProcessDispatcher(agg_worker)
+                    logger.info("Aggregation dispatch: InProcessDispatcher (auto — worker role)")
+            else:
+                # inprocess or unknown — dev/single-process mode
+                agg_worker = AggregationWorker(get_jobs_session, provider_manager)
+                agg_dispatcher = InProcessDispatcher(agg_worker)
+                logger.info("Aggregation dispatch: InProcessDispatcher (all-in-one dev mode)")
 
-        # Recovery and scheduler only run on control-plane / dev roles.
-        # Web tier never starts background tasks — it is fully stateless.
-        if runs_recovery():
-            recovered = await agg_service.recover_interrupted_jobs()
-            if recovered:
-                logger.info("Recovered %d interrupted aggregation jobs", recovered)
+            # Get ontology service reference for monolith-mode resolution
+            ontology_svc = None
+            try:
+                from .ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+                from .ontology.service import LocalOntologyService
+                ontology_svc = LocalOntologyService(
+                    SQLAlchemyOntologyRepository(None)  # session injected per-call
+                )
+            except Exception:
+                logger.warning("Ontology service not available for aggregation — will use DB fallback")
 
-        if runs_scheduler():
-            agg_scheduler = AggregationScheduler(get_jobs_session, provider_manager)
-            asyncio.create_task(agg_scheduler.start())
-            logger.info("Aggregation scheduler started")
+            agg_service = AggregationService(
+                dispatcher=agg_dispatcher,
+                registry=provider_manager,
+                session_factory=get_jobs_session,
+                ontology_service=ontology_svc,
+            )
 
-        logger.info("Aggregation service started (role=%s)", role.value)
-    except Exception as exc:
-        logger.warning("Aggregation service startup warning: %s", exc)
+            # Register as app state for endpoint access
+            _app.state.aggregation_service = agg_service
+
+            # Recovery and scheduler only run on control-plane / dev roles.
+            # Web tier never starts background tasks — it is fully stateless.
+            if runs_recovery():
+                recovered = await agg_service.recover_interrupted_jobs()
+                if recovered:
+                    logger.info("Recovered %d interrupted aggregation jobs", recovered)
+
+            if runs_scheduler():
+                agg_scheduler = AggregationScheduler(get_jobs_session, provider_manager)
+                asyncio.create_task(agg_scheduler.start())
+                logger.info("Aggregation scheduler started")
+
+            logger.info("Aggregation service started (role=%s)", role.value)
+        except Exception as exc:
+            logger.warning("Aggregation service startup warning: %s", exc)
 
     logger.info("Synodic Visualization Service started (role=%s)", role.value)
     yield
 
-    # Shutdown — release all provider connection pools (with timeout so a hung
+    # Shutdown — stop event listener, release providers, close connections.
+
+    # Stop aggregation event listener (if running in proxy mode)
+    _agg_listener = getattr(_app.state, "_agg_event_listener", None)
+    if _agg_listener is not None:
+        await _agg_listener.stop()
+        _agg_task = getattr(_app.state, "_agg_event_listener_task", None)
+        if _agg_task and not _agg_task.done():
+            _agg_task.cancel()
+            try:
+                await _agg_task
+            except asyncio.CancelledError:
+                pass
+        # Close the Redis client used by the event listener
+        try:
+            from .services.aggregation.redis_client import close_redis
+            await close_redis()
+        except Exception:
+            pass
+        logger.info("Aggregation event listener stopped")
+
+    # Release all provider connection pools (with timeout so a hung
     # provider doesn't block graceful shutdown indefinitely).
     try:
         await asyncio.wait_for(provider_manager.evict_all(), timeout=5)

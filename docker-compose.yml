@@ -1,12 +1,22 @@
 # ══════════════════════════════════════════════════════════════════════
-# Synodic — Full-Stack Docker Compose
+# Synodic — Full-Stack Docker Compose (Three-Service Architecture)
 # ══════════════════════════════════════════════════════════════════════
+#
+# Architecture:
+#   viz-service (8000)  ──proxy──>  aggregation-controlplane (8091)
+#                                          │
+#                                     Redis Streams
+#                                          │
+#                                   aggregation-worker (×N)
 #
 # Quick start (full platform):
 #   docker compose up --build
 #
 # Just infrastructure (for local dev with uvicorn):
-#   docker compose up falkordb postgres
+#   docker compose up falkordb postgres redis
+#
+# Scale aggregation workers:
+#   docker compose up --scale aggregation-worker=3
 #
 # With demo data seeding:
 #   docker compose --profile seed up --build
@@ -38,6 +48,28 @@ services:
       timeout: 3s
       retries: 10
 
+  # ── Redis (Message Broker) ─────────────────────────────────────────
+  # Dedicated Redis 7 for aggregation job dispatch (Redis Streams) and
+  # event pub/sub.  Separate from FalkorDB — graph memory must not
+  # compete with broker data.  AOF persistence ensures stream durability
+  # across restarts.  noeviction policy prevents silent message loss.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # ── PostgreSQL (Management Database) ──────────────────────────────
   postgres:
     image: postgres:16-alpine
@@ -55,9 +87,55 @@ services:
       timeout: 3s
       retries: 10
 
+  # ── Aggregation Control Plane (Port 8091) ─────────────────────────
+  # Owns the aggregation API surface: job lifecycle, scheduling, crash
+  # recovery, drift detection.  Dispatches execution to Workers via
+  # Redis Streams.  Does NOT run heavy FalkorDB MERGE — that's the
+  # Workers.  Uses SHORT FalkorDB timeouts (5s) so the API stays
+  # responsive even when the graph provider is slow/down.
+  #
+  # MUST start before viz-service (creates the aggregation schema) and
+  # before workers (they query the schema it owns).
+  aggregation-controlplane:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.controlplane
+    ports:
+      - "8091:8091"
+    environment:
+      MANAGEMENT_DB_URL: postgresql+asyncpg://synodic:synodic@postgres:5432/synodic
+      REDIS_URL: redis://redis:6379/0
+      AGGREGATION_DISPATCH_MODE: redis
+
+      # FalkorDB access for drift checks, readiness probes, and purge.
+      # Short timeout — API responsiveness over completeness.
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      FALKORDB_SOCKET_TIMEOUT: "5"
+      FALKORDB_GRAPH_NAME: nexus_lineage
+
+      AGGREGATION_API_PORT: "8091"
+      SYNODIC_ROLE: controlplane
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8091/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
   # ── Visualization Service (Port 8000) ─────────────────────────────
   # Primary backend: auth, workspaces, graph queries, ontology, views.
-  # On first boot it auto-creates DB tables, seeds templates, and
+  # Aggregation endpoints are proxied to the Control Plane (port 8091).
+  # On first boot it runs Alembic migrations, seeds templates, and
   # bootstraps an admin user + default provider/workspace from env.
   viz-service:
     build:
@@ -79,16 +157,73 @@ services:
       JWT_SECRET_KEY: change-me-in-production
       JWT_ALGORITHM: HS256
       JWT_EXPIRY_MINUTES: "60"
-      ADMIN_EMAIL: admin@synodic.local
+      ADMIN_EMAIL: admin@nexuslineage.local
       ADMIN_PASSWORD: admin123
 
       # Credential encryption (omit for plaintext in dev)
       # CREDENTIAL_ENCRYPTION_KEY: ""
 
+      # Redis (for aggregation event listener — syncs status from CP)
+      REDIS_URL: redis://redis:6379/0
+
+      # Aggregation proxy: all 13 aggregation endpoints are forwarded
+      # to the Control Plane.  The viz-service does NOT run any
+      # aggregation logic locally — no dispatcher, no scheduler, no
+      # worker.  Set to 'false' for single-process dev mode.
+      AGGREGATION_PROXY_ENABLED: "true"
+      AGGREGATION_SERVICE_URL: http://aggregation-controlplane:8091
+      SYNODIC_ROLE: web
+
       # CORS — allow the frontend container + local dev
       CORS_ALLOWED_ORIGINS: http://localhost:3080,http://localhost:5173,http://localhost:3000
     depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Wait for Control Plane to be healthy so the aggregation schema
+      # exists and proxy requests don't fail on first boot.
+      aggregation-controlplane:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Aggregation Worker (Data Plane) ────────────────────────────────
+  # Headless batch executor.  Consumes jobs from Redis Streams, runs
+  # heavy FalkorDB MERGE operations.  Own connection pools, own circuit
+  # breakers.  Provider failures here CANNOT affect the web tier or
+  # Control Plane.  No HTTP API — health probe only on port 8090.
+  # Scale horizontally: docker compose up --scale aggregation-worker=3
+  aggregation-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.aggregation
+    environment:
+      MANAGEMENT_DB_URL: postgresql+asyncpg://synodic:synodic@postgres:5432/synodic
+      REDIS_URL: redis://redis:6379/0
+
+      # FalkorDB — worker-specific tuning: longer timeouts for heavy
+      # MERGE ops, pool sizes auto-scaled from WORKER_CONCURRENCY.
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      FALKORDB_SOCKET_TIMEOUT: "60"
+
+      # Concurrency: max parallel aggregation jobs per worker replica.
+      # Pool sizes are auto-computed: graph = concurrency*4+8, redis = concurrency*3+8
+      WORKER_CONCURRENCY: "4"
+      AGGREGATION_JOB_TIMEOUT_SECS: "7200"
+
+      # Per-graph concurrency limit (prevent FalkorDB write lock contention)
+      MAX_CONCURRENT_PER_GRAPH: "2"
+
+      SYNODIC_ROLE: worker
+      LOG_LEVEL: INFO
+    depends_on:
+      # Worker must start after Control Plane (schema must exist)
+      aggregation-controlplane:
+        condition: service_healthy
       falkordb:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -153,4 +288,5 @@ services:
 
 volumes:
   falkordb_data:
+  redis_data:
   postgres_data:

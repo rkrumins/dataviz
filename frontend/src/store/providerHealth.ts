@@ -65,12 +65,12 @@ export const useProviderHealthStore = create<ProviderHealthState>((set, get) => 
 
 const POLL_INTERVAL_MS = 30_000
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+let authReady = false
 
 function startPolling() {
-  if (pollTimer) return
+  if (pollTimer || !authReady) return
   const poll = async () => {
     await useProviderHealthStore.getState().refresh()
-    // Add jitter (0-5s) to prevent thundering herd across tabs
     const jitter = Math.random() * 5_000
     pollTimer = setTimeout(poll, POLL_INTERVAL_MS + jitter)
   }
@@ -84,7 +84,14 @@ function stopPolling() {
   }
 }
 
-// Start/stop based on tab visibility
+/** Call once after auth resolves to enable polling. */
+export function enableProviderHealthPolling() {
+  authReady = true
+  if (typeof document !== 'undefined' && !document.hidden) {
+    startPolling()
+  }
+}
+
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
@@ -93,8 +100,4 @@ if (typeof document !== 'undefined') {
       startPolling()
     }
   })
-  // Initial start
-  if (!document.hidden) {
-    startPolling()
-  }
 }

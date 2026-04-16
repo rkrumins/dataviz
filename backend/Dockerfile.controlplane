@@ -1,0 +1,38 @@
+# ── Synodic Aggregation Control Plane ──────────────────────────────────
+# Standalone FastAPI process for the aggregation API surface.  Owns job
+# lifecycle, scheduling, crash recovery, drift detection.  Dispatches
+# job execution to Workers (Data Plane) via Redis Streams.
+#
+# Does NOT run any Worker logic — heavy FalkorDB MERGE operations happen
+# exclusively in the Worker containers (Dockerfile.aggregation).
+#
+# Uses SHORT FalkorDB timeouts (5s) so drift checks and readiness queries
+# never block the API.  A slow graph provider returns a degraded response
+# rather than hanging.
+# ───────────────────────────────────────────────────────────────────────
+FROM python:3.13-slim AS base
+
+WORKDIR /app
+
+# Runtime libs for pre-built wheels (no compiler needed)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libffi-dev libpq-dev curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies (same requirements.txt — no extra deps)
+COPY backend/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY backend/ /app/backend/
+
+# Non-root user
+RUN addgroup --system synodic && adduser --system --ingroup synodic synodic
+USER synodic
+
+EXPOSE 8091
+
+HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
+  CMD curl -sf http://localhost:8091/health || exit 1
+
+CMD ["python", "-m", "backend.app.services.aggregation.controlplane"]
