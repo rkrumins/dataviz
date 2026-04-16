@@ -1517,7 +1517,7 @@ class FalkorDBProvider(GraphDataProvider):
             containment_edge_types: Structural edge types (from ontology)
             lineage_edge_types: Functional edge types (from ontology)
             last_cursor: Resume point — composite key of last processed edge
-            progress_callback: async fn(processed, total, cursor) for checkpointing
+            progress_callback: async fn(processed, total, cursor, created_count) for checkpointing
         """
         await self._ensure_connected()
 
@@ -1633,7 +1633,7 @@ class FalkorDBProvider(GraphDataProvider):
             # Checkpoint via callback (for worker DB persistence)
             if progress_callback:
                 try:
-                    await progress_callback(processed, total, current_cursor)
+                    await progress_callback(processed, total, current_cursor, created_count)
                 except Exception as e:
                     logger.error(f"Progress callback failed: {e}")
 
