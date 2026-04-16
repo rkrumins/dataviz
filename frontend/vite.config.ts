@@ -4,10 +4,17 @@ import path from 'path'
 
 export default defineConfig({
   plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.ts',
+    css: false,
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
       '@docs': path.resolve(__dirname, '../docs'),
+      react: path.resolve(__dirname, './node_modules/react'),
+      'react-dom': path.resolve(__dirname, './node_modules/react-dom'),
     },
   },
   build: {
@@ -39,11 +46,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://localhost:8003',
         changeOrigin: true,
       },
     },
   },
 })
-
-

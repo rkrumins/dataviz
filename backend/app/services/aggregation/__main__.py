@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     """Standalone worker entrypoint for K8s deployment."""
-    from backend.app.db.engine import get_async_session, init_db
+    from backend.app.db.engine import get_jobs_session, init_db
     from backend.app.registry.provider_registry import ProviderRegistry
     from .worker import AggregationWorker
     from .scheduler import AggregationScheduler
@@ -36,8 +36,10 @@ async def main() -> None:
     registry = ProviderRegistry()
     await registry.bootstrap()
 
-    # Create worker
-    worker = AggregationWorker(get_async_session, registry)
+    # Create worker on the JOBS pool (plan Gap 3). Even as a standalone
+    # process the discipline stays the same — checkpoint storms never
+    # contend with any request-path pool that might be introduced later.
+    worker = AggregationWorker(get_jobs_session, registry)
 
     # In standalone mode, the worker would consume from a message queue:
     # consumer = MessageQueueConsumer(worker)
@@ -51,13 +53,13 @@ async def main() -> None:
     service = AggregationService(
         dispatcher=dispatcher,
         registry=registry,
-        session_factory=get_async_session,
+        session_factory=get_jobs_session,
     )
 
     recovered = await service.recover_interrupted_jobs()
     logger.info("Recovered %d interrupted aggregation jobs", recovered)
 
-    scheduler = AggregationScheduler(get_async_session, registry)
+    scheduler = AggregationScheduler(get_jobs_session, registry)
     logger.info("Standalone aggregation worker started")
     await scheduler.start()
 

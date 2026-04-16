@@ -3,9 +3,8 @@
  * recovers from an outage.
  *
  * Subscribes to the health store. When status transitions from
- * unreachable/degraded → recovered, it triggers:
+ * unreachable → recovered, it triggers:
  *   - Workspace list reload (populates sidebar, active workspace selection)
- *   - Connection list reload (legacy compat)
  *   - Views list reload (populates sidebar & view gallery)
  *   - Graph schema invalidation (next canvas route mount will re-fetch fresh)
  *
@@ -16,7 +15,6 @@ import { useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useHealthStore, type HealthStatus } from '@/store/health'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { useConnectionsStore } from '@/store/connections'
 import { useSchemaStore } from '@/store/schema'
 import { listViews, viewToViewConfig } from '@/services/viewApiService'
 import { GRAPH_SCHEMA_QUERY_KEY } from '@/hooks/useGraphSchema'
@@ -33,7 +31,7 @@ export function useBackendRecovery() {
       prevStatus.current = curr
 
       // Only trigger on recovery transitions
-      const wasDown = prev === 'unreachable' || prev === 'degraded'
+      const wasDown = prev === 'unreachable'
       const isBack = curr === 'recovered' || (curr === 'healthy' && wasDown)
 
       if (!isBack) return
@@ -43,9 +41,8 @@ export function useBackendRecovery() {
       // Reset all circuit breakers so providers can be probed immediately
       resetAllCircuitBreakers()
 
-      // Re-fetch workspaces + connections (drives provider rebuild)
+      // Re-fetch workspaces (drives provider rebuild)
       useWorkspacesStore.getState().loadWorkspaces()
-      useConnectionsStore.getState().loadConnections()
 
       // Re-fetch views list
       listViews()

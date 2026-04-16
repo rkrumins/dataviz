@@ -9,6 +9,7 @@ _StubProvider, which ships with deterministic in-memory data.
 import pytest
 from typing import Any, Dict, List, Optional
 from httpx import AsyncClient
+from fastapi import HTTPException
 
 from backend.common.interfaces.provider import GraphDataProvider
 from backend.common.models.graph import (
@@ -124,6 +125,20 @@ class _StubProvider(GraphDataProvider):
     async def create_node(self, node, containment_edge=None) -> bool:
         return True
 
+    async def create_edge(self, edge) -> bool:
+        return True
+
+    async def update_edge(self, edge_id, properties=None) -> Optional[GraphEdge]:
+        return None
+
+    async def delete_edge(self, edge_id) -> bool:
+        return True
+
+
+class _UnavailableProvider(_StubProvider):
+    async def search_nodes(self, query: str, limit: int = 10, **kw) -> List[GraphNode]:
+        raise OSError("connection refused")
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -145,6 +160,16 @@ async def graph_client(test_client: AsyncClient):
     yield test_client, mock_engine
     # Restore (test_client fixture will clear all overrides anyway)
     app.dependency_overrides.pop(get_context_engine, None)
+
+
+async def test_get_context_engine_requires_explicit_scope():
+    from backend.app.api.v1.endpoints.graph import get_context_engine
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_context_engine(ws_id=None, connectionId=None, session=object())  # type: ignore[arg-type]
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "scope_required: workspace_id or connection_id is required"
 
 
 def _get_sample_urn(engine: ContextEngine) -> str:
@@ -252,11 +277,45 @@ async def test_search_empty_query(graph_client):
     assert isinstance(resp.json(), list)
 
 
+async def test_search_provider_unavailable_returns_structured_503(test_client: AsyncClient):
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints.graph import get_context_engine
+
+    async def _override():
+        return ContextEngine(provider=_UnavailableProvider())
+
+    app.dependency_overrides[get_context_engine] = _override
+    try:
+        resp = await test_client.post(
+            "/api/v1/test-ws/graph/search",
+            json={"query": "demo", "limit": 5},
+        )
+    finally:
+        app.dependency_overrides.pop(get_context_engine, None)
+
+    assert resp.status_code == 503
+    assert resp.json() == {
+        "detail": {
+            "code": "PROVIDER_UNAVAILABLE",
+            "providerId": None,
+            "reason": "connection refused",
+        }
+    }
+
+
 # ── GET /introspection ────────────────────────────────────────────────
 
-async def test_introspection_returns_schema_stats(graph_client):
+async def test_introspection_returns_schema_stats(graph_client, monkeypatch):
     """GET /introspection returns GraphSchemaStats-shaped response."""
     client, _ = graph_client
+
+    async def _provider_for_workspace(_workspace_id, _session, _data_source_id=None):
+        return _StubProvider()
+
+    monkeypatch.setattr(
+        "backend.app.api.v1.endpoints.graph.provider_registry.get_provider_for_workspace",
+        _provider_for_workspace,
+    )
 
     resp = await client.get("/api/v1/test-ws/graph/introspection")
     assert resp.status_code == 200

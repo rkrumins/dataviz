@@ -5,15 +5,14 @@
  * a new RemoteGraphProvider is created with that workspaceId so all API calls
  * are routed through /v1/{ws_id}/graph/.
  *
- * Falls back to connection-aware mode during migration, and to the primary
- * connection when neither workspace nor connection is configured.
+ * When no workspace is configured, the context enters an explicit "no-scope"
+ * state instead of silently targeting a server default.
  */
 
 import { createContext, useContext, useState, useEffect, useRef, type ReactNode } from 'react'
 import type { GraphDataProvider, GraphProviderContextValue } from './GraphDataProvider'
 import { RemoteGraphProvider } from './RemoteGraphProvider'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { useConnectionsStore } from '@/store/connections'
 import { useCanvasStore } from '@/store/canvas'
 import { useHealthStore } from '@/store/health'
 
@@ -22,6 +21,7 @@ import { useHealthStore } from '@/store/health'
 // ============================================
 
 export interface GraphProviderContextValueExtended extends GraphProviderContextValue {
+    scopeKind: 'ready' | 'no-scope'
     workspaceId: string | null
     setWorkspaceId: (id: string | null) => void
     dataSourceId: string | null
@@ -54,11 +54,6 @@ export function GraphProvider({ children }: GraphProviderProps) {
     const setActiveWorkspace = useWorkspacesStore((s) => s.setActiveWorkspace)
     const setActiveDataSource = useWorkspacesStore((s) => s.setActiveDataSource)
 
-    // Connection-based (legacy fallback)
-    const activeConnectionId = useConnectionsStore((s) => s.activeConnectionId)
-    const loadConnections = useConnectionsStore((s) => s.loadConnections)
-    const setActiveConnection = useConnectionsStore((s) => s.setActiveConnection)
-
     const [isLoading, setIsLoading] = useState(true)
     const [error, setError] = useState<Error | null>(null)
     const [currentProvider, setCurrentProvider] = useState<GraphDataProvider | null>(null)
@@ -76,28 +71,23 @@ export function GraphProvider({ children }: GraphProviderProps) {
     // Track previous IDs so we only rebuild the provider when it changes
     const prevWorkspaceId = useRef<string | null | undefined>(undefined)
     const prevDataSourceId = useRef<string | null | undefined>(undefined)
-    const prevConnectionId = useRef<string | null | undefined>(undefined)
-
-    // Load both workspace and connection lists on mount
+    // Load workspace list on mount
     useEffect(() => {
         loadWorkspaces()
-        loadConnections()
-    }, [loadWorkspaces, loadConnections])
+    }, [loadWorkspaces])
 
-    // Rebuild provider when workspace, data source, or connection changes
+    // Rebuild provider when workspace or data source changes
     useEffect(() => {
         if (
             prevWorkspaceId.current === activeWorkspaceId &&
-            prevDataSourceId.current === activeDataSourceId &&
-            prevConnectionId.current === activeConnectionId
+            prevDataSourceId.current === activeDataSourceId
         ) return
         prevWorkspaceId.current = activeWorkspaceId
         prevDataSourceId.current = activeDataSourceId
-        prevConnectionId.current = activeConnectionId
 
         let cancelled = false
 
-        // Clear canvas immediately on workspace/connection change so stale nodes
+        // Clear canvas immediately on workspace change so stale nodes
         // from the previous workspace don't linger while the new data loads.
         const { setGraph } = useCanvasStore.getState()
         setGraph([], [])
@@ -105,20 +95,22 @@ export function GraphProvider({ children }: GraphProviderProps) {
         const initProvider = async () => {
             setError(null)
 
-            let p: RemoteGraphProvider
-            if (activeWorkspaceId) {
-                // Workspace-scoped: /v1/{ws_id}/graph/... with optional dataSourceId
-                p = new RemoteGraphProvider({
-                    workspaceId: activeWorkspaceId,
-                    dataSourceId: activeDataSourceId ?? undefined,
-                })
-            } else if (activeConnectionId) {
-                // Legacy connection-scoped: ?connectionId=xxx
-                p = new RemoteGraphProvider({ connectionId: activeConnectionId })
-            } else {
-                // No workspace or connection → server uses primary/default
-                p = new RemoteGraphProvider()
+            if (!activeWorkspaceId) {
+                if (!cancelled) {
+                    setCurrentProvider(null)
+                    setProviderWorkspaceId(null)
+                    setProviderDataSourceId(null)
+                    setProviderReady(true)
+                    setIsLoading(false)
+                }
+                return
             }
+
+            // Workspace-scoped: /v1/{ws_id}/graph/... with optional dataSourceId
+            const p = new RemoteGraphProvider({
+                workspaceId: activeWorkspaceId,
+                dataSourceId: activeDataSourceId ?? undefined,
+            })
 
             // Set the provider IMMEDIATELY — don't block on getStats().
             // This ensures navigation works instantly when switching workspaces.
@@ -154,14 +146,14 @@ export function GraphProvider({ children }: GraphProviderProps) {
         initProvider()
 
         return () => { cancelled = true }
-    }, [activeWorkspaceId, activeDataSourceId, activeConnectionId])
+    }, [activeWorkspaceId, activeDataSourceId])
 
     // Re-validate provider connectivity when backend recovers from an outage.
     // The main provider effect only re-runs when IDs change — this handles the
     // case where the same workspace stays active through a backend restart.
     useEffect(() => {
         const unsubscribe = useHealthStore.subscribe((state, prev) => {
-            const wasDown = prev.status === 'unreachable' || prev.status === 'degraded'
+            const wasDown = prev.status === 'unreachable'
             const isBack = state.status === 'recovered'
             if (!wasDown || !isBack || !currentProvider) return
 
@@ -183,10 +175,10 @@ export function GraphProvider({ children }: GraphProviderProps) {
     }, [currentProvider])
 
     const value: GraphProviderContextValueExtended = {
-        // currentProvider is guaranteed non-null here: the early-return above handles the null+loading case.
-        provider: currentProvider!,
+        provider: currentProvider,
         isLoading,
         error,
+        scopeKind: currentProvider ? 'ready' : 'no-scope',
         // Use provider-tracked IDs (not Zustand's activeWorkspaceId) so
         // consumers never see a mismatch between workspace IDs and the provider.
         // Zustand may update ahead of the provider rebuild; these stay in sync.
@@ -196,8 +188,8 @@ export function GraphProvider({ children }: GraphProviderProps) {
         setDataSourceId: setActiveDataSource,
         providerReady,
         providerVersion,
-        connectionId: activeConnectionId,
-        setConnectionId: setActiveConnection,
+        connectionId: null,
+        setConnectionId: () => undefined,
     }
 
     return (
@@ -243,6 +235,13 @@ export function useGraphProvider(): GraphDataProvider {
     const context = useContext(GraphProviderContext)
     if (!context) {
         throw new Error('useGraphProvider must be used within a <GraphProvider>')
+    }
+    if (!context.provider) {
+        throw new Error(
+            context.scopeKind === 'no-scope'
+                ? 'No graph scope selected. Choose a workspace or connection first.'
+                : 'Graph provider is unavailable.',
+        )
     }
     return context.provider
 }

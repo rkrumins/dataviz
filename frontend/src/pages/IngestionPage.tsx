@@ -8,7 +8,6 @@ import { workspaceService } from '@/services/workspaceService'
 import { RegistryConnections } from '@/components/admin/RegistryConnections'
 import { RegistryAssets } from '@/components/admin/RegistryAssets'
 import { RegistryJobHistory } from '@/components/admin/RegistryJobHistory'
-import { FirstRunHero } from '@/components/admin/FirstRunHero'
 import { OnboardingProgress } from '@/components/admin/OnboardingProgress'
 
 type IngestionTab = 'providers' | 'assets' | 'jobs'
@@ -26,6 +25,7 @@ export function IngestionPage() {
     const activeTab: IngestionTab = TABS.some(t => t.id === rawTab) ? (rawTab as IngestionTab) : 'providers'
 
     const [counts, setCounts] = useState({ providers: -1, catalogs: 0, workspaces: 0, hasOntology: false })
+    const [loadError, setLoadError] = useState<string | null>(null)
 
     useEffect(() => {
         document.title = 'Ingestion · Synodic'
@@ -33,23 +33,41 @@ export function IngestionPage() {
 
     useEffect(() => {
         let cancelled = false
-        Promise.all([
+        setLoadError(null)
+        Promise.allSettled([
             providerService.list(),
             catalogService.list(),
             workspaceService.list(),
-        ]).then(([providers, catalogs, workspaces]) => {
+        ]).then(([providersResult, catalogsResult, workspacesResult]) => {
             if (cancelled) return
+            const providers = providersResult.status === 'fulfilled' ? providersResult.value : null
+            const catalogs = catalogsResult.status === 'fulfilled' ? catalogsResult.value : []
+            const workspaces = workspacesResult.status === 'fulfilled' ? workspacesResult.value : []
+
+            const errors: string[] = []
+            if (providersResult.status === 'rejected') errors.push('providers')
+            if (catalogsResult.status === 'rejected') errors.push('catalog items')
+            if (workspacesResult.status === 'rejected') errors.push('workspaces')
+
             const hasOntology = workspaces.some(ws =>
                 ws.dataSources?.some(ds => !!ds.ontologyId)
             )
             setCounts({
-                providers: providers.length,
+                // Treat a failed providers load as "zero known providers" so
+                // the page still renders with the amber banner + tabs; the
+                // previous ``providers: -1`` sentinel kept counts.providers
+                // at -1 on error, which the gate below turned into an
+                // indefinite blank screen.
+                providers: providers ? providers.length : 0,
                 catalogs: catalogs.length,
                 workspaces: workspaces.length,
                 hasOntology,
             })
-        }).catch(() => {
-            if (!cancelled) setCounts(prev => ({ ...prev, providers: 0 }))
+            setLoadError(
+                errors.length > 0
+                    ? `Could not load ${errors.join(', ')}. Showing partial data.`
+                    : null,
+            )
         })
         return () => { cancelled = true }
     }, [activeTab])
@@ -64,15 +82,11 @@ export function IngestionPage() {
         }
     }
 
-    if (counts.providers === 0) {
-        return (
-            <FirstRunHero
-                onGetStarted={() => setSearchParams({ tab: 'providers' })}
-            />
-        )
-    }
-
-    if (counts.providers === -1) return null
+    // Initial-load gate: render nothing only while the first load is in
+    // flight AND hasn't produced any result (neither data nor error). Once
+    // any of those three things is set, render the page so partial data
+    // and the error banner become visible.
+    if (counts.providers === -1 && !loadError) return null
 
     const setTab = (id: IngestionTab) => setSearchParams({ tab: id })
 
@@ -86,9 +100,15 @@ export function IngestionPage() {
                 </p>
             </div>
 
+            {loadError && (
+                <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100">
+                    {loadError}
+                </div>
+            )}
+
             {/* Onboarding Progress */}
             <OnboardingProgress
-                providerCount={counts.providers}
+                providerCount={Math.max(counts.providers, 0)}
                 catalogItemCount={counts.catalogs}
                 workspaceCount={counts.workspaces}
                 hasOntology={counts.hasOntology}

@@ -1,4 +1,5 @@
 import { getCircuitBreaker, type CircuitBreaker } from '@/services/circuitBreaker'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 
 import type {
     GraphDataProvider,
@@ -119,12 +120,10 @@ export class RemoteGraphProvider implements GraphDataProvider {
             throw new Error('Provider unavailable (circuit open)')
         }
 
-        const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), 12_000)
         try {
-            const response = await fetch(url, {
+            const response = await fetchWithTimeout(url, {
                 ...fetchOptions,
-                signal: controller.signal,
+                timeoutMs: 12_000,
                 headers: {
                     'Content-Type': 'application/json',
                     ...fetchOptions?.headers,
@@ -151,17 +150,14 @@ export class RemoteGraphProvider implements GraphDataProvider {
             this.circuitBreaker.recordSuccess()
             return data
         } catch (err) {
-            if (err instanceof DOMException && err.name === 'AbortError') {
-                this.circuitBreaker.recordFailure()
-                throw new Error(`Request timed out: ${method} ${url}`)
-            }
-            // Network errors (fetch itself failed) — feed circuit breaker
             if (err instanceof TypeError) {
                 this.circuitBreaker.recordFailure()
+                if (err.message.includes('timed out')) {
+                    throw new Error(`Request timed out: ${method} ${url}`)
+                }
             }
             throw err
         } finally {
-            clearTimeout(timer)
             this._inflight.delete(cacheKey)
         }
     }

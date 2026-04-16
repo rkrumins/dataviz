@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .dispatcher import AggregationDispatcher
 from .models import AggregationJobORM
+from .reservation import claim_exclusive
 from .schemas import (
     AggregationJobResponse,
     AggregationSkipRequest,
@@ -85,19 +86,57 @@ class AggregationService:
         """
         from backend.app.db.models import WorkspaceDataSourceORM
 
-        # ── Atomic check-and-create (CRIT-1, Phase 0) ──────────────
-        # Wrap the existence check + job insert in a single explicit
-        # transaction so the whole sequence commits or rolls back as
-        # one unit. Phase 2 upgrades this to a dialect-aware claim
-        # (SELECT ... FOR UPDATE on Postgres, BEGIN IMMEDIATE + per-DS
-        # asyncio mutex on SQLite) to close the multi-worker race.
+        # ── Phase 2.2 — idempotency early-return (read-only fast path) ──
+        # Two POSTs sharing a key for the same data source within 60 min
+        # collapse to the original job (200 with the existing job ID).
+        # Done outside the transaction so non-key-bearing callers don't
+        # pay a lookup cost.
+        idem_key = request.idempotency_key
+        cutoff_iso = (
+            datetime.now(timezone.utc) - timedelta(minutes=60)
+        ).isoformat()
+        if idem_key:
+            existing_idem = (
+                await session.execute(
+                    select(AggregationJobORM)
+                    .where(AggregationJobORM.data_source_id == ds_id)
+                    .where(AggregationJobORM.idempotency_key == idem_key)
+                    .where(AggregationJobORM.created_at >= cutoff_iso)
+                    .order_by(AggregationJobORM.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if existing_idem is not None:
+                logger.info(
+                    "Idempotent replay for data source %s — returning job %s "
+                    "(idempotency_key=%s)",
+                    ds_id, existing_idem.id, idem_key,
+                )
+                return self._to_response(existing_idem)
+
+        # ── Atomic claim (Phase 2 §2.1) ────────────────────────────
+        # `claim_exclusive` combines a pg_try_advisory_xact_lock with
+        # SELECT ... FOR UPDATE SKIP LOCKED so concurrent triggers across
+        # uvicorn workers / replicas serialize cleanly: at most one caller
+        # ever observes "no active job" for a given data_source_id.
         async with session.begin():
-            existing = await session.execute(
-                select(AggregationJobORM)
-                .where(AggregationJobORM.data_source_id == ds_id)
-                .where(AggregationJobORM.status.in_(["pending", "running"]))
-            )
-            if existing.scalar_one_or_none():
+            if not await claim_exclusive(session, ds_id):
+                # Race window: another caller with the same idempotency_key
+                # may have just inserted between our early-return check and
+                # the lock attempt. Re-check before raising 409.
+                if idem_key:
+                    replay = (
+                        await session.execute(
+                            select(AggregationJobORM)
+                            .where(AggregationJobORM.data_source_id == ds_id)
+                            .where(AggregationJobORM.idempotency_key == idem_key)
+                            .where(AggregationJobORM.created_at >= cutoff_iso)
+                            .order_by(AggregationJobORM.created_at.desc())
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    if replay is not None:
+                        return self._to_response(replay)
                 raise ConflictError(
                     "An aggregation job is already active for this data source"
                 )
@@ -124,6 +163,7 @@ class AggregationService:
                 status="pending",
                 trigger_source=trigger_source,
                 batch_size=request.batch_size,
+                idempotency_key=idem_key,
                 created_at=_now(),
             )
             session.add(job)
@@ -207,7 +247,9 @@ class AggregationService:
         drift = False
         if is_ready and ds.graph_fingerprint:
             try:
-                provider = await self._registry.get_provider_for_data_source(ds_id)
+                provider = await self._registry.get_provider_for_workspace(
+                    ds.workspace_id, session, data_source_id=ds_id,
+                )
                 current_fp = await compute_graph_fingerprint(provider)
                 drift = not fingerprints_match(ds.graph_fingerprint, current_fp)
             except Exception:
@@ -560,7 +602,9 @@ class AggregationService:
                 f"Cannot purge while aggregation job {active.id} is active"
             )
 
-        provider = await self._registry.get_provider_for_data_source(ds_id)
+        provider = await self._registry.get_provider_for_workspace(
+            ds.workspace_id, session, data_source_id=ds_id,
+        )
         deleted = await provider.purge_aggregated_edges()
 
         # Reset data source aggregation state
@@ -603,7 +647,9 @@ class AggregationService:
             raise NotFoundError(f"Data source {ds_id} not found")
 
         try:
-            provider = await self._registry.get_provider_for_data_source(ds_id)
+            provider = await self._registry.get_provider_for_workspace(
+                ds.workspace_id, session, data_source_id=ds_id,
+            )
             current_fp = await compute_graph_fingerprint(provider)
         except Exception as e:
             logger.warning("Failed to compute fingerprint for drift check: %s", e)
@@ -687,7 +733,7 @@ class AggregationService:
         # Use the ontology service if available (monolith direct call)
         if self._ontology_service:
             try:
-                ontology = await self._ontology_service.resolve_for_data_source(
+                ontology = await self._ontology_service.resolve(
                     workspace_id=ds.workspace_id,
                     data_source_id=ds_id,
                 )
