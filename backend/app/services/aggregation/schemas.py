@@ -43,6 +43,30 @@ class AggregationScheduleRequest(BaseModel):
         populate_by_name = True
 
 
+class InternalTriggerRequest(BaseModel):
+    """Used by the viz-service proxy to send pre-resolved trigger data
+    to the Control Plane.
+
+    Ontology resolution happens in the viz-service (which has OntologyORM
+    access) so the Control Plane never needs to import OntologyORM.
+    All fields are frozen into the job record at trigger time.
+    """
+    data_source_id: str = Field(alias="dataSourceId")
+    workspace_id: str = Field(alias="workspaceId")
+    ontology_id: str = Field(alias="ontologyId")
+    containment_edge_types: List[str] = Field(alias="containmentEdgeTypes")
+    lineage_edge_types: List[str] = Field(alias="lineageEdgeTypes")
+    provider_id: str = Field(alias="providerId")
+    graph_name: str = Field(alias="graphName")
+    projection_mode: str = Field("in_source", alias="projectionMode")
+    batch_size: int = Field(5000, alias="batchSize", ge=100, le=50000)
+    trigger_source: str = Field("manual", alias="triggerSource")
+    idempotency_key: Optional[str] = Field(None, alias="idempotencyKey", max_length=255)
+
+    class Config:
+        populate_by_name = True
+
+
 # ── Responses ────────────────────────────────────────────────────────
 
 

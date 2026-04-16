@@ -452,6 +452,20 @@ async def init_db() -> None:
     from datetime import datetime as _dt, timezone as _tz
     sa_text = __import__("sqlalchemy").text
 
+    # ── Ensure the aggregation schema exists BEFORE Alembic runs ───
+    # The aggregation service owns its own Postgres schema. Tables in
+    # this schema are created by Alembic/create_all, but the schema
+    # itself must exist first. This is idempotent and safe from any
+    # process (viz-service, control plane, worker).
+    try:
+        sa_text_mod = __import__("sqlalchemy").text
+        engine = get_engine(PoolRole.ADMIN)
+        async with engine.begin() as conn:
+            await conn.execute(sa_text_mod("CREATE SCHEMA IF NOT EXISTS aggregation"))
+        logger.info("Aggregation schema ready")
+    except Exception as exc:
+        logger.warning("Aggregation schema creation warning: %s", exc)
+
     # ── Alembic upgrade with bounded retry ──────────────────────────
     budget = float(os.getenv("DB_STARTUP_RETRY_TIMEOUT_SECS", "60"))
     deadline = _time.monotonic() + budget

@@ -1,13 +1,18 @@
 """
-AggregationJobORM — package-local ORM table for aggregation job tracking.
+Aggregation-owned ORM tables.
 
-This table stores all state needed for crash-recoverable, resumable
-batch materialization. The worker reads everything from this record.
+These tables live in the ``aggregation`` Postgres schema, fully decoupled
+from the viz-service's ``public`` schema.  No foreign keys cross the
+schema boundary — data_source_id is a logical reference, not a FK.
+
+Tables:
+    aggregation.aggregation_jobs       Job state for crash-recoverable batch materialization.
+    aggregation.data_source_state      Per-data-source aggregation status (lightweight).
 """
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, Column, ForeignKey, Index, Integer, Text, text
+from sqlalchemy import CheckConstraint, Column, Index, Integer, Text, text
 from backend.app.db.engine import Base
 
 
@@ -16,18 +21,31 @@ def _now() -> str:
 
 
 class AggregationJobORM(Base):
+    """Job tracking table — the worker reads everything from this record.
+
+    All context needed for execution (provider_id, graph_name, edge types)
+    is denormalized and frozen at trigger time so the worker is fully
+    self-sufficient without querying the public schema.
+    """
     __tablename__ = "aggregation_jobs"
 
     id = Column(Text, primary_key=True, default=lambda: f"agg_{uuid.uuid4().hex[:12]}")
-    data_source_id = Column(
-        Text,
-        ForeignKey("workspace_data_sources.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+
+    # ── Logical reference (NOT a FK) — decoupled from public schema ──
+    data_source_id = Column(Text, nullable=False, index=True)
+
+    # ── Denormalized context (frozen at trigger time) ────────────────
+    # These fields are copied from the viz-service's data at trigger
+    # time so the worker and Control Plane never need to JOIN to public.
+    workspace_id = Column(Text, nullable=True)
+    provider_id = Column(Text, nullable=True)
+    graph_name = Column(Text, nullable=True)
+    data_source_label = Column(Text, nullable=True)
+
     ontology_id = Column(Text, nullable=True)  # audit trail — which ontology was used
-    projection_mode = Column(Text, nullable=False, default="in_source")  # "in_source" | "dedicated"
-    status = Column(Text, nullable=False, default="pending")  # pending|running|completed|failed|cancelled
-    trigger_source = Column(Text, nullable=False, default="manual")  # onboarding|manual|schedule|drift
+    projection_mode = Column(Text, nullable=False, default="in_source")
+    status = Column(Text, nullable=False, default="pending")
+    trigger_source = Column(Text, nullable=False, default="manual")
 
     # ── Resolved ontology edge types (frozen at trigger time) ────────
     containment_edge_types = Column(Text, nullable=True)  # JSON: ["CONTAINS", "HAS_SCHEMA"]
@@ -35,39 +53,38 @@ class AggregationJobORM(Base):
 
     # ── Progress tracking (cursor-based checkpoint) ──────────────────
     progress = Column(Integer, nullable=False, default=0)  # 0-100
-    total_edges = Column(Integer, nullable=False, default=0)  # total lineage edges to process
-    processed_edges = Column(Integer, nullable=False, default=0)  # edges processed so far
+    total_edges = Column(Integer, nullable=False, default=0)
+    processed_edges = Column(Integer, nullable=False, default=0)
     created_edges = Column(Integer, nullable=False, default=0)  # AGGREGATED edges created
     last_cursor = Column(Text, nullable=True)  # cursor-based resume point (NOT offset)
     batch_size = Column(Integer, nullable=False, default=1000)
-    last_checkpoint_at = Column(Text, nullable=True)  # ISO timestamp of last batch commit
+    last_checkpoint_at = Column(Text, nullable=True)
 
     # ── Error handling ───────────────────────────────────────────────
     error_message = Column(Text, nullable=True)
-    retry_count = Column(Integer, nullable=False, default=0)  # how many times retried
+    retry_count = Column(Integer, nullable=False, default=0)
     max_retries = Column(Integer, nullable=False, default=3)
+
+    # ── Dynamic timeout (estimated from graph size at trigger time) ──
+    timeout_secs = Column(Integer, nullable=True)  # None = use global default
 
     # ── Fingerprinting (change detection) ────────────────────────────
     graph_fingerprint_before = Column(Text, nullable=True)
     graph_fingerprint_after = Column(Text, nullable=True)
 
-    # ── Idempotency (Phase 2 §2.2) ───────────────────────────────────
-    # Optional caller-supplied key. Two triggers within 60 min sharing a key
-    # for the same data_source_id collapse to the original job (returns 200,
-    # not 409). Partial unique index lets the column be null for the vast
-    # majority of jobs without enforcing uniqueness on NULL.
+    # ── Idempotency ─────────────────────────────────────────────────
     idempotency_key = Column(Text, nullable=True)
 
     # ── Timestamps ───────────────────────────────────────────────────
     started_at = Column(Text, nullable=True)
     completed_at = Column(Text, nullable=True)
-    updated_at = Column(Text, nullable=True)  # heartbeat — updated every checkpoint
+    updated_at = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
 
-    # ── Index for concurrent job guard + status polling ───────────────
     __table_args__ = (
         Index("ix_agg_jobs_ds_status", "data_source_id", "status"),
         Index("ix_agg_jobs_created_at", "created_at"),
+        Index("ix_agg_jobs_workspace", "workspace_id"),
         Index(
             "ix_agg_jobs_idem_active",
             "data_source_id",
@@ -87,4 +104,25 @@ class AggregationJobORM(Base):
             "projection_mode IN ('in_source', 'dedicated')",
             name="ck_agg_jobs_projection_mode",
         ),
+        {"schema": "aggregation"},
     )
+
+
+class AggregationDataSourceStateORM(Base):
+    """Lightweight per-data-source aggregation state.
+
+    Replaces the aggregation-specific columns that were previously
+    stored on ``public.workspace_data_sources``.  The Control Plane
+    reads/writes this table.  The viz-service syncs its own copy
+    via Redis events.
+    """
+    __tablename__ = "data_source_state"
+    __table_args__ = ({"schema": "aggregation"},)
+
+    data_source_id = Column(Text, primary_key=True)
+    workspace_id = Column(Text, nullable=False, index=True)
+    aggregation_status = Column(Text, nullable=False, default="none")
+    last_aggregated_at = Column(Text, nullable=True)
+    aggregation_edge_count = Column(Integer, nullable=False, default=0)
+    graph_fingerprint = Column(Text, nullable=True)
+    aggregation_schedule = Column(Text, nullable=True)  # cron expression
