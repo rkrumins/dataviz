@@ -12,6 +12,7 @@ from ..models.graph import (
 )
 
 from ..providers.base import GraphDataProvider
+from backend.common.adapters import ProviderUnavailable
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -79,9 +80,19 @@ class ContextEngine:
         from ..ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
         from ..ontology.service import LocalOntologyService
 
-        provider = await registry.get_provider_for_workspace(
-            workspace_id, session, data_source_id
-        )
+        try:
+            provider = await registry.get_provider_for_workspace(
+                workspace_id, session, data_source_id
+            )
+        except ProviderUnavailable:
+            raise
+        except KeyError:
+            raise
+        except (ConnectionError, OSError, asyncio.TimeoutError) as exc:
+            raise ProviderUnavailable(
+                provider_name=f"ws:{workspace_id}",
+                reason=f"Provider instantiation failed: {exc}",
+            ) from exc
         repo = SQLAlchemyOntologyRepository(session)
         ontology_service = LocalOntologyService(repo)
         engine = cls(provider=provider, ontology_service=ontology_service)
@@ -124,7 +135,17 @@ class ContextEngine:
         """
         if connection_id is None:
             raise ValueError("connection_id is required")
-        provider = await registry.get_provider(connection_id, session)
+        try:
+            provider = await registry.get_provider(connection_id, session)
+        except ProviderUnavailable:
+            raise
+        except KeyError:
+            raise
+        except (ConnectionError, OSError, asyncio.TimeoutError) as exc:
+            raise ProviderUnavailable(
+                provider_name=f"conn:{connection_id}",
+                reason=f"Provider instantiation failed: {exc}",
+            ) from exc
         engine = cls(provider=provider)
         engine._connection_id = connection_id
         engine._db_session = session
@@ -370,6 +391,47 @@ class ContextEngine:
     async def get_edges(self, query: EdgeQuery = None) -> List[GraphEdge]:
         if query is None: query = EdgeQuery()
         return await self.provider.get_edges(query)
+
+    async def get_parent(self, child_urn: str) -> Optional[GraphNode]:
+        """Get the parent node in the containment hierarchy."""
+        return await self.provider.get_parent(child_urn)
+
+    async def get_nodes_query(self, query: NodeQuery) -> List[GraphNode]:
+        """Execute an advanced node query."""
+        return await self.provider.get_nodes(query)
+
+    async def get_distinct_values(self, property_name: str) -> List[Any]:
+        """Get distinct values for a node property."""
+        return await self.provider.get_distinct_values(property_name)
+
+    async def save_custom_graph(
+        self, nodes: List[GraphNode], edges: List[GraphEdge],
+    ) -> bool:
+        """Persist a custom graph (nodes + edges)."""
+        return await self.provider.save_custom_graph(nodes, edges)
+
+    async def materialize_aggregated_edges(
+        self,
+        batch_size: int = 1000,
+        containment_edge_types: Optional[List[str]] = None,
+        lineage_edge_types: Optional[List[str]] = None,
+        last_cursor: Optional[str] = None,
+        on_progress: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Trigger batch materialization of AGGREGATED edges.
+
+        Returns stats dict. Only supported on FalkorDB providers; raises
+        ValueError for other provider types.
+        """
+        if not hasattr(self.provider, "materialize_aggregated_edges_batch"):
+            raise ValueError("Materialization only supported for FalkorDB provider")
+        return await self.provider.materialize_aggregated_edges_batch(
+            batch_size=batch_size,
+            containment_edge_types=containment_edge_types,
+            lineage_edge_types=lineage_edge_types,
+            last_cursor=last_cursor,
+            on_progress=on_progress,
+        )
 
     async def get_neighborhood(self, urn: str) -> Optional[Dict[str, Any]]:
         """Get the node and its immediate edges (incoming/outgoing)."""

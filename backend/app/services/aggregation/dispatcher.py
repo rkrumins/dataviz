@@ -1,15 +1,19 @@
 """
-Dispatcher protocol + InProcessDispatcher for aggregation jobs.
+Dispatcher protocol + concrete implementations for aggregation jobs.
 
 The Dispatcher is the ONLY seam that changes when migrating from
-in-process (asyncio) to message-queue-based (K8s) deployment.
+in-process (asyncio) to standalone-process (Postgres NOTIFY) to
+message-queue-based (Redis Streams) deployment.
 
-Current:  AggregationService → InProcessDispatcher → asyncio.create_task()
-Future:   AggregationService → MessageQueueDispatcher → broker.publish()
+    dev / single-process:  InProcessDispatcher  → asyncio.create_task()
+    standalone worker:     PostgresDispatcher    → NOTIFY aggregation_jobs
+    future (K8s scale):    RedisStreamDispatcher → XADD aggregation.jobs
 """
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+from sqlalchemy import text
 
 if TYPE_CHECKING:
     from .worker import AggregationWorker
@@ -63,10 +67,36 @@ class InProcessDispatcher:
             )
 
 
-# Future (K8s):
-# class MessageQueueDispatcher:
-#     """Publishes job_id to a message broker — consumed by standalone worker pod."""
-#     def __init__(self, broker):
-#         self._broker = broker
+class PostgresDispatcher:
+    """Dispatches jobs to a standalone worker via Postgres NOTIFY.
+
+    The job row in ``aggregation_jobs`` IS the message — persistent by
+    definition.  NOTIFY provides instant wake-up; the worker's polling
+    loop (5s fallback) catches any missed notifications (e.g. if the
+    worker was restarting when NOTIFY fired).
+
+    Used when ``AGGREGATION_DISPATCH_MODE=postgres``.  The viz-service
+    (web tier) uses this dispatcher; the standalone aggregation-worker
+    process consumes the notifications.
+    """
+
+    def __init__(self, session_factory: Any) -> None:
+        self._session_factory = session_factory
+
+    async def dispatch(self, job_id: str) -> None:
+        async with self._session_factory() as session:
+            await session.execute(
+                text("SELECT pg_notify('aggregation_jobs', :job_id)"),
+                {"job_id": job_id},
+            )
+            await session.commit()
+        logger.info("PostgresDispatcher: notified channel 'aggregation_jobs' for job %s", job_id)
+
+
+# Future (K8s scale):
+# class RedisStreamDispatcher:
+#     """Publishes job_id to a Redis Stream — consumed by worker pods."""
+#     def __init__(self, redis_client):
+#         self._redis = redis_client
 #     async def dispatch(self, job_id: str) -> None:
-#         await self._broker.publish("aggregation.jobs", {"jobId": job_id})
+#         await self._redis.xadd("aggregation.jobs", {"job_id": job_id}, maxlen=10000)

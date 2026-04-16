@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 class AggregationTriggerRequest(BaseModel):
     ontology_id: Optional[str] = Field(None, alias="ontologyId")
     projection_mode: str = Field("in_source", alias="projectionMode")
-    batch_size: int = Field(1000, alias="batchSize", ge=100, le=50000)
+    batch_size: int = Field(5000, alias="batchSize", ge=100, le=50000)
     # Phase 2 §2.2 — caller-supplied idempotency token. Two POSTs sharing
     # this key for the same data source within the past 60 minutes
     # collapse to the original job (200 OK with the existing job ID).

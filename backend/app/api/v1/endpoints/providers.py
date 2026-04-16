@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.engine import get_db_session, get_readonly_db_session, with_short_session
 from backend.app.db.repositories import provider_repo
-from backend.app.registry.provider_registry import provider_registry
+from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.common.models.management import (
     ProviderCreateRequest,
     ProviderUpdateRequest,
