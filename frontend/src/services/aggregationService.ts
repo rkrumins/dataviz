@@ -147,8 +147,8 @@ class AggregationService {
     );
   }
 
-  async purgeAggregation(dataSourceId: string): Promise<{ deletedEdges: number; dataSourceId: string }> {
-    return authFetch<{ deletedEdges: number; dataSourceId: string }>(
+  async purgeAggregation(dataSourceId: string): Promise<{ deletedEdges: number; dataSourceId: string; jobId: string }> {
+    return authFetch<{ deletedEdges: number; dataSourceId: string; jobId: string }>(
       `/api/v1/admin/data-sources/${dataSourceId}/purge-aggregation`,
       { method: 'POST' }
     );

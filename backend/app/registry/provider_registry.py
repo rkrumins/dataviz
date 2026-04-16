@@ -317,4 +317,9 @@ class ProviderRegistry:
         raise ValueError(f"Unknown provider_type: {ptype!r}")
 
 # Module-level singleton — used by FastAPI dependency and ContextEngine.
+# DEPRECATED: Use provider_manager from backend.app.providers.manager instead.
+# This instance is kept for backward compatibility during migration.
 provider_registry = ProviderRegistry()
+
+# Re-export the new ProviderManager singleton so code can migrate incrementally.
+from backend.app.providers.manager import provider_manager  # noqa: E402, F401

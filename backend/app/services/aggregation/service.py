@@ -7,6 +7,7 @@ Does NOT own: batch materialization (that's the Worker).
 
 This class has NO FastAPI imports. No HTTP concepts. Pure domain logic.
 """
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -612,10 +613,32 @@ class AggregationService:
         ds.last_aggregated_at = None
         ds.aggregation_edge_count = 0
         ds.graph_fingerprint = None
+
+        # Create audit trail record so purge appears in job history
+        now = _now()
+        purge_job = AggregationJobORM(
+            id=_generate_id(),
+            data_source_id=ds_id,
+            status="completed",
+            trigger_source="purge",
+            projection_mode=ds.projection_mode or "in_source",
+            progress=100,
+            total_edges=deleted,
+            processed_edges=deleted,
+            created_edges=0,
+            batch_size=0,
+            retry_count=0,
+            max_retries=0,
+            started_at=now,
+            completed_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(purge_job)
         await session.commit()
 
-        logger.info("Purged %d aggregated edges from data source %s", deleted, ds_id)
-        return {"deletedEdges": deleted, "dataSourceId": ds_id}
+        logger.info("Purged %d aggregated edges from data source %s (job %s)", deleted, ds_id, purge_job.id)
+        return {"deletedEdges": deleted, "dataSourceId": ds_id, "jobId": purge_job.id}
 
     # ── Schedule ──────────────────────────────────────────────────────
 
@@ -677,6 +700,13 @@ class AggregationService:
         Scans for jobs stuck in 'pending' or 'running' (interrupted by crash).
         Re-dispatches via the configured dispatcher.
         The worker resumes from the stored last_cursor checkpoint.
+
+        Recovery distinguishes two cases:
+        - A *running* job with a checkpoint (last_cursor) was actively making
+          progress when the process died.  This is a clean crash recovery —
+          re-dispatch from the checkpoint **without** incrementing retry_count.
+        - A job with no checkpoint (never ran, or stuck in pending) counts as
+          a genuine retry and increments retry_count.
         """
         async with self._session_factory() as session:
             stale_jobs = await session.execute(
@@ -686,15 +716,47 @@ class AggregationService:
             )
             count = 0
             for job in stale_jobs.scalars():
-                if job.retry_count < job.max_retries:
-                    job.retry_count += 1
+                was_making_progress = (
+                    job.status == "running"
+                    and job.last_cursor is not None
+                )
+
+                if was_making_progress:
+                    # Clean crash recovery — resume from checkpoint, no penalty
+                    job.status = "pending"
+                    job.error_message = None
                     job.updated_at = _now()
                     await session.commit()
+                    # Before dispatching, add delay based on retry count to prevent rapid-fire
+                    # re-dispatch when the provider is still down
+                    if job.retry_count and job.retry_count > 0:
+                        delay = min(5.0 * (2 ** (job.retry_count - 1)), 120.0)
+                        logger.info("Delaying recovery dispatch for job %s by %.0fs (retry_count=%d)", job.id, delay, job.retry_count)
+                        await asyncio.sleep(delay)
                     await self._dispatcher.dispatch(job.id)
                     count += 1
                     logger.info(
-                        "Recovered aggregation job %s (retry %d/%d, cursor: %s)",
-                        job.id, job.retry_count, job.max_retries, job.last_cursor,
+                        "Crash-recovered aggregation job %s from checkpoint "
+                        "(cursor: %s, retry_count unchanged at %d)",
+                        job.id, job.last_cursor, job.retry_count,
+                    )
+                elif job.retry_count < job.max_retries:
+                    # No progress checkpoint — count as a genuine retry
+                    job.retry_count += 1
+                    job.status = "pending"
+                    job.updated_at = _now()
+                    await session.commit()
+                    # Before dispatching, add delay based on retry count to prevent rapid-fire
+                    # re-dispatch when the provider is still down
+                    if job.retry_count and job.retry_count > 0:
+                        delay = min(5.0 * (2 ** (job.retry_count - 1)), 120.0)
+                        logger.info("Delaying recovery dispatch for job %s by %.0fs (retry_count=%d)", job.id, delay, job.retry_count)
+                        await asyncio.sleep(delay)
+                    await self._dispatcher.dispatch(job.id)
+                    count += 1
+                    logger.info(
+                        "Retried aggregation job %s (retry %d/%d)",
+                        job.id, job.retry_count, job.max_retries,
                     )
                 else:
                     job.status = "failed"

@@ -21,7 +21,8 @@ import {
 } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import { workspaceService } from '@/services/workspaceService'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { aggregationService } from '@/services/aggregationService'
+import { useToast } from '@/components/ui/toast'
 import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
 import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 import { FirstRunHero } from './FirstRunHero'
@@ -491,6 +492,7 @@ function UnregisterDialog({
 export function RegistryAssets() {
     const [searchParams, setSearchParams] = useSearchParams()
     const initialProvider = searchParams.get('provider')
+    const { showToast, showLoading, hideLoading } = useToast()
 
     // Providers
     const [providers, setProviders] = useState<ProviderResponse[]>([])
@@ -650,42 +652,90 @@ export function RegistryAssets() {
     const handleReaggregate = useCallback(async (assetName: string) => {
         const item = existingCatalogs.find(c => c.sourceIdentifier === assetName)
         if (!item) return
+
+        showLoading('reaggregate', 'Discovering data sources…')
         try {
             const wsList = await workspaceService.list()
-            const dataSourcesToTrigger = wsList.flatMap((ws: any) => 
+            const dataSourcesToTrigger = wsList.flatMap((ws: any) =>
                 ws.dataSources?.filter((ds: any) => ds.catalogItemId === item.id) || []
             )
-            await Promise.all(dataSourcesToTrigger.map((ds: any) => 
-                fetchWithTimeout(`/api/v1/admin/data-sources/${ds.id}/aggregation-jobs?triggerSource=manual`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        projectionMode: ds.projectionMode || 'in_source',
-                        batchSize: 1000
-                    })
-                })
+
+            if (dataSourcesToTrigger.length === 0) {
+                hideLoading('reaggregate')
+                showToast('warning', 'No data sources found for this catalog item. Ensure it is bound to a workspace first.')
+                return
+            }
+
+            hideLoading('reaggregate')
+            showLoading('reaggregate', `Triggering aggregation for ${dataSourcesToTrigger.length} data source(s)…`)
+
+            const results = await Promise.allSettled(dataSourcesToTrigger.map((ds: any) =>
+                aggregationService.triggerAggregation(ds.id, {
+                    projectionMode: ds.projectionMode || 'in_source',
+                    batchSize: 1000,
+                }, 'manual')
             ))
-            // Re-aggregation triggered successfully
-        } catch (e) {
-            console.error('Failed to trigger aggregation', e)
+
+            const succeeded = results.filter(r => r.status === 'fulfilled').length
+            const failed = results.filter(r => r.status === 'rejected').length
+
+            hideLoading('reaggregate')
+            if (failed === 0) {
+                showToast('success', `Aggregation triggered for ${succeeded} data source(s). Switching to Job History…`)
+                // Navigate to Job History tab so the user sees live progress
+                setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
+            } else if (succeeded > 0) {
+                showToast('warning', `Triggered ${succeeded}, failed ${failed} data source(s). A job may already be active.`)
+            } else {
+                const firstError = (results.find(r => r.status === 'rejected') as PromiseRejectedResult)?.reason
+                showToast('error', firstError?.message ?? 'Failed to trigger aggregation')
+            }
+        } catch (e: any) {
+            hideLoading('reaggregate')
+            showToast('error', e?.message ?? 'Failed to discover data sources')
         }
-    }, [existingCatalogs])
+    }, [existingCatalogs, showToast, showLoading, hideLoading, setSearchParams])
 
     const handlePurge = useCallback(async (assetName: string) => {
         const item = existingCatalogs.find(c => c.sourceIdentifier === assetName)
         if (!item) return
+
+        showLoading('purge', 'Purging aggregated edges…')
         try {
             const wsList = await workspaceService.list()
             const dataSources = wsList.flatMap((ws: any) =>
                 ws.dataSources?.filter((ds: any) => ds.catalogItemId === item.id) || []
             )
-            await Promise.all(dataSources.map((ds: any) =>
-                fetchWithTimeout(`/api/v1/admin/data-sources/${ds.id}/purge-aggregation`, { method: 'POST' })
+
+            if (dataSources.length === 0) {
+                hideLoading('purge')
+                showToast('warning', 'No data sources found for this catalog item.')
+                return
+            }
+
+            const results = await Promise.allSettled(dataSources.map((ds: any) =>
+                aggregationService.purgeAggregation(ds.id)
             ))
-        } catch (e) {
-            console.error('Failed to purge aggregated edges', e)
+
+            const succeeded = results.filter(r => r.status === 'fulfilled')
+            const failed = results.filter(r => r.status === 'rejected').length
+            const totalDeleted = succeeded.reduce((sum, r) => sum + ((r as PromiseFulfilledResult<any>).value?.deletedEdges ?? 0), 0)
+
+            hideLoading('purge')
+            if (failed === 0) {
+                showToast('success', `Purged ${totalDeleted.toLocaleString()} aggregated edge(s). Switching to Job History…`)
+                setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
+            } else if (succeeded.length > 0) {
+                showToast('warning', `Purged ${totalDeleted.toLocaleString()} edges but ${failed} source(s) failed. A job may be active.`)
+            } else {
+                const firstError = (results.find(r => r.status === 'rejected') as PromiseRejectedResult)?.reason
+                showToast('error', firstError?.message ?? 'Failed to purge aggregated edges')
+            }
+        } catch (e: any) {
+            hideLoading('purge')
+            showToast('error', e?.message ?? 'Failed to purge aggregated edges')
         }
-    }, [existingCatalogs])
+    }, [existingCatalogs, showToast, showLoading, hideLoading, setSearchParams])
 
     const toggleSelection = (g: string) => {
         setSelected(prev => {

@@ -76,6 +76,7 @@ const TRIGGER_SOURCES = [
     { key: 'onboarding', label: 'Onboarding', icon: Zap },
     { key: 'schedule', label: 'Schedule', icon: Calendar },
     { key: 'drift', label: 'Drift', icon: Activity },
+    { key: 'purge', label: 'Purge', icon: Trash2 },
 ] as const
 const MODE_OPTIONS = [
     { key: 'in_source', label: 'In-Source' },
@@ -503,7 +504,7 @@ export function RegistryJobHistory() {
     const [searchInput, setSearchInput] = useState(filters.search ?? '')
     const [, setTick] = useState(0) // for refreshing relative timestamps
     const { showToast } = useToast()
-    const searchTimerRef = useRef<ReturnType<typeof setTimeout>>()
+    const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
     // Sync filters -> URL (preserve the 'tab' param from AdminRegistry)
     const setFilters = useCallback((updater: JobHistoryFilters | ((prev: JobHistoryFilters) => JobHistoryFilters)) => {
@@ -571,9 +572,13 @@ export function RegistryJobHistory() {
 
     useEffect(() => { setIsLoading(true); fetchJobs() }, [fetchJobs])
 
+    // Poll while active jobs exist OR for a brief window after mount to catch
+    // recently-triggered jobs that haven't appeared in the first fetch yet.
+    const mountedAtRef = useRef(Date.now())
     useEffect(() => {
         const hasActive = data?.items.some(j => j.status === 'pending' || j.status === 'running')
-        if (!hasActive) return
+        const withinStartupWindow = Date.now() - mountedAtRef.current < 15_000
+        if (!hasActive && !withinStartupWindow) return
         const interval = setInterval(fetchJobs, 3000)
         return () => clearInterval(interval)
     }, [data?.items, fetchJobs])
@@ -631,7 +636,7 @@ export function RegistryJobHistory() {
     }
 
     // Job actions — all with toast feedback
-    const withAction = async (jobId: string, fn: () => Promise<void>, successMsg: string) => {
+    const withAction = async (jobId: string, fn: () => Promise<unknown>, successMsg: string) => {
         setActionLoading(jobId)
         try {
             await fn()
@@ -691,7 +696,6 @@ export function RegistryJobHistory() {
     const currentPage = Math.floor((filters.offset ?? 0) / PAGE_SIZE) + 1
     const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
     const goToPage = (page: number) => setFilters(prev => ({ ...prev, offset: (page - 1) * PAGE_SIZE }))
-    const activeCount = data?.items.filter(j => j.status === 'running' || j.status === 'pending').length ?? 0
 
     // Needs-attention count from summary
     const failedCount = summary?.byStatus?.failed ?? 0
@@ -704,7 +708,7 @@ export function RegistryJobHistory() {
                 <div className="flex-shrink-0 w-9 h-9 rounded-xl bg-indigo-500/10 flex items-center justify-center">
                     <Activity className="w-4.5 h-4.5 text-indigo-500" />
                 </div>
-                <div>
+                <div className="flex-1">
                     <div className="flex items-center gap-2">
                         <h2 className="text-base font-semibold text-ink">Aggregation Job History</h2>
                         {isPolling && (
@@ -718,6 +722,12 @@ export function RegistryJobHistory() {
                         Track aggregation jobs across all workspaces and data sources
                     </p>
                 </div>
+                <button
+                    onClick={() => { fetchJobs(); aggregationService.getJobsSummary().then(setSummary).catch(() => {}) }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                >
+                    <RotateCcw className={cn('w-3.5 h-3.5', isLoading && 'animate-spin')} /> Refresh
+                </button>
             </div>
 
             {/* KPI Strip */}
@@ -942,7 +952,7 @@ export function RegistryJobHistory() {
                         <table className="w-full min-w-[900px]">
                             <thead>
                                 <tr className="border-b border-glass-border bg-black/[0.02] dark:bg-white/[0.01]">
-                                    {['Status', 'Data Source', 'Mode', 'Trigger', 'Coverage', 'Edges', 'Duration', 'Started', ''].map((h, i) => (
+                                    {['Status', 'Data Source', 'Mode', 'Trigger', 'Progress', 'Edges', 'Duration', 'Started', ''].map((h, i) => (
                                         <th key={h || 'actions'} className={cn(
                                             'text-[10px] font-bold text-ink-muted uppercase tracking-wider px-4 py-2.5',
                                             i === 8 ? 'text-right' : 'text-left'
@@ -1088,32 +1098,53 @@ function JobRow({ job, expanded, onToggle, onCancel, onResume, onRetrigger, onDe
                 </td>
 
                 <td className="px-4 py-2.5">
-                    <span className="text-[11px] text-ink-muted capitalize">{job.triggerSource}</span>
+                    {job.triggerSource === 'purge' ? (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-400">
+                            <Trash2 className="w-3 h-3" /> Purge
+                        </span>
+                    ) : (
+                        <span className="text-[11px] text-ink-muted capitalize">{job.triggerSource}</span>
+                    )}
                 </td>
 
                 <td className="px-4 py-2.5">
-                    {job.edgeCoveragePct != null ? (
-                        <span className={cn(
-                            'text-[11px] font-semibold tabular-nums',
-                            job.edgeCoveragePct >= 80 ? 'text-emerald-500' : job.edgeCoveragePct >= 50 ? 'text-amber-500' : 'text-red-500'
-                        )}>
-                            {job.edgeCoveragePct}%
-                        </span>
+                    {job.triggerSource === 'purge' ? (
+                        <span className="text-[11px] text-ink-muted">{'\u2014'}</span>
+                    ) : job.edgeCoveragePct != null ? (
+                        <Tip label="Percentage of input lineage edges processed">
+                            <span className={cn(
+                                'text-[11px] font-semibold tabular-nums',
+                                job.edgeCoveragePct >= 80 ? 'text-emerald-500' : job.edgeCoveragePct >= 50 ? 'text-amber-500' : 'text-red-500'
+                            )}>
+                                {job.edgeCoveragePct}%
+                            </span>
+                        </Tip>
                     ) : <span className="text-[11px] text-ink-muted">{'\u2014'}</span>}
                 </td>
 
                 <td className="px-4 py-2.5">
-                    <div className="flex items-center gap-2">
-                        <span className="text-[11px] text-ink-muted tabular-nums">
-                            {job.processedEdges.toLocaleString()}{job.totalEdges > 0 ? ` / ${job.totalEdges.toLocaleString()}` : ''}
+                    {job.triggerSource === 'purge' ? (
+                        <span className="text-[11px] text-red-400 font-medium">
+                            Purged {job.processedEdges.toLocaleString()} edge{job.processedEdges !== 1 ? 's' : ''}
                         </span>
-                        {isRunning && job.totalEdges > 0 && (
-                            <div className="w-12 h-1.5 bg-black/10 dark:bg-white/10 rounded-full overflow-hidden">
-                                <div className="h-full bg-indigo-500 rounded-full transition-all duration-500"
-                                    style={{ width: `${Math.min(100, Math.round(job.progress))}%` }} />
-                            </div>
-                        )}
-                    </div>
+                    ) : (
+                        <div className="flex items-center gap-2">
+                            <Tip label={`Input lineage edges processed${job.createdEdges > 0 ? ` · ${job.createdEdges.toLocaleString()} materialized` : ''}`}>
+                                <span className="text-[11px] text-ink-muted tabular-nums">
+                                    {job.processedEdges.toLocaleString()}{job.totalEdges > 0 ? ` / ${job.totalEdges.toLocaleString()}` : ''}
+                                    {job.status === 'completed' && job.createdEdges > 0 && (
+                                        <span className="text-emerald-500 font-medium"> → {job.createdEdges.toLocaleString()}</span>
+                                    )}
+                                </span>
+                            </Tip>
+                            {isRunning && job.totalEdges > 0 && (
+                                <div className="w-12 h-1.5 bg-black/10 dark:bg-white/10 rounded-full overflow-hidden">
+                                    <div className="h-full bg-indigo-500 rounded-full transition-all duration-500"
+                                        style={{ width: `${Math.min(100, Math.round(job.progress))}%` }} />
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </td>
 
                 <td className="px-4 py-2.5">
@@ -1171,11 +1202,26 @@ function JobRow({ job, expanded, onToggle, onCancel, onResume, onRetrigger, onDe
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-3">
                             <DetailField label="Job ID" value={job.id} mono />
                             <DetailField label="Data Source ID" value={job.dataSourceId} mono />
-                            <DetailField label="Retry Count" value={
-                                <span>{job.retryCount}{job.resumable && <span className="ml-1.5 text-[10px] text-indigo-400 font-medium">(resumable)</span>}</span>
-                            } />
-                            <DetailField label="Created Edges" value={job.createdEdges.toLocaleString()} />
-                            <DetailField label="Batch Size" value={job.batchSize.toLocaleString()} />
+                            {job.triggerSource !== 'purge' && (
+                                <DetailField label="Retry Count" value={
+                                    <span>{job.retryCount}{job.resumable && <span className="ml-1.5 text-[10px] text-indigo-400 font-medium">(resumable)</span>}</span>
+                                } />
+                            )}
+                            <DetailField
+                                label={job.triggerSource === 'purge' ? 'Purged Edges' : 'Materialized Edges'}
+                                value={
+                                    job.triggerSource === 'purge'
+                                        ? job.processedEdges.toLocaleString()
+                                        : job.createdEdges > 0
+                                            ? job.createdEdges.toLocaleString()
+                                            : job.status === 'completed'
+                                                ? '0'
+                                                : <span className="text-ink-muted/60">updates during processing</span>
+                                }
+                            />
+                            {job.triggerSource !== 'purge' && (
+                                <DetailField label="Batch Size" value={job.batchSize.toLocaleString()} />
+                            )}
                             {job.estimatedCompletionAt && (
                                 <DetailField label="Est. Completion" value={new Date(job.estimatedCompletionAt).toLocaleTimeString()} />
                             )}
@@ -1189,11 +1235,17 @@ function JobRow({ job, expanded, onToggle, onCancel, onResume, onRetrigger, onDe
                             <div className="mt-3 p-3 rounded-lg bg-red-500/5 border border-red-500/20">
                                 <span className="block text-[10px] text-red-400 uppercase tracking-wider font-bold mb-1">Error</span>
                                 <pre className="text-xs font-mono text-red-400 break-words whitespace-pre-wrap">{job.errorMessage}</pre>
+                                {job.errorMessage.includes('Max retries exceeded after crash recovery') && (
+                                    <p className="mt-2 text-[11px] text-amber-400">
+                                        This typically indicates server restarts during processing, not a job failure.
+                                        The job may have been making progress before each restart.
+                                    </p>
+                                )}
                             </div>
                         )}
 
                         {/* Purge aggregated edges (destructive — kept in detail for confirmation flow) */}
-                        {isTerminal && job.createdEdges > 0 && (
+                        {isTerminal && job.createdEdges > 0 && job.triggerSource !== 'purge' && (
                             <div className="mt-4 pt-3 border-t border-glass-border/50">
                                 {!isPurging ? (
                                     <button

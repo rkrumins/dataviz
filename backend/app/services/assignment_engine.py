@@ -50,8 +50,8 @@ class AssignmentEngine:
         )
 
         # ── Fetch graph data via the scoped engine ────────────────────────
-        all_nodes = await engine.provider.get_nodes(NodeQuery())
-        all_edges = await engine.provider.get_edges(EdgeQuery())
+        all_nodes = await engine.get_nodes_query(NodeQuery())
+        all_edges = await engine.get_edges(EdgeQuery())
 
         logging.info(f"Computing assignments for {len(all_nodes)} nodes and {len(all_edges)} edges")
 

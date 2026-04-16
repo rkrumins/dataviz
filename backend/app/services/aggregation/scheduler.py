@@ -10,10 +10,11 @@ For K8s: extract to a standalone cron-job pod or use K8s CronJob.
 """
 import asyncio
 import logging
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 
 logger = logging.getLogger(__name__)
 
@@ -95,3 +96,40 @@ class AggregationScheduler:
                     logger.warning(
                         "Drift check failed for data source %s: %s", ds.id, e
                     )
+
+            # Stale-job watchdog — catch jobs stuck in 'running' with no
+            # checkpoint update (e.g. worker died silently).
+            from .models import AggregationJobORM
+
+            job_timeout = int(os.getenv("AGGREGATION_JOB_TIMEOUT_SECS", "7200"))
+            watchdog_cutoff = datetime.now(tz=timezone.utc) - timedelta(seconds=job_timeout * 2)
+
+            stale_stmt = select(AggregationJobORM).where(
+                and_(
+                    AggregationJobORM.status == "running",
+                    AggregationJobORM.updated_at < watchdog_cutoff.isoformat(),
+                )
+            )
+            stale_result = await session.execute(stale_stmt)
+            stale_jobs = stale_result.scalars().all()
+
+            for stale_job in stale_jobs:
+                elapsed = (datetime.now(tz=timezone.utc) - datetime.fromisoformat(stale_job.updated_at)).total_seconds()
+                stale_job.status = "failed"
+                stale_job.error_message = f"Watchdog timeout: no checkpoint update in {int(elapsed)}s"
+                stale_job.updated_at = datetime.now(tz=timezone.utc).isoformat()
+                logger.warning(
+                    "Watchdog marked stale job %s as failed (no update in %ds)",
+                    stale_job.id, int(elapsed),
+                )
+                # Update parent data source
+                try:
+                    ds = await session.get(WorkspaceDataSourceORM, stale_job.data_source_id)
+                    if ds:
+                        ds.aggregation_status = "failed"
+                except Exception:
+                    pass
+
+            if stale_jobs:
+                await session.commit()
+                logger.info("Watchdog marked %d stale aggregation jobs as failed", len(stale_jobs))
