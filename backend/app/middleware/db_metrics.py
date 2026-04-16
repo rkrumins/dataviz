@@ -26,7 +26,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from backend.app.db.engine import get_engine
+from backend.app.db.engine import pool_status
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,9 @@ router = APIRouter(prefix="/internal/metrics", tags=["metrics"])
 
 _SATURATION_WARN_THRESHOLD = 0.8
 _SATURATION_WARN_SUSTAIN_SECS = 5.0
-_saturation_first_seen_at: float | None = None
+# Per-role saturation timer — roles are tracked independently so a
+# hot JOBS pool doesn't mask a separately-saturating WEB pool.
+_saturation_first_seen_at: dict[str, float | None] = {}
 
 
 def _enabled() -> bool:
@@ -42,74 +44,70 @@ def _enabled() -> bool:
 
 
 def get_pool_stats() -> dict[str, Any]:
-    """Pull current pool counters from the live engine.
+    """Per-role pool snapshot (plan Gap 3).
 
-    Field semantics (SQLAlchemy QueuePool):
-      * ``size`` — configured pool size (the steady-state count)
-      * ``checked_out`` — connections currently leased to callers
-      * ``checked_in`` — connections sitting idle in the pool
-      * ``overflow`` — connections beyond ``size`` (up to ``max_overflow``)
-      * ``utilisation_pct`` — checked_out / (size + max_overflow)
+    Returns a dict keyed by role (``web``/``jobs``/``readonly``/``admin``)
+    with utilisation + counters per pool. Only roles whose engine has
+    been materialised appear — a process that never opened a ``jobs``
+    session simply doesn't surface a ``jobs`` entry.
+
+    Also surfaces a top-level ``pools`` list (alphabetised role names)
+    for metrics scrapers that prefer a flat structure.
     """
-    engine = get_engine()
-    pool = engine.pool
-    # The pool exposes counters via individual methods on QueuePool /
-    # AsyncAdaptedQueuePool. Wrap in try/except so a future pool subclass
-    # change doesn't 500 the metrics endpoint.
-    try:
-        size = pool.size()                 # type: ignore[attr-defined]
-        checked_out = pool.checkedout()    # type: ignore[attr-defined]
-        checked_in = pool.checkedin()      # type: ignore[attr-defined]
-        overflow = pool.overflow()         # type: ignore[attr-defined]
-    except AttributeError:
-        # NullPool (used by alembic migrations) and some third-party
-        # pools don't expose these — return a degraded payload.
-        return {
-            "pool_class": type(pool).__name__,
-            "stats_available": False,
+    raw = pool_status()   # {role_name: {size, checked_out, checked_in, overflow}}
+    result: dict[str, Any] = {"pools": sorted(raw.keys())}
+    for role_name, stats in raw.items():
+        size = stats.get("size")
+        checked_out = stats.get("checked_out")
+        overflow = stats.get("overflow") or 0
+        if size is None or checked_out is None:
+            # NullPool (used by alembic) or unexpected pool type.
+            result[role_name] = {
+                "stats_available": False,
+            }
+            continue
+        total_capacity = size + max(overflow, 0)
+        utilisation = (checked_out / total_capacity) if total_capacity else 0.0
+        _maybe_log_saturation(role_name, utilisation)
+        result[role_name] = {
+            "size": size,
+            "checked_out": checked_out,
+            "checked_in": stats.get("checked_in"),
+            "overflow": overflow,
+            "utilisation_pct": round(utilisation * 100, 1),
+            "stats_available": True,
         }
-
-    total_capacity = size + max(overflow, 0)
-    utilisation = (checked_out / total_capacity) if total_capacity else 0.0
-
-    _maybe_log_saturation(utilisation)
-
-    return {
-        "pool_class": type(pool).__name__,
-        "size": size,
-        "checked_out": checked_out,
-        "checked_in": checked_in,
-        "overflow": overflow,
-        "utilisation_pct": round(utilisation * 100, 1),
-        "stats_available": True,
-    }
+    return result
 
 
-def _maybe_log_saturation(utilisation: float) -> None:
-    """WARN once when the pool stays >80% utilised for >5s."""
-    global _saturation_first_seen_at
+def _maybe_log_saturation(role: str, utilisation: float) -> None:
+    """WARN once per role when that pool stays >80% utilised for >5s."""
     now = time.monotonic()
+    first_seen = _saturation_first_seen_at.get(role)
     if utilisation < _SATURATION_WARN_THRESHOLD:
-        _saturation_first_seen_at = None
+        if first_seen is not None:
+            _saturation_first_seen_at[role] = None
         return
-    if _saturation_first_seen_at is None:
-        _saturation_first_seen_at = now
+    if first_seen is None:
+        _saturation_first_seen_at[role] = now
         return
-    if (now - _saturation_first_seen_at) >= _SATURATION_WARN_SUSTAIN_SECS:
+    if (now - first_seen) >= _SATURATION_WARN_SUSTAIN_SECS:
         logger.warning(
-            "DB pool sustained >%.0f%% utilisation for >%.0fs — consider "
-            "raising DB_POOL_SIZE / DB_POOL_MAX_OVERFLOW or finding the "
-            "session-leaking endpoint.",
-            _SATURATION_WARN_THRESHOLD * 100, _SATURATION_WARN_SUSTAIN_SECS,
+            "DB pool[%s] sustained >%.0f%% utilisation for >%.0fs — consider "
+            "raising DB_%s_POOL_SIZE / DB_%s_POOL_MAX_OVERFLOW or finding "
+            "the session-leaking endpoint on this role.",
+            role, _SATURATION_WARN_THRESHOLD * 100,
+            _SATURATION_WARN_SUSTAIN_SECS,
+            role.upper(), role.upper(),
         )
         # Reset so the warning re-fires after the next sustained window
         # rather than every second.
-        _saturation_first_seen_at = now
+        _saturation_first_seen_at[role] = now
 
 
 @router.get("/db")
 async def db_metrics():
-    """Snapshot of the management DB connection pool."""
+    """Per-role snapshot of the management DB connection pools."""
     if not _enabled():
         raise HTTPException(
             status_code=404,

@@ -9,7 +9,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from starlette.responses import JSONResponse
 
 from .api.v1.api import api_router
-from .db.engine import init_db, close_db, get_async_session
+from .db.engine import init_db, close_db, get_async_session, get_jobs_session
 from .db.seed_templates import seed_templates
 from .db.repositories import user_repo
 from .db.repositories.refresh_token_repo import make_refresh_store
@@ -145,7 +145,11 @@ async def lifespan(_app: FastAPI):
             InProcessDispatcher, AggregationScheduler,
         )
 
-        agg_worker = AggregationWorker(get_async_session, provider_registry)
+        # Aggregation subsystem uses the JOBS pool exclusively (plan Gap 3):
+        # checkpoint commits every ~2s cannot drain the WEB pool that
+        # serves user requests. Scheduler's periodic drift scan and the
+        # startup recovery helper share the same isolation.
+        agg_worker = AggregationWorker(get_jobs_session, provider_registry)
         agg_dispatcher = InProcessDispatcher(agg_worker)
 
         # Get ontology service reference for monolith-mode resolution
@@ -162,10 +166,10 @@ async def lifespan(_app: FastAPI):
         agg_service = AggregationService(
             dispatcher=agg_dispatcher,
             registry=provider_registry,
-            session_factory=get_async_session,
+            session_factory=get_jobs_session,
             ontology_service=ontology_svc,
         )
-        agg_scheduler = AggregationScheduler(get_async_session, provider_registry)
+        agg_scheduler = AggregationScheduler(get_jobs_session, provider_registry)
 
         # Register as app state for endpoint access
         _app.state.aggregation_service = agg_service
@@ -418,8 +422,13 @@ async def provider_health_check():
         # out could silently corrupt state or deadlock under a slow
         # provider. Closing the outer session first also keeps the
         # management-DB pool drained during the outbound probe storm.
+        # READONLY pool (plan Gap 3): this endpoint is polled by K8s
+        # readiness + the UI banner and only reads — isolating it from
+        # the WEB pool means high-frequency probes cannot contend with
+        # request-handler writes.
+        from .db.engine import get_readonly_session
         ds_meta: list[tuple[str, str, str]] = []
-        async with get_async_session() as session:
+        async with get_readonly_session() as session:
             workspaces = await list_workspaces(session)
             for ws in workspaces:
                 sources = await list_data_sources(session, ws.id)
@@ -445,8 +454,9 @@ async def provider_health_check():
                 try:
                     # Each probe owns its own session for the DB portion of
                     # get_provider_for_workspace; the outbound provider call
-                    # that follows does NOT hold a session.
-                    async with get_async_session() as probe_session:
+                    # that follows does NOT hold a session. READONLY pool —
+                    # the probe only reads provider config from Postgres.
+                    async with get_readonly_session() as probe_session:
                         provider = await asyncio.wait_for(
                             provider_registry.get_provider_for_workspace(
                                 ws_id, probe_session, ds_id,

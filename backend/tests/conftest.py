@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from backend.app.db.engine import Base, get_db_session
+from backend.app.db.engine import Base, get_db_session, get_readonly_db_session
 from backend.app.db import models as _models  # noqa: F401 — register ORM models
 from backend.app.db.repositories import user_repo as _user_repo
 from backend.app.db.repositories.refresh_token_repo import make_refresh_store
@@ -191,6 +191,7 @@ async def test_client(
         return _FAKE_USER
 
     app.dependency_overrides[get_db_session] = _override_get_db_session
+    app.dependency_overrides[get_readonly_db_session] = _override_get_db_session
     app.dependency_overrides[get_current_user] = _override_get_current_user
     app.dependency_overrides[get_optional_user] = _override_get_optional_user
     app.dependency_overrides[require_admin] = _override_require_admin
