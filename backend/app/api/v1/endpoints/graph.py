@@ -21,7 +21,7 @@ from backend.app.models.graph import (
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.app.services.context_engine import ContextEngine
 from backend.app.db.engine import get_db_session
-from backend.app.registry.provider_registry import provider_registry
+from backend.app.providers.manager import provider_manager
 
 router = APIRouter()
 
@@ -44,13 +44,22 @@ async def get_context_engine(
       - `dataSourceId` (optional query param) → targets specific data source within workspace
     - `connectionId` (query param, legacy) → connection-scoped engine
     - Neither → rejected; graph scope must be explicit
+
+    Error boundary: ContextEngine.for_workspace/for_connection normalize
+    all provider connectivity errors to ProviderUnavailable, which the
+    global exception handler at main.py converts to HTTP 503 with
+    Retry-After. KeyError (data source not found) becomes HTTP 404.
     """
-    if ws_id:
-        return await ContextEngine.for_workspace(
-            ws_id, provider_registry, session, data_source_id=dataSourceId
-        )
-    if connectionId:
-        return await ContextEngine.for_connection(connectionId, provider_registry, session)
+    try:
+        if ws_id:
+            return await ContextEngine.for_workspace(
+                ws_id, provider_manager, session, data_source_id=dataSourceId
+            )
+        if connectionId:
+            return await ContextEngine.for_connection(connectionId, provider_manager, session)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    # ProviderUnavailable propagates to FastAPI exception handler → 503
     raise HTTPException(
         status_code=400,
         detail="scope_required: workspace_id or connection_id is required",
@@ -213,7 +222,7 @@ async def get_node_parent(
     **Deprecated:** Use `GET /nodes/{urn}/ancestors?limit=1` instead.
     """
     logger.warning("Deprecated endpoint GET /nodes/%s/parent called — use GET /nodes/%s/ancestors?limit=1", urn, urn)
-    return await engine.provider.get_parent(urn)
+    return await engine.get_parent(urn)
 
 
 @router.get("/nodes/{urn}/children", response_model=List[GraphNode], response_model_by_alias=True)
@@ -260,7 +269,7 @@ async def search_nodes(
     offset: int = Body(0, embed=True),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    return await engine.provider.search_nodes(query, limit=limit, offset=offset)
+    return await engine.search_nodes(query, limit=limit, offset=offset)
 
 
 @router.get("/edges", response_model=List[GraphEdge], response_model_by_alias=True,
@@ -326,14 +335,13 @@ async def get_graph_stats(
         except Exception:
             pass  # Cache lookup or parse failed — fall through to provider
 
-    # 2. Only try provider if cache miss
-    try:
-        engine = await ContextEngine.for_workspace(
-            ws_id, provider_registry, session, data_source_id=dataSourceId
-        ) if ws_id else await ContextEngine.for_connection(connectionId, provider_registry, session)
-        return await engine.get_stats()
-    except Exception as exc:
-        raise HTTPException(503, detail=f"Graph provider unavailable and no cached data: {exc}")
+    # 2. Only try provider if cache miss.
+    # ContextEngine normalizes connectivity errors to ProviderUnavailable,
+    # caught by the global exception handler → 503 with Retry-After.
+    engine = await ContextEngine.for_workspace(
+        ws_id, provider_manager, session, data_source_id=dataSourceId
+    ) if ws_id else await ContextEngine.for_connection(connectionId, provider_manager, session)
+    return await engine.get_stats()
 
 
 @router.get("/nodes", response_model=List[GraphNode], response_model_by_alias=True,
@@ -356,7 +364,7 @@ async def get_nodes(
         limit=limit,
         offset=offset,
     )
-    return await engine.provider.get_nodes(q)
+    return await engine.get_nodes_query(q)
 
 
 @router.get("/nodes/{urn}/ancestors", response_model=List[GraphNode], response_model_by_alias=True)
@@ -448,7 +456,7 @@ async def query_nodes(
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Advanced node query (bulk fetch, complex filters)."""
-    return await engine.provider.get_nodes(query)
+    return await engine.get_nodes_query(query)
 
 
 @router.get("/metadata/entity-types", response_model=List[str])
@@ -456,7 +464,7 @@ async def get_entity_types(
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Get distinct entity types in the graph."""
-    values = await engine.provider.get_distinct_values("entityType")
+    values = await engine.get_distinct_values("entityType")
     return [str(v) for v in values]
 
 
@@ -465,7 +473,7 @@ async def get_tags(
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Get distinct tags in the graph."""
-    values = await engine.provider.get_distinct_values("tags")
+    values = await engine.get_distinct_values("tags")
     return [str(v) for v in values]
 
 
@@ -475,7 +483,7 @@ async def get_distinct_values(
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Generic endpoint to get distinct values for filters."""
-    return await engine.provider.get_distinct_values(property)
+    return await engine.get_distinct_values(property)
 
 
 class SaveGraphRequest(BaseModel):
@@ -489,7 +497,7 @@ async def save_graph(
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Save custom graph nodes and edges."""
-    success = await engine.provider.save_custom_graph(request.nodes, request.edges)
+    success = await engine.save_custom_graph(request.nodes, request.edges)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save graph")
     return {"status": "success", "message": "Graph saved successfully"}
@@ -515,14 +523,11 @@ async def get_graph_introspection(
         except Exception:
             pass  # Cache lookup or parse failed — fall through to provider
 
-    # 2. Only try provider if cache miss
-    try:
-        engine = await ContextEngine.for_workspace(
-            ws_id, provider_registry, session, data_source_id=dataSourceId
-        ) if ws_id else await ContextEngine.for_connection(connectionId, provider_registry, session)
-        return await engine.get_schema_stats()
-    except Exception as exc:
-        raise HTTPException(503, detail=f"Graph provider unavailable and no cached data: {exc}")
+    # 2. Only try provider if cache miss.
+    engine = await ContextEngine.for_workspace(
+        ws_id, provider_manager, session, data_source_id=dataSourceId
+    ) if ws_id else await ContextEngine.for_connection(connectionId, provider_manager, session)
+    return await engine.get_schema_stats()
 
 
 @router.get("/metadata/ontology", deprecated=True)
@@ -552,18 +557,15 @@ async def get_ontology_metadata(
         except Exception:
             pass  # Cache lookup or parse failed — fall through to provider
 
-    # 2. Only try provider if cache miss
-    try:
-        engine = await ContextEngine.for_workspace(
-            ws_id, provider_registry, session, data_source_id=dataSourceId
-        ) if ws_id else await ContextEngine.for_connection(connectionId, provider_registry, session)
-        result = await engine.get_ontology_metadata()
-        return JSONResponse(
-            content=result.model_dump(by_alias=True),
-            headers={"Cache-Control": "private, max-age=300"},
-        )
-    except Exception as exc:
-        raise HTTPException(503, detail=f"Graph provider unavailable and no cached data: {exc}")
+    # 2. Only try provider if cache miss.
+    engine = await ContextEngine.for_workspace(
+        ws_id, provider_manager, session, data_source_id=dataSourceId
+    ) if ws_id else await ContextEngine.for_connection(connectionId, provider_manager, session)
+    result = await engine.get_ontology_metadata()
+    return JSONResponse(
+        content=result.model_dump(by_alias=True),
+        headers={"Cache-Control": "private, max-age=300"},
+    )
 
 
 def _schema_etag(payload: dict) -> str:
@@ -626,15 +628,12 @@ async def get_graph_schema(
         except Exception:
             pass  # Cache lookup or parse failed — fall through to provider
 
-    # 2. Only try provider if cache miss
-    try:
-        engine = await ContextEngine.for_workspace(
-            ws_id, provider_registry, session, data_source_id=dataSourceId
-        ) if ws_id else await ContextEngine.for_connection(connectionId, provider_registry, session)
-        result = await engine.get_graph_schema()
-        return _schema_response(result.model_dump(by_alias=True), request)
-    except Exception as exc:
-        raise HTTPException(503, detail=f"Graph provider unavailable and no cached data: {exc}")
+    # 2. Only try provider if cache miss.
+    engine = await ContextEngine.for_workspace(
+        ws_id, provider_manager, session, data_source_id=dataSourceId
+    ) if ws_id else await ContextEngine.for_connection(connectionId, provider_manager, session)
+    result = await engine.get_graph_schema()
+    return _schema_response(result.model_dump(by_alias=True), request)
 
 
 @router.post("/edges/aggregated", response_model=AggregatedEdgeResult, response_model_by_alias=True)
@@ -662,19 +661,15 @@ async def materialize_aggregated_edges(
 
     This should be run after data ingestion or as a periodic maintenance task.
     """
-    from backend.app.providers.falkordb_provider import FalkorDBProvider
-    if not isinstance(engine.provider, FalkorDBProvider):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Materialization only supported for FalkorDB provider"}
-        )
-
     ontology = await engine.get_ontology_metadata()
-    stats = await engine.provider.materialize_aggregated_edges_batch(
-        batch_size=batch_size,
-        containment_edge_types=list(ontology.containment_edge_types),
-        lineage_edge_types=list(ontology.lineage_edge_types),
-    )
+    try:
+        stats = await engine.materialize_aggregated_edges(
+            batch_size=batch_size,
+            containment_edge_types=list(ontology.containment_edge_types),
+            lineage_edge_types=list(ontology.lineage_edge_types),
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
     return JSONResponse(content=stats)
 
 

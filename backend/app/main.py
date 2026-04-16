@@ -18,7 +18,7 @@ from .middleware.logging import StructuredLoggingMiddleware, configure_json_logg
 from .middleware.security_headers import SecurityHeadersMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from .registry.provider_registry import provider_registry
+from .providers.manager import provider_manager
 from backend.auth_service.csrf import CSRFMiddleware
 from backend.auth_service.providers import LocalIdentityProvider, register_provider
 from backend.auth_service.service import LocalIdentityService
@@ -138,19 +138,38 @@ async def lifespan(_app: FastAPI):
     )
     logger.info("Auth service initialised (provider=local)")
 
-    # 5. Wire up the aggregation service
+    # 5. Wire up the aggregation service (role-gated)
+    from .runtime.role import current_role, runs_scheduler, runs_recovery
+    role = current_role()
+
     try:
         from .services.aggregation import (
             AggregationService, AggregationWorker,
             InProcessDispatcher, AggregationScheduler,
         )
+        from .services.aggregation.dispatcher import PostgresDispatcher
+        from .runtime.role import runs_worker
 
-        # Aggregation subsystem uses the JOBS pool exclusively (plan Gap 3):
-        # checkpoint commits every ~2s cannot drain the WEB pool that
-        # serves user requests. Scheduler's periodic drift scan and the
-        # startup recovery helper share the same isolation.
-        agg_worker = AggregationWorker(get_jobs_session, provider_registry)
-        agg_dispatcher = InProcessDispatcher(agg_worker)
+        # Choose dispatcher based on role.
+        # - DEV: InProcessDispatcher (all-in-one, current behaviour)
+        # - WEB: PostgresDispatcher (job runs in standalone worker process)
+        # - WORKER/CONTROLPLANE: should not reach this code path
+        dispatch_mode = os.getenv("AGGREGATION_DISPATCH_MODE", "auto")
+        if dispatch_mode == "auto":
+            use_postgres_dispatch = not runs_worker()
+        else:
+            use_postgres_dispatch = dispatch_mode == "postgres"
+
+        if use_postgres_dispatch:
+            agg_dispatcher = PostgresDispatcher(get_jobs_session)
+            logger.info("Aggregation dispatch: PostgresDispatcher (jobs run in standalone worker)")
+        else:
+            # Aggregation subsystem uses the JOBS pool exclusively (plan Gap 3):
+            # checkpoint commits every ~2s cannot drain the WEB pool that
+            # serves user requests.
+            agg_worker = AggregationWorker(get_jobs_session, provider_manager)
+            agg_dispatcher = InProcessDispatcher(agg_worker)
+            logger.info("Aggregation dispatch: InProcessDispatcher (all-in-one dev mode)")
 
         # Get ontology service reference for monolith-mode resolution
         ontology_svc = None
@@ -165,33 +184,37 @@ async def lifespan(_app: FastAPI):
 
         agg_service = AggregationService(
             dispatcher=agg_dispatcher,
-            registry=provider_registry,
+            registry=provider_manager,
             session_factory=get_jobs_session,
             ontology_service=ontology_svc,
         )
-        agg_scheduler = AggregationScheduler(get_jobs_session, provider_registry)
 
         # Register as app state for endpoint access
         _app.state.aggregation_service = agg_service
 
-        # Recover interrupted jobs from previous crash/restart
-        recovered = await agg_service.recover_interrupted_jobs()
-        if recovered:
-            logger.info("Recovered %d interrupted aggregation jobs", recovered)
+        # Recovery and scheduler only run on control-plane / dev roles.
+        # Web tier never starts background tasks — it is fully stateless.
+        if runs_recovery():
+            recovered = await agg_service.recover_interrupted_jobs()
+            if recovered:
+                logger.info("Recovered %d interrupted aggregation jobs", recovered)
 
-        # Start background scheduler
-        asyncio.create_task(agg_scheduler.start())
-        logger.info("Aggregation service started (scheduler active)")
+        if runs_scheduler():
+            agg_scheduler = AggregationScheduler(get_jobs_session, provider_manager)
+            asyncio.create_task(agg_scheduler.start())
+            logger.info("Aggregation scheduler started")
+
+        logger.info("Aggregation service started (role=%s)", role.value)
     except Exception as exc:
         logger.warning("Aggregation service startup warning: %s", exc)
 
-    logger.info("Synodic Visualization Service started")
+    logger.info("Synodic Visualization Service started (role=%s)", role.value)
     yield
 
     # Shutdown — release all provider connection pools (with timeout so a hung
     # provider doesn't block graceful shutdown indefinitely).
     try:
-        await asyncio.wait_for(provider_registry.evict_all(), timeout=5)
+        await asyncio.wait_for(provider_manager.evict_all(), timeout=5)
     except asyncio.TimeoutError:
         logger.warning("Provider shutdown timed out after 5s — forcing exit")
     await close_db()
@@ -239,13 +262,14 @@ def _provider_unavailable_payload(request, exc) -> dict:
 
 
 async def _provider_error_handler(request, exc):
+    """Fallback handler for raw connectivity errors that bypass the circuit
+    breaker (e.g. during provider instantiation). Always returns structured
+    503 regardless of URL path — provider errors are provider errors."""
     logger.warning("Provider connectivity error on %s: %s", request.url.path, exc)
-    if "/graph" in request.url.path:
-        return JSONResponse(
-            status_code=503,
-            content=_provider_unavailable_payload(request, exc),
-        )
-    return JSONResponse(status_code=503, content={"detail": str(exc)})
+    return JSONResponse(
+        status_code=503,
+        content=_provider_unavailable_payload(request, exc),
+    )
 
 
 # Primary handler for provider failures: raised by the CircuitBreakerProxy
@@ -392,6 +416,48 @@ async def health_check():
     return result
 
 
+@app.get("/health/ready", tags=["health"])
+@app.get("/api/v1/health/ready", tags=["health"], include_in_schema=False)
+async def readiness_check():
+    """
+    Readiness probe — Postgres must be reachable. Provider health is
+    reported informally but does NOT affect the readiness verdict, so
+    non-graph endpoints remain available during provider outages.
+
+    K8s: use this for readinessProbe; use /health for livenessProbe.
+    """
+    from .db.engine import get_engine
+    from sqlalchemy import text
+
+    result: dict = {
+        "status": "ready",
+        "version": "0.2.0",
+        "postgres": "healthy",
+        "providers": {},
+    }
+
+    # Postgres check (required for readiness)
+    try:
+        engine = get_engine()
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "postgres": f"unhealthy: {exc}",
+                "providers": {},
+            },
+        )
+
+    # Provider health from ProviderManager — no new connections, just
+    # reads in-memory breaker state for cached/attempted providers.
+    result["providers"] = provider_manager.report_provider_states()
+
+    return result
+
+
 @app.get("/api/v1/health/providers", tags=["health"])
 async def provider_health_check():
     """
@@ -458,7 +524,7 @@ async def provider_health_check():
                     # the probe only reads provider config from Postgres.
                     async with get_readonly_session() as probe_session:
                         provider = await asyncio.wait_for(
-                            provider_registry.get_provider_for_workspace(
+                            provider_manager.get_provider_for_workspace(
                                 ws_id, probe_session, ds_id,
                             ),
                             timeout=PER_PROBE_TIMEOUT,

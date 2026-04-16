@@ -3,9 +3,11 @@ FalkorDB graph provider - persists graph data in FalkorDB and loads it via the a
 Implements GraphDataProvider interface using FalkorDB async client and Cypher queries.
 """
 
+import asyncio
 import json
 import logging
 import os
+import time
 from collections import defaultdict, deque
 from typing import List, Optional, Dict, Any, Set
 
@@ -22,6 +24,15 @@ from .base import GraphDataProvider
 from backend.common.interfaces.provider import ProviderConfigurationError
 
 logger = logging.getLogger(__name__)
+
+
+class AggregationBatchAbort(Exception):
+    """Raised when sustained provider failure makes continuing pointless.
+
+    The worker's outer try/except marks the job ``status=failed`` and
+    preserves ``last_cursor`` so the job can be resumed once the
+    provider recovers.
+    """
 
 
 def _sanitize_label(s: str) -> str:
@@ -118,23 +129,35 @@ class FalkorDBProvider(GraphDataProvider):
             from redis.asyncio import ConnectionPool, Redis
             from falkordb.asyncio import FalkorDB
 
-            # Pool for graph (Cypher) queries — used by FalkorDB client
+            # Pool for graph (Cypher) queries — used by FalkorDB client.
+            # FALKORDB_SOCKET_TIMEOUT controls how long a single Cypher
+            # query can run before the socket times out.  The default 10s
+            # is generous for normal reads but necessary for batch MERGE
+            # operations in the aggregation worker.  The old 3s default
+            # caused "Timeout reading from localhost:6379" on any
+            # moderately-sized UNWIND+MERGE, tripping the circuit breaker
+            # and killing the entire provider (including API traffic).
+            graph_pool_size = int(os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24"))
+            socket_timeout = float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
             self._pool = ConnectionPool(
                 host=self._host,
                 port=self._port,
-                max_connections=12,
-                socket_connect_timeout=1.0,
-                socket_timeout=3.0,
+                max_connections=graph_pool_size,
+                socket_connect_timeout=2.0,
+                socket_timeout=socket_timeout,
                 decode_responses=True,
             )
             # Separate pool for Redis data-structure ops (caching, SADD, HSET, etc.)
-            # Prevents cache/materialization ops from starving graph query connections
+            # Prevents cache/materialization ops from starving graph query connections.
+            # Uses the same socket_timeout — SADD/SCARD pipelines with thousands
+            # of ops also need headroom.
+            redis_pool_size = int(os.getenv("FALKORDB_REDIS_POOL_SIZE", "16"))
             self._redis_pool = ConnectionPool(
                 host=self._host,
                 port=self._port,
-                max_connections=8,
-                socket_connect_timeout=1.0,
-                socket_timeout=3.0,
+                max_connections=redis_pool_size,
+                socket_connect_timeout=2.0,
+                socket_timeout=socket_timeout,
                 decode_responses=True,
             )
             self._redis = Redis(connection_pool=self._redis_pool)
@@ -1194,19 +1217,162 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception:
             missing_urns = list(urns)
 
-        # Compute missing chains
+        # Compute missing chains with bounded concurrency.  A semaphore
+        # (not chunked gather) ensures at most _MAX_ANCESTOR_CONCURRENCY
+        # Cypher queries are in-flight at once, leaving headroom in the
+        # shared graph connection pool for batch fetches and MERGEs.
         if missing_urns:
+            _MAX_ANCESTOR_CONCURRENCY = 4
+            sem = asyncio.Semaphore(_MAX_ANCESTOR_CONCURRENCY)
+
+            async def _compute_with_sem(urn: str) -> tuple[str, list]:
+                async with sem:
+                    try:
+                        return urn, await self._compute_ancestor_chain(urn)
+                    except Exception as exc:
+                        logger.warning("Failed to compute ancestor chain for %s: %s", urn, exc)
+                        return urn, []
+
+            computed = await asyncio.gather(
+                *(_compute_with_sem(u) for u in missing_urns),
+            )
+            for u, chain in computed:
+                result[u] = chain
+
+            # Batch-store all computed chains in one pipeline
             store_pipe = self._redis.pipeline(transaction=False)
             for u in missing_urns:
-                chain = await self._compute_ancestor_chain(u)
-                result[u] = chain
-                store_pipe.execute_command("HSET", cache_key, u, json.dumps(chain))
+                store_pipe.execute_command("HSET", cache_key, u, json.dumps(result.get(u, [])))
             try:
                 await store_pipe.execute()
             except Exception as e:
                 logger.debug(f"Failed to batch-store ancestor chains: {e}")
 
         return result
+
+    # ------------------------------------------------------------------ #
+    # Batch-level materialization (used by materialize_aggregated_edges_batch)
+    # ------------------------------------------------------------------ #
+
+    # Max ancestor pairs per Cypher UNWIND+MERGE call.  Each input edge
+    # fans out to ~4 ancestor pairs (s_chain × t_chain), so 5000 input
+    # edges produce ~20K pairs.  A single MERGE with 20K items + REDUCE
+    # exceeds FalkorDB's 3s socket_timeout.  500 pairs keeps each call
+    # well under 1s while still being 500× fewer round-trips than the
+    # old per-edge approach.
+    _MERGE_SUB_BATCH_SIZE = 500
+
+    async def _materialize_edges_batched(
+        self,
+        rows: list,
+        ancestors_cache: Dict[str, List[str]],
+    ) -> tuple[int, int]:
+        """Batch-level materialization — all Redis + Cypher ops in ~4 round-trips.
+
+        Replaces the previous per-edge loop that did 3 round-trips per edge
+        (SADD pipeline + SCARD pipeline + Cypher MERGE × N edges). Now:
+
+        1. Compute all ancestor pairs across ALL edges in memory (O(1) per
+           edge using ``ancestors_cache`` populated by bulk pre-compute).
+        2. ONE Redis SADD pipeline for all pairs across all edges.
+        3. ONE Redis SCARD pipeline for newly-added pairs only.
+        4. ONE (or a few) Cypher UNWIND+MERGE for all new pairs.
+
+        Returns (created_count, error_count).
+        Raises AggregationBatchAbort on sustained provider failure.
+        """
+        await self._ensure_connected()
+        members_key_prefix = f"{self._graph_name}:agg_members"
+
+        # Step 1: Compute all ancestor pairs across ALL edges in the batch.
+        # Each edge (s, t) with edge_id and edge_type generates pairs from
+        # s_chain × t_chain (excluding self-loops).
+        all_sadd_ops: list[tuple[str, str, str, str, str]] = []  # (redis_key, edge_id, s, t, edge_type)
+        for row in rows:
+            s_urn, t_urn, edge_type, edge_id = row[0], row[1], row[2], row[3]
+            if not edge_id:
+                edge_id = f"{s_urn}|{edge_type}|{t_urn}"
+
+            s_chain = [s_urn] + ancestors_cache.get(s_urn, [])
+            t_chain = [t_urn] + ancestors_cache.get(t_urn, [])
+
+            for s in s_chain:
+                for t in t_chain:
+                    if s != t:
+                        key = f"{members_key_prefix}:{s}:{t}"
+                        all_sadd_ops.append((key, edge_id, s, t, edge_type))
+
+        if not all_sadd_ops:
+            return 0, 0
+
+        # Step 2: ONE Redis SADD pipeline for all pairs.
+        # SADD returns 1 if the member was newly added, 0 if already present.
+        pipe = self._redis.pipeline(transaction=False)
+        for redis_key, edge_id_val, _, _, _ in all_sadd_ops:
+            pipe.execute_command("SADD", redis_key, edge_id_val)
+        sadd_results = await pipe.execute()
+
+        # Step 3: Collect newly-added pairs and their keys for SCARD.
+        # Deduplicate by (s, t) — multiple input edges may generate the
+        # same ancestor pair, but we only need one SCARD + one MERGE per pair.
+        new_pair_keys: dict[tuple[str, str], tuple[str, str]] = {}  # (s,t) -> (redis_key, edge_type)
+        for i, (redis_key, _, s, t, etype) in enumerate(all_sadd_ops):
+            if sadd_results[i] != 0:
+                pair = (s, t)
+                if pair not in new_pair_keys:
+                    new_pair_keys[pair] = (redis_key, etype)
+
+        if not new_pair_keys:
+            return 0, 0
+
+        # ONE Redis SCARD pipeline for all newly-added pairs.
+        ordered_pairs = list(new_pair_keys.items())
+        pipe = self._redis.pipeline(transaction=False)
+        for (_, _), (redis_key, _) in ordered_pairs:
+            pipe.execute_command("SCARD", redis_key)
+        scard_results = await pipe.execute()
+
+        # Step 4: Build merge batch with edge type lists per pair.
+        # Collect all distinct edge types per (s, t) pair so we can
+        # store them in sourceEdgeTypes in a single Cypher call.
+        pair_edge_types: dict[tuple[str, str], set[str]] = {}
+        for _, _, s, t, etype in all_sadd_ops:
+            if (s, t) in new_pair_keys:
+                pair_edge_types.setdefault((s, t), set()).add(etype)
+
+        merge_batch: list[dict[str, Any]] = []
+        for i, ((s, t), _) in enumerate(ordered_pairs):
+            weight = scard_results[i] if scard_results[i] else 1
+            etypes = list(pair_edge_types.get((s, t), set()))
+            merge_batch.append({
+                "s": s, "t": t, "w": int(weight), "et": etypes,
+            })
+
+        # Execute ONE Cypher UNWIND+MERGE per sub-batch.  The Cypher
+        # REDUCE accumulates all edge types into sourceEdgeTypes in a
+        # single pass — no per-edge-type iteration needed.
+        proj = self._proj
+        created = 0
+        for chunk_start in range(0, len(merge_batch), self._MERGE_SUB_BATCH_SIZE):
+            chunk = merge_batch[chunk_start:chunk_start + self._MERGE_SUB_BATCH_SIZE]
+            await proj.query(
+                "UNWIND $batch AS item "
+                "MERGE (s {urn: item.s}) "
+                "MERGE (t {urn: item.t}) "
+                "MERGE (s)-[r:AGGREGATED]->(t) "
+                "SET r.weight = item.w, "
+                "    r.latestUpdate = timestamp(), "
+                "    r.sourceEdgeTypes = REDUCE(acc = "
+                "      CASE WHEN r.sourceEdgeTypes IS NULL THEN [] "
+                "           ELSE r.sourceEdgeTypes END, "
+                "      et IN item.et | "
+                "      CASE WHEN et IN acc THEN acc "
+                "           ELSE acc + et END)",
+                params={"batch": chunk},
+            )
+            created += len(chunk)
+
+        return created, 0
 
     async def on_lineage_edge_written(
         self,
@@ -1216,6 +1382,9 @@ class FalkorDBProvider(GraphDataProvider):
         edge_type: str,
     ) -> int:
         """Materialize AGGREGATED edges when a lineage edge is written.
+
+        Used for real-time per-edge materialization on individual writes.
+        For bulk aggregation, use ``_materialize_edges_batched`` instead.
 
         Uses pre-computed ancestor chains instead of Cypher variable-length
         paths, eliminating the Cartesian product explosion.
@@ -1253,29 +1422,31 @@ class FalkorDBProvider(GraphDataProvider):
         if not pairs_to_check:
             return 0
 
-        # Pipeline: SADD for all pairs
-        try:
-            pipe = self._redis.pipeline(transaction=False)
-            for s_urn, t_urn in pairs_to_check:
-                member_key = f"{members_key_prefix}:{s_urn}:{t_urn}"
-                pipe.execute_command("SADD", member_key, edge_id)
-            sadd_results = await pipe.execute()
-        except Exception:
-            sadd_results = [1] * len(pairs_to_check)
+        # Pipeline: SADD for all pairs.
+        # Do NOT silently fallback on Redis failure — the previous
+        # ``except: sadd_results = [1] * len(...)`` treated every pair
+        # as "newly added" and set weight=1, producing incorrect
+        # AGGREGATED edges. Let the exception propagate so the caller
+        # can count it as an error and, on sustained failure, abort the
+        # job via AggregationBatchAbort.
+        pipe = self._redis.pipeline(transaction=False)
+        for s_urn, t_urn in pairs_to_check:
+            member_key = f"{members_key_prefix}:{s_urn}:{t_urn}"
+            pipe.execute_command("SADD", member_key, edge_id)
+        sadd_results = await pipe.execute()
 
         # Phase 2: SCARD pipeline for pairs that were newly added
         new_pairs = [(pairs_to_check[i], sadd_results[i]) for i in range(len(pairs_to_check)) if sadd_results[i] != 0]
         if not new_pairs:
             return 0
 
-        try:
-            pipe = self._redis.pipeline(transaction=False)
-            for (s_urn, t_urn), _ in new_pairs:
-                member_key = f"{members_key_prefix}:{s_urn}:{t_urn}"
-                pipe.execute_command("SCARD", member_key)
-            scard_results = await pipe.execute()
-        except Exception:
-            scard_results = [1] * len(new_pairs)
+        # Same rationale as SADD above — silent fallback to [1]*N
+        # produces incorrect weights. Let failures propagate.
+        pipe = self._redis.pipeline(transaction=False)
+        for (s_urn, t_urn), _ in new_pairs:
+            member_key = f"{members_key_prefix}:{s_urn}:{t_urn}"
+            pipe.execute_command("SCARD", member_key)
+        scard_results = await pipe.execute()
 
         # Phase 3: Single UNWIND+MERGE for all new pairs
         merge_batch = []
@@ -1283,26 +1454,29 @@ class FalkorDBProvider(GraphDataProvider):
             weight = scard_results[i] if scard_results[i] else 1
             merge_batch.append({"s": s_urn, "t": t_urn, "w": int(weight)})
 
+        # Do NOT catch exceptions here — the previous ``except: return 0``
+        # silently swallowed MERGE failures (including the "Batched
+        # AGGREGATED_MERGE failed: timeout" error). The caller in
+        # materialize_aggregated_edges_batch has a per-edge try/except
+        # that logs and increments the error counter; on sustained
+        # failure, AggregationBatchAbort aborts the job and preserves
+        # last_cursor for resume.
         proj = self._proj
-        try:
-            await proj.query(
-                "UNWIND $batch AS item "
-                "MERGE (s {urn: item.s}) "
-                "MERGE (t {urn: item.t}) "
-                "MERGE (s)-[r:AGGREGATED]->(t) "
-                "SET r.weight = item.w, "
-                "r.sourceEdgeTypes = CASE "
-                "  WHEN r.sourceEdgeTypes IS NULL THEN [$edgeType] "
-                "  WHEN NOT $edgeType IN r.sourceEdgeTypes "
-                "    THEN r.sourceEdgeTypes + $edgeType "
-                "  ELSE r.sourceEdgeTypes END, "
-                "r.latestUpdate = timestamp()",
-                params={"batch": merge_batch, "edgeType": edge_type},
-            )
-            return len(merge_batch)
-        except Exception as e:
-            logger.error(f"Batched AGGREGATED MERGE failed: {e}")
-            return 0
+        await proj.query(
+            "UNWIND $batch AS item "
+            "MERGE (s {urn: item.s}) "
+            "MERGE (t {urn: item.t}) "
+            "MERGE (s)-[r:AGGREGATED]->(t) "
+            "SET r.weight = item.w, "
+            "r.sourceEdgeTypes = CASE "
+            "  WHEN r.sourceEdgeTypes IS NULL THEN [$edgeType] "
+            "  WHEN NOT $edgeType IN r.sourceEdgeTypes "
+            "    THEN r.sourceEdgeTypes + $edgeType "
+            "  ELSE r.sourceEdgeTypes END, "
+            "r.latestUpdate = timestamp()",
+            params={"batch": merge_batch, "edgeType": edge_type},
+        )
+        return len(merge_batch)
 
     async def on_lineage_edge_deleted(
         self,
@@ -1560,8 +1734,10 @@ class FalkorDBProvider(GraphDataProvider):
         errors = 0
         created_count = 0
         current_cursor = last_cursor
+        batch_num = 0
 
         while True:
+            batch_num += 1
             # Cursor-based batch fetch — sorted composite key for stable ordering
             if current_cursor:
                 batch_cypher = (
@@ -1589,46 +1765,51 @@ class FalkorDBProvider(GraphDataProvider):
             # preserves ``last_cursor`` for crash-resume. The provider
             # is either back (resume succeeds) or still down (breaker
             # opens and triggers 503 upstream).
+            t0 = time.monotonic()
             res = await self._graph.ro_query(batch_cypher, params=batch_params)
             rows = res.result_set or []
+            t_fetch = (time.monotonic() - t0) * 1000
 
             if not rows:
                 break
 
-            # Pre-compute ancestor chains for all URNs in this batch
+            # Pre-compute ancestor chains for all URNs in this batch.
+            # The returned dict maps URN → ancestor list (ordered parent
+            # to root). We pass this cache directly to the batched
+            # materializer to avoid per-edge Redis HGET round-trips.
+            t0 = time.monotonic()
             all_urns = set()
             for row in rows:
                 all_urns.add(row[0])
                 all_urns.add(row[1])
-            await self._compute_and_store_ancestors_bulk(list(all_urns))
+            ancestors_cache = await self._compute_and_store_ancestors_bulk(list(all_urns))
+            t_ancestors = (time.monotonic() - t0) * 1000
 
-            # Now materialize each edge using cached ancestor chains. The
-            # returned count is the number of AGGREGATED graph edges
-            # actually created or weight-updated by this call — not the
-            # number of input edges processed. Sum these so the caller
-            # sees the real graph effect; a count of 0 means the Redis
-            # idempotency sets already recorded every ancestor pair for
-            # these input edges (e.g. after a repeat run that produced
-            # no new AGGREGATED state).
-            for row in rows:
-                s_urn, t_urn, edge_type, edge_id = row[0], row[1], row[2], row[3]
-                if not edge_id:
-                    edge_id = f"{s_urn}|{edge_type}|{t_urn}"
-                try:
-                    affected = await self.on_lineage_edge_written(
-                        s_urn, t_urn, edge_id, edge_type,
-                    )
-                    created_count += int(affected or 0)
-                except Exception as e:
-                    logger.error(f"Materialization error for {s_urn}->{t_urn}: {e}")
-                    errors += 1
+            # Batch-level materialization: all Redis pipelines + Cypher
+            # MERGE in 4 round-trips total, regardless of batch size.
+            # This replaces the previous per-edge loop that did 3 round-
+            # trips per edge (SADD + SCARD + MERGE × N edges).
+            t0 = time.monotonic()
+            batch_created, batch_errors = await self._materialize_edges_batched(
+                rows, ancestors_cache,
+            )
+            created_count += batch_created
+            errors += batch_errors
+
+            t_materialize = (time.monotonic() - t0) * 1000
 
             processed += len(rows)
             # Update cursor to last row's composite key
             last_row = rows[-1]
             current_cursor = f"{last_row[0]}|{last_row[1]}"
 
-            logger.info(f"Batch materialization: {processed}/{total} edges processed")
+            logger.info(
+                "Batch %d: %d/%d edges | fetch=%.1fms ancestors=%.1fms "
+                "materialize=%.1fms | created=%d errors=%d",
+                batch_num, processed, total,
+                t_fetch, t_ancestors, t_materialize,
+                created_count, errors,
+            )
 
             # Checkpoint via callback (for worker DB persistence)
             if progress_callback:

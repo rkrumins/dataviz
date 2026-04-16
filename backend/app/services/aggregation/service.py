@@ -7,6 +7,7 @@ Does NOT own: batch materialization (that's the Worker).
 
 This class has NO FastAPI imports. No HTTP concepts. Pure domain logic.
 """
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -726,6 +727,12 @@ class AggregationService:
                     job.error_message = None
                     job.updated_at = _now()
                     await session.commit()
+                    # Before dispatching, add delay based on retry count to prevent rapid-fire
+                    # re-dispatch when the provider is still down
+                    if job.retry_count and job.retry_count > 0:
+                        delay = min(5.0 * (2 ** (job.retry_count - 1)), 120.0)
+                        logger.info("Delaying recovery dispatch for job %s by %.0fs (retry_count=%d)", job.id, delay, job.retry_count)
+                        await asyncio.sleep(delay)
                     await self._dispatcher.dispatch(job.id)
                     count += 1
                     logger.info(
@@ -739,6 +746,12 @@ class AggregationService:
                     job.status = "pending"
                     job.updated_at = _now()
                     await session.commit()
+                    # Before dispatching, add delay based on retry count to prevent rapid-fire
+                    # re-dispatch when the provider is still down
+                    if job.retry_count and job.retry_count > 0:
+                        delay = min(5.0 * (2 ** (job.retry_count - 1)), 120.0)
+                        logger.info("Delaying recovery dispatch for job %s by %.0fs (retry_count=%d)", job.id, delay, job.retry_count)
+                        await asyncio.sleep(delay)
                     await self._dispatcher.dispatch(job.id)
                     count += 1
                     logger.info(

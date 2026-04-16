@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import view_repo
 from backend.app.auth.dependencies import get_optional_user
-from backend.app.registry.provider_registry import provider_registry
+from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
 from backend.common.models.management import (
     ViewCreateRequest,
