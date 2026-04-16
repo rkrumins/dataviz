@@ -41,21 +41,40 @@ class StructuredLoggingMiddleware(BaseHTTPMiddleware):
 
 def configure_json_logging(level: int = logging.INFO) -> None:
     """
-    Configure root logger to emit JSON records.
+    Configure root logger.  Uses human-readable format in dev mode,
+    JSON in production.  Reads LOG_LEVEL from the environment so
+    .env.dev can control verbosity.
     Call once during application startup.
     """
-    try:
-        from pythonjsonlogger import jsonlogger
+    import os
 
-        handler = logging.StreamHandler()
-        formatter = jsonlogger.JsonFormatter(
-            fmt="%(asctime)s %(levelname)s %(name)s %(message)s"
+    env_level = os.getenv("LOG_LEVEL", "").upper()
+    if env_level and hasattr(logging, env_level):
+        level = getattr(logging, env_level)
+
+    is_dev = os.getenv("SYNODIC_ROLE", "") in ("dev", "")
+
+    handler = logging.StreamHandler()
+
+    if is_dev:
+        # Human-readable logs for local development
+        formatter = logging.Formatter(
+            fmt="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+            datefmt="%H:%M:%S",
         )
         handler.setFormatter(formatter)
-        root = logging.getLogger()
-        root.handlers.clear()
-        root.addHandler(handler)
-        root.setLevel(level)
-    except ImportError:
-        # python-json-logger not installed — fall back to standard logging
-        logging.basicConfig(level=level)
+    else:
+        try:
+            from pythonjsonlogger import jsonlogger
+
+            formatter = jsonlogger.JsonFormatter(
+                fmt="%(asctime)s %(levelname)s %(name)s %(message)s"
+            )
+            handler.setFormatter(formatter)
+        except ImportError:
+            pass  # fall through to default formatter
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(level)
