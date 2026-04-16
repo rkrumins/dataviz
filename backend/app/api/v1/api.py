@@ -4,10 +4,20 @@ from .endpoints import (
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation,
 )
+from backend.auth_service.api.router import router as auth_session_router
 
 api_router = APIRouter()
 
 # ── Auth & user routers ───────────────────────────────────────────────
+# Two routers under /auth:
+#   * auth_session_router (auth_service): /login, /logout, /refresh, /me
+#     — cookie-based session lifecycle, owned by the extractable auth service.
+#   * auth.router (legacy): /signup, /forgot-password, /reset-password,
+#     /verify-invite — flows that don't issue session cookies. Will follow
+#     into the auth service in a later move.
+api_router.include_router(
+    auth_session_router, prefix="/auth", tags=["auth"],
+)
 api_router.include_router(
     auth.router, prefix="/auth", tags=["auth"],
 )

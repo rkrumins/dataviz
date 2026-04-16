@@ -7,6 +7,8 @@ which overrides auth and DB session.
 import pytest
 from httpx import AsyncClient
 
+from backend.app.registry.provider_registry import provider_registry
+
 
 # ── Helper ────────────────────────────────────────────────────────────
 
@@ -25,6 +27,13 @@ def _provider_payload(name: str = "Test Provider", provider_type: str = "falkord
 async def test_list_providers_empty(test_client: AsyncClient):
     """Initially the provider list is empty."""
     resp = await test_client.get("/api/v1/admin/providers")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_provider_status_endpoint_returns_empty_list(test_client: AsyncClient):
+    resp = await test_client.get("/api/v1/admin/providers/status")
+
     assert resp.status_code == 200
     assert resp.json() == []
 
@@ -161,3 +170,198 @@ async def test_provider_crud_roundtrip(test_client: AsyncClient):
     # Gone
     r = await test_client.get(f"/api/v1/admin/providers/{prov_id}")
     assert r.status_code == 404
+
+
+async def test_provider_status_endpoint_bounded_when_one_provider_hangs(
+    test_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Scenario 1 — one provider out of N hangs must NOT stall the others.
+
+    Concretely: three providers, one of which takes longer than the
+    endpoint's overall wall-clock. The endpoint must still return 200
+    within the overall timeout + a small slack window, the healthy
+    providers must be reported as ``ready``, and the hung one must be
+    reported as ``unknown`` (not cause a 5xx, not block the response).
+    """
+    import asyncio
+    import time
+
+    from backend.app.api.v1.endpoints import providers as providers_module
+
+    # Keep the test fast.
+    monkeypatch.setattr(providers_module, "_STATUS_PROBE_TIMEOUT_SECS", 0.5)
+    monkeypatch.setattr(providers_module, "_STATUS_OVERALL_TIMEOUT_SECS", 1.0)
+
+    create_resp_a = await test_client.post(
+        "/api/v1/admin/providers", json=_provider_payload("Fast-A"),
+    )
+    create_resp_b = await test_client.post(
+        "/api/v1/admin/providers", json=_provider_payload("Hung-B"),
+    )
+    create_resp_c = await test_client.post(
+        "/api/v1/admin/providers", json=_provider_payload("Fast-C"),
+    )
+    id_a = create_resp_a.json()["id"]
+    id_b = create_resp_b.json()["id"]
+    id_c = create_resp_c.json()["id"]
+
+    class _FastProvider:
+        async def get_stats(self):
+            return {"node_count": 1}
+
+    class _HungProvider:
+        async def get_stats(self):
+            # Block longer than the overall wall-clock; cancellation
+            # should interrupt us.
+            await asyncio.sleep(10)
+            return {"node_count": 0}
+
+    async def _fake_load(provider_id: str, asset_name):
+        if provider_id == id_b:
+            return _HungProvider()
+        return _FastProvider()
+
+    monkeypatch.setattr(providers_module, "_load_provider_for_outbound", _fake_load)
+
+    t0 = time.monotonic()
+    resp = await test_client.get("/api/v1/admin/providers/status")
+    elapsed = time.monotonic() - t0
+
+    assert resp.status_code == 200
+    body = resp.json()
+    by_id = {row["id"]: row for row in body}
+
+    # The hung provider must not have taken the whole response with it.
+    assert elapsed < 3.0, f"Response took {elapsed:.2f}s — bounded fan-out is broken"
+
+    assert by_id[id_a]["status"] == "ready"
+    assert by_id[id_c]["status"] == "ready"
+    assert by_id[id_b]["status"] in ("unknown", "unavailable"), by_id[id_b]
+    # ``unknown`` is the expected wall-clock outcome; ``unavailable`` is
+    # a legitimate alternative if cancellation surfaced as an error —
+    # either way it's NOT "ready" and NOT missing from the response.
+
+
+async def test_provider_status_endpoint_reports_unavailable_when_circuit_open(
+    test_client: AsyncClient,
+):
+    """When a provider's circuit breaker is open, /status must short-circuit
+    to 'unavailable' without probing the downstream. Replaces the previous
+    negative-cache test — pybreaker is now the authoritative 'recently
+    failed' state."""
+    from backend.common.adapters import CircuitBreakerProxy
+
+    create_resp = await test_client.post(
+        "/api/v1/admin/providers",
+        json=_provider_payload("Circuit Open"),
+    )
+    provider_id = create_resp.json()["id"]
+
+    class _StubTarget:
+        async def close(self) -> None:
+            return None
+
+    proxy = CircuitBreakerProxy(_StubTarget(), name=f"{provider_id}:test")
+    proxy.breaker.open()
+    provider_registry._providers[(provider_id, "")] = proxy  # type: ignore[assignment]
+
+    try:
+        resp = await test_client.get("/api/v1/admin/providers/status")
+    finally:
+        provider_registry._providers.pop((provider_id, ""), None)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["id"] == provider_id
+    assert body[0]["name"] == "Circuit Open"
+    assert body[0]["status"] == "unavailable"
+    assert body[0]["lastCheckedAt"] is not None
+    assert "circuit open" in body[0]["error"].lower()
+
+
+async def test_test_connection_checks_unsaved_provider_details_without_persisting(
+    test_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _HealthyProvider:
+        async def get_stats(self):
+            return {"node_count": 1}
+
+    created: dict[str, object] = {}
+
+    def _create_provider_instance(provider_type, host, port, asset_name, tls_enabled, creds):
+        created.update({
+            "provider_type": provider_type,
+            "host": host,
+            "port": port,
+            "asset_name": asset_name,
+            "tls_enabled": tls_enabled,
+            "creds": creds,
+        })
+        return _HealthyProvider()
+
+    monkeypatch.setattr(provider_registry, "_create_provider_instance", _create_provider_instance)
+
+    resp = await test_client.post(
+        "/api/v1/admin/providers/test-connection",
+        json={
+            "name": "Unsaved Provider",
+            "providerType": "falkordb",
+            "host": "graph.internal",
+            "port": 6379,
+            "tlsEnabled": True,
+            "credentials": {"username": "demo", "password": "secret"},
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+    assert resp.json()["latencyMs"] is not None
+    assert created == {
+        "provider_type": "falkordb",
+        "host": "graph.internal",
+        "port": 6379,
+        "asset_name": None,
+        "tls_enabled": True,
+        "creds": {"username": "demo", "password": "secret", "token": None},
+    }
+
+    providers_resp = await test_client.get("/api/v1/admin/providers")
+    assert providers_resp.status_code == 200
+    assert providers_resp.json() == []
+
+
+async def test_test_connection_returns_failure_payload_for_unreachable_provider(
+    test_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _BrokenProvider:
+        async def get_stats(self):
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(
+        provider_registry,
+        "_create_provider_instance",
+        lambda *args, **kwargs: _BrokenProvider(),
+    )
+
+    resp = await test_client.post(
+        "/api/v1/admin/providers/test-connection",
+        json={
+            "name": "Unreachable Provider",
+            "providerType": "falkordb",
+            "host": "graph.internal",
+            "port": 6379,
+            "tlsEnabled": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "success": False,
+        "latencyMs": None,
+        "error": "connection refused",
+        "providerVersion": None,
+    }

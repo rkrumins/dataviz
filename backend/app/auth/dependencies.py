@@ -1,112 +1,67 @@
 """
 FastAPI dependency functions for authentication and authorization.
 
-Usage in endpoints:
-    @router.get("/me")
-    async def me(user = Depends(get_current_user)):
-        ...
+These are thin adapters that read the session cookie off the incoming
+request and delegate to the application's ``IdentityService``. The
+service does all the work — these helpers only translate auth failure
+into the right HTTP status.
 
-    @router.get("/admin/users")
-    async def list_users(user = Depends(require_admin)):
-        ...
+When the auth service is extracted into its own process, only the
+``IdentityService`` implementation on ``app.state`` changes — every call
+site (``Depends(get_current_user)``, etc.) keeps working unchanged.
 """
+from __future__ import annotations
+
 import logging
 
-import jwt
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import Depends, HTTPException, Request, status
 
-from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import user_repo
-from .jwt import decode_token
+from backend.auth_service.cookies import read_access_cookie
+from backend.auth_service.interface import IdentityService, User
 
 logger = logging.getLogger(__name__)
 
-oauth2_scheme = OAuth2PasswordBearer(
-    tokenUrl="/api/v1/auth/login",
-    auto_error=False,
-)
+
+def _identity_service(request: Request) -> IdentityService:
+    svc = getattr(request.app.state, "identity_service", None)
+    if svc is None:
+        raise RuntimeError(
+            "IdentityService not configured on app.state — see backend/app/main.py"
+        )
+    return svc
 
 
-async def get_current_user(
-    token: str | None = Depends(oauth2_scheme),
-    session: AsyncSession = Depends(get_db_session),
-):
+async def get_current_user(request: Request) -> User:
+    """Return the authenticated user or raise 401.
+
+    The access token is read from the ``nx_access`` HttpOnly cookie set
+    by /api/v1/auth/login.
     """
-    Decode the JWT, load the user from the DB, and return the ORM object.
-    Raises 401 if the token is missing, invalid, expired, or the user is
-    not active.
-    """
-    if token is None:
+    user = await _identity_service(request).validate_session(read_access_cookie(request))
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    try:
-        payload = decode_token(token)
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    user_id: str | None = payload.get("sub")
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
-        )
-
-    user = await user_repo.get_user_by_id(session, user_id)
-    if user is None or user.deleted_at is not None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-        )
-    if user.status != "active":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is not active",
         )
     return user
 
 
-async def get_optional_user(
-    token: str | None = Depends(oauth2_scheme),
-    session: AsyncSession = Depends(get_db_session),
-):
+async def get_optional_user(request: Request) -> User | None:
+    """Like ``get_current_user`` but returns ``None`` instead of raising 401.
+
+    Useful for endpoints that work for both authenticated and anonymous
+    users (e.g. created_by attribution that defaults to a sentinel).
     """
-    Like get_current_user but returns None when no token is present,
-    instead of raising 401.  Useful for endpoints that work for both
-    authenticated and anonymous users.
-    """
-    if token is None:
-        return None
-    try:
-        return await get_current_user(token=token, session=session)
-    except HTTPException:
-        return None
+    return await _identity_service(request).validate_session(read_access_cookie(request))
 
 
-async def require_admin(
-    user=Depends(get_current_user),
-    session: AsyncSession = Depends(get_db_session),
-):
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    """Require that the authenticated user has the 'admin' role.
+
+    Raises 403 otherwise. The role is materialised on the User DTO at
+    session-validation time, so this check is purely in-memory.
     """
-    Require that the authenticated user has the 'admin' role.
-    Raises 403 otherwise.
-    """
-    roles = await user_repo.get_user_roles(session, user.id)
-    if "admin" not in roles:
+    if user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required",

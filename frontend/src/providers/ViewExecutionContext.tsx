@@ -23,6 +23,7 @@ import type { GraphProviderContextValueExtended } from './GraphProviderContext'
 import { useGraphProviderContext, ProviderOverride } from './GraphProviderContext'
 import { getOrCreateProvider, poolKey } from './providerPool'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useProviderStatus } from '@/store/providerStatus'
 import { useGraphSchema } from '@/hooks/useGraphSchema'
 import { useSchemaStore, convertBackendEntityType, convertBackendRelationshipType } from '@/store/schema'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
@@ -110,6 +111,15 @@ export function ViewExecutionProvider({
     return primaryDs?.id ?? null
   }, [dataSourceIdProp, workspaceId, globalCtx.workspaceId, globalActiveDataSourceId, workspaces])
 
+  const providerId = useMemo(() => {
+    const ws = workspaces.find((workspace) => workspace.id === workspaceId)
+    const dataSource = ws?.dataSources?.find((candidate) => candidate.id === dataSourceId)
+      ?? ws?.dataSources?.find((candidate) => candidate.isPrimary)
+      ?? ws?.dataSources?.[0]
+    return dataSource?.providerId ?? null
+  }, [workspaces, workspaceId, dataSourceId])
+  const providerStatus = useProviderStatus(providerId)
+
   // ── Decide whether to reuse the global provider or create a scoped one ──
   const scopeMatchesGlobal =
     workspaceId === globalCtx.workspaceId &&
@@ -144,6 +154,11 @@ export function ViewExecutionProvider({
       setProviderError(null)
       return
     }
+    if (providerStatus?.status === 'unavailable') {
+      setProviderReady(true)
+      setProviderError(new Error(providerStatus.error ?? 'Provider unavailable'))
+      return
+    }
     let cancelled = false
     setProviderReady(false)
     setProviderError(null)
@@ -156,13 +171,14 @@ export function ViewExecutionProvider({
         }
       })
     return () => { cancelled = true }
-  }, [scopedProvider, scopeMatchesGlobal, globalCtx.providerReady])
+  }, [scopedProvider, scopeMatchesGlobal, globalCtx.providerReady, providerStatus])
 
   // ── Build the overridden provider context value ──
   const providerContextValue = useMemo<GraphProviderContextValueExtended>(() => ({
     provider: scopedProvider,
     isLoading: false,
     error: providerError,
+    scopeKind: 'ready',
     workspaceId,
     dataSourceId,
     providerReady,

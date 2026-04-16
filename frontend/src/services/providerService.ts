@@ -78,6 +78,14 @@ export interface ProviderResponse {
     updatedAt: string
 }
 
+export interface ProviderStatusResponse {
+    id: string
+    name: string
+    status: 'ready' | 'unavailable' | 'unknown'
+    lastCheckedAt: string | null
+    error?: string
+}
+
 export interface SchemaDiscoveryResult {
     labels: string[]
     relationshipTypes: string[]
@@ -120,7 +128,7 @@ function friendlyError(raw: string): string {
     return detail
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+async function request<T>(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
         headers: { 'Content-Type': 'application/json', ...init?.headers },
@@ -138,6 +146,10 @@ export const providerService = {
         return request<ProviderResponse[]>(ADMIN_API)
     },
 
+    listStatus(): Promise<ProviderStatusResponse[]> {
+        return request<ProviderStatusResponse[]>(`${ADMIN_API}/status`)
+    },
+
     get(id: string): Promise<ProviderResponse> {
         return request<ProviderResponse>(`${ADMIN_API}/${id}`)
     },
@@ -147,6 +159,22 @@ export const providerService = {
             method: 'POST',
             body: JSON.stringify(req),
         })
+    },
+
+    async testConnection(
+        req: ProviderCreateRequest,
+        opts?: { signal?: AbortSignal; timeoutMs?: number },
+    ): Promise<ConnectionTestResult> {
+        const result = await request<ConnectionTestResult>(`${ADMIN_API}/test-connection`, {
+            method: 'POST',
+            body: JSON.stringify(req),
+            ...(opts?.signal ? { signal: opts.signal } : {}),
+            ...(opts?.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+        })
+        if (!result.success && result.error) {
+            result.error = friendlyError(result.error)
+        }
+        return result
     },
 
     update(id: string, req: ProviderUpdateRequest): Promise<ProviderResponse> {
@@ -162,10 +190,14 @@ export const providerService = {
 
     async test(
         id: string,
-        opts?: { signal?: AbortSignal; timeoutMs?: number },
+        opts?: { signal?: AbortSignal; timeoutMs?: number; fresh?: boolean },
     ): Promise<ConnectionTestResult> {
+        // `fresh=true` bypasses the 10s server-side cache. Use it on
+        // explicit user clicks so a dead/recovered provider is reflected
+        // immediately instead of returning a cached prior result.
+        const qs = opts?.fresh ? '?fresh=true' : ''
         const result = await request<ConnectionTestResult>(
-            `${ADMIN_API}/${id}/test`,
+            `${ADMIN_API}/${id}/test${qs}`,
             {
                 method: 'POST',
                 ...(opts?.signal ? { signal: opts.signal } : {}),

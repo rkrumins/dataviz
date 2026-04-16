@@ -31,12 +31,9 @@ class AssignmentEngine:
         eliminates the intermittent ProviderConfigurationError that occurred
         when the ontology cache was cold.
 
-        Falls back to the global singleton only for tests / legacy callers.
         """
         if engine is None:
-            # Lazy import avoids a circular import at module level.
-            from backend.app.services.context_engine import context_engine as _singleton
-            engine = _singleton
+            raise ValueError("compute_assignments requires an explicit ContextEngine")
 
         start_time = time.time()
 

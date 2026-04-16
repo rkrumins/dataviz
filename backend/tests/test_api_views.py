@@ -220,7 +220,10 @@ async def test_update_visibility_enterprise(test_client: AsyncClient):
 
 
 async def test_update_visibility_invalid(test_client: AsyncClient):
-    """Invalid visibility value returns 422."""
+    """Invalid visibility value returns 422. ``public`` is explicitly
+    rejected because it was the old whitelist value before the rename to
+    ``enterprise`` (migration 0006); guarding against accidental
+    regression of the rename."""
     ws_id = await _create_workspace(test_client)
     created = await _create_view(test_client, ws_id, "Bad Vis")
     view_id = created["id"]

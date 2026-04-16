@@ -10,7 +10,6 @@ from ..models.graph import (
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
     CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult, TopLevelNodesResult,
 )
-import os
 
 from ..providers.base import GraphDataProvider
 
@@ -19,20 +18,6 @@ if TYPE_CHECKING:
     from ..ontology.protocols import OntologyServiceProtocol
 
 logger = logging.getLogger(__name__)
-
-
-def _create_provider() -> GraphDataProvider:
-    """Create graph provider based on GRAPH_PROVIDER env var."""
-    provider_name = os.getenv("GRAPH_PROVIDER", "falkordb").lower()
-    if provider_name == "falkordb":
-        from ..providers.falkordb_provider import FalkorDBProvider
-        return FalkorDBProvider(
-            host=os.getenv("FALKORDB_HOST", "localhost"),
-            port=int(os.getenv("FALKORDB_PORT", "6379")),
-            graph_name=os.getenv("FALKORDB_GRAPH_NAME", "nexus_lineage"),
-            seed_file=os.getenv("FALKORDB_SEED_FILE"),
-        )
-    raise ValueError(f"Unknown GRAPH_PROVIDER: {provider_name!r}")
 
 
 # Granularity is now expressed as an entity type ID string (e.g. "dataset", "term").
@@ -76,6 +61,20 @@ class ContextEngine:
         """
         Create a ContextEngine scoped to a workspace data source.
         If data_source_id is given, uses that specific source; otherwise the primary.
+
+        Ontology is resolved and pushed into the provider *eagerly* so
+        that endpoints which call ``engine.provider.*`` directly (e.g.
+        ``POST /nodes/query`` bypassing ``engine.get_nodes``) observe a
+        correctly configured provider. Without eager injection, those
+        direct call sites hit ``ProviderConfigurationError`` on the
+        first query after the provider is instantiated because the
+        provider's ``_resolved_containment_types_set`` flag is only set
+        from inside ``_resolve_ontology()``.
+
+        Resolution failure is NOT fatal — the engine still returns so
+        the endpoint can surface a cleaner error (and ``_resolve_ontology``
+        will retry on subsequent calls once the cache TTL rolls, or when
+        the engine is rebuilt on the next request).
         """
         from ..ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
         from ..ontology.service import LocalOntologyService
@@ -89,6 +88,24 @@ class ContextEngine:
         engine._workspace_id = workspace_id
         engine._data_source_id = data_source_id
         engine._db_session = session
+
+        # Eagerly resolve ontology so the provider is configured before
+        # any request handler touches ``engine.provider`` directly.
+        # ``_resolve_ontology`` handles provider-introspection failure
+        # internally (graceful fallback to DB ontology + empty
+        # introspection); we only need to catch catastrophic errors here
+        # so engine construction can still succeed for diagnostics
+        # (status endpoints, provider listing, etc.).
+        try:
+            await engine._resolve_ontology()
+        except Exception as exc:
+            logger.warning(
+                "Eager ontology resolution failed for workspace=%s ds=%s: %s — "
+                "provider will remain unconfigured; endpoints that call "
+                "engine.provider.* directly may fail until the next request.",
+                workspace_id, data_source_id, exc,
+            )
+
         return engine
 
     # ------------------------------------------------------------------ #
@@ -104,8 +121,9 @@ class ContextEngine:
     ) -> "ContextEngine":
         """
         Create a ContextEngine backed by the specified connection.
-        When connection_id is None, uses the primary connection from registry.
         """
+        if connection_id is None:
+            raise ValueError("connection_id is required")
         provider = await registry.get_provider(connection_id, session)
         engine = cls(provider=provider)
         engine._connection_id = connection_id
@@ -1354,5 +1372,3 @@ class ContextEngine:
             ))
         return sorted(result, key=lambda o: (not o.allowed, o.edge_type))
 
-# Singleton instance - provider selected via GRAPH_PROVIDER env (mock | falkordb)
-context_engine = ContextEngine(provider=_create_provider())

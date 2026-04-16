@@ -1,8 +1,6 @@
 import logging
 from typing import List, Optional, Set, Dict, Any
 from ..providers.falkordb_provider import FalkorDBProvider
-# Avoid circular import if possible, but context_engine is in same package
-from .context_engine import context_engine
 
 logger = logging.getLogger(__name__)
 
@@ -34,17 +32,8 @@ class LineageAggregator:
         # We will implement this in the provider or a script
         pass
 
-# Singleton instance
-# Dependency injection: we need the specific FalkorDB provider instance
-# For now, we assume context_engine has it, or we instantiate it here.
-# Since ContextEngine initializes the provider, we should probably access it via ContextEngine or separate DI.
-# For simplicity in this codebase, we'll instantiate if needed or grab from a registry if available.
-
-def get_aggregator():
-    # Helper to get aggregator with the active provider
-    if isinstance(context_engine.provider, FalkorDBProvider):
-        return LineageAggregator(context_engine.provider)
-    else:
-        # If mock provider, return a dummy or the mock provider wrapper if it supports it
-        # The user specifically asked for FalkorDB implementation
-        return None
+def get_aggregator(provider: Optional[FalkorDBProvider]):
+    """Return an aggregator for an explicit FalkorDB provider instance."""
+    if isinstance(provider, FalkorDBProvider):
+        return LineageAggregator(provider)
+    return None

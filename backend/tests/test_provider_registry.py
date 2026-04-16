@@ -7,26 +7,17 @@ a database session (get_provider_for_workspace, etc.) are not tested here.
 import pytest
 
 from backend.app.registry.provider_registry import ProviderRegistry
-from backend.common.interfaces.provider import GraphDataProvider
 
 
 # ---------------------------------------------------------------------------
 # Minimal stub for cache tests (no real connection needed)
 # ---------------------------------------------------------------------------
 
-class _StubProvider(GraphDataProvider):
-    """Lightweight stub that satisfies the GraphDataProvider interface."""
-
-    @property
-    def name(self) -> str:
-        return "stub"
+class _StubProvider:
+    """Lightweight stub used only for cache bookkeeping tests."""
 
     async def close(self) -> None:
         pass
-
-    # All other abstract methods are left unimplemented — these tests
-    # only exercise cache management, not provider behaviour.
-
 
 # ---------------------------------------------------------------------------
 # Tests — _create_provider_instance
@@ -117,18 +108,22 @@ class TestMergeExtraConfig:
 
 
 class TestCacheBehavior:
+    async def test_get_provider_requires_connection_id(self):
+        reg = ProviderRegistry()
+
+        with pytest.raises(ValueError, match="connection_id is required"):
+            await reg.get_provider(None, session=None)
+
     async def test_evict_all_clears_all_caches(self):
         reg = ProviderRegistry()
         stub = _StubProvider()
         reg._providers[("prov1", "graph1")] = stub
         reg._legacy_providers["conn1"] = stub
-        reg._default_ws_id = "ws_123"
 
         await reg.evict_all()
 
         assert len(reg._providers) == 0
         assert len(reg._legacy_providers) == 0
-        assert reg._default_ws_id is None
 
     async def test_evict_data_source_removes_specific_key(self):
         reg = ProviderRegistry()

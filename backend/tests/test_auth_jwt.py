@@ -1,10 +1,16 @@
 """
-Tests for backend.app.auth.jwt — create_access_token / decode_token round-trip.
+Tests for the auth-service token helpers — create_access_token /
+decode_token round-trip.
+
+Imports go through ``backend.app.auth.jwt`` (the compatibility shim) so
+the tests double as a regression check that the shim still re-exports
+the right symbols. The expiry monkeypatch targets the canonical module
+where the constant actually lives.
 """
 import jwt as pyjwt
 
-from backend.app.auth import jwt as jwt_mod
 from backend.app.auth.jwt import create_access_token, decode_token
+from backend.auth_service.core import tokens as tokens_mod
 
 
 class TestCreateAndDecodeToken:
@@ -31,7 +37,7 @@ class TestCreateAndDecodeToken:
 
     def test_expired_token_raises(self, monkeypatch):
         # Force expiry to be in the past by setting a negative-equivalent expiry
-        monkeypatch.setattr(jwt_mod, "JWT_EXPIRY_MINUTES", -1)
+        monkeypatch.setattr(tokens_mod, "JWT_EXPIRY_MINUTES", -1)
         token = create_access_token("usr_exp", "exp@test.com", "viewer")
         try:
             decode_token(token)

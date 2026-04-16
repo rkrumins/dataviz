@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,16 +9,28 @@ from fastapi.middleware.gzip import GZipMiddleware
 from starlette.responses import JSONResponse
 
 from .api.v1.api import api_router
-from .db.engine import init_db, close_db, get_async_session
+from .db.engine import init_db, close_db, get_async_session, get_jobs_session
 from .db.seed_templates import seed_templates
+from .db.repositories import user_repo
+from .db.repositories.refresh_token_repo import make_refresh_store
 from .middleware.request_id import RequestIdMiddleware
 from .middleware.logging import StructuredLoggingMiddleware, configure_json_logging
 from .middleware.security_headers import SecurityHeadersMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from .registry.provider_registry import provider_registry
+from backend.auth_service.csrf import CSRFMiddleware
+from backend.auth_service.providers import LocalIdentityProvider, register_provider
+from backend.auth_service.service import LocalIdentityService
 
 logger = logging.getLogger(__name__)
+
+try:
+    from redis.exceptions import ConnectionError as _RedisConnectionError
+    from redis.exceptions import TimeoutError as _RedisTimeoutError
+except Exception:  # pragma: no cover - redis is part of runtime deps
+    _RedisConnectionError = ConnectionError
+    _RedisTimeoutError = TimeoutError
 
 
 # ------------------------------------------------------------------ #
@@ -110,14 +121,35 @@ async def lifespan(_app: FastAPI):
         "admin wizard handles production onboarding."
     )
 
-    # 4. Wire up the aggregation service
+    # 4. Wire up the auth service. The IdentityService is the single
+    #    boundary every consumer crosses; today it's an in-process
+    #    LocalIdentityService, tomorrow (post-extraction) a remote HTTP
+    #    client implementing the same protocol.
+    register_provider("local", LocalIdentityProvider())
+
+    async def _emit_user_event(session, event_type: str, payload: dict) -> None:
+        await user_repo.create_outbox_event(session, event_type=event_type, payload=payload)
+
+    _app.state.identity_service = LocalIdentityService(
+        session_factory=get_async_session,
+        user_repo=user_repo,
+        refresh_store_factory=make_refresh_store,
+        outbox_emit=_emit_user_event,
+    )
+    logger.info("Auth service initialised (provider=local)")
+
+    # 5. Wire up the aggregation service
     try:
         from .services.aggregation import (
             AggregationService, AggregationWorker,
             InProcessDispatcher, AggregationScheduler,
         )
 
-        agg_worker = AggregationWorker(get_async_session, provider_registry)
+        # Aggregation subsystem uses the JOBS pool exclusively (plan Gap 3):
+        # checkpoint commits every ~2s cannot drain the WEB pool that
+        # serves user requests. Scheduler's periodic drift scan and the
+        # startup recovery helper share the same isolation.
+        agg_worker = AggregationWorker(get_jobs_session, provider_registry)
         agg_dispatcher = InProcessDispatcher(agg_worker)
 
         # Get ontology service reference for monolith-mode resolution
@@ -134,10 +166,10 @@ async def lifespan(_app: FastAPI):
         agg_service = AggregationService(
             dispatcher=agg_dispatcher,
             registry=provider_registry,
-            session_factory=get_async_session,
+            session_factory=get_jobs_session,
             ontology_service=ontology_svc,
         )
-        agg_scheduler = AggregationScheduler(get_async_session, provider_registry)
+        agg_scheduler = AggregationScheduler(get_jobs_session, provider_registry)
 
         # Register as app state for endpoint access
         _app.state.aggregation_service = agg_service
@@ -195,15 +227,63 @@ async def _db_operational_error_handler(_request, exc):
         content={"detail": "Management database is temporarily unavailable. Please try again."},
     )
 
-# Provider connectivity failures — return 503 (Service Unavailable) so the
-# frontend can distinguish provider-down (503) from bugs (500) and timeouts (504).
-@app.exception_handler(ConnectionError)
-async def _connection_error_handler(_request, exc):
-    logger.warning("Provider connection error: %s", exc)
+def _provider_unavailable_payload(request, exc) -> dict:
+    provider_id = request.query_params.get("connectionId")
+    return {
+        "detail": {
+            "code": "PROVIDER_UNAVAILABLE",
+            "providerId": provider_id,
+            "reason": str(exc),
+        }
+    }
+
+
+async def _provider_error_handler(request, exc):
+    logger.warning("Provider connectivity error on %s: %s", request.url.path, exc)
+    if "/graph" in request.url.path:
+        return JSONResponse(
+            status_code=503,
+            content=_provider_unavailable_payload(request, exc),
+        )
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+# Primary handler for provider failures: raised by the CircuitBreakerProxy
+# around every graph-provider instance. Carries a retry-after hint and a
+# sanitized reason (no redis.exceptions details leak to the client). When
+# the breaker is open, this handler fires in <1ms with no network I/O.
+from backend.common.adapters import ProviderUnavailable as _ProviderUnavailable
+
+
+@app.exception_handler(_ProviderUnavailable)
+async def _provider_unavailable_handler(request, exc: _ProviderUnavailable):
+    logger.warning(
+        "Provider unavailable on %s: provider=%s reason=%s retry_after=%ds",
+        request.url.path, exc.provider_name, exc.reason, exc.retry_after_seconds,
+    )
     return JSONResponse(
         status_code=503,
-        content={"detail": str(exc)},
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "PROVIDER_UNAVAILABLE",
+                "providerName": exc.provider_name,
+                "reason": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
     )
+
+
+# Fallback handlers for raw connectivity errors that bypass the breaker
+# (e.g. errors raised during provider instantiation, before the proxy is in
+# place). In steady state these should be rare because every cached provider
+# is breaker-wrapped.
+app.add_exception_handler(ConnectionError, _provider_error_handler)
+app.add_exception_handler(OSError, _provider_error_handler)
+app.add_exception_handler(asyncio.TimeoutError, _provider_error_handler)
+app.add_exception_handler(_RedisConnectionError, _provider_error_handler)
+app.add_exception_handler(_RedisTimeoutError, _provider_error_handler)
 
 # ------------------------------------------------------------------ #
 # Timeout middleware (raw ASGI — avoids BaseHTTPMiddleware streaming   #
@@ -251,7 +331,7 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token"],
 )
 
 # GZip compression for responses > 1 KB
@@ -266,11 +346,21 @@ app.add_middleware(RequestIdMiddleware)
 # Security headers (X-Content-Type-Options, X-Frame-Options, CSP, HSTS, etc.)
 app.add_middleware(SecurityHeadersMiddleware)
 
+# CSRF double-submit. Innermost so it runs closest to the route — the
+# preceding middleware (CORS, security headers) must complete first so
+# that browser preflight checks succeed before we enforce the CSRF rule.
+app.add_middleware(CSRFMiddleware)
+
 # ------------------------------------------------------------------ #
 # Routers                                                              #
 # ------------------------------------------------------------------ #
 
 app.include_router(api_router, prefix="/api/v1")
+
+# Internal pool-pressure metrics (Phase 2.5 §2.5.3) — opt-in via
+# INTERNAL_METRICS_ENABLED=true. Restrict at ingress in production.
+from .middleware.db_metrics import router as db_metrics_router  # noqa: E402
+app.include_router(db_metrics_router)
 
 
 # ------------------------------------------------------------------ #
@@ -281,7 +371,8 @@ app.include_router(api_router, prefix="/api/v1")
 @app.get("/api/v1/health", tags=["health"], include_in_schema=False)
 async def health_check():
     """
-    Enhanced health check — returns management DB + primary provider status.
+    Management-plane health check — only the management DB is required for the
+    application to be considered healthy.
     """
     from .db.engine import get_engine
     from sqlalchemy import text
@@ -296,33 +387,7 @@ async def health_check():
         result["dependencies"]["management_db"] = "healthy"
     except Exception as exc:
         result["dependencies"]["management_db"] = f"unhealthy: {exc}"
-        result["status"] = "degraded"
-
-    # Primary provider ping (with timeout so a hung provider doesn't block the
-    # entire health endpoint — which in turn blocks the frontend login flow).
-    try:
-        async with get_async_session() as session:
-            primary_id = await asyncio.wait_for(
-                provider_registry._resolve_primary_id(session), timeout=5
-            )
-            provider = await asyncio.wait_for(
-                provider_registry.get_provider(primary_id, session), timeout=5
-            )
-            t0 = time.perf_counter()
-            await asyncio.wait_for(provider.get_stats(), timeout=10)
-            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-            result["dependencies"]["primary_provider"] = {
-                "id": primary_id,
-                "type": provider.name,
-                "status": "healthy",
-                "latencyMs": latency_ms,
-            }
-    except asyncio.TimeoutError:
-        result["dependencies"]["primary_provider"] = {"status": "unhealthy: timeout"}
-        result["status"] = "degraded"
-    except Exception as exc:
-        result["dependencies"]["primary_provider"] = {"status": f"unhealthy: {exc}"}
-        result["status"] = "degraded"
+        result["status"] = "unhealthy"
 
     return result
 
@@ -333,44 +398,108 @@ async def provider_health_check():
     Per-workspace provider health — returns status for each data source.
     The frontend uses this to show health badges and warn users before
     navigating to a workspace with a dead provider.
+
+    Phase 2 §2.4: bounded fan-out so one hung provider can't take the
+    whole endpoint down. Concurrency cap of 5, per-probe timeout of 4s,
+    overall wall-clock cap of 12s. Probes that exceed the wall clock are
+    returned as `{"status": "unknown"}` — the endpoint is always 200 OK
+    with partial results, never a 5xx because of slow upstreams.
     """
     from .db.repositories.workspace_repo import list_workspaces
     from .db.repositories.data_source_repo import list_data_sources
 
+    PROBE_CONCURRENCY = 5
+    PER_PROBE_TIMEOUT = 4.0     # seconds — tightened from 5s
+    OVERALL_TIMEOUT = 12.0      # seconds — partial results returned past this
+
     providers: dict = {}
 
     try:
-        async with get_async_session() as session:
+        # Resilience: enumerate data sources under a SHORT session, then
+        # close it before spawning concurrent probes. Each probe opens its
+        # own short session for its DB portion — SQLAlchemy AsyncSession
+        # is not concurrency-safe, so sharing one session across the fan-
+        # out could silently corrupt state or deadlock under a slow
+        # provider. Closing the outer session first also keeps the
+        # management-DB pool drained during the outbound probe storm.
+        # READONLY pool (plan Gap 3): this endpoint is polled by K8s
+        # readiness + the UI banner and only reads — isolating it from
+        # the WEB pool means high-frequency probes cannot contend with
+        # request-handler writes.
+        from .db.engine import get_readonly_session
+        ds_meta: list[tuple[str, str, str]] = []
+        async with get_readonly_session() as session:
             workspaces = await list_workspaces(session)
+            for ws in workspaces:
+                sources = await list_data_sources(session, ws.id)
+                for ds in sources:
+                    ds_meta.append((ws.id, ds.id, ds.provider_id))
 
-            # Build tasks for concurrent health checks
-            async def check_provider(ws_id: str, ds_id: str, ds_provider_id: str):
-                key = f"{ws_id}:{ds_id}"
+        if not ds_meta:
+            # Explicit "nothing configured" signal so the frontend can
+            # render a first-run CTA instead of interpreting ``{}`` as
+            # "all healthy" (which would be wrong for both observability
+            # dashboards and new-install UX).
+            return {
+                "providers": {},
+                "dataSourceCount": 0,
+                "configured": False,
+            }
+
+        sem = asyncio.Semaphore(PROBE_CONCURRENCY)
+
+        async def check_provider(ws_id: str, ds_id: str, ds_provider_id: str):
+            key = f"{ws_id}:{ds_id}"
+            async with sem:
                 try:
-                    provider = await asyncio.wait_for(
-                        provider_registry.get_provider_for_workspace(ws_id, session, ds_id),
-                        timeout=5,
-                    )
-                    await asyncio.wait_for(provider.get_stats(), timeout=5)
+                    # Each probe owns its own session for the DB portion of
+                    # get_provider_for_workspace; the outbound provider call
+                    # that follows does NOT hold a session. READONLY pool —
+                    # the probe only reads provider config from Postgres.
+                    async with get_readonly_session() as probe_session:
+                        provider = await asyncio.wait_for(
+                            provider_registry.get_provider_for_workspace(
+                                ws_id, probe_session, ds_id,
+                            ),
+                            timeout=PER_PROBE_TIMEOUT,
+                        )
+                    await asyncio.wait_for(provider.get_stats(), timeout=PER_PROBE_TIMEOUT)
                     return key, {"status": "healthy", "providerId": ds_provider_id}
                 except Exception as exc:
                     return key, {"status": "unhealthy", "error": str(exc)[:200]}
 
-            tasks = []
-            for ws in workspaces:
-                sources = await list_data_sources(session, ws.id)
-                for ds in sources:
-                    tasks.append(check_provider(ws.id, ds.id, ds.provider_id))
+        tasks = [
+            asyncio.create_task(check_provider(ws_id, ds_id, prov_id))
+            for ws_id, ds_id, prov_id in ds_meta
+        ]
+        done, pending = await asyncio.wait(tasks, timeout=OVERALL_TIMEOUT)
 
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for item in results:
-                    if isinstance(item, Exception):
-                        continue
-                    key, status = item
-                    providers[key] = status
+        for task in done:
+            try:
+                key, status = task.result()
+                providers[key] = status
+            except Exception:
+                # Per-task failure already encoded by check_provider's
+                # try/except — anything reaching here is unexpected.
+                continue
+
+        # Probes that exceeded the wall clock — cancel and surface
+        # as "unknown" so the UI can distinguish "broken" from
+        # "we don't know yet".
+        for i, task in enumerate(tasks):
+            if task in pending:
+                task.cancel()
+                ws_id, ds_id, _ = ds_meta[i]
+                providers[f"{ws_id}:{ds_id}"] = {
+                    "status": "unknown",
+                    "error": f"Probe exceeded {OVERALL_TIMEOUT:.0f}s wall clock",
+                }
 
     except Exception as exc:
         return {"providers": {}, "error": str(exc)[:200]}
 
-    return {"providers": providers}
+    return {
+        "providers": providers,
+        "dataSourceCount": len(ds_meta),
+        "configured": True,
+    }

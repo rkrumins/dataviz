@@ -17,7 +17,6 @@ from backend.app.ontology.resolver import (
     validate_ontology,
 )
 from backend.app.ontology.service import LocalOntologyService
-from backend.app.services.context_engine import context_engine as _legacy_engine
 from backend.common.models.management import (
     OntologyCreateRequest,
     OntologyUpdateRequest,
@@ -37,21 +36,8 @@ router = APIRouter()
 
 
 def _invalidate_ontology_caches() -> None:
-    """Clear the legacy singleton ContextEngine's resolved-ontology cache.
-
-    Per-request workspace engines are short-lived and re-resolve the
-    ontology on each request, so they are self-correcting after a mutation.
-    The legacy module-level ``context_engine`` singleton is the only place
-    that caches a ResolvedOntology across requests (TTL 300s), so it must
-    be invalidated explicitly whenever an ontology definition changes.
-
-    Swallows exceptions because cache invalidation must never break a
-    successful mutation — stale reads are recoverable, lost writes aren't.
-    """
-    try:
-        _legacy_engine.invalidate_ontology_cache()
-    except Exception:  # noqa: BLE001 — defensive: never break mutation flow
-        pass
+    """Kept for call-site stability; per-request engines no longer need invalidation."""
+    return None
 
 
 @router.get("", response_model=List[OntologyDefinitionResponse])

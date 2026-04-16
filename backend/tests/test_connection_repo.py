@@ -49,7 +49,8 @@ async def test_create_connection_with_make_primary(db_session):
     req = _make_create_req(name="primary-conn")
     resp = await connection_repo.create_connection(db_session, req, make_primary=True)
 
-    assert resp.is_primary is True
+    # Legacy "primary connection" semantics are removed; the flag is ignored.
+    assert resp.is_primary is False
 
 
 # ── get ───────────────────────────────────────────────────────────────
@@ -120,44 +121,6 @@ async def test_delete_connection_success(db_session):
 async def test_delete_connection_returns_false_for_missing(db_session):
     result = await connection_repo.delete_connection(db_session, "conn_ghost")
     assert result is False
-
-
-# ── set_primary / get_primary ─────────────────────────────────────────
-
-async def test_set_primary_demotes_others(db_session):
-    c1 = await connection_repo.create_connection(
-        db_session, _make_create_req(name="c1"), make_primary=True
-    )
-    c2 = await connection_repo.create_connection(
-        db_session, _make_create_req(name="c2")
-    )
-
-    result = await connection_repo.set_primary(db_session, c2.id)
-    assert result is True
-
-    fetched_c1 = await connection_repo.get_connection(db_session, c1.id)
-    fetched_c2 = await connection_repo.get_connection(db_session, c2.id)
-    assert fetched_c1.is_primary is False
-    assert fetched_c2.is_primary is True
-
-
-async def test_get_primary_connection(db_session):
-    await connection_repo.create_connection(
-        db_session, _make_create_req(name="not-primary")
-    )
-    primary = await connection_repo.create_connection(
-        db_session, _make_create_req(name="primary"), make_primary=True
-    )
-
-    result = await connection_repo.get_primary_connection(db_session)
-    assert result is not None
-    assert result.id == primary.id
-
-
-async def test_get_primary_connection_returns_none_when_no_primary(db_session):
-    await connection_repo.create_connection(db_session, _make_create_req())
-    result = await connection_repo.get_primary_connection(db_session)
-    assert result is None
 
 
 # ── credentials ───────────────────────────────────────────────────────
