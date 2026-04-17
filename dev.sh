@@ -91,7 +91,8 @@ reset_infra() {
 # ── Service runners ─────────────────────────────────────────────────
 
 run_viz() {
-    log "Starting ${BLUE}viz-service${NC} on port 8000 (hot-reload)..."
+    local port="${VIZ_PORT:-8000}"
+    log "Starting ${BLUE}viz-service${NC} on port ${port} (hot-reload)..."
     echo -e "  Mode: ${YELLOW}single-process dev${NC} (aggregation runs in-process)"
     echo ""
 
@@ -104,8 +105,9 @@ run_viz() {
     exec python -m uvicorn backend.app.main:app \
         --reload \
         --host 0.0.0.0 \
-        --port 8000 \
-        --reload-dir backend
+        --port "$port" \
+        --reload-dir backend \
+        --log-level "$(echo "${LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')"
 }
 
 run_viz_proxy() {
@@ -123,7 +125,8 @@ run_viz_proxy() {
         --reload \
         --host 0.0.0.0 \
         --port 8000 \
-        --reload-dir backend
+        --reload-dir backend \
+        --log-level "$(echo "${LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')"
 }
 
 run_controlplane() {
