@@ -318,7 +318,6 @@ docker compose down
 
 # Wipe all data and start fresh
 docker compose down -v
-docker compose up --build
 ```
 
 | Service | URL |
