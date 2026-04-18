@@ -394,7 +394,7 @@ app.add_exception_handler(_RedisTimeoutError, _provider_error_handler)
 
 class _TimeoutMiddleware:
     """ASGI middleware: abort any HTTP request exceeding *timeout* seconds."""
-    def __init__(self, app, timeout: float = 30.0):
+    def __init__(self, app, timeout: float = 60.0):
         self.app = app
         self.timeout = timeout
 
@@ -402,19 +402,33 @@ class _TimeoutMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        response_started = False
+        original_send = send
+
+        async def tracked_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await original_send(message)
+
         try:
             await asyncio.wait_for(
-                self.app(scope, receive, send), timeout=self.timeout,
+                self.app(scope, receive, tracked_send), timeout=self.timeout,
             )
         except asyncio.TimeoutError:
-            response = JSONResponse(
-                {"detail": "Request timed out — the graph provider may be unreachable."},
-                status_code=504,
-            )
-            await response(scope, receive, send)
+            if not response_started:
+                response = JSONResponse(
+                    {"detail": "Request timed out — the graph provider may be unreachable."},
+                    status_code=504,
+                )
+                await response(scope, receive, original_send)
+            # If response already started, we can't send a new one — just log
+            else:
+                logger.warning("Request timed out after response started: %s",
+                               scope.get("path", "?"))
 
 # Must be added FIRST so it wraps all other middleware.
-app.add_middleware(_TimeoutMiddleware, timeout=25.0)
+app.add_middleware(_TimeoutMiddleware, timeout=60.0)
 
 # ------------------------------------------------------------------ #
 # Middleware (outermost → innermost order)                             #
