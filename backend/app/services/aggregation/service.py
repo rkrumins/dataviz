@@ -623,6 +623,14 @@ class AggregationService:
         provider = await self._registry.get_provider_for_workspace(
             state.workspace_id, session, data_source_id=ds_id,
         )
+
+        # Resolve the data source's projection mode so we purge from
+        # the correct graph (source or dedicated projection graph).
+        from backend.app.db.models import WorkspaceDataSourceORM
+        ds_orm = await session.get(WorkspaceDataSourceORM, ds_id)
+        actual_mode = (ds_orm.projection_mode if ds_orm else None) or "in_source"
+        await provider.set_projection_mode(actual_mode)
+
         deleted = await provider.purge_aggregated_edges()
 
         # Reset aggregation-owned state
@@ -639,7 +647,7 @@ class AggregationService:
             workspace_id=state.workspace_id,
             status="completed",
             trigger_source="purge",
-            projection_mode="in_source",
+            projection_mode=actual_mode,
             progress=100,
             total_edges=deleted,
             processed_edges=deleted,

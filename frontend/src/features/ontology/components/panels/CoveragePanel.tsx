@@ -19,6 +19,7 @@ export function CoveragePanel({
   isLocked,
   onDefineEntity,
   onDefineRel,
+  onChangeEvalTarget,
 }: {
   ontologyId: string
   workspaceId: string | null
@@ -26,6 +27,8 @@ export function CoveragePanel({
   isLocked: boolean
   onDefineEntity: (typeId: string) => void
   onDefineRel: (typeId: string) => void
+  /** Propagate data source override to page level (for Suggest from Graph etc.) */
+  onChangeEvalTarget?: (wsId: string, dsId: string) => void
 }) {
   const workspaces = useWorkspacesStore(s => s.workspaces)
 
@@ -114,6 +117,7 @@ export function CoveragePanel({
                       onClick={() => {
                         setOverrideWsId(ws.id)
                         setOverrideDsId(ds.id)
+                        onChangeEvalTarget?.(ws.id, ds.id)
                       }}
                       className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-left hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
                     >
@@ -202,6 +206,7 @@ export function CoveragePanel({
                         setOverrideWsId(ws.id)
                         setOverrideDsId(ds.id)
                         setShowPicker(false)
+                        onChangeEvalTarget?.(ws.id, ds.id)
                       }}
                       className={cn(
                         'w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs text-left transition-colors',

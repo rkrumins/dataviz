@@ -9,7 +9,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useBlocker } from 'react-router'
-import { Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, X, LayoutDashboard, Trash2, RotateCcw } from 'lucide-react'
+import { Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, X, LayoutDashboard, Trash2, RotateCcw, Clock } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { EntityTypeEditor } from '@/components/schema/EntityTypeEditor'
 import { RelationshipTypeEditor } from '@/components/schema/RelationshipTypeEditor'
@@ -36,7 +36,6 @@ import {
 } from '@/features/ontology/lib/ontology-parsers'
 import type { OntologyTab, EditorPanel, RelTypeWithClassifications } from '@/features/ontology/lib/ontology-types'
 
-import { OntologyContextBanner } from '@/features/ontology/components/OntologyContextBanner'
 import { OntologyDetailHeader } from '@/features/ontology/components/OntologyDetailHeader'
 import { OntologySidebar } from '@/features/ontology/components/OntologySidebar'
 import { useToast } from '@/components/ui/toast'
@@ -54,6 +53,7 @@ import { ImportDialog } from '@/features/ontology/components/dialogs/ImportDialo
 import { SuggestConfirmDialog } from '@/features/ontology/components/dialogs/SuggestConfirmDialog'
 import { ChangesReviewDialog } from '@/features/ontology/components/dialogs/ChangesReviewDialog'
 import { OverviewPanel } from '@/features/ontology/components/panels/OverviewPanel'
+import { VersionHistoryPanel } from '@/features/ontology/components/panels/VersionHistoryPanel'
 import type { OntologyImpactResponse, OntologyImportResponse } from '@/services/ontologyDefinitionService'
 
 // ---------------------------------------------------------------------------
@@ -70,6 +70,7 @@ const TAB_DEFS: Array<{
   { id: 'hierarchy', label: 'Hierarchy', icon: FolderTree },
   { id: 'coverage', label: 'Coverage', icon: BarChart3 },
   { id: 'adoption', label: 'Adoption', icon: Users },
+  { id: 'history', label: 'History', icon: Clock },
   { id: 'settings', label: 'Settings', icon: Settings },
 ]
 
@@ -79,7 +80,7 @@ const LEGACY_TAB_MAP: Record<string, OntologyTab> = {
   relationships: 'schema',
   hierarchy: 'hierarchy',
   usage: 'adoption',
-  history: 'adoption',
+  history: 'history',
 }
 
 // ---------------------------------------------------------------------------
@@ -409,15 +410,45 @@ export function OntologySchemaPage() {
     setEditorPanel(null)
     setValidationResult(null)
     setSearch('')
+    setEvalOverrideWsId(null)
+    setEvalOverrideDsId(null)
     discardChanges()
   }, [ontologyId])
 
-  // ── Handlers ───────────────────────────────────────────────────────
+  // ── Auto-select evaluation target from deployments ──────────────
+  // When an ontology is selected, auto-pick the first assigned data source
+  // as the evaluation target for Coverage/Overview/Suggest features.
+  const autoEvalTarget = useMemo(() => {
+    if (!selectedOntology) return null
+    for (const ws of workspaces) {
+      for (const ds of ws.dataSources ?? []) {
+        if (ds.ontologyId === selectedOntology.id) {
+          return { workspaceId: ws.id, dataSourceId: ds.id }
+        }
+      }
+    }
+    return null
+  }, [selectedOntology, workspaces])
 
-  function handleSwitchEnvironment(wsId: string, dsId: string) {
-    setActiveWorkspace(wsId)
-    setActiveDataSource(dsId)
-  }
+  // User can explicitly override the evaluation target (e.g. from CoveragePanel)
+  const [evalOverrideWsId, setEvalOverrideWsId] = useState<string | null>(null)
+  const [evalOverrideDsId, setEvalOverrideDsId] = useState<string | null>(null)
+
+  // Priority: explicit override > auto-selected from deployments > Zustand store
+  const evalWorkspaceId = evalOverrideWsId ?? autoEvalTarget?.workspaceId ?? activeWorkspaceId
+  const evalDataSourceId = evalOverrideDsId ?? autoEvalTarget?.dataSourceId ?? activeDataSourceId
+
+  // Resolved eval context objects for display
+  const evalWorkspace = useMemo(
+    () => workspaces.find(w => w.id === evalWorkspaceId) ?? null,
+    [workspaces, evalWorkspaceId],
+  )
+  const evalDataSource = useMemo(
+    () => evalWorkspace?.dataSources?.find(ds => ds.id === evalDataSourceId) ?? null,
+    [evalWorkspace, evalDataSourceId],
+  )
+
+  // ── Handlers ───────────────────────────────────────────────────────
 
   /** Assign the current ontology to a specific data source (ontology-centric) */
   async function handleAssignToDataSource(workspaceId: string, dataSourceId: string) {
@@ -469,25 +500,6 @@ export function OntologySchemaPage() {
       showToast('success', `Schema rolled out to all data sources in "${ws.name}"`)
     } catch (err: unknown) {
       showToast('error', `Rollout failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
-    } finally {
-      setIsAssigning(false)
-    }
-  }
-
-  /** Legacy handler kept for backward compatibility */
-  async function handleAssignOntology(assignId: string | undefined) {
-    if (!activeWorkspace || !activeDataSource) return
-    setIsAssigning(true)
-    try {
-      await workspaceService.updateDataSource(activeWorkspace.id, activeDataSource.id, {
-        ontologyId: assignId ?? '',
-      })
-      await loadWorkspaces()
-      invalidateGraphSchema()
-      if (assignId) navigate(schemaUrl(assignId))
-      showToast('success', assignId ? 'Semantic layer assigned to data source' : 'Semantic layer assignment cleared')
-    } catch (err: unknown) {
-      showToast('error', `Assignment failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
       setIsAssigning(false)
     }
@@ -614,8 +626,8 @@ export function OntologySchemaPage() {
 
   /** Phase 2: analyze the graph, return matches + counts for the dialog to display. */
   async function handleAnalyzeGraph() {
-    if (!activeWorkspaceId) throw new Error('No workspace selected')
-    const stats = await fetchSchemaStats(activeWorkspaceId, activeDataSourceId ?? undefined)
+    if (!evalWorkspaceId) throw new Error('No workspace selected')
+    const stats = await fetchSchemaStats(evalWorkspaceId, evalDataSourceId ?? undefined)
     const response = await ontologyDefinitionService.suggest(stats as unknown as Record<string, unknown>)
     suggestResponseRef.current = response
     return {
@@ -651,8 +663,8 @@ export function OntologySchemaPage() {
     setIsSuggesting(true)
     try {
       const finalName = name || generateSuggestedName(
-        activeDataSource?.label,
-        activeWorkspace?.name,
+        evalDataSource?.label,
+        evalWorkspace?.name,
         Object.keys(response.suggested.entityTypeDefinitions ?? {}),
       )
       const created = await mutations.create.mutateAsync({
@@ -802,8 +814,8 @@ export function OntologySchemaPage() {
     if (prePopulate) {
       setIsSuggesting(true)
       try {
-        if (!activeWorkspaceId) throw new Error('No workspace selected')
-        const stats = await fetchSchemaStats(activeWorkspaceId, activeDataSourceId ?? undefined)
+        if (!evalWorkspaceId) throw new Error('No workspace selected')
+        const stats = await fetchSchemaStats(evalWorkspaceId, evalDataSourceId ?? undefined)
         const response = await ontologyDefinitionService.suggest(stats as unknown as Record<string, unknown>)
         const created = await mutations.create.mutateAsync({ ...response.suggested, name })
         navigate(schemaUrl(created.id, 'schema'))
@@ -986,31 +998,13 @@ export function OntologySchemaPage() {
 
   return (
     <div className="flex flex-col h-full animate-in fade-in duration-500">
-      {/* Context breadcrumb — always visible; shows environment picker when no workspace active */}
-      <div className="relative px-6 pt-2 pb-1 border-b border-glass-border bg-canvas-elevated/20">
-        <OntologyContextBanner
-          workspace={activeWorkspace}
-          dataSource={activeDataSource}
-          workspaces={workspaces}
-          selectedOntologyId={selectedOntology?.id ?? null}
-          ontologies={ontologies}
-          selectedOntology={selectedOntology ?? null}
-          isAssigning={isAssigning}
-          onAssign={handleAssignOntology}
-          onSwitchEnvironment={handleSwitchEnvironment}
-          onAssignToDataSource={handleAssignToDataSource}
-          onUnassignFromDataSource={handleUnassignFromDataSource}
-          onRollOutToWorkspace={handleRollOutToWorkspace}
-        />
-      </div>
-
       {/* Main layout: Sidebar + Detail */}
       <div className="flex-1 min-h-0 flex">
         {/* Sidebar — self-sizes via internal width state */}
         <OntologySidebar
             ontologies={ontologies}
             selectedOntologyId={ontologyId}
-            activeDataSource={activeDataSource}
+            activeDataSource={evalDataSource}
             assignmentCountMap={assignmentCountMap}
             workspaces={workspaces}
             isLoading={isLoadingOntologies}
@@ -1051,6 +1045,12 @@ export function OntologySchemaPage() {
                 isImmutable={isImmutable}
                 hasPendingChanges={hasPendingChanges}
                 isSaving={isSaving}
+                workspaces={workspaces}
+                ontologies={ontologies}
+                isAssigning={isAssigning}
+                onAssignToDataSource={handleAssignToDataSource}
+                onUnassignFromDataSource={handleUnassignFromDataSource}
+                onRollOutToWorkspace={handleRollOutToWorkspace}
                 onDiscard={discardChanges}
                 onSave={handleSaveAllChanges}
                 onReviewChanges={() => setShowChangesReview(true)}
@@ -1123,8 +1123,8 @@ export function OntologySchemaPage() {
                       {activeTab === 'overview' && (
                         <OverviewPanel
                           ontology={selectedOntology}
-                          workspaceId={activeWorkspaceId}
-                          dataSourceId={activeDataSourceId}
+                          workspaceId={evalWorkspaceId}
+                          dataSourceId={evalDataSourceId}
                           assignmentCount={assignmentCountMap.get(selectedOntology.id) ?? 0}
                           onNavigateTab={(tab) => setTab(tab)}
                         />
@@ -1174,8 +1174,9 @@ export function OntologySchemaPage() {
                       {activeTab === 'coverage' && (
                         <CoveragePanel
                           ontologyId={selectedOntology.id}
-                          workspaceId={activeWorkspaceId}
-                          dataSourceId={activeDataSourceId}
+                          workspaceId={evalWorkspaceId}
+                          dataSourceId={evalDataSourceId}
+                          onChangeEvalTarget={(wsId, dsId) => { setEvalOverrideWsId(wsId); setEvalOverrideDsId(dsId) }}
                           isLocked={isLocked}
                           onDefineEntity={typeId => {
                             ensureEditMode()
@@ -1210,6 +1211,10 @@ export function OntologySchemaPage() {
 
                       {activeTab === 'adoption' && (
                         <AdoptionPanel ontology={selectedOntology} workspaces={workspaces} ontologies={ontologies} />
+                      )}
+
+                      {activeTab === 'history' && (
+                        <VersionHistoryPanel ontology={selectedOntology} />
                       )}
 
                       {activeTab === 'settings' && (
@@ -1317,7 +1322,7 @@ export function OntologySchemaPage() {
       {/* Dialogs */}
       {showCreateDialog && (
         <CreateOntologyDialog
-          hasGraphContext={!!activeDataSource}
+          hasGraphContext={!!evalDataSourceId}
           ontologies={ontologies}
           onClose={() => setShowCreateDialog(false)}
           onCreate={handleCreateDraft}
@@ -1371,10 +1376,10 @@ export function OntologySchemaPage() {
       {/* Suggest from Graph */}
       {showSuggestDialog && (
         <SuggestConfirmDialog
-          dataSourceLabel={activeDataSource?.label || activeDataSource?.id || null}
-          suggestedName={generateSuggestedName(activeDataSource?.label, activeWorkspace?.name)}
+          dataSourceLabel={evalDataSource?.label || evalDataSource?.id || null}
+          suggestedName={generateSuggestedName(evalDataSource?.label, evalWorkspace?.name)}
           ontologies={ontologies}
-          currentOntologyId={activeDataSource?.ontologyId ?? null}
+          currentOntologyId={evalDataSource?.ontologyId ?? null}
           assignmentCountMap={assignmentCountMap}
           onAnalyze={handleAnalyzeGraph}
           onUseExisting={handleSuggestUseExisting}

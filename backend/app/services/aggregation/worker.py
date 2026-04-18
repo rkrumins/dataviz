@@ -119,6 +119,11 @@ class AggregationWorker:
                     "", session, data_source_id=job.data_source_id
                 )
 
+                # Configure projection mode from the job record.  The provider
+                # is cached and shared, so we set this per-job to route
+                # AGGREGATED edges to the correct graph (source or dedicated).
+                await provider.set_projection_mode(job.projection_mode or "in_source")
+
                 # Configure the provider with the data source's specific structural mapping
                 # so physical queries can correctly differentiate lineage vs containment
                 provider.set_containment_edge_types(containment_types)

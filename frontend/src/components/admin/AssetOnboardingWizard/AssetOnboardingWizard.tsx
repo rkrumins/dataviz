@@ -35,7 +35,14 @@ export interface OnboardingFormData {
         newWorkspaceName: string
         newWorkspaceDescription: string
     }>
-    projectionMode: 'in_source' | 'dedicated'
+    projectionMode: 'in_source' | 'dedicated' | 'skip'
+    dedicatedStrategy: 'full_copy' | 'containment_only'
+    dedicatedGraphName: string
+    advancedConfig: {
+        batchSize: number       // 100–50,000, default 5000
+        maxRetries: number      // 0–10, default 3
+        timeoutMinutes: number | null  // null = 2hr default
+    }
     ontologySelections: Record<string, {
         ontologyId: string       // '' = unselected
         suggestedOntology: any | null
@@ -82,6 +89,9 @@ export function AssetOnboardingWizard({
             catalogItems.map(c => [c.id, { workspaceId: '', newWorkspaceName: '', newWorkspaceDescription: '' }])
         ),
         projectionMode: 'in_source',
+        dedicatedStrategy: 'full_copy',
+        dedicatedGraphName: '',
+        advancedConfig: { batchSize: 5000, maxRetries: 3, timeoutMinutes: null },
         ontologySelections: Object.fromEntries(
             catalogItems.map(c => [c.id, { ontologyId: '', suggestedOntology: null, coverageStats: null }])
         ),
@@ -130,6 +140,9 @@ export function AssetOnboardingWizard({
                     catalogItems.map(c => [c.id, { workspaceId: '', newWorkspaceName: '', newWorkspaceDescription: '' }])
                 ),
                 projectionMode: 'in_source',
+                dedicatedStrategy: 'full_copy',
+                dedicatedGraphName: '',
+                advancedConfig: { batchSize: 5000, maxRetries: 3, timeoutMinutes: null },
                 ontologySelections: Object.fromEntries(
                     catalogItems.map(c => [c.id, { ontologyId: '', suggestedOntology: null, coverageStats: null }])
                 ),
@@ -191,7 +204,7 @@ export function AssetOnboardingWizard({
             if (stepId === 'workspace') {
                 showToast('success', 'Workspace allocation saved')
             } else if (stepId === 'aggregation') {
-                showToast('success', `Aggregation: ${formData.projectionMode === 'in_source' ? 'In-source' : 'Dedicated'} selected`)
+                showToast('success', `Aggregation: ${formData.projectionMode === 'in_source' ? 'In-source' : formData.projectionMode === 'dedicated' ? 'Dedicated' : 'Skipped'} selected`)
             } else if (stepId === 'semantic') {
                 const count = Object.values(formData.ontologySelections).filter(s => s.ontologyId !== '').length
                 showToast('success', `Semantic layer configured for ${count} source${count !== 1 ? 's' : ''}`)
@@ -303,6 +316,11 @@ export function AssetOnboardingWizard({
                     if (formData.projectionMode === 'dedicated') {
                         for (const ds of ws.dataSources) {
                             await workspaceService.setProjectionMode(wsId, ds.id, 'dedicated')
+                            if (formData.dedicatedGraphName) {
+                                await workspaceService.updateDataSource(wsId, ds.id, {
+                                    dedicatedGraphName: formData.dedicatedGraphName,
+                                })
+                            }
                         }
                     }
                 } else {
@@ -326,12 +344,17 @@ export function AssetOnboardingWizard({
                         }
                         if (formData.projectionMode === 'dedicated') {
                             await workspaceService.setProjectionMode(wsId, ds.id, 'dedicated')
+                            if (formData.dedicatedGraphName) {
+                                await workspaceService.updateDataSource(wsId, ds.id, {
+                                    dedicatedGraphName: formData.dedicatedGraphName,
+                                })
+                            }
                         }
                     }
                 }
             }
 
-            // Step 4: Trigger Aggregation (fire and forget)
+            // Step 4: Aggregation — skip or trigger depending on mode
             for (const [key, group] of groups) {
                 const wsId = key.startsWith('new:')
                     ? (Object.keys(wsNameMap).find(id => wsNameMap[id] === group.alloc.newWorkspaceName) || '')
@@ -345,14 +368,22 @@ export function AssetOnboardingWizard({
                         const catalogId = group.items[i].id
                         const ds = ws.dataSources.find(d => d.catalogItemId === catalogId)
                         if (ds) {
-                            await aggregationService.triggerAggregation(ds.id, {
-                                projectionMode: formData.projectionMode,
-                                batchSize: 1000,
-                            }, 'onboarding')
+                            if (formData.projectionMode === 'skip') {
+                                await aggregationService.skipAggregation(ds.id)
+                            } else {
+                                await aggregationService.triggerAggregation(ds.id, {
+                                    projectionMode: formData.projectionMode,
+                                    batchSize: formData.advancedConfig.batchSize,
+                                    maxRetries: formData.advancedConfig.maxRetries,
+                                    timeoutSecs: formData.advancedConfig.timeoutMinutes
+                                        ? formData.advancedConfig.timeoutMinutes * 60
+                                        : undefined,
+                                }, 'onboarding')
+                            }
                         }
                     }
                 } catch (aggErr) {
-                    console.error('Failed to trigger aggregation:', aggErr)
+                    console.error('Failed to trigger/skip aggregation:', aggErr)
                 }
             }
 
@@ -540,6 +571,7 @@ export function AssetOnboardingWizard({
                                     <AggregationStep
                                         formData={formData}
                                         updateFormData={updateFormData}
+                                        catalogItems={catalogItems}
                                     />
                                 ) : currentStep === 'semantic' ? (
                                     <SemanticStep

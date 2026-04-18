@@ -231,7 +231,7 @@ export function WorkspaceDetailPage() {
     const handleReaggregate = async (ds: DataSourceResponse) => {
         if (!wsId) return
         try {
-            await fetchWithTimeout(`/api/v1/admin/data-sources/${ds.id}/aggregation-jobs?triggerSource=manual`, {
+            const res = await fetchWithTimeout(`/api/v1/admin/data-sources/${ds.id}/aggregation-jobs?triggerSource=manual`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -239,9 +239,15 @@ export function WorkspaceDetailPage() {
                     batchSize: 1000
                 })
             })
+            if (!res.ok) {
+                const text = await res.text()
+                const detail = (() => { try { return JSON.parse(text).detail } catch { return text } })()
+                throw new Error(detail || `HTTP ${res.status}`)
+            }
+            showToast('success', `Aggregation triggered for "${ds.label || 'data source'}"`)
             reload()
-        } catch (err) {
-            console.error('Failed to trigger aggregation', err)
+        } catch (err: any) {
+            showToast('error', err?.message ?? 'Failed to trigger aggregation')
         }
     }
 
