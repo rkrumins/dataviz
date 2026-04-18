@@ -1,3 +1,7 @@
+/**
+ * @deprecated Uses mock API and is never wired to React Flow. Replaced by
+ * viewport-aware filtering in GraphCanvas (MAX_VISIBLE_NODES cap + viewport bounds).
+ */
 import { useCallback, useRef, useState } from 'react'
 import type { Viewport } from '@xyflow/react'
 import { useCanvasStore } from '@/store/canvas'

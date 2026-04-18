@@ -3,7 +3,6 @@ import { Handle, Position, type NodeProps, NodeToolbar } from '@xyflow/react'
 import * as LucideIcons from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSchemaStore } from '@/store/schema'
-import { useLineageExplorationStore } from '@/hooks/useLineageExploration'
 import { cn } from '@/lib/utils'
 import { generateColorFromType, generateIconFallback } from '@/lib/type-visuals'
 import type { EntityInstance, EntityVisualConfig } from '@/types/schema'
@@ -31,8 +30,9 @@ interface GenericNodeData extends EntityInstance {
   persona?: 'business' | 'technical'
   // Ghost state (unknown/placeholder node)
   isGhost?: boolean
-  // Layout triggers
+  // Canvas-agnostic callbacks (injected by the canvas host)
   onLoadMore?: () => void
+  onToggleExpanded?: (nodeId: string) => void
 }
 
 import type { Node } from '@xyflow/react'
@@ -59,8 +59,9 @@ export const GenericNode = memo(function GenericNode({
 
   const { isTraced, isDimmed, isUpstream, isDownstream, isFocus, persona = 'business' } = entityData
 
-  const loadMoreNodes = useLineageExplorationStore((s) => s.loadMoreNodes)
-  const toggleExpanded = useLineageExplorationStore((s) => s.toggleExpanded)
+  // Canvas-agnostic callbacks — injected via data props by the host canvas
+  const onLoadMore = entityData.onLoadMore
+  const onToggleExpanded = entityData.onToggleExpanded
 
   const hiddenCount = (entityData as any)._hiddenCount || 0
   const paginationId = (entityData as any)._paginationId
@@ -265,12 +266,12 @@ export const GenericNode = memo(function GenericNode({
           </div>
 
           {/* Expand Button */}
-          {isExpandable && (
+          {isExpandable && onToggleExpanded && (
             <button
               title={expansionMode === 'inline' ? 'Expand inline' : 'Expand on canvas'}
               onClick={(e) => {
                 e.stopPropagation()
-                toggleExpanded(id)
+                onToggleExpanded(id)
               }}
               className={cn(
                 "w-5 h-5 rounded flex items-center justify-center",
@@ -349,9 +350,8 @@ export const GenericNode = memo(function GenericNode({
             onClick={(e) => {
               e.stopPropagation()
               if (paginationId) {
-                // Trigger layout stabilization anchor
-                entityData.onLoadMore?.()
-                loadMoreNodes(paginationId, 5)
+                // Trigger layout stabilization anchor via the canvas-injected callback
+                onLoadMore?.()
               }
             }}
           >
@@ -373,6 +373,36 @@ export const GenericNode = memo(function GenericNode({
         style={{ borderColor: visual.color }}
       />
     </>
+  )
+}, (prev, next) => {
+  // Custom comparator: only re-render when fields that affect visuals change
+  if (prev.id !== next.id || prev.selected !== next.selected || prev.dragging !== next.dragging) {
+    return false
+  }
+
+  const prevRaw = prev.data as Record<string, unknown>
+  const nextRaw = next.data as Record<string, unknown>
+  const prevD = (prevRaw.data ?? prevRaw) as Record<string, unknown>
+  const nextD = (nextRaw.data ?? nextRaw) as Record<string, unknown>
+
+  return (
+    prevD.label === nextD.label &&
+    prevD.name === nextD.name &&
+    prevD.typeId === nextD.typeId &&
+    (prevD.type as unknown) === (nextD.type as unknown) &&
+    prevD.isExpanded === nextD.isExpanded &&
+    prevD.isLoading === nextD.isLoading &&
+    prevD.isTraced === nextD.isTraced &&
+    prevD.isDimmed === nextD.isDimmed &&
+    prevD.isUpstream === nextD.isUpstream &&
+    prevD.isDownstream === nextD.isDownstream &&
+    prevD.isFocus === nextD.isFocus &&
+    prevD.isGhost === nextD.isGhost &&
+    prevD.childCount === nextD.childCount &&
+    prevD.persona === nextD.persona &&
+    prevD._hiddenCount === nextD._hiddenCount &&
+    prevD.onLoadMore === nextD.onLoadMore &&
+    prevD.onToggleExpanded === nextD.onToggleExpanded
   )
 })
 

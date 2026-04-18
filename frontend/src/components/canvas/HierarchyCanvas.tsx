@@ -14,7 +14,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
-import { useSchemaStore, isContainmentEdgeType, normalizeEdgeType } from '@/store/schema'
+import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -33,18 +33,9 @@ import { EditorToolbar } from './EditorToolbar'
 import { NodePalette } from './NodePalette'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { TraceToolbar } from './TraceToolbar'
-import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
-import { useGraphProvider } from '@/providers'
-
-interface HierarchyNode {
-  id: string
-  typeId: string
-  name: string
-  data: Record<string, unknown>
-  children: HierarchyNode[]
-  parentId?: string
-  depth: number
-}
+import { useCanvasTrace } from '@/hooks/useCanvasTrace'
+import type { HierarchyNode } from '@/types/hierarchy'
+import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 
 interface HierarchyCanvasProps {
   className?: string
@@ -71,8 +62,6 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const edges = useCanvasStore(s => s.edges)
   const selectNode = useCanvasStore(s => s.selectNode)
   const selectedNodeIds = useCanvasStore(s => s.selectedNodeIds)
-  const addNodes = useCanvasStore(s => s.addNodes)
-  const addEdges = useCanvasStore(s => s.addEdges)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const schema = useSchemaStore((s) => s.schema)
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
@@ -80,8 +69,6 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const { loadChildren, loadingNodes, isLoading: isLoadingChildren } = useGraphHydration()
   useLoadingToast('hier-children', isLoadingChildren, 'Expanding hierarchy')
   const relationshipTypes = useViewRelationshipTypes()
-  const provider = useGraphProvider()
-
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<string[]>([])
@@ -89,86 +76,21 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const searchInputRef = useRef<HTMLInputElement>(null)
 
   // Edit Mode State (unified with LineageCanvas)
-  const isEditing = useCanvasStore((s) => s.isEditing)
   const [isPaletteOpen, setPaletteOpen] = useState(false)
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
 
-  // URN resolver for trace
-  const urnResolver = useCallback((nodeId: string) => {
-    const node = nodes.find(n => n.id === nodeId)
-    return (node?.data?.urn as string) || nodeId
-  }, [nodes])
+  // Build containment hierarchy using shared hook (must precede trace + traceContextSet)
+  const isContainmentEdge = useCallback(
+    (normalizedType: string) => isContainmentEdgeType(normalizedType, containmentEdgeTypes),
+    [containmentEdgeTypes]
+  )
+  const { parentMap, childMap, rootNodes: hierarchyRoots, nodeMap } = useContainmentHierarchy({
+    nodes, edges, isContainmentEdge,
+  })
 
-  // Unified Trace System
-  const trace = useUnifiedTrace({
-    provider,
-    urnResolver,
-    onTraceComplete: (result) => {
-      console.log('[HierarchyCanvas] Trace complete:', result.traceNodes.size, 'nodes')
-
-      // CRITICAL: Merge trace result nodes/edges into canvas store
-      if (result.lineageResult) {
-        const lr = result.lineageResult
-
-        // Convert GraphNode[] → LineageNode[] and add to canvas
-        const newCanvasNodes = lr.nodes.map((gn: any) => ({
-          id: gn.urn,
-          type: 'default' as const,
-          position: { x: 0, y: 0 },
-          data: {
-            label: gn.displayName,
-            urn: gn.urn,
-            type: gn.entityType,
-            classifications: gn.tags ?? [],
-            metadata: {
-              ...gn.properties,
-              childCount: gn.childCount,
-              sourceSystem: gn.sourceSystem,
-            },
-          },
-        }))
-        if (newCanvasNodes.length > 0) {
-          addNodes(newCanvasNodes as any[])
-        }
-
-        // Convert GraphEdge[] → LineageEdge[] and add to canvas
-        const newCanvasEdges = lr.edges.map((ge: any) => ({
-          id: ge.id,
-          source: ge.sourceUrn,
-          target: ge.targetUrn,
-          data: {
-            edgeType: ge.edgeType,
-            relationship: ge.edgeType,
-            confidence: ge.confidence,
-          },
-        }))
-        if (newCanvasEdges.length > 0) {
-          addEdges(newCanvasEdges as any[])
-        }
-
-        // Auto-expand ancestors of traced nodes
-        const nodesToExpand = new Set(expandedNodes)
-
-        // Build parent map from ALL edges (including newly added)
-        const allCurrentEdges = [...edges, ...newCanvasEdges]
-        const traceParentMap = new Map<string, string>()
-        allCurrentEdges.forEach(e => {
-          if (isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) {
-            traceParentMap.set(e.target ?? (e as any).targetUrn, e.source ?? (e as any).sourceUrn)
-          }
-        })
-
-        result.traceNodes.forEach(id => {
-          let curr = traceParentMap.get(id)
-          while (curr) {
-            nodesToExpand.add(curr)
-            curr = traceParentMap.get(curr)
-          }
-        })
-
-        setExpandedNodes(nodesToExpand)
-      }
-    }
+  // Unified Trace System (shared hook handles merge + auto-expand)
+  const trace = useCanvasTrace({
+    nodes, edges, isContainmentEdge, expandedNodes, setExpandedNodes,
   })
 
   // Build trace context set that includes ancestors of traced nodes
@@ -181,14 +103,6 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     // Add all visible trace nodes
     trace.visibleTraceNodes.forEach(id => set.add(id))
 
-    // Build parent map from edges
-    const parentMap = new Map<string, string>()
-    edges.forEach(e => {
-      if (isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) {
-        parentMap.set(e.target, e.source)
-      }
-    })
-
     // Add all ancestors of traced nodes so containers stay visible
     trace.visibleTraceNodes.forEach(id => {
       let curr = parentMap.get(id)
@@ -199,7 +113,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     })
 
     return set
-  }, [trace.isTracing, trace.visibleTraceNodes, edges, containmentEdgeTypes])
+  }, [trace.isTracing, trace.visibleTraceNodes, parentMap])
 
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
   const interactions = useCanvasInteractions({
@@ -229,35 +143,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     }
   }, [nodes, edges])
 
-  // Build hierarchy tree from nodes and edges
+  // Build hierarchy tree from the shared containment maps
   const hierarchyTree = useMemo(() => {
     if (!nodes.length) return []
-
-    // Find containment edges using ontology-driven types
-    const containmentEdges = edges.filter((e) =>
-      isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
-    )
-
-    // Build tree from containment edges (Set-based dedup prevents duplicate children)
-    const nodeMap = new Map(nodes.map((n) => [n.id, n]))
-    const childSets = new Map<string, Set<string>>()
-    const hasParent = new Set<string>()
-
-    containmentEdges.forEach((edge) => {
-      // Guard: skip edges with empty source/target
-      if (!edge.source || !edge.target) return
-      if (!childSets.has(edge.source)) childSets.set(edge.source, new Set())
-      childSets.get(edge.source)!.add(edge.target)
-      hasParent.add(edge.target)
-    })
-
-    const childMap = new Map<string, string[]>()
-    childSets.forEach((children, parent) => childMap.set(parent, Array.from(children)))
-
-    // Find root nodes (no parent in containment hierarchy, must have a valid id)
-    const rootNodes = nodes.filter((n) =>
-      n.id && !hasParent.has(n.id) && n.data.type !== 'ghost'
-    )
 
     const buildTree = (nodeId: string, depth: number): HierarchyNode | null => {
       const node = nodeMap.get(nodeId)
@@ -270,19 +158,22 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
 
       return {
         id: node.id,
-        typeId: node.data.type,
+        typeId: node.data.type as string,
         name: (node.data.label as string) ?? (node.data.businessLabel as string) ?? node.id,
         data: node.data as Record<string, unknown>,
         children,
         depth,
+        urn: (node.data.urn as string) ?? node.id,
+        entityTypeOption: (node.data.type as string) ?? '',
+        tags: (node.data.classifications as string[]) ?? [],
       }
     }
 
-    return rootNodes
+    return hierarchyRoots
       .map((n) => buildTree(n.id, 0))
       .filter((n): n is HierarchyNode => n !== null)
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [nodes, edges, containmentEdgeTypes])
+  }, [nodes.length, hierarchyRoots, childMap, nodeMap])
 
   // Flatten tree for search
   const flatNodes = useMemo(() => {

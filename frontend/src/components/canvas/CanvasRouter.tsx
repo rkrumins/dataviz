@@ -2,10 +2,10 @@
  * CanvasRouter - Thin routing shell that switches between canvas types
  *
  * Renders the appropriate canvas component based on the view's layout type:
- * - 'graph' → LineageCanvas (React Flow graph)
+ * - 'graph' → GraphCanvas (unified React Flow graph, replaces LineageCanvas)
  * - 'hierarchy' | 'tree' → HierarchyCanvas (Hierarchy-style nested view)
  * - 'reference' → ReferenceModelCanvas (context view)
- * - 'layered-lineage' → LayeredLineageCanvas
+ * - 'layered-lineage' → GraphCanvas (unified React Flow graph, replaces LayeredLineageCanvas)
  *
  * All data loading is handled by useGraphHydration (called here and in canvas components).
  */
@@ -19,10 +19,9 @@ import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useLoadingToast } from '@/components/ui/toast'
-import { LineageCanvas } from './LineageCanvas'
+import { GraphCanvas } from './GraphCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
-import { LayeredLineageCanvas } from './LayeredLineageCanvas'
 import { cn } from '@/lib/utils'
 
 interface CanvasRouterProps {
@@ -55,7 +54,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {
-    if (layoutType === 'layered-lineage') return LayeredLineageCanvas
+    if (layoutType === 'layered-lineage') return GraphCanvas
     if (layoutType === 'reference') return ReferenceModelCanvas
 
     switch (layoutType) {
@@ -64,7 +63,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
         return HierarchyCanvas
       case 'graph':
       default:
-        return LineageCanvas
+        return GraphCanvas
     }
   }, [layoutType])
 
