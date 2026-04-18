@@ -1,6 +1,9 @@
 /**
+ * @deprecated Use useContainmentHierarchy + useCanvasTrace + useEdgeProjection instead.
+ * This monolithic hook is superseded by composable shared hooks in GraphCanvas.
+ *
  * useLineageExploration - Hook for managing lineage exploration state
- * 
+ *
  * Provides:
  * - Mode switching (overview/focused/full)
  * - Granularity control (column/table/schema/domain)

@@ -8,7 +8,7 @@
 export { ContextViewCanvas, ContextViewCanvas as ReferenceModelCanvas } from './context-view/ContextViewCanvas'
 export { defaultReferenceModelLayers } from './context-view/constants'
 export type { ContextViewCanvasProps } from './context-view/ContextViewCanvas'
-export type { HierarchyNode } from './context-view/types'
+export type { HierarchyNode } from '@/types/hierarchy'
 
 import { ContextViewCanvas } from './context-view/ContextViewCanvas'
 export default ContextViewCanvas

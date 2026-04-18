@@ -1,6 +1,8 @@
 /**
+ * @deprecated Use useSemanticZoom instead — ontology-driven thresholds, event-based (no polling).
+ *
  * useLevelOfDetail Hook
- * 
+ *
  * Automatically adjusts graph granularity based on zoom level.
  * Provides smooth LOD transitions for optimal performance at different zoom levels.
  */

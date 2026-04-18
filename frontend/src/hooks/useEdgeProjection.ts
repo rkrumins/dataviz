@@ -13,7 +13,7 @@
 
 import { useMemo, useRef } from 'react'
 import { normalizeEdgeType } from '@/store/schema'
-import type { HierarchyNode } from '../components/canvas/context-view/types'
+import type { HierarchyNode } from '@/types/hierarchy'
 
 // ============================================
 // Types

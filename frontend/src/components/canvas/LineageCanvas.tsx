@@ -1,3 +1,9 @@
+/**
+ * @deprecated Use GraphCanvas instead. This component is superseded by
+ * the unified GraphCanvas which composes shared hooks (useContainmentHierarchy,
+ * useCanvasTrace, useEdgeProjection, etc.) and eliminates the deprecated
+ * useLineageExploration, useLevelOfDetail, and useSpatialLoading hooks.
+ */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ReactFlow,
