@@ -19,7 +19,7 @@ interface AdoptionPanelProps {
 }
 
 export function AdoptionPanel({ ontology, workspaces, ontologies }: AdoptionPanelProps) {
-  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(true)
 
   return (
     <div className="space-y-8">

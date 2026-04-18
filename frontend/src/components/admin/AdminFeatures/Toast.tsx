@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Check, AlertCircle } from 'lucide-react'
+import { Check, AlertCircle, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { prefersReducedMotion } from './constants'
 
@@ -47,6 +47,12 @@ export function Toast({
             <Check className="w-5 h-5 shrink-0" />
           )}
           <span className="text-sm font-medium">{message}</span>
+          <button
+            onClick={onDismiss}
+            className="shrink-0 rounded-md p-0.5 opacity-60 hover:opacity-100 transition-opacity hover:bg-black/5 dark:hover:bg-white/5"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </motion.div>
       )}
     </AnimatePresence>

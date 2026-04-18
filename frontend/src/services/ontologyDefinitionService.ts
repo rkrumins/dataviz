@@ -170,6 +170,12 @@ export const ontologyDefinitionService = {
         })
     },
 
+    createNewVersion(id: string): Promise<OntologyDefinitionResponse> {
+        return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}/new-version`, {
+            method: 'POST',
+        })
+    },
+
     auditLog(id: string): Promise<OntologyAuditEntry[]> {
         return request<OntologyAuditEntry[]>(`${ADMIN_API}/${id}/audit`)
     },

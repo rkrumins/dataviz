@@ -1,20 +1,29 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { X, FileEdit, Sparkles, PenLine } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 
 interface CreateOntologyDialogProps {
   hasGraphContext: boolean
+  ontologies: OntologyDefinitionResponse[]
   onClose: () => void
   onCreate: (name: string, prePopulate: boolean) => void
 }
 
 export function CreateOntologyDialog({
   hasGraphContext,
+  ontologies,
   onClose,
   onCreate,
 }: CreateOntologyDialogProps) {
   const [name, setName] = useState('New Semantic Layer')
   const [mode, setMode] = useState<'empty' | 'graph'>(hasGraphContext ? 'graph' : 'empty')
+
+  const isDuplicateName = useMemo(() => {
+    const trimmed = name.trim().toLowerCase()
+    if (!trimmed) return false
+    return ontologies.some(o => o.name.trim().toLowerCase() === trimmed)
+  }, [name, ontologies])
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -47,9 +56,21 @@ export function CreateOntologyDialog({
               onChange={e => setName(e.target.value)}
               placeholder="e.g., Data Catalog Schema"
               autoFocus
-              className="w-full px-4 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-all"
+              className={cn(
+                'w-full px-4 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 transition-all',
+                isDuplicateName
+                  ? 'border-amber-400 focus:ring-amber-500/40 focus:border-amber-500/40'
+                  : 'border-glass-border focus:ring-indigo-500/40 focus:border-indigo-500/40',
+              )}
             />
-            <p className="text-[11px] text-ink-muted mt-1.5">Choose a descriptive name. You can change it later.</p>
+            {isDuplicateName ? (
+              <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1.5 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 flex-shrink-0" />
+                A schema named &ldquo;{name.trim()}&rdquo; already exists
+              </p>
+            ) : (
+              <p className="text-[11px] text-ink-muted mt-1.5">Choose a descriptive name. You can change it later.</p>
+            )}
           </div>
 
           {/* Starting point selection — visual option cards */}

@@ -55,11 +55,11 @@ export interface ElkLayoutState {
     clearPinnedNodes: () => void
 }
 
-// Default configuration
+// Default configuration — tuned for deep hierarchies
 const DEFAULT_CONFIG: ElkLayoutConfig = {
-    direction: 'LR',
-    layerSpacing: 150,
-    nodeSpacing: 50,
+    direction: 'TB',
+    layerSpacing: 120,
+    nodeSpacing: 40,
     hierarchyLimits: {
         domain: 5,
         system: 10,
@@ -214,23 +214,14 @@ interface ElkInputEdge {
     target: string
 }
 
-interface ElkInputEdgeWithType extends ElkInputEdge {
-    type?: string
-}
-
 function buildElkGraph(
     nodes: ElkInputNode[],
     edges: ElkInputEdge[],
     direction: 'LR' | 'TB',
     layerSpacing: number,
     nodeSpacing: number,
-    _schemaEntityTypes?: EntityTypeSchema[],
-    parentMap?: Map<string, string>,
-    expandedNodes?: Set<string>,
-    isContainmentEdge?: (edgeType: string) => boolean
 ) {
     const elkDirection = direction === 'TB' ? 'DOWN' : 'RIGHT'
-    const hasCompoundNodes = parentMap && expandedNodes && expandedNodes.size > 0
 
     const layoutOptions: Record<string, string> = {
         'elk.algorithm': 'layered',
@@ -240,93 +231,29 @@ function buildElkGraph(
         'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
         'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
         'elk.separateConnectedComponents': 'true',
-        'elk.edgeRouting': 'ORTHOGONAL',
+        'elk.edgeRouting': 'SPLINES',
+        'elk.spacing.componentComponent': '60',
+        // Prevent extremely wide layouts by allowing more layers
+        'elk.layered.layering.strategy': 'NETWORK_SIMPLEX',
     }
 
-    // Enable hierarchy handling when compound nodes are present
-    if (hasCompoundNodes) {
-        layoutOptions['elk.hierarchyHandling'] = 'INCLUDE_CHILDREN'
-    }
-
-    // Build node index for quick lookups
-    const nodeById = new Map(nodes.map(n => [n.id, n]))
+    // Flat layout — all nodes at the same level, edges drive the layer structure.
+    // Containment edges (parent→child) naturally create hierarchical layers in ELK:
+    //   Layer 0: nodes with no incoming edges (roots)
+    //   Layer 1: nodes with incoming containment from layer 0 (children)
+    //   etc.
     const nodeIdSet = new Set(nodes.map(n => n.id))
 
-    // Build ELK node hierarchy
-    let elkNodes: Array<{
-        id: string
-        width: number
-        height: number
-        children?: Array<{ id: string; width: number; height: number }>
-        layoutOptions?: Record<string, string>
-    }>
+    const elkNodes = nodes.map(node => ({
+        id: node.id,
+        width: node.width,
+        height: node.height,
+    }))
 
-    if (hasCompoundNodes) {
-        // Determine which nodes are children of expanded parents
-        const childrenOfExpanded = new Set<string>()
-        const expandedParentChildren = new Map<string, ElkInputNode[]>()
-
-        for (const node of nodes) {
-            const parentId = parentMap.get(node.id)
-            if (parentId && expandedNodes.has(parentId) && nodeById.has(parentId)) {
-                childrenOfExpanded.add(node.id)
-                if (!expandedParentChildren.has(parentId)) {
-                    expandedParentChildren.set(parentId, [])
-                }
-                expandedParentChildren.get(parentId)!.push(node)
-            }
-        }
-
-        elkNodes = []
-        for (const node of nodes) {
-            // Skip nodes that are children of an expanded parent — they'll be nested
-            if (childrenOfExpanded.has(node.id)) continue
-
-            if (expandedNodes.has(node.id) && expandedParentChildren.has(node.id)) {
-                // This is an expanded parent — create compound node with children
-                const children = expandedParentChildren.get(node.id)!
-                elkNodes.push({
-                    id: node.id,
-                    width: node.width,
-                    height: node.height,
-                    layoutOptions: {
-                        'elk.padding': '[top=40,left=20,bottom=20,right=20]',
-                    },
-                    children: children.map(child => ({
-                        id: child.id,
-                        width: child.width,
-                        height: child.height,
-                    })),
-                })
-            } else {
-                // Leaf node (or non-expanded parent)
-                elkNodes.push({
-                    id: node.id,
-                    width: node.width,
-                    height: node.height,
-                })
-            }
-        }
-    } else {
-        // Flat layout — no parent-child hierarchy in ELK
-        elkNodes = nodes.map(node => ({
-            id: node.id,
-            width: node.width,
-            height: node.height,
-        }))
-    }
-
-    // Filter edges: must reference valid nodes, and optionally exclude containment edges
+    // ALL edges go to ELK — containment edges create the hierarchy layers,
+    // lineage edges create cross-connections. Both affect layout.
     const elkEdges = edges
-        .filter(e => {
-            if (!nodeIdSet.has(e.source) || !nodeIdSet.has(e.target)) return false
-            // When isContainmentEdge is provided, filter out containment edges —
-            // containment is expressed through the ELK node hierarchy instead
-            if (isContainmentEdge && (e as ElkInputEdgeWithType).type && isContainmentEdge((e as ElkInputEdgeWithType).type!)) {
-                return false
-            }
-            return true
-        })
+        .filter(e => nodeIdSet.has(e.source) && nodeIdSet.has(e.target))
         .map(edge => ({
             id: edge.id,
             sources: [edge.source],
@@ -350,35 +277,14 @@ interface ElkLayoutNode {
 
 function extractPositions(
     elkGraph: { children?: ElkLayoutNode[] },
-    expandedNodes?: Set<string>
 ): Array<{ id: string; x: number; y: number }> {
     const positions: Array<{ id: string; x: number; y: number }> = []
-
     if (!elkGraph.children) return positions
-
     for (const child of elkGraph.children) {
         if (typeof child.x === 'number' && typeof child.y === 'number') {
-            positions.push({
-                id: child.id,
-                x: child.x,
-                y: child.y,
-            })
-
-            // For compound nodes, flatten child positions to absolute coordinates
-            if (expandedNodes?.has(child.id) && child.children) {
-                for (const nested of child.children) {
-                    if (typeof nested.x === 'number' && typeof nested.y === 'number') {
-                        positions.push({
-                            id: nested.id,
-                            x: child.x + nested.x,
-                            y: child.y + nested.y,
-                        })
-                    }
-                }
-            }
+            positions.push({ id: child.id, x: child.x, y: child.y })
         }
     }
-
     return positions
 }
 
@@ -399,9 +305,6 @@ export interface UseElkLayoutResult {
         nodes: Node[],
         edges: Edge[],
         schemaEntityTypes?: EntityTypeSchema[],
-        parentMap?: Map<string, string>,
-        expandedNodes?: Set<string>,
-        isContainmentEdge?: (edgeType: string) => boolean
     ) => Promise<Node[]>
     /** Apply incremental layout (pin existing, position new) */
     applyIncrementalLayout: (
@@ -409,9 +312,6 @@ export interface UseElkLayoutResult {
         newNodes: Node[],
         edges: Edge[],
         schemaEntityTypes?: EntityTypeSchema[],
-        parentMap?: Map<string, string>,
-        expandedNodes?: Set<string>,
-        isContainmentEdge?: (edgeType: string) => boolean
     ) => Promise<Node[]>
     /** Layout in progress */
     isLayouting: boolean
@@ -445,9 +345,6 @@ export function useElkLayout(options: UseElkLayoutOptions = {}): UseElkLayoutRes
             nodes: Node[],
             edges: Edge[],
             schemaEntityTypes?: EntityTypeSchema[],
-            parentMap?: Map<string, string>,
-            expandedNodes?: Set<string>,
-            isContainmentEdge?: (edgeType: string) => boolean
         ): Promise<Node[]> => {
             if (nodes.length === 0) {
                 return nodes
@@ -479,14 +376,12 @@ export function useElkLayout(options: UseElkLayoutOptions = {}): UseElkLayoutRes
                     }
                 })
 
-                // Prepare edges, preserving semantic edge type for containment filtering
-                // Use data.edgeType (semantic: 'CONTAINS', 'TRANSFORMS') not edge.type (React Flow: 'lineage')
-                const elkEdges: ElkInputEdgeWithType[] = edges
+                // Prepare edges for ELK
+                const elkEdges: ElkInputEdge[] = edges
                     .map((edge) => ({
                         id: edge.id,
                         source: edge.source,
                         target: edge.target,
-                        type: (edge.data as any)?.edgeType ?? (edge.data as any)?.relationship ?? edge.type,
                     }))
 
                 // Build ELK graph (handles compound nodes and containment edge filtering)
@@ -496,15 +391,11 @@ export function useElkLayout(options: UseElkLayoutOptions = {}): UseElkLayoutRes
                     config.direction,
                     config.layerSpacing,
                     config.nodeSpacing,
-                    schemaEntityTypes,
-                    parentMap,
-                    expandedNodes,
-                    isContainmentEdge
                 )
 
                 // Run ELK layout
                 const layoutedGraph = await elk.layout(elkGraph)
-                const positions = extractPositions(layoutedGraph, expandedNodes)
+                const positions = extractPositions(layoutedGraph)
 
                 console.log(`[ELK] Layout complete, positioned ${positions.length} nodes`)
 
@@ -544,16 +435,13 @@ export function useElkLayout(options: UseElkLayoutOptions = {}): UseElkLayoutRes
             newNodes: Node[],
             edges: Edge[],
             schemaEntityTypes?: EntityTypeSchema[],
-            parentMap?: Map<string, string>,
-            expandedNodes?: Set<string>,
-            isContainmentEdge?: (edgeType: string) => boolean
         ): Promise<Node[]> => {
             // Pin all existing nodes
             pinAllCurrentNodes(existingNodes.map((n) => n.id))
 
             // Combine and layout
             const allNodes = [...existingNodes, ...newNodes]
-            const result = await applyLayout(allNodes, edges, schemaEntityTypes, parentMap, expandedNodes, isContainmentEdge)
+            const result = await applyLayout(allNodes, edges, schemaEntityTypes)
 
             // Clear pins after layout
             clearPinnedNodes()

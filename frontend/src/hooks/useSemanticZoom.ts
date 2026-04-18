@@ -56,6 +56,8 @@ export interface UseSemanticZoomOptions {
 export interface UseSemanticZoomResult {
   /** Connect this to ReactFlow's onViewportChange */
   onViewportChange: (viewport: Viewport) => void
+  /** Register a manual override (user expanded/collapsed manually) */
+  registerManualOverride: (nodeId: string) => void
   /** Current effective zoom level */
   currentZoom: number
   /** Whether semantic zoom is active */
@@ -75,10 +77,13 @@ const BASE_ZOOM = 0.2
 const ZOOM_PER_LEVEL = 0.25
 
 /** Debounce delay for viewport changes (ms) */
-const DEBOUNCE_MS = 300
+const DEBOUNCE_MS = 500
 
 /** Max auto-expands per zoom gesture to prevent loading storms */
-const MAX_AUTO_EXPANDS = 5
+const MAX_AUTO_EXPANDS = 3
+
+/** Minimum zoom delta to trigger processing (avoids micro-adjustments) */
+const MIN_ZOOM_DELTA = 0.08
 
 /**
  * Manual overrides are cleared when the zoom crosses this many threshold
@@ -166,6 +171,11 @@ export function useSemanticZoom(options: UseSemanticZoomOptions): UseSemanticZoo
       if (!isEnabled || !rfInstance) return
 
       const prevZoom = currentZoomRef.current
+
+      // Skip if zoom change is too small (avoids micro-adjustments from fitView/pan)
+      const delta = Math.abs(zoom - prevZoom)
+      if (delta < MIN_ZOOM_DELTA) return
+
       currentZoomRef.current = zoom
 
       // Determine zoom direction
@@ -238,8 +248,14 @@ export function useSemanticZoom(options: UseSemanticZoomOptions): UseSemanticZoo
 
   const toggle = useCallback(() => setIsEnabled((prev) => !prev), [])
 
+  // Register a manual override — prevents semantic zoom from undoing user actions
+  const registerManualOverride = useCallback((nodeId: string) => {
+    manualOverridesRef.current.add(nodeId)
+  }, [])
+
   return {
     onViewportChange,
+    registerManualOverride,
     currentZoom: currentZoomRef.current,
     isEnabled,
     toggle,
