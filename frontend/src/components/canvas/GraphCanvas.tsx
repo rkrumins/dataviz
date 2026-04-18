@@ -59,6 +59,7 @@ import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useElkLayout } from '@/hooks/useElkLayout'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
+import { useAggregatedLineage } from '@/hooks/useAggregatedLineage'
 import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { useSemanticZoom } from '@/hooks/useSemanticZoom'
@@ -204,10 +205,8 @@ export function GraphCanvas({ className }: { className?: string }) {
     [rawNodes, visibleNodeIds]
   )
 
-  const visibleRawEdges = useMemo(() =>
-    rawEdges.filter(e => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target)),
-    [rawEdges, visibleNodeIds]
-  )
+  // Note: visibleRawEdges removed — edge projection in allVisibleEdges
+  // handles visibility by projecting to visible ancestors, not filtering.
 
   // 7. Progressive loading
   const { loadChildren, isLoading: isLoadingChildren, loadingNodes } = useGraphHydration()
@@ -246,15 +245,161 @@ export function GraphCanvas({ className }: { className?: string }) {
     return set
   }, [trace.isTracing, trace.focusId, trace.visibleTraceNodes, parentMap])
 
-  // 10. Lineage edges — non-containment edges between VISIBLE nodes only
-  const lineageEdges = useMemo(() => {
-    if (!showLineageFlow && !trace.isTracing) return []
-    return visibleRawEdges.filter(edge =>
-      !isContainmentEdge(normalizeEdgeType(edge))
-    )
-  }, [visibleRawEdges, showLineageFlow, trace.isTracing, isContainmentEdge])
+  // 9b. Aggregated Lineage — fetches rolled-up lineage from the backend.
+  // Lineage edges in the graph DB typically connect deep entities (tables, columns).
+  // The aggregation service rolls them up to whatever level is currently visible.
+  // This is WHY ContextViewCanvas shows lineage but raw edges alone don't.
+  const {
+    aggregatedEdges,
+    fetchAggregated,
+    isLoading: isLoadingAggEdges,
+  } = useAggregatedLineage({ granularity: null })
+  useLoadingToast('graph-agg', isLoadingAggEdges, 'Loading lineage')
 
-  // 12. Highlight state — uses lineageEdges directly
+  // Stable ref for nodes (avoids effect dependency on nodes array)
+  const nodesRef = useRef(rawNodes)
+  nodesRef.current = rawNodes
+
+  // Track previous aggregation targets to avoid redundant fetches
+  const prevAggregationKeyRef = useRef('')
+
+  // Fetch aggregated lineage when visible node set changes
+  useEffect(() => {
+    if (!showLineageFlow || rawNodes.length === 0) return
+
+    const fetchDebounced = setTimeout(() => {
+      // Collect URNs of all visible nodes
+      const visibleUrns = rawNodes
+        .filter(n => visibleNodeIds.has(n.id))
+        .map(n => (n.data?.urn as string) || n.id)
+        .filter(Boolean)
+
+      if (visibleUrns.length === 0 || visibleUrns.length > 500) return
+
+      // Only fetch for COLLAPSED visible nodes (expanded ones' children handle themselves)
+      const urnToId = new Map(nodesRef.current.map(n => [(n.data?.urn as string) || n.id, n.id]))
+      const aggregationTargets = visibleUrns.filter(urn => {
+        const nodeId = urnToId.get(urn)
+        return nodeId && !expandedNodes.has(nodeId)
+      })
+
+      // Skip if target set hasn't changed
+      const aggregationKey = aggregationTargets.sort().join(',')
+      if (aggregationKey === prevAggregationKeyRef.current) return
+      prevAggregationKeyRef.current = aggregationKey
+
+      if (aggregationTargets.length > 0) {
+        fetchAggregated(aggregationTargets, aggregationTargets)
+      }
+    }, 500) // 500ms debounce
+
+    return () => clearTimeout(fetchDebounced)
+  }, [showLineageFlow, rawNodes.length, visibleNodeIds, expandedNodes, fetchAggregated])
+
+  // 10. Edge projection — the core of multi-level lineage visualization.
+  //
+  // For every edge in rawEdges, we find the VISIBLE ancestor of each endpoint:
+  // - If a node is visible, it maps to itself
+  // - If a node is hidden (inside collapsed parent), walk up parentMap until
+  //   we find a visible ancestor → project the edge to that ancestor
+  //
+  // This enables "inherited lineage": if Domain A → Domain B (lineage) and
+  // Domain B is expanded, we show edges from Domain A to each of B's visible children.
+  //
+  // Containment edges: only shown when BOTH endpoints are directly visible (no projection)
+  // Lineage edges: projected to visible ancestors, shown at all zoom levels
+
+  // Helper: find the nearest visible ancestor of a node
+  const findVisibleAncestor = useCallback((nodeId: string): string | null => {
+    if (visibleNodeIds.has(nodeId)) return nodeId
+    const parent = parentMap.get(nodeId)
+    if (!parent) return null // Node not in tree at all
+    return findVisibleAncestor(parent)
+  }, [visibleNodeIds, parentMap])
+
+  const allVisibleEdges = useMemo(() => {
+    const result: Array<typeof rawEdges[0] & { _isContainment: boolean; _isProjected: boolean }> = []
+    const seen = new Set<string>() // Deduplicate projected edges
+
+    for (const edge of rawEdges) {
+      const edgeType = normalizeEdgeType(edge)
+      const isContainment = isContainmentEdge(edgeType)
+
+      if (isContainment) {
+        // Containment: only show when BOTH endpoints are directly visible
+        if (visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)) {
+          result.push({ ...edge, _isContainment: true, _isProjected: false })
+        }
+      } else {
+        // Lineage: project to visible ancestors
+        const visibleSource = findVisibleAncestor(edge.source)
+        const visibleTarget = findVisibleAncestor(edge.target)
+
+        if (visibleSource && visibleTarget && visibleSource !== visibleTarget) {
+          // Deduplicate: multiple underlying edges may project to the same visible pair
+          const projectedKey = `${visibleSource}->${visibleTarget}:${edgeType}`
+          if (seen.has(projectedKey)) continue
+          seen.add(projectedKey)
+
+          const isProjected = visibleSource !== edge.source || visibleTarget !== edge.target
+          result.push({
+            ...edge,
+            id: isProjected ? `proj:${edge.id}` : edge.id,
+            source: visibleSource,
+            target: visibleTarget,
+            _isContainment: false,
+            _isProjected: isProjected,
+          })
+        }
+      }
+    }
+
+    // B. Aggregated lineage edges from the backend aggregation service.
+    // These represent rolled-up lineage (e.g., Domain A → Domain B based on
+    // underlying table-level TRANSFORMS edges). This is the primary source of
+    // lineage visibility at the top level.
+    aggregatedEdges.forEach((aggState, _key) => {
+      if (aggState.state !== 'collapsed') return
+      const agg = aggState.aggregated
+      if (!agg?.sourceUrn || !agg?.targetUrn) return
+
+      // Map URNs to visible node IDs
+      const sourceId = findVisibleAncestor(agg.sourceUrn)
+      const targetId = findVisibleAncestor(agg.targetUrn)
+      if (!sourceId || !targetId || sourceId === targetId) return
+
+      const aggKey = `agg:${sourceId}->${targetId}`
+      if (seen.has(aggKey)) return
+      seen.add(aggKey)
+
+      result.push({
+        id: agg.id || aggKey,
+        source: sourceId,
+        target: targetId,
+        type: 'aggregated',
+        data: {
+          edgeType: 'AGGREGATED',
+          relationship: 'aggregated',
+          isAggregated: true,
+          edgeCount: agg.edgeCount ?? 1,
+          edgeTypes: agg.edgeTypes ?? [],
+          confidence: agg.confidence ?? 1,
+        },
+        _isContainment: false,
+        _isProjected: sourceId !== agg.sourceUrn || targetId !== agg.targetUrn,
+      } as any)
+    })
+
+    return result
+  }, [rawEdges, visibleNodeIds, isContainmentEdge, findVisibleAncestor, aggregatedEdges])
+
+  // Lineage-only subset for highlight computation
+  const lineageEdges = useMemo(() =>
+    allVisibleEdges.filter(e => !e._isContainment),
+    [allVisibleEdges]
+  )
+
+  // 12. Highlight state — uses lineageEdges for click/hover highlighting
   const hoveredNodeId = useHoveredNodeId()
   const { highlightState, isHighlightActive: isClickHighlightActive } = useHighlightState({
     selectedNodeId,
@@ -321,13 +466,20 @@ export function GraphCanvas({ className }: { className?: string }) {
     }
   }, [rfInstance, layoutedNodes, scheduleFitView])
 
-  // Layout signature — derived from VISIBLE nodes/edges + direction
+  // Edges for ELK: all edges where BOTH endpoints are visible (containment + lineage)
+  // ELK uses these for positioning — containment edges create hierarchical structure
+  const layoutEdges = useMemo(() =>
+    rawEdges.filter(e => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target)),
+    [rawEdges, visibleNodeIds]
+  )
+
+  // Layout signature — derived from visible nodes + their edges + direction
   const layoutSignature = useMemo(() => {
     if (visibleNodes.length === 0) return ''
     const nodeIds = visibleNodes.map((n) => n.id).sort().join(',')
-    const edgeIds = visibleRawEdges.map((e) => e.id).sort().join(',')
+    const edgeIds = layoutEdges.map((e) => e.id).sort().join(',')
     return `${nodeIds}|${edgeIds}|${direction}`
-  }, [visibleNodes, visibleRawEdges, direction])
+  }, [visibleNodes, layoutEdges, direction])
 
   // ELK layout on visible nodes + ALL their connecting edges (containment included
   // so ELK knows the structure for positioning, but only visible nodes are laid out)
@@ -341,7 +493,7 @@ export function GraphCanvas({ className }: { className?: string }) {
     if (layoutSignature === prevLayoutSig.current) return
     prevLayoutSig.current = layoutSignature
 
-    applyLayout(visibleNodes, visibleRawEdges, schemaEntityTypes as any)
+    applyLayout(visibleNodes, layoutEdges, schemaEntityTypes as any)
       .then((positioned) => {
         setLayoutedNodes(positioned as LineageNode[])
         if (!hasAppliedInitialLayout.current) scheduleFitViewRef.current()
@@ -406,24 +558,69 @@ export function GraphCanvas({ className }: { className?: string }) {
     toggleNodeRef.current(nodeId)
   }, [])
 
-  // 15. Convert lineage edges to React Flow display format
+  // 15. Display edges — ALL visible edges with distinct styles per type
+  //
+  // Containment (parent→child): thin dashed gray, smooth step routing
+  //   → Visible whenever the parent is expanded, clearly shows hierarchy
+  // Lineage (data flow): thick solid colored, animated, bezier routing
+  //   → Shows data dependencies, highlights on hover/click
+  //
+  // When lineage flow is off, hide lineage but still show containment structure.
   const displayEdges = useMemo(() => {
-    return lineageEdges.map(edge => ({
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      type: 'lineage' as const,
-      animated: !isHighlightActive || mergedHighlightEdges.has(edge.id),
-      style: {
-        opacity: isHighlightActive && !mergedHighlightEdges.has(edge.id) ? 0.15 : 1,
-      },
-      data: {
-        edgeType: edge.data?.edgeType ?? edge.data?.relationship ?? '',
-        confidence: edge.data?.confidence ?? 1,
-        isTraced: trace.isTracing && trace.result?.traceEdges?.has(edge.id),
-      },
-    }))
-  }, [lineageEdges, trace.isTracing, trace.result, isHighlightActive, mergedHighlightEdges])
+    return allVisibleEdges
+      .filter(edge => {
+        // Always show containment edges when parent is expanded
+        if (edge._isContainment) return true
+        // Show lineage edges when flow toggle is on or tracing
+        return showLineageFlow || trace.isTracing
+      })
+      .map(edge => {
+        if (edge._isContainment) {
+          // Containment: thin dashed gray — shows hierarchy structure
+          return {
+            id: edge.id,
+            source: edge.source,
+            target: edge.target,
+            type: 'smoothstep' as const,
+            animated: false,
+            style: {
+              stroke: '#94a3b8',
+              strokeDasharray: '6,4',
+              strokeWidth: 1.5,
+              opacity: isHighlightActive ? 0.3 : 0.6,
+            },
+            data: {
+              edgeType: edge.data?.edgeType ?? 'CONTAINS',
+              isContainment: true,
+            },
+          }
+        }
+        // Lineage: solid colored animated — shows data flow
+        const isProjected = (edge as any)._isProjected
+        const isAggregated = (edge.data as any)?.isAggregated === true
+        return {
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          // Use 'aggregated' edge component for rolled-up edges (shows edge count badge)
+          type: isAggregated ? 'aggregated' as const : 'lineage' as const,
+          animated: !isProjected && !isAggregated && (!isHighlightActive || mergedHighlightEdges.has(edge.id)),
+          style: {
+            opacity: isHighlightActive && !mergedHighlightEdges.has(edge.id) ? 0.15 : (isProjected ? 0.7 : 1),
+            strokeDasharray: isProjected && !isAggregated ? '8,4' : undefined,
+          },
+          data: {
+            edgeType: edge.data?.edgeType ?? edge.data?.relationship ?? '',
+            confidence: edge.data?.confidence ?? 1,
+            isTraced: trace.isTracing && trace.result?.traceEdges?.has(edge.id),
+            isProjected,
+            isAggregated,
+            edgeCount: (edge.data as any)?.edgeCount,
+            sourceEdgeCount: (edge.data as any)?.edgeCount,
+          },
+        }
+      })
+  }, [allVisibleEdges, showLineageFlow, trace.isTracing, trace.result, isHighlightActive, mergedHighlightEdges])
 
   // 16. Display nodes with visual state — only VISIBLE nodes (expand/collapse aware)
   const displayNodes = useMemo(() => {
@@ -678,7 +875,7 @@ export function GraphCanvas({ className }: { className?: string }) {
               data: node.data as Record<string, unknown>,
             })
           }}
-          defaultEdgeOptions={{ type: 'lineage', animated: true, interactionWidth: 20 }}
+          defaultEdgeOptions={{ interactionWidth: 20 }}
           selectionOnDrag
           multiSelectionKeyCode="Shift"
           selectionMode={SelectionMode.Partial}
@@ -775,7 +972,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           selectedNodeId ? 'right-[420px]' : 'right-4',
         )}
       >
-        <EdgeLegend defaultExpanded={false} visibleEdges={lineageEdges} />
+        <EdgeLegend defaultExpanded={false} visibleEdges={allVisibleEdges} />
       </div>
 
       {/* Panels */}
