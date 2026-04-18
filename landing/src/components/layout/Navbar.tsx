@@ -8,13 +8,13 @@ import { useScrollspy } from '@/hooks/useScrollspy'
 
 const NAV_LINKS = [
   { label: 'Features', href: '#features' },
-  { label: 'Universal Lineage', href: '#universal-lineage' },
+  { label: 'AI Assistant', href: '#ai-assistant' },
   { label: 'Architecture', href: '#architecture' },
   { label: 'Compare', href: '#comparison' },
   { label: 'FAQ', href: '#faq' },
 ]
 
-const SECTION_IDS = ['hero', 'features', 'showcase', 'how-it-works', 'universal-lineage', 'architecture', 'comparison', 'integrations', 'testimonials', 'ai-assistant', 'faq', 'community']
+const SECTION_IDS = ['hero', 'features', 'showcase', 'how-it-works', 'ai-assistant', 'universal-lineage', 'architecture', 'comparison', 'testimonials', 'integrations', 'faq', 'community']
 
 export function Navbar() {
   const [scrolled, setScrolled] = useState(false)
