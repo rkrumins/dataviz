@@ -27,6 +27,30 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+    <!-- Structured Data -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "Nexus Lineage",
+      "applicationCategory": "DeveloperApplication",
+      "description": "Interactive data lineage visualization platform that scales from column-level detail to enterprise-wide domain views.",
+      "operatingSystem": "Docker, Linux, macOS",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "license": "https://www.apache.org/licenses/LICENSE-2.0",
+      "featureList": [
+        "Interactive canvas with pan, zoom, trace",
+        "Multi-granularity zoom (column to domain)",
+        "Business and technical persona toggle",
+        "Pluggable graph backends (FalkorDB, Neo4j, DataHub)",
+        "Versioned ontology with evolution policies",
+        "Pre-computed aggregated edges",
+        "Workspace isolation and multi-tenancy",
+        "Crash-recoverable batch workers"
+      ]
+    }
+    </script>
   </head>
   <body>
     <div id="root"></div>
