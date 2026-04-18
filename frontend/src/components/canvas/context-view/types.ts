@@ -1,22 +1,6 @@
-import type { EntityType } from '@/providers/GraphDataProvider'
-import type { LogicalNodeConfig } from '@/types/schema'
-
-export interface HierarchyNode {
-  id: string
-  typeId: string
-  name: string
-  data: Record<string, unknown>
-  children: HierarchyNode[]
-  parentId?: string
-  depth: number
-  // GraphNode properties for layer logic
-  urn: string
-  entityTypeOption: EntityType
-  tags: string[]
-  // Logical Node extensions
-  isLogical?: boolean
-  logicalConfig?: LogicalNodeConfig
-}
+// Re-export HierarchyNode from shared types for backward compatibility
+export type { HierarchyNode } from '@/types/hierarchy'
+import type { HierarchyNode } from '@/types/hierarchy'
 
 export interface FlatTreeNode {
   node: HierarchyNode

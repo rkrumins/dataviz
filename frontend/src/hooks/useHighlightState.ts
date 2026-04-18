@@ -6,7 +6,7 @@
  */
 
 import { useMemo, useState, useEffect, useRef } from 'react'
-import type { HierarchyNode } from '../components/canvas/context-view/types'
+import type { HierarchyNode } from '@/types/hierarchy'
 
 // ============================================
 // Types

@@ -61,6 +61,7 @@ import type { ViewLayerConfig, LogicalNodeConfig } from '@/types/schema'
 // Extracted types, constants, hooks, and components
 import { defaultReferenceModelLayers } from './constants'
 import { useLayerAssignment } from '@/hooks/useLayerAssignment'
+import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
 import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
 import { LayerColumn } from './LayerColumn'
@@ -464,62 +465,10 @@ export function ContextViewCanvas({
   const canvasVersion = useCanvasVersion()
   const nodeEdgeFingerprint = `${activeView?.id ?? ''}:${canvasVersion}`
 
-  // Build generic hierarchy tree from nodes and containment edges.
-  // Incremental: only processes new edges when addGraph appends (the common path).
-  // Full rebuild when edges shrink (removeEdges/setGraph) or containmentEdgeTypes change.
-  const prevEdgeLenRef = useRef(0)
-  const prevContainmentTypesRef = useRef(containmentEdgeTypes)
-  const childSetsRef = useRef(new Map<string, Set<string>>())
-  const parentMapRef = useRef(new Map<string, string>())
-  const childMapRef = useRef(new Map<string, string[]>())
-
-  const { nodeMap, childMap, parentMap } = useMemo(() => {
-    const nMap = new Map(nodes.map((n) => [n.id, n]))
-
-    const typesChanged = prevContainmentTypesRef.current !== containmentEdgeTypes
-    const edgesShrank = edges.length < prevEdgeLenRef.current
-    const needsFullRebuild = typesChanged || edgesShrank
-
-    let cSets: Map<string, Set<string>>
-    let pMap: Map<string, string>
-
-    if (needsFullRebuild) {
-      // Full rebuild
-      cSets = new Map<string, Set<string>>()
-      pMap = new Map<string, string>()
-      edges.filter((e) => isContainmentEdge(normalizeEdgeType(e))).forEach((edge) => {
-        if (!cSets.has(edge.source)) cSets.set(edge.source, new Set())
-        cSets.get(edge.source)!.add(edge.target)
-        pMap.set(edge.target, edge.source)
-      })
-    } else {
-      // Incremental: reuse previous maps, only process new edges
-      cSets = childSetsRef.current
-      pMap = parentMapRef.current
-      const startIdx = prevEdgeLenRef.current
-      for (let i = startIdx; i < edges.length; i++) {
-        const edge = edges[i]
-        if (!isContainmentEdge(normalizeEdgeType(edge))) continue
-        if (!cSets.has(edge.source)) cSets.set(edge.source, new Set())
-        cSets.get(edge.source)!.add(edge.target)
-        pMap.set(edge.target, edge.source)
-      }
-    }
-
-    // Convert Sets to arrays for downstream consumers
-    const cMap = new Map<string, string[]>()
-    cSets.forEach((children, parent) => cMap.set(parent, Array.from(children)))
-
-    // Update refs for next incremental pass
-    prevEdgeLenRef.current = edges.length
-    prevContainmentTypesRef.current = containmentEdgeTypes
-    childSetsRef.current = cSets
-    parentMapRef.current = pMap
-    childMapRef.current = cMap
-
-    return { nodeMap: nMap, childMap: cMap, parentMap: pMap }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeEdgeFingerprint, containmentEdgeTypes])
+  // Build containment hierarchy using shared hook (incremental updates).
+  const { nodeMap, childMap, parentMap } = useContainmentHierarchy({
+    nodes, edges, isContainmentEdge, fingerprint: nodeEdgeFingerprint,
+  })
 
   // Helper: Calculate currently visible top-level nodes (containers)
   const getVisibleContainerUrns = useCallback(() => {
