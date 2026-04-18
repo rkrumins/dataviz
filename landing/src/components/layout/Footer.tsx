@@ -4,26 +4,24 @@ const PRODUCT_LINKS = [
   { label: 'Features', href: '#features' },
   { label: 'Architecture', href: '#architecture' },
   { label: 'Integrations', href: '#integrations' },
-  { label: 'Changelog', href: '#' },
+  { label: 'Compare', href: '#comparison' },
 ]
 
 const RESOURCE_LINKS = [
-  { label: 'Documentation', href: '#' },
-  { label: 'API Reference', href: '#' },
-  { label: 'Community Forum', href: '#' },
-  { label: 'Blog', href: '#' },
+  { label: 'FAQ', href: '#faq' },
+  { label: 'How It Works', href: '#how-it-works' },
+  { label: 'AI Assistant', href: '#ai-assistant' },
+  { label: 'Request Demo', href: '#contact' },
 ]
 
 const COMPANY_LINKS = [
-  { label: 'About', href: '#' },
+  { label: 'Open Source', href: '#community' },
   { label: 'Contact', href: '#contact' },
-  { label: 'Privacy Policy', href: '#' },
-  { label: 'Terms of Service', href: '#' },
 ]
 
 const SOCIAL_LINKS = [
   { label: 'GitHub', href: 'https://github.com', icon: Github },
-  { label: 'Discord', href: '#', icon: MessageCircle },
+  { label: 'Discord', href: 'https://discord.gg', icon: MessageCircle },
 ]
 
 export function Footer() {
