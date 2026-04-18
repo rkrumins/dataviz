@@ -322,6 +322,15 @@ class GraphDataProvider(ABC):
     # (no-ops by default — providers override as needed)
     # ==========================================
 
+    async def set_projection_mode(self, mode: str) -> None:
+        """Switch the projection target for aggregation operations.
+
+        ``mode`` is ``"in_source"`` (write aggregated edges to the source
+        graph) or ``"dedicated"`` (write to a separate projection graph).
+        Called by the aggregation worker per-job before materialization.
+        """
+        pass
+
     async def ensure_projections(self) -> None:
         """Set up projection infrastructure (indices, projection graphs, etc.)."""
         pass

@@ -285,8 +285,17 @@ function ReviewPhase({
                         <div className="flex-1">
                             <p className="text-sm font-medium text-slate-500 uppercase tracking-wide">Aggregation</p>
                             <p className="font-semibold text-slate-800 dark:text-slate-200">
-                                {formData.projectionMode === 'in_source' ? 'In-source projection' : 'Dedicated projection graph'}
+                                {formData.projectionMode === 'in_source'
+                                    ? 'In-source projection'
+                                    : formData.projectionMode === 'dedicated'
+                                        ? `Dedicated projection graph${formData.dedicatedGraphName ? ` (${formData.dedicatedGraphName})` : ''}`
+                                        : 'Aggregation skipped (can be enabled later)'}
                             </p>
+                            {formData.projectionMode === 'dedicated' && (
+                                <p className="text-xs text-slate-500 mt-0.5">
+                                    Strategy: {formData.dedicatedStrategy === 'full_copy' ? 'Full Copy' : 'Containment Only'}
+                                </p>
+                            )}
                         </div>
                         <Check className="w-5 h-5 text-green-500" />
                     </div>
