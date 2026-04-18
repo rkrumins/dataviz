@@ -10,7 +10,7 @@ export interface RelTypeWithClassifications extends RelationshipTypeSchema {
 export type ToastType = 'success' | 'error' | 'warning' | 'info'
 export interface Toast { type: ToastType; message: string; id: number; action?: { label: string; onClick: () => void } }
 
-export type OntologyTab = 'overview' | 'schema' | 'hierarchy' | 'coverage' | 'adoption' | 'settings'
+export type OntologyTab = 'overview' | 'schema' | 'hierarchy' | 'coverage' | 'adoption' | 'history' | 'settings'
 
 /** @deprecated — old tab IDs for URL migration */
 export type LegacyOntologyTab = 'entities' | 'relationships' | 'hierarchy' | 'usage' | 'history'
