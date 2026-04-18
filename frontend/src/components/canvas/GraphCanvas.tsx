@@ -32,7 +32,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { AnimatePresence } from 'framer-motion'
-import { ArrowRight, ArrowDown, Loader2, GitBranch } from 'lucide-react'
+import { ArrowRight, ArrowDown, Loader2, GitBranch, ZoomIn } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { generateColorFromType } from '@/lib/type-visuals'
 
@@ -543,7 +543,6 @@ export function GraphCanvas({ className }: { className?: string }) {
   }, [layoutSignature, applyLayout])
 
   // 16. Semantic zoom — ontology-driven auto-expand/collapse on zoom
-  // Disabled by default until layout stabilization is complete — enable via toggle
   const semanticZoom = useSemanticZoom({
     rfInstance,
     expandedNodes,
@@ -552,7 +551,7 @@ export function GraphCanvas({ className }: { className?: string }) {
     parentMap,
     schemaEntityTypes: schemaEntityTypes as any,
     loadChildren,
-    enabled: false,
+    enabled: true,
   })
   semanticZoomRef.current = semanticZoom.onViewportChange
 
@@ -576,6 +575,9 @@ export function GraphCanvas({ className }: { className?: string }) {
   const pendingLoadRef = useRef<Set<string>>(new Set())
   const toggleNode = useCallback(
     async (nodeId: string) => {
+      // Register manual override so semantic zoom doesn't undo this action
+      semanticZoom.registerManualOverride(nodeId)
+
       let wasExpanded = false
       setExpandedNodes((prev) => {
         wasExpanded = prev.has(nodeId)
@@ -593,7 +595,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         }
       }
     },
-    [loadChildren],
+    [loadChildren, semanticZoom],
   )
 
   const toggleNodeRef = useRef(toggleNode)
@@ -886,6 +888,19 @@ export function GraphCanvas({ className }: { className?: string }) {
           >
             <GitBranch className="w-3.5 h-3.5" />
             {showLineageFlow ? 'Flow On' : 'Flow Off'}
+          </button>
+          <button
+            onClick={semanticZoom.toggle}
+            className={cn(
+              'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all',
+              semanticZoom.isEnabled
+                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                : 'bg-black/5 dark:bg-white/10 text-ink-muted',
+            )}
+            title="Semantic Zoom: auto-expand/collapse entities based on zoom level"
+          >
+            <ZoomIn className="w-3.5 h-3.5" />
+            {semanticZoom.isEnabled ? 'LOD On' : 'LOD Off'}
           </button>
           {trace.isTracing && (
             <button
