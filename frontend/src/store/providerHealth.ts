@@ -92,6 +92,12 @@ export function enableProviderHealthPolling() {
   }
 }
 
+/** Call on logout / session expiry to stop polling. */
+export function disableProviderHealthPolling() {
+  authReady = false
+  stopPolling()
+}
+
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {

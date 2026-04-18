@@ -22,6 +22,7 @@ import type {
     OntologyMatchResult,
     OntologySuggestResponse,
 } from '@/services/ontologyDefinitionService'
+import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import { providerService } from '@/services/providerService'
 import type { CatalogItemResponse } from '@/services/catalogService'
 import type { OnboardingFormData } from '../AssetOnboardingWizard'
@@ -97,6 +98,7 @@ export function SemanticStep({
     workspaceNames = {},
     onOntologiesLoaded,
 }: SemanticStepProps) {
+    const mutations = useOntologyMutations()
     const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
     const [loadingOntologies, setLoadingOntologies] = useState(true)
     const [sourceStates, setSourceStates] = useState<Record<string, SourceState>>(() =>
@@ -235,7 +237,7 @@ export function SemanticStep({
                 ...state.suggestResponse.suggested,
                 name: state.draftName.trim() || `${catalogItems.find(c => c.id === itemId)?.name} Schema`,
             }
-            const created = await ontologyDefinitionService.create(createReq)
+            const created = await mutations.create.mutateAsync(createReq)
             // Update ontologies list
             setOntologies(prev => {
                 const updated = [created, ...prev]
@@ -258,7 +260,7 @@ export function SemanticStep({
                 error: err instanceof Error ? err.message : 'Failed to create draft',
             })
         }
-    }, [sourceStates, catalogItems, updateSource, updateOntologySelection])
+    }, [sourceStates, catalogItems, updateSource, updateOntologySelection, mutations])
 
     // ─── Skip source ────────────────────────────────────────────────────
 

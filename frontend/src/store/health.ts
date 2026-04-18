@@ -100,10 +100,11 @@ export const useHealthStore = create<HealthState>()((set, get) => ({
       const body = await res.json()
       const prevStatus = get().status
 
-      if (body.status === 'unhealthy') {
-        const detail = typeof body.dependencies?.management_db === 'string'
-          ? body.dependencies.management_db
-          : 'The backend management database is unavailable.'
+      if (body.status === 'unhealthy' || body.status === 'degraded') {
+        const detail = body.reason
+          ?? (typeof body.dependencies?.management_db === 'string'
+            ? body.dependencies.management_db
+            : 'The backend management database is unavailable.')
         applyFailure(get, set, 'backend-down', detail)
         return
       }

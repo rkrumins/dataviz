@@ -36,8 +36,8 @@ services:
       context: ./data/quickstart
       dockerfile: Dockerfile.falkordb
     ports:
-      - "6379:6379"
-      - "3000:3000"       # FalkorDB Browser UI
+      - "6381:6379"
+      - "3001:3000"       # FalkorDB Browser UI
     environment:
       FALKORDB_ARGS: THREAD_COUNT 4
     volumes:
@@ -56,7 +56,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6380:6379"
+      - "6382:6379"
     volumes:
       - redis_data:/data
     command: >
@@ -78,7 +78,7 @@ services:
       POSTGRES_PASSWORD: synodic
       POSTGRES_DB: synodic
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -101,7 +101,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile.controlplane
     ports:
-      - "8091:8091"
+      - "8092:8091"
     environment:
       MANAGEMENT_DB_URL: postgresql+asyncpg://synodic:synodic@postgres:5432/synodic
       REDIS_URL: redis://redis:6379/0
@@ -142,7 +142,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile.viz
     ports:
-      - "8000:8000"
+      - "8004:8000"
     environment:
       # Graph provider bootstrap (used if management DB is empty)
       GRAPH_PROVIDER: falkordb
@@ -237,7 +237,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile.graph
     ports:
-      - "8001:8001"
+      - "8005:8001"
     environment:
       FALKORDB_HOST: falkordb
       FALKORDB_PORT: "6379"
@@ -285,6 +285,30 @@ services:
       falkordb:
         condition: service_healthy
     restart: "no"
+
+  # ── Solidatus Generator (standalone utility service) ───────────────
+  # On-demand synthetic Solidatus model generation and FalkorDB import.
+  # POST /api/v1/solidatus-generator/jobs to trigger, poll for status.
+  solidatus-generator:
+    build: ./solidatus-generator
+    ports:
+      - "8090:8090"
+    environment:
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Landing Page (standalone marketing site) ──────────────────────
+  landing:
+    build:
+      context: ./landing
+      dockerfile: Dockerfile
+    ports:
+      - "3090:80"
+    restart: unless-stopped
 
 volumes:
   falkordb_data:

@@ -112,6 +112,10 @@ class SQLAlchemyOntologyRepository:
         row.scope = data.scope
 
         await self._session.flush()
+        # Ensure schema_id is populated (mirrors create_ontology logic)
+        if not row.schema_id:
+            row.schema_id = row.id
+            await self._session.flush()
         return _orm_to_data(row)
 
     async def list_all(self, latest_only: bool = True) -> List[OntologyData]:

@@ -9,7 +9,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from starlette.responses import JSONResponse
 
 from .api.v1.api import api_router
-from .db.engine import init_db, close_db, get_async_session, get_jobs_session
+from .db.engine import init_db, close_db, get_async_session, get_jobs_session, classify_alembic_error
 from .db.seed_templates import seed_templates
 from .db.repositories import user_repo
 from .db.repositories.refresh_token_repo import make_refresh_store
@@ -37,20 +37,14 @@ except Exception:  # pragma: no cover - redis is part of runtime deps
 # Lifespan                                                             #
 # ------------------------------------------------------------------ #
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    """Startup / shutdown lifecycle."""
-    configure_json_logging()
-
-    # 1. Initialise management DB tables (idempotent — safe to run every restart)
-    await init_db()
-
-    # 2. Seed Quick Start Templates (idempotent — skips if already present)
+async def _run_seeds() -> None:
+    """Run all seed steps. Called during normal startup and after recovery."""
+    # Seed Quick Start Templates (idempotent — skips if already present)
     async with get_async_session() as session:
         await seed_templates(session)
 
-    # 2a. Seed feature system — each seed gets its own session so a failure
-    #      in one (e.g. multi-worker IntegrityError) doesn't roll back the others.
+    # Seed feature system — each seed gets its own session so a failure
+    # in one (e.g. multi-worker IntegrityError) doesn't roll back the others.
     from .db.seed_feature_registry import seed_feature_registry, seed_feature_flags, seed_feature_registry_meta  # noqa: E402
     try:
         async with get_async_session() as session:
@@ -68,7 +62,7 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("Feature registry meta seed warning: %s", exc)
 
-    # 2b. Seed system default ontology (idempotent — merge-not-overwrite strategy)
+    # Seed system default ontology (idempotent — merge-not-overwrite strategy)
     try:
         from .ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
         from .ontology.service import LocalOntologyService
@@ -80,12 +74,8 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("System default ontology seed warning: %s", exc)
 
-    # 2c. Bootstrap system admin (idempotent — skips if any user exists)
-    # Always ensures at least one admin account is present.
-    # Customizable via ADMIN_EMAIL / ADMIN_PASSWORD env vars; defaults provided.
+    # Bootstrap system admin (idempotent — skips if any user exists)
     try:
-        import os
-        from .db.repositories import user_repo
         from .auth.password import hash_password
         admin_email = os.getenv("ADMIN_EMAIL", "admin@nexuslineage.local")
         admin_password = os.getenv("ADMIN_PASSWORD", "changeme")
@@ -111,20 +101,9 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("Admin bootstrap warning: %s", exc)
 
-    # 3. Environment bootstrap is no longer auto-invoked on startup.
-    #    Fresh installs go through the admin wizard; Docker quickstart /
-    #    CI fixtures invoke `python -m backend.scripts.seed_default_environment`
-    #    explicitly. Startup must never mutate user data.
-    logger.info(
-        "Startup is side-effect-free. Run "
-        "`python -m backend.scripts.seed_default_environment` for dev seed; "
-        "admin wizard handles production onboarding."
-    )
 
-    # 4. Wire up the auth service. The IdentityService is the single
-    #    boundary every consumer crosses; today it's an in-process
-    #    LocalIdentityService, tomorrow (post-extraction) a remote HTTP
-    #    client implementing the same protocol.
+def _init_auth_service(_app: FastAPI) -> None:
+    """Wire up the auth service. Extracted so recovery can re-call it."""
     register_provider("local", LocalIdentityProvider())
 
     async def _emit_user_event(session, event_type: str, payload: dict) -> None:
@@ -137,6 +116,71 @@ async def lifespan(_app: FastAPI):
         outbox_emit=_emit_user_event,
     )
     logger.info("Auth service initialised (provider=local)")
+
+
+async def _recovery_loop(_app: FastAPI, reason: str) -> None:
+    """Background task: retry init_db + seeds + auth every 15s until success."""
+    alembic_reason = classify_alembic_error(Exception(reason))
+    if alembic_reason is not None:
+        # Permanent Alembic error (missing revision, schema mismatch) — don't retry
+        logger.error("Skipping recovery: Alembic error is permanent — %s", reason)
+        return
+
+    while getattr(_app.state, "degraded", False):
+        await asyncio.sleep(15)
+        try:
+            logger.info("Recovery attempt: retrying init_db...")
+            await init_db()
+            await _run_seeds()
+            _init_auth_service(_app)
+            _app.state.degraded = False
+            _app.state.degraded_reason = None
+            logger.info("Recovery complete — transitioned from degraded to healthy")
+            return
+        except Exception as exc:
+            logger.warning("Recovery attempt failed, retrying in 15s: %s", str(exc)[:200])
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Startup / shutdown lifecycle."""
+    configure_json_logging()
+
+    # Degraded-mode flag — checked by health endpoint and middleware
+    _app.state.degraded = False
+    _app.state.degraded_reason = None
+    _app.state._recovery_task = None
+
+    # 1. Initialise management DB tables (idempotent — safe to run every restart)
+    try:
+        await init_db()
+    except Exception as exc:
+        reason = classify_alembic_error(exc) or f"database_unavailable: {str(exc)[:200]}"
+        logger.error("init_db failed — entering degraded mode: %s", reason)
+        _app.state.degraded = True
+        _app.state.degraded_reason = reason
+        _app.state._recovery_task = asyncio.create_task(_recovery_loop(_app, reason))
+
+    # 2. Seeds and admin bootstrap (only if DB init succeeded)
+    if not _app.state.degraded:
+        await _run_seeds()
+
+    # 3. Environment bootstrap is no longer auto-invoked on startup.
+    logger.info(
+        "Startup is side-effect-free. Run "
+        "`python -m backend.scripts.seed_default_environment` for dev seed; "
+        "admin wizard handles production onboarding."
+    )
+
+    # 4. Wire up the auth service (only if DB available)
+    if not _app.state.degraded:
+        try:
+            _init_auth_service(_app)
+        except Exception as exc:
+            logger.error("Auth service init failed — entering degraded mode: %s", exc)
+            _app.state.degraded = True
+            _app.state.degraded_reason = f"auth_init_failed: {str(exc)[:200]}"
+            _recovery_task = asyncio.create_task(_recovery_loop(_app, str(exc)))
 
     # 5. Wire up the aggregation service (role-gated)
     from .runtime.role import current_role, runs_scheduler, runs_recovery
@@ -267,7 +311,17 @@ async def lifespan(_app: FastAPI):
     logger.info("Synodic Visualization Service started (role=%s)", role.value)
     yield
 
-    # Shutdown — stop event listener, release providers, close connections.
+    # Shutdown — cancel recovery, stop event listener, release providers, close connections.
+
+    # Cancel background recovery task (if running)
+    _rtask = getattr(_app.state, "_recovery_task", None)
+    if _rtask and not _rtask.done():
+        _rtask.cancel()
+        try:
+            await _rtask
+        except asyncio.CancelledError:
+            pass
+        logger.info("Background recovery task cancelled")
 
     # Stop aggregation event listener (if running in proxy mode)
     _agg_listener = getattr(_app.state, "_agg_event_listener", None)
@@ -486,11 +540,20 @@ app.include_router(db_metrics_router)
 @app.get("/api/v1/health", tags=["health"], include_in_schema=False)
 async def health_check():
     """
-    Management-plane health check — only the management DB is required for the
-    application to be considered healthy.
+    Management-plane health check — always responds, even in degraded mode.
+    Returns degraded status with reason when DB or auth init failed.
     """
     from .db.engine import get_engine
     from sqlalchemy import text
+
+    # Degraded mode: app started but DB/auth init failed
+    if getattr(app.state, "degraded", False):
+        return {
+            "status": "degraded",
+            "version": "0.2.0",
+            "reason": getattr(app.state, "degraded_reason", "unknown"),
+            "dependencies": {"management_db": "unreachable"},
+        }
 
     result: dict = {"status": "healthy", "version": "0.2.0", "dependencies": {}}
 

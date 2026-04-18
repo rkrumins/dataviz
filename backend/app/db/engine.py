@@ -428,6 +428,48 @@ def _is_transient_db_error(exc: BaseException) -> bool:
     return False
 
 
+def classify_alembic_error(exc: BaseException) -> str | None:
+    """Classify Alembic-specific errors for degraded-mode reporting.
+
+    Returns a short reason string suitable for the health endpoint, or
+    None if the exception is not Alembic-related.
+
+    These are permanent errors — retrying won't help because they
+    indicate a code/data mismatch (missing revision, broken migration).
+    """
+    from sqlalchemy.exc import ProgrammingError
+
+    # Missing revision: Alembic can't find a migration file referenced
+    # by the DB's alembic_version table.
+    if isinstance(exc, KeyError):
+        msg = str(exc)
+        if "revision" in msg.lower() or len(msg) == 14:  # 12-char hex + quotes
+            return f"alembic_missing_revision: {msg}"
+
+    # Alembic's own resolution/command errors
+    try:
+        from alembic.util.exc import CommandError
+        if isinstance(exc, CommandError):
+            return f"alembic_command_error: {str(exc)[:200]}"
+    except ImportError:
+        pass
+
+    try:
+        from alembic.script.revision import ResolutionError
+        if isinstance(exc, ResolutionError):
+            return f"alembic_resolution_error: {str(exc)[:200]}"
+    except ImportError:
+        pass
+
+    # Table doesn't exist during migration — schema out of sync
+    if isinstance(exc, ProgrammingError):
+        msg = str(exc).lower()
+        if "does not exist" in msg or "no such table" in msg:
+            return f"alembic_schema_mismatch: {str(exc)[:200]}. Try: ./dev.sh reset"
+
+    return None
+
+
 async def init_db() -> None:
     """Apply Alembic migrations and seed minimal singleton rows.
 
@@ -485,6 +527,15 @@ async def init_db() -> None:
             logger.info("Alembic upgrade complete (head reached)")
             break
         except Exception as exc:
+            # Check for Alembic-specific permanent errors first
+            alembic_reason = classify_alembic_error(exc)
+            if alembic_reason is not None:
+                logger.error(
+                    "Alembic upgrade failed with permanent error: %s",
+                    alembic_reason,
+                )
+                raise
+
             remaining = deadline - _time.monotonic()
             if not _is_transient_db_error(exc) or remaining <= 0:
                 if remaining <= 0:

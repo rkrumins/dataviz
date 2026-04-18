@@ -15,6 +15,7 @@
 #   ./dev.sh frontend     Start frontend dev server only
 #   ./dev.sh stop         Stop infrastructure
 #   ./dev.sh reset        Wipe all data and start fresh
+#   ./dev.sh doctor       Run all preflight checks
 #
 # Prerequisites:
 #   - Python 3.13+ with venv at .venv/
@@ -25,6 +26,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT_DIR"
+
+# ── Preflight library ──────────────────────────────────────────────
+# shellcheck source=scripts/preflight.sh
+source "$ROOT_DIR/scripts/preflight.sh"
 
 # ── Colors ──────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -62,6 +67,12 @@ check_venv() {
 
 # ── Infrastructure ──────────────────────────────────────────────────
 start_infra() {
+    log "Preflight: checking infrastructure ports..."
+    check_port 5432 "Postgres" || exit 1
+    check_port 6379 "FalkorDB" || exit 1
+    check_port 3000 "FalkorDB UI" || exit 1
+    check_port 6380 "Redis" || exit 1
+
     log "Starting infrastructure (Postgres, FalkorDB, Redis)..."
     docker compose -f docker-compose.dev.yml up -d
     log "Waiting for services to be healthy..."
@@ -92,6 +103,11 @@ reset_infra() {
 
 run_viz() {
     local port="${VIZ_PORT:-8000}"
+    check_port "$port" "viz-service" || exit 1
+    wait_for_service localhost 5432 "Postgres" 30 || exit 1
+    wait_for_service localhost 6380 "Redis" 15 || exit 1
+    wait_for_service localhost 6379 "FalkorDB" 15 || exit 1
+
     log "Starting ${BLUE}viz-service${NC} on port ${port} (hot-reload)..."
     echo -e "  Mode: ${YELLOW}single-process dev${NC} (aggregation runs in-process)"
     echo ""
@@ -111,6 +127,11 @@ run_viz() {
 }
 
 run_viz_proxy() {
+    check_port 8000 "viz-service" || exit 1
+    wait_for_service localhost 5432 "Postgres" 30 || exit 1
+    wait_for_service localhost 6380 "Redis" 15 || exit 1
+    wait_for_service localhost 6379 "FalkorDB" 15 || exit 1
+
     log "Starting ${BLUE}viz-service${NC} on port 8000 (proxy mode, hot-reload)..."
     echo -e "  Mode: ${YELLOW}proxy${NC} (aggregation -> controlplane:8091)"
     echo ""
@@ -130,6 +151,11 @@ run_viz_proxy() {
 }
 
 run_controlplane() {
+    check_port 8091 "aggregation-controlplane" || exit 1
+    wait_for_service localhost 5432 "Postgres" 30 || exit 1
+    wait_for_service localhost 6380 "Redis" 15 || exit 1
+    wait_for_service localhost 6379 "FalkorDB" 15 || exit 1
+
     log "Starting ${BLUE}aggregation-controlplane${NC} on port 8091..."
     echo ""
 
@@ -143,6 +169,10 @@ run_controlplane() {
 }
 
 run_worker() {
+    wait_for_service localhost 5432 "Postgres" 30 || exit 1
+    wait_for_service localhost 6380 "Redis" 15 || exit 1
+    wait_for_service localhost 6379 "FalkorDB" 15 || exit 1
+
     log "Starting ${BLUE}aggregation-worker${NC} (headless)..."
     echo ""
 
@@ -156,12 +186,26 @@ run_worker() {
 }
 
 run_frontend() {
+    check_port 5173 "frontend" || exit 1
+
     log "Starting ${BLUE}frontend${NC} dev server on port 5173..."
     echo ""
 
     cd "$ROOT_DIR/frontend"
     if [ ! -d "node_modules" ]; then
         warn "Installing frontend dependencies..."
+        npm install
+    fi
+    exec npm run dev
+}
+
+run_landing() {
+    log "Starting ${BLUE}landing page${NC} dev server on port 5174..."
+    echo ""
+
+    cd "$ROOT_DIR/landing"
+    if [ ! -d "node_modules" ]; then
+        warn "Installing landing page dependencies..."
         npm install
     fi
     exec npm run dev
@@ -202,6 +246,12 @@ case "${1:-all}" in
     frontend|fe)
         run_frontend
         ;;
+    landing)
+        run_landing
+        ;;
+    doctor)
+        run_doctor
+        ;;
     all)
         load_env
         check_venv
@@ -229,7 +279,7 @@ case "${1:-all}" in
         echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
         ;;
     *)
-        echo "Usage: ./dev.sh [infra|stop|reset|viz|viz-proxy|controlplane|worker|frontend|all]"
+        echo "Usage: ./dev.sh [infra|stop|reset|viz|viz-proxy|controlplane|worker|frontend|doctor|all]"
         echo ""
         echo "  infra         Start infrastructure (Postgres, FalkorDB, Redis)"
         echo "  stop          Stop infrastructure"
@@ -239,6 +289,7 @@ case "${1:-all}" in
         echo "  controlplane  Start aggregation control plane (port 8091)"
         echo "  worker        Start aggregation worker (headless)"
         echo "  frontend      Start frontend Vite dev server"
+        echo "  doctor        Run all preflight checks without starting anything"
         echo "  all           Start infra + show instructions (default)"
         exit 1
         ;;

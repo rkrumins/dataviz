@@ -16,6 +16,8 @@
 
 import { create } from 'zustand'
 import { authService, type AuthUser, type SignUpRequest } from '@/services/authService'
+import { disableProviderStatusPolling } from '@/store/providerStatus'
+import { disableProviderHealthPolling } from '@/store/providerHealth'
 
 export type AuthStatus = 'idle' | 'loading' | 'authenticated' | 'unauthenticated'
 
@@ -100,6 +102,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     },
 
     logout: async () => {
+        disableProviderStatusPolling()
+        disableProviderHealthPolling()
         // Best-effort: call /logout so the server can revoke the refresh
         // family. Even if it fails (network down, etc.) we still clear
         // local state — the user is logging out either way.
@@ -112,6 +116,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     },
 
     handleSessionLost: () => {
+        disableProviderStatusPolling()
+        disableProviderHealthPolling()
         set({ ..._unauthenticated, error: null })
     },
 

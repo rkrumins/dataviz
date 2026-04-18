@@ -655,7 +655,7 @@ export function OntologySchemaPage() {
         activeWorkspace?.name,
         Object.keys(response.suggested.entityTypeDefinitions ?? {}),
       )
-      const created = await ontologyDefinitionService.create({
+      const created = await mutations.create.mutateAsync({
         ...response.suggested,
         name: finalName,
       })
@@ -758,9 +758,9 @@ export function OntologySchemaPage() {
     reader.readAsText(file)
   }
 
-  function handleImportSuccess(result: OntologyImportResponse) {
+  async function handleImportSuccess(result: OntologyImportResponse) {
     setImportData(null)
-    mutations.invalidateAll()
+    await mutations.invalidateAll()
     if (result.ontology?.id) {
       navigate(schemaUrl(result.ontology.id))
     }
@@ -794,7 +794,7 @@ export function OntologySchemaPage() {
         if (!activeWorkspaceId) throw new Error('No workspace selected')
         const stats = await fetchSchemaStats(activeWorkspaceId, activeDataSourceId ?? undefined)
         const response = await ontologyDefinitionService.suggest(stats as unknown as Record<string, unknown>)
-        const created = await ontologyDefinitionService.create({ ...response.suggested, name })
+        const created = await mutations.create.mutateAsync({ ...response.suggested, name })
         navigate(schemaUrl(created.id, 'schema'))
         showToast('success', `"${name}" created with ${Object.keys(created.entityTypeDefinitions ?? {}).length} entity types from your graph`)
       } catch (err: unknown) {
@@ -832,7 +832,7 @@ export function OntologySchemaPage() {
         onClick: async () => {
           try {
             await ontologyDefinitionService.restore(deletedId)
-            mutations.invalidateAll()
+            await mutations.invalidateAll()
             navigate(schemaUrl(deletedId))
             showToast('success', `"${deletedName}" restored`)
           } catch {
@@ -849,7 +849,7 @@ export function OntologySchemaPage() {
     if (!selectedOntology) return
     try {
       await ontologyDefinitionService.restore(selectedOntology.id)
-      mutations.invalidateAll()
+      await mutations.invalidateAll()
       showToast('success', `"${selectedOntology.name}" restored`)
     } catch (err: unknown) {
       showToast('error', `Failed to restore: ${err instanceof Error ? err.message : 'Unknown error'}`)

@@ -128,8 +128,18 @@ export function BackendHealthBanner() {
       intervalRef.current = setTimeout(scheduleNext, ms)
     }
 
-    // Kick off immediately
-    scheduleNext()
+    // If the health store already has data from AuthBootstrap's startup
+    // check, skip the immediate poll and go straight to scheduling the
+    // next cycle. This eliminates the duplicate initial health check.
+    const { lastCheckedAt } = useHealthStore.getState()
+    if (lastCheckedAt && Date.now() - lastCheckedAt < POLL_HEALTHY_MS) {
+      const { status: currentStatus, consecutiveFailures: failures } = useHealthStore.getState()
+      const isHealthy = currentStatus === 'healthy' || currentStatus === 'recovered'
+      const ms = isHealthy ? POLL_HEALTHY_MS : getUnhealthyInterval(failures)
+      intervalRef.current = setTimeout(scheduleNext, ms)
+    } else {
+      scheduleNext()
+    }
 
     return () => {
       cancelled = true

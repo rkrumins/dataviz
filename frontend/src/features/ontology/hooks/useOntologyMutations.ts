@@ -7,9 +7,11 @@ export function useOntologyMutations() {
   const queryClient = useQueryClient()
   const invalidateSchema = useInvalidateGraphSchema()
 
-  const invalidateAll = () => {
-    queryClient.invalidateQueries({ queryKey: ONTOLOGY_KEYS.all })
-    invalidateSchema()
+  const invalidateAll = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ONTOLOGY_KEYS.all }),
+      invalidateSchema(),
+    ])
   }
 
   const create = useMutation({
@@ -20,10 +22,12 @@ export function useOntologyMutations() {
   const update = useMutation({
     mutationFn: ({ id, req }: { id: string; req: OntologyUpdateRequest }) =>
       ontologyDefinitionService.update(id, req),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ONTOLOGY_KEYS.list() })
-      queryClient.invalidateQueries({ queryKey: ONTOLOGY_KEYS.detail(data.id) })
-      invalidateSchema()
+    onSuccess: async (data) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ONTOLOGY_KEYS.list() }),
+        queryClient.invalidateQueries({ queryKey: ONTOLOGY_KEYS.detail(data.id) }),
+        invalidateSchema(),
+      ])
     },
   })
 

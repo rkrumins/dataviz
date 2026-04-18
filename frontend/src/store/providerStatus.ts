@@ -68,6 +68,12 @@ export function enableProviderStatusPolling() {
   startPolling()
 }
 
+/** Call on logout / session expiry to stop polling. */
+export function disableProviderStatusPolling() {
+  authReady = false
+  stopPolling()
+}
+
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {

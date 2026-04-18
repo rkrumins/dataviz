@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useRef } from 'react'
 import ReactDOM from 'react-dom/client'
 import { RouterProvider } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -7,6 +7,7 @@ import './styles/globals.css'
 import { GraphProvider } from '@/providers/GraphProviderContext'
 import { BackendHealthBanner } from '@/components/layout/BackendHealthBanner'
 import { useAuthStore } from '@/store/auth'
+import { useHealthStore } from '@/store/health'
 import { enableProviderStatusPolling } from '@/store/providerStatus'
 import { enableProviderHealthPolling } from '@/store/providerHealth'
 
@@ -42,12 +43,24 @@ export function getQueryClient(): QueryClient | null {
 function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const bootstrap = useAuthStore((s) => s.bootstrap)
   const status = useAuthStore((s) => s.status)
+  const healthPoll = useHealthStore((s) => s.poll)
+  const healthChecked = useRef(false)
+
   useEffect(() => {
     void bootstrap()
     const onSessionLost = () => useAuthStore.getState().handleSessionLost()
     window.addEventListener('auth:session-lost', onSessionLost)
     return () => window.removeEventListener('auth:session-lost', onSessionLost)
   }, [bootstrap])
+
+  // Perform a single startup health check once auth resolves.
+  // The result populates the health store so BackendHealthBanner reads
+  // from the store on mount rather than firing its own initial poll.
+  useEffect(() => {
+    if ((status === 'idle' || status === 'loading') || healthChecked.current) return
+    healthChecked.current = true
+    void healthPoll()
+  }, [status, healthPoll])
 
   // Block rendering until auth resolves — prevents premature API calls
   if (status === 'idle' || status === 'loading') return null
