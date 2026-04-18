@@ -182,7 +182,7 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
       exit={{ opacity: 0, y: 12, scale: 0.95 }}
       transition={{ type: 'spring', damping: 20, stiffness: 300 }}
       className={cn(
-        'w-80 max-w-sm rounded-xl overflow-hidden',
+        'w-80 max-w-sm rounded-xl overflow-hidden pointer-events-auto',
         'bg-white dark:bg-slate-800',
         'border border-slate-200 dark:border-slate-700 shadow-2xl shadow-black/15 dark:shadow-black/40',
       )}

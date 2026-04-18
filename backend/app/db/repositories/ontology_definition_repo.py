@@ -489,6 +489,61 @@ async def list_versions_by_schema(session: AsyncSession, schema_id: str) -> List
     return [_to_response(r) for r in result.scalars().all()]
 
 
+async def get_draft_for_schema(
+    session: AsyncSession, schema_id: str
+) -> Optional[OntologyORM]:
+    """Return an existing unpublished draft for a given schema_id, if one exists."""
+    result = await session.execute(
+        select(OntologyORM)
+        .where(OntologyORM.schema_id == schema_id)
+        .where(OntologyORM.is_published == False)  # noqa: E712
+        .where(OntologyORM.deleted_at.is_(None))
+        .order_by(OntologyORM.version.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_new_version_from_source(
+    session: AsyncSession, source: OntologyORM
+) -> OntologyDefinitionResponse:
+    """Create a new draft version from a published/system ontology under the same schema_id."""
+    schema_id = source.schema_id or source.id
+    result = await session.execute(
+        select(func.max(OntologyORM.version)).where(
+            OntologyORM.schema_id == schema_id
+        )
+    )
+    max_version = result.scalar() or 0
+
+    new_row = OntologyORM(
+        schema_id=schema_id,
+        name=source.name,
+        description=getattr(source, "description", None),
+        version=max_version + 1,
+        containment_edge_types=source.containment_edge_types,
+        lineage_edge_types=source.lineage_edge_types,
+        edge_type_metadata=source.edge_type_metadata,
+        entity_type_hierarchy=source.entity_type_hierarchy,
+        root_entity_types=source.root_entity_types,
+        entity_type_definitions=source.entity_type_definitions,
+        relationship_type_definitions=source.relationship_type_definitions,
+        evolution_policy=getattr(source, "evolution_policy", "reject") or "reject",
+        is_published=False,
+        is_system=False,
+        scope=source.scope or "universal",
+    )
+    session.add(new_row)
+    await session.flush()
+    entity_count = len(json.loads(new_row.entity_type_definitions or "{}"))
+    rel_count = len(json.loads(new_row.relationship_type_definitions or "{}"))
+    await _record_audit(
+        session, new_row, "cloned",
+        summary=f"Created draft v{new_row.version} from v{source.version} ({entity_count} entity types, {rel_count} relationships)",
+    )
+    return _to_response(new_row)
+
+
 async def has_data_sources(session: AsyncSession, ontology_id: str) -> bool:
     """Check if any data sources reference this ontology."""
     from ..models import WorkspaceDataSourceORM

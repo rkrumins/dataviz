@@ -24,7 +24,9 @@ import {
   BackgroundVariant,
   type OnNodesChange,
   type OnEdgesChange,
+  type OnConnect,
   type NodeMouseHandler,
+  type EdgeMouseHandler,
   type ReactFlowInstance,
   applyNodeChanges,
   applyEdgeChanges,
@@ -32,7 +34,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { AnimatePresence } from 'framer-motion'
-import { ArrowRight, ArrowDown, Loader2, GitBranch } from 'lucide-react'
+import { ArrowRight, ArrowDown, Loader2, GitBranch, ZoomIn } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { generateColorFromType } from '@/lib/type-visuals'
 
@@ -77,6 +79,7 @@ import {
   useViewSchemaIsReady,
 } from '@/hooks/useViewSchema'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { usePreferencesStore } from '@/store/preferences'
 
 // Types
@@ -91,6 +94,8 @@ const edgeTypes = { lineage: LineageEdge, aggregated: AggregatedEdge as any }
 
 /** Maximum nodes rendered in the DOM before viewport culling kicks in */
 const MAX_VISIBLE_NODES = 2000
+/** Maximum children shown per parent before "Show More" */
+const MAX_CHILDREN_PER_PARENT = 20
 
 // ============================================
 // Component
@@ -101,7 +106,7 @@ export function GraphCanvas({ className }: { className?: string }) {
   const isSchemaReady = useViewSchemaIsReady()
 
   // 2. Canvas store
-  const { setNodes, setEdges, selectNode, clearSelection } = useCanvasStore()
+  const { setNodes, setEdges, selectNode, selectEdge, clearSelection, addEdges, addNodes } = useCanvasStore()
   const rawNodes = useCanvasStore((s) => s.nodes)
   const rawEdges = useCanvasStore((s) => s.edges)
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
@@ -143,17 +148,21 @@ export function GraphCanvas({ className }: { className?: string }) {
   //
   // A node is visible if:
   //   (a) It's a root (no containment parent), OR
-  //   (b) Every ancestor in its containment chain is expanded.
+  //   (b) Every ancestor in its containment chain is expanded
+  //       AND it's within the per-parent child cap (MAX_CHILDREN_PER_PARENT)
   //
-  // This is what makes expand/collapse actually work in the graph:
-  // - Roots always show
-  // - Children only show when their parent (and grandparent, etc.) are all expanded
-  // - Collapsing a parent hides all descendants
+  // hiddenChildCounts tracks how many children are hidden per parent for "Load More" UI.
   //
-  // We also build displayMap for highlight state.
-  const { visibleNodeIds, displayMap } = useMemo(() => {
+  // Tracks per-parent how many extra children to show beyond the default cap.
+  const [childPageSize, setChildPageSize] = useState<Map<string, number>>(new Map())
+
+  const { visibleNodeIds, displayMap, hiddenChildCounts } = useMemo(() => {
     const visible = new Set<string>()
     const dMap = new Map<string, HierarchyNode>()
+    const hiddenCounts = new Map<string, number>()
+
+    // Count visible children per parent (for capping)
+    const visibleChildCount = new Map<string, number>()
 
     // Helper: check if a node's entire ancestor chain is expanded
     const isAncestorChainExpanded = (nodeId: string): boolean => {
@@ -163,19 +172,44 @@ export function GraphCanvas({ className }: { className?: string }) {
       return isAncestorChainExpanded(parent) // Check grandparent recursively
     }
 
-    // Process all nodes
+    // First pass: determine which nodes WOULD be visible (ignoring cap)
+    const wouldBeVisible = new Set<string>()
     rawNodes.forEach(n => {
       if (n.data.type === 'ghost') return
-      if (isAncestorChainExpanded(n.id)) {
-        visible.add(n.id)
+      if (isAncestorChainExpanded(n.id)) wouldBeVisible.add(n.id)
+    })
+
+    // Second pass: apply per-parent child cap
+    rawNodes.forEach(n => {
+      if (n.data.type === 'ghost') return
+      if (!wouldBeVisible.has(n.id)) return
+
+      const parent = parentMap.get(n.id)
+      if (parent && expandedNodes.has(parent)) {
+        // This is a child of an expanded parent — check cap
+        const currentCount = visibleChildCount.get(parent) ?? 0
+        const pageSize = childPageSize.get(parent) ?? MAX_CHILDREN_PER_PARENT
+        if (currentCount >= pageSize) {
+          // Over cap — track as hidden
+          hiddenCounts.set(parent, (hiddenCounts.get(parent) ?? 0) + 1)
+          return // Don't add to visible
+        }
+        visibleChildCount.set(parent, currentCount + 1)
       }
-      // Build displayMap for ALL nodes (needed by highlight to walk children)
+
+      visible.add(n.id)
+    })
+
+    // Build displayMap for ALL loaded nodes (needed by highlight/edge projection)
+    rawNodes.forEach(n => {
+      if (n.data.type === 'ghost') return
+      const childIds = childMap.get(n.id) ?? []
       dMap.set(n.id, {
         id: n.id,
         typeId: (n.data.type as string) ?? '',
         name: (n.data.label as string) ?? n.id,
         data: n.data as Record<string, unknown>,
-        children: (childMap.get(n.id) ?? [])
+        children: childIds
           .map(cid => nodeMap.get(cid))
           .filter(Boolean)
           .map(cn => ({
@@ -196,8 +230,8 @@ export function GraphCanvas({ className }: { className?: string }) {
       })
     })
 
-    return { visibleNodeIds: visible, displayMap: dMap }
-  }, [rawNodes, parentMap, expandedNodes, childMap, nodeMap])
+    return { visibleNodeIds: visible, displayMap: dMap, hiddenChildCounts: hiddenCounts }
+  }, [rawNodes, parentMap, expandedNodes, childMap, nodeMap, childPageSize])
 
   // Visible nodes and edges — filtered by expansion state
   const visibleNodes = useMemo(() =>
@@ -481,8 +515,8 @@ export function GraphCanvas({ className }: { className?: string }) {
     return `${nodeIds}|${edgeIds}|${direction}`
   }, [visibleNodes, layoutEdges, direction])
 
-  // ELK layout on visible nodes + ALL their connecting edges (containment included
-  // so ELK knows the structure for positioning, but only visible nodes are laid out)
+  // ELK layout — uses incremental layout when nodes are added (expand),
+  // full layout on initial load or when direction changes.
   useEffect(() => {
     if (visibleNodes.length === 0) {
       setLayoutedNodes([])
@@ -493,6 +527,12 @@ export function GraphCanvas({ className }: { className?: string }) {
     if (layoutSignature === prevLayoutSig.current) return
     prevLayoutSig.current = layoutSignature
 
+    // FLAT layout — pass ALL edges (containment + lineage) so ELK's layered
+    // algorithm naturally creates hierarchical layers:
+    //   Layer 0: roots (no incoming containment)
+    //   Layer 1: children (incoming CONTAINS edge from layer 0)
+    //   Layer 2: grandchildren, etc.
+    // This is how DataHub/OpenMetadata do it — no compound nodes, just edge-driven layers.
     applyLayout(visibleNodes, layoutEdges, schemaEntityTypes as any)
       .then((positioned) => {
         setLayoutedNodes(positioned as LineageNode[])
@@ -506,7 +546,6 @@ export function GraphCanvas({ className }: { className?: string }) {
   }, [layoutSignature, applyLayout])
 
   // 16. Semantic zoom — ontology-driven auto-expand/collapse on zoom
-  // Disabled by default until layout stabilization is complete — enable via toggle
   const semanticZoom = useSemanticZoom({
     rfInstance,
     expandedNodes,
@@ -515,7 +554,7 @@ export function GraphCanvas({ className }: { className?: string }) {
     parentMap,
     schemaEntityTypes: schemaEntityTypes as any,
     loadChildren,
-    enabled: false,
+    enabled: true,
   })
   semanticZoomRef.current = semanticZoom.onViewportChange
 
@@ -525,12 +564,23 @@ export function GraphCanvas({ className }: { className?: string }) {
   loadChildrenRef.current = loadChildren
 
   const stableOnLoadMore = useCallback((parentId: string) => {
+    // Increase visible cap for this parent (show more already-loaded children)
+    setChildPageSize(prev => {
+      const next = new Map(prev)
+      const current = next.get(parentId) ?? MAX_CHILDREN_PER_PARENT
+      next.set(parentId, current + MAX_CHILDREN_PER_PARENT)
+      return next
+    })
+    // Also trigger backend fetch for more children (if not all loaded)
     loadChildrenRef.current(parentId)
   }, [])
 
   const pendingLoadRef = useRef<Set<string>>(new Set())
   const toggleNode = useCallback(
     async (nodeId: string) => {
+      // Register manual override so semantic zoom doesn't undo this action
+      semanticZoom.registerManualOverride(nodeId)
+
       let wasExpanded = false
       setExpandedNodes((prev) => {
         wasExpanded = prev.has(nodeId)
@@ -548,7 +598,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         }
       }
     },
-    [loadChildren],
+    [loadChildren, semanticZoom],
   )
 
   const toggleNodeRef = useRef(toggleNode)
@@ -640,6 +690,9 @@ export function GraphCanvas({ className }: { className?: string }) {
         isDownstream: trace.isDownstream(node.id),
         isFocus: trace.isFocus(node.id),
         isHighlighted: mergedHighlightNodes.has(node.id),
+        isExpanded: expandedNodes.has(node.id),
+        // Hidden child count — drives "Load More" badge on the node
+        _hiddenCount: hiddenChildCounts.get(node.id) ?? 0,
         onLoadMore: stableOnLoadMore,
         onToggleExpanded: stableOnToggle,
       },
@@ -694,6 +747,8 @@ export function GraphCanvas({ className }: { className?: string }) {
     stableOnLoadMore,
     stableOnToggle,
     viewportBounds,
+    expandedNodes,
+    hiddenChildCounts,
   ])
 
   // 18. Handlers
@@ -743,6 +798,214 @@ export function GraphCanvas({ className }: { className?: string }) {
 
   const onPaneClick = useCallback(() => clearSelection(), [clearSelection])
 
+  // Edge click
+  const onEdgeClick: EdgeMouseHandler = useCallback(
+    (_, edge) => selectEdge(edge.id),
+    [selectEdge],
+  )
+
+  // Edge context menu — uses ref because interactions is defined later
+  const interactionsRef = useRef<any>(null)
+  const onEdgeContextMenu: EdgeMouseHandler = useCallback(
+    (event, edge) => {
+      event.preventDefault()
+      interactionsRef.current?.openContextMenu(event as unknown as React.MouseEvent, {
+        type: 'edge',
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+      })
+    },
+    [],
+  )
+
+  // Helper: find all valid relationship types between two entity types (ontology-driven)
+  // Uses containmentEdgeTypes and lineageEdgeTypes to classify each result.
+  // Treats empty/missing sourceTypes or targetTypes as wildcards (any entity type allowed).
+  const getValidEdgeTypes = useCallback(
+    (sourceType: string, targetType: string) => {
+      const containmentSet = new Set(containmentEdgeTypes.map(t => t.toUpperCase()))
+
+      return relationshipTypes
+        .filter(rt => {
+          // Empty arrays or missing = wildcard (any type allowed)
+          const srcOk = !rt.sourceTypes?.length || rt.sourceTypes.includes('*') || rt.sourceTypes.includes(sourceType)
+          const tgtOk = !rt.targetTypes?.length || rt.targetTypes.includes('*') || rt.targetTypes.includes(targetType)
+          return srcOk && tgtOk
+        })
+        .map(rt => ({
+          ...rt,
+          _isContainment: rt.isContainment ?? containmentSet.has(rt.id.toUpperCase()),
+          _isLineage: rt.isLineage ?? !containmentSet.has(rt.id.toUpperCase()),
+          _category: rt.isContainment ? 'Containment' : (rt.isLineage ? 'Lineage' : (rt.category ?? 'Association')),
+        }))
+    },
+    [relationshipTypes, containmentEdgeTypes],
+  )
+
+  // Edge picker state — shown when user needs to choose between multiple valid edge types
+  const [edgePicker, setEdgePicker] = useState<{
+    isOpen: boolean
+    position: { x: number; y: number }
+    connection: { source: string; target: string; sourceName: string; targetName: string } | null
+    validTypes: Array<{ id: string; name: string; description?: string; _isContainment: boolean; _isLineage: boolean; _category: string }>
+  }>({ isOpen: false, position: { x: 0, y: 0 }, connection: null, validTypes: [] })
+
+  // Create edge with a specific type
+  const createEdgeWithType = useCallback(
+    (source: string, target: string, edgeTypeId: string) => {
+      const isContainment = containmentEdgeTypes.some(t => t.toUpperCase() === edgeTypeId.toUpperCase())
+      addEdges([{
+        id: `e-${source}-${target}-${edgeTypeId}-${Date.now()}`,
+        source,
+        target,
+        type: isContainment ? 'smoothstep' : 'lineage',
+        data: { edgeType: edgeTypeId, relationship: edgeTypeId },
+        animated: !isContainment,
+      }])
+      setEdgePicker(prev => ({ ...prev, isOpen: false, connection: null }))
+    },
+    [addEdges, containmentEdgeTypes],
+  )
+
+  // Create edge by dragging between node handles — ontology-aware
+  // Shows picker when multiple valid types exist; auto-creates when only one
+  const onConnect: OnConnect = useCallback(
+    (connection) => {
+      if (!connection.source || !connection.target) return
+
+      const sourceNode = rawNodes.find(n => n.id === connection.source)
+      const targetNode = rawNodes.find(n => n.id === connection.target)
+      if (!sourceNode || !targetNode) return
+
+      const sourceType = (sourceNode.data.type as string) ?? ''
+      const targetType = (targetNode.data.type as string) ?? ''
+      const validTypes = getValidEdgeTypes(sourceType, targetType)
+
+      if (validTypes.length === 0) return
+
+      if (validTypes.length === 1) {
+        createEdgeWithType(connection.source, connection.target, validTypes[0].id)
+        return
+      }
+
+      // Multiple valid types — show picker
+      const targetEl = document.querySelector(`[data-id="${connection.target}"]`)
+      const rect = targetEl?.getBoundingClientRect()
+      setEdgePicker({
+        isOpen: true,
+        position: rect
+          ? { x: rect.left + rect.width / 2, y: rect.top }
+          : { x: window.innerWidth / 2, y: window.innerHeight / 2 },
+        connection: {
+          source: connection.source,
+          target: connection.target,
+          sourceName: (sourceNode.data.label as string) ?? sourceNode.id,
+          targetName: (targetNode.data.label as string) ?? targetNode.id,
+        },
+        validTypes,
+      })
+    },
+    [rawNodes, getValidEdgeTypes, createEdgeWithType],
+  )
+
+  // Edge reconnection — ontology-aware
+  const onReconnect = useCallback(
+    (oldEdge: any, newConnection: any) => {
+      if (!newConnection.source || !newConnection.target) return
+
+      const sourceNode = rawNodes.find(n => n.id === newConnection.source)
+      const targetNode = rawNodes.find(n => n.id === newConnection.target)
+      if (!sourceNode || !targetNode) return
+
+      const sourceType = (sourceNode.data.type as string) ?? ''
+      const targetType = (targetNode.data.type as string) ?? ''
+      const validTypes = getValidEdgeTypes(sourceType, targetType)
+
+      const originalType = oldEdge.data?.edgeType ?? oldEdge.data?.relationship
+      const edgeType = validTypes.find(rt => rt.id === originalType)?.id ?? validTypes[0]?.id
+      if (!edgeType) return
+
+      const { removeEdge, addEdges: addEdgesFresh } = useCanvasStore.getState()
+      removeEdge(oldEdge.id)
+      const isContainment = containmentEdgeTypes.some(t => t.toUpperCase() === edgeType.toUpperCase())
+      addEdgesFresh([{
+        id: `e-${newConnection.source}-${newConnection.target}-${edgeType}-${Date.now()}`,
+        source: newConnection.source,
+        target: newConnection.target,
+        type: isContainment ? 'smoothstep' : 'lineage',
+        data: { edgeType, relationship: edgeType },
+        animated: !isContainment,
+      }])
+    },
+    [rawNodes, getValidEdgeTypes, containmentEdgeTypes],
+  )
+
+  // Connection validation — checks ALL ontology relationship types
+  // A connection is valid if ANY relationship type allows this source→target type combination
+  const isValidConnection = useCallback(
+    (connection: any) => {
+      if (connection.source === connection.target) return false
+
+      const sourceNode = rawNodes.find(n => n.id === connection.source)
+      const targetNode = rawNodes.find(n => n.id === connection.target)
+      if (!sourceNode || !targetNode) return false
+
+      const sourceType = (sourceNode.data.type as string) ?? ''
+      const targetType = (targetNode.data.type as string) ?? ''
+
+      return getValidEdgeTypes(sourceType, targetType).length > 0
+    },
+    [rawNodes, getValidEdgeTypes],
+  )
+
+  // Drag-and-drop from NodePalette
+  const onDragOver = useCallback((event: React.DragEvent) => {
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+  }, [])
+
+  const onDrop = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault()
+      const type = event.dataTransfer.getData('application/reactflow')
+      if (!type || !rfInstance) return
+
+      const position = rfInstance.screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      })
+
+      addNodes([{
+        id: `node-${Date.now()}`,
+        type: 'generic',
+        position,
+        data: {
+          type,
+          label: `New ${type}`,
+          urn: `urn:manual:${type}:${Date.now()}`,
+        },
+      }])
+    },
+    [rfInstance, addNodes],
+  )
+
+  // Save graph to backend
+  const handleSave = useCallback(async () => {
+    try {
+      const response = await fetchWithTimeout('/api/v1/graph/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodes: rawNodes, edges: rawEdges }),
+      })
+      if (!response.ok) throw new Error('Failed to save graph')
+      alert('Graph saved successfully!')
+    } catch (error) {
+      console.error('Error saving graph:', error)
+      alert('Failed to save graph')
+    }
+  }, [rawNodes, rawEdges])
+
   // 19. Canvas interactions (context menu, inline edit, quick create, command palette)
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => trace.startTrace(nodeId),
@@ -764,6 +1027,7 @@ export function GraphCanvas({ className }: { className?: string }) {
   })
 
   useCanvasKeyboard({ enabled: true, handlers: interactions.keyboardHandlers })
+  interactionsRef.current = interactions
 
   // 20. Minimap color
   const minimapNodeColor = useCallback(
@@ -802,9 +1066,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       <div className="absolute top-4 left-4 z-30">
         <EditorToolbar
           onAddNode={() => setPaletteOpen(true)}
-          onSave={() => {
-            /* TODO */
-          }}
+          onSave={handleSave}
           edgeTypes={relationshipTypes}
           activeEdgeType={activeEdgeType}
           onSelectEdgeType={setActiveEdgeType}
@@ -837,6 +1099,19 @@ export function GraphCanvas({ className }: { className?: string }) {
             <GitBranch className="w-3.5 h-3.5" />
             {showLineageFlow ? 'Flow On' : 'Flow Off'}
           </button>
+          <button
+            onClick={semanticZoom.toggle}
+            className={cn(
+              'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all',
+              semanticZoom.isEnabled
+                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                : 'bg-black/5 dark:bg-white/10 text-ink-muted',
+            )}
+            title="Semantic Zoom: auto-expand/collapse entities based on zoom level"
+          >
+            <ZoomIn className="w-3.5 h-3.5" />
+            {semanticZoom.isEnabled ? 'LOD On' : 'LOD Off'}
+          </button>
           {trace.isTracing && (
             <button
               onClick={() => {
@@ -867,6 +1142,13 @@ export function GraphCanvas({ className }: { className?: string }) {
           onNodeMouseEnter={onNodeMouseEnter}
           onNodeMouseLeave={onNodeMouseLeave}
           onPaneClick={onPaneClick}
+          onConnect={onConnect}
+          onReconnect={onReconnect}
+          onEdgeClick={onEdgeClick}
+          onEdgeContextMenu={onEdgeContextMenu}
+          onDrop={onDrop}
+          onDragOver={onDragOver}
+          isValidConnection={isValidConnection}
           onNodeContextMenu={(event, node) => {
             event.preventDefault()
             interactions.openContextMenu(event as any, {
@@ -875,7 +1157,11 @@ export function GraphCanvas({ className }: { className?: string }) {
               data: node.data as Record<string, unknown>,
             })
           }}
-          defaultEdgeOptions={{ interactionWidth: 20 }}
+          defaultEdgeOptions={{
+            type: 'lineage',
+            animated: true,
+            interactionWidth: 20,
+          }}
           selectionOnDrag
           multiSelectionKeyCode="Shift"
           selectionMode={SelectionMode.Partial}
@@ -1037,6 +1323,109 @@ export function GraphCanvas({ className }: { className?: string }) {
         }}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />
+
+      {/* Edge Type Picker — ontology-driven relationship selection */}
+      {edgePicker.isOpen && edgePicker.connection && (
+        <>
+          <div
+            className="fixed inset-0 z-[60] bg-black/20 backdrop-blur-[1px]"
+            onClick={() => setEdgePicker(prev => ({ ...prev, isOpen: false, connection: null }))}
+          />
+          <div
+            className="fixed z-[61] bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl min-w-[280px] max-w-[360px] overflow-hidden"
+            style={{
+              left: Math.min(edgePicker.position.x, window.innerWidth - 380),
+              top: Math.max(edgePicker.position.y - 10, 40),
+              transform: 'translateX(-50%)',
+            }}
+          >
+            {/* Header */}
+            <div className="px-4 py-3 border-b border-glass-border bg-canvas-elevated/80">
+              <p className="text-sm font-semibold text-ink">Connect Entities</p>
+              <p className="text-xs text-ink-muted mt-1">
+                <span className="font-medium text-ink">{edgePicker.connection.sourceName}</span>
+                <span className="mx-1.5 text-ink-muted/50">→</span>
+                <span className="font-medium text-ink">{edgePicker.connection.targetName}</span>
+              </p>
+            </div>
+
+            {/* Grouped by category */}
+            <div className="py-1.5 px-1.5 max-h-[300px] overflow-y-auto">
+              {/* Lineage edges first */}
+              {edgePicker.validTypes.filter(rt => rt._isLineage).length > 0 && (
+                <div className="mb-1">
+                  <p className="px-2.5 py-1 text-2xs font-semibold text-accent-lineage uppercase tracking-wider">
+                    Lineage
+                  </p>
+                  {edgePicker.validTypes.filter(rt => rt._isLineage).map(rt => (
+                    <button
+                      key={rt.id}
+                      className="w-full text-left px-3 py-2 rounded-lg text-sm transition-colors hover:bg-accent-lineage/10"
+                      onClick={() => edgePicker.connection && createEdgeWithType(edgePicker.connection.source, edgePicker.connection.target, rt.id)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className="w-1.5 h-1.5 rounded-full bg-accent-lineage" />
+                        <span className="font-medium text-ink">{rt.name}</span>
+                      </div>
+                      {rt.description && (
+                        <p className="text-2xs text-ink-muted mt-0.5 ml-3.5 line-clamp-2">{rt.description}</p>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Containment edges */}
+              {edgePicker.validTypes.filter(rt => rt._isContainment).length > 0 && (
+                <div className="mb-1">
+                  <p className="px-2.5 py-1 text-2xs font-semibold text-slate-500 uppercase tracking-wider">
+                    Containment
+                  </p>
+                  {edgePicker.validTypes.filter(rt => rt._isContainment).map(rt => (
+                    <button
+                      key={rt.id}
+                      className="w-full text-left px-3 py-2 rounded-lg text-sm transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"
+                      onClick={() => edgePicker.connection && createEdgeWithType(edgePicker.connection.source, edgePicker.connection.target, rt.id)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+                        <span className="font-medium text-ink">{rt.name}</span>
+                      </div>
+                      {rt.description && (
+                        <p className="text-2xs text-ink-muted mt-0.5 ml-3.5 line-clamp-2">{rt.description}</p>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Other/association edges */}
+              {edgePicker.validTypes.filter(rt => !rt._isLineage && !rt._isContainment).length > 0 && (
+                <div>
+                  <p className="px-2.5 py-1 text-2xs font-semibold text-amber-600 dark:text-amber-400 uppercase tracking-wider">
+                    Association
+                  </p>
+                  {edgePicker.validTypes.filter(rt => !rt._isLineage && !rt._isContainment).map(rt => (
+                    <button
+                      key={rt.id}
+                      className="w-full text-left px-3 py-2 rounded-lg text-sm transition-colors hover:bg-amber-50 dark:hover:bg-amber-900/20"
+                      onClick={() => edgePicker.connection && createEdgeWithType(edgePicker.connection.source, edgePicker.connection.target, rt.id)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                        <span className="font-medium text-ink">{rt.name}</span>
+                      </div>
+                      {rt.description && (
+                        <p className="text-2xs text-ink-muted mt-0.5 ml-3.5 line-clamp-2">{rt.description}</p>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }
