@@ -144,6 +144,28 @@ function MiniPreview({ viewType }: { viewType: string }) {
       </svg>
     )
   }
+  if (viewType === 'graph' || viewType === 'layered-lineage') {
+    return (
+      <svg viewBox="0 0 120 48" className="w-full h-full text-indigo-500/20">
+        {/* Nodes at different levels */}
+        <rect x="8" y="4" width="18" height="10" rx="2" fill="currentColor" />
+        <rect x="8" y="22" width="18" height="10" rx="2" fill="currentColor" opacity="0.8" />
+        <rect x="8" y="36" width="18" height="10" rx="2" fill="currentColor" opacity="0.6" />
+        <rect x="50" y="8" width="18" height="10" rx="2" fill="currentColor" opacity="0.7" />
+        <rect x="50" y="28" width="18" height="10" rx="2" fill="currentColor" opacity="0.5" />
+        <rect x="92" y="14" width="18" height="10" rx="2" fill="currentColor" opacity="0.6" />
+        <rect x="92" y="32" width="18" height="10" rx="2" fill="currentColor" opacity="0.4" />
+        {/* Lineage edges */}
+        <path d="M26 9 Q38 9 50 13" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.6" />
+        <path d="M26 27 Q38 27 50 33" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.5" />
+        <path d="M68 13 Q80 13 92 19" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.4" />
+        <path d="M68 33 Q80 33 92 37" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.4" />
+        {/* Containment edges (dashed) */}
+        <path d="M17 14 L17 22" stroke="currentColor" strokeWidth="0.8" strokeDasharray="2,2" opacity="0.4" />
+        <path d="M17 32 L17 36" stroke="currentColor" strokeWidth="0.8" strokeDasharray="2,2" opacity="0.3" />
+      </svg>
+    )
+  }
   if (viewType === 'reference') {
     return (
       <svg viewBox="0 0 120 48" className="w-full h-full text-rose-500/20">
@@ -230,7 +252,7 @@ export function ExplorerViewCard({
   const visibleTags = tags.slice(0, 3)
   const overflowCount = tags.length - visibleTags.length
   const healthInfo = healthStatus ? HEALTH_INDICATOR[healthStatus] : null
-  const hasPreview = view.viewType === 'hierarchy' || view.viewType === 'reference'
+  const hasPreview = view.viewType === 'hierarchy' || view.viewType === 'reference' || view.viewType === 'graph' || view.viewType === 'layered-lineage'
   const showContextModel = view.contextModelName
     && view.contextModelName.toLowerCase() !== view.name.toLowerCase()
 
