@@ -8,8 +8,8 @@ export function Hero() {
     <section id="hero" className="relative min-h-screen flex items-center overflow-hidden">
       {/* Background effects */}
       <div className="absolute inset-0 hero-grid-bg opacity-60" />
-      <div className="absolute top-0 left-0 w-[600px] h-[600px] bg-accent-lineage/8 rounded-full blur-[120px] -translate-x-1/2 -translate-y-1/2" />
-      <div className="absolute bottom-0 right-0 w-[500px] h-[500px] bg-accent-business/6 rounded-full blur-[100px] translate-x-1/3 translate-y-1/3" />
+      <div className="absolute top-0 left-0 w-[300px] h-[300px] md:w-[600px] md:h-[600px] bg-accent-lineage/8 rounded-full blur-[80px] md:blur-[120px] -translate-x-1/2 -translate-y-1/2" />
+      <div className="absolute bottom-0 right-0 w-[250px] h-[250px] md:w-[500px] md:h-[500px] bg-accent-business/6 rounded-full blur-[60px] md:blur-[100px] translate-x-1/3 translate-y-1/3" />
 
       <div className="relative max-w-7xl mx-auto px-6 lg:px-8 pt-24 pb-16 w-full">
         <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
@@ -43,8 +43,8 @@ export function Hero() {
               <Button href="#contact" icon={<ArrowRight size={16} />}>
                 Request a Demo
               </Button>
-              <Button variant="secondary" href="#" icon={<BookOpen size={16} />}>
-                Explore the Docs
+              <Button variant="secondary" href="#faq" icon={<BookOpen size={16} />}>
+                Learn More
               </Button>
             </div>
 

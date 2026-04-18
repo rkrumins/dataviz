@@ -57,7 +57,14 @@ export function Comparison() {
         </p>
       </div>
 
-      <div className="overflow-x-auto -mx-6 px-6">
+      {/* Scroll hint for mobile */}
+      <div className="flex items-center justify-center gap-1.5 mb-4 md:hidden text-2xs text-ink-muted">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14 4h6v6M10 20H4v-6M20 4L4 20" />
+        </svg>
+        Swipe to compare all tools
+      </div>
+      <div className="overflow-x-auto -mx-6 px-6 scrollbar-thin" role="region" aria-label="Feature comparison table — scroll horizontally to see all tools" tabIndex={0}>
         <table className="w-full min-w-[720px] text-sm">
           <thead>
             <tr className="border-b border-[var(--nx-border-subtle)]">
