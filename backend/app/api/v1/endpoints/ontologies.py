@@ -245,6 +245,38 @@ async def clone_ontology(
     return result
 
 
+@router.post("/{ontology_id}/new-version", response_model=OntologyDefinitionResponse, status_code=201)
+async def create_new_version(
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Create a new draft version of an existing ontology within the same schema lineage.
+
+    The source ontology must be published or system. Copies all definitions into a new
+    draft with version = max + 1 and the same schema_id. Returns 409 if a draft already
+    exists for this schema (edit that draft instead).
+    """
+    source = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    if not source.is_published and not source.is_system:
+        raise HTTPException(
+            status_code=409,
+            detail="Only published or system ontologies can spawn new versions. Edit the existing draft instead.",
+        )
+    schema_id = source.schema_id or source.id
+    existing_draft = await ontology_definition_repo.get_draft_for_schema(session, schema_id)
+    if existing_draft:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A draft version (v{existing_draft.version}) already exists for this schema. Edit it instead.",
+        )
+    result = await ontology_definition_repo.create_new_version_from_source(session, source)
+    _invalidate_ontology_caches()
+    return result
+
+
 @router.post("/{ontology_id}/validate", response_model=OntologyValidationResponse)
 async def validate_ontology_endpoint(
     ontology_id: str = Path(...),

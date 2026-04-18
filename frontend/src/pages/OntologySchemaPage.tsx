@@ -655,7 +655,7 @@ export function OntologySchemaPage() {
         activeWorkspace?.name,
         Object.keys(response.suggested.entityTypeDefinitions ?? {}),
       )
-      const created = await ontologyDefinitionService.create({
+      const created = await mutations.create.mutateAsync({
         ...response.suggested,
         name: finalName,
       })
@@ -674,9 +674,20 @@ export function OntologySchemaPage() {
     try {
       const cloned = await mutations.clone.mutateAsync(selectedOntology.id)
       navigate(schemaUrl(cloned.id))
-      showToast('success', 'Cloned — now editing a new draft')
+      showToast('success', 'Cloned — now editing an independent copy')
     } catch (err: unknown) {
       showToast('error', `Clone failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    }
+  }
+
+  async function handleCreateNewVersion() {
+    if (!selectedOntology) return
+    try {
+      const newVersion = await mutations.createNewVersion.mutateAsync(selectedOntology.id)
+      navigate(schemaUrl(newVersion.id))
+      showToast('success', `Draft v${newVersion.version} created — now editing`)
+    } catch (err: unknown) {
+      showToast('error', `Failed to create new version: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
   }
 
@@ -794,7 +805,7 @@ export function OntologySchemaPage() {
         if (!activeWorkspaceId) throw new Error('No workspace selected')
         const stats = await fetchSchemaStats(activeWorkspaceId, activeDataSourceId ?? undefined)
         const response = await ontologyDefinitionService.suggest(stats as unknown as Record<string, unknown>)
-        const created = await ontologyDefinitionService.create({ ...response.suggested, name })
+        const created = await mutations.create.mutateAsync({ ...response.suggested, name })
         navigate(schemaUrl(created.id, 'schema'))
         showToast('success', `"${name}" created with ${Object.keys(created.entityTypeDefinitions ?? {}).length} entity types from your graph`)
       } catch (err: unknown) {
@@ -976,7 +987,7 @@ export function OntologySchemaPage() {
   return (
     <div className="flex flex-col h-full animate-in fade-in duration-500">
       {/* Context breadcrumb — always visible; shows environment picker when no workspace active */}
-      <div className="relative px-6 pt-3 border-b border-glass-border bg-canvas-elevated/20">
+      <div className="relative px-6 pt-2 pb-1 border-b border-glass-border bg-canvas-elevated/20">
         <OntologyContextBanner
           workspace={activeWorkspace}
           dataSource={activeDataSource}
@@ -1046,6 +1057,7 @@ export function OntologySchemaPage() {
                 onValidate={handleValidate}
                 onPublish={handlePublish}
                 onClone={handleClone}
+                onCreateNewVersion={handleCreateNewVersion}
                 onExport={handleExport}
                 onImport={() => fileInputRef.current?.click()}
                 onEditDetails={() => setEditDetailsTarget(selectedOntology)}
@@ -1306,6 +1318,7 @@ export function OntologySchemaPage() {
       {showCreateDialog && (
         <CreateOntologyDialog
           hasGraphContext={!!activeDataSource}
+          ontologies={ontologies}
           onClose={() => setShowCreateDialog(false)}
           onCreate={handleCreateDraft}
         />
