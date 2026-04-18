@@ -42,9 +42,14 @@ export function useOntologyMutations() {
     onSuccess: invalidateAll,
   })
 
+  const createNewVersion = useMutation({
+    mutationFn: (id: string) => ontologyDefinitionService.createNewVersion(id),
+    onSuccess: invalidateAll,
+  })
+
   const validate = useMutation({
     mutationFn: (id: string) => ontologyDefinitionService.validate(id),
   })
 
-  return { create, update, remove, publish, clone, validate, invalidateAll }
+  return { create, update, remove, publish, clone, createNewVersion, validate, invalidateAll }
 }

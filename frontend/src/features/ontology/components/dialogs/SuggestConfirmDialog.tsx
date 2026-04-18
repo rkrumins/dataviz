@@ -61,6 +61,12 @@ export function SuggestConfirmDialog({
 
   const isBusy = phase === 'analyzing' || isCreating
 
+  const isDuplicateName = useMemo(() => {
+    const trimmed = draftName.trim().toLowerCase()
+    if (!trimmed) return false
+    return ontologies.some(o => o.name.trim().toLowerCase() === trimmed)
+  }, [draftName, ontologies])
+
   function getOntology(id: string) {
     return ontologies.find(o => o.id === id)
   }
@@ -567,9 +573,20 @@ export function SuggestConfirmDialog({
                     value={draftName}
                     onChange={e => setDraftName(e.target.value)}
                     placeholder="Enter schema name..."
-                    className="w-full px-3 py-1.5 rounded-lg bg-white dark:bg-black/20 border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/30 transition-all"
+                    className={cn(
+                      'w-full px-3 py-1.5 rounded-lg bg-white dark:bg-black/20 border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 transition-all',
+                      isDuplicateName
+                        ? 'border-amber-400 focus:ring-amber-500/30 focus:border-amber-500/30'
+                        : 'border-glass-border focus:ring-indigo-500/30 focus:border-indigo-500/30',
+                    )}
                     autoFocus
                   />
+                  {isDuplicateName && (
+                    <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500 flex-shrink-0" />
+                      A schema named &ldquo;{draftName.trim()}&rdquo; already exists
+                    </p>
+                  )}
                 </div>
               </div>
             </div>

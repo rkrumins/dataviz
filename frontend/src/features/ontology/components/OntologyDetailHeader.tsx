@@ -2,26 +2,31 @@
  * OntologyDetailHeader — extracted header component for the detail pane.
  *
  * Two-tier layout:
- *   Tier 1 (always visible): Name + version/status + primary actions
+ *   Tier 1 (always visible): Name + version selector + primary actions
  *   Tier 2 (expandable): Description + metadata dates
  *
  * Toolbar states:
  *   - Draft, no changes: [... menu] [Publish]
  *   - Draft, has changes: [Discard] [Review Changes] [Save All] [Publish]
- *   - Immutable: [... menu] [Clone to Edit]
+ *   - Immutable: [... menu] [New Version]
  *
- * No explicit "Edit" button — drafts auto-enter edit mode on interaction.
+ * Version selector dropdown next to the version badge shows all versions
+ * within the same schema lineage.
  */
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Lock, PenLine, Loader2, Save, X, ShieldCheck,
   Copy, Download, Upload, Settings, MoreHorizontal,
   CircleDot, Trash2, ChevronDown, ChevronUp, Eye,
+  GitBranch, Plus,
 } from 'lucide-react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import * as Popover from '@radix-ui/react-popover'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { OntologyStatusBadge } from './OntologyStatusBadge'
+import { useOntologyVersions } from '../hooks/useOntologies'
 
 interface OntologyDetailHeaderProps {
   ontology: OntologyDefinitionResponse
@@ -34,6 +39,7 @@ interface OntologyDetailHeaderProps {
   onValidate: () => void
   onPublish: () => void
   onClone: () => void
+  onCreateNewVersion: () => void
   onExport: () => void
   onImport: () => void
   onEditDetails: () => void
@@ -51,15 +57,22 @@ export function OntologyDetailHeader({
   onValidate,
   onPublish,
   onClone,
+  onCreateNewVersion,
   onExport,
   onImport,
   onEditDetails,
   onDelete,
 }: OntologyDetailHeaderProps) {
+  const navigate = useNavigate()
   const [expanded, setExpanded] = useState(false)
+  const [versionOpen, setVersionOpen] = useState(false)
+
+  const { data: versions } = useOntologyVersions(ontology.id)
 
   const entityCount = Object.keys(ontology.entityTypeDefinitions ?? {}).length
   const relCount = Object.keys(ontology.relationshipTypeDefinitions ?? {}).length
+
+  const hasMultipleVersions = versions && versions.length > 1
 
   return (
     <div className="flex-shrink-0 px-8 pt-6 pb-0">
@@ -68,17 +81,98 @@ export function OntologyDetailHeader({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold tracking-tight text-ink truncate">{ontology.name}</h1>
-            <span className={cn(
-              'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold font-mono flex-shrink-0 border',
-              ontology.isPublished || ontology.isSystem
-                ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/40'
-                : 'bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border-amber-200/50 dark:border-amber-800/40',
-            )}>
-              {ontology.isPublished || ontology.isSystem
-                ? <Lock className="w-3 h-3" />
-                : <PenLine className="w-3 h-3" />}
-              v{ontology.version}
-            </span>
+
+            {/* Version badge — clickable if multiple versions exist */}
+            {hasMultipleVersions ? (
+              <Popover.Root open={versionOpen} onOpenChange={setVersionOpen}>
+                <Popover.Trigger asChild>
+                  <button className={cn(
+                    'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold font-mono flex-shrink-0 border cursor-pointer transition-all hover:ring-2 hover:ring-indigo-500/20',
+                    ontology.isPublished || ontology.isSystem
+                      ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/40'
+                      : 'bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border-amber-200/50 dark:border-amber-800/40',
+                  )}>
+                    {ontology.isPublished || ontology.isSystem
+                      ? <Lock className="w-3 h-3" />
+                      : <PenLine className="w-3 h-3" />}
+                    v{ontology.version}
+                    <ChevronDown className={cn('w-3 h-3 opacity-50 transition-transform', versionOpen && 'rotate-180')} />
+                  </button>
+                </Popover.Trigger>
+                <Popover.Portal>
+                  <Popover.Content
+                    className="w-[280px] bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in zoom-in-95"
+                    sideOffset={6} align="start"
+                  >
+                    <div className="px-3 py-2 border-b border-glass-border/50">
+                      <div className="flex items-center gap-2">
+                        <GitBranch className="w-3.5 h-3.5 text-ink-muted" />
+                        <span className="text-xs font-bold text-ink">Version History</span>
+                        <span className="text-[10px] text-ink-muted ml-auto">{versions.length} version{versions.length !== 1 ? 's' : ''}</span>
+                      </div>
+                    </div>
+                    <div className="max-h-[300px] overflow-y-auto p-1.5">
+                      {versions.map(v => {
+                        const isCurrent = v.id === ontology.id
+                        return (
+                          <button
+                            key={v.id}
+                            onClick={() => {
+                              if (!isCurrent) navigate(`/schema/${v.id}`)
+                              setVersionOpen(false)
+                            }}
+                            className={cn(
+                              'w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left transition-all',
+                              isCurrent
+                                ? 'bg-indigo-500/[0.08] text-indigo-600 dark:text-indigo-400'
+                                : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03] text-ink-secondary',
+                            )}
+                          >
+                            <span className={cn(
+                              'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold font-mono border flex-shrink-0',
+                              v.isPublished || v.isSystem
+                                ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/40'
+                                : 'bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border-amber-200/50 dark:border-amber-800/40',
+                            )}>
+                              {v.isPublished || v.isSystem ? <Lock className="w-2.5 h-2.5" /> : <PenLine className="w-2.5 h-2.5" />}
+                              v{v.version}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <span className="text-xs font-medium">
+                                {v.isSystem ? 'System' : v.isPublished ? 'Published' : 'Draft'}
+                              </span>
+                              <p className="text-[10px] text-ink-muted truncate">
+                                {v.isPublished && v.publishedAt
+                                  ? new Date(v.publishedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+                                  : new Date(v.updatedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+                                }
+                              </p>
+                            </div>
+                            {isCurrent && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-500 flex-shrink-0">VIEWING</span>
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </Popover.Content>
+                </Popover.Portal>
+              </Popover.Root>
+            ) : (
+              /* Single version — static badge */
+              <span className={cn(
+                'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold font-mono flex-shrink-0 border',
+                ontology.isPublished || ontology.isSystem
+                  ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/40'
+                  : 'bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border-amber-200/50 dark:border-amber-800/40',
+              )}>
+                {ontology.isPublished || ontology.isSystem
+                  ? <Lock className="w-3 h-3" />
+                  : <PenLine className="w-3 h-3" />}
+                v{ontology.version}
+              </span>
+            )}
+
             <OntologyStatusBadge ontology={ontology} />
             {hasPendingChanges && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/10 text-[10px] font-bold text-amber-600 dark:text-amber-400 ring-1 ring-amber-500/20 animate-pulse">
@@ -161,15 +255,14 @@ export function OntologyDetailHeader({
                   <ShieldCheck className="w-3.5 h-3.5" />
                   Validate
                 </DropdownMenu.Item>
-                {!isImmutable && (
-                  <DropdownMenu.Item
-                    onClick={onClone}
-                    className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                    Clone
-                  </DropdownMenu.Item>
-                )}
+                {/* Clone — available for all (creates independent copy) */}
+                <DropdownMenu.Item
+                  onClick={onClone}
+                  className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  Clone (Independent Copy)
+                </DropdownMenu.Item>
                 <DropdownMenu.Separator className="h-px bg-glass-border/60 my-1" />
                 <DropdownMenu.Item
                   onClick={onExport}
@@ -240,14 +333,14 @@ export function OntologyDetailHeader({
             </button>
           )}
 
-          {/* Clone to Edit — shown for immutable ontologies */}
+          {/* New Version — shown for immutable (published/system) ontologies */}
           {isImmutable && !ontology.deletedAt && (
             <button
-              onClick={onClone}
+              onClick={onCreateNewVersion}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20"
             >
-              <Copy className="w-4 h-4" />
-              Clone to Edit
+              <Plus className="w-4 h-4" />
+              New Version
             </button>
           )}
         </div>
