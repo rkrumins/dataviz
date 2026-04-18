@@ -259,6 +259,30 @@ class FalkorDBProvider(GraphDataProvider):
             self._resolved_containment_types_set = True
         # else: introspection-only with no containment found — don't set sentinel
 
+    async def set_projection_mode(self, mode: str) -> None:
+        """Dynamically switch the projection target for aggregation operations.
+
+        Because provider instances are cached and shared across data sources,
+        projection_mode cannot be baked into the constructor.  The aggregation
+        worker calls this per-job to route AGGREGATED edges to the correct
+        graph (source or dedicated ``{graph_name}_proj``).
+
+        Must be called AFTER ``_ensure_connected()`` so ``self._db`` is ready.
+        """
+        await self._ensure_connected()
+        old = self._projection_mode
+        self._projection_mode = mode
+        if mode == "dedicated":
+            if self._proj_graph is None:
+                self._proj_graph = self._db.select_graph(f"{self._graph_name}_proj")
+        else:
+            # Switching back to in_source — clear proj_graph so _proj returns _graph
+            self._proj_graph = None
+        logger.info(
+            "Projection mode changed %s → %s for graph %s",
+            old, mode, self._graph_name,
+        )
+
     def set_resolved_edge_metadata(
         self,
         edge_type_metadata: Dict[str, Any],
