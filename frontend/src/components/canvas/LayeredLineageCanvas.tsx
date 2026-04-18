@@ -1,4 +1,7 @@
 /**
+ * @deprecated Use GraphCanvas instead. This component is superseded by
+ * the unified GraphCanvas.
+ *
  * LayeredLineageCanvas - React Flow graph with layer-aware layout
  *
  * A free-floating graph canvas where:

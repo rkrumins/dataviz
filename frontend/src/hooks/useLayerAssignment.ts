@@ -16,7 +16,7 @@ import {
   type LayerAssignmentRule,
   type EntityType,
 } from '@/providers/GraphDataProvider'
-import type { HierarchyNode } from '../components/canvas/context-view/types'
+import type { HierarchyNode } from '@/types/hierarchy'
 
 // ============================================
 // Types

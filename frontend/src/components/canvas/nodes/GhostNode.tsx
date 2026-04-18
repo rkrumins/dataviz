@@ -3,15 +3,17 @@ import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { ChevronDown, Loader2, Plus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { LineageNode } from '@/store/canvas'
-import { useLineageExplorationStore } from '@/hooks/useLineageExploration'
 
 type GhostNodeProps = NodeProps<LineageNode>
 
 /**
  * GhostNode - "Load More" placeholder for paginated children
- * 
+ *
  * Displays count of hidden nodes and handles click to expand.
  * Properly positioned by ELK layout engine.
+ *
+ * Canvas-agnostic: receives onLoadMore via data prop instead of reaching
+ * into any specific exploration store.
  */
 export const GhostNode = memo(function GhostNode({
   data,
@@ -25,21 +27,21 @@ export const GhostNode = memo(function GhostNode({
   const parentId = nodeData.parentId as string | undefined
   const entityType = nodeData.entityType as string | undefined
 
-  // Get loadMoreNodes action from exploration store
-  const loadMoreNodes = useLineageExplorationStore((s) => s.loadMoreNodes)
+  // Read the load-more callback from the node data prop (injected by the canvas host)
+  const onLoadMore = nodeData.onLoadMore as ((parentId: string, count: number) => void) | undefined
 
   const handleClick = useCallback(() => {
-    if (!parentId || isLoading) return
+    if (!parentId || isLoading || !onLoadMore) return
 
     setIsLoading(true)
 
     // Load more nodes for this parent
     // The default increment is 5, but could be configurable
-    loadMoreNodes(parentId, 5)
+    onLoadMore(parentId, 5)
 
     // Reset loading after a brief delay (layout will re-render anyway)
     setTimeout(() => setIsLoading(false), 300)
-  }, [parentId, isLoading, loadMoreNodes])
+  }, [parentId, isLoading, onLoadMore])
 
   // Determine label based on entity type
   const typeLabel = entityType ? getTypePluralLabel(entityType) : 'items'
@@ -110,6 +112,17 @@ export const GhostNode = memo(function GhostNode({
         )}
       />
     </>
+  )
+}, (prev, next) => {
+  const prevData = prev.data as unknown as Record<string, unknown>
+  const nextData = next.data as unknown as Record<string, unknown>
+  return (
+    prev.selected === next.selected &&
+    prevData.hiddenCount === nextData.hiddenCount &&
+    prevData.nodeCount === nextData.nodeCount &&
+    prevData.parentId === nextData.parentId &&
+    prevData.entityType === nextData.entityType &&
+    prevData.onLoadMore === nextData.onLoadMore
   )
 })
 
