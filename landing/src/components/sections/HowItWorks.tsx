@@ -42,7 +42,7 @@ const STEPS = [
 
 export function HowItWorks() {
   return (
-    <Section id="how-it-works" alt>
+    <Section id="how-it-works">
       <div className="text-center mb-16">
         <h2 className="text-3xl md:text-4xl font-display font-bold tracking-tight mb-4">
           From zero to lineage in{' '}

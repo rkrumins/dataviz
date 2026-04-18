@@ -29,7 +29,7 @@ const TESTIMONIALS = [
 
 export function Testimonials() {
   return (
-    <Section id="testimonials">
+    <Section id="testimonials" alt>
       <div className="text-center mb-16">
         <h2 className="text-3xl md:text-4xl font-display font-bold tracking-tight mb-4">
           What data teams{' '}

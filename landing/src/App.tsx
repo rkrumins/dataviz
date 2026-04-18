@@ -7,14 +7,35 @@ import { LogoBar } from '@/components/sections/LogoBar'
 import { ValueProps } from '@/components/sections/ValueProps'
 import { FeatureShowcase } from '@/components/sections/FeatureShowcase'
 import { HowItWorks } from '@/components/sections/HowItWorks'
-import { Architecture } from '@/components/sections/Architecture'
-import { UniversalLineage } from '@/components/sections/UniversalLineage'
-import { Comparison } from '@/components/sections/Comparison'
-import { Integrations } from '@/components/sections/Integrations'
-import { Testimonials } from '@/components/sections/Testimonials'
 import { AIAssistant } from '@/components/sections/AIAssistant'
+import { UniversalLineage } from '@/components/sections/UniversalLineage'
+import { Architecture } from '@/components/sections/Architecture'
+import { Comparison } from '@/components/sections/Comparison'
+import { Testimonials } from '@/components/sections/Testimonials'
+import { Integrations } from '@/components/sections/Integrations'
 import { FAQ } from '@/components/sections/FAQ'
 import { CallToAction } from '@/components/sections/CallToAction'
+
+/*
+ * Page flow (narrative arc):
+ *
+ *  1. Hero                — Problem + vision + product preview
+ *  2. LogoBar             — Quick credibility
+ *  3. ValueProps           — 3 outcomes (why this matters)
+ *  4. FeatureShowcase  ALT — 6 features with interactive demos (how it works)
+ *  5. HowItWorks           — 5-step getting started
+ *  6. AIAssistant      ALT — Natural language exploration (key selling point)
+ *  7. UniversalLineage     — Connect to any graph/catalog
+ *  8. Architecture     ALT — Technical depth for evaluators
+ *  9. Comparison           — vs competitors
+ * 10. Testimonials     ALT — Social proof
+ * 11. Integrations         — Ecosystem
+ * 12. FAQ              ALT — Objection handling
+ * 13. CallToAction         — Convert
+ *
+ * Background alternation: every other section after LogoBar gets `alt`
+ * for consistent visual rhythm.
+ */
 
 function App() {
   return (
@@ -25,14 +46,14 @@ function App() {
         <Hero />
         <LogoBar />
         <ValueProps />
-        <FeatureShowcase />
+        <FeatureShowcase />      {/* alt applied inside component */}
         <HowItWorks />
+        <AIAssistant />
         <UniversalLineage />
         <Architecture />
         <Comparison />
-        <Integrations />
         <Testimonials />
-        <AIAssistant />
+        <Integrations />
         <FAQ />
         <CallToAction />
       </main>

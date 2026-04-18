@@ -15,7 +15,7 @@ const INTEGRATIONS = [
 
 export function Integrations() {
   return (
-    <Section id="integrations" alt>
+    <Section id="integrations">
       <div className="text-center mb-16">
         <h2 className="text-3xl md:text-4xl font-display font-bold tracking-tight mb-4">
           Connects to what you{' '}

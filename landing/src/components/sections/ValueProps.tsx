@@ -1,28 +1,34 @@
-import { MousePointerClick, ZoomIn, Users } from 'lucide-react'
+import { Compass, RefreshCcw, Lock } from 'lucide-react'
 import { Card } from '@/components/ui/Card'
 import { Section } from '@/components/layout/Section'
 
+/*
+ * Three high-level value propositions — the "why" before the "how."
+ * Each maps to a user pain point, not a product feature.
+ * Features are covered in FeatureShowcase; this section sells the outcome.
+ */
+
 const PROPS = [
   {
-    icon: MousePointerClick,
-    title: 'Interactive, Not Static',
+    icon: Compass,
+    title: 'Clarity across your data stack',
     description:
-      'Explore lineage like a design tool. Pan, zoom, trace upstream, drill into column-level detail. Your graph responds to every click.',
+      'See how data flows from source to dashboard in one interactive view. No more chasing dependencies across wikis, Slack threads, and stale documentation.',
     color: '#6366f1',
   },
   {
-    icon: ZoomIn,
-    title: 'Any Zoom Level',
+    icon: RefreshCcw,
+    title: 'Adapt without rebuilding',
     description:
-      'Jump from a 10,000-foot domain view to individual column transformations. Pre-computed aggregation means zero wait, even at millions of edges.',
-    color: '#8b5cf6',
+      'Change graph backends, evolve your ontology, or restructure teams — your views and lineage survive. The architecture is designed to absorb change, not fight it.',
+    color: '#10b981',
   },
   {
-    icon: Users,
-    title: 'Speak Their Language',
+    icon: Lock,
+    title: 'Govern without gatekeeping',
     description:
-      'Business users see domains and KPIs. Engineers see schemas and transformations. Same graph, same truth, different perspectives.',
-    color: '#10b981',
+      'Each team gets isolated workspaces with their own views and ontologies. Platform-wide lineage stays consistent, but nobody steps on each other\'s context.',
+    color: '#8b5cf6',
   },
 ]
 

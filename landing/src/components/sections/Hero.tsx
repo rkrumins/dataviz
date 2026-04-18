@@ -36,7 +36,7 @@ export function Hero() {
 
             <p className="text-lg md:text-xl text-ink-secondary leading-relaxed mb-8 max-w-xl">
               Interactive lineage visualization that scales from a single column to your
-              entire data platform. No static DAGs. No vendor lock-in. Just clarity.
+              entire data platform. Explore, trace, and understand — not just view.
             </p>
 
             <div className="flex flex-wrap gap-4">
