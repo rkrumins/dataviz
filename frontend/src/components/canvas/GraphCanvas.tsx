@@ -91,6 +91,8 @@ const edgeTypes = { lineage: LineageEdge, aggregated: AggregatedEdge as any }
 
 /** Maximum nodes rendered in the DOM before viewport culling kicks in */
 const MAX_VISIBLE_NODES = 2000
+/** Maximum children shown per parent before "Show More" */
+const MAX_CHILDREN_PER_PARENT = 20
 
 // ============================================
 // Component
@@ -143,17 +145,21 @@ export function GraphCanvas({ className }: { className?: string }) {
   //
   // A node is visible if:
   //   (a) It's a root (no containment parent), OR
-  //   (b) Every ancestor in its containment chain is expanded.
+  //   (b) Every ancestor in its containment chain is expanded
+  //       AND it's within the per-parent child cap (MAX_CHILDREN_PER_PARENT)
   //
-  // This is what makes expand/collapse actually work in the graph:
-  // - Roots always show
-  // - Children only show when their parent (and grandparent, etc.) are all expanded
-  // - Collapsing a parent hides all descendants
+  // hiddenChildCounts tracks how many children are hidden per parent for "Load More" UI.
   //
-  // We also build displayMap for highlight state.
-  const { visibleNodeIds, displayMap } = useMemo(() => {
+  // Tracks per-parent how many extra children to show beyond the default cap.
+  const [childPageSize, setChildPageSize] = useState<Map<string, number>>(new Map())
+
+  const { visibleNodeIds, displayMap, hiddenChildCounts } = useMemo(() => {
     const visible = new Set<string>()
     const dMap = new Map<string, HierarchyNode>()
+    const hiddenCounts = new Map<string, number>()
+
+    // Count visible children per parent (for capping)
+    const visibleChildCount = new Map<string, number>()
 
     // Helper: check if a node's entire ancestor chain is expanded
     const isAncestorChainExpanded = (nodeId: string): boolean => {
@@ -163,19 +169,44 @@ export function GraphCanvas({ className }: { className?: string }) {
       return isAncestorChainExpanded(parent) // Check grandparent recursively
     }
 
-    // Process all nodes
+    // First pass: determine which nodes WOULD be visible (ignoring cap)
+    const wouldBeVisible = new Set<string>()
     rawNodes.forEach(n => {
       if (n.data.type === 'ghost') return
-      if (isAncestorChainExpanded(n.id)) {
-        visible.add(n.id)
+      if (isAncestorChainExpanded(n.id)) wouldBeVisible.add(n.id)
+    })
+
+    // Second pass: apply per-parent child cap
+    rawNodes.forEach(n => {
+      if (n.data.type === 'ghost') return
+      if (!wouldBeVisible.has(n.id)) return
+
+      const parent = parentMap.get(n.id)
+      if (parent && expandedNodes.has(parent)) {
+        // This is a child of an expanded parent — check cap
+        const currentCount = visibleChildCount.get(parent) ?? 0
+        const pageSize = childPageSize.get(parent) ?? MAX_CHILDREN_PER_PARENT
+        if (currentCount >= pageSize) {
+          // Over cap — track as hidden
+          hiddenCounts.set(parent, (hiddenCounts.get(parent) ?? 0) + 1)
+          return // Don't add to visible
+        }
+        visibleChildCount.set(parent, currentCount + 1)
       }
-      // Build displayMap for ALL nodes (needed by highlight to walk children)
+
+      visible.add(n.id)
+    })
+
+    // Build displayMap for ALL loaded nodes (needed by highlight/edge projection)
+    rawNodes.forEach(n => {
+      if (n.data.type === 'ghost') return
+      const childIds = childMap.get(n.id) ?? []
       dMap.set(n.id, {
         id: n.id,
         typeId: (n.data.type as string) ?? '',
         name: (n.data.label as string) ?? n.id,
         data: n.data as Record<string, unknown>,
-        children: (childMap.get(n.id) ?? [])
+        children: childIds
           .map(cid => nodeMap.get(cid))
           .filter(Boolean)
           .map(cn => ({
@@ -196,8 +227,8 @@ export function GraphCanvas({ className }: { className?: string }) {
       })
     })
 
-    return { visibleNodeIds: visible, displayMap: dMap }
-  }, [rawNodes, parentMap, expandedNodes, childMap, nodeMap])
+    return { visibleNodeIds: visible, displayMap: dMap, hiddenChildCounts: hiddenCounts }
+  }, [rawNodes, parentMap, expandedNodes, childMap, nodeMap, childPageSize])
 
   // Visible nodes and edges — filtered by expansion state
   const visibleNodes = useMemo(() =>
@@ -481,8 +512,8 @@ export function GraphCanvas({ className }: { className?: string }) {
     return `${nodeIds}|${edgeIds}|${direction}`
   }, [visibleNodes, layoutEdges, direction])
 
-  // ELK layout on visible nodes + ALL their connecting edges (containment included
-  // so ELK knows the structure for positioning, but only visible nodes are laid out)
+  // ELK layout — uses incremental layout when nodes are added (expand),
+  // full layout on initial load or when direction changes.
   useEffect(() => {
     if (visibleNodes.length === 0) {
       setLayoutedNodes([])
@@ -493,6 +524,12 @@ export function GraphCanvas({ className }: { className?: string }) {
     if (layoutSignature === prevLayoutSig.current) return
     prevLayoutSig.current = layoutSignature
 
+    // FLAT layout — pass ALL edges (containment + lineage) so ELK's layered
+    // algorithm naturally creates hierarchical layers:
+    //   Layer 0: roots (no incoming containment)
+    //   Layer 1: children (incoming CONTAINS edge from layer 0)
+    //   Layer 2: grandchildren, etc.
+    // This is how DataHub/OpenMetadata do it — no compound nodes, just edge-driven layers.
     applyLayout(visibleNodes, layoutEdges, schemaEntityTypes as any)
       .then((positioned) => {
         setLayoutedNodes(positioned as LineageNode[])
@@ -525,6 +562,14 @@ export function GraphCanvas({ className }: { className?: string }) {
   loadChildrenRef.current = loadChildren
 
   const stableOnLoadMore = useCallback((parentId: string) => {
+    // Increase visible cap for this parent (show more already-loaded children)
+    setChildPageSize(prev => {
+      const next = new Map(prev)
+      const current = next.get(parentId) ?? MAX_CHILDREN_PER_PARENT
+      next.set(parentId, current + MAX_CHILDREN_PER_PARENT)
+      return next
+    })
+    // Also trigger backend fetch for more children (if not all loaded)
     loadChildrenRef.current(parentId)
   }, [])
 
@@ -640,6 +685,9 @@ export function GraphCanvas({ className }: { className?: string }) {
         isDownstream: trace.isDownstream(node.id),
         isFocus: trace.isFocus(node.id),
         isHighlighted: mergedHighlightNodes.has(node.id),
+        isExpanded: expandedNodes.has(node.id),
+        // Hidden child count — drives "Load More" badge on the node
+        _hiddenCount: hiddenChildCounts.get(node.id) ?? 0,
         onLoadMore: stableOnLoadMore,
         onToggleExpanded: stableOnToggle,
       },
@@ -694,6 +742,8 @@ export function GraphCanvas({ className }: { className?: string }) {
     stableOnLoadMore,
     stableOnToggle,
     viewportBounds,
+    expandedNodes,
+    hiddenChildCounts,
   ])
 
   // 18. Handlers
