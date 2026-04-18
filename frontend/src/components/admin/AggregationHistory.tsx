@@ -69,7 +69,7 @@ export function AggregationHistory({ dataSourceId }: AggregationHistoryProps) {
 }
 
 function JobCard({ job }: { job: AggregationJobResponse }) {
-    const progressPercent = Math.round((job.progress || 0) * 100)
+    const progressPercent = Math.round(job.progress || 0)
     
     // Status visual mapping
     let icon, statusColor, bgColor, statusText;
@@ -126,9 +126,9 @@ function JobCard({ job }: { job: AggregationJobResponse }) {
             {job.status === 'running' && (
                 <div className="mt-1 flex items-center justify-between gap-3">
                     <div className="w-full h-1.5 bg-black/10 dark:bg-white/10 rounded-full overflow-hidden">
-                        <div 
-                            className="h-full bg-indigo-500 rounded-full transition-all duration-500" 
-                            style={{ width: `${progressPercent}%` }} 
+                        <div
+                            className="h-full bg-indigo-500 rounded-full transition-all duration-500"
+                            style={{ width: `${Math.min(100, progressPercent)}%` }}
                         />
                     </div>
                     <span className="text-[10px] font-bold text-indigo-500 w-8 text-right">

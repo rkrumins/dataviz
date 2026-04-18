@@ -252,6 +252,23 @@ async def set_projection_mode(
     ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if not ds or ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+
+    # Guard: cannot change mode while an aggregation job is active
+    from sqlalchemy import select
+    from backend.app.services.aggregation.models import AggregationJobORM
+    active_job = (
+        await session.execute(
+            select(AggregationJobORM)
+            .where(AggregationJobORM.data_source_id == ds_id)
+            .where(AggregationJobORM.status.in_(["pending", "running"]))
+        )
+    ).scalars().first()
+    if active_job:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot change projection mode while aggregation job '{active_job.id}' is active. Cancel or wait for it to complete.",
+        )
+
     ds.projection_mode = mode if mode else None
     from datetime import datetime, timezone
     ds.updated_at = datetime.now(timezone.utc).isoformat()

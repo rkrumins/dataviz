@@ -475,6 +475,25 @@ export function DataSourceDetailPanel({
                                         </div>
                                     )}
 
+                                    {/* Mode-switch purge warning — shown when changing modes with existing aggregated edges */}
+                                    {isDirty && pendingMode !== originalMode && ds.aggregationStatus === 'ready' && (
+                                        <div className="p-3 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] animate-in slide-in-from-top-2 fade-in duration-200">
+                                            <div className="flex items-start gap-2">
+                                                <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                                                <div>
+                                                    <p className="text-xs font-semibold text-amber-600 dark:text-amber-400">
+                                                        Existing aggregated edges detected
+                                                    </p>
+                                                    <p className="text-[11px] text-amber-600/80 dark:text-amber-400/80 mt-0.5 leading-relaxed">
+                                                        Switching projection modes will leave stale aggregated edges in the previous location.
+                                                        After saving, purge the existing edges and then re-trigger aggregation to write them
+                                                        to the new target.
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {/* Save / Discard bar — sticky feel, only when dirty */}
                                     {isDirty && (
                                         <div className="flex items-center justify-end gap-2 p-3 rounded-lg bg-amber-500/[0.06] border border-amber-500/20 animate-in slide-in-from-top-1 fade-in duration-150">

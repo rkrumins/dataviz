@@ -4,6 +4,8 @@ export interface AggregationTriggerRequest {
   ontologyId?: string;
   projectionMode: string;
   batchSize: number;
+  maxRetries?: number;
+  timeoutSecs?: number;
 }
 
 export interface AggregationSkipRequest {
