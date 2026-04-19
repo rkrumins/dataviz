@@ -3,6 +3,7 @@ import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { OntologyStatusBadge } from '../OntologyStatusBadge'
 import { formatDate } from '../../lib/ontology-parsers'
+import { EducationalCallout } from '../EducationalCallout'
 
 interface SettingsPanelProps {
   ontology: OntologyDefinitionResponse
@@ -59,6 +60,13 @@ export function SettingsPanel({ ontology, workingDetails, onUpdateDetails, onDel
 
   return (
     <div className="space-y-8 max-w-2xl">
+      <EducationalCallout
+        id="edu-publish-draft"
+        title="Draft vs. Published"
+        description="Draft ontologies can be freely edited and only affect data sources when explicitly assigned. Publishing locks the ontology, creating an immutable version that serves as a stable contract. To make changes after publishing, create a new version."
+        variant="tip"
+      />
+
       {/* Metadata Section */}
       <div className="rounded-xl border border-glass-border bg-canvas-elevated/50 p-5">
         <h3 className="text-sm font-semibold text-ink mb-4 flex items-center gap-2">
