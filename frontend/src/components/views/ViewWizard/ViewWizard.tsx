@@ -429,6 +429,14 @@ function ViewWizardScopeResolver(props: ViewWizardProps) {
     const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
     const activeDataSourceId = useWorkspacesStore(s => s.activeDataSourceId)
     const workspaces = useWorkspacesStore(s => s.workspaces)
+    const loadWorkspaces = useWorkspacesStore(s => s.loadWorkspaces)
+
+    // Refresh workspace list when wizard opens so newly onboarded sources appear
+    useEffect(() => {
+        if (props.isOpen) {
+            loadWorkspaces()
+        }
+    }, [props.isOpen, loadWorkspaces])
 
     // ── Edit mode — unchanged ──────────────────────────────────
     if (props.mode === 'edit' && props.viewId) {
