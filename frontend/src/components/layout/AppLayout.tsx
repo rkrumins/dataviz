@@ -59,10 +59,7 @@ export function AppLayout() {
   // Load views from the API into the schema store cache.
   // Fetches ALL accessible views (no workspace filter) so that cross-workspace
   // links in the sidebar and deep-linked URLs resolve without a page refresh.
-  // Re-runs when activeWorkspaceId or activeDataSourceId changes so newly
-  // created views and data-source-scoped views are picked up.
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
-  const activeDataSourceId = useWorkspacesStore(s => s.activeDataSourceId)
   useEffect(() => {
     if (!isAuthenticated) return
 
@@ -77,7 +74,7 @@ export function AppLayout() {
       }
     }
     loadViews()
-  }, [isAuthenticated, activeWorkspaceId, activeDataSourceId])
+  }, [isAuthenticated])
 
   // Apply theme
   useEffect(() => {

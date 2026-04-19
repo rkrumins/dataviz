@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
-import { WorkspaceBreadcrumb } from '@/components/layout/WorkspaceBreadcrumb'
 import { BookmarksPopover } from '@/components/layout/BookmarksPopover'
 import { NotificationBell } from '@/components/layout/NotificationBell'
 import { AvatarPickerDialog, useAvatarContent } from '@/components/layout/AvatarPickerDialog'
@@ -106,11 +105,6 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
             </div>
           </div>
 
-          {/* Breadcrumb separator */}
-          <div className="w-px h-6 bg-glass-border shrink-0" />
-
-          {/* Workspace Breadcrumb */}
-          <WorkspaceBreadcrumb />
         </div>
 
         {/* Center: Search Bar */}
