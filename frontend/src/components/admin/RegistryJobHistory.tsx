@@ -387,6 +387,8 @@ export function RegistryJobHistory() {
                     {/* KPIs + Health Summary */}
                     <JobHistoryKPIs
                         summary={summary}
+                        filteredJobs={data?.items ?? []}
+                        hasActiveFilters={activeChips.length > 0}
                         allDataSources={allDataSources}
                         onShowFailed={() => updateFilter({ status: ['failed'] })}
                     />
