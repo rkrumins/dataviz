@@ -6,11 +6,7 @@ import {
   Boxes,
   DatabaseZap,
   Layers,
-  ChevronsUpDown,
-  Check,
   Settings,
-  Database,
-  Search,
   PanelLeftClose,
   PanelLeftOpen,
   Pin,
@@ -18,12 +14,10 @@ import {
   ArrowRight,
   BookOpen,
 } from 'lucide-react'
-import * as Popover from '@radix-ui/react-popover'
 import { useNavigate } from 'react-router-dom'
 import { useNavigationStore, type NavigationTab } from '@/store/navigation'
 import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
-import { useWorkspaces } from '@/hooks/useWorkspaces'
 import { useWorkspaceContext } from '@/hooks/useWorkspaceContext'
 import { cn } from '@/lib/utils'
 import { DynamicIcon, layoutTypeIcon, viewTypeColor } from '@/lib/viewUtils'
@@ -49,17 +43,6 @@ const baseNavItems: Omit<NavItem, 'badge'>[] = [
   { id: 'schema', label: 'Semantic Layers', icon: Layers },
   { id: 'admin', label: 'Administration', icon: Settings },
 ]
-
-// ── Workspace Avatar Colors (sidebar gradient variant) ──────────────
-const WS_COLORS = [
-  'from-indigo-500 to-violet-500',
-  'from-emerald-500 to-teal-500',
-  'from-amber-500 to-orange-500',
-  'from-rose-500 to-pink-500',
-  'from-cyan-500 to-blue-500',
-  'from-fuchsia-500 to-purple-500',
-]
-function wsColor(index: number) { return WS_COLORS[index % WS_COLORS.length] }
 
 // ── Portal-based tooltip (escapes overflow:hidden) ──────────────────
 function CollapsedTooltip({
@@ -93,247 +76,6 @@ function CollapsedTooltip({
       </div>
     </div>,
     document.body,
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Environment Switcher
-// ─────────────────────────────────────────────────────────────────────
-
-function EnvironmentSwitcher({
-  onManageWorkspaces,
-  collapsed,
-  onToggleSidebar,
-  viewCountsByWorkspace,
-  viewCountsByScope,
-}: {
-  onManageWorkspaces: () => void,
-  collapsed: boolean,
-  onToggleSidebar: () => void,
-  viewCountsByWorkspace: Map<string, number>,
-  viewCountsByScope: Map<string, number>,
-}) {
-  const navigate = useNavigate()
-  const {
-    workspaces,
-    activeWorkspace,
-    activeWorkspaceId,
-    setActiveWorkspace,
-    activeDataSourceId,
-    setActiveDataSource
-  } = useWorkspaces()
-
-  const [isOpen, setIsOpen] = useState(false)
-  const [search, setSearch] = useState('')
-  const [wsHovered, setWsHovered] = useState(false)
-  const wsButtonRef = useRef<HTMLButtonElement | null>(null)
-
-  const activeDs = activeWorkspace?.dataSources?.find(d => d.id === activeDataSourceId)
-  const activeIdx = workspaces.findIndex(ws => ws.id === activeWorkspaceId)
-
-  const filteredWorkspaces = search
-    ? workspaces.map(ws => {
-      const matchWs = ws.name.toLowerCase().includes(search.toLowerCase())
-      const matchDs = ws.dataSources?.filter(ds =>
-        (ds.label || ds.catalogItemId).toLowerCase().includes(search.toLowerCase())
-      )
-      if (matchWs) return ws
-      if (matchDs && matchDs.length > 0) return { ...ws, dataSources: matchDs }
-      return null
-    }).filter(Boolean) as typeof workspaces
-    : workspaces
-
-  const handleSelect = (wsId: string, dsId: string) => {
-    setActiveWorkspace(wsId)
-    setActiveDataSource(dsId)
-    setIsOpen(false)
-    setSearch('')
-    navigate(`/explorer?workspace=${encodeURIComponent(wsId)}`)
-  }
-
-  if (collapsed) {
-    return (
-      <div className="flex flex-col items-center gap-1.5 py-2.5 border-b border-glass-border">
-        <button
-          onClick={onToggleSidebar}
-          className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-          title="Expand sidebar"
-        >
-          <PanelLeftOpen className="w-4.5 h-4.5" />
-        </button>
-        <button
-          ref={wsButtonRef}
-          onClick={() => setIsOpen(!isOpen)}
-          onMouseEnter={() => setWsHovered(true)}
-          onMouseLeave={() => setWsHovered(false)}
-          className={cn(
-            "w-9 h-9 rounded-xl flex items-center justify-center text-sm font-bold text-white border cursor-pointer transition-all",
-            activeWorkspace
-              ? `bg-gradient-to-br ${wsColor(activeIdx)} border-white/20 shadow-lg`
-              : "bg-black/10 dark:bg-white/10 border-glass-border text-ink-muted"
-          )}
-        >
-          {activeWorkspace ? activeWorkspace.name.charAt(0).toUpperCase() : '?'}
-        </button>
-
-        <CollapsedTooltip anchorRef={wsButtonRef} visible={wsHovered && !isOpen}>
-          <div className="flex items-center gap-2.5">
-            <div className={cn(
-              "w-8 h-8 rounded-lg flex items-center justify-center text-white text-xs font-bold shrink-0",
-              activeWorkspace ? `bg-gradient-to-br ${wsColor(activeIdx)}` : "bg-black/10 dark:bg-white/10"
-            )}>
-              {activeWorkspace ? activeWorkspace.name.charAt(0).toUpperCase() : '?'}
-            </div>
-            <div className="flex flex-col min-w-0">
-              <span className="text-sm font-semibold text-ink truncate">
-                {activeWorkspace?.name || 'No workspace'}
-              </span>
-              <span className="text-xs text-ink-muted truncate flex items-center gap-1.5 mt-0.5">
-                {activeDs && <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />}
-                {activeDs ? (activeDs.label || 'Default Source') : 'No source selected'}
-              </span>
-            </div>
-          </div>
-        </CollapsedTooltip>
-      </div>
-    )
-  }
-
-  return (
-    <div className="px-3 pt-3 pb-2 border-b border-glass-border mb-2">
-      <div className="flex items-center gap-1.5">
-        <Popover.Root open={isOpen} onOpenChange={setIsOpen}>
-          <Popover.Trigger asChild>
-            <button className="group flex-1 min-w-0 flex items-center gap-3 p-2.5 rounded-xl bg-canvas hover:bg-canvas-elevated border border-transparent hover:border-glass-border transition-all text-left outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50">
-              <div className={cn(
-                "w-9 h-9 rounded-lg shadow-inner flex items-center justify-center text-white shrink-0 text-xs font-bold",
-                activeWorkspace ? `bg-gradient-to-br ${wsColor(activeIdx)}` : "bg-black/10 dark:bg-white/10 text-ink-muted"
-              )}>
-                {activeWorkspace ? activeWorkspace.name.charAt(0).toUpperCase() : '?'}
-              </div>
-              <div className="flex flex-col min-w-0 flex-1">
-                <span className="text-sm font-bold text-ink truncate leading-tight">
-                  {activeWorkspace?.name || 'Select Workspace'}
-                </span>
-                <span className="text-xs text-ink-secondary truncate flex items-center gap-1.5 mt-0.5">
-                  {activeDs && <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />}
-                  {activeDs ? (activeDs.label || 'Default Source') : 'No source selected'}
-                </span>
-              </div>
-              <ChevronsUpDown className="w-4 h-4 text-ink-muted opacity-50 group-hover:opacity-100 transition-opacity shrink-0" />
-            </button>
-          </Popover.Trigger>
-
-        <Popover.Portal>
-          <Popover.Content
-            side="bottom"
-            align="start"
-            className="w-72 bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl p-0 overflow-hidden z-50 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2 ml-3"
-            sideOffset={4}
-          >
-            <div className="p-2 border-b border-glass-border bg-black/5 dark:bg-white/5">
-              <div className="relative flex items-center">
-                <Search className="absolute left-2.5 w-3.5 h-3.5 text-ink-muted" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={e => setSearch(e.target.value)}
-                  placeholder="Search workspaces..."
-                  autoFocus
-                  className="w-full bg-transparent pl-8 pr-3 py-1.5 text-sm text-ink focus:outline-none placeholder:text-ink-muted"
-                />
-              </div>
-            </div>
-
-            <div className="max-h-[50vh] overflow-y-auto custom-scrollbar p-2 space-y-3">
-              {filteredWorkspaces.map((ws, i) => {
-                const isWsActive = ws.id === activeWorkspaceId
-                const wsViewCount = viewCountsByWorkspace.get(ws.id) ?? 0
-                return (
-                  <div key={ws.id}>
-                    <div className="px-2 pb-1.5 flex items-center gap-2">
-                      <div className={cn(
-                        "w-5 h-5 rounded overflow-hidden flex items-center justify-center text-[10px] font-bold text-white shrink-0",
-                        `bg-gradient-to-br ${wsColor(i)}`
-                      )}>
-                        {ws.name.charAt(0).toUpperCase()}
-                      </div>
-                      <span className="text-xs font-bold text-ink tracking-wide truncate">{ws.name}</span>
-                      {wsViewCount > 0 && (
-                        <span className="text-2xs text-ink-muted ml-auto">
-                          {wsViewCount} view{wsViewCount !== 1 ? 's' : ''}
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="flex flex-col gap-0.5 ml-2 border-l-2 border-glass-border pl-1.5">
-                      {ws.dataSources && ws.dataSources.map(ds => {
-                        const isSelected = isWsActive && ds.id === activeDataSourceId
-                        const scopeKey = `${ws.id}/${ds.id}`
-                        const dsViewCount = viewCountsByScope.get(scopeKey) ?? 0
-                        return (
-                          <button
-                            key={ds.id}
-                            onClick={() => handleSelect(ws.id, ds.id)}
-                            className={cn(
-                              "flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer outline-none transition-colors text-left group",
-                              isSelected
-                                ? "bg-indigo-500/10 text-indigo-500"
-                                : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink focus-visible:ring-2 focus-visible:ring-indigo-500/50"
-                            )}
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <Database className={cn("w-3.5 h-3.5 shrink-0", isSelected ? "text-indigo-500" : "text-ink-muted group-hover:text-ink")} />
-                              <span className="text-sm font-medium truncate">{ds.label || 'Data Source'}</span>
-                              {dsViewCount > 0 && (
-                                <span className="text-2xs text-ink-muted">{dsViewCount}</span>
-                              )}
-                            </div>
-                            {isSelected && <Check className="w-4 h-4 text-indigo-500 shrink-0 ml-2" />}
-                          </button>
-                        )
-                      })}
-                      {(!ws.dataSources || ws.dataSources.length === 0) && (
-                        <button
-                          onClick={() => { onManageWorkspaces(); setIsOpen(false) }}
-                          className="px-3 py-2 text-xs text-ink-muted italic border border-dashed border-glass-border rounded-lg text-left hover:bg-black/5 dark:hover:bg-white/5 transition-colors focus-visible:outline-none"
-                        >
-                          No sources configured. Click to manage.
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-              {filteredWorkspaces.length === 0 && (
-                <div className="px-3 py-4 text-center text-xs text-ink-muted">
-                  {search ? 'No workspaces match your search' : 'No workspaces available'}
-                </div>
-              )}
-            </div>
-
-            <div className="p-2 border-t border-glass-border bg-black/5 dark:bg-white/5">
-              <button
-                onClick={() => { onManageWorkspaces(); setIsOpen(false) }}
-                className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
-              >
-                <span className="flex items-center gap-1.5"><Settings className="w-3.5 h-3.5" /> Manage Workspaces</span>
-                <span className="font-mono px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 text-[9px]">⌘K</span>
-              </button>
-            </div>
-          </Popover.Content>
-        </Popover.Portal>
-        </Popover.Root>
-
-        <button
-          onClick={onToggleSidebar}
-          className="shrink-0 p-2 rounded-xl text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-          title="Collapse sidebar"
-        >
-          <PanelLeftClose className="w-5 h-5" />
-        </button>
-      </div>
-    </div>
   )
 }
 
@@ -528,7 +270,7 @@ export function SidebarNav() {
   const { sidebarCollapsed, toggleSidebar } = usePreferencesStore()
   const activeLensId = useCanvasStore((s) => s.activeLensId)
 
-  const { viewCount, viewCountsByWorkspace, viewCountsByScope, openView } = useWorkspaceContext()
+  const { viewCount, openView } = useWorkspaceContext()
 
   // ── Resize state ──────────────────────────────────────────────────
   const [width, setWidth] = useState(DEFAULT_WIDTH)
@@ -594,13 +336,22 @@ export function SidebarNav() {
     >
       {/* Main Navigation */}
       <nav className="flex-1 flex flex-col overflow-y-auto custom-scrollbar pb-3">
-        <EnvironmentSwitcher
-          collapsed={sidebarCollapsed}
-          onManageWorkspaces={() => navigate('/workspaces')}
-          onToggleSidebar={toggleSidebar}
-          viewCountsByWorkspace={viewCountsByWorkspace}
-          viewCountsByScope={viewCountsByScope}
-        />
+        {/* Sidebar toggle */}
+        <div className={cn(
+          "flex items-center border-b border-glass-border",
+          sidebarCollapsed ? "justify-center py-2.5" : "justify-end px-3 py-2.5"
+        )}>
+          <button
+            onClick={toggleSidebar}
+            className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            {sidebarCollapsed
+              ? <PanelLeftOpen className="w-4.5 h-4.5" />
+              : <PanelLeftClose className="w-5 h-5" />
+            }
+          </button>
+        </div>
 
         {/* Primary nav items */}
         <div className={cn("space-y-0.5", sidebarCollapsed ? "px-1.5" : "px-3")}>
