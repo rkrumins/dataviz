@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { Search, Plus, Sparkles, Shield, CheckCircle2, PenLine, Lock, Box, GitBranch, Loader2, BookOpen, Database, X, Trash2, LayoutGrid, LayoutDashboard, Link2, Unlink, PanelLeftClose, PanelLeftOpen, Info, ChevronDown, ChevronUp } from 'lucide-react'
+import { Search, Plus, Shield, CheckCircle2, PenLine, Lock, Box, GitBranch, Loader2, BookOpen, Database, X, Trash2, LayoutGrid, LayoutDashboard, Link2, Unlink, PanelLeftClose, PanelLeftOpen, Info, ChevronDown, ChevronUp } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceResponse, WorkspaceResponse } from '@/services/workspaceService'
@@ -15,9 +15,9 @@ interface OntologySidebarProps {
   assignmentCountMap: Map<string, number>
   workspaces: WorkspaceResponse[]
   isLoading: boolean
-  isSuggesting: boolean
+  isSuggesting?: boolean
   onCreateDraft: () => void
-  onSuggest: () => void
+  onSuggest?: () => void
   dashboardMode?: boolean
   onToggleDashboard?: () => void
 }
@@ -110,9 +110,7 @@ export function OntologySidebar({
   assignmentCountMap,
   workspaces,
   isLoading,
-  isSuggesting,
   onCreateDraft,
-  onSuggest,
   dashboardMode,
   onToggleDashboard,
 }: OntologySidebarProps) {
@@ -295,14 +293,6 @@ export function OntologySidebar({
       if (union > 0) matchPercent = Math.round((overlap / union) * 100)
     }
 
-    const statusDotColor = isDeleted
-      ? 'bg-red-400'
-      : statusKey === 'system'
-        ? 'bg-indigo-500'
-        : statusKey === 'published'
-          ? 'bg-emerald-500'
-          : 'bg-amber-500'
-
     return (
       <button
         key={o.id}
@@ -318,9 +308,27 @@ export function OntologySidebar({
           isDeleted && !isSelected && 'hover:bg-red-500/[0.03]',
         )}
       >
-        {/* Row 1: Status dot + Name + version + badges */}
-        <div className="flex items-center gap-2">
-          <span className={cn('w-2 h-2 rounded-full flex-shrink-0', statusDotColor)} />
+        {/* Row 1: Icon badge + Name + version + badges */}
+        <div className="flex items-center gap-2.5">
+          {/* AdminOverview-style icon badge */}
+          <div className={cn(
+            'w-7 h-7 rounded-lg border flex items-center justify-center flex-shrink-0',
+            isDeleted
+              ? 'bg-red-500/10 border-red-500/20'
+              : statusKey === 'system'
+                ? 'bg-indigo-500/10 border-indigo-500/20'
+                : statusKey === 'published'
+                  ? 'bg-emerald-500/10 border-emerald-500/20'
+                  : 'bg-amber-500/10 border-amber-500/20',
+          )}>
+            {isDeleted
+              ? <Trash2 className="w-3.5 h-3.5 text-red-400" />
+              : statusKey === 'system'
+                ? <Shield className="w-3.5 h-3.5 text-indigo-500" />
+                : statusKey === 'published'
+                  ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                  : <PenLine className="w-3.5 h-3.5 text-amber-500" />}
+          </div>
           <span className={cn(
             'text-[13px] font-semibold truncate flex-1 min-w-0',
             isDeleted && 'line-through text-ink-muted',
@@ -348,7 +356,7 @@ export function OntologySidebar({
         </div>
 
         {/* Row 2: Entity/rel counts + workspace count */}
-        <div className="flex items-center justify-between mt-1 ml-4">
+        <div className="flex items-center justify-between mt-1 ml-[38px]">
           <span className={cn(
             'text-[11px]',
             isDeleted ? 'text-ink-muted/40' : 'text-ink-muted/60',
@@ -593,28 +601,26 @@ export function OntologySidebar({
           </button>
         </div>
 
-        {/* Deployment Dashboard quick-access card */}
+        {/* Semantic Layers overview — AdminPage nav-item style */}
         {onToggleDashboard && (
           <button
             onClick={onToggleDashboard}
             className={cn(
-              'w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-left transition-all mb-2',
+              'w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left group transition-all duration-200 relative mb-2',
               dashboardMode
-                ? 'bg-gradient-to-r from-indigo-500/15 to-purple-500/10 border border-indigo-500/30 shadow-sm shadow-indigo-500/5'
-                : 'border border-glass-border/60 hover:border-indigo-400/40 hover:bg-indigo-500/[0.04]',
+                ? 'bg-gradient-to-r from-indigo-500/10 to-violet-500/10 text-indigo-600 dark:text-indigo-400 shadow-sm border border-indigo-500/20'
+                : 'text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink border border-transparent',
             )}
           >
             <div className={cn(
-              'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0',
-              dashboardMode ? 'bg-indigo-500/20' : 'bg-black/[0.04] dark:bg-white/[0.04]',
+              'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors',
+              dashboardMode ? 'bg-indigo-500/20' : 'bg-black/5 dark:bg-white/5',
             )}>
               <LayoutDashboard className={cn('w-3.5 h-3.5', dashboardMode ? 'text-indigo-500' : 'text-ink-muted')} />
             </div>
-            <div className="flex-1 min-w-0">
-              <p className={cn('text-[11px] font-semibold', dashboardMode ? 'text-indigo-600 dark:text-indigo-400' : 'text-ink-secondary')}>
-                Deployment Dashboard
-              </p>
-              <p className="text-[9px] text-ink-muted">Cross-workspace overview</p>
+            <div className="flex flex-col min-w-0 flex-1">
+              <span className="text-sm font-semibold truncate leading-tight">Semantic Layers</span>
+              <span className="text-[10px] text-ink-muted truncate mt-0.5">Overview &amp; Assignments</span>
             </div>
           </button>
         )}
@@ -981,24 +987,14 @@ export function OntologySidebar({
         )}
       </div>
 
-      {/* Bottom actions */}
-      <div className="border-t border-glass-border/60 p-3 space-y-2">
+      {/* Bottom — single compact "New" button (CTAs live in the dashboard hero now) */}
+      <div className="border-t border-glass-border/60 p-3">
         <button
           onClick={onCreateDraft}
-          className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 active:bg-indigo-700 transition-colors shadow-sm shadow-indigo-500/25"
+          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 to-violet-600 text-white hover:from-indigo-600 hover:to-violet-700 transition-all shadow-sm shadow-indigo-500/25"
         >
           <Plus className="w-3.5 h-3.5" />
-          New Draft
-        </button>
-        <button
-          onClick={onSuggest}
-          disabled={isSuggesting}
-          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-medium border border-glass-border/60 hover:border-indigo-400/40 hover:bg-indigo-500/[0.04] text-ink-secondary hover:text-indigo-600 dark:hover:text-indigo-400 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          {isSuggesting
-            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            : <Sparkles className="w-3.5 h-3.5" />}
-          Suggest from Graph
+          New Semantic Layer
         </button>
       </div>
 

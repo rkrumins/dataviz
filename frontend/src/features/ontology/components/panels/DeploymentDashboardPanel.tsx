@@ -9,13 +9,14 @@ import {
   Database, Layers, AlertTriangle, ArrowRight, Search,
   Shield, CheckCircle2, PenLine, Unlink, Sparkles,
   GitBranch, ChevronDown, ChevronRight, X,
+  Plus, BookOpen, Eye,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { useDeploymentMatrix } from '../../hooks/useDeploymentMatrix'
 import type { DeploymentEntry } from '../../lib/ontology-types'
-import { EducationalCallout } from '../EducationalCallout'
+// EducationalCallout replaced by inline hero section for the landing page
 
 // ---------------------------------------------------------------------------
 // Stagger CSS (matches ExplorerPage / WorkspacesPage pattern)
@@ -54,6 +55,8 @@ interface DeploymentDashboardPanelProps {
   onAssign: (workspaceId: string, dataSourceId: string) => void
   onUnassign: (workspaceId: string, dataSourceId: string) => void
   onSuggest: (workspaceId: string, dataSourceId: string) => void
+  onCreateDraft?: () => void
+  onSuggestFromGraph?: () => void
   isAssigning: boolean
 }
 
@@ -63,6 +66,8 @@ export function DeploymentDashboardPanel({
   onNavigateToOntology,
   onUnassign,
   onSuggest,
+  onCreateDraft,
+  onSuggestFromGraph,
   isAssigning,
 }: DeploymentDashboardPanelProps) {
   const { entries, orphans, versionMismatches, stats } = useDeploymentMatrix(workspaces, ontologies)
@@ -133,21 +138,115 @@ export function DeploymentDashboardPanel({
     <div className="p-8 animate-in fade-in duration-500">
       <style>{STAGGER_STYLE}</style>
 
-      <EducationalCallout
-        id="edu-deployment"
-        title="Deployment Overview"
-        description="This dashboard shows every data source across all your workspaces and which semantic layer each one uses. Data sources without an ontology won't have access to ontology-driven features like views, hierarchy navigation, and semantic search."
-        variant="concept"
-      />
+      {/* ── Hero section ─────────────────────────────────────────── */}
+      <div className="mb-8">
+        <div className="flex items-start justify-between gap-6">
+          <div className="flex-1">
+            <h1 className="text-3xl font-bold tracking-tight text-ink">Semantic Layers</h1>
+            <p className="text-sm text-ink-muted mt-2 max-w-2xl leading-relaxed">
+              A semantic layer defines the vocabulary for your knowledge graph — entity types, relationships,
+              and hierarchy rules that give structure and meaning to raw graph data.
+            </p>
+          </div>
 
-      {/* ── Header (WorkspacesPage pattern: text-3xl + subtitle) ─────── */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight text-ink">Deployment Dashboard</h1>
-          <p className="text-sm text-ink-muted mt-2 max-w-2xl">
-            Semantic layer assignments across all workspaces and data sources.
-          </p>
+          {/* Primary CTAs */}
+          {(onCreateDraft || onSuggestFromGraph) && (
+            <div className="flex items-center gap-2 flex-shrink-0 pt-1">
+              {onSuggestFromGraph && (
+                <button onClick={onSuggestFromGraph}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold border border-glass-border text-ink-secondary hover:text-indigo-600 hover:border-indigo-300 hover:bg-indigo-500/[0.04] transition-all">
+                  <Sparkles className="w-4 h-4" />
+                  Suggest from Graph
+                </button>
+              )}
+              {onCreateDraft && (
+                <button onClick={onCreateDraft}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/20 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
+                  <Plus className="w-4 h-4" />
+                  New Semantic Layer
+                </button>
+              )}
+            </div>
+          )}
         </div>
+
+        {/* How it works — 3-step guide */}
+        {ontologies.length <= 5 && (
+          <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="flex items-start gap-3 p-4 rounded-xl border border-glass-border bg-canvas-elevated/50">
+              <div className="w-9 h-9 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <BookOpen className="w-4 h-4 text-indigo-500" />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-ink mb-1">1. Define your schema</p>
+                <p className="text-[11px] text-ink-muted leading-relaxed">
+                  Create a semantic layer with entity types (Person, Company) and relationships (WORKS_AT, OWNS) that describe your graph.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-start gap-3 p-4 rounded-xl border border-glass-border bg-canvas-elevated/50">
+              <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <Database className="w-4 h-4 text-emerald-500" />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-ink mb-1">2. Assign to data sources</p>
+                <p className="text-[11px] text-ink-muted leading-relaxed">
+                  Connect a semantic layer to one or more data sources. This tells the system how to interpret each graph's nodes and edges.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-start gap-3 p-4 rounded-xl border border-glass-border bg-canvas-elevated/50">
+              <div className="w-9 h-9 rounded-lg bg-violet-500/10 border border-violet-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <Eye className="w-4 h-4 text-violet-500" />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-ink mb-1">3. Build views &amp; explore</p>
+                <p className="text-[11px] text-ink-muted leading-relaxed">
+                  Once assigned, create views with type-aware features — expandable hierarchy, semantic search, and structured filters.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Why it matters — impact explanation */}
+        {ontologies.length <= 5 && (
+          <div className="mt-4 rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
+            <div className="h-0.5 w-full bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500" />
+            <div className="p-5">
+              <div className="flex items-center gap-2 mb-3">
+                <Sparkles className="w-4 h-4 text-amber-500" />
+                <h3 className="text-sm font-bold text-ink">Why semantic layers matter</h3>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-ink-muted leading-relaxed">
+                <div className="flex items-start gap-2.5">
+                  <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 flex-shrink-0" />
+                  <div>
+                    <span className="font-semibold text-ink">Type-aware views</span> — Without a semantic layer, views treat all nodes and edges as generic. With one, the system knows that a "Person" should render differently from a "Document", enabling icons, colors, and labels per type.
+                  </div>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 flex-shrink-0" />
+                  <div>
+                    <span className="font-semibold text-ink">Hierarchy navigation</span> — Containment rules (e.g., Organization contains Department contains Team) power expand/collapse, breadcrumb trails, and drill-down exploration.
+                  </div>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <div className="w-1.5 h-1.5 rounded-full bg-violet-400 mt-1.5 flex-shrink-0" />
+                  <div>
+                    <span className="font-semibold text-ink">Semantic search</span> — Entity type definitions enable scoped searches like "find all People" or "show Documents connected to this Company" instead of raw node/edge queries.
+                  </div>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <div className="w-1.5 h-1.5 rounded-full bg-amber-400 mt-1.5 flex-shrink-0" />
+                  <div>
+                    <span className="font-semibold text-ink">Consistency across teams</span> — Publishing a semantic layer creates an immutable contract. All data sources using it share the same type definitions, ensuring consistent behavior across workspaces and views.
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Summary banner (WorkspacesPage pattern: horizontal stats + gradient bar) ─── */}
