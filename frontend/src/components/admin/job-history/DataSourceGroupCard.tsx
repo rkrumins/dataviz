@@ -2,12 +2,13 @@ import { useState, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
-    ChevronRight, Database, Play, Trash2, Activity,
+    ChevronRight, Play, Trash2, Activity, Server, FolderOpen,
     MoreHorizontal, TrendingUp, TrendingDown, Minus,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import type { DataSourceResponse } from '@/services/workspaceService'
+import { getProviderLogo } from '../ProviderLogos'
 import { formatDuration, timeAgo, useClickOutside, type DataSourceMeta } from './shared'
 import { JobRow } from './JobRow'
 
@@ -249,30 +250,37 @@ export function DataSourceGroupCard({
     useClickOutside(actionsRef, useCallback(() => setShowActions(false), []))
 
     const { meta, dsResponse, jobs, totalRuns, successRate, avgDuration, lastRunAt, isActive, sparklineData, durationTrend } = group
-    const aggStatus = dsResponse?.aggregationStatus ?? 'none'
     const edgeCount = dsResponse?.aggregationEdgeCount ?? 0
     const activeJob = isActive ? jobs.find(j => j.status === 'running' || j.status === 'pending') : undefined
     const visibleJobs = showAll ? jobs : jobs.slice(0, INITIAL_VISIBLE_JOBS)
+    const ProviderLogo = getProviderLogo(meta.providerType)
 
-    const statusStyles = aggStatus === 'ready'
-        ? { accent: 'bg-gradient-to-r from-emerald-500/80 via-emerald-500/40 to-transparent', pill: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500', dot: 'bg-emerald-500', label: 'Ready', pulse: false }
-        : aggStatus === 'running'
-        ? { accent: 'bg-gradient-to-r from-indigo-500/80 via-indigo-500/40 to-transparent', pill: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500', dot: 'bg-indigo-500', label: 'Running', pulse: true }
-        : aggStatus === 'pending'
-        ? { accent: 'bg-gradient-to-r from-amber-500/80 via-amber-500/40 to-transparent', pill: 'bg-amber-500/10 border-amber-500/20 text-amber-500', dot: 'bg-amber-500', label: 'Pending', pulse: true }
-        : aggStatus === 'failed'
-        ? { accent: 'bg-gradient-to-r from-red-500/80 via-red-500/40 to-transparent', pill: 'bg-red-500/10 border-red-500/20 text-red-500', dot: 'bg-red-500', label: 'Failed', pulse: false }
-        : aggStatus === 'skipped'
-        ? { accent: 'bg-gradient-to-r from-zinc-500/30 to-transparent', pill: 'bg-zinc-500/10 border-zinc-500/20 text-zinc-400', dot: 'bg-zinc-400', label: 'Skipped', pulse: false }
-        : { accent: 'bg-gradient-to-r from-zinc-500/30 to-transparent', pill: 'bg-zinc-500/10 border-zinc-500/20 text-zinc-400', dot: 'bg-zinc-400', label: 'Not Started', pulse: false }
+    // Derive effective status: prefer dsResponse, fall back to latest job status
+    const rawStatus = dsResponse?.aggregationStatus ?? 'none'
+    const effectiveStatus = rawStatus !== 'none'
+        ? rawStatus
+        : group.lastStatus === 'completed' ? 'ready'
+        : group.lastStatus === 'running' ? 'running'
+        : group.lastStatus === 'pending' ? 'pending'
+        : group.lastStatus === 'failed' ? 'failed'
+        : 'none'
+
+    const STATUS_STYLE_MAP: Record<string, { accent: string; pill: string; dot: string; label: string; pulse: boolean }> = {
+        ready:   { accent: 'bg-gradient-to-r from-emerald-500/80 via-emerald-500/40 to-transparent', pill: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500', dot: 'bg-emerald-500', label: 'Ready', pulse: false },
+        running: { accent: 'bg-gradient-to-r from-indigo-500/80 via-indigo-500/40 to-transparent', pill: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500', dot: 'bg-indigo-500', label: 'Running', pulse: true },
+        pending: { accent: 'bg-gradient-to-r from-amber-500/80 via-amber-500/40 to-transparent', pill: 'bg-amber-500/10 border-amber-500/20 text-amber-500', dot: 'bg-amber-500', label: 'Pending', pulse: true },
+        failed:  { accent: 'bg-gradient-to-r from-red-500/80 via-red-500/40 to-transparent', pill: 'bg-red-500/10 border-red-500/20 text-red-500', dot: 'bg-red-500', label: 'Failed', pulse: false },
+        skipped: { accent: 'bg-gradient-to-r from-zinc-500/30 to-transparent', pill: 'bg-zinc-500/10 border-zinc-500/20 text-zinc-400', dot: 'bg-zinc-400', label: 'Skipped', pulse: false },
+    }
+    const statusStyles = STATUS_STYLE_MAP[effectiveStatus] ?? { accent: 'bg-gradient-to-r from-zinc-500/30 to-transparent', pill: 'bg-zinc-500/10 border-zinc-500/20 text-zinc-400', dot: 'bg-zinc-400', label: 'Not Started', pulse: false }
 
     return (
         <div
             className={cn(
                 'glass-panel rounded-xl border transition-all duration-200',
-                aggStatus === 'failed' ? 'border-red-500/20' :
-                aggStatus === 'running' ? 'border-indigo-500/20' :
-                aggStatus === 'ready' ? 'border-emerald-500/15' :
+                effectiveStatus === 'failed' ? 'border-red-500/20' :
+                effectiveStatus === 'running' ? 'border-indigo-500/20' :
+                effectiveStatus === 'ready' ? 'border-emerald-500/15' :
                 'border-glass-border/60',
             )}
         >
@@ -297,12 +305,7 @@ export function DataSourceGroupCard({
 
                 <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
-                        <Database className={cn(
-                            'w-4 h-4 flex-shrink-0',
-                            meta.providerType === 'falkordb' ? 'text-red-400' :
-                            meta.providerType === 'neo4j' ? 'text-blue-400' :
-                            'text-ink-muted',
-                        )} />
+                        <ProviderLogo className="w-4 h-4 flex-shrink-0" />
                         <span className="text-sm font-bold text-ink truncate">{meta.label}</span>
                         <span className={cn(
                             'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[10px] font-semibold flex-shrink-0',
@@ -317,17 +320,28 @@ export function DataSourceGroupCard({
                         </span>
                     </div>
 
-                    <div className="flex items-center gap-2 text-[10px] text-ink-muted mb-2">
-                        {meta.providerType !== 'unknown' && (
-                            <>
-                                <span className="font-bold uppercase tracking-wider">{meta.providerType}</span>
-                                <span className="text-ink-muted/30">/</span>
-                            </>
+                    <div className="flex items-center gap-1.5 text-[10px] text-ink-muted mb-2 flex-wrap">
+                        {/* Provider badge */}
+                        {meta.providerName && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/[0.03] dark:bg-white/[0.04]">
+                                <Server className="w-2.5 h-2.5 text-ink-muted/50" />
+                                <span className="font-medium truncate max-w-[140px]">{meta.providerName}</span>
+                            </span>
                         )}
-                        <span className="truncate">{meta.workspaceName}</span>
+                        {/* Workspace badge — skip if same as provider name */}
+                        {meta.workspaceName && meta.workspaceName !== meta.providerName && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/[0.03] dark:bg-white/[0.04]">
+                                <FolderOpen className="w-2.5 h-2.5 text-ink-muted/50" />
+                                <span className="truncate max-w-[140px]">{meta.workspaceName}</span>
+                            </span>
+                        )}
+                        {/* Graph name */}
+                        {meta.graphName && (
+                            <span className="font-mono text-ink-muted/50 truncate max-w-[120px]">{meta.graphName}</span>
+                        )}
                         {edgeCount > 0 && (
                             <>
-                                <span className="text-ink-muted/30">·</span>
+                                <span className="text-ink-muted/20 mx-0.5">·</span>
                                 <span className="tabular-nums font-medium">{edgeCount.toLocaleString()} edges</span>
                             </>
                         )}
