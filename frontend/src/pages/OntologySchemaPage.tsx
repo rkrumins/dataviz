@@ -180,15 +180,6 @@ export function OntologySchemaPage() {
     return `/schema/${ontId}${qs ? `?${qs}` : ''}`
   }, [activeWorkspaceId, activeDataSourceId])
 
-  const activeWorkspace = useMemo(
-    () => workspaces.find(w => w.id === activeWorkspaceId) ?? null,
-    [workspaces, activeWorkspaceId],
-  )
-  const activeDataSource = useMemo(
-    () => activeWorkspace?.dataSources?.find(ds => ds.id === activeDataSourceId) ?? null,
-    [activeWorkspace, activeDataSourceId],
-  )
-
   // ── React Query data ───────────────────────────────────────────────
   const { data: ontologies = [], isLoading: isLoadingOntologies } = useOntologies()
   const { data: selectedOntology } = useOntology(ontologyId)
@@ -452,15 +443,16 @@ export function OntologySchemaPage() {
     return true
   })
 
-  // ── Auto-redirect to first ontology if none selected ───────────────
+  // ── Auto-activate dashboard when landing on /schema with no ontology selected ──
   useEffect(() => {
-    if (!ontologyId && ontologies.length > 0) {
-      const target = (activeDataSource?.ontologyId && ontologies.find(o => o.id === activeDataSource.ontologyId))
-        ? activeDataSource.ontologyId
-        : ontologies[0].id
-      navigate(schemaUrl(target), { replace: true })
+    if (!ontologyId && !dashboardMode) {
+      setSearchParams(prev => {
+        prev.set('view', 'dashboard')
+        return prev
+      }, { replace: true })
     }
-  }, [ontologyId, ontologies, activeDataSource?.ontologyId, navigate])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ontologyId])
 
   // ── Load workspaces ────────────────────────────────────────────────
   useEffect(() => { loadWorkspaces() }, [loadWorkspaces])
@@ -1133,6 +1125,8 @@ export function OntologySchemaPage() {
                 onAssign={handleAssignToDataSource}
                 onUnassign={requestUnassign}
                 onSuggest={handleSuggestForDataSource}
+                onCreateDraft={() => setShowCreateDialog(true)}
+                onSuggestFromGraph={handleSuggestOntology}
                 isAssigning={isAssigning}
               />
             </div>
