@@ -9,7 +9,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useBlocker } from 'react-router'
-import { Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, X, LayoutDashboard, Trash2, RotateCcw, Clock } from 'lucide-react'
+import { Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, X, LayoutDashboard, Trash2, RotateCcw, Clock, AlertTriangle, Unlink } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { EntityTypeEditor } from '@/components/schema/EntityTypeEditor'
 import { RelationshipTypeEditor } from '@/components/schema/RelationshipTypeEditor'
@@ -51,9 +51,14 @@ import { UnsavedChangesDialog } from '@/features/ontology/components/dialogs/Uns
 import { PublishConfirmDialog } from '@/features/ontology/components/dialogs/PublishConfirmDialog'
 import { ImportDialog } from '@/features/ontology/components/dialogs/ImportDialog'
 import { SuggestConfirmDialog } from '@/features/ontology/components/dialogs/SuggestConfirmDialog'
+import { FindDataSourcesDialog } from '@/features/ontology/components/dialogs/FindDataSourcesDialog'
 import { ChangesReviewDialog } from '@/features/ontology/components/dialogs/ChangesReviewDialog'
+import { UnassignConfirmDialog } from '@/features/ontology/components/dialogs/UnassignConfirmDialog'
+import { AssignmentManagerDialog } from '@/features/ontology/components/dialogs/AssignmentManagerDialog'
 import { OverviewPanel } from '@/features/ontology/components/panels/OverviewPanel'
 import { VersionHistoryPanel } from '@/features/ontology/components/panels/VersionHistoryPanel'
+import { DeploymentDashboardPanel } from '@/features/ontology/components/panels/DeploymentDashboardPanel'
+import { OntologyAlertBanner, type OntologyAlert } from '@/features/ontology/components/OntologyAlertBanner'
 import type { OntologyImpactResponse, OntologyImportResponse } from '@/services/ontologyDefinitionService'
 
 // ---------------------------------------------------------------------------
@@ -93,6 +98,7 @@ export function OntologySchemaPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const rawTab = searchParams.get('tab') || 'overview'
   const activeTab = (LEGACY_TAB_MAP[rawTab] || rawTab) as OntologyTab
+  const dashboardMode = searchParams.get('view') === 'dashboard'
 
   // ── Workspace context ──────────────────────────────────────────────
   const workspaces = useWorkspacesStore(s => s.workspaces)
@@ -150,6 +156,16 @@ export function OntologySchemaPage() {
   const setTab = useCallback((tab: string) => {
     setSearchParams(prev => {
       prev.set('tab', tab)
+      prev.delete('view')  // exit dashboard mode when switching tabs
+      return prev
+    })
+  }, [setSearchParams])
+
+  // Helper: toggle dashboard view
+  const toggleDashboard = useCallback(() => {
+    setSearchParams(prev => {
+      if (prev.get('view') === 'dashboard') prev.delete('view')
+      else prev.set('view', 'dashboard')
       return prev
     })
   }, [setSearchParams])
@@ -204,7 +220,15 @@ export function OntologySchemaPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [importData, setImportData] = useState<Record<string, unknown> | null>(null)
   const [showSuggestDialog, setShowSuggestDialog] = useState(false)
+  const [showFindDsDialog, setShowFindDsDialog] = useState(false)
+  // Pre-seed suggest dialog from dashboard (specific DS context)
+  const [suggestPreSeed, setSuggestPreSeed] = useState<{ wsId: string; dsId: string } | null>(null)
   const suggestResponseRef = useRef<import('@/services/ontologyDefinitionService').OntologySuggestResponse | null>(null)
+  const [showAssignmentManager, setShowAssignmentManager] = useState(false)
+  // Unassign confirmation
+  const [unassignTarget, setUnassignTarget] = useState<{
+    wsId: string; dsId: string; dsLabel: string; wsName: string; ontologyName: string | null
+  } | null>(null)
 
   // ── Edit mode + working copies (lazy initialization) ────────────
   // No explicit isEditing toggle — working copies are created on first edit attempt.
@@ -312,6 +336,42 @@ export function OntologySchemaPage() {
     }
     return m
   }, [workspaces])
+
+  // ── Contextual alerts ──────────────────────────────────────────────
+  const orphanDsCount = useMemo(() => {
+    let count = 0
+    for (const ws of workspaces) {
+      for (const ds of ws.dataSources ?? []) {
+        if (!ds.ontologyId) count++
+      }
+    }
+    return count
+  }, [workspaces])
+
+  const contextAlerts = useMemo((): OntologyAlert[] => {
+    const alerts: OntologyAlert[] = []
+    if (orphanDsCount > 0) {
+      alerts.push({
+        id: 'orphan-ds',
+        severity: 'warning',
+        icon: AlertTriangle,
+        title: `${orphanDsCount} data source${orphanDsCount !== 1 ? 's' : ''} without a semantic layer.`,
+        description: '',
+        action: { label: 'View Dashboard', onClick: () => { if (!dashboardMode) toggleDashboard() } },
+      })
+    }
+    if (selectedOntology && !selectedOntology.isSystem && (assignmentCountMap.get(selectedOntology.id) ?? 0) === 0) {
+      alerts.push({
+        id: 'unassigned-ontology',
+        severity: 'info',
+        icon: Unlink,
+        title: 'This ontology is not assigned to any data source.',
+        description: '',
+        action: { label: 'Find Matches', onClick: () => setShowFindDsDialog(true) },
+      })
+    }
+    return alerts
+  }, [orphanDsCount, selectedOntology, assignmentCountMap, dashboardMode, toggleDashboard])
 
   // ── Edit mode helpers ─────────────────────────────────────────────
   /** Lazily create working copies on first edit attempt. Returns false if immutable. */
@@ -468,14 +528,30 @@ export function OntologySchemaPage() {
     }
   }
 
-  /** Unassign the current ontology from a specific data source */
-  async function handleUnassignFromDataSource(workspaceId: string, dataSourceId: string) {
+  /** Request unassign — opens confirmation dialog with context */
+  function requestUnassign(workspaceId: string, dataSourceId: string) {
+    const ws = workspaces.find(w => w.id === workspaceId)
+    const ds = ws?.dataSources?.find(d => d.id === dataSourceId)
+    const ont = ds?.ontologyId ? ontologies.find(o => o.id === ds.ontologyId) : null
+    setUnassignTarget({
+      wsId: workspaceId,
+      dsId: dataSourceId,
+      dsLabel: ds?.label || ds?.id || dataSourceId,
+      wsName: ws?.name || workspaceId,
+      ontologyName: ont?.name ?? null,
+    })
+  }
+
+  /** Execute unassign after confirmation */
+  async function handleConfirmUnassign() {
+    if (!unassignTarget) return
     setIsAssigning(true)
     try {
-      await workspaceService.updateDataSource(workspaceId, dataSourceId, { ontologyId: '' })
+      await workspaceService.updateDataSource(unassignTarget.wsId, unassignTarget.dsId, { ontologyId: '' })
       await loadWorkspaces()
       invalidateGraphSchema()
       showToast('success', 'Schema unassigned from data source')
+      setUnassignTarget(null)
     } catch (err: unknown) {
       showToast('error', `Unassign failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
@@ -621,13 +697,20 @@ export function OntologySchemaPage() {
 
   function handleSuggestOntology() {
     suggestResponseRef.current = null
+    setSuggestPreSeed(null)
+    setShowSuggestDialog(true)
+  }
+
+  /** Open suggest dialog pre-seeded with a specific data source (from dashboard) */
+  function handleSuggestForDataSource(workspaceId: string, dataSourceId: string) {
+    suggestResponseRef.current = null
+    setSuggestPreSeed({ wsId: workspaceId, dsId: dataSourceId })
     setShowSuggestDialog(true)
   }
 
   /** Phase 2: analyze the graph, return matches + counts for the dialog to display. */
-  async function handleAnalyzeGraph() {
-    if (!evalWorkspaceId) throw new Error('No workspace selected')
-    const stats = await fetchSchemaStats(evalWorkspaceId, evalDataSourceId ?? undefined)
+  async function handleAnalyzeGraph(workspaceId: string, dataSourceId: string) {
+    const stats = await fetchSchemaStats(workspaceId, dataSourceId)
     const response = await ontologyDefinitionService.suggest(stats as unknown as Record<string, unknown>)
     suggestResponseRef.current = response
     return {
@@ -637,27 +720,47 @@ export function OntologySchemaPage() {
     }
   }
 
-  /** User chose "Use This" on an existing match. */
-  function handleSuggestUseExisting(ontologyId: string) {
-    setShowSuggestDialog(false)
-    navigate(schemaUrl(ontologyId))
-    showToast('success', 'Navigated to the matching semantic layer')
+  /** Assign an ontology to the target data source picked in the suggest dialog */
+  async function assignOntologyToTarget(ontologyId: string, targetWsId: string | null, targetDsId: string | null) {
+    if (!targetWsId || !targetDsId) return
+    try {
+      await workspaceService.updateDataSource(targetWsId, targetDsId, { ontologyId })
+      await loadWorkspaces()
+      invalidateGraphSchema()
+    } catch {
+      // Assignment failure is non-fatal — we still navigate to the ontology
+    }
   }
 
-  /** User chose "Clone & Extend" on an existing match. */
-  async function handleSuggestCloneExisting(ontologyId: string) {
+  /** User chose "Use This" on an existing match — assign + navigate. */
+  async function handleSuggestUseExisting(ontologyId: string, targetWsId: string | null, targetDsId: string | null) {
+    setShowSuggestDialog(false)
+    await assignOntologyToTarget(ontologyId, targetWsId, targetDsId)
+    navigate(schemaUrl(ontologyId))
+    const dsLabel = targetDsId
+      ? workspaces.flatMap(ws => ws.dataSources ?? []).find(ds => ds.id === targetDsId)?.label || targetDsId
+      : null
+    showToast('success', dsLabel
+      ? `Assigned to "${dsLabel}" and navigated to the semantic layer`
+      : 'Navigated to the matching semantic layer',
+    )
+  }
+
+  /** User chose "Clone & Extend" — clone, assign to target DS, navigate. */
+  async function handleSuggestCloneExisting(ontologyId: string, targetWsId: string | null, targetDsId: string | null) {
     setShowSuggestDialog(false)
     try {
       const cloned = await mutations.clone.mutateAsync(ontologyId)
+      await assignOntologyToTarget(cloned.id, targetWsId, targetDsId)
       navigate(schemaUrl(cloned.id, 'schema'))
-      showToast('success', 'Cloned — now editing a new draft')
+      showToast('success', 'Cloned and assigned — now editing a new draft')
     } catch (err: unknown) {
       showToast('error', `Clone failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
   }
 
-  /** User chose "Create New Draft" (skip recommendations). */
-  async function handleSuggestCreateDraft(name?: string) {
+  /** User chose "Create New Draft" — create, assign to target DS, navigate. */
+  async function handleSuggestCreateDraft(name: string | undefined, targetWsId: string | null, targetDsId: string | null) {
     const response = suggestResponseRef.current
     if (!response) return
     setIsSuggesting(true)
@@ -671,9 +774,10 @@ export function OntologySchemaPage() {
         ...response.suggested,
         name: finalName,
       })
+      await assignOntologyToTarget(created.id, targetWsId, targetDsId)
       setShowSuggestDialog(false)
       navigate(schemaUrl(created.id, 'schema'))
-      showToast('info', 'Draft created from graph — review types and publish when ready')
+      showToast('info', 'Draft created and assigned — review types and publish when ready')
     } catch (err: unknown) {
       showToast('error', `Failed to create draft: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
@@ -1003,7 +1107,7 @@ export function OntologySchemaPage() {
         {/* Sidebar — self-sizes via internal width state */}
         <OntologySidebar
             ontologies={ontologies}
-            selectedOntologyId={ontologyId}
+            selectedOntologyId={dashboardMode ? undefined : ontologyId}
             activeDataSource={evalDataSource}
             assignmentCountMap={assignmentCountMap}
             workspaces={workspaces}
@@ -1011,11 +1115,28 @@ export function OntologySchemaPage() {
             isSuggesting={isSuggesting}
             onCreateDraft={() => setShowCreateDialog(true)}
             onSuggest={handleSuggestOntology}
+            dashboardMode={dashboardMode}
+            onToggleDashboard={toggleDashboard}
           />
 
         {/* Detail pane */}
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-          {selectedOntology ? (
+          {dashboardMode ? (
+            <div className="flex-1 overflow-y-auto">
+              <DeploymentDashboardPanel
+                workspaces={workspaces}
+                ontologies={ontologies}
+                onNavigateToOntology={(ontId) => {
+                  navigate(schemaUrl(ontId))
+                  toggleDashboard()
+                }}
+                onAssign={handleAssignToDataSource}
+                onUnassign={requestUnassign}
+                onSuggest={handleSuggestForDataSource}
+                isAssigning={isAssigning}
+              />
+            </div>
+          ) : selectedOntology ? (
             <>
               {/* Deleted banner */}
               {isDeleted && (
@@ -1048,9 +1169,6 @@ export function OntologySchemaPage() {
                 workspaces={workspaces}
                 ontologies={ontologies}
                 isAssigning={isAssigning}
-                onAssignToDataSource={handleAssignToDataSource}
-                onUnassignFromDataSource={handleUnassignFromDataSource}
-                onRollOutToWorkspace={handleRollOutToWorkspace}
                 onDiscard={discardChanges}
                 onSave={handleSaveAllChanges}
                 onReviewChanges={() => setShowChangesReview(true)}
@@ -1062,7 +1180,14 @@ export function OntologySchemaPage() {
                 onImport={() => fileInputRef.current?.click()}
                 onEditDetails={() => setEditDetailsTarget(selectedOntology)}
                 onDelete={handleDeleteOntology}
+                onFindDataSources={() => setShowFindDsDialog(true)}
+                onOpenAssignments={() => setShowAssignmentManager(true)}
               />
+
+              {/* Contextual alerts */}
+              {contextAlerts.length > 0 && (
+                <OntologyAlertBanner alerts={contextAlerts} />
+              )}
 
               {/* Tabs — underline style (AdminRegistry pattern) */}
               <div className="flex items-center gap-1 border-b border-glass-border px-8 shrink-0">
@@ -1127,6 +1252,9 @@ export function OntologySchemaPage() {
                           dataSourceId={evalDataSourceId}
                           assignmentCount={assignmentCountMap.get(selectedOntology.id) ?? 0}
                           onNavigateTab={(tab) => setTab(tab)}
+                          workspaces={workspaces}
+                          onAssignToDataSource={handleAssignToDataSource}
+                          onFindDataSources={() => setShowFindDsDialog(true)}
                         />
                       )}
 
@@ -1376,7 +1504,9 @@ export function OntologySchemaPage() {
       {/* Suggest from Graph */}
       {showSuggestDialog && (
         <SuggestConfirmDialog
-          dataSourceLabel={evalDataSource?.label || evalDataSource?.id || null}
+          workspaces={workspaces}
+          initialWorkspaceId={suggestPreSeed?.wsId ?? evalWorkspaceId}
+          initialDataSourceId={suggestPreSeed?.dsId ?? evalDataSourceId}
           suggestedName={generateSuggestedName(evalDataSource?.label, evalWorkspace?.name)}
           ontologies={ontologies}
           currentOntologyId={evalDataSource?.ontologyId ?? null}
@@ -1390,6 +1520,18 @@ export function OntologySchemaPage() {
         />
       )}
 
+      {/* Find Matching Data Sources (reverse suggest) */}
+      {showFindDsDialog && selectedOntology && (
+        <FindDataSourcesDialog
+          ontology={selectedOntology}
+          workspaces={workspaces}
+          ontologies={ontologies}
+          onAssign={handleAssignToDataSource}
+          onClose={() => setShowFindDsDialog(false)}
+          isAssigning={isAssigning}
+        />
+      )}
+
       {/* Import Dialog */}
       {importData && (
         <ImportDialog
@@ -1399,6 +1541,32 @@ export function OntologySchemaPage() {
           onImportNew={ontologyDefinitionService.importNew}
           onImportInto={ontologyDefinitionService.importInto}
           onSuccess={handleImportSuccess}
+        />
+      )}
+
+      {/* Assignment Manager */}
+      {showAssignmentManager && selectedOntology && (
+        <AssignmentManagerDialog
+          ontology={selectedOntology}
+          workspaces={workspaces}
+          ontologies={ontologies}
+          isAssigning={isAssigning}
+          onAssign={handleAssignToDataSource}
+          onUnassign={requestUnassign}
+          onRollOutToWorkspace={handleRollOutToWorkspace}
+          onClose={() => setShowAssignmentManager(false)}
+        />
+      )}
+
+      {/* Unassign Confirmation */}
+      {unassignTarget && (
+        <UnassignConfirmDialog
+          dataSourceLabel={unassignTarget.dsLabel}
+          workspaceName={unassignTarget.wsName}
+          ontologyName={unassignTarget.ontologyName}
+          onConfirm={handleConfirmUnassign}
+          onCancel={() => setUnassignTarget(null)}
+          isLoading={isAssigning}
         />
       )}
 

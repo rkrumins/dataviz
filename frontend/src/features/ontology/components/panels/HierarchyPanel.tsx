@@ -6,6 +6,7 @@ import type { EntityTypeSchema } from '@/types/schema'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 
 import { EmptyState } from '../EmptyState'
+import { EducationalCallout } from '../EducationalCallout'
 import type { RelTypeWithClassifications } from '../../lib/ontology-types'
 
 // ---------------------------------------------------------------------------
@@ -581,6 +582,13 @@ export function HierarchyPanel({
 
   return (
     <div>
+      <EducationalCallout
+        id="edu-hierarchy"
+        title="Type Hierarchy"
+        description="The hierarchy defines containment relationships between entity types — which types can contain which others. This powers features like expandable nodes, breadcrumb navigation, and nested views. A type can have multiple parents (DAG structure)."
+        variant="info"
+      />
+
       {/* Saving overlay indicator */}
       {isSaving && (
         <div className="flex items-center gap-2 text-xs text-indigo-600 dark:text-indigo-400 mb-4">
