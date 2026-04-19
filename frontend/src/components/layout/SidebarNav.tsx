@@ -2,11 +2,11 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import {
   LayoutDashboard,
-  Network,
+  Compass,
   Boxes,
   DatabaseZap,
   Layers,
-  Settings,
+  Shield,
   PanelLeftClose,
   PanelLeftOpen,
   Pin,
@@ -46,11 +46,11 @@ interface NavItemConfig {
 
 const NAV_ITEMS_CONFIG: Omit<NavItemConfig, 'badge'>[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, description: 'Overview and workspace activity', color: { bg: 'bg-indigo-500/10', text: 'text-indigo-500', border: 'border-indigo-500/20', hoverBg: 'group-hover:bg-indigo-500/10' } },
-  { id: 'explore', label: 'Explore', icon: Network, description: 'Browse and open saved views', color: { bg: 'bg-violet-500/10', text: 'text-violet-500', border: 'border-violet-500/20', hoverBg: 'group-hover:bg-violet-500/10' } },
+  { id: 'explore', label: 'Explore', icon: Compass, description: 'Browse and open saved views', color: { bg: 'bg-violet-500/10', text: 'text-violet-500', border: 'border-violet-500/20', hoverBg: 'group-hover:bg-violet-500/10' } },
   { id: 'workspaces', label: 'Workspaces', icon: Boxes, description: 'Manage isolated data environments', color: { bg: 'bg-blue-500/10', text: 'text-blue-500', border: 'border-blue-500/20', hoverBg: 'group-hover:bg-blue-500/10' } },
   { id: 'ingestion', label: 'Ingestion', icon: DatabaseZap, description: 'Connect sources and import data', color: { bg: 'bg-emerald-500/10', text: 'text-emerald-500', border: 'border-emerald-500/20', hoverBg: 'group-hover:bg-emerald-500/10' } },
   { id: 'schema', label: 'Semantic Layers', icon: Layers, description: 'Define and manage ontology models', color: { bg: 'bg-amber-500/10', text: 'text-amber-500', border: 'border-amber-500/20', hoverBg: 'group-hover:bg-amber-500/10' } },
-  { id: 'admin', label: 'Administration', icon: Settings, description: 'System settings, users, and health', color: { bg: 'bg-slate-500/10', text: 'text-slate-500', border: 'border-slate-500/20', hoverBg: 'group-hover:bg-slate-500/10' } },
+  { id: 'admin', label: 'Administration', icon: Shield, description: 'System settings, users, and health', color: { bg: 'bg-slate-500/10', text: 'text-slate-500', border: 'border-slate-500/20', hoverBg: 'group-hover:bg-slate-500/10' } },
 ]
 
 // ── Portal-based tooltip (escapes overflow:hidden) ──────────────────
