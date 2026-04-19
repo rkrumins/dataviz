@@ -8,8 +8,8 @@ import { useState, useMemo, useRef } from 'react'
 import {
   Database, Layers, AlertTriangle, ArrowRight, Search,
   Shield, CheckCircle2, PenLine, Unlink, Sparkles,
-  GitBranch, ChevronDown, ChevronRight, X,
-  Plus, BookOpen, Eye,
+  GitBranch, ChevronDown, ChevronUp, ChevronRight, X,
+  Plus, BookOpen, Eye, HelpCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WorkspaceResponse } from '@/services/workspaceService'
@@ -71,6 +71,7 @@ export function DeploymentDashboardPanel({
   isAssigning,
 }: DeploymentDashboardPanelProps) {
   const { entries, orphans, versionMismatches, stats } = useDeploymentMatrix(workspaces, ontologies)
+  const [guideExpanded, setGuideExpanded] = useState(false)
   const [search, setSearch] = useState('')
   const [searchFocused, setSearchFocused] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -170,77 +171,102 @@ export function DeploymentDashboardPanel({
           )}
         </div>
 
-        {/* How it works — 3-step guide */}
+        {/* Getting started guide — original rich layout with collapse toggle */}
         {ontologies.length <= 5 && (
-          <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div className="flex items-start gap-3 p-4 rounded-xl border border-glass-border bg-canvas-elevated/50">
-              <div className="w-9 h-9 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <BookOpen className="w-4 h-4 text-indigo-500" />
+          <div className="mt-6">
+            {/* Toggle bar */}
+            <button
+              onClick={() => setGuideExpanded(!guideExpanded)}
+              className="flex items-center gap-2 mb-4 text-left group"
+            >
+              <div className="w-7 h-7 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center flex-shrink-0">
+                <HelpCircle className="w-3.5 h-3.5 text-indigo-500" />
               </div>
-              <div>
-                <p className="text-xs font-bold text-ink mb-1">1. Define your schema</p>
-                <p className="text-[11px] text-ink-muted leading-relaxed">
-                  Create a semantic layer with entity types (Person, Company) and relationships (WORKS_AT, OWNS) that describe your graph.
-                </p>
-              </div>
-            </div>
-            <div className="flex items-start gap-3 p-4 rounded-xl border border-glass-border bg-canvas-elevated/50">
-              <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <Database className="w-4 h-4 text-emerald-500" />
-              </div>
-              <div>
-                <p className="text-xs font-bold text-ink mb-1">2. Assign to data sources</p>
-                <p className="text-[11px] text-ink-muted leading-relaxed">
-                  Connect a semantic layer to one or more data sources. This tells the system how to interpret each graph's nodes and edges.
-                </p>
-              </div>
-            </div>
-            <div className="flex items-start gap-3 p-4 rounded-xl border border-glass-border bg-canvas-elevated/50">
-              <div className="w-9 h-9 rounded-lg bg-violet-500/10 border border-violet-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <Eye className="w-4 h-4 text-violet-500" />
-              </div>
-              <div>
-                <p className="text-xs font-bold text-ink mb-1">3. Build views &amp; explore</p>
-                <p className="text-[11px] text-ink-muted leading-relaxed">
-                  Once assigned, create views with type-aware features — expandable hierarchy, semantic search, and structured filters.
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
+              <span className="text-xs font-bold text-ink-secondary group-hover:text-ink transition-colors">Getting Started Guide</span>
+              {guideExpanded
+                ? <ChevronUp className="w-3.5 h-3.5 text-ink-muted" />
+                : <ChevronDown className="w-3.5 h-3.5 text-ink-muted" />}
+            </button>
 
-        {/* Why it matters — impact explanation */}
-        {ontologies.length <= 5 && (
-          <div className="mt-4 rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
-            <div className="h-0.5 w-full bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500" />
-            <div className="p-5">
-              <div className="flex items-center gap-2 mb-3">
-                <Sparkles className="w-4 h-4 text-amber-500" />
-                <h3 className="text-sm font-bold text-ink">Why semantic layers matter</h3>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-ink-muted leading-relaxed">
-                <div className="flex items-start gap-2.5">
-                  <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 flex-shrink-0" />
-                  <div>
-                    <span className="font-semibold text-ink">Type-aware views</span> — Without a semantic layer, views treat all nodes and edges as generic. With one, the system knows that a "Person" should render differently from a "Document", enabling icons, colors, and labels per type.
+            {/* Collapsible content — CSS grid transition, original layout preserved */}
+            <div
+              className="grid transition-[grid-template-rows] duration-300 ease-out"
+              style={{ gridTemplateRows: guideExpanded ? '1fr' : '0fr' }}
+            >
+              <div className="overflow-hidden">
+                <div className="space-y-4 pb-2">
+                  {/* 3-step guide — original cards */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="flex items-start gap-3 p-4 rounded-xl border border-glass-border bg-canvas-elevated/50">
+                      <div className="w-9 h-9 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                        <BookOpen className="w-4 h-4 text-indigo-500" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-ink mb-1">1. Define your schema</p>
+                        <p className="text-[11px] text-ink-muted leading-relaxed">
+                          Create a semantic layer with entity types (Person, Company) and relationships (WORKS_AT, OWNS) that describe your graph.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3 p-4 rounded-xl border border-glass-border bg-canvas-elevated/50">
+                      <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                        <Database className="w-4 h-4 text-emerald-500" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-ink mb-1">2. Assign to data sources</p>
+                        <p className="text-[11px] text-ink-muted leading-relaxed">
+                          Connect a semantic layer to one or more data sources. This tells the system how to interpret each graph's nodes and edges.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3 p-4 rounded-xl border border-glass-border bg-canvas-elevated/50">
+                      <div className="w-9 h-9 rounded-lg bg-violet-500/10 border border-violet-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                        <Eye className="w-4 h-4 text-violet-500" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-ink mb-1">3. Build views &amp; explore</p>
+                        <p className="text-[11px] text-ink-muted leading-relaxed">
+                          Once assigned, create views with type-aware features — expandable hierarchy, semantic search, and structured filters.
+                        </p>
+                      </div>
+                    </div>
                   </div>
-                </div>
-                <div className="flex items-start gap-2.5">
-                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 flex-shrink-0" />
-                  <div>
-                    <span className="font-semibold text-ink">Hierarchy navigation</span> — Containment rules (e.g., Organization contains Department contains Team) power expand/collapse, breadcrumb trails, and drill-down exploration.
-                  </div>
-                </div>
-                <div className="flex items-start gap-2.5">
-                  <div className="w-1.5 h-1.5 rounded-full bg-violet-400 mt-1.5 flex-shrink-0" />
-                  <div>
-                    <span className="font-semibold text-ink">Semantic search</span> — Entity type definitions enable scoped searches like "find all People" or "show Documents connected to this Company" instead of raw node/edge queries.
-                  </div>
-                </div>
-                <div className="flex items-start gap-2.5">
-                  <div className="w-1.5 h-1.5 rounded-full bg-amber-400 mt-1.5 flex-shrink-0" />
-                  <div>
-                    <span className="font-semibold text-ink">Consistency across teams</span> — Publishing a semantic layer creates an immutable contract. All data sources using it share the same type definitions, ensuring consistent behavior across workspaces and views.
+
+                  {/* Why it matters — original card with amber gradient bar */}
+                  <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
+                    <div className="h-0.5 w-full bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500" />
+                    <div className="p-5">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Sparkles className="w-4 h-4 text-amber-500" />
+                        <h3 className="text-sm font-bold text-ink">Why semantic layers matter</h3>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-ink-muted leading-relaxed">
+                        <div className="flex items-start gap-2.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 flex-shrink-0" />
+                          <div>
+                            <span className="font-semibold text-ink">Type-aware views</span> — Without a semantic layer, views treat all nodes and edges as generic. With one, the system knows that a "Person" should render differently from a "Document", enabling icons, colors, and labels per type.
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 flex-shrink-0" />
+                          <div>
+                            <span className="font-semibold text-ink">Hierarchy navigation</span> — Containment rules (e.g., Organization contains Department contains Team) power expand/collapse, breadcrumb trails, and drill-down exploration.
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-violet-400 mt-1.5 flex-shrink-0" />
+                          <div>
+                            <span className="font-semibold text-ink">Semantic search</span> — Entity type definitions enable scoped searches like "find all People" or "show Documents connected to this Company" instead of raw node/edge queries.
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-amber-400 mt-1.5 flex-shrink-0" />
+                          <div>
+                            <span className="font-semibold text-ink">Consistency across teams</span> — Publishing a semantic layer creates an immutable contract. All data sources using it share the same type definitions, ensuring consistent behavior across workspaces and views.
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
