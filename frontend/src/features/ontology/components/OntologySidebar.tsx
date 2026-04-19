@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { Search, Plus, Shield, CheckCircle2, PenLine, Lock, Box, GitBranch, Loader2, BookOpen, Database, X, Trash2, LayoutGrid, LayoutDashboard, Link2, Unlink, PanelLeftClose, PanelLeftOpen, Info, ChevronDown, ChevronUp } from 'lucide-react'
+import { Search, Plus, Shield, CheckCircle2, PenLine, Lock, Box, GitBranch, Loader2, BookOpen, Database, X, Trash2, LayoutGrid, LayoutDashboard, Link2, Unlink, PanelLeftClose, PanelLeftOpen, Info, ChevronDown, ChevronUp, Layers } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceResponse, WorkspaceResponse } from '@/services/workspaceService'
@@ -571,55 +571,63 @@ export function OntologySidebar({
       className="flex-shrink-0 flex flex-col border-r border-glass-border bg-canvas-elevated/40 h-full relative"
       style={{ width }}
     >
-      {/* Header: Search + Collapse */}
-      <div className="px-3 pt-3 pb-2">
-        <div className="flex items-center gap-1.5 mb-2">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted/60" />
-            <input
-              type="text"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search..."
-              className="w-full pl-9 pr-8 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/30 focus:bg-white dark:focus:bg-white/[0.06] transition-all"
-            />
-            {search && (
-              <button
-                onClick={() => setSearch('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 text-ink-muted/50 hover:text-ink-muted transition-colors"
-              >
-                <X className="w-3 h-3" />
-              </button>
-            )}
+      {/* Header */}
+      <div className="px-4 pt-4 pb-3">
+        <div className="flex items-center gap-3 mb-3">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg shadow-amber-500/20">
+            <Layers className="w-5 h-5 text-white" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h1 className="text-lg font-bold text-ink leading-tight">Semantic Layers</h1>
+            <p className="text-[11px] text-ink-muted">Ontology models &amp; assignments</p>
           </div>
           <button
             onClick={() => setCollapsed(true)}
-            className="p-2 rounded-lg hover:bg-black/[0.04] dark:hover:bg-white/[0.04] text-ink-muted hover:text-ink transition-colors flex-shrink-0"
+            className="p-1.5 rounded-lg hover:bg-black/[0.04] dark:hover:bg-white/[0.04] text-ink-muted hover:text-ink transition-colors flex-shrink-0"
             title="Collapse sidebar"
           >
             <PanelLeftClose className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Semantic Layers overview — AdminPage nav-item style */}
+        <div className="relative mb-2">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted/60" />
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search..."
+            className="w-full pl-9 pr-8 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/30 focus:bg-white dark:focus:bg-white/[0.06] transition-all"
+          />
+          {search && (
+            <button
+              onClick={() => setSearch('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 text-ink-muted/50 hover:text-ink-muted transition-colors"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+
+        {/* Dashboard toggle */}
         {onToggleDashboard && (
           <button
             onClick={onToggleDashboard}
             className={cn(
               'w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left group transition-all duration-200 relative mb-2',
               dashboardMode
-                ? 'bg-gradient-to-r from-indigo-500/10 to-violet-500/10 text-indigo-600 dark:text-indigo-400 shadow-sm border border-indigo-500/20'
+                ? 'bg-gradient-to-r from-amber-500/10 to-orange-500/10 text-amber-600 dark:text-amber-400 shadow-sm border border-amber-500/20'
                 : 'text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink border border-transparent',
             )}
           >
             <div className={cn(
               'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors',
-              dashboardMode ? 'bg-indigo-500/20' : 'bg-black/5 dark:bg-white/5',
+              dashboardMode ? 'bg-amber-500/20' : 'bg-black/5 dark:bg-white/5',
             )}>
-              <LayoutDashboard className={cn('w-3.5 h-3.5', dashboardMode ? 'text-indigo-500' : 'text-ink-muted')} />
+              <LayoutDashboard className={cn('w-3.5 h-3.5', dashboardMode ? 'text-amber-500' : 'text-ink-muted')} />
             </div>
             <div className="flex flex-col min-w-0 flex-1">
-              <span className="text-sm font-semibold truncate leading-tight">Semantic Layers</span>
+              <span className="text-sm font-semibold truncate leading-tight">Deployment Dashboard</span>
               <span className="text-[10px] text-ink-muted truncate mt-0.5">Overview &amp; Assignments</span>
             </div>
           </button>

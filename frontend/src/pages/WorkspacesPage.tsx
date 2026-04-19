@@ -3,7 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import {
     Database, Plus, Edit2, Settings, AlertTriangle,
-    CircleDot, ArrowRightLeft, Eye, Sparkles,
+    CircleDot, ArrowRightLeft, Eye, Sparkles, Boxes,
 } from 'lucide-react'
 import { listViews } from '@/services/viewApiService'
 import { workspaceService, type WorkspaceResponse, type WorkspaceCreateRequest } from '@/services/workspaceService'
@@ -372,11 +372,14 @@ export function WorkspacesPage() {
 
             {/* ── Header ── */}
             <div className="flex items-center justify-between">
-                <div>
-                    <h1 className="text-3xl font-bold tracking-tight text-ink">Workspaces</h1>
-                    <p className="text-sm text-ink-muted mt-2 max-w-2xl">
-                        Your data domains — group sources, govern schemas, and power team views.
-                    </p>
+                <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+                        <Boxes className="w-5 h-5 text-white" />
+                    </div>
+                    <div>
+                        <h1 className="text-xl font-bold text-ink leading-tight">Workspaces</h1>
+                        <p className="text-[11px] text-ink-muted">Your data domains — group sources, govern schemas, and power team views</p>
+                    </div>
                 </div>
                 <button onClick={() => { resetWizard(); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
                     <Plus className="w-4 h-4" /> Create Workspace

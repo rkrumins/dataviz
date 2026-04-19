@@ -2,11 +2,11 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import {
   LayoutDashboard,
-  Network,
+  Compass,
   Boxes,
   DatabaseZap,
   Layers,
-  Settings,
+  Shield,
   PanelLeftClose,
   PanelLeftOpen,
   Pin,
@@ -28,20 +28,29 @@ const MAX_WIDTH = 400
 const DEFAULT_WIDTH = 256
 const COLLAPSED_WIDTH = 56
 
-interface NavItem {
+interface NavItemColor {
+  bg: string
+  text: string
+  border: string
+  hoverBg: string
+}
+
+interface NavItemConfig {
   id: NavigationTab
   label: string
   icon: React.ComponentType<{ className?: string }>
+  description: string
+  color: NavItemColor
   badge?: number
 }
 
-const baseNavItems: Omit<NavItem, 'badge'>[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'explore', label: 'Explore', icon: Network },
-  { id: 'workspaces', label: 'Workspaces', icon: Boxes },
-  { id: 'ingestion', label: 'Ingestion', icon: DatabaseZap },
-  { id: 'schema', label: 'Semantic Layers', icon: Layers },
-  { id: 'admin', label: 'Administration', icon: Settings },
+const NAV_ITEMS_CONFIG: Omit<NavItemConfig, 'badge'>[] = [
+  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, description: 'Overview and workspace activity', color: { bg: 'bg-indigo-500/10', text: 'text-indigo-500', border: 'border-indigo-500/20', hoverBg: 'group-hover:bg-indigo-500/10' } },
+  { id: 'explore', label: 'Explore', icon: Compass, description: 'Browse and open saved views', color: { bg: 'bg-violet-500/10', text: 'text-violet-500', border: 'border-violet-500/20', hoverBg: 'group-hover:bg-violet-500/10' } },
+  { id: 'workspaces', label: 'Workspaces', icon: Boxes, description: 'Manage isolated data environments', color: { bg: 'bg-blue-500/10', text: 'text-blue-500', border: 'border-blue-500/20', hoverBg: 'group-hover:bg-blue-500/10' } },
+  { id: 'ingestion', label: 'Ingestion', icon: DatabaseZap, description: 'Connect sources and import data', color: { bg: 'bg-emerald-500/10', text: 'text-emerald-500', border: 'border-emerald-500/20', hoverBg: 'group-hover:bg-emerald-500/10' } },
+  { id: 'schema', label: 'Semantic Layers', icon: Layers, description: 'Define and manage ontology models', color: { bg: 'bg-amber-500/10', text: 'text-amber-500', border: 'border-amber-500/20', hoverBg: 'group-hover:bg-amber-500/10' } },
+  { id: 'admin', label: 'Administration', icon: Shield, description: 'System settings, users, and health', color: { bg: 'bg-slate-500/10', text: 'text-slate-500', border: 'border-slate-500/20', hoverBg: 'group-hover:bg-slate-500/10' } },
 ]
 
 // ── Portal-based tooltip (escapes overflow:hidden) ──────────────────
@@ -107,7 +116,7 @@ function SidebarQuickAccess({
 
   if (!hasContent) {
     return (
-      <div className="px-3 mt-4">
+      <div className="px-2.5 mt-4">
         <p className="text-[11px] text-ink-muted px-2 leading-relaxed">
           Pin views for quick access. Open any view and click the pin icon, or browse the{' '}
           <button
@@ -122,7 +131,7 @@ function SidebarQuickAccess({
   }
 
   return (
-    <div className="px-3 mt-4 space-y-3">
+    <div className="px-2.5 mt-4 space-y-3">
       {/* Pinned section */}
       {pinnedViews.length > 0 && (
         <div>
@@ -219,7 +228,7 @@ function SidebarQuickAccess({
 // Nav button with tooltip support when collapsed
 // ─────────────────────────────────────────────────────────────────────
 interface NavButtonProps {
-  item: NavItem
+  item: NavItemConfig
   collapsed: boolean
   active?: boolean
   onClick?: () => void
@@ -236,22 +245,42 @@ function NavButton({ item, collapsed, active, onClick, onHoverStart, onHoverEnd 
       onMouseEnter={collapsed ? (e) => onHoverStart?.(e.currentTarget) : undefined}
       onMouseLeave={collapsed ? () => onHoverEnd?.() : undefined}
       className={cn(
-        "w-full flex items-center rounded-lg transition-all duration-150 relative",
-        collapsed ? "justify-center p-2.5" : "gap-3 px-3 py-2.5",
+        "w-full flex items-center rounded-lg transition-all duration-150 relative group",
+        collapsed ? "justify-center p-2" : "gap-3 px-2.5 py-2",
         active
-          ? "bg-accent-lineage/10 text-accent-lineage"
-          : "text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink"
+          ? "bg-accent-lineage/8 text-ink"
+          : "text-ink-secondary hover:bg-black/[0.03] dark:hover:bg-white/[0.03] hover:text-ink"
       )}
     >
-      {active && collapsed && (
-        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full bg-accent-lineage" />
+      {/* Active indicator bar */}
+      {active && (
+        <div className={cn(
+          "absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full bg-accent-lineage",
+          collapsed ? "h-5" : "h-6"
+        )} />
       )}
-      <Icon className="w-5 h-5 flex-shrink-0" />
+
+      {/* Icon with colored background */}
+      <div className={cn(
+        "flex items-center justify-center rounded-lg border shrink-0 transition-all duration-150",
+        "w-8 h-8",
+        item.color.text,
+        active
+          ? cn(item.color.bg, item.color.border)
+          : cn("bg-transparent border-transparent", item.color.hoverBg)
+      )}>
+        <Icon className="w-4 h-4" />
+      </div>
+
+      {/* Label + Description + Badge (expanded only) */}
       {!collapsed && (
         <>
-          <span className="flex-1 text-left text-sm font-medium">{item.label}</span>
+          <div className="flex-1 min-w-0 text-left">
+            <span className="text-sm font-medium truncate block">{item.label}</span>
+            <span className="text-2xs text-ink-muted truncate block leading-tight">{item.description}</span>
+          </div>
           {item.badge != null && item.badge > 0 && (
-            <span className="px-1.5 py-0.5 text-2xs font-medium bg-accent-lineage/10 text-accent-lineage rounded">
+            <span className="px-1.5 py-0.5 text-2xs font-medium bg-accent-lineage/10 text-accent-lineage rounded shrink-0">
               {item.badge}
             </span>
           )}
@@ -322,7 +351,7 @@ export function SidebarNav() {
   }
 
   // Populate nav item badges
-  const mainNavItems: NavItem[] = baseNavItems.map((item) => ({
+  const mainNavItems: NavItemConfig[] = NAV_ITEMS_CONFIG.map((item) => ({
     ...item,
     badge: item.id === 'explore' ? viewCount : undefined,
   }))
@@ -336,25 +365,24 @@ export function SidebarNav() {
     >
       {/* Main Navigation */}
       <nav className="flex-1 flex flex-col overflow-y-auto custom-scrollbar pb-3">
-        {/* Sidebar toggle */}
-        <div className={cn(
-          "flex items-center border-b border-glass-border",
-          sidebarCollapsed ? "justify-center py-2.5" : "justify-end px-3 py-2.5"
-        )}>
-          <button
-            onClick={toggleSidebar}
-            className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          >
-            {sidebarCollapsed
-              ? <PanelLeftOpen className="w-4.5 h-4.5" />
-              : <PanelLeftClose className="w-5 h-5" />
-            }
-          </button>
-        </div>
-
         {/* Primary nav items */}
-        <div className={cn("space-y-0.5", sidebarCollapsed ? "px-1.5" : "px-3")}>
+        <div className={cn("space-y-0.5 pt-2", sidebarCollapsed ? "px-1.5" : "px-2.5")}>
+          {/* Sidebar toggle — integrated into nav flow */}
+          <div className={cn(
+            "flex mb-1",
+            sidebarCollapsed ? "justify-center" : "justify-end"
+          )}>
+            <button
+              onClick={toggleSidebar}
+              className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              {sidebarCollapsed
+                ? <PanelLeftOpen className="w-4.5 h-4.5" />
+                : <PanelLeftClose className="w-4.5 h-4.5" />
+              }
+            </button>
+          </div>
           {mainNavItems.map((item) => (
             <NavButton
               key={item.id}
@@ -390,18 +418,24 @@ export function SidebarNav() {
       )}
 
       {/* Documentation link */}
-      <div className={cn("border-t border-glass-border", sidebarCollapsed ? "px-1.5 py-2" : "px-3 py-2")}>
+      <div className={cn("border-t border-glass-border", sidebarCollapsed ? "px-1.5 py-2" : "px-2.5 py-2")}>
         <a
           href="/docs"
           target="_blank"
           rel="noopener noreferrer"
           className={cn(
-            "flex items-center rounded-lg transition-all duration-150 text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5",
-            sidebarCollapsed ? "justify-center p-2.5" : "gap-2.5 px-3 py-2"
+            "flex items-center rounded-lg transition-all duration-150 text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]",
+            sidebarCollapsed ? "justify-center p-2" : "gap-3 px-2.5 py-2"
           )}
           title="Documentation"
         >
-          <BookOpen className="w-4 h-4 shrink-0" />
+          <div className={cn(
+            "flex items-center justify-center rounded-lg shrink-0",
+            sidebarCollapsed ? "w-8 h-8" : "w-7 h-7",
+            "bg-black/[0.04] dark:bg-white/[0.06]"
+          )}>
+            <BookOpen className={cn(sidebarCollapsed ? "w-4 h-4" : "w-3.5 h-3.5")} />
+          </div>
           {!sidebarCollapsed && <span className="text-xs font-medium">Documentation</span>}
         </a>
       </div>
@@ -417,9 +451,17 @@ export function SidebarNav() {
       {/* Portal tooltip for collapsed nav items */}
       {sidebarCollapsed && hoveredNavItem && (
         <CollapsedTooltip anchorRef={hoveredNavRef} visible>
-          <div className="flex items-center gap-2">
-            <hoveredNavItem.icon className="w-4 h-4 text-accent-lineage" />
-            <span className="text-sm font-semibold text-ink">{hoveredNavItem.label}</span>
+          <div className="flex items-center gap-2.5">
+            <div className={cn(
+              "w-7 h-7 rounded-lg border flex items-center justify-center shrink-0",
+              hoveredNavItem.color.bg, hoveredNavItem.color.text, hoveredNavItem.color.border
+            )}>
+              <hoveredNavItem.icon className="w-3.5 h-3.5" />
+            </div>
+            <div className="min-w-0">
+              <span className="text-sm font-semibold text-ink block">{hoveredNavItem.label}</span>
+              <span className="text-xs text-ink-muted block mt-0.5">{hoveredNavItem.description}</span>
+            </div>
           </div>
         </CollapsedTooltip>
       )}

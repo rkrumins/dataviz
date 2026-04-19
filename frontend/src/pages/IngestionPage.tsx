@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
-import { Server, Layers, Activity } from 'lucide-react'
+import { Server, Layers, Activity, DatabaseZap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
@@ -87,11 +87,14 @@ export function IngestionPage() {
             <div className="shrink-0 px-8 pt-8">
                 <div className="max-w-7xl mx-auto">
                     {/* Header */}
-                    <div className="mb-6">
-                        <h1 className="text-3xl font-bold tracking-tight text-ink">Data Ingestion</h1>
-                        <p className="text-sm text-ink-muted mt-2 max-w-2xl">
-                            Connect providers, register assets, and monitor the pipeline that feeds your workspaces.
-                        </p>
+                    <div className="flex items-center gap-3 mb-6">
+                        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/20">
+                            <DatabaseZap className="w-5 h-5 text-white" />
+                        </div>
+                        <div>
+                            <h1 className="text-xl font-bold text-ink leading-tight">Data Ingestion</h1>
+                            <p className="text-[11px] text-ink-muted">Connect providers, register assets, and monitor your pipeline</p>
+                        </div>
                     </div>
 
                     {loadError && (
