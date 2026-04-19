@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { Search, Plus, Sparkles, Shield, CheckCircle2, PenLine, Lock, Box, GitBranch, Loader2, BookOpen, Database, X, Trash2, LayoutGrid, Link2, Unlink, PanelLeftClose, PanelLeftOpen, Info, ChevronDown, ChevronUp } from 'lucide-react'
+import { Search, Plus, Sparkles, Shield, CheckCircle2, PenLine, Lock, Box, GitBranch, Loader2, BookOpen, Database, X, Trash2, LayoutGrid, LayoutDashboard, Link2, Unlink, PanelLeftClose, PanelLeftOpen, Info, ChevronDown, ChevronUp } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceResponse, WorkspaceResponse } from '@/services/workspaceService'
@@ -18,6 +18,8 @@ interface OntologySidebarProps {
   isSuggesting: boolean
   onCreateDraft: () => void
   onSuggest: () => void
+  dashboardMode?: boolean
+  onToggleDashboard?: () => void
 }
 
 const STATUS_CONFIGS: Record<Exclude<StatusFilter, 'all' | 'deleted'>, {
@@ -111,6 +113,8 @@ export function OntologySidebar({
   isSuggesting,
   onCreateDraft,
   onSuggest,
+  dashboardMode,
+  onToggleDashboard,
 }: OntologySidebarProps) {
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
@@ -589,6 +593,32 @@ export function OntologySidebar({
           </button>
         </div>
 
+        {/* Deployment Dashboard quick-access card */}
+        {onToggleDashboard && (
+          <button
+            onClick={onToggleDashboard}
+            className={cn(
+              'w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-left transition-all mb-2',
+              dashboardMode
+                ? 'bg-gradient-to-r from-indigo-500/15 to-purple-500/10 border border-indigo-500/30 shadow-sm shadow-indigo-500/5'
+                : 'border border-glass-border/60 hover:border-indigo-400/40 hover:bg-indigo-500/[0.04]',
+            )}
+          >
+            <div className={cn(
+              'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0',
+              dashboardMode ? 'bg-indigo-500/20' : 'bg-black/[0.04] dark:bg-white/[0.04]',
+            )}>
+              <LayoutDashboard className={cn('w-3.5 h-3.5', dashboardMode ? 'text-indigo-500' : 'text-ink-muted')} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className={cn('text-[11px] font-semibold', dashboardMode ? 'text-indigo-600 dark:text-indigo-400' : 'text-ink-secondary')}>
+                Deployment Dashboard
+              </p>
+              <p className="text-[9px] text-ink-muted">Cross-workspace overview</p>
+            </div>
+          </button>
+        )}
+
         {/* Status filter row */}
         <div className="flex items-center gap-0.5 p-0.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03]">
           {STATUS_TABS.map(f => {
@@ -962,8 +992,7 @@ export function OntologySidebar({
         </button>
         <button
           onClick={onSuggest}
-          disabled={isSuggesting || !activeDataSource}
-          title={!activeDataSource ? 'Select a data source from the environment switcher first' : undefined}
+          disabled={isSuggesting}
           className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-medium border border-glass-border/60 hover:border-indigo-400/40 hover:bg-indigo-500/[0.04] text-ink-secondary hover:text-indigo-600 dark:hover:text-indigo-400 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {isSuggesting

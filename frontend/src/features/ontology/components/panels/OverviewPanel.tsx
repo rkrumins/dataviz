@@ -33,6 +33,9 @@ import { fetchSchemaStats } from '../../lib/ontology-utils'
 import { formatCount, entityDefToSchema, relDefToSchema } from '../../lib/ontology-parsers'
 import { SchemaMinimapSVG } from '../SchemaMinimapSVG'
 import { SchemaHealthRing } from '../SchemaHealthRing'
+import { EducationalCallout } from '../EducationalCallout'
+import { QuickRecommendBanner } from '../QuickRecommendBanner'
+import type { WorkspaceResponse } from '@/services/workspaceService'
 
 interface OverviewPanelProps {
   ontology: OntologyDefinitionResponse
@@ -40,6 +43,10 @@ interface OverviewPanelProps {
   dataSourceId: string | null
   assignmentCount: number
   onNavigateTab: (tab: string) => void
+  /** For QuickRecommendBanner — optional, only shown when unassigned */
+  workspaces?: WorkspaceResponse[]
+  onAssignToDataSource?: (workspaceId: string, dataSourceId: string) => void
+  onFindDataSources?: () => void
 }
 
 function StatCard({ icon: Icon, label, value, accent, onClick }: {
@@ -75,6 +82,9 @@ export function OverviewPanel({
   dataSourceId,
   assignmentCount,
   onNavigateTab,
+  workspaces,
+  onAssignToDataSource,
+  onFindDataSources,
 }: OverviewPanelProps) {
   // Self-contained: fetch graph stats + coverage when workspace context exists
   const [graphStats, setGraphStats] = useState<GraphSchemaStats | null>(null)
@@ -183,6 +193,23 @@ export function OverviewPanel({
 
   return (
     <div className="space-y-8">
+      <EducationalCallout
+        id="edu-ontology-intro"
+        title="What is a Semantic Layer?"
+        description="A semantic layer (ontology) defines the vocabulary for your knowledge graph — the entity types, relationships, and hierarchy that give structure and meaning to your data. It tells views and features how to interpret nodes and edges in your graph."
+        variant="concept"
+      />
+
+      {/* Quick Recommend — shown when ontology has no assignments */}
+      {assignmentCount === 0 && !ontology.isSystem && workspaces && onAssignToDataSource && onFindDataSources && (
+        <QuickRecommendBanner
+          ontology={ontology}
+          workspaces={workspaces}
+          onAssign={onAssignToDataSource}
+          onViewDetails={onFindDataSources}
+        />
+      )}
+
       {/* ── Status Banner + Schema Minimap ───────────────────────── */}
       <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Status banner */}
