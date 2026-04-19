@@ -53,11 +53,6 @@ export function IngestionPage() {
                 ws.dataSources?.some(ds => !!ds.ontologyId)
             )
             setCounts({
-                // Treat a failed providers load as "zero known providers" so
-                // the page still renders with the amber banner + tabs; the
-                // previous ``providers: -1`` sentinel kept counts.providers
-                // at -1 on error, which the gate below turned into an
-                // indefinite blank screen.
                 providers: providers ? providers.length : 0,
                 catalogs: catalogs.length,
                 workspaces: workspaces.length,
@@ -82,81 +77,91 @@ export function IngestionPage() {
         }
     }
 
-    // Initial-load gate: render nothing only while the first load is in
-    // flight AND hasn't produced any result (neither data nor error). Once
-    // any of those three things is set, render the page so partial data
-    // and the error banner become visible.
     if (counts.providers === -1 && !loadError) return null
 
     const setTab = (id: IngestionTab) => setSearchParams({ tab: id })
 
     return (
-        <div className="p-8 max-w-7xl mx-auto flex flex-col h-full animate-in fade-in duration-500">
-            {/* Header */}
-            <div className="mb-6">
-                <h1 className="text-3xl font-bold tracking-tight text-ink">Data Ingestion</h1>
-                <p className="text-sm text-ink-muted mt-2 max-w-2xl">
-                    Connect providers, register assets, and monitor the pipeline that feeds your workspaces.
-                </p>
-            </div>
+        <div className="absolute inset-0 flex flex-col animate-in fade-in duration-500">
+            {/* Fixed header area — does not scroll */}
+            <div className="shrink-0 px-8 pt-8">
+                <div className="max-w-7xl mx-auto">
+                    {/* Header */}
+                    <div className="mb-6">
+                        <h1 className="text-3xl font-bold tracking-tight text-ink">Data Ingestion</h1>
+                        <p className="text-sm text-ink-muted mt-2 max-w-2xl">
+                            Connect providers, register assets, and monitor the pipeline that feeds your workspaces.
+                        </p>
+                    </div>
 
-            {loadError && (
-                <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100">
-                    {loadError}
+                    {loadError && (
+                        <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100">
+                            {loadError}
+                        </div>
+                    )}
+
+                    {/* Onboarding Progress */}
+                    <OnboardingProgress
+                        providerCount={Math.max(counts.providers, 0)}
+                        catalogItemCount={counts.catalogs}
+                        workspaceCount={counts.workspaces}
+                        hasOntology={counts.hasOntology}
+                        onStageClick={handleStageClick}
+                    />
+
+                    {/* Tabs */}
+                    <div
+                        role="tablist"
+                        aria-label="Ingestion sections"
+                        className="flex items-center gap-1 border-b border-glass-border"
+                    >
+                        {TABS.map(tab => {
+                            const Icon = tab.icon
+                            const isActive = activeTab === tab.id
+                            return (
+                                <button
+                                    key={tab.id}
+                                    role="tab"
+                                    aria-selected={isActive}
+                                    aria-controls={`ingestion-panel-${tab.id}`}
+                                    id={`ingestion-tab-${tab.id}`}
+                                    onClick={() => setTab(tab.id)}
+                                    title={tab.desc}
+                                    className={cn(
+                                        'flex items-center gap-2 px-6 py-3 text-sm font-semibold transition-all border-b-2 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                        isActive
+                                            ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
+                                            : 'border-transparent text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 rounded-t-xl'
+                                    )}
+                                >
+                                    <Icon className="w-4 h-4" />
+                                    {tab.label}
+                                </button>
+                            )
+                        })}
+                    </div>
                 </div>
-            )}
-
-            {/* Onboarding Progress */}
-            <OnboardingProgress
-                providerCount={Math.max(counts.providers, 0)}
-                catalogItemCount={counts.catalogs}
-                workspaceCount={counts.workspaces}
-                hasOntology={counts.hasOntology}
-                onStageClick={handleStageClick}
-            />
-
-            {/* Tabs */}
-            <div
-                role="tablist"
-                aria-label="Ingestion sections"
-                className="flex items-center gap-1 border-b border-glass-border mb-8 shrink-0"
-            >
-                {TABS.map(tab => {
-                    const Icon = tab.icon
-                    const isActive = activeTab === tab.id
-                    return (
-                        <button
-                            key={tab.id}
-                            role="tab"
-                            aria-selected={isActive}
-                            aria-controls={`ingestion-panel-${tab.id}`}
-                            id={`ingestion-tab-${tab.id}`}
-                            onClick={() => setTab(tab.id)}
-                            title={tab.desc}
-                            className={cn(
-                                'flex items-center gap-2 px-6 py-3 text-sm font-semibold transition-all border-b-2 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
-                                isActive
-                                    ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
-                                    : 'border-transparent text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 rounded-t-xl'
-                            )}
-                        >
-                            <Icon className="w-4 h-4" />
-                            {tab.label}
-                        </button>
-                    )
-                })}
             </div>
 
-            {/* Content pane */}
+            {/* Content pane — fills remaining space */}
             <div
                 role="tabpanel"
                 id={`ingestion-panel-${activeTab}`}
                 aria-labelledby={`ingestion-tab-${activeTab}`}
-                className="flex-1 min-h-0"
+                className={cn(
+                    'flex-1 min-h-0',
+                    // Jobs tab manages its own scroll so it can pin header/filters
+                    activeTab === 'jobs' ? 'flex flex-col' : 'overflow-y-auto',
+                )}
             >
-                {activeTab === 'providers' && <RegistryConnections />}
-                {activeTab === 'assets' && <RegistryAssets />}
-                {activeTab === 'jobs' && <RegistryJobHistory />}
+                {activeTab === 'jobs' ? (
+                    <RegistryJobHistory />
+                ) : (
+                    <div className="px-8 py-6 max-w-7xl mx-auto">
+                        {activeTab === 'providers' && <RegistryConnections />}
+                        {activeTab === 'assets' && <RegistryAssets />}
+                    </div>
+                )}
             </div>
         </div>
     )
