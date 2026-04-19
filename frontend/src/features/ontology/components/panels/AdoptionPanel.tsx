@@ -11,6 +11,7 @@ import type { WorkspaceResponse } from '@/services/workspaceService'
 
 import { UsagePanel } from './UsagePanel'
 import { VersionHistoryPanel } from './VersionHistoryPanel'
+import { EducationalCallout } from '../EducationalCallout'
 
 interface AdoptionPanelProps {
   ontology: OntologyDefinitionResponse
@@ -23,6 +24,13 @@ export function AdoptionPanel({ ontology, workspaces, ontologies }: AdoptionPane
 
   return (
     <div className="space-y-8">
+      <EducationalCallout
+        id="edu-assignment"
+        title="Ontology Assignments"
+        description="Assigning an ontology to a data source tells the system to interpret that graph using these type definitions. Views, visualizations, and semantic features are all driven by the assigned ontology. Data sources without one will have limited functionality."
+        variant="info"
+      />
+
       {/* Usage section — rendered directly */}
       <UsagePanel ontology={ontology} workspaces={workspaces} ontologies={ontologies} />
 

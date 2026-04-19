@@ -14,6 +14,7 @@ import type { EditorPanel, RelTypeWithClassifications } from '../../lib/ontology
 
 import { EntityTypesPanel } from './EntityTypesPanel'
 import { RelationshipsPanel } from './RelationshipsPanel'
+import { EducationalCallout } from '../EducationalCallout'
 
 type SchemaSubView = 'entities' | 'relationships'
 
@@ -91,6 +92,13 @@ export function SchemaPanel({
 
   return (
     <div>
+      <EducationalCallout
+        id="edu-entity-rel"
+        title="Entity & Relationship Types"
+        description="Entity types define the categories of nodes in your graph (e.g., Person, Company). Relationship types define the edges between them (e.g., WORKS_AT, OWNS). Each type can have visual styling, metadata fields, and hierarchy rules that control how they appear and behave in views."
+        variant="info"
+      />
+
       {/* Sub-view pill toggle */}
       <div className="flex items-center gap-1 mb-6 p-1 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] w-fit">
         {SUB_VIEWS.map(sv => {

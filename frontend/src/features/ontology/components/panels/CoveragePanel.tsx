@@ -7,6 +7,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { fetchSchemaStats } from '../../lib/ontology-utils'
 import { formatCount } from '../../lib/ontology-parsers'
 import type { CoverageState } from '../../lib/ontology-types'
+import { EducationalCallout } from '../EducationalCallout'
 
 // ---------------------------------------------------------------------------
 // CoveragePanel — self-contained gap analysis with data source context
@@ -173,6 +174,13 @@ export function CoveragePanel({
 
   return (
     <div>
+      <EducationalCallout
+        id="edu-coverage"
+        title="Understanding Coverage"
+        description="Coverage measures how well this semantic layer describes the actual data in your graph. 100% means every entity and relationship type has a definition. Gaps mean some types exist in your data but aren't defined, which can lead to missing features in views and search."
+        variant="tip"
+      />
+
       {/* Data source context bar */}
       <div className="flex items-center justify-between mb-4 px-1">
         <div className="flex items-center gap-2 text-xs text-ink-muted">

@@ -26,3 +26,16 @@ export type EditorPanel =
   | null
   | { kind: 'entity'; data?: import('@/types/schema').EntityTypeSchema }
   | { kind: 'rel'; data?: RelTypeWithClassifications }
+
+export interface DeploymentEntry {
+  workspaceId: string
+  workspaceName: string
+  dataSourceId: string
+  dataSourceLabel: string
+  ontologyId: string | null
+  ontologyName: string | null
+  ontologyVersion: number | null
+  ontologySchemaId: string | null
+  ontologyStatus: 'system' | 'published' | 'draft' | null
+  coveragePercent: number | null
+}

@@ -13,12 +13,15 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyMatchResult, OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
+import type { WorkspaceResponse } from '@/services/workspaceService'
 import { CoverageRing, MiniBar } from '@/components/admin/AssetOnboardingWizard/steps/CoverageVisuals'
+import { DataSourcePicker } from '../DataSourcePicker'
 
 type Phase = 'confirm' | 'analyzing' | 'recommendations'
 
 interface SuggestConfirmDialogProps {
-  dataSourceLabel: string | null
+  /** @deprecated — use initialDataSourceId instead; kept for backward compat */
+  dataSourceLabel?: string | null
   /** Pre-generated meaningful name for the new draft. */
   suggestedName?: string
   ontologies: OntologyDefinitionResponse[]
@@ -26,14 +29,21 @@ interface SuggestConfirmDialogProps {
   currentOntologyId: string | null
   /** Map from ontology ID → number of data sources using it. */
   assignmentCountMap: Map<string, number>
-  onAnalyze: () => Promise<{
+  /** All workspaces for cross-workspace data source selection */
+  workspaces: WorkspaceResponse[]
+  /** Pre-selected workspace (from eval context) */
+  initialWorkspaceId?: string | null
+  /** Pre-selected data source (from eval context) */
+  initialDataSourceId?: string | null
+  onAnalyze: (workspaceId: string, dataSourceId: string) => Promise<{
     matches: OntologyMatchResult[]
     suggestedEntityCount: number
     suggestedRelCount: number
   }>
-  onUseExisting: (ontologyId: string) => void
-  onCloneExisting: (ontologyId: string) => void
-  onCreateDraft: (name?: string) => void
+  /** Use an existing ontology — receives the picked DS context for assignment */
+  onUseExisting: (ontologyId: string, targetWsId: string | null, targetDsId: string | null) => void
+  onCloneExisting: (ontologyId: string, targetWsId: string | null, targetDsId: string | null) => void
+  onCreateDraft: (name: string | undefined, targetWsId: string | null, targetDsId: string | null) => void
   onClose: () => void
   isCreating: boolean
 }
@@ -44,6 +54,9 @@ export function SuggestConfirmDialog({
   ontologies,
   currentOntologyId,
   assignmentCountMap,
+  workspaces,
+  initialWorkspaceId,
+  initialDataSourceId,
   onAnalyze,
   onUseExisting,
   onCloneExisting,
@@ -59,6 +72,26 @@ export function SuggestConfirmDialog({
   const [search, setSearch] = useState('')
   const [draftName, setDraftName] = useState(suggestedName || 'Graph Schema')
 
+  // Cross-workspace data source selection (decoupled from active workspace)
+  const [pickedWsId, setPickedWsId] = useState<string | null>(initialWorkspaceId ?? null)
+  const [pickedDsId, setPickedDsId] = useState<string | null>(initialDataSourceId ?? null)
+
+  const pickedDs = useMemo(() => {
+    if (!pickedWsId || !pickedDsId) return null
+    const ws = workspaces.find(w => w.id === pickedWsId)
+    return ws?.dataSources?.find(ds => ds.id === pickedDsId) ?? null
+  }, [workspaces, pickedWsId, pickedDsId])
+
+  const pickedDsLabel = pickedDs?.label || pickedDs?.id || dataSourceLabel
+
+  // Derive the current ontology from the PICKED data source, not the page-level prop.
+  // This fixes the bug where selecting an unassigned DS still showed "CURRENTLY ASSIGNED"
+  // on whatever ontology the *original* eval data source had.
+  const effectiveCurrentOntologyId = pickedDs?.ontologyId ?? currentOntologyId ?? null
+
+  // Status filter for recommendations phase
+  const [statusFilter, setStatusFilter] = useState<'all' | 'published' | 'system' | 'draft'>('all')
+
   const isBusy = phase === 'analyzing' || isCreating
 
   const isDuplicateName = useMemo(() => {
@@ -72,10 +105,11 @@ export function SuggestConfirmDialog({
   }
 
   async function handleAnalyze() {
+    if (!pickedWsId || !pickedDsId) return
     setPhase('analyzing')
     setError(null)
     try {
-      const result = await onAnalyze()
+      const result = await onAnalyze(pickedWsId, pickedDsId)
       setMatches(result.matches)
       setGraphCounts({ entities: result.suggestedEntityCount, rels: result.suggestedRelCount })
       setPhase('recommendations')
@@ -95,28 +129,62 @@ export function SuggestConfirmDialog({
     }
   }
 
-  // Sort: system first, then by Jaccard desc
+  // Sort: Published first (stable, production-ready), then System, then Draft.
+  // Within each tier, sort by Jaccard score descending.
   const sortedMatches = useMemo(() => [...matches].sort((a, b) => {
-    const aSystem = getOntology(a.ontologyId)?.isSystem ? 1 : 0
-    const bSystem = getOntology(b.ontologyId)?.isSystem ? 1 : 0
-    if (aSystem !== bSystem) return bSystem - aSystem
+    const ontA = getOntology(a.ontologyId)
+    const ontB = getOntology(b.ontologyId)
+    // Priority: published=3, system=2, draft=1
+    const priorityA = ontA?.isPublished ? 3 : ontA?.isSystem ? 2 : 1
+    const priorityB = ontB?.isPublished ? 3 : ontB?.isSystem ? 2 : 1
+    if (priorityA !== priorityB) return priorityB - priorityA
     return b.jaccardScore - a.jaccardScore
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [matches, ontologies])
 
-  // Filter by search query
+  // Filter by search query + status filter
   const filteredMatches = useMemo(() => {
-    if (!search.trim()) return sortedMatches
-    const q = search.toLowerCase()
-    return sortedMatches.filter(m => {
-      const ont = getOntology(m.ontologyId)
-      return (
-        m.ontologyName.toLowerCase().includes(q) ||
-        ont?.description?.toLowerCase().includes(q)
-      )
-    })
+    let result = sortedMatches
+
+    // Status filter
+    if (statusFilter !== 'all') {
+      result = result.filter(m => {
+        const ont = getOntology(m.ontologyId)
+        if (statusFilter === 'published') return ont?.isPublished && !ont?.isSystem
+        if (statusFilter === 'system') return ont?.isSystem
+        if (statusFilter === 'draft') return !ont?.isPublished && !ont?.isSystem
+        return true
+      })
+    }
+
+    // Search filter
+    if (search.trim()) {
+      const q = search.toLowerCase()
+      result = result.filter(m => {
+        const ont = getOntology(m.ontologyId)
+        return (
+          m.ontologyName.toLowerCase().includes(q) ||
+          ont?.description?.toLowerCase().includes(q)
+        )
+      })
+    }
+
+    return result
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sortedMatches, search, ontologies])
+  }, [sortedMatches, search, statusFilter, ontologies])
+
+  // Counts for filter chips
+  const statusCounts = useMemo(() => {
+    const counts = { published: 0, system: 0, draft: 0 }
+    for (const m of sortedMatches) {
+      const ont = getOntology(m.ontologyId)
+      if (ont?.isSystem) counts.system++
+      else if (ont?.isPublished) counts.published++
+      else counts.draft++
+    }
+    return counts
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortedMatches, ontologies])
 
   const selectedMatch = selectedId ? sortedMatches.find(m => m.ontologyId === selectedId) : null
   const selectedOnt = selectedId ? getOntology(selectedId) : null
@@ -126,10 +194,13 @@ export function SuggestConfirmDialog({
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={isBusy ? undefined : onClose} />
       <div className={cn(
         'relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden flex flex-col',
-        phase === 'recommendations' ? 'max-w-2xl max-h-[85vh]' : 'max-w-md',
+        phase === 'recommendations' ? 'max-w-3xl max-h-[85vh]' : 'max-w-2xl max-h-[85vh]',
       )}>
+        {/* Gradient top bar */}
+        <div className="h-1 w-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 flex-shrink-0" />
+
         {/* Header */}
-        <div className="border-b border-glass-border/50 px-6 pt-6 pb-4 flex-shrink-0">
+        <div className="border-b border-glass-border/50 px-6 pt-5 pb-4 flex-shrink-0">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500/20 to-purple-500/20 border border-indigo-500/20 flex items-center justify-center">
@@ -160,24 +231,25 @@ export function SuggestConfirmDialog({
         {(phase === 'confirm' || phase === 'analyzing') && (
           <div className="px-6 py-5 space-y-4 flex-1 overflow-y-auto">
             <p className="text-sm text-ink-secondary leading-relaxed">
-              This will analyze the entity and relationship types in your active data source,
-              check for <span className="font-semibold text-ink">existing semantic layers</span> that
+              Select a data source to analyze. We'll check for{' '}
+              <span className="font-semibold text-ink">existing semantic layers</span> that
               already cover your graph, and recommend the best match before creating anything new.
             </p>
 
-            {dataSourceLabel && (
-              <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-3.5">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200/50 dark:border-emerald-800/40 flex items-center justify-center flex-shrink-0">
-                    <Database className="w-4 h-4 text-emerald-500" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[10px] text-ink-muted uppercase tracking-wider font-bold">Data Source</p>
-                    <p className="text-sm font-semibold text-ink truncate">{dataSourceLabel}</p>
-                  </div>
-                </div>
-              </div>
-            )}
+            {/* Cross-workspace data source picker */}
+            <div>
+              <p className="text-[10px] font-bold text-ink-muted uppercase tracking-wider mb-2">
+                Select Data Source to Analyze
+              </p>
+              <DataSourcePicker
+                workspaces={workspaces}
+                selectedWorkspaceId={pickedWsId}
+                selectedDataSourceId={pickedDsId}
+                onSelect={(wsId, dsId) => { setPickedWsId(wsId); setPickedDsId(dsId) }}
+                ontologies={ontologies}
+                highlightOrphans
+              />
+            </div>
 
             <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-4">
               <p className="text-[10px] text-ink-muted uppercase tracking-wider font-bold mb-2.5">What happens next</p>
@@ -219,16 +291,36 @@ export function SuggestConfirmDialog({
           <div className="flex-1 overflow-y-auto min-h-0">
             {/* Graph stats banner */}
             <div className="px-6 pt-5 pb-3">
-              <div className="flex items-center gap-1 px-4 py-3 rounded-xl bg-gradient-to-r from-indigo-500/[0.06] to-purple-500/[0.06] border border-indigo-500/10">
-                <Database className="w-4 h-4 text-indigo-400 mr-2 flex-shrink-0" />
-                <span className="text-xs text-ink-secondary">Your graph contains</span>
-                <span className="text-xs font-bold text-ink mx-0.5">{graphCounts.entities}</span>
-                <span className="text-xs text-ink-secondary mr-1">entity type{graphCounts.entities !== 1 ? 's' : ''}</span>
-                <span className="text-xs text-ink-muted mx-1">and</span>
-                <span className="text-xs font-bold text-ink mx-0.5">{graphCounts.rels}</span>
-                <span className="text-xs text-ink-secondary">relationship{graphCounts.rels !== 1 ? 's' : ''}</span>
+              <div className="px-4 py-3 rounded-xl bg-gradient-to-r from-indigo-500/[0.06] to-purple-500/[0.06] border border-indigo-500/10">
+                <div className="flex items-center gap-1 flex-wrap">
+                  <Database className="w-4 h-4 text-indigo-400 mr-1.5 flex-shrink-0" />
+                  {pickedDsLabel && (
+                    <>
+                      <span className="text-xs font-semibold text-ink">{pickedDsLabel}</span>
+                      <span className="text-xs text-ink-muted mx-1">—</span>
+                    </>
+                  )}
+                  <span className="text-xs font-bold text-ink">{graphCounts.entities}</span>
+                  <span className="text-xs text-ink-secondary mr-1">entity type{graphCounts.entities !== 1 ? 's' : ''}</span>
+                  <span className="text-xs text-ink-muted mx-0.5">and</span>
+                  <span className="text-xs font-bold text-ink">{graphCounts.rels}</span>
+                  <span className="text-xs text-ink-secondary">relationship{graphCounts.rels !== 1 ? 's' : ''}</span>
+                </div>
               </div>
             </div>
+
+            {/* No matches message */}
+            {sortedMatches.length === 0 && (
+              <div className="px-6 pb-4">
+                <div className="text-center py-6 px-4 rounded-xl border border-dashed border-glass-border bg-black/[0.01] dark:bg-white/[0.01]">
+                  <Sparkles className="w-6 h-6 mx-auto mb-2 text-indigo-400 opacity-50" />
+                  <p className="text-sm font-semibold text-ink-secondary mb-1">No existing matches found</p>
+                  <p className="text-xs text-ink-muted">
+                    None of your existing semantic layers cover this graph's types. Create a new draft below to get started.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Search + match cards */}
             {sortedMatches.length > 0 && (
@@ -264,8 +356,34 @@ export function SuggestConfirmDialog({
                   </div>
                 )}
 
+                {/* Status filter chips */}
+                <div className="flex items-center gap-1.5 mb-3">
+                  <FilterChip label="All" count={sortedMatches.length} active={statusFilter === 'all'}
+                    onClick={() => setStatusFilter('all')}
+                    activeClass="bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 ring-1 ring-indigo-500/20"
+                    badgeClass="bg-indigo-500/15" />
+                  {statusCounts.published > 0 && (
+                    <FilterChip label="Published" count={statusCounts.published} active={statusFilter === 'published'}
+                      onClick={() => setStatusFilter('published')}
+                      activeClass="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 ring-1 ring-emerald-500/20"
+                      badgeClass="bg-emerald-500/15" />
+                  )}
+                  {statusCounts.system > 0 && (
+                    <FilterChip label="System" count={statusCounts.system} active={statusFilter === 'system'}
+                      onClick={() => setStatusFilter('system')}
+                      activeClass="bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 ring-1 ring-indigo-500/20"
+                      badgeClass="bg-indigo-500/15" />
+                  )}
+                  {statusCounts.draft > 0 && (
+                    <FilterChip label="Draft" count={statusCounts.draft} active={statusFilter === 'draft'}
+                      onClick={() => setStatusFilter('draft')}
+                      activeClass="bg-amber-500/10 text-amber-600 dark:text-amber-400 ring-1 ring-amber-500/20"
+                      badgeClass="bg-amber-500/15" />
+                  )}
+                </div>
+
                 {/* Filtered results count */}
-                {search && (
+                {(search || statusFilter !== 'all') && (
                   <p className="text-[11px] text-ink-muted mb-2">
                     {filteredMatches.length} of {sortedMatches.length} match{sortedMatches.length !== 1 ? 'es' : ''}
                   </p>
@@ -278,7 +396,7 @@ export function SuggestConfirmDialog({
                     const isPublished = ont?.isPublished ?? false
                     const isBest = !search && idx === 0
                     const isSelected = selectedId === match.ontologyId
-                    const isCurrent = match.ontologyId === currentOntologyId
+                    const isCurrent = match.ontologyId === effectiveCurrentOntologyId
                     const assignCount = assignmentCountMap.get(match.ontologyId) ?? 0
 
                     // Separate entity and relationship coverage
@@ -347,6 +465,14 @@ export function SuggestConfirmDialog({
                                     BEST MATCH
                                   </span>
                                 )}
+                                <span className={cn(
+                                  'text-[10px] font-bold',
+                                  overallPct >= 80 ? 'text-emerald-600 dark:text-emerald-400' :
+                                  overallPct >= 50 ? 'text-amber-600 dark:text-amber-400' :
+                                  'text-red-500',
+                                )}>
+                                  {overallPct}% match
+                                </span>
                               </div>
 
                               {/* Description */}
@@ -545,7 +671,7 @@ export function SuggestConfirmDialog({
                 <span className="text-[11px] text-ink-secondary">
                   Selected: <span className="font-semibold text-ink">{selectedOnt.name}</span>
                   <span className="text-ink-muted ml-1">v{selectedMatch.version}</span>
-                  {selectedId === currentOntologyId && (
+                  {selectedId === effectiveCurrentOntologyId && (
                     <span className="text-emerald-600 dark:text-emerald-400 ml-1.5 font-medium">(currently assigned)</span>
                   )}
                 </span>
@@ -613,10 +739,12 @@ export function SuggestConfirmDialog({
               {phase === 'confirm' && (
                 <button
                   onClick={handleAnalyze}
+                  disabled={!pickedWsId || !pickedDsId}
                   className={cn(
                     'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm',
                     'bg-gradient-to-r from-indigo-500 to-purple-500 text-white',
                     'hover:from-indigo-600 hover:to-purple-600 shadow-indigo-500/25',
+                    (!pickedWsId || !pickedDsId) && 'opacity-50 cursor-not-allowed',
                   )}
                 >
                   <Sparkles className="w-4 h-4" />
@@ -638,7 +766,7 @@ export function SuggestConfirmDialog({
                   {/* Clone & Extend — only when an existing layer is selected */}
                   {selectedId && selectedId !== '__create_from_graph__' && (
                     <button
-                      onClick={() => onCloneExisting(selectedId)}
+                      onClick={() => onCloneExisting(selectedId, pickedWsId, pickedDsId)}
                       disabled={isCreating}
                       className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium text-ink-secondary border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
                     >
@@ -650,7 +778,7 @@ export function SuggestConfirmDialog({
                   {/* Primary confirm — changes label based on selection */}
                   {selectedId === '__create_from_graph__' ? (
                     <button
-                      onClick={() => onCreateDraft(draftName.trim() || undefined)}
+                      onClick={() => onCreateDraft(draftName.trim() || undefined, pickedWsId, pickedDsId)}
                       disabled={isCreating || !draftName.trim()}
                       className={cn(
                         'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm',
@@ -664,7 +792,7 @@ export function SuggestConfirmDialog({
                     </button>
                   ) : selectedId ? (
                     <button
-                      onClick={() => onUseExisting(selectedId)}
+                      onClick={() => onUseExisting(selectedId, pickedWsId, pickedDsId)}
                       disabled={isCreating}
                       className={cn(
                         'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm',
@@ -684,5 +812,38 @@ export function SuggestConfirmDialog({
         </div>
       </div>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// FilterChip — status filter pill for recommendations
+// ---------------------------------------------------------------------------
+
+function FilterChip({ label, count, active, onClick, activeClass, badgeClass }: {
+  label: string
+  count: number
+  active: boolean
+  onClick: () => void
+  activeClass: string
+  badgeClass: string
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        'inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all',
+        active
+          ? activeClass
+          : 'text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
+      )}
+    >
+      {label}
+      <span className={cn(
+        'px-1 py-0 rounded-full text-[9px] font-bold',
+        active ? badgeClass : 'bg-black/[0.05] dark:bg-white/[0.06]',
+      )}>
+        {count}
+      </span>
+    </button>
   )
 }
