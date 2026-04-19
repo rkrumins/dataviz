@@ -91,7 +91,7 @@ export function AssetOnboardingWizard({
         projectionMode: 'in_source',
         dedicatedStrategy: 'full_copy',
         dedicatedGraphName: '',
-        advancedConfig: { batchSize: 5000, maxRetries: 3, timeoutMinutes: null },
+        advancedConfig: { batchSize: 1000, maxRetries: 3, timeoutMinutes: null },
         ontologySelections: Object.fromEntries(
             catalogItems.map(c => [c.id, { ontologyId: '', suggestedOntology: null, coverageStats: null }])
         ),
@@ -104,6 +104,9 @@ export function AssetOnboardingWizard({
     const [submitError, setSubmitError] = useState<string | null>(null)
     const [wizardPhase, setWizardPhase] = useState<'steps' | 'success'>('steps')
     const [showCloseConfirm, setShowCloseConfirm] = useState(false)
+
+    // Direction tracking for step transition animations (1 = forward, -1 = back)
+    const [stepDirection, setStepDirection] = useState(1)
 
     // Track created workspace/ds IDs for success screen navigation
     const [createdContext, setCreatedContext] = useState<{ wsId: string; dsId: string } | null>(null)
@@ -142,7 +145,7 @@ export function AssetOnboardingWizard({
                 projectionMode: 'in_source',
                 dedicatedStrategy: 'full_copy',
                 dedicatedGraphName: '',
-                advancedConfig: { batchSize: 5000, maxRetries: 3, timeoutMinutes: null },
+                advancedConfig: { batchSize: 1000, maxRetries: 3, timeoutMinutes: null },
                 ontologySelections: Object.fromEntries(
                     catalogItems.map(c => [c.id, { ontologyId: '', suggestedOntology: null, coverageStats: null }])
                 ),
@@ -192,6 +195,36 @@ export function AssetOnboardingWizard({
         }
     }, [currentStep, formData, catalogItems])
 
+    // ─── Step Summary (mini-text under completed step pills) ────────────────
+    const getStepSummary = useCallback((stepId: WizardStep): string | null => {
+        switch (stepId) {
+            case 'workspace': {
+                const uniqueWs = new Set(
+                    Object.values(formData.allocations)
+                        .map(a => a.workspaceId === 'new' ? `new:${a.newWorkspaceName}` : a.workspaceId)
+                        .filter(Boolean)
+                )
+                if (uniqueWs.size === 0) return null
+                if (uniqueWs.size === 1) {
+                    const first = Object.values(formData.allocations).find(a => a.workspaceId)
+                    const label = first?.workspaceId === 'new' ? first.newWorkspaceName : (loadedWorkspaceNames[first?.workspaceId || ''] || '')
+                    return label ? `${catalogItems.length} → ${label}` : `${uniqueWs.size} workspace`
+                }
+                return `${uniqueWs.size} workspaces`
+            }
+            case 'aggregation':
+                return formData.projectionMode === 'in_source' ? 'In-Source'
+                    : formData.projectionMode === 'dedicated' ? 'Dedicated'
+                    : 'Skipped'
+            case 'semantic': {
+                const configured = Object.values(formData.ontologySelections).filter(s => s.ontologyId).length
+                return `${configured}/${catalogItems.length} configured`
+            }
+            default:
+                return null
+        }
+    }, [formData, catalogItems, loadedWorkspaceNames])
+
     // ─── Navigation ───────────────────────────────────────────────────────────
     const currentStepIndex = STEPS.findIndex(s => s.id === currentStep)
 
@@ -210,6 +243,7 @@ export function AssetOnboardingWizard({
                 showToast('success', `Semantic layer configured for ${count} source${count !== 1 ? 's' : ''}`)
             }
 
+            setStepDirection(1)
             setPreviousSteps(prev => [...prev, currentStep])
             setCurrentStep(STEPS[nextIndex].id)
         }
@@ -218,6 +252,7 @@ export function AssetOnboardingWizard({
     const goBack = useCallback(() => {
         if (previousSteps.length > 0) {
             const prev = previousSteps[previousSteps.length - 1]
+            setStepDirection(-1)
             setPreviousSteps(ps => ps.slice(0, -1))
             setCurrentStep(prev)
         }
@@ -226,6 +261,7 @@ export function AssetOnboardingWizard({
     const goToStep = useCallback((stepId: WizardStep) => {
         const targetIndex = STEPS.findIndex(s => s.id === stepId)
         if (targetIndex < currentStepIndex) {
+            setStepDirection(-1)
             setPreviousSteps(prev => prev.slice(0, targetIndex))
             setCurrentStep(stepId)
         }
@@ -500,32 +536,40 @@ export function AssetOnboardingWizard({
                                     const isComplete = i < currentStepIndex
                                     const isCurrent = i === currentStepIndex
                                     const isClickable = isComplete || isCurrent
+                                    const summary = isComplete ? getStepSummary(step.id) : null
                                     return (
                                         <div key={step.id} className="flex items-center">
-                                            <button
-                                                onClick={() => isComplete ? goToStep(step.id) : undefined}
-                                                disabled={!isClickable}
-                                                className={cn(
-                                                    "flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all",
-                                                    isCurrent
-                                                        ? "bg-indigo-600 text-white shadow-md ring-2 ring-indigo-100 dark:ring-indigo-900"
-                                                        : isComplete
-                                                            ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/30 cursor-pointer"
-                                                            : "text-slate-400 dark:text-slate-500 cursor-not-allowed",
-                                                )}
-                                            >
-                                                {isComplete
-                                                    ? <Check className="w-4 h-4" />
-                                                    : (
-                                                        <span className={cn(
-                                                            "w-4 h-4 flex items-center justify-center rounded-full text-[10px] font-bold border",
-                                                            isCurrent ? "border-transparent bg-white/20" : "border-slate-300 dark:border-slate-600",
-                                                        )}>
-                                                            {i + 1}
-                                                        </span>
+                                            <div className="flex flex-col items-center">
+                                                <button
+                                                    onClick={() => isComplete ? goToStep(step.id) : undefined}
+                                                    disabled={!isClickable}
+                                                    className={cn(
+                                                        "flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all",
+                                                        isCurrent
+                                                            ? "bg-indigo-600 text-white shadow-md ring-2 ring-indigo-100 dark:ring-indigo-900"
+                                                            : isComplete
+                                                                ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/30 cursor-pointer"
+                                                                : "text-slate-400 dark:text-slate-500 cursor-not-allowed",
                                                     )}
-                                                {step.title}
-                                            </button>
+                                                >
+                                                    {isComplete
+                                                        ? <Check className="w-4 h-4" />
+                                                        : (
+                                                            <span className={cn(
+                                                                "w-4 h-4 flex items-center justify-center rounded-full text-[10px] font-bold border",
+                                                                isCurrent ? "border-transparent bg-white/20" : "border-slate-300 dark:border-slate-600",
+                                                            )}>
+                                                                {i + 1}
+                                                            </span>
+                                                        )}
+                                                    {step.title}
+                                                </button>
+                                                {summary && (
+                                                    <span className="text-[9px] text-emerald-600/70 dark:text-emerald-400/60 font-medium mt-0.5 max-w-[120px] truncate">
+                                                        {summary}
+                                                    </span>
+                                                )}
+                                            </div>
                                             {i < STEPS.length - 1 && (
                                                 <div className={cn(
                                                     "w-8 h-px mx-2",
@@ -544,9 +588,9 @@ export function AssetOnboardingWizard({
                         <AnimatePresence mode="wait">
                             <motion.div
                                 key={wizardPhase === 'success' ? 'success' : currentStep}
-                                initial={{ opacity: 0, x: 20 }}
+                                initial={{ opacity: 0, x: stepDirection * 20 }}
                                 animate={{ opacity: 1, x: 0 }}
-                                exit={{ opacity: 0, x: -20 }}
+                                exit={{ opacity: 0, x: stepDirection * -20 }}
                                 transition={{ duration: 0.2 }}
                                 className="p-8"
                             >
