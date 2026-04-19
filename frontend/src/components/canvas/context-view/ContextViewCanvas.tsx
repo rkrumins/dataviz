@@ -52,7 +52,7 @@ import { CommandPalette } from '../CommandPalette'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
-// Editor components (unified with LineageCanvas)
+// Editor components (shared across canvases)
 import { EditorToolbar } from '../EditorToolbar'
 import { NodePalette } from '../NodePalette'
 
@@ -323,7 +323,7 @@ export function ContextViewCanvas({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView?.id])
 
-  // Edit Mode State (unified with LineageCanvas)
+  // Edit Mode State (shared across canvases)
   const [isPaletteOpen, setPaletteOpen] = useState(false)
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   const relationshipTypes = useViewRelationshipTypes()
@@ -396,13 +396,7 @@ export function ContextViewCanvas({
     ).color
   }, [relationshipTypes, containmentEdgeTypes, ontologyMetadata])
 
-  // Trace Calculation for Double Click
-  // We import computeTrace dynamically or assume it's available via utility
-  // Since we can't easily import from hook file if it's not exported, we'll implement a lightweight version
-  // OR rely on the hook if possible.
-  // Actually, we can assume the user meant "computeTrace" is importable.
-  // Checking previous file view: "export function computeTrace" exists in hooks/useLineageExploration.ts
-
+  // Double-click handler: inline edit (default) or trace (shift+double-click)
   const handleDoubleClick = useCallback(async (nodeId: string, event?: React.MouseEvent) => {
     // UX-first: Double-click = inline edit (modern approach)
     // Use Shift+Double-click for trace (power user feature)
