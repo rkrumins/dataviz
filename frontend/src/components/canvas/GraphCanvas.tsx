@@ -54,6 +54,7 @@ import { InlineNodeEditor } from './InlineNodeEditor'
 import { QuickCreateNode } from './QuickCreateNode'
 import { CommandPalette } from './CommandPalette'
 import { EditorToolbar } from './EditorToolbar'
+import { TraceToolbar } from './TraceToolbar'
 import { NodePalette } from './NodePalette'
 
 // Hooks
@@ -74,6 +75,7 @@ import { useSchemaStore, normalizeEdgeType, useEdgeTypeMetadataMap } from '@/sto
 import {
   useViewContainmentEdgeTypes,
   useViewIsContainmentEdge,
+  useViewLineageEdgeTypes,
   useViewRelationshipTypes,
   useViewEntityTypes,
   useViewSchemaIsReady,
@@ -114,6 +116,7 @@ export function GraphCanvas({ className }: { className?: string }) {
   // 3. Schema / ontology
   const schema = useSchemaStore((s) => s.schema)
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
+  const lineageEdgeTypes = useViewLineageEdgeTypes()
   const isContainmentEdge = useViewIsContainmentEdge()
   const relationshipTypes = useViewRelationshipTypes()
   const schemaEntityTypes = useViewEntityTypes()
@@ -1112,19 +1115,40 @@ export function GraphCanvas({ className }: { className?: string }) {
             <ZoomIn className="w-3.5 h-3.5" />
             {semanticZoom.isEnabled ? 'LOD On' : 'LOD Off'}
           </button>
-          {trace.isTracing && (
-            <button
-              onClick={() => {
+        </div>
+      </div>
+
+      {/* Trace Toolbar — full controls, only when tracing (same as ContextViewCanvas/HierarchyCanvas) */}
+      <AnimatePresence>
+        {trace.isTracing && (
+          <div className="absolute top-14 left-1/2 -translate-x-1/2 z-20 pointer-events-auto">
+            <TraceToolbar
+              focusNodeName={displayMap.get(trace.focusId || '')?.name || trace.focusId || 'Unknown'}
+              upstreamCount={trace.upstreamCount}
+              downstreamCount={trace.downstreamCount}
+              showUpstream={trace.showUpstream}
+              showDownstream={trace.showDownstream}
+              onToggleUpstream={() => trace.setShowUpstream(!trace.showUpstream)}
+              onToggleDownstream={() => trace.setShowDownstream(!trace.showDownstream)}
+              onExitTrace={() => {
                 trace.clearTrace()
                 setExpandedNodes(new Set())
               }}
-              className="px-2.5 py-1 rounded-lg text-xs font-medium bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-all"
-            >
-              Exit Trace
-            </button>
-          )}
-        </div>
-      </div>
+              onRetrace={trace.retrace}
+              onTraceUpstream={() => trace.focusId && trace.traceUpstream(trace.focusId)}
+              onTraceDownstream={() => trace.focusId && trace.traceDownstream(trace.focusId)}
+              onTraceFullLineage={() => trace.focusId && trace.traceFullLineage(trace.focusId)}
+              config={trace.config}
+              onConfigChange={trace.setConfig}
+              traceResult={trace.result}
+              statistics={trace.statistics}
+              isLoading={trace.isLoading}
+              availableLineageEdgeTypes={lineageEdgeTypes}
+              position="top"
+            />
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* React Flow Canvas */}
       <div className="flex-1">

@@ -5,7 +5,7 @@
  *   1. A RemoteGraphProvider scoped to the view's workspace/datasource (from a pool)
  *   2. The resolved schema (entity types, edge types, etc.) for the view's data source
  *   3. A provider context override so all downstream hooks (useGraphProvider,
- *      useGraphHydration, useLineageExploration, etc.) use the scoped provider
+ *      useGraphHydration, etc.) use the scoped provider
  *
  * Views are self-contained data products. They carry their scope (workspaceId +
  * dataSourceId) and load their own data at runtime — without mutating the global
