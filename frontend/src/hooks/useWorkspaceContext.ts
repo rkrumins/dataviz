@@ -33,10 +33,6 @@ export interface WorkspaceContext {
   // All views (for cross-workspace search / counts)
   allViews: ViewConfiguration[]
 
-  // Counts for all workspaces (for EnvironmentSwitcher badges)
-  viewCountsByWorkspace: Map<string, number>
-  viewCountsByScope: Map<string, number>
-
   // Quick access
   recentViews: RecentViewEntry[]
   bookmarks: View[]
@@ -44,8 +40,6 @@ export interface WorkspaceContext {
   isLoadingBookmarks: boolean
 
   // Actions
-  switchWorkspace: (wsId: string) => void
-  switchDataSource: (dsId: string) => void
   openView: (viewId: string, wsId?: string, dsId?: string) => void
   toggleBookmark: (viewId: string, isCurrentlyBookmarked: boolean) => void
   recordVisit: (entry: Omit<RecentViewEntry, 'visitedAt'>) => void
@@ -58,8 +52,6 @@ export function useWorkspaceContext(): WorkspaceContext {
   const workspaces = useWorkspacesStore((s) => s.workspaces)
   const activeWorkspaceId = useWorkspacesStore((s) => s.activeWorkspaceId)
   const activeDataSourceId = useWorkspacesStore((s) => s.activeDataSourceId)
-  const setActiveWorkspace = useWorkspacesStore((s) => s.setActiveWorkspace)
-  const setActiveDataSource = useWorkspacesStore((s) => s.setActiveDataSource)
 
   const workspace = useMemo(
     () => workspaces.find((w) => w.id === activeWorkspaceId) ?? null,
@@ -97,44 +89,7 @@ export function useWorkspaceContext(): WorkspaceContext {
     [bookmarks]
   )
 
-  // ── Derived: view counts ────────────────────────────────
-  const viewCountsByWorkspace = useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const v of allViews) {
-      if (v.workspaceId) {
-        counts.set(v.workspaceId, (counts.get(v.workspaceId) ?? 0) + 1)
-      }
-    }
-    return counts
-  }, [allViews])
-
-  const viewCountsByScope = useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const v of allViews) {
-      const key = v.scopeKey ?? (v.workspaceId ? `${v.workspaceId}/default` : null)
-      if (key) {
-        counts.set(key, (counts.get(key) ?? 0) + 1)
-      }
-    }
-    return counts
-  }, [allViews])
-
   // ── Actions ─────────────────────────────────────────────
-  const switchWorkspace = useCallback(
-    (wsId: string) => {
-      setActiveWorkspace(wsId)
-      navigate(`/explorer?workspace=${encodeURIComponent(wsId)}`)
-    },
-    [setActiveWorkspace, navigate]
-  )
-
-  const switchDataSource = useCallback(
-    (dsId: string) => {
-      setActiveDataSource(dsId)
-    },
-    [setActiveDataSource]
-  )
-
   const openView = useCallback(
     (viewId: string, _wsId?: string, _dsId?: string) => {
       // Do NOT call switchToViewScope() here — useViewNavigation in ViewPage
@@ -158,14 +113,10 @@ export function useWorkspaceContext(): WorkspaceContext {
     activeViewId,
     viewCount: views.length,
     allViews,
-    viewCountsByWorkspace,
-    viewCountsByScope,
     recentViews,
     bookmarks,
     bookmarkedIds,
     isLoadingBookmarks,
-    switchWorkspace,
-    switchDataSource,
     openView,
     toggleBookmark,
     recordVisit,
