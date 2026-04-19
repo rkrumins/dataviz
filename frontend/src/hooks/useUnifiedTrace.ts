@@ -1,7 +1,7 @@
 /**
  * useUnifiedTrace - Unified trace functionality across all canvas views
  * 
- * Consolidates trace logic from ReferenceModelCanvas and LineageCanvas
+ * Consolidates trace logic across all canvas views (GraphCanvas, ContextViewCanvas, HierarchyCanvas)
  * into a single reusable hook with configurable depth and direction.
  * 
  * Features:
