@@ -1,11 +1,12 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import {
     Loader2, AlertCircle, ChevronRight, RotateCcw, StopCircle, Play, Trash2,
-    Database, Users, AlertTriangle,
+    AlertTriangle, Server, FolderOpen,
 } from 'lucide-react'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
 import type { AggregationJobResponse } from '@/services/aggregationService'
+import { getProviderLogo } from '../ProviderLogos'
 import { formatDuration, timeAgo, STATUS_CONFIG, type DataSourceMeta } from './shared'
 
 // ── Tooltip ──────────────────────────────────────────────────────────
@@ -91,6 +92,7 @@ export function JobRow({ job, meta, expanded, onToggle, onCancel, onResume, onRe
     const dsName = meta?.label || job.dataSourceLabel || job.dataSourceId
     const wsName = meta?.workspaceName || job.workspaceName
     const provType = meta?.providerType
+    const ProviderLogoIcon = getProviderLogo(provType ?? '')
 
     // Diff-to-previous computations
     const edgeDelta = previousJob && job.status === 'completed' && previousJob.status === 'completed'
@@ -138,27 +140,25 @@ export function JobRow({ job, meta, expanded, onToggle, onCancel, onResume, onRe
                 {/* Data Source + Provider + Workspace — hidden in compact mode */}
                 {!compact && (
                     <td className="px-4 py-3">
-                        <div className="space-y-1">
-                            <span className="text-[13px] font-semibold text-ink leading-none block">
-                                {dsName}
-                            </span>
-                            <div className="flex items-center gap-2 text-[10px] text-ink-muted">
-                                {provType && (
-                                    <>
-                                        <span className={cn(
-                                            'inline-flex items-center gap-0.5 font-bold uppercase tracking-wider',
-                                            provType === 'falkordb' ? 'text-red-400/80' :
-                                            provType === 'neo4j' ? 'text-blue-400/80' :
-                                            'text-zinc-400/80',
-                                        )}>
-                                            <Database className="w-2.5 h-2.5" />
-                                            {provType}
-                                        </span>
-                                        <span className="text-ink-muted/30">/</span>
-                                    </>
+                        <div className="space-y-1.5">
+                            <div className="flex items-center gap-1.5">
+                                {provType && <ProviderLogoIcon className="w-3.5 h-3.5 flex-shrink-0" />}
+                                <span className="text-[13px] font-semibold text-ink leading-none truncate">
+                                    {dsName}
+                                </span>
+                            </div>
+                            <div className="flex items-center gap-1.5 text-[10px] text-ink-muted">
+                                {meta?.providerName && (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/[0.03] dark:bg-white/[0.04]">
+                                        <Server className="w-2.5 h-2.5 text-ink-muted/50" />
+                                        <span className="font-medium truncate max-w-[100px]">{meta.providerName}</span>
+                                    </span>
                                 )}
-                                {wsName && (
-                                    <span className="truncate max-w-[160px]">{wsName}</span>
+                                {wsName && wsName !== meta?.providerName && (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/[0.03] dark:bg-white/[0.04]">
+                                        <FolderOpen className="w-2.5 h-2.5 text-ink-muted/50" />
+                                        <span className="truncate max-w-[100px]">{wsName}</span>
+                                    </span>
                                 )}
                             </div>
                         </div>
@@ -314,30 +314,26 @@ export function JobRow({ job, meta, expanded, onToggle, onCancel, onResume, onRe
                                     <div className="p-5 space-y-4">
                                         {/* Header row */}
                                         <div className="flex items-start justify-between">
-                                            <div className="space-y-1">
-                                                <h3 className="text-sm font-bold text-ink">{dsName}</h3>
-                                                <div className="flex items-center gap-3 text-[11px] text-ink-muted">
-                                                    {wsName && (
-                                                        <span className="flex items-center gap-1">
-                                                            <Users className="w-3 h-3 text-ink-muted/50" />
-                                                            {wsName}
+                                            <div className="space-y-1.5">
+                                                <div className="flex items-center gap-1.5">
+                                                    <ProviderLogoIcon className="w-4 h-4 flex-shrink-0" />
+                                                    <h3 className="text-sm font-bold text-ink">{dsName}</h3>
+                                                </div>
+                                                <div className="flex items-center gap-1.5 text-[10px] text-ink-muted">
+                                                    {meta?.providerName && (
+                                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/[0.03] dark:bg-white/[0.04]">
+                                                            <Server className="w-2.5 h-2.5 text-ink-muted/50" />
+                                                            <span className="font-medium">{meta.providerName}</span>
                                                         </span>
                                                     )}
-                                                    {meta?.providerName && (
-                                                        <span className="flex items-center gap-1">
-                                                            <span className={cn(
-                                                                'w-1.5 h-1.5 rounded-full',
-                                                                provType === 'falkordb' ? 'bg-red-400' :
-                                                                provType === 'neo4j' ? 'bg-blue-400' :
-                                                                'bg-zinc-400',
-                                                            )} />
-                                                            {meta.providerName}
-                                                            {meta.graphName && (
-                                                                <span className="text-ink-muted/40 font-mono text-[10px]">
-                                                                    / {meta.graphName}
-                                                                </span>
-                                                            )}
+                                                    {wsName && wsName !== meta?.providerName && (
+                                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/[0.03] dark:bg-white/[0.04]">
+                                                            <FolderOpen className="w-2.5 h-2.5 text-ink-muted/50" />
+                                                            <span>{wsName}</span>
                                                         </span>
+                                                    )}
+                                                    {meta?.graphName && (
+                                                        <span className="font-mono text-ink-muted/50">{meta.graphName}</span>
                                                     )}
                                                 </div>
                                             </div>
