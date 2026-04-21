@@ -233,8 +233,11 @@ class Neo4jProvider(GraphDataProvider):
                 return
             try:
                 import redis.asyncio as aioredis
-                self._redis = aioredis.from_url(redis_url, decode_responses=True)
-                await self._redis.ping()
+                from backend.common.adapters import TimeoutRedis
+                _redis_op_timeout = float(os.getenv("NEO4J_REDIS_OP_TIMEOUT", "3"))
+                _raw_redis = aioredis.from_url(redis_url, decode_responses=True)
+                await _raw_redis.ping()
+                self._redis = TimeoutRedis(_raw_redis, timeout=_redis_op_timeout)
                 self._redis_available = True
                 logger.info("Neo4j provider: Redis connected at %s", redis_url)
             except Exception as e:

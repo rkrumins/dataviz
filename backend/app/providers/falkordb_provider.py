@@ -147,20 +147,38 @@ class FalkorDBProvider(GraphDataProvider):
                 socket_timeout=socket_timeout,
                 decode_responses=True,
             )
-            # Separate pool for Redis data-structure ops (caching, SADD, HSET, etc.)
-            # Prevents cache/materialization ops from starving graph query connections.
-            # Uses the same socket_timeout — SADD/SCARD pipelines with thousands
-            # of ops also need headroom.
+            # Redis for non-graph ops (caching, materialization tracking,
+            # ancestor chains, stats). When CACHE_REDIS_URL is set, these
+            # go to a DEDICATED Redis instance — fully decoupled from
+            # FalkorDB so a graph outage doesn't take out caching/state.
+            # When unset, falls back to the FalkorDB instance (dev compat).
+            from backend.common.adapters import TimeoutRedis
+            cache_redis_url = os.getenv("CACHE_REDIS_URL")
             redis_pool_size = int(os.getenv("FALKORDB_REDIS_POOL_SIZE", "16"))
-            self._redis_pool = ConnectionPool(
-                host=self._host,
-                port=self._port,
-                max_connections=redis_pool_size,
-                socket_connect_timeout=2.0,
-                socket_timeout=socket_timeout,
-                decode_responses=True,
-            )
-            self._redis = Redis(connection_pool=self._redis_pool)
+            redis_op_timeout = float(os.getenv("FALKORDB_REDIS_OP_TIMEOUT", "3"))
+            if cache_redis_url:
+                _raw_redis = Redis.from_url(
+                    cache_redis_url,
+                    max_connections=redis_pool_size,
+                    socket_connect_timeout=2.0,
+                    socket_timeout=socket_timeout,
+                    decode_responses=True,
+                )
+                self._redis_pool = None  # managed by from_url
+            else:
+                self._redis_pool = ConnectionPool(
+                    host=self._host,
+                    port=self._port,
+                    max_connections=redis_pool_size,
+                    socket_connect_timeout=2.0,
+                    socket_timeout=socket_timeout,
+                    decode_responses=True,
+                )
+                _raw_redis = Redis(connection_pool=self._redis_pool)
+            # Wrap in TimeoutRedis — every async call and pipeline.execute()
+            # automatically gets an asyncio.wait_for() deadline. No call-site
+            # wrapping needed. See backend/common/adapters/timeout_redis.py.
+            self._redis = TimeoutRedis(_raw_redis, timeout=redis_op_timeout)
             self._db = FalkorDB(connection_pool=self._pool)
             self._graph = self._db.select_graph(self._graph_name)
 
@@ -173,16 +191,58 @@ class FalkorDBProvider(GraphDataProvider):
             await self.ensure_projections()
 
             # Optional lazy seed
+            _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
             if self._seed_file:
-                count_result = await self._graph.ro_query(
-                    "MATCH (n) RETURN count(n) AS c",
-                    params={}
+                count_result = await asyncio.wait_for(
+                    self._graph.ro_query("MATCH (n) RETURN count(n) AS c", params={}),
+                    timeout=_init_timeout,
                 )
                 if count_result.result_set and count_result.result_set[0][0] == 0:
                     await self._seed_from_file()
         except Exception as e:
             logger.error(f"FalkorDB connection failed: {e}")
             raise
+
+    # ── Timeout-guarded query helpers ────────────────────────────────
+    # Every Cypher query routed through these methods gets an
+    # asyncio.wait_for() deadline. TimeoutError is a network-class
+    # exception — the CircuitBreakerProxy counts it toward the failure
+    # budget and opens the breaker after fail_max consecutive failures.
+    # See backend/app/config/resilience.py for full reference of all tunables.
+    _READ_TIMEOUT = float(os.getenv("FALKORDB_QUERY_TIMEOUT", "5"))
+    _WRITE_TIMEOUT = float(os.getenv("FALKORDB_WRITE_TIMEOUT", "15"))
+
+    async def _ro_query(self, cypher: str, params: dict = None, *, timeout: float = None):
+        """Timeout-guarded read-only query on the source graph."""
+        t = timeout if timeout is not None else self._READ_TIMEOUT
+        return await asyncio.wait_for(
+            self._graph.ro_query(cypher, params=params or {}),
+            timeout=t,
+        )
+
+    async def _query(self, cypher: str, params: dict = None, *, timeout: float = None):
+        """Timeout-guarded write query on the source graph."""
+        t = timeout if timeout is not None else self._WRITE_TIMEOUT
+        return await asyncio.wait_for(
+            self._graph.query(cypher, params=params or {}),
+            timeout=t,
+        )
+
+    async def _proj_ro_query(self, cypher: str, params: dict = None, *, timeout: float = None):
+        """Timeout-guarded read-only query on the projection graph."""
+        t = timeout if timeout is not None else self._READ_TIMEOUT
+        return await asyncio.wait_for(
+            self._proj.ro_query(cypher, params=params or {}),
+            timeout=t,
+        )
+
+    async def _proj_query(self, cypher: str, params: dict = None, *, timeout: float = None):
+        """Timeout-guarded write query on the projection graph."""
+        t = timeout if timeout is not None else self._WRITE_TIMEOUT
+        return await asyncio.wait_for(
+            self._proj.query(cypher, params=params or {}),
+            timeout=t,
+        )
 
     async def _seed_from_file(self):
         """Load graph from seed JSON file if graph is empty."""
@@ -229,10 +289,14 @@ class FalkorDBProvider(GraphDataProvider):
 
         properties = ["urn", "displayName", "qualifiedName"]
 
+        _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
         for label in labels:
             for prop in properties:
                 try:
-                    await self._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
+                    await asyncio.wait_for(
+                        self._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})"),
+                        timeout=_init_timeout,
+                    )
                 except Exception:
                     pass
 
@@ -382,7 +446,7 @@ class FalkorDBProvider(GraphDataProvider):
         # Try label-aware lookup first (index-assisted, 10-50x faster)
         label = await self._get_cached_label(urn)
         if label:
-            result = await self._graph.ro_query(
+            result = await self._ro_query(
                 f"MATCH (n:{_sanitize_label(label)} {{urn: $urn}}) RETURN n",
                 params={"urn": urn},
             )
@@ -390,7 +454,7 @@ class FalkorDBProvider(GraphDataProvider):
                 return self._extract_node_from_result(result.result_set[0])
 
         # Fallback: label-less scan (still works, just slower)
-        result = await self._graph.ro_query(
+        result = await self._ro_query(
             "MATCH (n) WHERE n.urn = $urn RETURN n",
             params={"urn": urn},
         )
@@ -508,7 +572,7 @@ class FalkorDBProvider(GraphDataProvider):
             cypher = " ".join(clauses)
 
         try:
-            result = await self._graph.ro_query(cypher, params=params)
+            result = await self._ro_query(cypher, params=params)
         except Exception as e:
             logger.warning(f"get_nodes query failed: {e}")
             return []
@@ -638,7 +702,7 @@ class FalkorDBProvider(GraphDataProvider):
         params["limit"] = limit
         cypher += " RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, properties(r) AS rprops SKIP $skip LIMIT $limit"
 
-        result = await self._graph.ro_query(cypher, params=params)
+        result = await self._ro_query(cypher, params=params)
         edges = []
         for row in (result.result_set or []):
             src, tgt, rel_type, rprops = row[0], row[1], row[2], (row[3] or {})
@@ -708,7 +772,7 @@ class FalkorDBProvider(GraphDataProvider):
                 f"RETURN c, count(gc) as childCount"
             )
 
-        result = await self._graph.ro_query(cypher, params=params)
+        result = await self._ro_query(cypher, params=params)
         nodes = []
         for row in (result.result_set or []):
             # Extract node and childCount
@@ -795,7 +859,7 @@ class FalkorDBProvider(GraphDataProvider):
                 f"RETURN c, count(gc) as childCount, p.urn as parentUrn, type(r) as relType, properties(r) as rprops"
             )
 
-        result = await self._graph.ro_query(cypher, params=params)
+        result = await self._ro_query(cypher, params=params)
 
         children: List[GraphNode] = []
         containment_edges: List[GraphEdge] = []
@@ -841,7 +905,7 @@ class FalkorDBProvider(GraphDataProvider):
                 f"RETURN a.urn, b.urn, type(lr), properties(lr)"
             )
 
-            lr_result = await self._graph.ro_query(lineage_cypher, params=lineage_params)
+            lr_result = await self._ro_query(lineage_cypher, params=lineage_params)
             for row in (lr_result.result_set or []):
                 lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}))
 
@@ -865,7 +929,7 @@ class FalkorDBProvider(GraphDataProvider):
             # No containment types — flat graph, no parent
             return None
         # Match any containment-type edge where child is target
-        result = await self._graph.ro_query(
+        result = await self._ro_query(
             "MATCH (p)-[r]->(c) WHERE c.urn = $child AND type(r) IN $ctypes RETURN p",
             params={"child": child_urn, "ctypes": list(containment)},
         )
@@ -968,7 +1032,7 @@ class FalkorDBProvider(GraphDataProvider):
             )
 
         try:
-            page_result = await self._graph.ro_query(page_cypher, params=params)
+            page_result = await self._ro_query(page_cypher, params=params)
         except Exception as e:
             logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
             page_result = None
@@ -1019,7 +1083,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         total_count = 0
         try:
-            count_result = await self._graph.ro_query(count_cypher, params=count_params)
+            count_result = await self._ro_query(count_cypher, params=count_params)
             if count_result and count_result.result_set:
                 first = count_result.result_set[0]
                 total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
@@ -1082,7 +1146,7 @@ class FalkorDBProvider(GraphDataProvider):
                 f"RETURN DISTINCT neighbor.urn AS urn"
             )
 
-        result = await self._graph.ro_query(cypher, params=params)
+        result = await self._ro_query(cypher, params=params)
         return {
             row[0] for row in (result.result_set or [])
             if row[0] and row[0] != start_urn
@@ -1163,9 +1227,9 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def ensure_projections(self) -> None:
         """Create indices on the projection target for fast AGGREGATED reads."""
-        proj = self._proj
+
         try:
-            await proj.query("CREATE INDEX FOR (n:_Projection) ON (n.urn)")
+            await self._proj_query("CREATE INDEX FOR (n:_Projection) ON (n.urn)")
         except Exception:
             pass  # Index may already exist
 
@@ -1203,7 +1267,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         # Variable-length path: returns ordered list of ancestor URNs
         # nodes(path) gives [child, parent, grandparent, ...] — skip index 0 (self)
-        result = await self._graph.ro_query(
+        result = await self._ro_query(
             f"MATCH path = (child)<-[:{containment_cypher}*1..10]-(ancestor) "
             f"WHERE child.urn = $urn "
             f"WITH path ORDER BY length(path) DESC LIMIT 1 "
@@ -1375,11 +1439,11 @@ class FalkorDBProvider(GraphDataProvider):
         # Execute ONE Cypher UNWIND+MERGE per sub-batch.  The Cypher
         # REDUCE accumulates all edge types into sourceEdgeTypes in a
         # single pass — no per-edge-type iteration needed.
-        proj = self._proj
+
         created = 0
         for chunk_start in range(0, len(merge_batch), self._MERGE_SUB_BATCH_SIZE):
             chunk = merge_batch[chunk_start:chunk_start + self._MERGE_SUB_BATCH_SIZE]
-            await proj.query(
+            await self._proj_query(
                 "UNWIND $batch AS item "
                 "MERGE (s {urn: item.s}) "
                 "MERGE (t {urn: item.t}) "
@@ -1485,8 +1549,8 @@ class FalkorDBProvider(GraphDataProvider):
         # that logs and increments the error counter; on sustained
         # failure, AggregationBatchAbort aborts the job and preserves
         # last_cursor for resume.
-        proj = self._proj
-        await proj.query(
+
+        await self._proj_query(
             "UNWIND $batch AS item "
             "MERGE (s {urn: item.s}) "
             "MERGE (t {urn: item.t}) "
@@ -1556,10 +1620,10 @@ class FalkorDBProvider(GraphDataProvider):
             elif remaining is not None:
                 update_batch.append({"s": s_urn, "t": t_urn, "w": int(remaining)})
 
-        proj = self._proj
+
         if delete_batch:
             try:
-                await proj.query(
+                await self._proj_query(
                     "UNWIND $batch AS item "
                     "MATCH (s {urn: item.s})-[r:AGGREGATED]->(t {urn: item.t}) "
                     "DELETE r",
@@ -1575,7 +1639,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         if update_batch:
             try:
-                await proj.query(
+                await self._proj_query(
                     "UNWIND $batch AS item "
                     "MATCH (s {urn: item.s})-[r:AGGREGATED]->(t {urn: item.t}) "
                     "SET r.weight = item.w, r.latestUpdate = timestamp()",
@@ -1606,7 +1670,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         while queue:
             current = queue.popleft()
-            result = await self._graph.ro_query(
+            result = await self._ro_query(
                 "MATCH (p)-[r]->(c) WHERE p.urn = $urn AND type(r) IN $ctypes RETURN c.urn",
                 params={"urn": current, "ctypes": containment},
             )
@@ -1644,9 +1708,9 @@ class FalkorDBProvider(GraphDataProvider):
         not updated and so cleaned nothing until this fix.
         """
         await self._ensure_connected()
-        proj = self._proj
+
         try:
-            result = await proj.query(
+            result = await self._proj_query(
                 "MATCH ()-[r:AGGREGATED]->() "
                 "WITH r LIMIT 100000 "
                 "DELETE r "
@@ -1749,7 +1813,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         # Count total lineage edges
         count_cypher = f"MATCH ()-[r]->() {type_filter} RETURN count(r)"
-        count_res = await self._graph.ro_query(count_cypher, params=type_params)
+        count_res = await self._ro_query(count_cypher, params=type_params)
         total = count_res.result_set[0][0] if count_res.result_set else 0
 
         logger.info(f"Batch materialization: {total} lineage edges to process (cursor: {last_cursor or 'start'})")
@@ -1790,7 +1854,7 @@ class FalkorDBProvider(GraphDataProvider):
             # is either back (resume succeeds) or still down (breaker
             # opens and triggers 503 upstream).
             t0 = time.monotonic()
-            res = await self._graph.ro_query(batch_cypher, params=batch_params)
+            res = await self._ro_query(batch_cypher, params=batch_params)
             rows = res.result_set or []
             t_fetch = (time.monotonic() - t0) * 1000
 
@@ -1880,7 +1944,7 @@ class FalkorDBProvider(GraphDataProvider):
         """
         await self._ensure_connected()
 
-        proj = self._proj
+
 
         if target_urns:
             cypher = (
@@ -1907,7 +1971,7 @@ class FalkorDBProvider(GraphDataProvider):
             params = {"sourceUrns": source_urns}
 
         try:
-            result = await proj.ro_query(cypher, params=params)
+            result = await self._proj_ro_query(cypher, params=params)
             rows = result.result_set or []
         except Exception as e:
             logger.warning(f"AGGREGATED edge read failed: {e}")
@@ -1981,7 +2045,7 @@ class FalkorDBProvider(GraphDataProvider):
                 f"WHERE p.urn = $urn AND type(r) IN $containment "
                 f"RETURN c.urn"
             )
-            res_kids = await self._graph.ro_query(
+            res_kids = await self._ro_query(
                 cypher_kids, 
                 params={"urn": urn, "containment": safe_containment}
             )
@@ -2030,7 +2094,7 @@ class FalkorDBProvider(GraphDataProvider):
                 dir_queries.append(("downstream", cypher_down))
 
             for dir_label, cypher_q in dir_queries:
-                res = await self._graph.ro_query(
+                res = await self._ro_query(
                     cypher_q,
                     params={"frontier": current_frontier, "lineage": safe_lineage}
                 )
@@ -2111,7 +2175,7 @@ class FalkorDBProvider(GraphDataProvider):
                  if not current_level_urns:
                      break
 
-                 res_struct = await self._graph.ro_query(
+                 res_struct = await self._ro_query(
                      cypher_structure,
                      params={"urns": current_level_urns, "containment": safe_containment}
                  )
@@ -2170,7 +2234,7 @@ class FalkorDBProvider(GraphDataProvider):
             pass
 
         # Optimize: Combine node counting with type aggregation
-        type_res = await self._graph.ro_query(
+        type_res = await self._ro_query(
             "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c"
         )
         entity_type_counts = {}
@@ -2182,7 +2246,7 @@ class FalkorDBProvider(GraphDataProvider):
             node_count += cnt
 
         # Optimize: Combine edge counting with type aggregation
-        edge_type_res = await self._graph.ro_query(
+        edge_type_res = await self._ro_query(
             "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"
         )
         edge_type_counts = {}
@@ -2211,7 +2275,7 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         
         # Single query: counts + samples per label using collect() with slicing
-        type_res = await self._graph.ro_query(
+        type_res = await self._ro_query(
             "MATCH (n) "
             "WITH labels(n)[0] AS lbl, n.displayName AS name "
             "WITH lbl, count(*) AS c, collect(name)[0..3] AS samples "
@@ -2228,7 +2292,7 @@ class FalkorDBProvider(GraphDataProvider):
             total_nodes += cnt
             entity_stats.append(EntityTypeSummary(id=lbl, name=lbl, count=cnt, sampleNames=samples))
 
-        edge_type_res = await self._graph.ro_query(
+        edge_type_res = await self._ro_query(
             "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"
         )
         edge_stats = []
@@ -2242,7 +2306,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         # Tag stats - kept as is for now, but ensured safe execution
         try:
-            tag_res = await self._graph.ro_query(
+            tag_res = await self._ro_query(
                 "MATCH (n) WHERE n.tags IS NOT NULL AND n.tags <> '[]' RETURN n.tags"
             )
             tag_counts: Dict[str, int] = {}
@@ -2292,7 +2356,7 @@ class FalkorDBProvider(GraphDataProvider):
         
         # 1. Determine Lineage Types
         # Instead of fetching all edges, we query distinct types
-        type_res = await self._graph.ro_query("MATCH ()-[r]->() RETURN DISTINCT type(r)")
+        type_res = await self._ro_query("MATCH ()-[r]->() RETURN DISTINCT type(r)")
         all_types = [row[0] for row in (type_res.result_set or [])]
         
         # Use ontology-resolved edge metadata if available, otherwise fall back to heuristics
@@ -2354,7 +2418,7 @@ class FalkorDBProvider(GraphDataProvider):
             "WHERE type(r) IN $containment "
             "RETURN DISTINCT labels(p)[0], labels(c)[0], type(r)"
         )
-        hierarchy_res = await self._graph.ro_query(
+        hierarchy_res = await self._ro_query(
             hierarchy_cypher, 
             params={"containment": containment}
         )
@@ -2407,10 +2471,10 @@ class FalkorDBProvider(GraphDataProvider):
     async def get_distinct_values(self, property_name: str) -> List[Any]:
         await self._ensure_connected()
         if property_name in ("entityType", "entitytype"):
-            res = await self._graph.ro_query("MATCH (n) RETURN DISTINCT labels(n)[0] AS lbl")
+            res = await self._ro_query("MATCH (n) RETURN DISTINCT labels(n)[0] AS lbl")
             return [row[0] for row in (res.result_set or []) if row[0]]
         if property_name == "tags":
-            res = await self._graph.ro_query("MATCH (n) RETURN n.tags")
+            res = await self._ro_query("MATCH (n) RETURN n.tags")
             seen = set()
             for row in (res.result_set or []):
                 raw = row[0]
@@ -2423,7 +2487,7 @@ class FalkorDBProvider(GraphDataProvider):
             return list(seen)
         safe_prop = "".join(c for c in property_name if c.isalnum() or c == "_") or "urn"
         try:
-            res = await self._graph.ro_query(
+            res = await self._ro_query(
                 f"MATCH (n) WHERE n.{safe_prop} IS NOT NULL RETURN DISTINCT n.{safe_prop} AS v LIMIT 100"
             )
             return [row[0] for row in (res.result_set or [])]
@@ -2474,7 +2538,7 @@ class FalkorDBProvider(GraphDataProvider):
             f"SKIP $skip LIMIT $lim"
         )
 
-        result = await self._graph.ro_query(cypher, params=params)
+        result = await self._ro_query(cypher, params=params)
         nodes = []
         for row in (result.result_set or []):
             n = self._extract_node_from_result(row)
@@ -2485,7 +2549,7 @@ class FalkorDBProvider(GraphDataProvider):
     async def get_nodes_by_tag(self, tag: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         await self._ensure_connected()
         tag_pattern = json.dumps(tag)
-        result = await self._graph.ro_query(
+        result = await self._ro_query(
             "MATCH (n) WHERE n.tags IS NOT NULL AND n.tags CONTAINS $tag RETURN n SKIP $skip LIMIT $limit",
             params={"tag": tag_pattern, "skip": offset, "limit": limit},
         )
@@ -2498,7 +2562,7 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def get_nodes_by_layer(self, layer_id: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         await self._ensure_connected()
-        result = await self._graph.ro_query(
+        result = await self._ro_query(
             "MATCH (n) WHERE n.layerAssignment = $lid RETURN n SKIP $skip LIMIT $limit",
             params={"lid": layer_id, "skip": offset, "limit": limit},
         )
@@ -2539,7 +2603,7 @@ class FalkorDBProvider(GraphDataProvider):
             for i in range(0, len(items), batch_size):
                 batch = items[i : i + batch_size]
                 try:
-                    await self._graph.query(
+                    await self._query(
                         f"UNWIND $batch AS item "
                         f"MERGE (n:{label} {{urn: item.urn}}) "
                         f"SET n.displayName = item.displayName, "
@@ -2573,7 +2637,7 @@ class FalkorDBProvider(GraphDataProvider):
             for i in range(0, len(items), batch_size):
                 batch = items[i : i + batch_size]
                 try:
-                    await self._graph.query(
+                    await self._query(
                         f"UNWIND $batch AS item "
                         f"MATCH (a {{urn: item.src}}) "
                         f"MATCH (b {{urn: item.tgt}}) "
@@ -2603,14 +2667,14 @@ class FalkorDBProvider(GraphDataProvider):
                 "sourceSystem": node.source_system or "",
                 "lastSyncedAt": node.last_synced_at or "",
             }
-            await self._graph.query(
+            await self._query(
                 f"MERGE (n:{label} {{urn: $urn}}) SET n += $p",
                 params={"urn": node.urn, "p": params},
             )
             await self._cache_urn_label(node.urn, label)
             if containment_edge:
                 rel_type = _sanitize_label(str(containment_edge.edge_type))
-                await self._graph.query(
+                await self._query(
                     f"""
                     MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}})
                     MERGE (a)-[r:{rel_type}]->(b)
@@ -2633,7 +2697,7 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         try:
             rel_type = _sanitize_label(str(edge.edge_type))
-            await self._graph.query(
+            await self._query(
                 f"MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}}) "
                 f"MERGE (a)-[r:{rel_type}]->(b) "
                 f"SET r.id = $eid, r.confidence = $conf, r.properties = $props",
@@ -2654,7 +2718,7 @@ class FalkorDBProvider(GraphDataProvider):
         """Update edge properties by edge ID."""
         await self._ensure_connected()
         try:
-            result = await self._graph.query(
+            result = await self._query(
                 "MATCH (a)-[r]->(b) WHERE r.id = $eid "
                 "SET r.properties = $props "
                 "RETURN a.urn, b.urn, type(r), properties(r)",
@@ -2672,7 +2736,7 @@ class FalkorDBProvider(GraphDataProvider):
         """Delete an edge by its ID property."""
         await self._ensure_connected()
         try:
-            result = await self._graph.query(
+            result = await self._query(
                 "MATCH ()-[r]->() WHERE r.id = $eid DELETE r RETURN count(r)",
                 params={"eid": edge_id},
             )

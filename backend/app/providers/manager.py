@@ -38,9 +38,10 @@ from backend.common.interfaces.provider import GraphDataProvider
 
 logger = logging.getLogger(__name__)
 
-# Tuneable via env vars.
+# Tuneable via env vars. See backend/app/config/resilience.py for full reference.
 _BREAKER_FAIL_MAX = int(os.getenv("PROVIDER_BREAKER_FAIL_MAX", "3"))
 _BREAKER_RESET_TIMEOUT = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_SECS", "30"))
+_BREAKER_METHOD_TIMEOUT = float(os.getenv("PROVIDER_METHOD_TIMEOUT_SECS", "10"))
 
 
 class HealthState(str, Enum):
@@ -59,6 +60,7 @@ def _wrap_in_breaker(provider: GraphDataProvider, name: str) -> GraphDataProvide
         name=name,
         fail_max=_BREAKER_FAIL_MAX,
         reset_timeout=_BREAKER_RESET_TIMEOUT,
+        method_timeout=_BREAKER_METHOD_TIMEOUT,
     )
 
 

@@ -135,7 +135,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
                 const error = new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
                 // 5xx errors indicate provider/backend failure — feed circuit breaker
                 if (response.status >= 500) {
-                    this.circuitBreaker.recordFailure()
+                    // Honor Retry-After header from backend (sent on 503 ProviderUnavailable)
+                    const retryAfter = response.headers.get('Retry-After')
+                    const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : undefined
+                    this.circuitBreaker.recordFailure(
+                        retryAfterMs && !isNaN(retryAfterMs) ? retryAfterMs : undefined,
+                    )
                 }
                 throw error
             }
