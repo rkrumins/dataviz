@@ -2221,17 +2221,24 @@ class FalkorDBProvider(GraphDataProvider):
             hasMore=False
         )
 
+    # Schema-level caches are persisted in Postgres by the stats service;
+    # this in-memory Redis layer is just a short-term memoization for
+    # repeated calls within a polling interval. Default 300s (5 min) —
+    # matches the stats service poll interval. Set to 0 to disable.
+    _SCHEMA_CACHE_TTL = int(os.getenv("FALKORDB_SCHEMA_CACHE_TTL", "300"))
+
     async def get_stats(self) -> Dict[str, Any]:
         await self._ensure_connected()
 
-        # Check Redis cache (60s TTL)
+        # Check Redis cache (best-effort; Postgres is the source of truth)
         cache_key = f"{self._graph_name}:stats_cache"
-        try:
-            cached = await self._redis.get(cache_key)
-            if cached:
-                return json.loads(cached)
-        except Exception:
-            pass
+        if self._SCHEMA_CACHE_TTL > 0:
+            try:
+                cached = await self._redis.get(cache_key)
+                if cached:
+                    return json.loads(cached)
+            except Exception:
+                pass
 
         # Optimize: Combine node counting with type aggregation
         type_res = await self._ro_query(
@@ -2264,10 +2271,11 @@ class FalkorDBProvider(GraphDataProvider):
             "edgeTypeCounts": edge_type_counts,
         }
 
-        try:
-            await self._redis.setex(cache_key, 60, json.dumps(result))
-        except Exception:
-            pass
+        if self._SCHEMA_CACHE_TTL > 0:
+            try:
+                await self._redis.setex(cache_key, self._SCHEMA_CACHE_TTL, json.dumps(result))
+            except Exception:
+                pass
 
         return result
 
@@ -2344,12 +2352,13 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
 
         cache_key = f"{self._graph_name}:ontology_cache"
-        try:
-            cached = await self._redis.get(cache_key)
-            if cached:
-                return OntologyMetadata(**json.loads(cached))
-        except Exception:
-            pass
+        if self._SCHEMA_CACHE_TTL > 0:
+            try:
+                cached = await self._redis.get(cache_key)
+                if cached:
+                    return OntologyMetadata(**json.loads(cached))
+            except Exception:
+                pass
 
         containment = list(self._get_containment_edge_types())
         containment_upper = {t.upper() for t in containment}
@@ -2461,10 +2470,11 @@ class FalkorDBProvider(GraphDataProvider):
             rootEntityTypes=root_entity_types,
         )
 
-        try:
-            await self._redis.setex(cache_key, 60, result.model_dump_json())
-        except Exception:
-            pass
+        if self._SCHEMA_CACHE_TTL > 0:
+            try:
+                await self._redis.setex(cache_key, self._SCHEMA_CACHE_TTL, result.model_dump_json())
+            except Exception:
+                pass
 
         return result
 
