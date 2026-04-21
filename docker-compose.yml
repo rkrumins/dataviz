@@ -28,6 +28,8 @@
 #   docker compose down -v
 # ══════════════════════════════════════════════════════════════════════
 
+name: synodic
+
 services:
 
   # ── FalkorDB (Graph Database) — pre-loaded with sample data ───────
@@ -35,9 +37,10 @@ services:
     build:
       context: ./data/quickstart
       dockerfile: Dockerfile.falkordb
+    restart: unless-stopped
     ports:
-      - "6379:6379"
-      - "3000:3000"       # FalkorDB Browser UI
+      - "${FALKORDB_PORT:-6379}:6379"
+      - "${FALKORDB_UI_PORT:-3000}:3000"       # FalkorDB Browser UI
     environment:
       FALKORDB_ARGS: THREAD_COUNT 4
     volumes:
@@ -54,9 +57,10 @@ services:
   # compete with broker data.  AOF persistence ensures stream durability
   # across restarts.  noeviction policy prevents silent message loss.
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
+    restart: unless-stopped
     ports:
-      - "6380:6379"
+      - "${REDIS_PORT:-6380}:6379"
     volumes:
       - redis_data:/data
     command: >
@@ -72,17 +76,20 @@ services:
 
   # ── PostgreSQL (Management Database) ──────────────────────────────
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: synodic
-      POSTGRES_PASSWORD: synodic
-      POSTGRES_DB: synodic
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U synodic"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -101,9 +108,9 @@ services:
       context: .
       dockerfile: backend/Dockerfile.controlplane
     ports:
-      - "8091:8091"
+      - "${CONTROLPLANE_PORT:-8091}:8091"
     environment:
-      MANAGEMENT_DB_URL: postgresql+asyncpg://synodic:synodic@postgres:5432/synodic
+      MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
       AGGREGATION_DISPATCH_MODE: redis
 
@@ -112,11 +119,11 @@ services:
       FALKORDB_HOST: falkordb
       FALKORDB_PORT: "6379"
       FALKORDB_SOCKET_TIMEOUT: "5"
-      FALKORDB_GRAPH_NAME: nexus_lineage
+      FALKORDB_GRAPH_NAME: ${FALKORDB_GRAPH_NAME:-nexus_lineage}
 
       AGGREGATION_API_PORT: "8091"
       SYNODIC_ROLE: controlplane
-      LOG_LEVEL: INFO
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
@@ -142,26 +149,26 @@ services:
       context: .
       dockerfile: backend/Dockerfile.viz
     ports:
-      - "8000:8000"
+      - "${VIZ_PORT:-8000}:8000"
     environment:
       # Graph provider bootstrap (used if management DB is empty)
-      GRAPH_PROVIDER: falkordb
+      GRAPH_PROVIDER: ${GRAPH_PROVIDER:-falkordb}
       FALKORDB_HOST: falkordb
       FALKORDB_PORT: "6379"
-      FALKORDB_GRAPH_NAME: nexus_lineage
+      FALKORDB_GRAPH_NAME: ${FALKORDB_GRAPH_NAME:-nexus_lineage}
 
       # Management database
-      MANAGEMENT_DB_URL: postgresql+asyncpg://synodic:synodic@postgres:5432/synodic
+      MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
 
-      # Auth — change these in production!
-      JWT_SECRET_KEY: change-me-in-production
-      JWT_ALGORITHM: HS256
-      JWT_EXPIRY_MINUTES: "60"
-      ADMIN_EMAIL: admin@nexuslineage.local
-      ADMIN_PASSWORD: admin123
+      # Auth — fail fast if secrets aren't set
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_EXPIRY_MINUTES: "${JWT_EXPIRY_MINUTES:-60}"
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@synodic.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env}
 
       # Credential encryption (omit for plaintext in dev)
-      # CREDENTIAL_ENCRYPTION_KEY: ""
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
 
       # Redis (for aggregation event listener — syncs status from CP)
       REDIS_URL: redis://redis:6379/0
@@ -175,7 +182,9 @@ services:
       SYNODIC_ROLE: web
 
       # CORS — allow the frontend container + local dev
-      CORS_ALLOWED_ORIGINS: http://localhost:3080,http://localhost:5173,http://localhost:3000
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3080,http://localhost:5173,http://localhost:3000}
+
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
@@ -185,6 +194,12 @@ services:
       # exists and proxy requests don't fail on first boot.
       aggregation-controlplane:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
 
   # ── Aggregation Worker (Data Plane) ────────────────────────────────
@@ -198,7 +213,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile.aggregation
     environment:
-      MANAGEMENT_DB_URL: postgresql+asyncpg://synodic:synodic@postgres:5432/synodic
+      MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
 
       # FalkorDB — worker-specific tuning: longer timeouts for heavy
@@ -209,14 +224,14 @@ services:
 
       # Concurrency: max parallel aggregation jobs per worker replica.
       # Pool sizes are auto-computed: graph = concurrency*4+8, redis = concurrency*3+8
-      WORKER_CONCURRENCY: "4"
-      AGGREGATION_JOB_TIMEOUT_SECS: "7200"
+      WORKER_CONCURRENCY: "${WORKER_CONCURRENCY:-4}"
+      AGGREGATION_JOB_TIMEOUT_SECS: "${AGGREGATION_JOB_TIMEOUT_SECS:-7200}"
 
       # Per-graph concurrency limit (prevent FalkorDB write lock contention)
-      MAX_CONCURRENT_PER_GRAPH: "2"
+      MAX_CONCURRENT_PER_GRAPH: "${MAX_CONCURRENT_PER_GRAPH:-2}"
 
       SYNODIC_ROLE: worker
-      LOG_LEVEL: INFO
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       # Worker must start after Control Plane (schema must exist)
       aggregation-controlplane:
@@ -237,13 +252,19 @@ services:
       context: .
       dockerfile: backend/Dockerfile.graph
     ports:
-      - "8001:8001"
+      - "${GRAPH_PORT:-8001}:8001"
     environment:
       FALKORDB_HOST: falkordb
       FALKORDB_PORT: "6379"
     depends_on:
       falkordb:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
     restart: unless-stopped
 
   # ── Frontend (Nginx + React SPA) ──────────────────────────────────
@@ -254,10 +275,12 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
     ports:
-      - "3080:80"
+      - "${FRONTEND_PORT:-3080}:80"
     depends_on:
-      - viz-service
-      - graph-service
+      viz-service:
+        condition: service_healthy
+      graph-service:
+        condition: service_healthy
     restart: unless-stopped
 
   # ── Demo Data Seeder (one-shot, opt-in) ───────────────────────────

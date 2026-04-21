@@ -87,6 +87,43 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _reset_stale_alembic_version(connection) -> None:
+    """If alembic_version points to a deleted revision, stamp to baseline.
+
+    Migrations 0002-0007 were consolidated into 0001_baseline. Existing
+    databases that ran those old migrations carry a version_num that
+    Alembic cannot locate on disk, causing 'Can't locate revision' on
+    every startup.
+
+    This detects the stale state and resets to 0001_baseline so the
+    normal upgrade path can proceed. Safe because 0001_baseline uses
+    Base.metadata.create_all(checkfirst=True) — it won't recreate
+    existing tables.
+    """
+    from sqlalchemy import inspect as sa_inspect, text
+
+    inspector = sa_inspect(connection)
+    if not inspector.has_table("alembic_version"):
+        return  # Fresh database — nothing to reset
+
+    row = connection.execute(text("SELECT version_num FROM alembic_version")).fetchone()
+    if row is None:
+        return  # Table exists but empty
+
+    current_version = row[0]
+    if current_version == "0001_baseline":
+        return  # Already at baseline
+
+    logger.warning(
+        "Stale alembic_version detected: '%s' — resetting to '0001_baseline'",
+        current_version,
+    )
+    connection.execute(text(
+        "UPDATE alembic_version SET version_num = '0001_baseline'"
+    ))
+    connection.commit()
+
+
 def run_migrations_online() -> None:
     """Apply migrations against a live Postgres.
 
@@ -105,6 +142,9 @@ def run_migrations_online() -> None:
         connect_args={"connect_timeout": connect_timeout},
     )
     with connectable.connect() as connection:
+        # Fix stale revision pointers BEFORE Alembic reads the chain.
+        _reset_stale_alembic_version(connection)
+
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
