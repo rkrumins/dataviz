@@ -19,7 +19,7 @@ import {
 } from '@/services/ontologyDefinitionService'
 import { workspaceService } from '@/services/workspaceService'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { fetchSchemaStats, generateSuggestedName } from '@/features/ontology/lib/ontology-utils'
+import { fetchSchemaStats, fetchSchemaStatsWithMeta, generateSuggestedName, triggerIntrospectionRefresh } from '@/features/ontology/lib/ontology-utils'
 import { cn } from '@/lib/utils'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import type { EntityTypeSummary, EdgeTypeSummary } from '@/providers/GraphDataProvider'
@@ -700,16 +700,25 @@ export function OntologySchemaPage() {
     setShowSuggestDialog(true)
   }
 
-  /** Phase 2: analyze the graph, return matches + counts for the dialog to display. */
+  /** Phase 2: analyze the graph, return matches + counts for the dialog to display.
+   *  Uses the Postgres-cached stats when available; surfaces freshness so the
+   *  dialog can offer a refresh button if the cache is stale. */
   async function handleAnalyzeGraph(workspaceId: string, dataSourceId: string) {
-    const stats = await fetchSchemaStats(workspaceId, dataSourceId)
+    const { stats, freshness } = await fetchSchemaStatsWithMeta(workspaceId, dataSourceId)
     const response = await ontologyDefinitionService.suggest(stats as unknown as Record<string, unknown>)
     suggestResponseRef.current = response
     return {
       matches: response.matchingOntologies,
       suggestedEntityCount: Object.keys(response.suggested.entityTypeDefinitions ?? {}).length,
       suggestedRelCount: Object.keys(response.suggested.relationshipTypeDefinitions ?? {}).length,
+      freshness,
     }
+  }
+
+  /** Trigger a non-blocking background refresh of the Postgres schema cache
+   *  for the given data source. Returns the job ID so the dialog can poll. */
+  async function handleRefreshIntrospection(workspaceId: string, dataSourceId: string) {
+    return triggerIntrospectionRefresh(workspaceId, dataSourceId)
   }
 
   /** Assign an ontology to the target data source picked in the suggest dialog */
@@ -1506,6 +1515,7 @@ export function OntologySchemaPage() {
           currentOntologyId={evalDataSource?.ontologyId ?? null}
           assignmentCountMap={assignmentCountMap}
           onAnalyze={handleAnalyzeGraph}
+          onRefreshIntrospection={handleRefreshIntrospection}
           onUseExisting={handleSuggestUseExisting}
           onCloneExisting={handleSuggestCloneExisting}
           onCreateDraft={handleSuggestCreateDraft}

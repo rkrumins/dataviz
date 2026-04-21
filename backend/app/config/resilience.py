@@ -74,3 +74,17 @@ SCHEDULER_DRIFT_CHECK_TIMEOUT_SECS: float = float(os.getenv("SCHEDULER_DRIFT_CHE
 # Timeout for Redis subscribe and per-message poll in the aggregation
 # event listener background task.
 EVENT_LISTENER_TIMEOUT_SECS: float = float(os.getenv("EVENT_LISTENER_TIMEOUT", "10"))
+
+# ── Stats service (background schema/ontology refresh) ─────────────
+# Per-data-source polling timeout. Size-adaptive: default for small
+# graphs, extended for graphs past the large-node threshold (since
+# full-graph MATCH scans on 1M+ node graphs legitimately need minutes).
+STATS_POLL_TIMEOUT_SECS: float = float(os.getenv("STATS_POLL_TIMEOUT_SECS", "30"))
+STATS_POLL_TIMEOUT_LARGE_SECS: float = float(os.getenv("STATS_POLL_TIMEOUT_LARGE_SECS", "600"))
+STATS_POLL_LARGE_THRESHOLD: int = int(os.getenv("STATS_POLL_LARGE_THRESHOLD", "100000"))
+
+# ── Schema / ontology in-memory Redis cache ─────────────────────────
+# Short-term memoization layer for get_stats / get_ontology_metadata.
+# Postgres (DataSourceStatsORM, populated by the stats service) is the
+# durable source of truth. Set to 0 to disable the Redis memoization.
+FALKORDB_SCHEMA_CACHE_TTL: int = int(os.getenv("FALKORDB_SCHEMA_CACHE_TTL", "300"))

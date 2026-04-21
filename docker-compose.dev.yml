@@ -1,101 +1,113 @@
 # ══════════════════════════════════════════════════════════════════════
-# Synodic — Infrastructure Only (for local development)
+# Synodic — Dev Overlay
 # ══════════════════════════════════════════════════════════════════════
 #
-# Runs ONLY the infrastructure: Postgres, FalkorDB, Redis.
-# All application services run locally from source (hot-reload).
+# Merges with docker-compose.yml to add bind-mounted source and hot-reload
+# to the app services. Infra (postgres / redis / falkordb) is inherited
+# unchanged — the explicit `name:` on volumes below just pins the dev
+# data to separate Docker volumes so a dev stack cannot clobber a prod
+# stack that happens to share the host.
 #
-# Start infrastructure:
-#   docker compose -f docker-compose.dev.yml up -d
-#
-# Stop infrastructure (data preserved):
-#   docker compose -f docker-compose.dev.yml down
-#
-# Wipe all data (fresh start):
-#   docker compose -f docker-compose.dev.yml down -v
-#
-# Then run services locally — see ./dev.sh or the commands below.
+# Usage:
+#   docker compose --env-file .env.dev \
+#     -f docker-compose.yml -f docker-compose.dev.yml up -d
+# (or just `./dev.sh up`)
 # ══════════════════════════════════════════════════════════════════════
 
 name: synodic-dev
 
 services:
 
-  # ── PostgreSQL 16 ────────────────────────────────────────────────
+  # Infra — stable container names so `docker exec synodic-postgres-dev …`
+  # and the preflight library work without guessing the compose-generated
+  # name. Safe because this stack is always project `synodic-dev`.
   postgres:
-    image: postgres:16.4-alpine
     container_name: synodic-postgres-dev
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-synodic}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-synodic}
-      POSTGRES_DB: ${POSTGRES_DB:-synodic}
-      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
-    command:
-      - postgres
-      - -c
-      - max_connections=200
-      - -c
-      - shared_buffers=256MB
-      - -c
-      - log_statement=none
-      - -c
-      - log_min_duration_statement=200
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - postgres_dev_data:/var/lib/postgresql/data
-      - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-synodic} -d ${POSTGRES_DB:-synodic}"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
 
-  # ── FalkorDB (Graph Database) ────────────────────────────────────
-  falkordb:
-    build:
-      context: ./data/quickstart
-      dockerfile: Dockerfile.falkordb
-    container_name: synodic-falkordb-dev
-    restart: unless-stopped
-    ports:
-      - "${FALKORDB_PORT:-6379}:6379"
-      - "${FALKORDB_UI_PORT:-3000}:3000"       # FalkorDB Browser UI
-    environment:
-      FALKORDB_ARGS: THREAD_COUNT 4
-    volumes:
-      - falkordb_dev_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
-
-  # ── Redis 7 (Message Broker) ─────────────────────────────────────
   redis:
-    image: redis:7.4-alpine
     container_name: synodic-redis-dev
-    restart: unless-stopped
-    ports:
-      - "${REDIS_PORT:-6380}:6379"
+
+  falkordb:
+    container_name: synodic-falkordb-dev
+
+  viz-service:
     volumes:
-      - redis_dev_data:/data
-    command: >
-      redis-server
-      --appendonly yes
-      --maxmemory 256mb
-      --maxmemory-policy noeviction
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
+      - ./backend:/app/backend
+    command:
+      - uvicorn
+      - backend.app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/backend
+    environment:
+      # Single-process dev mode: aggregation runs in-process, no proxy
+      # hop to the controlplane. Overrides the prod values.
+      SYNODIC_ROLE: dev
+      AGGREGATION_PROXY_ENABLED: "false"
+      AGGREGATION_DISPATCH_MODE: inprocess
+
+  aggregation-controlplane:
+    volumes:
+      - ./backend:/app/backend
+    # No --reload: the controlplane is a plain `python -m ...` entry
+    # point, not a uvicorn app we can hand --reload to. On code change
+    # run:  ./dev.sh restart aggregation-controlplane
+
+  aggregation-worker:
+    volumes:
+      - ./backend:/app/backend
+    # Same: `./dev.sh restart aggregation-worker` picks up changes.
+
+  graph-service:
+    volumes:
+      - ./backend:/app/backend
+    command:
+      - uvicorn
+      - backend.graph.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --reload
+      - --reload-dir
+      - /app/backend
+
+  frontend:
+    build:
+      target: development
+    command:
+      - npm
+      - run
+      - dev
+      - --
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5173"
+    ports:
+      # Override prod's 3080:80 with vite's 5173:5173
+      - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - ./frontend:/app
+      - ./docs:/docs:ro
+      # Anonymous volume shadows host's node_modules (if any) so the
+      # container's Linux-built modules win over whatever npm install
+      # placed on macOS.
+      - /app/node_modules
+    environment:
+      VITE_PROXY_TARGET: http://viz-service:8000
 
 volumes:
-  postgres_dev_data:
+  # Override the auto-prefixed names (synodic-dev_postgres_data etc.) with
+  # stable explicit names. Keeps existing dev volumes in-place across
+  # the 780-line-dev.sh → overlay migration.
+  postgres_data:
     name: synodic-postgres-dev-data
-  falkordb_dev_data:
-    name: synodic-falkordb-dev-data
-  redis_dev_data:
+  redis_data:
     name: synodic-redis-dev-data
+  falkordb_data:
+    name: synodic-falkordb-dev-data

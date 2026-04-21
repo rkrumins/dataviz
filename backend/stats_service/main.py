@@ -2,8 +2,9 @@ import asyncio
 import logging
 import os
 import json
-from datetime import datetime, timezone
 import sys
+from datetime import datetime, timezone
+from typing import Any
 
 # Configure logging
 logging.basicConfig(
@@ -24,6 +25,30 @@ from backend.app.db.models import WorkspaceDataSourceORM, DataSourcePollingConfi
 from backend.app.db.repositories.stats_repo import upsert_data_source_stats
 from backend.app.registry.provider_registry import provider_registry
 from backend.app.services.context_engine import ContextEngine
+
+
+# Size-adaptive per-data-source timeout. The default 30s is fine for
+# small graphs but times out on 1M+ node graphs. The stats poller needs
+# enough budget to actually complete a full-graph scan; otherwise the
+# Postgres cache never populates and the API falls through to live
+# provider calls that also time out. All values configurable via env.
+_STATS_POLL_TIMEOUT_DEFAULT = float(os.getenv("STATS_POLL_TIMEOUT_SECS", "30"))
+_STATS_POLL_TIMEOUT_LARGE = float(os.getenv("STATS_POLL_TIMEOUT_LARGE_SECS", "600"))
+# "Large" is any graph past this node count.
+_STATS_POLL_LARGE_NODE_THRESHOLD = int(os.getenv("STATS_POLL_LARGE_THRESHOLD", "100000"))
+
+
+def _resolve_poll_timeout(last_known_node_count: int) -> float:
+    """Pick a polling timeout based on prior known graph size.
+
+    Cold start (node_count=0) uses the default — if that fails, next
+    iteration will have a recorded size and can switch to the larger
+    timeout. This gives us graceful degradation without making every
+    poll wait 10 minutes.
+    """
+    if last_known_node_count >= _STATS_POLL_LARGE_NODE_THRESHOLD:
+        return _STATS_POLL_TIMEOUT_LARGE
+    return _STATS_POLL_TIMEOUT_DEFAULT
 
 
 async def poll_data_source(ds_id: str, workspace_id: str):
@@ -121,9 +146,19 @@ async def scheduled_polling_loop():
                     .where(WorkspaceDataSourceORM.is_active == True)
                 )
                 
-                tasks = []
+                # Tuples of (coroutine, per-task-timeout) so each task gets
+                # a timeout sized to its own graph, not a global flat value.
+                tasks: list[tuple[Any, float]] = []
                 now = datetime.now(timezone.utc)
-                
+
+                # Pull known node counts so we can pick a reasonable timeout.
+                # Cold-start entries have no stats yet and get the default.
+                from backend.app.db.models import DataSourceStatsORM as _StatsORM
+                stats_rows = await session.execute(select(_StatsORM))
+                node_counts: dict[str, int] = {
+                    r.data_source_id: (r.node_count or 0) for r in stats_rows.scalars()
+                }
+
                 for ds, config in result.all():
                     # If config is missing, auto-create one with default 5m interval
                     if not config:
@@ -135,10 +170,10 @@ async def scheduled_polling_loop():
                         )
                         session.add(config)
                         await session.commit()
-                        
+
                     if not config.is_enabled:
                         continue
-                        
+
                     # Check if due for polling
                     is_due = False
                     if not config.last_polled_at:
@@ -148,16 +183,17 @@ async def scheduled_polling_loop():
                         elapsed = (now - last_polled).total_seconds()
                         if elapsed >= config.interval_seconds:
                             is_due = True
-                            
+
                     if is_due:
-                        tasks.append(poll_data_source(ds.id, ds.workspace_id))
-                
+                        timeout = _resolve_poll_timeout(node_counts.get(ds.id, 0))
+                        tasks.append((poll_data_source(ds.id, ds.workspace_id), timeout))
+
                 # Execute due polls concurrently outside the session context block
-                
+
             if tasks:
                 logger.info(f"Executing {len(tasks)} polling tasks...")
                 results = await asyncio.gather(
-                    *[asyncio.wait_for(t, timeout=30) for t in tasks],
+                    *[asyncio.wait_for(coro, timeout=t) for coro, t in tasks],
                     return_exceptions=True,
                 )
                 for result in results:

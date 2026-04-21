@@ -44,7 +44,11 @@ services:
     environment:
       FALKORDB_ARGS: THREAD_COUNT 4
     volumes:
-      - falkordb_data:/data
+      # FalkorDB's actual data dir is /var/lib/falkordb/data (the image
+      # symlinks /data/data → there). Mounting the volume at /data would
+      # capture nothing, so runtime graph writes would be lost on every
+      # `compose down`.
+      - falkordb_data:/var/lib/falkordb/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
