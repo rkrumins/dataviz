@@ -10,14 +10,27 @@ import { useState, useMemo } from 'react'
 import {
   X, Sparkles, Database, Loader2, Box, GitBranch, Shield,
   CheckCircle2, Copy, ArrowRight, PenLine, Users, Check, Search, Zap,
+  Clock, RefreshCw, AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyMatchResult, OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
+import type { SchemaStatsFreshness } from '@/features/ontology/lib/ontology-utils'
 import { CoverageRing, MiniBar } from '@/components/admin/AssetOnboardingWizard/steps/CoverageVisuals'
 import { DataSourcePicker } from '../DataSourcePicker'
 
 type Phase = 'confirm' | 'analyzing' | 'recommendations'
+
+/** Threshold above which cached analysis data is considered "stale" in the UI. */
+const STALE_THRESHOLD_SECONDS = 30 * 60  // 30 minutes
+
+function formatAge(seconds: number | null): string {
+  if (seconds === null || seconds < 0) return 'unknown'
+  if (seconds < 60) return `${seconds}s ago`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
+  return `${Math.floor(seconds / 86400)}d ago`
+}
 
 interface SuggestConfirmDialogProps {
   /** @deprecated — use initialDataSourceId instead; kept for backward compat */
@@ -39,7 +52,11 @@ interface SuggestConfirmDialogProps {
     matches: OntologyMatchResult[]
     suggestedEntityCount: number
     suggestedRelCount: number
+    freshness?: SchemaStatsFreshness
   }>
+  /** Trigger a non-blocking background refresh of the schema cache.
+   *  Optional — when omitted, the staleness banner's refresh button is hidden. */
+  onRefreshIntrospection?: (workspaceId: string, dataSourceId: string) => Promise<{ jobId: string }>
   /** Use an existing ontology — receives the picked DS context for assignment */
   onUseExisting: (ontologyId: string, targetWsId: string | null, targetDsId: string | null) => void
   onCloneExisting: (ontologyId: string, targetWsId: string | null, targetDsId: string | null) => void
@@ -58,6 +75,7 @@ export function SuggestConfirmDialog({
   initialWorkspaceId,
   initialDataSourceId,
   onAnalyze,
+  onRefreshIntrospection,
   onUseExisting,
   onCloneExisting,
   onCreateDraft,
@@ -67,6 +85,9 @@ export function SuggestConfirmDialog({
   const [phase, setPhase] = useState<Phase>('confirm')
   const [matches, setMatches] = useState<OntologyMatchResult[]>([])
   const [graphCounts, setGraphCounts] = useState({ entities: 0, rels: 0 })
+  const [freshness, setFreshness] = useState<SchemaStatsFreshness | null>(null)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -112,6 +133,7 @@ export function SuggestConfirmDialog({
       const result = await onAnalyze(pickedWsId, pickedDsId)
       setMatches(result.matches)
       setGraphCounts({ entities: result.suggestedEntityCount, rels: result.suggestedRelCount })
+      setFreshness(result.freshness ?? null)
       setPhase('recommendations')
       // Auto-select the best match if available
       if (result.matches.length > 0) {
@@ -128,6 +150,41 @@ export function SuggestConfirmDialog({
       setPhase('confirm')
     }
   }
+
+  /** Skip analysis entirely — jump to recommendations with no match data.
+   *  For large graphs where Analyze would time out: user can still pick an
+   *  existing ontology by name or create a new draft. No match coverage data
+   *  is shown (would require stats), but Apply still works end-to-end. */
+  function handleSkipAnalysis() {
+    if (!pickedWsId || !pickedDsId) return
+    setMatches([])
+    setGraphCounts({ entities: 0, rels: 0 })
+    setFreshness(null)
+    setPhase('recommendations')
+    // No auto-selection — user picks explicitly.
+  }
+
+  /** Trigger a non-blocking background refresh of the schema cache,
+   *  then re-run analyze when done. */
+  async function handleRefresh() {
+    if (!pickedWsId || !pickedDsId || !onRefreshIntrospection) return
+    setIsRefreshing(true)
+    setRefreshError(null)
+    try {
+      await onRefreshIntrospection(pickedWsId, pickedDsId)
+      // The refresh runs in the background on the server. Re-run analyze
+      // after a brief delay — by then, the cache should be updated.
+      setTimeout(() => {
+        setIsRefreshing(false)
+        void handleAnalyze()
+      }, 2000)
+    } catch (err: unknown) {
+      setIsRefreshing(false)
+      setRefreshError(err instanceof Error ? err.message : 'Refresh failed')
+    }
+  }
+
+  const isStale = freshness?.ageSeconds != null && freshness.ageSeconds > STALE_THRESHOLD_SECONDS
 
   // Sort: Published first (stable, production-ready), then System, then Draft.
   // Within each tier, sort by Jaccard score descending.
@@ -289,6 +346,50 @@ export function SuggestConfirmDialog({
         {/* ── Phase 3: Recommendations ─────────────────────────────── */}
         {phase === 'recommendations' && (
           <div className="flex-1 overflow-y-auto min-h-0">
+            {/* Freshness / staleness banner — only shown when cached data was used */}
+            {freshness && freshness.fromCache && (
+              <div className="px-6 pt-5 pb-0">
+                <div className={cn(
+                  'flex items-center gap-3 px-3 py-2 rounded-lg border text-[11px]',
+                  isStale
+                    ? 'bg-amber-50/50 dark:bg-amber-950/15 border-amber-300/40 dark:border-amber-800/30 text-amber-700 dark:text-amber-300'
+                    : 'bg-black/[0.02] dark:bg-white/[0.02] border-glass-border/60 text-ink-muted',
+                )}>
+                  {isStale ? (
+                    <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+                  ) : (
+                    <Clock className="w-3.5 h-3.5 flex-shrink-0" />
+                  )}
+                  <span className="flex-1">
+                    {isStale ? (
+                      <>Analysis from <span className="font-semibold">{formatAge(freshness.ageSeconds)}</span> — may be outdated.</>
+                    ) : (
+                      <>Analysis refreshed <span className="font-semibold">{formatAge(freshness.ageSeconds)}</span>.</>
+                    )}
+                  </span>
+                  {onRefreshIntrospection && pickedWsId && pickedDsId && (
+                    <button
+                      onClick={handleRefresh}
+                      disabled={isRefreshing || isBusy}
+                      className={cn(
+                        'inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold transition-colors',
+                        isStale
+                          ? 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300'
+                          : 'bg-black/[0.04] dark:bg-white/[0.06] hover:bg-black/[0.08] dark:hover:bg-white/[0.1] text-ink',
+                        (isRefreshing || isBusy) && 'opacity-50 cursor-not-allowed',
+                      )}
+                    >
+                      <RefreshCw className={cn('w-3 h-3', isRefreshing && 'animate-spin')} />
+                      {isRefreshing ? 'Refreshing…' : 'Refresh'}
+                    </button>
+                  )}
+                </div>
+                {refreshError && (
+                  <p className="text-[10px] text-red-500 mt-1 px-1">{refreshError}</p>
+                )}
+              </div>
+            )}
+
             {/* Graph stats banner */}
             <div className="px-6 pt-5 pb-3">
               <div className="px-4 py-3 rounded-xl bg-gradient-to-r from-indigo-500/[0.06] to-purple-500/[0.06] border border-indigo-500/10">
@@ -300,11 +401,19 @@ export function SuggestConfirmDialog({
                       <span className="text-xs text-ink-muted mx-1">—</span>
                     </>
                   )}
-                  <span className="text-xs font-bold text-ink">{graphCounts.entities}</span>
-                  <span className="text-xs text-ink-secondary mr-1">entity type{graphCounts.entities !== 1 ? 's' : ''}</span>
-                  <span className="text-xs text-ink-muted mx-0.5">and</span>
-                  <span className="text-xs font-bold text-ink">{graphCounts.rels}</span>
-                  <span className="text-xs text-ink-secondary">relationship{graphCounts.rels !== 1 ? 's' : ''}</span>
+                  {graphCounts.entities === 0 && graphCounts.rels === 0 ? (
+                    <span className="text-xs text-ink-muted">
+                      Analysis skipped — pick an existing semantic layer below or create a new draft.
+                    </span>
+                  ) : (
+                    <>
+                      <span className="text-xs font-bold text-ink">{graphCounts.entities}</span>
+                      <span className="text-xs text-ink-secondary mr-1">entity type{graphCounts.entities !== 1 ? 's' : ''}</span>
+                      <span className="text-xs text-ink-muted mx-0.5">and</span>
+                      <span className="text-xs font-bold text-ink">{graphCounts.rels}</span>
+                      <span className="text-xs text-ink-secondary">relationship{graphCounts.rels !== 1 ? 's' : ''}</span>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
@@ -737,19 +846,35 @@ export function SuggestConfirmDialog({
               </button>
 
               {phase === 'confirm' && (
-                <button
-                  onClick={handleAnalyze}
-                  disabled={!pickedWsId || !pickedDsId}
-                  className={cn(
-                    'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm',
-                    'bg-gradient-to-r from-indigo-500 to-purple-500 text-white',
-                    'hover:from-indigo-600 hover:to-purple-600 shadow-indigo-500/25',
-                    (!pickedWsId || !pickedDsId) && 'opacity-50 cursor-not-allowed',
-                  )}
-                >
-                  <Sparkles className="w-4 h-4" />
-                  Analyze Graph
-                </button>
+                <>
+                  {/* Skip analysis — for large graphs where Analyze would
+                      take too long. User can still pick any existing
+                      ontology by name or create a blank draft. */}
+                  <button
+                    onClick={handleSkipAnalysis}
+                    disabled={!pickedWsId || !pickedDsId}
+                    title="Skip the graph scan and pick a semantic layer manually. Useful for very large graphs."
+                    className={cn(
+                      'flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium text-ink-secondary border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors',
+                      (!pickedWsId || !pickedDsId) && 'opacity-50 cursor-not-allowed',
+                    )}
+                  >
+                    Skip Analysis
+                  </button>
+                  <button
+                    onClick={handleAnalyze}
+                    disabled={!pickedWsId || !pickedDsId}
+                    className={cn(
+                      'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm',
+                      'bg-gradient-to-r from-indigo-500 to-purple-500 text-white',
+                      'hover:from-indigo-600 hover:to-purple-600 shadow-indigo-500/25',
+                      (!pickedWsId || !pickedDsId) && 'opacity-50 cursor-not-allowed',
+                    )}
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    Analyze Graph
+                  </button>
+                </>
               )}
 
               {phase === 'analyzing' && (

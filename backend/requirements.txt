@@ -26,3 +26,5 @@ httpx>=0.26.0            # DataHub GraphQL HTTP client + async test client
 
 # Structured logging
 python-json-logger>=2.0.7
+
+greenlet
