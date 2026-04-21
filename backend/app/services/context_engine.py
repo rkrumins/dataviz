@@ -221,10 +221,24 @@ class ContextEngine:
             ):
                 return self._resolved_ontology_cache
 
-            # Provider introspection — graceful degradation if provider is unreachable
+            # Provider introspection — graceful degradation if provider is unreachable.
+            # Outer timeout caps the aggregate introspection call (which may issue
+            # 4-5 internal Cypher queries). Per-query timeouts from the provider
+            # layer fire first in most cases; this is a defense-in-depth backstop.
+            import os as _os
+            _INTROSPECTION_TIMEOUT = float(_os.getenv("ONTOLOGY_INTROSPECTION_TIMEOUT", "8"))
             introspected = None
             try:
-                introspected = await self.provider.get_ontology_metadata()
+                introspected = await asyncio.wait_for(
+                    self.provider.get_ontology_metadata(),
+                    timeout=_INTROSPECTION_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Provider introspection timed out (get_ontology_metadata) after %.0fs — "
+                    "proceeding with empty introspection data.",
+                    _INTROSPECTION_TIMEOUT,
+                )
             except Exception as exc:
                 logger.warning(
                     "Provider introspection failed (get_ontology_metadata): %s — "

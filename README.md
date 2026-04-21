@@ -1,32 +1,58 @@
-# synodic
+# Synodic
 
-## FalkorDB Graph Provider (Persistent Backend)
+Graph metadata + lineage platform. Backend in Python (FastAPI), frontend in React, graph store in FalkorDB.
 
-To use FalkorDB as the graph backend instead of the in-memory mock:
+## Three paths to get running
 
-1. **Start FalkorDB** (Docker):
-   ```bash
-   docker run -d -p 6379:6379 --name falkordb falkordb/falkordb
-   ```
+### 1. Contributor — edit source locally
 
-2. **Seed the graph** (optional, for demo data):
-   ```bash
-   cd /path/to/synodic
-   python -m backend.scripts.seed_falkordb
-   ```
-   Or with a smaller sample: `python -m backend.scripts.seed_falkordb --max-nodes 1000 --max-edges 2000`
+Backend/frontend from source with hot-reload; infra in Docker.
 
-3. **Run the backend** with FalkorDB:
-   ```bash
-   GRAPH_PROVIDER=falkordb uvicorn backend.app.main:app --port 8001 --reload
-   ```
+```bash
+cp .env.example .env.dev
+./dev.sh              # starts infra + prints next steps
+```
 
-### Environment Variables
+Full guide: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-| Variable | Default | Description |
-|----------|---------|--------------|
-| `GRAPH_PROVIDER` | `mock` | `mock` or `falkordb` |
-| `FALKORDB_HOST` | `localhost` | FalkorDB/Redis host |
-| `FALKORDB_PORT` | `6379` | FalkorDB/Redis port |
-| `FALKORDB_GRAPH_NAME` | `nexus` | Graph name in FalkorDB |
-| `FALKORDB_SEED_FILE` | (none) | Optional JSON path to seed on empty graph |
+### 2. Self-host — run on a VM
+
+Everything in containers; persistent volumes; auto-restart on VM reboot.
+
+```bash
+cp .env.prod.example .env
+$EDITOR .env          # replace REPLACE_ME values
+./deploy.sh up
+```
+
+Full guide: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+### 3. Quickstart — zero-config demo
+
+Pre-seeded SQLite + FalkorDB for a quick look:
+
+```bash
+docker compose -f docker-compose.quickstart.yml up --build
+```
+
+Access:
+- Frontend: http://localhost:3080
+- API docs: http://localhost:8000/docs
+- Login: `admin@synodic.local` / `admin123`
+
+## Diagnostics
+
+Both runners ship with `doctor`, `status`, and `repair` subcommands — they check environment, ports, role/db state, and orphan containers. If something feels off:
+
+```bash
+./dev.sh doctor       # local dev
+./deploy.sh doctor    # self-host
+```
+
+## Documentation
+
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — contributor guide
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — self-host operator guide
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — system overview
+- [docs/BACKEND.md](docs/BACKEND.md) — backend internals
+- [docs/FRONTEND.md](docs/FRONTEND.md) — frontend internals

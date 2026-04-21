@@ -428,6 +428,56 @@ def _is_transient_db_error(exc: BaseException) -> bool:
     return False
 
 
+def _permanent_bootstrap_reason(exc: BaseException) -> str | None:
+    """If the error is a known permanent bootstrap failure, return a short
+    identifier; otherwise None. Used to surface actionable recovery hints
+    instead of stack traces.
+    """
+    msg = str(exc).lower()
+    if "role" in msg and "does not exist" in msg:
+        return "role_missing"
+    if "database" in msg and "does not exist" in msg:
+        return "database_missing"
+    if "password authentication failed" in msg:
+        return "auth_failed"
+    return None
+
+
+_BOOTSTRAP_RECOVERY_HINTS: dict[str, str] = {
+    "role_missing": (
+        "Postgres role does not exist. Your data volume is likely stale "
+        "(initialized earlier with different credentials, or init failed). "
+        "Recover:\n"
+        "  Local dev:   ./dev.sh repair\n"
+        "  Self-host:   docker compose down -v && docker compose up -d   # WIPES DATA"
+    ),
+    "database_missing": (
+        "Postgres database does not exist. Same fix as missing role:\n"
+        "  Local dev:   ./dev.sh repair\n"
+        "  Self-host:   docker compose down -v && docker compose up -d   # WIPES DATA"
+    ),
+    "auth_failed": (
+        "Postgres authentication failed. POSTGRES_PASSWORD in your env "
+        "doesn't match the password stored in the Postgres data volume.\n"
+        "  Local dev:  check .env.dev matches the volume; else ./dev.sh reset\n"
+        "  Self-host:  check .env POSTGRES_PASSWORD matches; if changed intentionally, "
+        "either reset (wipes data) or `ALTER ROLE ... PASSWORD ...` via psql"
+    ),
+}
+
+
+class BootstrapError(RuntimeError):
+    """Raised when a permanent DB bootstrap failure is detected. Carries a
+    short reason code so the lifespan can tag the degraded state precisely.
+    """
+
+    def __init__(self, reason: str, original: BaseException) -> None:
+        hint = _BOOTSTRAP_RECOVERY_HINTS.get(reason, "")
+        super().__init__(f"{hint}\n\nOriginal error: {original}" if hint else str(original))
+        self.reason = reason
+        self.original = original
+
+
 async def init_db() -> None:
     """Apply Alembic migrations and seed minimal singleton rows.
 
@@ -457,6 +507,10 @@ async def init_db() -> None:
     # this schema are created by Alembic/create_all, but the schema
     # itself must exist first. This is idempotent and safe from any
     # process (viz-service, control plane, worker).
+    #
+    # Also doubles as the bootstrap probe: if the role or database is
+    # missing we fail fast here with an actionable message instead of
+    # burning the 60s Alembic retry budget on a permanent error.
     try:
         sa_text_mod = __import__("sqlalchemy").text
         engine = get_engine(PoolRole.ADMIN)
@@ -464,6 +518,12 @@ async def init_db() -> None:
             await conn.execute(sa_text_mod("CREATE SCHEMA IF NOT EXISTS aggregation"))
         logger.info("Aggregation schema ready")
     except Exception as exc:
+        reason = _permanent_bootstrap_reason(exc)
+        if reason is not None:
+            err = BootstrapError(reason, exc)
+            logger.error("Bootstrap failed (%s):\n%s", reason, err)
+            raise err from exc
+        # Transient or unrelated — continue; Alembic retry will surface it.
         logger.warning("Aggregation schema creation warning: %s", exc)
 
     # ── Alembic upgrade with bounded retry ──────────────────────────
@@ -486,6 +546,11 @@ async def init_db() -> None:
             break
         except Exception as exc:
             remaining = deadline - _time.monotonic()
+            reason = _permanent_bootstrap_reason(exc)
+            if reason is not None:
+                err = BootstrapError(reason, exc)
+                logger.error("Alembic bootstrap failed (%s):\n%s", reason, err)
+                raise err from exc
             if not _is_transient_db_error(exc) or remaining <= 0:
                 if remaining <= 0:
                     logger.error(
@@ -502,6 +567,24 @@ async def init_db() -> None:
             )
             await _asyncio.sleep(sleep_for)
             delay = min(delay * 2, 10.0)
+
+    # ── Fallback: ensure aggregation tables exist ────────────────────
+    # The aggregation schema was created above. Now ensure its tables
+    # exist even if Alembic had a partial failure or the migration chain
+    # was broken. checkfirst=True makes this idempotent (~2ms cost).
+    try:
+        from backend.app.services.aggregation import models as _agg_models  # noqa: F401
+        _admin_engine = get_engine(PoolRole.ADMIN)
+        async with _admin_engine.begin() as _agg_conn:
+            _agg_tables = [
+                t for t in Base.metadata.tables.values()
+                if getattr(t, "schema", None) == "aggregation"
+            ]
+            for _t in _agg_tables:
+                await _agg_conn.run_sync(lambda sync_conn, tbl=_t: tbl.create(sync_conn, checkfirst=True))
+        logger.info("Aggregation tables verified (%d tables)", len(_agg_tables))
+    except Exception as exc:
+        logger.warning("Aggregation table fallback creation warning: %s", exc)
 
     # ── Seed singleton rows that aren't covered by ORM defaults ──────
     # announcement_config has a CHECK(id=1) constraint and needs an

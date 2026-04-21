@@ -277,12 +277,19 @@ class AggregationService:
 
         # Check for drift using the aggregation-owned fingerprint
         drift = False
+        _DRIFT_TIMEOUT = float(__import__("os").getenv("SCHEDULER_DRIFT_CHECK_TIMEOUT", "5"))
         if is_ready and state.graph_fingerprint:
             try:
-                provider = await self._registry.get_provider_for_workspace(
-                    state.workspace_id, session, data_source_id=ds_id,
+                provider = await asyncio.wait_for(
+                    self._registry.get_provider_for_workspace(
+                        state.workspace_id, session, data_source_id=ds_id,
+                    ),
+                    timeout=_DRIFT_TIMEOUT,
                 )
-                current_fp = await compute_graph_fingerprint(provider)
+                current_fp = await asyncio.wait_for(
+                    compute_graph_fingerprint(provider),
+                    timeout=_DRIFT_TIMEOUT,
+                )
                 drift = not fingerprints_match(state.graph_fingerprint, current_fp)
             except Exception:
                 pass  # Can't check drift — don't block
@@ -695,11 +702,18 @@ class AggregationService:
         if not state:
             raise NotFoundError(f"Data source {ds_id} not found in aggregation state")
 
+        _DRIFT_TIMEOUT = float(__import__("os").getenv("SCHEDULER_DRIFT_CHECK_TIMEOUT", "5"))
         try:
-            provider = await self._registry.get_provider_for_workspace(
-                state.workspace_id, session, data_source_id=ds_id,
+            provider = await asyncio.wait_for(
+                self._registry.get_provider_for_workspace(
+                    state.workspace_id, session, data_source_id=ds_id,
+                ),
+                timeout=_DRIFT_TIMEOUT,
             )
-            current_fp = await compute_graph_fingerprint(provider)
+            current_fp = await asyncio.wait_for(
+                compute_graph_fingerprint(provider),
+                timeout=_DRIFT_TIMEOUT,
+            )
         except Exception as e:
             logger.warning("Failed to compute fingerprint for drift check: %s", e)
             return DriftCheckResponse(

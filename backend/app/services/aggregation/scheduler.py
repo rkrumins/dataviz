@@ -70,12 +70,23 @@ class AggregationScheduler:
                 )
             )
 
+            # Per-provider timeout: prevent a slow/hung provider from
+            # blocking the scheduler (and, by extension, the API event loop
+            # when running in-process).
+            _DRIFT_TIMEOUT = float(os.getenv("SCHEDULER_DRIFT_CHECK_TIMEOUT", "5"))
+
             for state in result.scalars():
                 try:
-                    provider = await self._registry.get_provider_for_workspace(
-                        state.workspace_id, session, data_source_id=state.data_source_id,
+                    provider = await asyncio.wait_for(
+                        self._registry.get_provider_for_workspace(
+                            state.workspace_id, session, data_source_id=state.data_source_id,
+                        ),
+                        timeout=_DRIFT_TIMEOUT,
                     )
-                    current_fp = await compute_graph_fingerprint(provider)
+                    current_fp = await asyncio.wait_for(
+                        compute_graph_fingerprint(provider),
+                        timeout=_DRIFT_TIMEOUT,
+                    )
 
                     if not fingerprints_match(state.graph_fingerprint, current_fp):
                         logger.info(
@@ -86,7 +97,7 @@ class AggregationScheduler:
                         # Note: we do NOT change aggregation_status here.
                         # The frontend polls for drift via the readiness endpoint.
                         # The user decides whether to re-aggregate.
-                except Exception as e:
+                except (asyncio.TimeoutError, Exception) as e:
                     logger.warning(
                         "Drift check failed for data source %s: %s",
                         state.data_source_id, e,
