@@ -37,15 +37,30 @@ class AggregationEventListener:
         self._running = True
         logger.info("Aggregation event listener starting on channel '%s'", EVENTS_CHANNEL)
 
+        import os
+        _SUBSCRIBE_TIMEOUT = float(os.getenv("EVENT_LISTENER_TIMEOUT", "10"))
+
         while self._running:
             try:
                 self._pubsub = self._redis.pubsub()
-                await self._pubsub.subscribe(EVENTS_CHANNEL)
+                await asyncio.wait_for(
+                    self._pubsub.subscribe(EVENTS_CHANNEL),
+                    timeout=_SUBSCRIBE_TIMEOUT,
+                )
                 logger.info("Subscribed to '%s'", EVENTS_CHANNEL)
 
-                async for message in self._pubsub.listen():
-                    if not self._running:
-                        break
+                # Poll-based listen with timeout instead of blocking
+                # `async for` iterator. Prevents silent hang if Redis
+                # goes down without raising an exception.
+                while self._running:
+                    message = await asyncio.wait_for(
+                        self._pubsub.get_message(
+                            ignore_subscribe_messages=True, timeout=1.0,
+                        ),
+                        timeout=_SUBSCRIBE_TIMEOUT,
+                    )
+                    if message is None:
+                        continue
                     if message["type"] != "message":
                         continue
 

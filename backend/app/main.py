@@ -9,7 +9,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from starlette.responses import JSONResponse
 
 from .api.v1.api import api_router
-from .db.engine import init_db, close_db, get_async_session, get_jobs_session
+from .db.engine import init_db, close_db, get_async_session, get_jobs_session, BootstrapError
 from .db.seed_templates import seed_templates
 from .db.repositories import user_repo
 from .db.repositories.refresh_token_repo import make_refresh_store
@@ -37,13 +37,104 @@ except Exception:  # pragma: no cover - redis is part of runtime deps
 # Lifespan                                                             #
 # ------------------------------------------------------------------ #
 
+async def _degraded_recovery_loop(_app: FastAPI, interval: float = 15.0) -> None:
+    """Background task: probe the management DB every `interval` seconds.
+    On first successful probe, clear the degraded flag. We do NOT re-run
+    seeds / auth / aggregation init — the operator should restart the
+    service for full functionality. The flag clears so that DB-backed
+    endpoints stop 503-ing and the health endpoint reports healthy.
+    """
+    from .db.engine import get_engine
+    from sqlalchemy import text as _sa_text
+
+    logger.info(
+        "Degraded-mode recovery loop started (interval=%.0fs, reason=%s)",
+        interval, getattr(_app.state, "degraded_reason", "unknown"),
+    )
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            engine = get_engine()
+            async with engine.connect() as conn:
+                await conn.execute(_sa_text("SELECT 1"))
+            _app.state.degraded = False
+            prev_reason = getattr(_app.state, "degraded_reason", None)
+            _app.state.degraded_reason = None
+            logger.info(
+                "Recovery complete — transitioned from degraded to healthy "
+                "(was: %s). Restart the service to rerun bootstrap (seeds, "
+                "admin, aggregation) for full functionality.",
+                prev_reason,
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Degraded recovery probe failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Startup / shutdown lifecycle."""
+    """Startup / shutdown lifecycle.
+
+    If bootstrap (DB migration, seeds, auth init) fails, the app starts in
+    degraded mode: `app.state.degraded = True` and a background task
+    probes the DB periodically. DB-backed endpoints will surface 503s via
+    the existing OperationalError handler; the health endpoint reports
+    degraded explicitly. The operator can fix the DB (e.g. `./dev.sh
+    repair`) and either restart or wait for the recovery loop to clear
+    the flag.
+    """
     configure_json_logging()
 
+    _app.state.degraded = False
+    _app.state.degraded_reason = None
+    _app.state._recovery_task = None
+
     # 1. Initialise management DB tables (idempotent — safe to run every restart)
-    await init_db()
+    try:
+        await init_db()
+    except BootstrapError as exc:
+        _app.state.degraded = True
+        _app.state.degraded_reason = exc.reason
+        logger.error(
+            "Bootstrap failed — starting in degraded mode (reason=%s):\n%s",
+            exc.reason, exc,
+        )
+        _app.state._recovery_task = asyncio.create_task(
+            _degraded_recovery_loop(_app)
+        )
+        yield
+        # Shutdown path for degraded start
+        if _app.state._recovery_task and not _app.state._recovery_task.done():
+            _app.state._recovery_task.cancel()
+            try:
+                await _app.state._recovery_task
+            except asyncio.CancelledError:
+                pass
+        await close_db()
+        logger.info("Synodic Visualization Service stopped (was degraded)")
+        return
+    except Exception as exc:
+        _app.state.degraded = True
+        _app.state.degraded_reason = "database_unavailable"
+        logger.error(
+            "Bootstrap failed with unexpected error — starting in degraded mode: %s",
+            exc,
+        )
+        _app.state._recovery_task = asyncio.create_task(
+            _degraded_recovery_loop(_app)
+        )
+        yield
+        if _app.state._recovery_task and not _app.state._recovery_task.done():
+            _app.state._recovery_task.cancel()
+            try:
+                await _app.state._recovery_task
+            except asyncio.CancelledError:
+                pass
+        await close_db()
+        logger.info("Synodic Visualization Service stopped (was degraded)")
+        return
 
     # 2. Seed Quick Start Templates (idempotent — skips if already present)
     async with get_async_session() as session:
@@ -393,15 +484,39 @@ app.add_exception_handler(_RedisTimeoutError, _provider_error_handler)
 # ------------------------------------------------------------------ #
 
 class _TimeoutMiddleware:
-    """ASGI middleware: abort any HTTP request exceeding *timeout* seconds."""
-    def __init__(self, app, timeout: float = 60.0):
+    """ASGI middleware: tiered per-path timeout for HTTP requests.
+
+    Tiers (first substring match wins):
+        /health*                    ->  5s  (probes must be fast)
+        /graph/                     -> 15s  (read queries, bounded by per-query timeouts)
+        /aggregation/               -> 45s  (write-heavy operations)
+        everything else             -> 30s  (default — halved from the old flat 60s)
+    """
+
+    def __init__(self, app):
         self.app = app
-        self.timeout = timeout
+        # Read once at startup — see backend/app/config/resilience.py for reference.
+        self._tiers: list[tuple[str, float]] = [
+            ("/health",        float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))),
+            ("/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "15"))),
+            ("/aggregation/",  float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
+        ]
+        self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
+
+    def _resolve_timeout(self, path: str) -> float:
+        for pattern, timeout in self._tiers:
+            if pattern in path:
+                return timeout
+        return self._default_timeout
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+
+        path = scope.get("path", "")
+        timeout = self._resolve_timeout(path)
+
         response_started = False
         original_send = send
 
@@ -413,22 +528,23 @@ class _TimeoutMiddleware:
 
         try:
             await asyncio.wait_for(
-                self.app(scope, receive, tracked_send), timeout=self.timeout,
+                self.app(scope, receive, tracked_send), timeout=timeout,
             )
         except asyncio.TimeoutError:
             if not response_started:
                 response = JSONResponse(
-                    {"detail": "Request timed out — the graph provider may be unreachable."},
+                    {"detail": f"Request timed out after {timeout:.0f}s — the graph provider may be unreachable."},
                     status_code=504,
                 )
                 await response(scope, receive, original_send)
-            # If response already started, we can't send a new one — just log
             else:
-                logger.warning("Request timed out after response started: %s",
-                               scope.get("path", "?"))
+                logger.warning(
+                    "Request timed out after response started: %s (timeout=%.0fs)",
+                    path, timeout,
+                )
 
 # Must be added FIRST so it wraps all other middleware.
-app.add_middleware(_TimeoutMiddleware, timeout=60.0)
+app.add_middleware(_TimeoutMiddleware)
 
 # ------------------------------------------------------------------ #
 # Middleware (outermost → innermost order)                             #
@@ -486,13 +602,27 @@ app.include_router(db_metrics_router)
 @app.get("/api/v1/health", tags=["health"], include_in_schema=False)
 async def health_check():
     """
-    Management-plane health check — only the management DB is required for the
-    application to be considered healthy.
+    Management-plane health check. Always returns HTTP 200 so container
+    liveness probes pass even when the DB is temporarily unreachable
+    (degraded mode). The `status` field carries the real verdict:
+
+      - "healthy"   — fully operational
+      - "degraded"  — lifespan bootstrap failed; recovery loop is probing;
+                      DB-backed endpoints will 503 until recovery clears
+      - "unhealthy" — bootstrap succeeded historically but the DB is
+                      unreachable right now
     """
     from .db.engine import get_engine
     from sqlalchemy import text
 
-    result: dict = {"status": "healthy", "version": "0.2.0", "dependencies": {}}
+    degraded = getattr(app.state, "degraded", False)
+    degraded_reason = getattr(app.state, "degraded_reason", None)
+
+    result: dict = {
+        "status": "healthy",
+        "version": "0.2.0",
+        "dependencies": {},
+    }
 
     # Management DB ping
     try:
@@ -503,6 +633,10 @@ async def health_check():
     except Exception as exc:
         result["dependencies"]["management_db"] = f"unhealthy: {exc}"
         result["status"] = "unhealthy"
+
+    if degraded:
+        result["status"] = "degraded"
+        result["reason"] = degraded_reason or "database_unavailable"
 
     return result
 

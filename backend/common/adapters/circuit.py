@@ -233,6 +233,12 @@ class CircuitBreakerProxy:
     reset_timeout:
         Seconds the breaker stays open before probing the downstream again
         (half-open state). Also surfaced as the ``Retry-After`` hint.
+    method_timeout:
+        Per-method deadline in seconds. When > 0, every guarded async call
+        is wrapped in ``asyncio.wait_for()`` so hung connections are
+        converted into ``TimeoutError``s that count toward the failure
+        budget. Set to 0 (default) to disable. Recommended: 10s for
+        typical graph-provider workloads.
     extra_ignored_exceptions:
         Logical-error classes raised by *this* adapter that should not
         affect breaker state on top of the defaults.
@@ -245,10 +251,18 @@ class CircuitBreakerProxy:
         *,
         fail_max: int = 5,
         reset_timeout: int = 30,
+        method_timeout: float = 0,
         extra_ignored_exceptions: Iterable[type[BaseException]] = (),
     ) -> None:
         self._target = target
         self._name = name
+        # Per-method deadline: if > 0, every guarded async call is wrapped in
+        # asyncio.wait_for(). This converts hung connections (which never
+        # complete and therefore never trip the breaker) into TimeoutErrors
+        # that DO count toward the failure budget. Without this, a half-open
+        # TCP connection can block the event loop for the full socket_timeout
+        # (10-30s) on every request, starving healthy providers.
+        self._method_timeout: float = method_timeout
         self._ignored = tuple(_DEFAULT_IGNORED_EXCEPTIONS) + tuple(extra_ignored_exceptions)
         self._breaker = _AsyncCircuitBreaker(
             name=name,
@@ -318,7 +332,13 @@ class CircuitBreakerProxy:
                 ) from None
 
             try:
-                result = await attr(*args, **kwargs)
+                if proxy._method_timeout > 0:
+                    result = await asyncio.wait_for(
+                        attr(*args, **kwargs),
+                        timeout=proxy._method_timeout,
+                    )
+                else:
+                    result = await attr(*args, **kwargs)
             except proxy._ignored:
                 # Logical errors — re-raise untouched; breaker does not count these.
                 raise

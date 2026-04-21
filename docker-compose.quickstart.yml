@@ -19,6 +19,8 @@
 #   FalkorDB:  http://localhost:3000 (browser UI)
 # ══════════════════════════════════════════════════════════════════════
 
+name: synodic-quickstart
+
 services:
 
   # ── FalkorDB with pre-loaded graph data ─────────────────────────────

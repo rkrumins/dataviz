@@ -26,10 +26,12 @@ export class CircuitBreaker {
     if (this.state === 'closed') return true
 
     if (this.state === 'open') {
+      const effectiveReset = this.dynamicResetMs ?? this.resetTimeoutMs
       // Check if enough time has passed to try a probe
-      if (Date.now() - this.lastFailureTime >= this.resetTimeoutMs) {
+      if (Date.now() - this.lastFailureTime >= effectiveReset) {
         this.state = 'half-open'
         this.halfOpenPending = false
+        this.dynamicResetMs = undefined // reset to default for next cycle
       } else {
         return false
       }
@@ -52,16 +54,26 @@ export class CircuitBreaker {
     this.halfOpenPending = false
   }
 
-  /** Record a failed response — may open the circuit. */
-  recordFailure(): void {
+  /** Record a failed response — may open the circuit.
+   *  @param retryAfterMs  Optional server-provided retry delay (from Retry-After header).
+   *                       When provided and the breaker opens, overrides the default resetTimeoutMs
+   *                       so the frontend waits at least as long as the backend suggests. */
+  recordFailure(retryAfterMs?: number): void {
     this.consecutiveFailures++
     this.lastFailureTime = Date.now()
     this.halfOpenPending = false
 
     if (this.consecutiveFailures >= this.failureThreshold) {
       this.state = 'open'
+      // Honor the backend's Retry-After hint if longer than our default
+      if (retryAfterMs && retryAfterMs > this.resetTimeoutMs) {
+        this.dynamicResetMs = retryAfterMs
+      }
     }
   }
+
+  /** Effective reset timeout — may be extended by a Retry-After hint. */
+  private dynamicResetMs: number | undefined
 
   /** Force-reset to closed (e.g. on health recovery). */
   reset(): void {
@@ -73,9 +85,11 @@ export class CircuitBreaker {
   /** Current state — useful for UI indicators. */
   getState(): CircuitState {
     // Re-evaluate open → half-open on read
-    if (this.state === 'open' && Date.now() - this.lastFailureTime >= this.resetTimeoutMs) {
+    const effectiveReset = this.dynamicResetMs ?? this.resetTimeoutMs
+    if (this.state === 'open' && Date.now() - this.lastFailureTime >= effectiveReset) {
       this.state = 'half-open'
       this.halfOpenPending = false
+      this.dynamicResetMs = undefined
     }
     return this.state
   }
