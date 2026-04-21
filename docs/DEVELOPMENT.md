@@ -4,6 +4,31 @@ Local-dev reference for contributors iterating on Synodic source code.
 
 For self-hosting on a VM, see [DEPLOYMENT.md](DEPLOYMENT.md) instead.
 
+## Mental model — two workflows, never both
+
+```
+┌───────────────────────────┬────────────────────────────┐
+│ dev.sh     (source iter)  │ deploy.sh  (VM self-host)  │
+├───────────────────────────┼────────────────────────────┤
+│ docker-compose.dev.yml    │ docker-compose.yml         │
+│ compose project: synodic-dev   compose project: synodic│
+│ infra only in Docker      │ everything in Docker       │
+│ apps run from .venv + npm │ apps built as images       │
+│ volumes: synodic-*-dev-data    volumes: synodic_*_data │
+│ env file: .env.dev        │ env file: .env             │
+└───────────────────────────┴────────────────────────────┘
+```
+
+The two stacks use **different compose project names** and **different volume names**, so they can coexist without data collisions. Mixing them (running `deploy.sh` while `dev.sh infra` is up, or vice versa) causes port conflicts — pick one.
+
+### Three capabilities you care about
+
+| Capability | Dev workflow (`dev.sh`) | Self-host workflow (`deploy.sh`) |
+|---|---|---|
+| **Rebuild images** | Only `falkordb` has a build context; `./dev.sh infra` rebuilds it when source under `data/quickstart/` changes. Apps run from source — no image build needed. | `./deploy.sh up --build` (rebuild + start) or `./deploy.sh update` (git pull + rebuild + start) |
+| **Start stopped containers** | `./dev.sh infra` — `docker compose up -d` resumes existing containers without recreating them | `./deploy.sh up` — same semantics |
+| **Persistent data** | Named volumes `synodic-postgres-dev-data`, `synodic-falkordb-dev-data`, `synodic-redis-dev-data` survive `stop` / `restart` / host reboot. Only wiped by `./dev.sh reset`. | Named volumes `synodic_postgres_data`, `synodic_falkordb_data`, `synodic_redis_data`. Backed up via `./deploy.sh backup`, wiped by `./deploy.sh restore` or `docker compose down -v`. |
+
 ## Prerequisites
 
 - Docker Engine 20+ / Docker Desktop (for the infrastructure containers)

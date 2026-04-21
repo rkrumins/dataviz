@@ -1,8 +1,11 @@
 from typing import List, Optional, Any
+import asyncio
 import hashlib
 import json
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
+import uuid
+from datetime import datetime, timezone
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Body, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -503,31 +506,70 @@ async def save_graph(
     return {"status": "success", "message": "Graph saved successfully"}
 
 
-@router.get("/introspection", response_model=GraphSchemaStats, response_model_by_alias=True)
+def _freshness_headers(updated_at_iso: Optional[str]) -> dict:
+    """Build X-Cache-* headers so the frontend can show a staleness banner.
+
+    Returns empty dict if no timestamp. Otherwise emits:
+      * X-Cache-Updated-At: ISO timestamp of last successful refresh
+      * X-Cache-Age-Seconds: integer seconds since refresh
+      * X-Cache-Source: "postgres" (persisted) or "live" (just computed)
+    """
+    if not updated_at_iso:
+        return {"X-Cache-Source": "live"}
+    try:
+        from datetime import datetime, timezone
+        ts = datetime.fromisoformat(updated_at_iso)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age = int((datetime.now(timezone.utc) - ts).total_seconds())
+        return {
+            "X-Cache-Updated-At": updated_at_iso,
+            "X-Cache-Age-Seconds": str(max(0, age)),
+            "X-Cache-Source": "postgres",
+        }
+    except Exception:
+        return {"X-Cache-Source": "postgres"}
+
+
+@router.get("/introspection")
 async def get_graph_introspection(
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     connectionId: Optional[str] = Query(None, description="Legacy connection ID."),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Get detailed schema statistics for the graph."""
+    """Get detailed schema statistics for the graph.
+
+    Prefers the Postgres stats cache (populated by the background stats
+    service). Falls back to a live provider call only when no cache
+    exists. Emits ``X-Cache-*`` response headers so the frontend can
+    surface cache freshness in the UI.
+    """
     from backend.app.db.repositories.stats_repo import get_data_source_stats
 
-    # 1. Try DB cache first (no provider needed)
+    # 1. Try DB cache first (no provider needed — always fast, even on 1M+ graphs)
     ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
     if ds_id:
         try:
             stats_cache = await get_data_source_stats(session, ds_id)
             if stats_cache and stats_cache.schema_stats and stats_cache.schema_stats != "{}":
-                return GraphSchemaStats.model_validate(json.loads(stats_cache.schema_stats))
+                payload = GraphSchemaStats.model_validate(json.loads(stats_cache.schema_stats))
+                return JSONResponse(
+                    content=payload.model_dump(by_alias=True),
+                    headers=_freshness_headers(stats_cache.updated_at),
+                )
         except Exception:
             pass  # Cache lookup or parse failed — fall through to provider
 
-    # 2. Only try provider if cache miss.
+    # 2. Only try provider if cache miss (first-ever request for this data source).
     engine = await ContextEngine.for_workspace(
         ws_id, provider_manager, session, data_source_id=dataSourceId
     ) if ws_id else await ContextEngine.for_connection(connectionId, provider_manager, session)
-    return await engine.get_schema_stats()
+    result = await engine.get_schema_stats()
+    return JSONResponse(
+        content=result.model_dump(by_alias=True),
+        headers=_freshness_headers(None),
+    )
 
 
 @router.get("/metadata/ontology", deprecated=True)
@@ -581,12 +623,17 @@ def _schema_etag(payload: dict) -> str:
     return f'W/"{digest}"'
 
 
-def _schema_response(payload: dict, request: Request) -> Response:
+def _schema_response(
+    payload: dict, request: Request, *, freshness: Optional[dict] = None,
+) -> Response:
     """Build a cache-aware JSONResponse with ETag/If-None-Match handling.
 
     Returns 304 Not Modified with an empty body when the client's
     If-None-Match header matches the computed ETag. Otherwise returns
     200 with the payload and the ETag header attached.
+
+    ``freshness`` — optional dict of ``X-Cache-*`` headers (see
+    :func:`_freshness_headers`) to surface cache staleness to the client.
     """
     etag = _schema_etag(payload)
     if_none_match = request.headers.get("if-none-match")
@@ -594,6 +641,8 @@ def _schema_response(payload: dict, request: Request) -> Response:
         "ETag": etag,
         "Cache-Control": "private, max-age=0, must-revalidate",
     }
+    if freshness:
+        headers.update(freshness)
     if if_none_match and if_none_match == etag:
         return Response(status_code=304, headers=headers)
     return JSONResponse(content=payload, headers=headers)
@@ -618,22 +667,138 @@ async def get_graph_schema(
     """
     from backend.app.db.repositories.stats_repo import get_data_source_stats
 
-    # 1. Try DB cache first (no provider needed)
+    # 1. Try DB cache first (no provider needed — always fast, even on 1M+ graphs)
     ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
     if ds_id:
         try:
             stats_cache = await get_data_source_stats(session, ds_id)
             if stats_cache and stats_cache.graph_schema and stats_cache.graph_schema != "{}":
-                return _schema_response(json.loads(stats_cache.graph_schema), request)
+                return _schema_response(
+                    json.loads(stats_cache.graph_schema), request,
+                    freshness=_freshness_headers(stats_cache.updated_at),
+                )
         except Exception:
             pass  # Cache lookup or parse failed — fall through to provider
 
-    # 2. Only try provider if cache miss.
+    # 2. Only try provider if cache miss (first-ever request for this data source).
     engine = await ContextEngine.for_workspace(
         ws_id, provider_manager, session, data_source_id=dataSourceId
     ) if ws_id else await ContextEngine.for_connection(connectionId, provider_manager, session)
     result = await engine.get_graph_schema()
-    return _schema_response(result.model_dump(by_alias=True), request)
+    return _schema_response(
+        result.model_dump(by_alias=True), request,
+        freshness=_freshness_headers(None),
+    )
+
+
+# ── Async introspection refresh ──────────────────────────────────────
+# On large graphs (1M+ nodes/edges), a live introspection can take
+# minutes. The background stats service normally keeps the Postgres
+# cache fresh on a 5-minute interval. This endpoint lets the frontend
+# explicitly trigger a refresh without blocking the HTTP request: the
+# actual work runs in a FastAPI BackgroundTask, the caller gets 202.
+
+_refresh_jobs: dict[str, dict] = {}  # job_id -> {status, ds_id, started_at, error}
+_refresh_locks: dict[str, asyncio.Lock] = {}  # per-ds_id lock
+
+
+async def _run_refresh(job_id: str, ds_id: str, workspace_id: str) -> None:
+    """Background task: recompute schema_stats / ontology / graph_schema
+    for a data source and upsert to Postgres. Never raises — errors are
+    recorded in the job status dict so the frontend can surface them.
+    """
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.repositories.stats_repo import upsert_data_source_stats
+
+    # One refresh at a time per data source — prevents thundering herd
+    # if the user mashes the refresh button.
+    lock = _refresh_locks.setdefault(ds_id, asyncio.Lock())
+    if lock.locked():
+        _refresh_jobs[job_id] = {
+            "status": "skipped",
+            "data_source_id": ds_id,
+            "reason": "A refresh is already running for this data source.",
+        }
+        return
+
+    async with lock:
+        try:
+            async with get_async_session() as session:
+                engine = await ContextEngine.for_workspace(
+                    workspace_id, provider_manager, session, data_source_id=ds_id
+                )
+                provider = engine.provider
+                stats, schema_stats_obj, ontology_obj, schema_obj = await asyncio.gather(
+                    provider.get_stats(),
+                    provider.get_schema_stats(),
+                    engine.get_ontology_metadata(),
+                    engine.get_graph_schema(),
+                )
+                await upsert_data_source_stats(
+                    session=session,
+                    ds_id=ds_id,
+                    node_count=stats.get("nodeCount", 0),
+                    edge_count=stats.get("edgeCount", 0),
+                    entity_type_counts=json.dumps(stats.get("entityTypeCounts", {})),
+                    edge_type_counts=json.dumps(stats.get("edgeTypeCounts", {})),
+                    schema_stats=schema_stats_obj.model_dump_json(by_alias=True),
+                    ontology_metadata=ontology_obj.model_dump_json(by_alias=True),
+                    graph_schema=schema_obj.model_dump_json(by_alias=True),
+                )
+                await session.commit()
+            _refresh_jobs[job_id] = {
+                "status": "completed",
+                "data_source_id": ds_id,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as exc:
+            logger.warning("Introspection refresh failed for %s: %s", ds_id, exc)
+            _refresh_jobs[job_id] = {
+                "status": "failed",
+                "data_source_id": ds_id,
+                "error": str(exc)[:500],
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+
+@router.post("/introspection/refresh", status_code=202)
+async def refresh_introspection(
+    background_tasks: BackgroundTasks,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Trigger a non-blocking refresh of the schema/introspection cache.
+
+    Returns ``202 Accepted`` with a job ID. Poll
+    ``GET /introspection/refresh/{job_id}`` to check status. The actual
+    introspection runs as a FastAPI BackgroundTask; the HTTP request
+    returns immediately so the frontend UI never blocks.
+
+    Idempotency: only one refresh per data source runs at a time. A
+    second request while one is in flight is recorded as "skipped".
+    """
+    ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
+    if not ds_id or not ws_id:
+        raise HTTPException(status_code=400, detail="ws_id and dataSourceId required")
+
+    job_id = str(uuid.uuid4())
+    _refresh_jobs[job_id] = {
+        "status": "pending",
+        "data_source_id": ds_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    background_tasks.add_task(_run_refresh, job_id, ds_id, ws_id)
+    return {"job_id": job_id, "status": "pending", "data_source_id": ds_id}
+
+
+@router.get("/introspection/refresh/{job_id}")
+async def get_refresh_status(job_id: str):
+    """Poll the status of a background introspection refresh."""
+    job = _refresh_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    return job
 
 
 @router.post("/edges/aggregated", response_model=AggregatedEdgeResult, response_model_by_alias=True)
