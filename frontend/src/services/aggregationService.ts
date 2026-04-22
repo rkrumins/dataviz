@@ -27,8 +27,16 @@ export interface AggregationJobResponse {
   createdEdges: number;
   batchSize: number;
   lastCheckpointAt?: string;
+  /**
+   * Cursor-based resume checkpoint. Non-null implies the worker can resume from this position.
+   * BE-1 must expose this field on the API response — currently absent server-side; if missing
+   * at runtime the Resume button stays hidden (treated as null).
+   */
+  lastCursor?: string | null;
   resumable: boolean;
   retryCount: number;
+  maxRetries?: number;
+  timeoutSecs?: number;
   errorMessage?: string;
   estimatedCompletionAt?: string;
   startedAt?: string;
@@ -42,6 +50,13 @@ export interface AggregationJobResponse {
   projectionMode?: string;
   durationSeconds?: number;
   edgeCoveragePct?: number;
+}
+
+export interface ResumeOverrides {
+  batchSize?: number;
+  projectionMode?: 'in_source' | 'dedicated';
+  maxRetries?: number;
+  timeoutSecs?: number;
 }
 
 export interface PaginatedJobsResponse {
@@ -128,10 +143,18 @@ class AggregationService {
     );
   }
 
-  async resumeJob(dataSourceId: string, jobId: string): Promise<AggregationJobResponse> {
+  async resumeJob(
+    dataSourceId: string,
+    jobId: string,
+    overrides?: ResumeOverrides,
+  ): Promise<AggregationJobResponse> {
+    const init: RequestInit = { method: 'POST' };
+    if (overrides && Object.keys(overrides).length > 0) {
+      init.body = JSON.stringify(overrides);
+    }
     return authFetch<AggregationJobResponse>(
       `/api/v1/admin/data-sources/${dataSourceId}/aggregation-jobs/${jobId}/resume`,
-      { method: 'POST' }
+      init,
     );
   }
 
