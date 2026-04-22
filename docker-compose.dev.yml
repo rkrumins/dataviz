@@ -62,6 +62,12 @@ services:
       - ./backend:/app/backend
     # Same: `./dev.sh restart aggregation-worker` picks up changes.
 
+  stats-service:
+    volumes:
+      - ./backend:/app/backend
+    # No --reload (headless process, not a uvicorn app). Pick up
+    # code changes with:  ./dev.sh restart stats-service
+
   graph-service:
     volumes:
       - ./backend:/app/backend

@@ -248,6 +248,73 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ── Stats Service (Background Poller) ─────────────────────────────
+  # Headless refresh loop that keeps per-data-source graph stats
+  # (node/edge counts, schema, ontology) fresh in Postgres so the viz
+  # service serves cached stats instead of hammering providers on every
+  # read. Same isolation model as aggregation-worker: own Postgres
+  # session pool (JOBS), own provider registry, own circuit breakers —
+  # provider slowness here CANNOT affect the web tier.
+  #
+  # Architecture: scheduler + XREADGROUP worker + health endpoint,
+  # all in one process. Scale horizontally with:
+  #   docker compose up -d --scale stats-service=N
+  # Per-source Redis SET NX dedup guarantees at-most-one pending poll
+  # per data source across replicas.
+  stats-service:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.stats
+    environment:
+      # Management DB (polling configs + stats cache + data source catalog)
+      MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+
+      # Redis — job stream + dedup keys. Same broker as aggregation.
+      REDIS_URL: redis://redis:6379/0
+
+      # Provider bootstrap — only used when a data source's credentials
+      # reference env vars (normal path: credentials come from Postgres).
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+
+      # Must match viz-service or stored provider credentials won't decrypt.
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
+
+      # ── Stats tunables (see .env.example for full docs) ─────────
+      STATS_SCHEDULER_TICK_SECS: "${STATS_SCHEDULER_TICK_SECS:-30}"
+      STATS_WORKER_CONCURRENCY: "${STATS_WORKER_CONCURRENCY:-2}"
+      STATS_MAX_CONCURRENT_PER_GRAPH: "${STATS_MAX_CONCURRENT_PER_GRAPH:-1}"
+      STATS_DEFAULT_INTERVAL_SECS: "${STATS_DEFAULT_INTERVAL_SECS:-300}"
+      STATS_MIN_INTERVAL_SECS: "${STATS_MIN_INTERVAL_SECS:-60}"
+      STATS_MAX_DELIVERY_ATTEMPTS: "${STATS_MAX_DELIVERY_ATTEMPTS:-3}"
+      STATS_DRAIN_TIMEOUT_SECS: "${STATS_DRAIN_TIMEOUT_SECS:-60}"
+      STATS_HEALTH_PORT: "8092"
+
+      # Size-adaptive poll timeouts (owned by backend/app/config/resilience.py).
+      STATS_POLL_TIMEOUT_SECS: "${STATS_POLL_TIMEOUT_SECS:-30}"
+      STATS_POLL_TIMEOUT_LARGE_SECS: "${STATS_POLL_TIMEOUT_LARGE_SECS:-600}"
+      STATS_POLL_LARGE_THRESHOLD: "${STATS_POLL_LARGE_THRESHOLD:-100000}"
+
+      SYNODIC_ROLE: stats
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+      # Controlplane runs Alembic — ensures polling_config / stats tables exist.
+      aggregation-controlplane:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8092/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
   # ── Graph Service (Port 8001) ─────────────────────────────────────
   # Stateless: provider discovery & connectivity testing.
   # No DB access — takes connection params in request body.
