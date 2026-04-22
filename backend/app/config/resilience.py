@@ -5,11 +5,13 @@ can reason about the system's failure behaviour from a single file.
 All values are configurable via environment variables with sensible defaults.
 
 Timeout layering (outermost to innermost):
-    HTTP middleware  →  CircuitBreakerProxy  →  Provider-specific query
-    (15-45s)            (10s)                   (5-15s)
-
-The innermost timeout fires first in most cases. Outer layers are
-defense-in-depth backstops.
+    HTTP middleware                       →  CircuitBreakerProxy
+    (15-45s)                                 (no deadline; gate + observer)
+                                          →  Provider per-operation deadline
+                                             (5-15s, owned by provider)
+The innermost timeout fires first by design. The proxy does not impose
+a deadline because only the provider knows the right granularity (a
+single query vs. an orchestration of many).
 """
 
 import os
@@ -19,10 +21,6 @@ import os
 BREAKER_FAIL_MAX: int = int(os.getenv("PROVIDER_BREAKER_FAIL_MAX", "3"))
 # Seconds the breaker stays open before allowing a single probe request.
 BREAKER_RESET_TIMEOUT_SECS: int = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_SECS", "30"))
-# Per-method deadline (seconds) enforced by CircuitBreakerProxy on every
-# async call. Converts hung connections into TimeoutErrors that count
-# toward the failure budget. 0 = disabled. Applies to ALL providers.
-BREAKER_METHOD_TIMEOUT_SECS: float = float(os.getenv("PROVIDER_METHOD_TIMEOUT_SECS", "10"))
 
 # ── FalkorDB-specific query timeouts ────────────────────────────────
 # Read-only Cypher queries (MATCH ... RETURN).

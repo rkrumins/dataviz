@@ -19,7 +19,8 @@
 #   ./dev.sh doctor         Run preflight checks, no side effects
 #
 # Service names: viz-service, aggregation-controlplane, aggregation-worker,
-#                graph-service, frontend, postgres, redis, falkordb
+#                stats-service, graph-service, frontend, postgres, redis,
+#                falkordb
 #
 # For VM / self-host deployment, use ./deploy.sh instead.
 # ══════════════════════════════════════════════════════════════════════

@@ -37,6 +37,8 @@ from typing import Any, Callable, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.common.adapters import ProviderUnavailable
+
 from .models import AggregationJobORM
 from .fingerprint import compute_graph_fingerprint
 
@@ -265,6 +267,7 @@ class AggregationWorker:
         """
         max_attempts = (job.max_retries or 3) + 1
         last_error: Exception | None = None
+        provider_unavailable_count = 0
 
         for attempt in range(max_attempts):
             try:
@@ -275,6 +278,52 @@ class AggregationWorker:
                     containment_types=containment_types,
                     lineage_types=lineage_types,
                 )
+            except ProviderUnavailable as e:
+                last_error = e
+                provider_unavailable_count += 1
+                job.retry_count = attempt + 1
+
+                # Second occurrence whose reason is "Circuit open" — fail fast.
+                # Retrying further is pointless: the breaker has already
+                # decided the downstream is sick.
+                if (
+                    provider_unavailable_count >= 2
+                    and "circuit open" in (e.reason or "").lower()
+                ):
+                    job.error_message = (
+                        f"Provider {e.provider_name} unavailable after "
+                        f"{attempt + 1} attempts; circuit breaker open"
+                    )[:2000]
+                    job.updated_at = _now()
+                    await session.commit()
+                    logger.warning(
+                        "Aggregation job %s: aborting — provider %s circuit "
+                        "open after %d attempts",
+                        job.id, e.provider_name, attempt + 1,
+                    )
+                    raise
+
+                if attempt < max_attempts - 1:
+                    exp_backoff = min(5.0 * (2 ** attempt), 120.0) + random.uniform(0, 2)
+                    # Breaker is open for at least retry_after_seconds; sleep
+                    # at least that long (plus jitter) so the next attempt
+                    # arrives after the probe window has elapsed rather than
+                    # fast-failing against an OPEN breaker.
+                    breaker_delay = (e.retry_after_seconds or 0) + random.uniform(0, 2)
+                    delay = max(exp_backoff, breaker_delay)
+                    job.error_message = (
+                        f"Retry {attempt + 1}/{job.max_retries}: {e}"
+                    )[:2000]
+                    job.updated_at = _now()
+                    await session.commit()
+                    logger.warning(
+                        "Aggregation job %s: retry %d/%d after %.0fs (provider unavailable) — %s",
+                        job.id, attempt + 1, job.max_retries, delay, e,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    # Final attempt exhausted — let the caller handle it
+                    raise
             except Exception as e:
                 last_error = e
                 job.retry_count = attempt + 1

@@ -2765,7 +2765,14 @@ class FalkorDBProvider(GraphDataProvider):
         """Return all graph keys on this FalkorDB instance via GRAPH.LIST."""
         await self._ensure_connected()
         try:
-            result = await self._db.execute_command("GRAPH.LIST")
+            # GRAPH.LIST is a one-off Redis-protocol command on the FalkorDB
+            # client (not Cypher, not the TimeoutRedis proxy) so it has no
+            # natural wrapper.  Bound it inline at the read-query timeout to
+            # honour the per-operation deadline contract.
+            result = await asyncio.wait_for(
+                self._db.execute_command("GRAPH.LIST"),
+                timeout=self._READ_TIMEOUT,
+            )
             return list(result) if result else []
         except Exception as exc:
             logger.warning("GRAPH.LIST failed: %s", exc)
@@ -2773,13 +2780,18 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def close(self) -> None:
         """Release both connection pools held by this provider."""
+        # Pool teardown still hits the network (graceful socket close) so it
+        # qualifies under the per-operation deadline contract.  Use the
+        # short init/teardown timeout — a stuck shutdown should fail fast,
+        # not block the event loop forever.
+        _close_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
         try:
             if hasattr(self, "_redis") and self._redis is not None:
-                await self._redis.aclose()
+                await asyncio.wait_for(self._redis.aclose(), timeout=_close_timeout)
             if self._redis_pool is not None:
-                await self._redis_pool.aclose()
+                await asyncio.wait_for(self._redis_pool.aclose(), timeout=_close_timeout)
             if self._pool is not None:
-                await self._pool.aclose()
+                await asyncio.wait_for(self._pool.aclose(), timeout=_close_timeout)
         except Exception as exc:
             logger.warning("Error closing FalkorDB pools: %s", exc)
         finally:
