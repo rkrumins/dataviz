@@ -33,6 +33,13 @@ class GraphDataProvider(ABC):
     Abstract interface for graph data providers.
     Enables swapping between Mock, FalkorDB, Neo4j, DataHub, etc.
     All methods must be async to prevent blocking the event loop.
+
+    Implementations MUST bound every async I/O call with a per-operation
+    deadline (e.g. via ``asyncio.wait_for``). The :class:`CircuitBreakerProxy`
+    does not enforce deadlines on provider calls; deadlines are the
+    provider's responsibility because only the provider knows the right
+    granularity (a single query vs. a batched orchestration). Failure to
+    comply will manifest as hung worker tasks during downstream incidents.
     """
 
     @property

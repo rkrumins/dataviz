@@ -34,7 +34,6 @@ import logging
 import os
 import platform
 import signal
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -381,42 +380,16 @@ class _JobConsumer:
 
 
 async def _run_health_server(consumer: _JobConsumer, port: int) -> None:
-    """Minimal health endpoint for K8s probes.
+    """Wrap the shared health-server helper with this worker's status payload."""
+    from backend.app.common.health_server import run_health_server
 
-    Pure asyncio — no extra dependency (aiohttp, uvicorn, etc.).
-    Responds to any HTTP request with a JSON health payload.
-    """
-    import json as _json
-
-    start_time = time.monotonic()
-
-    async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        try:
-            # Read the request (we only care that it arrived)
-            await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
-        except Exception:
-            pass
-
-        body = _json.dumps({
-            "status": "healthy",
+    def _payload() -> dict:
+        return {
             "activeJobs": len(consumer._active_tasks),
-            "uptime": int(time.monotonic() - start_time),
-            "role": "aggregation-worker",
             "consumer": consumer._consumer_name,
-        })
-        response = (
-            f"HTTP/1.1 200 OK\r\n"
-            f"Content-Type: application/json\r\n"
-            f"Content-Length: {len(body)}\r\n"
-            f"Connection: close\r\n"
-            f"\r\n{body}"
-        )
-        writer.write(response.encode())
-        await writer.drain()
-        writer.close()
+        }
 
-    server = await asyncio.start_server(_handle_client, "0.0.0.0", port)  # noqa: F841
-    logger.info("Health endpoint listening on port %d", port)
+    await run_health_server(port, role="aggregation-worker", status_payload_fn=_payload)
 
 
 async def main() -> None:
