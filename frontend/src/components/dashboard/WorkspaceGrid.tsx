@@ -1,8 +1,8 @@
 import { useState, useCallback, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { DataSourceStats } from '@/hooks/useDashboardData'
 import { type WorkspaceResponse, type DataSourceResponse } from '@/services/workspaceService'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { useNavigationStore } from '@/store/navigation'
 import { useSchemaViews } from '@/store/schema'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -15,6 +15,7 @@ import {
     Server,
     Eye,
     CircleDot,
+    Compass,
     GitBranch,
     CheckCircle2,
     X,
@@ -26,14 +27,16 @@ import { WORKSPACE_PALETTES, compactNum } from './dashboard-constants'
 // Routing helper
 // ───────────────────────────────────────────────────────────────────────────────
 function useNavigateToWorkspace() {
+    const navigate = useNavigate()
     const setActiveWorkspace = useWorkspacesStore(s => s.setActiveWorkspace)
     const setActiveDataSource = useWorkspacesStore(s => s.setActiveDataSource)
-    const setActiveTab = useNavigationStore(s => s.setActiveTab)
     return useCallback((wsId: string, dsId?: string) => {
         setActiveWorkspace(wsId)
         if (dsId) setActiveDataSource(dsId)
-        setActiveTab('explore')
-    }, [setActiveWorkspace, setActiveDataSource, setActiveTab])
+        const params = new URLSearchParams({ workspace: wsId })
+        if (dsId) params.set('dataSource', dsId)
+        navigate(`/explorer?${params.toString()}`)
+    }, [navigate, setActiveWorkspace, setActiveDataSource])
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -341,7 +344,7 @@ function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceI
                     )}
                 </AnimatePresence>
 
-                {/* CTA — opens canvas */}
+                {/* CTA — jump into Explorer scoped to this workspace */}
                 <button
                     onClick={handleOpenCanvas}
                     className={cn(
@@ -351,7 +354,18 @@ function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceI
                             : cn('bg-transparent border-glass-border/50 hover:border-glass-border', palette.label)
                     )}
                 >
-                    <span>{isActive ? 'Open canvas' : 'Open canvas'}</span>
+                    <span className="flex items-center gap-2">
+                        <Compass className="w-4 h-4" />
+                        Explore Views
+                        {totalViews > 0 && (
+                            <span className={cn(
+                                'inline-flex items-center justify-center min-w-[20px] h-[18px] px-1.5 rounded-full text-[10px] font-bold tabular-nums',
+                                isActive ? 'bg-white/20 text-white' : 'bg-violet-500/12 text-violet-500',
+                            )}>
+                                {compactNum(totalViews)}
+                            </span>
+                        )}
+                    </span>
                     <ArrowRight className="w-4 h-4 group-hover/cta:translate-x-0.5 transition-transform" />
                 </button>
             </div>
