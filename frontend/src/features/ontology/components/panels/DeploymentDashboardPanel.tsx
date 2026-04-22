@@ -380,6 +380,43 @@ export function DeploymentDashboardPanel({
                       </div>
                     </div>
                   </div>
+
+                  {/* Why it matters — original card with amber gradient bar */}
+                  <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
+                    <div className="h-0.5 w-full bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500" />
+                    <div className="p-5">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Sparkles className="w-4 h-4 text-amber-500" />
+                        <h3 className="text-sm font-bold text-ink">Why semantic layers matter</h3>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-ink-muted leading-relaxed">
+                        <div className="flex items-start gap-2.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 flex-shrink-0" />
+                          <div>
+                            <span className="font-semibold text-ink">Type-aware views</span> — Without a semantic layer, views treat all nodes and edges as generic. With one, the system knows that a "Person" should render differently from a "Document", enabling icons, colors, and labels per type.
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 flex-shrink-0" />
+                          <div>
+                            <span className="font-semibold text-ink">Hierarchy navigation</span> — Containment rules (e.g., Organization contains Department contains Team) power expand/collapse, breadcrumb trails, and drill-down exploration.
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-violet-400 mt-1.5 flex-shrink-0" />
+                          <div>
+                            <span className="font-semibold text-ink">Semantic search</span> — Entity type definitions enable scoped searches like "find all People" or "show Documents connected to this Company" instead of raw node/edge queries.
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-amber-400 mt-1.5 flex-shrink-0" />
+                          <div>
+                            <span className="font-semibold text-ink">Consistency across teams</span> — Publishing a semantic layer creates an immutable contract. All data sources using it share the same type definitions, ensuring consistent behavior across workspaces and views.
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
