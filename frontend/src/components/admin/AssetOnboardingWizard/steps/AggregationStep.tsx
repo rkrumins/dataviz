@@ -14,59 +14,19 @@
  * - Track Progress reference to the Ingestion page
  */
 
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Settings, Check, AlertTriangle, Clock, Loader2, CheckCircle2,
-    Activity, ChevronDown, SkipForward, Copy, GitBranch, Info,
-    Shield, Zap,
+    Activity, SkipForward, Copy, GitBranch, Info,
 } from 'lucide-react'
-import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
 import type { OnboardingFormData } from '../AssetOnboardingWizard'
 import type { CatalogItemResponse } from '@/services/catalogService'
-
-// ============================================
-// Inline Sub-components
-// ============================================
-
-function Tip({ children, label }: { children: React.ReactNode; label: string }) {
-    return (
-        <TooltipPrimitive.Provider delayDuration={300}>
-            <TooltipPrimitive.Root>
-                <TooltipPrimitive.Trigger asChild>{children}</TooltipPrimitive.Trigger>
-                <TooltipPrimitive.Portal>
-                    <TooltipPrimitive.Content
-                        side="top"
-                        sideOffset={6}
-                        className="z-50 max-w-xs px-3 py-2 rounded-lg bg-ink text-canvas text-[11px] font-medium shadow-lg animate-in fade-in zoom-in-95 duration-150 leading-relaxed"
-                    >
-                        {label}
-                        <TooltipPrimitive.Arrow className="fill-ink" />
-                    </TooltipPrimitive.Content>
-                </TooltipPrimitive.Portal>
-            </TooltipPrimitive.Root>
-        </TooltipPrimitive.Provider>
-    )
-}
-
-function ImpactMeter({ label, level, max = 5 }: { label: string; level: number; max?: number }) {
-    return (
-        <div className="flex items-center gap-2">
-            <span className="text-[9px] text-ink-muted uppercase tracking-wider w-16 shrink-0">{label}</span>
-            <div className="flex gap-0.5">
-                {Array.from({ length: max }, (_, i) => (
-                    <div key={i} className={cn(
-                        'w-3 h-1.5 rounded-full transition-colors duration-300',
-                        i < level
-                            ? level <= 2 ? 'bg-emerald-500' : level <= 3 ? 'bg-amber-500' : 'bg-red-400'
-                            : 'bg-black/[0.06] dark:bg-white/[0.08]'
-                    )} />
-                ))}
-            </div>
-        </div>
-    )
-}
+import {
+    AggregationOverridesForm,
+    type AggregationOverridesValue,
+} from '../../shared/AggregationOverridesForm'
 
 // ============================================
 // Types
@@ -133,56 +93,16 @@ const OPTIONS: OptionDef[] = [
 ]
 
 // ============================================
-// Config Presets
+// formData <-> AggregationOverridesValue bridge
 // ============================================
 
-interface ConfigPreset {
-    id: 'conservative' | 'balanced' | 'performance'
-    label: string
-    description: string
-    icon: typeof Shield
-    color: string
-    batchSize: number
-    maxRetries: number
-    timeoutMinutes: number | null
-    traits: { memory: number; speed: number; reliability: number }
-}
-
-const CONFIG_PRESETS: ConfigPreset[] = [
-    {
-        id: 'conservative',
-        label: 'Conservative',
-        description: 'Safest option — low memory, high resilience',
-        icon: Shield,
-        color: 'emerald',
-        batchSize: 500,
-        maxRetries: 5,
-        timeoutMinutes: 180,
-        traits: { memory: 1, speed: 1, reliability: 5 },
-    },
-    {
-        id: 'balanced',
-        label: 'Balanced',
-        description: 'Recommended for most workloads',
-        icon: Activity,
-        color: 'indigo',
-        batchSize: 1000,
-        maxRetries: 3,
-        timeoutMinutes: null,
-        traits: { memory: 3, speed: 3, reliability: 3 },
-    },
-    {
-        id: 'performance',
-        label: 'Performance',
-        description: 'Maximum throughput, less fault-tolerant',
-        icon: Zap,
-        color: 'amber',
-        batchSize: 5000,
-        maxRetries: 1,
-        timeoutMinutes: 60,
-        traits: { memory: 5, speed: 5, reliability: 1 },
-    },
-]
+/**
+ * The wizard's `advancedConfig.timeoutMinutes` is `number | null` (null = 2hr
+ * default). The shared form requires a concrete `number`. We materialise null
+ * as 120 (the documented 2hr default) when handing to the form, and pass the
+ * form's number straight back into `formData` (no longer null).
+ */
+const TIMEOUT_DEFAULT_MINUTES = 120
 
 // ============================================
 // Component
@@ -190,40 +110,6 @@ const CONFIG_PRESETS: ConfigPreset[] = [
 
 export function AggregationStep({ formData, updateFormData, catalogItems }: AggregationStepProps) {
     const selected = formData.projectionMode
-    const [showAdvanced, setShowAdvanced] = useState(false)
-
-    const activePreset = useMemo(() => {
-        return CONFIG_PRESETS.find(p =>
-            p.batchSize === formData.advancedConfig.batchSize &&
-            p.maxRetries === formData.advancedConfig.maxRetries &&
-            p.timeoutMinutes === formData.advancedConfig.timeoutMinutes
-        )?.id ?? null
-    }, [formData.advancedConfig])
-
-    const currentTraits = useMemo(() => {
-        const bs = formData.advancedConfig.batchSize
-        const mr = formData.advancedConfig.maxRetries
-        const tm = formData.advancedConfig.timeoutMinutes
-        return {
-            memory: bs <= 500 ? 1 : bs <= 1000 ? 2 : bs <= 2000 ? 3 : bs <= 5000 ? 4 : 5,
-            // Speed factors in both batch size (throughput) and timeout (shorter = more aggressive)
-            speed: Math.min(5, Math.max(1, Math.round(
-                (bs <= 500 ? 1 : bs <= 1000 ? 2 : bs <= 2000 ? 3 : bs <= 5000 ? 4 : 5) * 0.6 +
-                (tm === null ? 3 : tm <= 60 ? 5 : tm <= 120 ? 3 : tm <= 180 ? 2 : 1) * 0.4
-            ))),
-            reliability: mr >= 5 ? 5 : mr >= 3 ? 3 : mr >= 1 ? 2 : 1,
-        }
-    }, [formData.advancedConfig])
-
-    const applyPreset = useCallback((preset: ConfigPreset) => {
-        updateFormData({
-            advancedConfig: {
-                batchSize: preset.batchSize,
-                maxRetries: preset.maxRetries,
-                timeoutMinutes: preset.timeoutMinutes,
-            },
-        })
-    }, [updateFormData])
 
     // Auto-populate dedicated graph name when switching to dedicated mode
     useEffect(() => {
@@ -234,10 +120,26 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
         }
     }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Helper to update nested advancedConfig
-    const updateAdvancedConfig = (field: string, value: number | null) => {
+    // Bridge formData.advancedConfig <-> AggregationOverridesValue.
+    // The shared form needs a concrete number for timeoutMinutes; we surface the
+    // documented 2hr default when the wizard's value is null, and write back as
+    // a concrete number on every edit. projectionMode in the shared form is
+    // 'in_source' | 'dedicated' only — when the wizard is in 'skip', the form
+    // is not rendered, so we feed any valid placeholder.
+    const overridesValue: AggregationOverridesValue = {
+        batchSize: formData.advancedConfig.batchSize,
+        maxRetries: formData.advancedConfig.maxRetries,
+        timeoutMinutes: formData.advancedConfig.timeoutMinutes ?? TIMEOUT_DEFAULT_MINUTES,
+        projectionMode: selected === 'dedicated' ? 'dedicated' : 'in_source',
+    }
+
+    const handleOverridesChange = (next: AggregationOverridesValue) => {
         updateFormData({
-            advancedConfig: { ...formData.advancedConfig, [field]: value },
+            advancedConfig: {
+                batchSize: next.batchSize,
+                maxRetries: next.maxRetries,
+                timeoutMinutes: next.timeoutMinutes,
+            },
         })
     }
 
@@ -542,186 +444,11 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
                         transition={{ duration: 0.2 }}
                         className="overflow-hidden"
                     >
-                        <div className="rounded-xl border border-glass-border overflow-hidden">
-                            {/* Toggle */}
-                            <button
-                                type="button"
-                                onClick={() => setShowAdvanced(!showAdvanced)}
-                                className="flex items-center gap-2 w-full px-4 py-3 text-left hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
-                            >
-                                <ChevronDown className={cn(
-                                    'w-4 h-4 text-ink-muted transition-transform duration-200',
-                                    showAdvanced && 'rotate-180'
-                                )} />
-                                <span className="text-xs font-semibold text-ink-secondary">Fine-Tune Performance</span>
-                                {activePreset && (
-                                    <span className="text-[10px] text-indigo-400 font-medium ml-1.5">
-                                        {CONFIG_PRESETS.find(p => p.id === activePreset)?.label}
-                                    </span>
-                                )}
-                                <span className="text-[10px] text-ink-muted ml-auto">Optional</span>
-                            </button>
-
-                            {/* Expandable Content */}
-                            <AnimatePresence>
-                                {showAdvanced && (
-                                    <motion.div
-                                        initial={{ opacity: 0, height: 0 }}
-                                        animate={{ opacity: 1, height: 'auto' }}
-                                        exit={{ opacity: 0, height: 0 }}
-                                        transition={{ duration: 0.2 }}
-                                        className="overflow-hidden"
-                                    >
-                                        <div className="px-4 pb-4 pt-3 border-t border-glass-border/50 space-y-4">
-                                            {/* Preset Selector */}
-                                            <div className="grid grid-cols-3 gap-3">
-                                                {CONFIG_PRESETS.map(preset => {
-                                                    const Icon = preset.icon
-                                                    const isActive = activePreset === preset.id
-                                                    return (
-                                                        <motion.button
-                                                            key={preset.id}
-                                                            type="button"
-                                                            whileHover={{ scale: 1.02 }}
-                                                            whileTap={{ scale: 0.98 }}
-                                                            onClick={() => applyPreset(preset)}
-                                                            className={cn(
-                                                                'rounded-xl border p-3 text-left transition-all cursor-pointer',
-                                                                isActive
-                                                                    ? 'border-indigo-500/40 bg-indigo-500/5 ring-2 ring-indigo-500/20 shadow-lg shadow-indigo-500/5'
-                                                                    : 'border-glass-border hover:border-indigo-500/20'
-                                                            )}
-                                                        >
-                                                            <div className="flex items-center gap-2 mb-1">
-                                                                <Icon className={cn(
-                                                                    'w-4 h-4',
-                                                                    isActive ? 'text-indigo-400' : 'text-ink-muted'
-                                                                )} />
-                                                                <span className={cn(
-                                                                    'text-xs font-semibold',
-                                                                    isActive ? 'text-indigo-400' : 'text-ink'
-                                                                )}>
-                                                                    {preset.label}
-                                                                </span>
-                                                            </div>
-                                                            <p className="text-[10px] text-ink-muted leading-relaxed">
-                                                                {preset.description}
-                                                            </p>
-                                                        </motion.button>
-                                                    )
-                                                })}
-                                            </div>
-
-                                            {/* Parameter Grid */}
-                                            <div className="grid grid-cols-3 gap-4">
-                                                {/* Batch Size */}
-                                                <div>
-                                                    <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
-                                                        Batch Size
-                                                        <Tip label="Number of edges processed per database transaction. Higher values mean fewer round trips to the database but require more memory per batch. Start low for graphs with complex edge properties.">
-                                                            <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
-                                                        </Tip>
-                                                    </label>
-                                                    <input
-                                                        type="number"
-                                                        min={100}
-                                                        max={50000}
-                                                        value={formData.advancedConfig.batchSize}
-                                                        onChange={e => updateAdvancedConfig('batchSize', parseInt(e.target.value) || 1000)}
-                                                        onBlur={e => {
-                                                            const v = parseInt(e.target.value) || 1000
-                                                            updateAdvancedConfig('batchSize', Math.max(100, Math.min(50000, v)))
-                                                        }}
-                                                        className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink outline-none transition-all focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border"
-                                                    />
-                                                    <p className="text-[10px] text-ink-muted mt-1">Edges per batch (100-50,000)</p>
-                                                    <div className="mt-1.5">
-                                                        <ImpactMeter label="Memory" level={currentTraits.memory} />
-                                                    </div>
-                                                </div>
-
-                                                {/* Max Retries */}
-                                                <div>
-                                                    <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
-                                                        Max Retries
-                                                        <Tip label="How many times a failed batch is retried before marking the job as failed. Higher values increase resilience to transient network errors and database locks.">
-                                                            <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
-                                                        </Tip>
-                                                    </label>
-                                                    <input
-                                                        type="number"
-                                                        min={0}
-                                                        max={10}
-                                                        value={formData.advancedConfig.maxRetries}
-                                                        onChange={e => updateAdvancedConfig('maxRetries', parseInt(e.target.value) || 0)}
-                                                        onBlur={e => {
-                                                            const v = parseInt(e.target.value) || 0
-                                                            updateAdvancedConfig('maxRetries', Math.max(0, Math.min(10, v)))
-                                                        }}
-                                                        className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink outline-none transition-all focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border"
-                                                    />
-                                                    <p className="text-[10px] text-ink-muted mt-1">Retry attempts on failure (0-10)</p>
-                                                    <div className="mt-1.5">
-                                                        <ImpactMeter label="Reliab." level={currentTraits.reliability} />
-                                                    </div>
-                                                </div>
-
-                                                {/* Timeout */}
-                                                <div>
-                                                    <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
-                                                        Timeout (minutes)
-                                                        <Tip label="Maximum wall-clock duration the aggregation job can run. Prevents runaway jobs from consuming resources indefinitely. Leave empty for the 2-hour default.">
-                                                            <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
-                                                        </Tip>
-                                                    </label>
-                                                    <input
-                                                        type="number"
-                                                        min={1}
-                                                        value={formData.advancedConfig.timeoutMinutes ?? ''}
-                                                        onChange={e => {
-                                                            const raw = e.target.value
-                                                            updateAdvancedConfig('timeoutMinutes', raw === '' ? null : (parseInt(raw) || null))
-                                                        }}
-                                                        onBlur={e => {
-                                                            const raw = e.target.value
-                                                            if (raw !== '') {
-                                                                const v = parseInt(raw) || 1
-                                                                updateAdvancedConfig('timeoutMinutes', Math.max(1, v))
-                                                            }
-                                                        }}
-                                                        placeholder="120 (default)"
-                                                        className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink placeholder:text-ink-muted/50 outline-none transition-all focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border"
-                                                    />
-                                                    <p className="text-[10px] text-ink-muted mt-1">Max job duration. Empty = 2hr default</p>
-                                                    <div className="mt-1.5">
-                                                        <ImpactMeter label="Speed" level={currentTraits.speed} />
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            {/* Estimated Impact Guidance */}
-                                            <div className="pt-3 border-t border-glass-border/50">
-                                                <p className="text-[10px] font-bold text-ink-muted uppercase tracking-wider mb-2">Guidance for Your Graph Size</p>
-                                                <div className="grid grid-cols-3 gap-3">
-                                                    <div className="text-[11px] text-ink-muted">
-                                                        <span className="font-semibold text-ink-secondary">Small (&lt;10K edges)</span>
-                                                        <p className="mt-0.5 leading-relaxed">Batch 500 &middot; 2-5 min</p>
-                                                    </div>
-                                                    <div className="text-[11px] text-ink-muted">
-                                                        <span className="font-semibold text-ink-secondary">Medium (10K-100K)</span>
-                                                        <p className="mt-0.5 leading-relaxed">Batch 1000 &middot; 10-30 min</p>
-                                                    </div>
-                                                    <div className="text-[11px] text-ink-muted">
-                                                        <span className="font-semibold text-ink-secondary">Large (100K+)</span>
-                                                        <p className="mt-0.5 leading-relaxed">Batch 5000 &middot; 30-120 min</p>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </motion.div>
-                                )}
-                            </AnimatePresence>
-                        </div>
+                        <AggregationOverridesForm
+                            value={overridesValue}
+                            onChange={handleOverridesChange}
+                            hideProjectionMode
+                        />
                     </motion.div>
                 )}
             </AnimatePresence>

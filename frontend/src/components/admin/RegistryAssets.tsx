@@ -26,6 +26,8 @@ import { useToast } from '@/components/ui/toast'
 import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
 import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 import { FirstRunHero } from './FirstRunHero'
+import { RetriggerDialog } from './job-history/RetriggerDialog'
+import type { AggregationOverridesValue } from './shared/AggregationOverridesForm'
 
 // ─── Provider type helpers ────────────────────────────────────────────────────
 const PROVIDER_TYPES = [
@@ -519,6 +521,15 @@ export function RegistryAssets() {
     const [unregisterImpact, setUnregisterImpact] = useState<ProviderImpactResponse | null>(null)
     const [unregisterLoading, setUnregisterLoading] = useState(false)
 
+    // Re-aggregate dialog: holds the resolved set of data sources to fan out to.
+    // We resolve them eagerly (when the user clicks Re-aggregate) so the dialog
+    // can pre-populate `projectionMode` from the first data source's actual setting.
+    const [reaggregateCtx, setReaggregateCtx] = useState<{
+        assetName: string
+        dataSources: Array<{ id: string; projectionMode?: string | null }>
+        initialValue: AggregationOverridesValue
+    } | null>(null)
+
     // Provider asset count cache (assetId → count)
     const [providerAssetCounts, setProviderAssetCounts] = useState<Record<string, { total: number; registered: number }>>({})
 
@@ -649,6 +660,11 @@ export function RegistryAssets() {
         }
     }
 
+    /**
+     * Step 1 of re-aggregate: discover the bound data sources, then open the
+     * overrides dialog. The actual trigger fan-out happens in
+     * `handleConfirmReaggregate` once the user picks their knob settings.
+     */
     const handleReaggregate = useCallback(async (assetName: string) => {
         const item = existingCatalogs.find(c => c.sourceIdentifier === assetName)
         if (!item) return
@@ -656,23 +672,53 @@ export function RegistryAssets() {
         showLoading('reaggregate', 'Discovering data sources…')
         try {
             const wsList = await workspaceService.list()
-            const dataSourcesToTrigger = wsList.flatMap((ws: any) =>
-                ws.dataSources?.filter((ds: any) => ds.catalogItemId === item.id) || []
-            )
+            const dataSourcesToTrigger: Array<{ id: string; projectionMode?: string | null }> =
+                wsList.flatMap((ws: any) =>
+                    ws.dataSources?.filter((ds: any) => ds.catalogItemId === item.id) || []
+                )
+
+            hideLoading('reaggregate')
 
             if (dataSourcesToTrigger.length === 0) {
-                hideLoading('reaggregate')
                 showToast('warning', 'No data sources found for this catalog item. Ensure it is bound to a workspace first.')
                 return
             }
 
+            // Default projectionMode to the first data source's setting; the user can
+            // change it in the dialog and it will apply uniformly to every fan-out.
+            const firstMode = dataSourcesToTrigger[0]?.projectionMode === 'dedicated' ? 'dedicated' : 'in_source'
+            setReaggregateCtx({
+                assetName,
+                dataSources: dataSourcesToTrigger,
+                initialValue: {
+                    batchSize: 5000,
+                    projectionMode: firstMode,
+                    maxRetries: 3,
+                    timeoutMinutes: 120,
+                },
+            })
+        } catch (e: any) {
             hideLoading('reaggregate')
-            showLoading('reaggregate', `Triggering aggregation for ${dataSourcesToTrigger.length} data source(s)…`)
+            showToast('error', e?.message ?? 'Failed to discover data sources')
+        }
+    }, [existingCatalogs, showToast, showLoading, hideLoading])
 
-            const results = await Promise.allSettled(dataSourcesToTrigger.map((ds: any) =>
+    /**
+     * Step 2 of re-aggregate: fan-out trigger calls with the user's overrides.
+     * Throws on total failure so the dialog stays open and surfaces the error.
+     */
+    const handleConfirmReaggregate = useCallback(async (overrides: AggregationOverridesValue) => {
+        if (!reaggregateCtx) return
+        const { dataSources } = reaggregateCtx
+        showLoading('reaggregate', `Triggering aggregation for ${dataSources.length} data source(s)…`)
+        const timeoutSecs = overrides.timeoutMinutes * 60
+        try {
+            const results = await Promise.allSettled(dataSources.map(ds =>
                 aggregationService.triggerAggregation(ds.id, {
-                    projectionMode: ds.projectionMode || 'in_source',
-                    batchSize: 1000,
+                    projectionMode: overrides.projectionMode,
+                    batchSize: overrides.batchSize,
+                    maxRetries: overrides.maxRetries,
+                    timeoutSecs,
                 }, 'manual')
             ))
 
@@ -682,19 +728,21 @@ export function RegistryAssets() {
             hideLoading('reaggregate')
             if (failed === 0) {
                 showToast('success', `Aggregation triggered for ${succeeded} data source(s). Switching to Job History…`)
-                // Navigate to Job History tab so the user sees live progress
                 setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else if (succeeded > 0) {
                 showToast('warning', `Triggered ${succeeded}, failed ${failed} data source(s). A job may already be active.`)
+                setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else {
                 const firstError = (results.find(r => r.status === 'rejected') as PromiseRejectedResult)?.reason
                 showToast('error', firstError?.message ?? 'Failed to trigger aggregation')
+                throw firstError instanceof Error ? firstError : new Error('Failed to trigger aggregation')
             }
         } catch (e: any) {
             hideLoading('reaggregate')
-            showToast('error', e?.message ?? 'Failed to discover data sources')
+            // Re-throw so RetriggerDialog stays open with the user's overrides intact.
+            throw e
         }
-    }, [existingCatalogs, showToast, showLoading, hideLoading, setSearchParams])
+    }, [reaggregateCtx, showToast, showLoading, hideLoading, setSearchParams])
 
     const handlePurge = useCallback(async (assetName: string) => {
         const item = existingCatalogs.find(c => c.sourceIdentifier === assetName)
@@ -1046,6 +1094,24 @@ export function RegistryAssets() {
                     onClose={() => setShowOnboarding(false)}
                 />
             )}
+
+            {/* Re-aggregate overrides dialog (fan-out trigger across all bound data sources) */}
+            <RetriggerDialog
+                isOpen={!!reaggregateCtx}
+                onClose={() => setReaggregateCtx(null)}
+                title={
+                    reaggregateCtx
+                        ? `Re-aggregate ${reaggregateCtx.assetName} (${reaggregateCtx.dataSources.length} data source${reaggregateCtx.dataSources.length !== 1 ? 's' : ''})`
+                        : 'Re-aggregate'
+                }
+                initialValue={reaggregateCtx?.initialValue ?? {
+                    batchSize: 5000,
+                    projectionMode: 'in_source',
+                    maxRetries: 3,
+                    timeoutMinutes: 120,
+                }}
+                onConfirmRetrigger={handleConfirmReaggregate}
+            />
         </div>
     )
 }

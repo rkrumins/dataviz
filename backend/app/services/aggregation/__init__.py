@@ -35,6 +35,7 @@ from .schemas import (
     PaginatedJobsResponse,
     DataSourceReadinessResponse,
     DriftCheckResponse,
+    ResumeOverrides,
 )
 
 __all__ = [
@@ -53,4 +54,5 @@ __all__ = [
     "PaginatedJobsResponse",
     "DataSourceReadinessResponse",
     "DriftCheckResponse",
+    "ResumeOverrides",
 ]
