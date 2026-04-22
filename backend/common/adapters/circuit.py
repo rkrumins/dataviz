@@ -155,7 +155,14 @@ class _AsyncCircuitBreaker:
 
     @property
     def current_state(self) -> str:
-        """String form of the state (matches pybreaker's contract)."""
+        """String form of the state (matches pybreaker's contract).
+
+        Note: this property reads ``_state`` and ``_opened_at`` without the
+        lock — it is intended for diagnostic / log-line use. Code that needs
+        a consistent snapshot alongside a state mutation must obtain it from
+        the value returned by ``_record_failure`` / ``_record_success``,
+        which sample inside the critical section.
+        """
         if self._state == BreakerState.OPEN:
             if (
                 self._opened_at is not None
@@ -190,24 +197,52 @@ class _AsyncCircuitBreaker:
                 # Probe window has arrived — move to HALF_OPEN for exactly
                 # one trial call.
                 self._state = BreakerState.HALF_OPEN
+                logger.info(
+                    "Circuit breaker '%s' transition OPEN -> HALF_OPEN "
+                    "(reset_timeout=%ds elapsed; probing downstream)",
+                    self.name,
+                    self.reset_timeout,
+                )
 
-    async def _record_success(self) -> None:
+    async def _record_success(self) -> tuple[str, int]:
+        """Record a successful call. Returns (state_str, fail_counter) snapshot."""
         async with self._lock:
             self._fail_counter = 0
             self._state = BreakerState.CLOSED
             self._opened_at = None
+            return self._state.value, self._fail_counter
 
-    async def _record_failure(self) -> None:
+    async def _record_failure(self) -> tuple[str, int]:
+        """Record a failed call. Returns (state_str, fail_counter) snapshot
+        captured inside the critical section so callers can log a value
+        consistent with the transition that just occurred."""
         async with self._lock:
             if self._state == BreakerState.HALF_OPEN:
                 # Probe failed — re-open immediately.
                 self._state = BreakerState.OPEN
                 self._opened_at = time.monotonic()
-                return
+                logger.info(
+                    "Circuit breaker '%s' transition HALF_OPEN -> OPEN "
+                    "(probe failed; reset_timeout=%ds)",
+                    self.name,
+                    self.reset_timeout,
+                )
+                return self._state.value, self._fail_counter
             self._fail_counter += 1
             if self._fail_counter >= self.fail_max:
+                was_closed = self._state == BreakerState.CLOSED
                 self._state = BreakerState.OPEN
                 self._opened_at = time.monotonic()
+                if was_closed:
+                    logger.info(
+                        "Circuit breaker '%s' transition CLOSED -> OPEN "
+                        "(fails=%d/%d; reset_timeout=%ds)",
+                        self.name,
+                        self._fail_counter,
+                        self.fail_max,
+                        self.reset_timeout,
+                    )
+            return self._state.value, self._fail_counter
 
 
 class _BreakerOpenError(Exception):
@@ -222,6 +257,18 @@ class CircuitBreakerProxy:
     """Async proxy that routes every async-method call on ``target`` through a
     per-instance circuit breaker.
 
+    Responsibility split: the proxy is a *state observer + fast-fail gate*.
+    It classifies completed calls as healthy or sick, opens after the
+    failure budget is exceeded, and short-circuits subsequent calls during
+    the open window. It does **not** impose a deadline on the wrapped
+    target. Per-operation deadlines are the wrapped target's responsibility
+    because only the target knows the right granularity — a single query
+    has a very different acceptable latency than a long-running batch
+    method composed of many short, individually-deadlined operations. An
+    outer proxy-level timeout would cancel healthy long-running orchestrations
+    and falsely classify them as unhealthy, tripping the breaker on legitimate
+    work.
+
     Parameters
     ----------
     target:
@@ -233,12 +280,6 @@ class CircuitBreakerProxy:
     reset_timeout:
         Seconds the breaker stays open before probing the downstream again
         (half-open state). Also surfaced as the ``Retry-After`` hint.
-    method_timeout:
-        Per-method deadline in seconds. When > 0, every guarded async call
-        is wrapped in ``asyncio.wait_for()`` so hung connections are
-        converted into ``TimeoutError``s that count toward the failure
-        budget. Set to 0 (default) to disable. Recommended: 10s for
-        typical graph-provider workloads.
     extra_ignored_exceptions:
         Logical-error classes raised by *this* adapter that should not
         affect breaker state on top of the defaults.
@@ -251,18 +292,10 @@ class CircuitBreakerProxy:
         *,
         fail_max: int = 5,
         reset_timeout: int = 30,
-        method_timeout: float = 0,
         extra_ignored_exceptions: Iterable[type[BaseException]] = (),
     ) -> None:
         self._target = target
         self._name = name
-        # Per-method deadline: if > 0, every guarded async call is wrapped in
-        # asyncio.wait_for(). This converts hung connections (which never
-        # complete and therefore never trip the breaker) into TimeoutErrors
-        # that DO count toward the failure budget. Without this, a half-open
-        # TCP connection can block the event loop for the full socket_timeout
-        # (10-30s) on every request, starving healthy providers.
-        self._method_timeout: float = method_timeout
         self._ignored = tuple(_DEFAULT_IGNORED_EXCEPTIONS) + tuple(extra_ignored_exceptions)
         self._breaker = _AsyncCircuitBreaker(
             name=name,
@@ -332,31 +365,34 @@ class CircuitBreakerProxy:
                 ) from None
 
             try:
-                if proxy._method_timeout > 0:
-                    result = await asyncio.wait_for(
-                        attr(*args, **kwargs),
-                        timeout=proxy._method_timeout,
-                    )
-                else:
-                    result = await attr(*args, **kwargs)
+                result = await attr(*args, **kwargs)
             except proxy._ignored:
                 # Logical errors — re-raise untouched; breaker does not count these.
                 raise
-            except ProviderUnavailable:
+            except ProviderUnavailable as exc:
                 # A nested adapter already sanitized this. Count it (downstream
                 # is sick) and re-raise without double-wrapping.
-                await proxy._breaker._record_failure()
+                state_after, fails_after = await proxy._breaker._record_failure()
+                logger.warning(
+                    "Provider %s nested ProviderUnavailable on %s: %s (breaker=%s fails=%d/%d)",
+                    proxy._name,
+                    name,
+                    exc,
+                    state_after,
+                    fails_after,
+                    proxy._breaker.fail_max,
+                )
                 raise
             except _NETWORK_EXCEPTIONS as exc:
-                await proxy._breaker._record_failure()
+                state_after, fails_after = await proxy._breaker._record_failure()
                 logger.warning(
                     "Provider %s network error on %s: %s=%s (breaker=%s fails=%d/%d)",
                     proxy._name,
                     name,
                     type(exc).__name__,
                     exc,
-                    proxy._breaker.current_state,
-                    proxy._breaker.fail_counter,
+                    state_after,
+                    fails_after,
                     proxy._breaker.fail_max,
                 )
                 raise ProviderUnavailable(
@@ -370,12 +406,23 @@ class CircuitBreakerProxy:
                 # and re-raise as ProviderUnavailable. Note: Exception (not
                 # BaseException) so CancelledError/KeyboardInterrupt pass
                 # through untouched.
-                await proxy._breaker._record_failure()
+                state_after, fails_after = await proxy._breaker._record_failure()
+                logger.warning(
+                    "Provider %s unexpected error on %s: %s=%s (breaker=%s fails=%d/%d)",
+                    proxy._name,
+                    name,
+                    type(exc).__name__,
+                    exc,
+                    state_after,
+                    fails_after,
+                    proxy._breaker.fail_max,
+                )
                 raise ProviderUnavailable(
                     provider_name=proxy._name,
                     reason=f"{type(exc).__name__}: {exc}",
                     retry_after_seconds=int(proxy._breaker.reset_timeout),
                 ) from exc
+
             else:
                 await proxy._breaker._record_success()
                 return result

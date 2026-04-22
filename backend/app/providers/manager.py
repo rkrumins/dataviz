@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 # Tuneable via env vars. See backend/app/config/resilience.py for full reference.
 _BREAKER_FAIL_MAX = int(os.getenv("PROVIDER_BREAKER_FAIL_MAX", "3"))
 _BREAKER_RESET_TIMEOUT = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_SECS", "30"))
-_BREAKER_METHOD_TIMEOUT = float(os.getenv("PROVIDER_METHOD_TIMEOUT_SECS", "10"))
 
 
 class HealthState(str, Enum):
@@ -60,7 +59,6 @@ def _wrap_in_breaker(provider: GraphDataProvider, name: str) -> GraphDataProvide
         name=name,
         fail_max=_BREAKER_FAIL_MAX,
         reset_timeout=_BREAKER_RESET_TIMEOUT,
-        method_timeout=_BREAKER_METHOD_TIMEOUT,
     )
 
 
@@ -147,20 +145,20 @@ class ProviderManager:
                     timeout=10,
                 )
             except asyncio.TimeoutError:
-                await breaker._record_failure()
+                state_after, fails_after = await breaker._record_failure()
                 logger.warning(
                     "Provider instantiation timed out for %s (breaker=%s fails=%d/%d)",
-                    cache_key, breaker.current_state, breaker.fail_counter, breaker.fail_max,
+                    cache_key, state_after, fails_after, breaker.fail_max,
                 )
                 raise ProviderUnavailable(
                     provider_name=f"{cache_key[0]}:{cache_key[1]}",
                     reason="Provider instantiation timed out",
                 )
             except Exception as exc:
-                await breaker._record_failure()
+                state_after, fails_after = await breaker._record_failure()
                 logger.warning(
                     "Provider instantiation failed for %s: %s (breaker=%s fails=%d/%d)",
-                    cache_key, exc, breaker.current_state, breaker.fail_counter, breaker.fail_max,
+                    cache_key, exc, state_after, fails_after, breaker.fail_max,
                 )
                 raise ProviderUnavailable(
                     provider_name=f"{cache_key[0]}:{cache_key[1]}",
@@ -170,10 +168,10 @@ class ProviderManager:
             # Success: wrap in circuit breaker and cache.
             breaker_name = f"{ds.provider_id}:{ds.graph_name or ''}"
             self._providers[cache_key] = _wrap_in_breaker(raw_provider, breaker_name)
-            await breaker._record_success()
+            state_after, _ = await breaker._record_success()
             logger.info(
                 "Provider cached for %s (breaker=%s)",
-                cache_key, breaker.current_state,
+                cache_key, state_after,
             )
 
         return self._providers[cache_key]
