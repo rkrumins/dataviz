@@ -18,10 +18,11 @@ import os
 from typing import List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.engine import get_db_session
+from backend.app.services.aggregation.schemas import ResumeOverrides
 
 logger = logging.getLogger(__name__)
 
@@ -275,12 +276,22 @@ async def resume_job(
     request: Request,
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(get_db_session),
+    overrides: ResumeOverrides | None = Body(default=None),
 ):
     if _PROXY_ENABLED:
-        return await _proxy("POST", f"/aggregation/data-sources/{ds_id}/jobs/{job_id}/resume", request)
+        # Forward the (possibly empty) body so the Control Plane can
+        # apply the same overrides. body() returns b"" when no body
+        # was sent — _proxy treats that as no content.
+        body = await request.body()
+        return await _proxy(
+            "POST",
+            f"/aggregation/data-sources/{ds_id}/jobs/{job_id}/resume",
+            request,
+            body=body if body else None,
+        )
     _, _, _, _, NotFoundError = _direct_imports()
     try:
-        return await svc.resume(ds_id, job_id, session)
+        return await svc.resume(ds_id, job_id, session, overrides=overrides)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:

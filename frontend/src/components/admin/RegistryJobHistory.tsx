@@ -10,7 +10,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
-    Loader2, Activity, RotateCcw, Play, Trash2,
+    Loader2, Activity, RotateCcw, Trash2,
     ChevronLeft, ChevronsLeft, ChevronRight, ChevronsRight,
     List, LayoutGrid,
 } from 'lucide-react'
@@ -34,9 +34,34 @@ import {
 } from './job-history/shared'
 import { JobRow } from './job-history/JobRow'
 import { ConfirmDialog } from './job-history/ConfirmDialog'
+import { RetriggerDialog } from './job-history/RetriggerDialog'
 import { JobHistoryFilterBar } from './job-history/JobHistoryFilterBar'
 import { JobHistoryKPIs } from './job-history/JobHistoryKPIs'
 import { JobHistoryGroupedView } from './job-history/JobHistoryGroupedView'
+import type { AggregationOverridesValue } from './shared/AggregationOverridesForm'
+
+// ── Defaults ─────────────────────────────────────────────────────────
+const DEFAULT_TIMEOUT_SECS = 7200
+const DEFAULT_MAX_RETRIES = 3
+const DEFAULT_BATCH_SIZE = 5000
+
+function buildInitialOverridesFromJob(job: AggregationJobResponse): AggregationOverridesValue {
+    return {
+        batchSize: job.batchSize ?? DEFAULT_BATCH_SIZE,
+        projectionMode: (job.projectionMode === 'dedicated' ? 'dedicated' : 'in_source'),
+        maxRetries: job.maxRetries ?? DEFAULT_MAX_RETRIES,
+        timeoutMinutes: Math.round((job.timeoutSecs ?? DEFAULT_TIMEOUT_SECS) / 60),
+    }
+}
+
+function buildInitialOverridesForDataSource(projectionMode?: string | null): AggregationOverridesValue {
+    return {
+        batchSize: DEFAULT_BATCH_SIZE,
+        projectionMode: projectionMode === 'dedicated' ? 'dedicated' : 'in_source',
+        maxRetries: DEFAULT_MAX_RETRIES,
+        timeoutMinutes: Math.round(DEFAULT_TIMEOUT_SECS / 60),
+    }
+}
 
 // ── View mode ────────────────────────────────────────────────────────
 
@@ -69,10 +94,16 @@ export function RegistryJobHistory() {
     const [expandedRowId, setExpandedRowId] = useState<string | null>(null)
     const [actionLoading, setActionLoading] = useState<string | null>(null)
     const [purgeConfirm, setPurgeConfirm] = useState<string | null>(null)
-    const [confirmAction, setConfirmAction] = useState<{ job: AggregationJobResponse; type: 'delete' | 'retrigger' } | null>(null)
+    const [confirmDelete, setConfirmDelete] = useState<AggregationJobResponse | null>(null)
+    // Retrigger dialog: either job-derived (from a JobRow) or data-source-derived (from grouped card).
+    const [retriggerCtx, setRetriggerCtx] = useState<
+        | { kind: 'job'; job: AggregationJobResponse; initialValue: AggregationOverridesValue }
+        | { kind: 'dataSource'; dataSourceId: string; dataSourceLabel: string; initialValue: AggregationOverridesValue }
+        | null
+    >(null)
     const [searchInput, setSearchInput] = useState(filters.search ?? '')
     const [, setTick] = useState(0)
-    const { showToast } = useToast()
+    const { showToast, showLoading, hideLoading } = useToast()
     const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
     // Sync filters -> URL
@@ -241,28 +272,79 @@ export function RegistryJobHistory() {
     const handleCancel = (job: AggregationJobResponse) =>
         withAction(job.id, () => aggregationService.cancelJob(job.dataSourceId, job.id), 'Job cancelled')
 
+    // Both Resume and Re-trigger buttons on JobRow open the same dialog. The
+    // user picks the action inside (Resume preserves last_cursor; Re-trigger
+    // starts from scratch). This keeps the headline timeout-recovery flow on
+    // a single path so users can always tweak timeout/batch_size before retry.
     const handleResume = (job: AggregationJobResponse) =>
-        withAction(job.id, () => aggregationService.resumeJob(job.dataSourceId, job.id), 'Job resumed from checkpoint')
+        setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job) })
 
     const handleRetrigger = (job: AggregationJobResponse) =>
-        setConfirmAction({ job, type: 'retrigger' })
+        setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job) })
 
     const handleDelete = (job: AggregationJobResponse) =>
-        setConfirmAction({ job, type: 'delete' })
+        setConfirmDelete(job)
 
-    const executeConfirmedAction = () => {
-        if (!confirmAction) return
-        const { job, type } = confirmAction
-        setConfirmAction(null)
-        if (type === 'delete') {
-            withAction(job.id, () => aggregationService.deleteJob(job.id), 'Job removed from history')
-        } else {
-            withAction(job.id, () => aggregationService.triggerAggregation(job.dataSourceId, {
-                projectionMode: job.projectionMode ?? 'in_source',
-                batchSize: 1000,
-            }, 'manual'), 'Aggregation triggered')
-        }
+    const executeConfirmedDelete = () => {
+        if (!confirmDelete) return
+        const job = confirmDelete
+        setConfirmDelete(null)
+        withAction(job.id, () => aggregationService.deleteJob(job.id), 'Job removed from history')
     }
+
+    /**
+     * Run an aggregation trigger/resume from the dialog.
+     * Throws on failure so the dialog stays open with the user's overrides.
+     */
+    const runDialogAction = useCallback(async (
+        loadingKey: string,
+        action: () => Promise<unknown>,
+        successMsg: string,
+    ) => {
+        showLoading(loadingKey, 'Submitting…')
+        try {
+            await action()
+            hideLoading(loadingKey)
+            showToast('success', successMsg)
+            setViewMode('flat')  // ensure user lands somewhere they can see the new job
+            await fetchJobs()
+            aggregationService.getJobsSummary().then(setSummary).catch(() => {})
+        } catch (err: any) {
+            hideLoading(loadingKey)
+            showToast('error', err?.message ?? 'Action failed')
+            throw err
+        }
+    }, [showLoading, hideLoading, showToast, setViewMode, fetchJobs])
+
+    const handleConfirmRetrigger = useCallback(async (overrides: AggregationOverridesValue) => {
+        if (!retriggerCtx) return
+        const dsId = retriggerCtx.kind === 'job' ? retriggerCtx.job.dataSourceId : retriggerCtx.dataSourceId
+        await runDialogAction(
+            `retrigger-${dsId}`,
+            () => aggregationService.triggerAggregation(dsId, {
+                projectionMode: overrides.projectionMode,
+                batchSize: overrides.batchSize,
+                maxRetries: overrides.maxRetries,
+                timeoutSecs: overrides.timeoutMinutes * 60,
+            }, 'manual'),
+            'Aggregation triggered',
+        )
+    }, [retriggerCtx, runDialogAction])
+
+    const handleConfirmResume = useCallback(async (overrides: AggregationOverridesValue) => {
+        if (!retriggerCtx || retriggerCtx.kind !== 'job') return
+        const { job } = retriggerCtx
+        await runDialogAction(
+            `resume-${job.id}`,
+            () => aggregationService.resumeJob(job.dataSourceId, job.id, {
+                projectionMode: overrides.projectionMode,
+                batchSize: overrides.batchSize,
+                maxRetries: overrides.maxRetries,
+                timeoutSecs: overrides.timeoutMinutes * 60,
+            }),
+            'Job resumed from checkpoint',
+        )
+    }, [retriggerCtx, runDialogAction])
 
     const handlePurge = async (job: AggregationJobResponse) => {
         setPurgeConfirm(null)
@@ -279,13 +361,15 @@ export function RegistryJobHistory() {
         }
     }
 
-    // Data source-level actions (for grouped view)
+    // Data source-level actions (for grouped view) — opens the overrides dialog.
     const handleTriggerAggregation = (dataSourceId: string) => {
-        const dsId = dataSourceId
-        withAction(dsId, () => aggregationService.triggerAggregation(dsId, {
-            projectionMode: dsLookup.get(dsId)?.projectionMode ?? 'in_source',
-            batchSize: 1000,
-        }, 'manual'), 'Aggregation triggered')
+        const meta = dsLookup.get(dataSourceId)
+        setRetriggerCtx({
+            kind: 'dataSource',
+            dataSourceId,
+            dataSourceLabel: meta?.label ?? dataSourceId,
+            initialValue: buildInitialOverridesForDataSource(meta?.projectionMode),
+        })
     }
 
     const handlePurgeDataSource = async (dataSourceId: string) => {
@@ -540,21 +624,43 @@ export function RegistryJobHistory() {
                 </div>
             </div>
 
-            {/* Confirm Dialog for Delete / Re-trigger */}
+            {/* Confirm Dialog for Delete only */}
             <ConfirmDialog
-                open={!!confirmAction}
-                title={confirmAction?.type === 'delete' ? 'Delete job from history' : 'Re-trigger aggregation'}
-                message={
-                    confirmAction?.type === 'delete'
-                        ? `Remove job ${confirmAction?.job.id ?? ''} from history? This only deletes the record — aggregated edges in the graph are not affected.`
-                        : `Start a new aggregation job for ${confirmAction?.job.dataSourceLabel || confirmAction?.job.dataSourceId || 'this data source'}? This will re-process all edges.`
-                }
-                confirmLabel={confirmAction?.type === 'delete' ? 'Delete' : 'Re-trigger'}
-                confirmColor={confirmAction?.type === 'delete' ? 'bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/25' : 'bg-indigo-500 hover:bg-indigo-600 shadow-lg shadow-indigo-500/25'}
-                confirmIcon={confirmAction?.type === 'delete' ? Trash2 : Play}
-                onConfirm={executeConfirmedAction}
-                onCancel={() => setConfirmAction(null)}
+                open={!!confirmDelete}
+                title="Delete job from history"
+                message={`Remove job ${confirmDelete?.id ?? ''} from history? This only deletes the record — aggregated edges in the graph are not affected.`}
+                confirmLabel="Delete"
+                confirmColor="bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/25"
+                confirmIcon={Trash2}
+                onConfirm={executeConfirmedDelete}
+                onCancel={() => setConfirmDelete(null)}
                 loading={!!actionLoading}
+            />
+
+            {/* Re-trigger / Resume dialog with override knobs */}
+            <RetriggerDialog
+                isOpen={!!retriggerCtx}
+                onClose={() => setRetriggerCtx(null)}
+                title={
+                    retriggerCtx?.kind === 'job'
+                        ? 'Re-trigger aggregation'
+                        : retriggerCtx?.kind === 'dataSource'
+                            ? `Trigger aggregation — ${retriggerCtx.dataSourceLabel}`
+                            : 'Re-trigger aggregation'
+                }
+                initialValue={retriggerCtx?.initialValue ?? {
+                    batchSize: DEFAULT_BATCH_SIZE,
+                    projectionMode: 'in_source',
+                    maxRetries: DEFAULT_MAX_RETRIES,
+                    timeoutMinutes: Math.round(DEFAULT_TIMEOUT_SECS / 60),
+                }}
+                originatingJob={retriggerCtx?.kind === 'job' ? {
+                    id: retriggerCtx.job.id,
+                    lastCursor: retriggerCtx.job.lastCursor ?? null,
+                    status: retriggerCtx.job.status,
+                } : undefined}
+                onConfirmRetrigger={handleConfirmRetrigger}
+                onConfirmResume={retriggerCtx?.kind === 'job' ? handleConfirmResume : undefined}
             />
         </div>
     )

@@ -26,6 +26,7 @@ from .schemas import (
     DataSourceReadinessResponse,
     DriftCheckResponse,
     PaginatedJobsResponse,
+    ResumeOverrides,
 )
 from .fingerprint import compute_graph_fingerprint, fingerprints_match
 
@@ -178,7 +179,7 @@ class AggregationService:
                 )
 
             # Create job with frozen edge types + denormalized graph metadata
-            job = AggregationJobORM(
+            job_kwargs = dict(
                 id=_generate_id(),
                 data_source_id=ds_id,
                 workspace_id=ontology_data.get("workspace_id"),
@@ -193,8 +194,16 @@ class AggregationService:
                 trigger_source=trigger_source,
                 batch_size=request.batch_size,
                 idempotency_key=idem_key,
+                # Per-job overrides: when None, the worker / ORM defaults
+                # apply (timeout_secs → _JOB_TIMEOUT_SECS env, max_retries → 3).
+                timeout_secs=request.timeout_secs,
                 created_at=_now(),
             )
+            # Only set max_retries when caller supplied one, so the ORM
+            # column default (3) is honoured for backwards-compat callers.
+            if request.max_retries is not None:
+                job_kwargs["max_retries"] = request.max_retries
+            job = AggregationJobORM(**job_kwargs)
             session.add(job)
 
             # Update aggregation-owned state table
@@ -531,20 +540,48 @@ class AggregationService:
             projection_mode=job.projection_mode,
             duration_seconds=duration,
             edge_coverage_pct=coverage,
+            last_cursor=job.last_cursor,
+            max_retries=job.max_retries,
+            timeout_secs=job.timeout_secs,
         )
 
     # ── Resume ────────────────────────────────────────────────────────
 
     async def resume(
-        self, ds_id: str, job_id: str, session: AsyncSession
+        self,
+        ds_id: str,
+        job_id: str,
+        session: AsyncSession,
+        overrides: Optional[ResumeOverrides] = None,
     ) -> AggregationJobResponse:
-        """Resume a failed aggregation job from its last checkpoint."""
+        """Resume a failed aggregation job from its last checkpoint.
+
+        Optional `overrides` lets the caller bump per-job parameters
+        (timeout_secs, batch_size, projection_mode, max_retries) before
+        the worker picks the job back up. The checkpoint (`last_cursor`)
+        is intentionally preserved — that's the whole point of resume.
+        """
         job = await session.get(AggregationJobORM, job_id)
         if not job or job.data_source_id != ds_id:
             raise NotFoundError(f"Aggregation job {job_id} not found")
 
-        if job.status != "failed":
-            raise ValueError(f"Job {job_id} is not in 'failed' status (current: {job.status})")
+        if job.status not in ("failed", "cancelled"):
+            raise ValueError(
+                f"Job {job_id} is not resumable (current status: {job.status}; "
+                f"resume requires 'failed' or 'cancelled')"
+            )
+
+        # Apply overrides BEFORE the max_retries gate so a caller who
+        # raises max_retries can resume a job that exhausted the old cap.
+        if overrides is not None:
+            if overrides.timeout_secs is not None:
+                job.timeout_secs = overrides.timeout_secs
+            if overrides.batch_size is not None:
+                job.batch_size = overrides.batch_size
+            if overrides.projection_mode is not None:
+                job.projection_mode = overrides.projection_mode
+            if overrides.max_retries is not None:
+                job.max_retries = overrides.max_retries
 
         if job.retry_count >= job.max_retries:
             raise ValueError(f"Job {job_id} has exceeded max retries ({job.max_retries})")
@@ -961,6 +998,10 @@ class AggregationService:
                 round(job.processed_edges / job.total_edges * 100, 1)
                 if job.total_edges and job.total_edges > 0 else None
             ),
+            last_cursor=job.last_cursor,
+            max_retries=job.max_retries,
+            timeout_secs=job.timeout_secs,
+            projection_mode=job.projection_mode,
         )
 
 
