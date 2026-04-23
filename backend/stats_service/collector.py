@@ -41,6 +41,18 @@ async def collect(session: AsyncSession, envelope: StatsJobEnvelope) -> None:
     )
     provider = engine.provider
 
+    # Eager ontology resolution in ContextEngine.for_workspace logs a
+    # warning and continues on failure, leaving the provider's sentinel
+    # flag unset. Surface that upfront so the poll fails with a specific
+    # message instead of a cryptic mid-gather traceback attributed to
+    # whichever provider call hit the unconfigured state first.
+    if getattr(provider, "_resolved_containment_types_set", True) is False:
+        raise RuntimeError(
+            f"Provider for ds={envelope.data_source_id} is unconfigured — "
+            "ontology resolution failed during ContextEngine.for_workspace. "
+            "Check the scheduler log for the preceding warning."
+        )
+
     stats, schema_stats, ontology_meta, graph_schema = await asyncio.gather(
         provider.get_stats(),
         provider.get_schema_stats(),

@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from .endpoints import (
     graph, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
-    auth, users, announcements, aggregation,
+    auth, users, announcements, aggregation, stats_admin,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -59,6 +59,10 @@ api_router.include_router(
 # Aggregation service: /api/v1/admin/...
 api_router.include_router(
     aggregation.router, prefix="/admin", tags=["admin:aggregation"],
+)
+# Stats service: /api/v1/admin/stats-polling
+api_router.include_router(
+    stats_admin.router, prefix="/admin", tags=["admin:stats"],
 )
 
 # ── Top-level views (first-class, cross-workspace) ─────────────────

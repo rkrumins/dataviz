@@ -18,16 +18,113 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 
 from backend.app.common.health_server import run_health_server
-from backend.app.services.aggregation.redis_client import close_redis
+from backend.app.services.aggregation.redis_client import close_redis, get_redis
 
 from .config import StatsServiceConfig
 from .redis_streams import ensure_consumer_group
-from .scheduler import run_scheduler
+from .scheduler import get_scheduler_status, run_scheduler
 from .worker import StatsJobConsumer
 
 logger = logging.getLogger(__name__)
+
+
+_REQUIRED_TABLES = (
+    "workspace_data_sources",
+    "data_source_polling_configs",
+    "data_source_stats",
+)
+
+
+async def _preflight() -> None:
+    """Validate environment and infra before starting the event loop.
+
+    Each failure exits with a single CRITICAL line naming the missing
+    piece and a pointer to the fix. Fast, cheap, and avoids the 30-second
+    debug round-trip of "it starts fine then crashes in the scheduler".
+    """
+    try:
+        import asyncpg  # noqa: F401
+    except ImportError:
+        logger.critical(
+            "asyncpg not installed. Run 'pip install -r backend/requirements.txt' "
+            "in your venv, or launch via './dev.sh up' (Docker has it pre-installed)."
+        )
+        sys.exit(1)
+
+    db_url = os.getenv("MANAGEMENT_DB_URL")
+    if not db_url:
+        logger.critical(
+            "MANAGEMENT_DB_URL is not set. Export it (e.g. 'set -a; source .env.dev; set +a') "
+            "or run './dev.sh up' which sets it in the container."
+        )
+        sys.exit(1)
+
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        logger.critical(
+            "REDIS_URL is not set. Export it (e.g. 'set -a; source .env.dev; set +a') "
+            "or run './dev.sh up'."
+        )
+        sys.exit(1)
+
+    # Import here so the asyncpg check above can surface its own clean
+    # error — importing engine.py eagerly loads asyncpg.
+    from sqlalchemy import text
+
+    from backend.app.db.engine import PoolRole, get_session_factory
+
+    try:
+        factory = get_session_factory(PoolRole.READONLY)
+        async with factory() as session:
+            await session.execute(text("SELECT 1"))
+    except Exception as exc:
+        logger.critical(
+            "Cannot reach Postgres at MANAGEMENT_DB_URL (%s). "
+            "Run './dev.sh infra' (or './dev.sh up') and retry. Underlying: %s",
+            db_url, exc,
+        )
+        sys.exit(1)
+
+    try:
+        redis = get_redis()
+        await redis.ping()
+    except Exception as exc:
+        logger.critical(
+            "Cannot reach Redis at REDIS_URL=%s. Run './dev.sh infra' "
+            "(or './dev.sh up') and retry. Underlying: %s",
+            redis_url, exc,
+        )
+        sys.exit(1)
+
+    # Schema check — the controlplane is supposed to have run Alembic
+    # already (docker-compose depends_on: aggregation-controlplane:
+    # service_healthy). If someone launches us directly against a fresh
+    # DB, say so instead of crashing with a SQL 42P01 on the first tick.
+    try:
+        factory = get_session_factory(PoolRole.READONLY)
+        async with factory() as session:
+            for table in _REQUIRED_TABLES:
+                result = await session.execute(
+                    text("SELECT to_regclass(:name)"), {"name": table}
+                )
+                if result.scalar() is None:
+                    logger.critical(
+                        "Required table '%s' is missing. Run './dev.sh up' "
+                        "(controlplane applies Alembic migrations) or "
+                        "'alembic -c backend/alembic.ini upgrade head'.",
+                        table,
+                    )
+                    sys.exit(1)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        logger.critical("Schema preflight check failed: %s", exc)
+        sys.exit(1)
+
+    logger.info("Preflight OK: asyncpg present, Postgres reachable, Redis reachable, schema present.")
 
 
 async def main() -> None:
@@ -47,6 +144,8 @@ async def main() -> None:
         config.min_interval_secs,
         config.health_port,
     )
+
+    await _preflight()
 
     await ensure_consumer_group()
 
@@ -68,6 +167,7 @@ async def main() -> None:
         status_payload_fn=lambda: {
             "activeJobs": consumer.active_count,
             "consumer": consumer.consumer_name,
+            "scheduler": get_scheduler_status(),
         },
     )
 
