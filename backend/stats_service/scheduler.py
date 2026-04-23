@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +28,28 @@ from .redis_streams import enqueue, try_claim
 from .schemas import StatsJobEnvelope
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TickSummary:
+    """What a single scheduler pass observed and did. Surfaced in logs
+    and via ``get_scheduler_status()`` for the /health payload."""
+    seen: int
+    due: int
+    enqueued: int
+    skipped_dedup: int
+    materialized: int
+
+
+_last_tick: Optional[TickSummary] = None
+_last_tick_at: Optional[datetime] = None
+
+
+def get_scheduler_status() -> dict:
+    """Return a JSON-friendly snapshot of the last tick for /health."""
+    if _last_tick is None or _last_tick_at is None:
+        return {"last_tick_at": None}
+    return {"last_tick_at": _last_tick_at.isoformat(), **asdict(_last_tick)}
 
 
 async def _materialize_config(
@@ -61,10 +85,10 @@ def _is_due(config: DataSourcePollingConfigORM, now: datetime, min_interval_secs
     return (now - last).total_seconds() >= interval
 
 
-async def _tick(config: StatsServiceConfig) -> int:
-    """Single scheduler pass. Returns the number of jobs enqueued."""
+async def _tick(config: StatsServiceConfig) -> TickSummary:
+    """Single scheduler pass. Returns a summary of what was seen and done."""
     factory = get_session_factory(PoolRole.JOBS)
-    enqueued = 0
+    seen = due = enqueued = skipped_dedup = materialized = 0
     now = datetime.now(timezone.utc)
 
     async with factory() as session:
@@ -78,20 +102,24 @@ async def _tick(config: StatsServiceConfig) -> int:
             .where(WorkspaceDataSourceORM.is_active.is_(True))
         )
         rows = result.all()
+        seen = len(rows)
 
         for ds, polling_config in rows:
             if polling_config is None:
                 polling_config = await _materialize_config(
                     session, ds.id, config.default_interval_secs, config.min_interval_secs
                 )
+                materialized += 1
 
             if not _is_due(polling_config, now, config.min_interval_secs):
                 continue
+            due += 1
 
             claimed = await try_claim(ds.id, ttl_secs=config.dedup_ttl_secs)
             if not claimed:
                 # Another replica already enqueued, or a previous job is
                 # still in-flight. Silently skip.
+                skipped_dedup += 1
                 continue
 
             envelope = StatsJobEnvelope(
@@ -108,7 +136,13 @@ async def _tick(config: StatsServiceConfig) -> int:
 
         await session.commit()
 
-    return enqueued
+    return TickSummary(
+        seen=seen,
+        due=due,
+        enqueued=enqueued,
+        skipped_dedup=skipped_dedup,
+        materialized=materialized,
+    )
 
 
 async def run_scheduler(config: StatsServiceConfig, shutdown: asyncio.Event) -> None:
@@ -119,11 +153,17 @@ async def run_scheduler(config: StatsServiceConfig, shutdown: asyncio.Event) -> 
         config.default_interval_secs,
         config.min_interval_secs,
     )
+    global _last_tick, _last_tick_at
     while not shutdown.is_set():
         try:
-            enqueued = await _tick(config)
-            if enqueued:
-                logger.debug("Scheduler tick: enqueued %d job(s)", enqueued)
+            summary = await _tick(config)
+            _last_tick = summary
+            _last_tick_at = datetime.now(timezone.utc)
+            logger.info(
+                "Scheduler tick: seen=%d due=%d enqueued=%d dedup_skipped=%d new_configs=%d",
+                summary.seen, summary.due, summary.enqueued,
+                summary.skipped_dedup, summary.materialized,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
