@@ -2,9 +2,13 @@
  * Shared utilities for ontology features.
  */
 import type { GraphSchemaStats } from '@/providers/GraphDataProvider'
+import {
+  fetchEnvelopedWithMeta,
+  type CacheMeta,
+} from '@/services/cacheEnvelope'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 
-/** Cache freshness metadata surfaced from the backend's X-Cache-* headers. */
+/** Cache freshness metadata surfaced from the backend response envelope. */
 export interface SchemaStatsFreshness {
   /** ISO timestamp of when the cache was last refreshed. */
   updatedAt: string | null
@@ -21,15 +25,28 @@ export interface SchemaStatsResult {
   freshness: SchemaStatsFreshness
 }
 
-function _parseFreshness(res: Response, fromCache: boolean): SchemaStatsFreshness {
-  const updatedAt = res.headers.get('X-Cache-Updated-At')
-  const ageRaw = res.headers.get('X-Cache-Age-Seconds')
-  const source = (res.headers.get('X-Cache-Source') as 'postgres' | 'live' | null) ?? 'unknown'
+/** Map an envelope's ``meta`` block to the legacy SchemaStatsFreshness shape. */
+function _freshnessFromMeta(meta: CacheMeta | null, fromCache: boolean): SchemaStatsFreshness {
+  if (!meta) {
+    return {
+      updatedAt: null,
+      ageSeconds: null,
+      source: fromCache ? 'postgres' : 'unknown',
+      fromCache,
+    }
+  }
+  // meta.source ∈ "postgres" | "ontology" | "none" | "error"
+  // Map to the existing 'postgres' | 'live' | 'unknown' display vocabulary
+  // since downstream UI components don't yet model the richer states.
+  const source =
+    meta.source === 'postgres' ? 'postgres'
+    : meta.source === 'ontology' ? 'postgres'  // synthetic schema is still "from cache"
+    : 'unknown'
   return {
-    updatedAt,
-    ageSeconds: ageRaw ? parseInt(ageRaw, 10) : null,
+    updatedAt: meta.updated_at ?? null,
+    ageSeconds: meta.age_seconds,
     source,
-    fromCache: fromCache || source === 'postgres',
+    fromCache: source === 'postgres',
   }
 }
 
@@ -58,38 +75,41 @@ export async function fetchSchemaStatsWithMeta(
   workspaceId: string,
   dataSourceId?: string,
 ): Promise<SchemaStatsResult> {
-  // 1. Try DB cache first (always fast, even on 1M+ graphs)
+  const circuitScope = { workspaceId, dataSourceId }
+
+  // 1. Try the management-DB cached-stats endpoint. The composite payload
+  //    contains a ``schemaStats`` field; use ``fetchEnvelopedWithMeta`` so
+  //    the UI can also render the freshness banner from ``meta``.
   if (dataSourceId) {
-    try {
-      const res = await fetchWithTimeout(
-        `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-stats`,
-      )
-      if (res.ok) {
-        const data = await res.json()
-        if (data.schemaStats) {
-          return {
-            stats: data.schemaStats as GraphSchemaStats,
-            freshness: _parseFreshness(res, /*fromCache*/ true),
-          }
-        }
+    const { data, meta } = await fetchEnvelopedWithMeta<{
+      schemaStats?: GraphSchemaStats
+    }>(
+      `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-stats`,
+      { circuitScope },
+    )
+    if (data?.schemaStats) {
+      return {
+        stats: data.schemaStats,
+        freshness: _freshnessFromMeta(meta, /*fromCache*/ true),
       }
-    } catch { /* cache miss — fall through */ }
+    }
   }
 
-  // 2. Fall back to provider-backed endpoint (also checks Postgres cache first)
+  // 2. Try the provider-backed introspection endpoint (also Postgres-cached).
+  //    The unwrapped payload IS the GraphSchemaStats directly (no nested key).
   if (workspaceId && dataSourceId) {
-    try {
-      const res = await fetchWithTimeout(
-        `/api/v1/${workspaceId}/graph/introspection?dataSourceId=${encodeURIComponent(dataSourceId)}`,
-      )
-      if (res.ok) {
-        const stats = await res.json() as GraphSchemaStats
-        return { stats, freshness: _parseFreshness(res, false) }
-      }
-    } catch { /* fall through to provider */ }
+    const { data, meta } = await fetchEnvelopedWithMeta<GraphSchemaStats>(
+      `/api/v1/${workspaceId}/graph/introspection?dataSourceId=${encodeURIComponent(dataSourceId)}`,
+      { circuitScope },
+    )
+    if (data) {
+      return { stats: data, freshness: _freshnessFromMeta(meta, /*fromCache*/ false) }
+    }
   }
 
-  // 3. Last resort: direct provider call (may time out on large graphs)
+  // 3. Last resort: direct provider call. ``getSchemaStats`` already unwraps
+  //    the envelope internally and throws on error/cache-miss — let that
+  //    propagate so callers can render their error UI.
   const { RemoteGraphProvider } = await import('@/providers/RemoteGraphProvider')
   const provider = new RemoteGraphProvider({ workspaceId, dataSourceId })
   const stats = await provider.getSchemaStats()
@@ -108,6 +128,9 @@ export async function triggerIntrospectionRefresh(
   workspaceId: string,
   dataSourceId: string,
 ): Promise<{ jobId: string }> {
+  // The refresh endpoint returns the canonical {data, meta} envelope.
+  // The job id lives at ``meta.job_id`` (envelope shape), not ``data.job_id``
+  // — the legacy snake-case ``job_id`` field on the body root is gone.
   const res = await fetchWithTimeout(
     `/api/v1/${workspaceId}/graph/introspection/refresh?dataSourceId=${encodeURIComponent(dataSourceId)}`,
     { method: 'POST' },
@@ -115,8 +138,12 @@ export async function triggerIntrospectionRefresh(
   if (!res.ok) {
     throw new Error(`Refresh failed: ${res.status} ${await res.text()}`)
   }
-  const data = await res.json()
-  return { jobId: data.job_id }
+  const body = await res.json()
+  const jobId = body?.meta?.job_id ?? body?.job_id ?? ''
+  if (!jobId) {
+    throw new Error('Refresh accepted but no jobId returned')
+  }
+  return { jobId }
 }
 
 /**

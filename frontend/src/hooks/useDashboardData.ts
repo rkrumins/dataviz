@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useWorkspaces } from './useWorkspaces'
 import { useSchemaStore } from '@/store/schema'
+import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import type { ViewConfiguration } from '@/types/schema'
 
@@ -99,21 +100,24 @@ export function useDashboardData() {
 
             const fetchPromises = workspaces.flatMap(ws =>
                 (ws.dataSources || []).map(async ds => {
-                    try {
-                        // Use cached-stats endpoint (DB-only) — no provider dependency
-                        const url = `/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`
-                        const res = await fetchWithTimeout(url)
-                        if (res.ok) {
-                            const data = await res.json()
-                            const nodeCount = data.nodeCount ?? 0
-                            const edgeCount = data.edgeCount ?? 0
-                            const entityTypes = Object.keys(data.entityTypeCounts ?? {})
-                            results[`${ws.id}/${ds.id}`] = { nodeCount, edgeCount, entityTypes }
-                            totalEntities += nodeCount
-                        }
-                    } catch {
-                        // Silently ignore per-datasource stat failures
-                    }
+                    // Use cached-stats endpoint (DB-only) — no provider dependency.
+                    // The endpoint returns the canonical {data, meta} envelope;
+                    // ``fetchEnveloped`` unwraps and returns ``null`` on cold
+                    // cache (``meta.status === "computing"``) so we render zero
+                    // counts only when the row is genuinely missing — same UX
+                    // as before, but no longer broken by the envelope wrapper.
+                    const url = `/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`
+                    const data = await fetchEnveloped<{
+                        nodeCount?: number
+                        edgeCount?: number
+                        entityTypeCounts?: Record<string, number>
+                    }>(url, { circuitScope: { workspaceId: ws.id, dataSourceId: ds.id } })
+                    if (!data) return
+                    const nodeCount = data.nodeCount ?? 0
+                    const edgeCount = data.edgeCount ?? 0
+                    const entityTypes = Object.keys(data.entityTypeCounts ?? {})
+                    results[`${ws.id}/${ds.id}`] = { nodeCount, edgeCount, entityTypes }
+                    totalEntities += nodeCount
                 })
             )
 

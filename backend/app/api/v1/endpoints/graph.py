@@ -22,8 +22,9 @@ from backend.app.models.graph import (
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.stats_cache import (
-    CacheMiss, build_computing_response_body, build_synthetic_schema,
-    read_stats_cache, synthetic_schema_headers,
+    CacheMiss, SYNTHETIC_SCHEMA_MISSING_FIELDS,
+    build_computing_envelope, build_envelope, build_error_envelope, build_meta,
+    build_synthetic_schema, read_stats_cache,
 )
 from backend.app.db.engine import get_db_session
 from backend.app.providers.manager import provider_manager
@@ -326,9 +327,10 @@ async def get_graph_stats(
     """**Deprecated:** Use `GET /introspection` instead — returns a superset of stats with full schema details.
 
     Cache-only read: serves the latest ``data_source_stats`` row populated
-    by the stats service. On cache-miss returns 202 Accepted with a
-    pollable jobId — the handler never calls the provider, so it cannot
-    504 regardless of graph size.
+    by the stats service. The handler never calls the provider, so it
+    cannot 504 regardless of graph size. Always returns HTTP 200 with
+    the canonical ``{data, meta}`` envelope; cache state lives in
+    ``meta.status``.
     """
     logger.warning("Deprecated endpoint GET /stats called — use GET /introspection")
 
@@ -337,21 +339,17 @@ async def get_graph_stats(
         raise HTTPException(status_code=400, detail="dataSourceId is required")
 
     try:
-        payload, headers = await read_stats_cache(session, ds_id, ws_id, "node_stats")
-        return JSONResponse(content=payload, headers=headers)
+        data, meta = await read_stats_cache(session, ds_id, ws_id, "node_stats")
+        return JSONResponse(content=build_envelope(data, meta))
     except CacheMiss:
-        pass  # fall through to 202
+        pass
     except (OperationalError, SQLAlchemyError) as exc:
         logger.warning("get_graph_stats: database unavailable (ds_id=%s): %s", ds_id, exc)
-        raise HTTPException(
-            status_code=503, detail="Database temporarily unavailable",
-            headers={"Retry-After": "30"},
-        )
+        return JSONResponse(content=build_error_envelope(ds_id, reason="db_unavailable"))
 
     msg_id = await enqueue_stats_job_safe(ds_id, ws_id) if ws_id else None
-    body = build_computing_response_body(ds_id, ws_id, msg_id)
-    logger.info("stats_cache.served_202 endpoint=/graph/stats ds_id=%s msg_id=%s", ds_id, msg_id)
-    return JSONResponse(status_code=202, content=body)
+    logger.info("stats_cache.served_computing endpoint=/graph/stats ds_id=%s msg_id=%s", ds_id, msg_id)
+    return JSONResponse(content=build_computing_envelope(ds_id, ws_id, msg_id))
 
 
 @router.get("/nodes", response_model=List[GraphNode], response_model_by_alias=True,
@@ -531,33 +529,27 @@ async def get_graph_introspection(
     """Get detailed schema statistics for the graph.
 
     Cache-only read: serves the latest ``data_source_stats.schema_stats``
-    row populated by the stats service. On cache-miss returns 202
-    Accepted with a pollable jobId. The handler never calls the
-    provider; 504s are impossible by construction.
-
-    Emits ``X-Cache-*`` / ``X-Stats-Service-Status`` / ``X-Provider-Health``
-    headers so the frontend can surface staleness in the UI.
+    row populated by the stats service. Always returns HTTP 200 with
+    the canonical ``{data, meta}`` envelope; ``meta.status`` carries
+    cache state (``fresh``/``stale``/``computing``). The handler never
+    calls the provider; 504s are impossible by construction.
     """
     ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
     if not ds_id:
         raise HTTPException(status_code=400, detail="dataSourceId is required")
 
     try:
-        payload, headers = await read_stats_cache(session, ds_id, ws_id, "schema_stats")
-        return JSONResponse(content=payload, headers=headers)
+        data, meta = await read_stats_cache(session, ds_id, ws_id, "schema_stats")
+        return JSONResponse(content=build_envelope(data, meta))
     except CacheMiss:
         pass
     except (OperationalError, SQLAlchemyError) as exc:
         logger.warning("get_graph_introspection: database unavailable (ds_id=%s): %s", ds_id, exc)
-        raise HTTPException(
-            status_code=503, detail="Database temporarily unavailable",
-            headers={"Retry-After": "30"},
-        )
+        return JSONResponse(content=build_error_envelope(ds_id, reason="db_unavailable"))
 
     msg_id = await enqueue_stats_job_safe(ds_id, ws_id) if ws_id else None
-    body = build_computing_response_body(ds_id, ws_id, msg_id)
-    logger.info("stats_cache.served_202 endpoint=/introspection ds_id=%s msg_id=%s", ds_id, msg_id)
-    return JSONResponse(status_code=202, content=body)
+    logger.info("stats_cache.served_computing endpoint=/introspection ds_id=%s msg_id=%s", ds_id, msg_id)
+    return JSONResponse(content=build_computing_envelope(ds_id, ws_id, msg_id))
 
 
 @router.get("/metadata/ontology", deprecated=True)
@@ -571,7 +563,7 @@ async def get_ontology_metadata(
 
     **Deprecated:** Use `GET /metadata/schema` instead — returns a superset including ontology, entity types, and relationship definitions.
 
-    Cache-only read. On miss returns 202 Accepted; never calls the provider.
+    Cache-only read with ``{data, meta}`` envelope, always HTTP 200.
     """
     logger.warning("Deprecated endpoint GET /metadata/ontology called — use GET /metadata/schema")
 
@@ -580,60 +572,65 @@ async def get_ontology_metadata(
         raise HTTPException(status_code=400, detail="dataSourceId is required")
 
     try:
-        payload, headers = await read_stats_cache(session, ds_id, ws_id, "ontology_metadata")
-        headers["Cache-Control"] = "private, max-age=300"
-        return JSONResponse(content=payload, headers=headers)
+        data, meta = await read_stats_cache(session, ds_id, ws_id, "ontology_metadata")
+        return JSONResponse(
+            content=build_envelope(data, meta),
+            headers={"Cache-Control": "private, max-age=300"},
+        )
     except CacheMiss:
         pass
     except (OperationalError, SQLAlchemyError) as exc:
         logger.warning("get_ontology_metadata: database unavailable (ds_id=%s): %s", ds_id, exc)
-        raise HTTPException(
-            status_code=503, detail="Database temporarily unavailable",
-            headers={"Retry-After": "30"},
-        )
+        return JSONResponse(content=build_error_envelope(ds_id, reason="db_unavailable"))
 
     msg_id = await enqueue_stats_job_safe(ds_id, ws_id) if ws_id else None
-    body = build_computing_response_body(ds_id, ws_id, msg_id)
-    logger.info("stats_cache.served_202 endpoint=/metadata/ontology ds_id=%s msg_id=%s", ds_id, msg_id)
-    return JSONResponse(status_code=202, content=body)
+    logger.info("stats_cache.served_computing endpoint=/metadata/ontology ds_id=%s msg_id=%s", ds_id, msg_id)
+    return JSONResponse(content=build_computing_envelope(ds_id, ws_id, msg_id))
 
 
-def _schema_etag(payload: dict) -> str:
-    """Compute a weak ETag over the JSON-serialized schema payload.
+def _schema_etag(payload: dict, *, status: str, source: str) -> str:
+    """Compute a weak ETag over the canonical schema payload + state markers.
 
-    Uses SHA-256 over canonical JSON (sorted keys, no whitespace) so that
-    semantically-identical responses produce identical ETags regardless of
-    dict key order. Emitted as a weak validator because the payload is a
-    deterministic serialisation, not a byte-exact representation.
+    The ETag input includes ``meta.status`` and ``meta.source`` because
+    those signal a semantic transition the client must observe — e.g. a
+    synthetic schema (``status=partial``, ``source=ontology``) replaced
+    by the real schema (``status=fresh``, ``source=postgres``) that
+    happens to be byte-identical (empty graph case). Without status/
+    source in the ETag, the client would 304 on the transition, never
+    update its banner, and stay stuck on "partial" forever.
+
+    ``updated_at`` is intentionally excluded — it changes every poll
+    and would make 304s impossible. Cache freshness boundary crossings
+    (fresh→stale) DO change ``status``, so they correctly invalidate.
     """
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    seed = f"{status}|{source}|{canonical}"
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
     return f'W/"{digest}"'
 
 
 def _schema_response(
-    payload: dict, request: Request, *, freshness: Optional[dict] = None,
+    data: Optional[dict], request: Request, *, meta: dict,
 ) -> Response:
-    """Build a cache-aware JSONResponse with ETag/If-None-Match handling.
+    """Build the envelope response for /metadata/schema with ETag handling.
 
-    Returns 304 Not Modified with an empty body when the client's
-    If-None-Match header matches the computed ETag. Otherwise returns
-    200 with the payload and the ETag header attached.
-
-    ``freshness`` — optional dict of ``X-Cache-*`` headers (see
-    :func:`_freshness_headers`) to surface cache staleness to the client.
+    The envelope is ``{"data": data, "meta": meta}``. The ETag is
+    computed over ``data`` plus ``meta.status`` and ``meta.source`` —
+    so transitions that swap the *meaning* of an otherwise-identical
+    payload (synthetic → real, fresh → stale) correctly invalidate the
+    client's cached copy. ``meta.updated_at`` is excluded so steady-
+    state polls within the same tier still benefit from 304s.
     """
-    etag = _schema_etag(payload)
-    if_none_match = request.headers.get("if-none-match")
-    headers = {
-        "ETag": etag,
+    headers: dict[str, str] = {
         "Cache-Control": "private, max-age=0, must-revalidate",
     }
-    if freshness:
-        headers.update(freshness)
-    if if_none_match and if_none_match == etag:
-        return Response(status_code=304, headers=headers)
-    return JSONResponse(content=payload, headers=headers)
+    if data is not None:
+        etag = _schema_etag(data, status=meta.get("status", ""), source=meta.get("source", ""))
+        headers["ETag"] = etag
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match and if_none_match == etag:
+            return Response(status_code=304, headers=headers)
+    return JSONResponse(content=build_envelope(data, meta), headers=headers)
 
 
 @router.get("/metadata/schema")
@@ -652,48 +649,56 @@ async def get_graph_schema(
     Cache-first: reads the latest ``data_source_stats.graph_schema`` row
     populated by the stats service. On miss, serves a synthetic schema
     built from the data source's assigned ontology (zero entity counts,
-    but correct types/relationships — the canvas renders immediately
-    while the real schema computes in the background). If there is no
-    ontology assigned either, returns 202 Accepted with a pollable jobId.
+    but correct types/relationships — canvas renders immediately while
+    the real schema computes in the background; ``meta.status=partial``,
+    ``meta.source=ontology``). If there is no ontology assigned either,
+    returns ``meta.status=computing`` with a pollable jobId.
 
-    Responds with a weak ETag computed from the canonical payload. Clients
-    that send a matching If-None-Match header get a 304 Not Modified with
-    no body — use this to avoid re-parsing unchanged schemas on refetch.
+    Always HTTP 200. ``data`` carries the schema (or null when
+    computing); ``meta`` carries cache state.
+
+    A weak ETag is computed over ``data`` so clients that re-fetch with
+    ``If-None-Match`` get a 304 — saves re-parsing unchanged schemas
+    while ``meta`` still updates freshness on every read.
     """
     ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
     if not ds_id:
         raise HTTPException(status_code=400, detail="dataSourceId is required")
 
     try:
-        payload, headers = await read_stats_cache(session, ds_id, ws_id, "graph_schema")
-        return _schema_response(payload, request, freshness=headers)
+        data, meta = await read_stats_cache(session, ds_id, ws_id, "graph_schema")
+        return _schema_response(data, request, meta=meta)
     except CacheMiss:
         pass
     except (OperationalError, SQLAlchemyError) as exc:
         logger.warning("get_graph_schema: database unavailable (ds_id=%s): %s", ds_id, exc)
-        raise HTTPException(
-            status_code=503, detail="Database temporarily unavailable",
-            headers={"Retry-After": "30"},
-        )
+        return JSONResponse(content=build_error_envelope(ds_id, reason="db_unavailable"))
 
-    # Synthetic fallback: render canvas from ontology-only if assigned
-    synthetic = await build_synthetic_schema(session, ds_id)
-    if ws_id:
-        # Fire-and-forget: enqueue a real refresh regardless of whether
-        # synthetic rendered. Frontend will auto-upgrade when the job
-        # completes via its polling hook.
-        await enqueue_stats_job_safe(ds_id, ws_id)
-    if synthetic:
-        logger.info(
-            "stats_cache.served_synthetic endpoint=/metadata/schema ds_id=%s",
-            ds_id,
-        )
-        return _schema_response(synthetic, request, freshness=synthetic_schema_headers())
-
+    # Cache miss: enqueue a real refresh in the background regardless of
+    # whether synthetic schema rendered, so the frontend's poll hook
+    # auto-upgrades from synthetic to real when the worker completes.
     msg_id = await enqueue_stats_job_safe(ds_id, ws_id) if ws_id else None
-    body = build_computing_response_body(ds_id, ws_id, msg_id)
-    logger.info("stats_cache.served_202 endpoint=/metadata/schema ds_id=%s msg_id=%s", ds_id, msg_id)
-    return JSONResponse(status_code=202, content=body)
+    job_id = msg_id or f"dedup:{ds_id}"
+    poll_url = f"/api/v1/{ws_id}/graph/introspection/refresh/{job_id}" if ws_id else None
+
+    synthetic = await build_synthetic_schema(session, ds_id)
+    if synthetic:
+        logger.info("stats_cache.served_synthetic endpoint=/metadata/schema ds_id=%s", ds_id)
+        meta = build_meta(
+            status="partial",
+            source="ontology",
+            data_source_id=ds_id,
+            missing_fields=SYNTHETIC_SCHEMA_MISSING_FIELDS,
+            refreshing=True,
+            job_id=job_id,
+            poll_url=poll_url,
+        )
+        return _schema_response(synthetic, request, meta=meta)
+
+    logger.info("stats_cache.served_computing endpoint=/metadata/schema ds_id=%s msg_id=%s", ds_id, msg_id)
+    return JSONResponse(content=build_computing_envelope(
+        ds_id, ws_id, msg_id, missing_fields=SYNTHETIC_SCHEMA_MISSING_FIELDS,
+    ))
 
 
 # ── Async introspection refresh ──────────────────────────────────────
@@ -712,7 +717,7 @@ async def get_graph_schema(
 # status endpoint regardless.
 
 
-@router.post("/introspection/refresh", status_code=202)
+@router.post("/introspection/refresh")
 async def refresh_introspection(
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None),
@@ -720,89 +725,110 @@ async def refresh_introspection(
 ):
     """Trigger a non-blocking refresh of the schema/introspection cache.
 
-    Pushes a job onto the stats-service Redis stream ``stats.jobs``. The
-    stats worker — which owns the only code path allowed to introspect
-    the provider — picks it up within seconds. Returns 202 Accepted
-    immediately.
+    Pushes a job onto the stats-service Redis stream ``stats.jobs``.
+    The stats worker — which owns the only code path allowed to
+    introspect the provider — picks it up within seconds.
 
-    Idempotency: the stats service's ``try_claim`` atomic SET-NX ensures
-    only one job per data source runs at a time. If a claim is already
-    held, this endpoint returns ``already_computing`` with the
-    deterministic dedup jobId — the caller polls identically either way.
+    Always HTTP 200 with the canonical ``{data, meta}`` envelope.
+    ``meta.status="computing"`` regardless of whether we won the
+    ``try_claim`` race; the caller polls the status endpoint identically
+    either way and observes completion via ``data_source_stats.updated_at``.
     """
     ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
     if not ds_id or not ws_id:
         raise HTTPException(status_code=400, detail="ws_id and dataSourceId required")
 
     msg_id = await enqueue_stats_job_safe(ds_id, ws_id)
-    body = build_computing_response_body(ds_id, ws_id, msg_id)
     logger.info(
         "stats_cache.refresh_trigger ds_id=%s msg_id=%s outcome=%s",
         ds_id, msg_id, "enqueued" if msg_id else "dedup_or_redis_down",
     )
-    return body
+    return build_computing_envelope(ds_id, ws_id, msg_id)
 
 
 @router.get("/introspection/refresh/{job_id}")
 async def get_refresh_status(
     job_id: str,
     dataSourceId: Optional[str] = Query(None, description="Data source ID for completion inference."),
-    since: Optional[str] = Query(None, description="ISO timestamp the caller considers the job 'started at'. Used to decide if a later updated_at proves completion."),
+    since: Optional[str] = Query(None, description="ISO timestamp the caller considers the job 'started at'. A later cache updated_at proves completion."),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Poll refresh status by comparing ``data_source_stats.updated_at``.
 
     The stats service does not track individual job lifecycles — it just
     upserts the cache row on completion. We infer completion: if the
-    cache row's ``updated_at`` is newer than the ``since`` timestamp the
-    caller sent, the job completed (from the caller's perspective).
+    cache row's ``updated_at`` is newer than the ``since`` timestamp
+    the caller sent, the job has completed.
 
-    Responses:
-    - ``status=completed`` if ``updated_at > since``
-    - ``status=computing`` otherwise (caller keeps polling)
-    - ``status=unknown`` if dataSourceId missing (no way to infer)
+    Returns the canonical ``{data, meta}`` envelope. ``meta.status`` is
+    one of:
+
+    * ``fresh`` — cache row exists and (when ``since`` provided)
+                  ``updated_at > since`` proves the requested job finished
+    * ``computing`` — no row yet, or ``updated_at`` not advanced past ``since``
+    * ``error`` — DB unavailable
     """
     from backend.app.db.repositories.stats_repo import get_data_source_stats
 
     if not dataSourceId:
-        return {"jobId": job_id, "status": "unknown", "reason": "dataSourceId query param required to infer completion"}
+        return build_envelope(
+            None,
+            build_meta(
+                status="error", source="error",
+                data_source_id="",
+                missing_fields=["dataSourceId_query_param_required"],
+                job_id=job_id,
+            ),
+        )
 
     try:
         cache = await get_data_source_stats(session, dataSourceId)
     except (OperationalError, SQLAlchemyError) as exc:
         logger.warning("get_refresh_status: database unavailable (ds_id=%s): %s", dataSourceId, exc)
-        raise HTTPException(
-            status_code=503, detail="Database temporarily unavailable",
-            headers={"Retry-After": "30"},
+        return build_envelope(
+            None,
+            build_meta(
+                status="error", source="error",
+                data_source_id=dataSourceId,
+                missing_fields=["db_unavailable"],
+                job_id=job_id,
+            ),
         )
 
-    if not cache:
-        return {"jobId": job_id, "status": "computing", "dataSourceId": dataSourceId}
-
-    if since:
+    completed = False
+    if since and cache and cache.updated_at:
         try:
             since_dt = datetime.fromisoformat(since)
             if since_dt.tzinfo is None:
                 since_dt = since_dt.replace(tzinfo=timezone.utc)
-            updated_dt = datetime.fromisoformat(cache.updated_at) if cache.updated_at else None
-            if updated_dt and updated_dt.tzinfo is None:
+            updated_dt = datetime.fromisoformat(cache.updated_at)
+            if updated_dt.tzinfo is None:
                 updated_dt = updated_dt.replace(tzinfo=timezone.utc)
-            if updated_dt and updated_dt > since_dt:
-                return {
-                    "jobId": job_id,
-                    "status": "completed",
-                    "dataSourceId": dataSourceId,
-                    "completedAt": cache.updated_at,
-                }
+            completed = updated_dt > since_dt
         except (ValueError, TypeError):
-            pass  # Fall through to "computing" — caller re-submits a valid `since`
+            completed = False
 
-    return {
-        "jobId": job_id,
-        "status": "computing",
-        "dataSourceId": dataSourceId,
-        "cacheUpdatedAt": cache.updated_at,
-    }
+    if completed:
+        return build_envelope(
+            None,
+            build_meta(
+                status="fresh", source="postgres",
+                data_source_id=dataSourceId,
+                age_seconds=0, ttl_seconds=None,
+                refreshing=False, job_id=job_id,
+                updated_at=cache.updated_at if cache else None,
+            ),
+        )
+
+    return build_envelope(
+        None,
+        build_meta(
+            status="computing", source="none",
+            data_source_id=dataSourceId,
+            refreshing=True, job_id=job_id,
+            updated_at=cache.updated_at if cache else None,
+        ),
+    )
 
 
 @router.post("/edges/aggregated", response_model=AggregatedEdgeResult, response_model_by_alias=True)

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { fetchEnveloped } from '@/services/cacheEnvelope'
 import {
     Database, Plus, Edit2, Settings, AlertTriangle,
     CircleDot, ArrowRightLeft, Eye, Sparkles, Boxes,
@@ -223,16 +223,20 @@ export function WorkspacesPage() {
             const statsPromises = wsList.map(async (ws) => {
                 let totalNodes = 0, totalEdges = 0, allTypes = new Set<string>()
                 const dsPromises = (ws.dataSources || []).map(async (ds) => {
-                    try {
-                        const res = await fetchWithTimeout(`/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`)
-                        if (res.ok) {
-                            const data = await res.json()
-                            totalNodes += (data.nodeCount ?? 0)
-                            totalEdges += (data.edgeCount ?? 0)
-                            const typeCounts = data.entityTypeCounts ?? {}
-                            Object.keys(typeCounts).forEach((t: string) => allTypes.add(t))
-                        }
-                    } catch { /* no cached stats yet */ }
+                    // Cache-only read via canonical {data, meta} envelope.
+                    // ``fetchEnveloped`` returns null on cache-miss / circuit-open.
+                    const data = await fetchEnveloped<{
+                        nodeCount?: number
+                        edgeCount?: number
+                        entityTypeCounts?: Record<string, number>
+                    }>(
+                        `/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`,
+                        { circuitScope: { workspaceId: ws.id, dataSourceId: ds.id } },
+                    )
+                    if (!data) return
+                    totalNodes += (data.nodeCount ?? 0)
+                    totalEdges += (data.edgeCount ?? 0)
+                    Object.keys(data.entityTypeCounts ?? {}).forEach(t => allTypes.add(t))
                 })
                 await Promise.all(dsPromises)
                 statsMap[ws.id] = { nodes: totalNodes, edges: totalEdges, types: allTypes.size }

@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Optional
+
+from backend.app.config import resilience
 
 from .redis_streams import enqueue, try_claim
 from .schemas import StatsJobEnvelope
@@ -23,11 +26,15 @@ from .schemas import StatsJobEnvelope
 logger = logging.getLogger(__name__)
 
 
-# Matches STATS_POLL_TIMEOUT_LARGE_SECS * 2 (the worker's own ceiling).
-# A single external caller doesn't need to tune this — the stats service
-# config owns it. We only fall back to 600s here as a hard default that
-# prevents a stuck claim from surviving past the worker's longest poll.
-_DEFAULT_DEDUP_TTL_SECS = 600
+# Dedup-claim TTL must be ≥ longest-possible poll, otherwise the claim
+# expires while the original poll is still running and a duplicate XADD
+# can be enqueued. We use ``2 × STATS_POLL_TIMEOUT_LARGE_SECS`` (default
+# 1200s) — same value the stats-service scheduler uses, read from the
+# same source. ``STATS_DEDUP_TTL_SECS`` overrides for both paths.
+_DEFAULT_DEDUP_TTL_SECS = int(os.getenv(
+    "STATS_DEDUP_TTL_SECS",
+    str(int(resilience.STATS_POLL_TIMEOUT_LARGE_SECS * 2)),
+))
 
 
 async def enqueue_stats_job(
