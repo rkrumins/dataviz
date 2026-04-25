@@ -3,6 +3,7 @@ from .endpoints import (
     graph, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, stats_admin,
+    insights,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -63,6 +64,11 @@ api_router.include_router(
 # Stats service: /api/v1/admin/stats-polling
 api_router.include_router(
     stats_admin.router, prefix="/admin", tags=["admin:stats"],
+)
+# Insights service: /api/v1/admin/insights/providers/{id}/assets[/...]
+# Cache-only reads for pre-registration discovery.
+api_router.include_router(
+    insights.router, prefix="/admin/insights", tags=["admin:insights"],
 )
 
 # ── Top-level views (first-class, cross-workspace) ─────────────────

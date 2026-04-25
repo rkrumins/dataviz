@@ -17,9 +17,7 @@ from backend.common.models.management import (
     ProviderUpdateRequest,
     ProviderResponse,
     ConnectionTestResult,
-    AssetListResponse,
     ProviderImpactResponse,
-    PhysicalGraphStatsResponse,
 )
 
 router = APIRouter()
@@ -398,38 +396,14 @@ async def _load_provider_for_outbound(provider_id: str, asset_name: str | None):
     return provider_registry._create_provider_instance(ptype, host, port, asset_name, tls, creds)
 
 
-@router.get("/{provider_id}/assets", response_model=AssetListResponse)
-async def list_assets(provider_id: str = Path(...)):
-    """List available assets on this provider. Short-session pattern."""
-    instance = await _load_provider_for_outbound(provider_id, None)
-    try:
-        graphs = await asyncio.wait_for(instance.list_graphs(), timeout=10)
-        return AssetListResponse(assets=graphs)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Provider timed out while listing assets")
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.get("/{provider_id}/assets/{asset_name}/stats", response_model=PhysicalGraphStatsResponse)
-async def get_asset_stats(
-    provider_id: str = Path(...),
-    asset_name: str = Path(...),
-):
-    """Get raw physical metadata (node/edge counts). Short-session pattern."""
-    instance = await _load_provider_for_outbound(provider_id, asset_name)
-    try:
-        raw = await asyncio.wait_for(instance.get_stats(), timeout=10)
-        return PhysicalGraphStatsResponse(
-            nodeCount=raw.get("node_count", raw.get("nodeCount", 0)),
-            edgeCount=raw.get("edge_count", raw.get("edgeCount", 0)),
-            entityTypeCounts=raw.get("entity_type_counts", raw.get("entityTypeCounts", {})),
-            edgeTypeCounts=raw.get("edge_type_counts", raw.get("edgeTypeCounts", {})),
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Provider timed out while fetching asset stats")
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+# ── Cache-only discovery endpoints moved to endpoints/insights.py ─────
+# ``GET /admin/providers/{id}/assets`` and
+# ``GET /admin/providers/{id}/assets/{name}/stats`` were synchronous
+# live calls into the upstream provider with a 10s timeout. For large
+# providers (50+ graphs) and slow upstreams they'd 504 under load. The
+# replacements live at ``/admin/insights/providers/{id}/assets[/...]``
+# and read only from ``asset_discovery_cache``; cache-miss enqueues a
+# background discovery job. See backend/app/api/v1/endpoints/insights.py.
 
 
 @router.post("/{provider_id}/discover-schema")
