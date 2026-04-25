@@ -3,21 +3,15 @@
  * completes, then run a refetch callback so the consumer re-reads the
  * underlying cache row.
  *
- * Usage:
- *
- *   const { status } = useInsightsJob(envelope.meta.job_id, envelope.meta.poll_url, {
- *       onComplete: () => refetch(),
- *       enabled: envelope.meta.refreshing,
- *   })
- *
- * Status:
- *  - 'idle'      — no jobId / disabled
- *  - 'running'   — last poll said running; will re-poll
- *  - 'completed' — last poll said completed; onComplete fired, no further polls
- *  - 'unknown'   — Redis unreachable per backend; the hook stops polling
- *  - 'error'     — the poll request failed (network, 500, etc.)
+ * Built on React Query: ``refetchInterval`` drives the poll cadence,
+ * ``retry`` handles transient errors, query-key dedup means N
+ * mounted hooks against the same job_id share one network request.
+ * The previous implementation used hand-rolled ``setTimeout`` +
+ * ``cancelled`` flag + manual exponential backoff (~140 LOC of state
+ * machine) — React Query subsumes all of it.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 
 export type JobStatus = 'idle' | 'running' | 'completed' | 'unknown' | 'error'
@@ -34,10 +28,18 @@ interface UseInsightsJobOptions {
     /** Default 2000ms — under the cache freshness window so users don't wait. */
     pollIntervalMs?: number
     /**
-     * Fired exactly once when the job transitions to `completed`. Use it
+     * Fired exactly once per `running → completed` transition. Use it
      * to invalidate / refetch the underlying data query.
      */
     onComplete?: () => void
+}
+
+async function fetchJobStatus(pollUrl: string): Promise<JobStatusResponse> {
+    const res = await fetchWithTimeout(pollUrl, { method: 'GET' })
+    if (!res.ok) {
+        throw new Error(`Job status fetch failed: ${res.status}`)
+    }
+    return res.json()
 }
 
 export function useInsightsJob(
@@ -49,99 +51,60 @@ export function useInsightsJob(
         onComplete,
     }: UseInsightsJobOptions = {},
 ): { status: JobStatus; error: string | null } {
-    const [status, setStatus] = useState<JobStatus>('idle')
-    const [error, setError] = useState<string | null>(null)
+    const isEnabled = enabled && !!jobId && !!pollUrl
 
-    // Avoid stale-closure bugs: keep a ref to the latest onComplete so the
-    // poll loop calls the freshest version. Same trick as React's docs
-    // recommend for "interval that calls a callback".
-    const onCompleteRef = useRef(onComplete)
+    const query = useQuery<JobStatusResponse, Error>({
+        // jobId is the natural dedup key — N rows polling the same job
+        // collapse to one underlying fetch. URL is included so a cache
+        // invalidation that swaps the URL reuses neither key.
+        queryKey: ['insights-job', jobId, pollUrl],
+        queryFn: () => fetchJobStatus(pollUrl as string),
+        enabled: isEnabled,
+        // Poll at the configured cadence while the backend reports
+        // running. Once status flips to `completed` or `unknown` the
+        // function returns false and React Query stops polling.
+        refetchInterval: (q) => {
+            const status = q.state.data?.status
+            return status === 'running' ? pollIntervalMs : false
+        },
+        // 4 transient retries with exponential backoff (capped at 30s)
+        // before surfacing the error. React Query handles the timing.
+        retry: 4,
+        retryDelay: (attempt) =>
+            Math.min(30_000, pollIntervalMs * Math.pow(2, attempt)),
+        // No window-focus refetch: a tab regaining focus shouldn't
+        // re-poll a job whose status we already know. Auto-recovery
+        // happens through the parent's invalidation hooks instead.
+        refetchOnWindowFocus: false,
+    })
+
+    // Fire onComplete once when the polled status transitions to
+    // `completed`. React Query's reference-stable data means this only
+    // re-runs on a real status change, not on every refetch.
     useEffect(() => {
-        onCompleteRef.current = onComplete
-    }, [onComplete])
-
-    useEffect(() => {
-        if (!enabled || !jobId || !pollUrl) {
-            setStatus('idle')
-            setError(null)
-            return
+        if (query.data?.status === 'completed') {
+            onComplete?.()
         }
+        // We deliberately depend only on the status string so a new
+        // onComplete identity (parent re-renders) doesn't refire.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [query.data?.status])
 
-        let cancelled = false
-        // Tolerate up to 4 consecutive transient errors before giving up.
-        // A 502 from a rolling deploy or a brief network drop should not
-        // permanently break the poll. After this we set status='error'
-        // and stop — the consumer will surface that and the user can
-        // refresh.
-        const MAX_CONSECUTIVE_ERRORS = 4
-        const ERROR_BACKOFF_CAP_MS = 30_000
-        let consecutiveErrors = 0
+    let status: JobStatus = 'idle'
+    if (!isEnabled) {
+        status = 'idle'
+    } else if (query.isError) {
+        status = 'error'
+    } else if (query.data?.status === 'completed') {
+        status = 'completed'
+    } else if (query.data?.status === 'unknown') {
+        status = 'unknown'
+    } else if (query.data?.status === 'running' || query.isFetching) {
+        status = 'running'
+    }
 
-        setStatus('running')
-        setError(null)
-
-        // Compute the next delay. On error, exponential backoff bounded
-        // by the cap so a sustained outage doesn't pin one tab on a
-        // 60s+ retry loop. On success, base interval.
-        const nextDelay = (errorCount: number): number => {
-            if (errorCount === 0) return pollIntervalMs
-            return Math.min(
-                ERROR_BACKOFF_CAP_MS,
-                pollIntervalMs * Math.pow(2, errorCount - 1),
-            )
-        }
-
-        const handleTransientError = (message: string) => {
-            consecutiveErrors += 1
-            if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-                setStatus('error')
-                setError(message)
-                return
-            }
-            // Stay in 'running' so the consumer (e.g. RegistryAssets)
-            // doesn't tear down the polled query while we retry.
-            timeout = window.setTimeout(poll, nextDelay(consecutiveErrors))
-        }
-
-        async function poll() {
-            try {
-                const res = await fetchWithTimeout(pollUrl as string, { method: 'GET' })
-                if (cancelled) return
-                if (!res.ok) {
-                    handleTransientError(`Job status fetch failed: ${res.status}`)
-                    return
-                }
-                const body = (await res.json()) as JobStatusResponse
-                if (cancelled) return
-                if (body.status === 'completed') {
-                    setStatus('completed')
-                    setError(null)
-                    onCompleteRef.current?.()
-                    return
-                }
-                if (body.status === 'unknown') {
-                    // Backend signals Redis is unavailable; back off rather
-                    // than re-poll a known-broken endpoint forever.
-                    setStatus('unknown')
-                    return
-                }
-                // Successful tick — reset error budget and schedule next.
-                consecutiveErrors = 0
-                setStatus('running')
-                timeout = window.setTimeout(poll, pollIntervalMs)
-            } catch (e: any) {
-                if (cancelled) return
-                handleTransientError(e?.message ?? 'Job status fetch failed')
-            }
-        }
-
-        let timeout: number | null = window.setTimeout(poll, pollIntervalMs)
-
-        return () => {
-            cancelled = true
-            if (timeout != null) window.clearTimeout(timeout)
-        }
-    }, [enabled, jobId, pollUrl, pollIntervalMs])
-
-    return { status, error }
+    return {
+        status,
+        error: query.error ? query.error.message : null,
+    }
 }

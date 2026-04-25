@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class StreamConfig:
     """Identity of one Redis Stream + its consumer group + dedup namespace."""
-    kind: str            # 'stats_poll' | 'discovery' | 'schema_refresh'
+    kind: str            # 'stats_poll' | 'discovery' | 'purge'
     stream: str          # Redis stream key
     group: str           # XREADGROUP consumer group
     dedup_prefix: str    # SET NX key prefix for the producer-side claim
@@ -58,14 +58,17 @@ DISCOVERY_STREAM = StreamConfig(
     dedup_prefix="insights:discovery",
 )
 
-SCHEMA_STREAM = StreamConfig(
-    kind="schema_refresh",
-    stream="insights.jobs.schema",
+# Purge gets its own stream so the worker's per-graph semaphore + size-
+# bucketed timeouts apply uniformly. The dedup prefix is keyed on the
+# data_source_id so two purge requests for the same source coalesce.
+PURGE_STREAM = StreamConfig(
+    kind="purge",
+    stream="insights.jobs.purge",
     group=SHARED_GROUP,
-    dedup_prefix="insights:schema",
+    dedup_prefix="insights:purge",
 )
 
-ALL_STREAMS: tuple[StreamConfig, ...] = (STATS_STREAM, DISCOVERY_STREAM, SCHEMA_STREAM)
+ALL_STREAMS: tuple[StreamConfig, ...] = (STATS_STREAM, DISCOVERY_STREAM, PURGE_STREAM)
 
 _BY_KIND: dict[str, StreamConfig] = {s.kind: s for s in ALL_STREAMS}
 

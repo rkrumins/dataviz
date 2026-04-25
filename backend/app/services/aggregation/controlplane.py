@@ -37,7 +37,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import (
-    BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response, status,
+    Depends, FastAPI, HTTPException, Query, Request, Response, status,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -401,20 +401,22 @@ async def delete_job(
 async def purge_aggregation(
     ds_id: str,
     response: Response,
-    background_tasks: BackgroundTasks,
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(_get_session),
 ):
-    """Queue a purge job and return immediately. The provider call
-    runs in a background task — see service.start_purge / execute_purge."""
+    """Claim a purge slot and hand off to the insights-service worker.
+    The provider DELETE runs as a Redis Streams job with retry, DLQ,
+    and crash recovery (see ``backend/insights_service/purge.py``)."""
+    from backend.insights_service.enqueue import enqueue_purge_job_safe
+
     try:
-        job = await svc.start_purge(ds_id, session)
+        job = await svc.claim_purge_job(ds_id, session)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    background_tasks.add_task(svc.execute_purge, job.id)
+    await enqueue_purge_job_safe(job.id, ds_id, job.workspace_id)
     response.headers["Location"] = (
         f"/aggregation/data-sources/{ds_id}/jobs/{job.id}"
     )
@@ -422,7 +424,7 @@ async def purge_aggregation(
         "deletedEdges": 0,
         "dataSourceId": ds_id,
         "jobId": job.id,
-        "status": "running",
+        "status": "pending",
     }
 
 
