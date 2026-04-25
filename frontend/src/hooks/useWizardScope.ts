@@ -16,7 +16,7 @@
 import { useMemo } from 'react'
 import { useQueries } from '@tanstack/react-query'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { fetchEnveloped } from '@/services/cacheEnvelope'
 import type { DataSourceStats } from './useDashboardData'
 
 export type { DataSourceStats }
@@ -40,9 +40,12 @@ export interface WizardScopeData {
 
 async function fetchDataSourceStats(wsId: string, dsId: string): Promise<DataSourceStats> {
     const url = `/api/v1/admin/workspaces/${wsId}/datasources/${dsId}/cached-stats`
-    const res = await fetchWithTimeout(url)
-    if (!res.ok) return { nodeCount: 0, edgeCount: 0, entityTypes: [] }
-    const data = await res.json()
+    const data = await fetchEnveloped<{
+        nodeCount?: number
+        edgeCount?: number
+        entityTypeCounts?: Record<string, number>
+    }>(url, { circuitScope: { workspaceId: wsId, dataSourceId: dsId } })
+    if (!data) return { nodeCount: 0, edgeCount: 0, entityTypes: [] }
     return {
         nodeCount: data.nodeCount ?? 0,
         edgeCount: data.edgeCount ?? 0,
