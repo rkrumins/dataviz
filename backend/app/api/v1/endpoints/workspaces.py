@@ -153,13 +153,22 @@ async def add_data_source(
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
         raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
     try:
-        return await data_source_repo.create_data_source(session, workspace_id, req)
+        created = await data_source_repo.create_data_source(session, workspace_id, req)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         if "uq_ds_ws_prov_graph" in str(e) or "already allocated" in str(e):
             raise HTTPException(status_code=409, detail="This data source already exists on this workspace")
         raise
+
+    # Proactive seeding: enqueue an immediate stats poll so the cache is
+    # populated by the time the user opens Explorer — otherwise the first
+    # visit would hit the synthetic/202 path and force a 2-minute wait.
+    # Best-effort: Redis being down silently falls through.
+    from backend.stats_service.enqueue import enqueue_stats_job_safe
+    await enqueue_stats_job_safe(created.id, workspace_id)
+
+    return created
 
 
 @router.put("/{workspace_id}/data-sources/{ds_id}", response_model=DataSourceResponse)
@@ -178,6 +187,14 @@ async def update_data_source(
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
         raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
 
+    # Track whether schema-invalidating fields changed so we know whether
+    # to re-seed the stats cache below.
+    schema_invalidating_change = (
+        req.projection_mode is not None
+        or req.dedicated_graph_name is not None
+        or req.ontology_id is not None
+    )
+
     # Evict old cache entry if provider/graph config changed
     if req.projection_mode is not None or req.dedicated_graph_name is not None:
         await provider_registry.evict_workspace(workspace_id, session)
@@ -185,6 +202,13 @@ async def update_data_source(
     ds = await data_source_repo.update_data_source(session, ds_id, req)
     if not ds:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found")
+
+    # Re-seed cache on schema-invalidating changes so the next read
+    # doesn't serve stale schema/ontology.
+    if schema_invalidating_change:
+        from backend.stats_service.enqueue import enqueue_stats_job_safe
+        await enqueue_stats_job_safe(ds_id, workspace_id)
+
     return ds
 
 
@@ -329,40 +353,42 @@ async def get_cached_schema(
 ):
     """Return cached graph schema for a data source.
 
-    Reads from the ``data_source_stats`` table (populated by the stats poller).
-    Falls back to building a schema from the ontology definition if no cached
-    schema exists.  Zero dependency on graph provider connectivity.
+    Cache-only read. On miss, returns a synthetic schema built from the
+    assigned ontology (canvas renders with correct types, zero counts)
+    and enqueues a background refresh. If no ontology is assigned
+    either, returns 202 Accepted with a pollable jobId. Never 404 when
+    the data source exists — "cache not populated yet" is a state, not
+    an error.
     """
-    import json
-    from backend.app.db.repositories.stats_repo import get_data_source_stats
+    from backend.app.services.stats_cache import (
+        CacheMiss, build_computing_response_body, build_synthetic_schema,
+        read_stats_cache, synthetic_schema_headers,
+    )
+    from backend.stats_service.enqueue import enqueue_stats_job_safe
+    from fastapi.responses import JSONResponse
 
-    # Verify the data source belongs to this workspace
+    # Verify the data source belongs to this workspace (404 here is a
+    # genuine "doesn't exist", not a cache-state error).
     ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if not ds or ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace '{workspace_id}'")
 
-    # Try cached schema from stats poller
-    stats = await get_data_source_stats(session, ds_id)
-    if stats and stats.graph_schema and stats.graph_schema != "{}":
-        return json.loads(stats.graph_schema)
+    try:
+        payload, headers = await read_stats_cache(session, ds_id, workspace_id, "graph_schema")
+        return JSONResponse(content=payload, headers=headers)
+    except CacheMiss:
+        pass
 
-    # Fallback: build schema from the ontology definition assigned to this data source
-    if ds.ontology_id:
-        try:
-            from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
-            from backend.app.ontology.service import LocalOntologyService
-            repo = SQLAlchemyOntologyRepository(session)
-            svc = LocalOntologyService(repo)
-            resolved = await svc.resolve(ds.ontology_id, ds_id)
-            return {
-                "entityTypes": [],
-                "relationshipTypes": [],
-                "ontology": resolved.model_dump(by_alias=True) if resolved else {},
-            }
-        except Exception:
-            pass  # Ontology resolution failed — return 404
+    # Enqueue the real refresh regardless of synthetic outcome — frontend
+    # auto-upgrades when cache populates.
+    msg_id = await enqueue_stats_job_safe(ds_id, workspace_id)
 
-    raise HTTPException(status_code=404, detail="No cached schema available yet — the stats poller may not have run.")
+    synthetic = await build_synthetic_schema(session, ds_id)
+    if synthetic:
+        return JSONResponse(content=synthetic, headers=synthetic_schema_headers())
+
+    body = build_computing_response_body(ds_id, workspace_id, msg_id)
+    return JSONResponse(status_code=202, content=body)
 
 
 # ================================================================== #
@@ -377,19 +403,26 @@ async def get_cached_ontology(
 ):
     """Return cached ontology metadata for a data source.
 
-    Reads from the ``data_source_stats`` table (populated by the stats poller).
-    Zero dependency on graph provider connectivity.
+    Cache-only read. On miss, enqueues a background refresh and returns
+    202 Accepted with a pollable jobId. Never 404 when the data source
+    exists.
     """
-    import json
-    from backend.app.db.repositories.stats_repo import get_data_source_stats
+    from backend.app.services.stats_cache import (
+        CacheMiss, build_computing_response_body, read_stats_cache,
+    )
+    from backend.stats_service.enqueue import enqueue_stats_job_safe
+    from fastapi.responses import JSONResponse
 
-    # Verify the data source belongs to this workspace
     ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if not ds or ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace '{workspace_id}'")
 
-    stats = await get_data_source_stats(session, ds_id)
-    if stats and stats.ontology_metadata and stats.ontology_metadata != "{}":
-        return json.loads(stats.ontology_metadata)
+    try:
+        payload, headers = await read_stats_cache(session, ds_id, workspace_id, "ontology_metadata")
+        return JSONResponse(content=payload, headers=headers)
+    except CacheMiss:
+        pass
 
-    raise HTTPException(status_code=404, detail="No cached ontology metadata available yet — the stats poller may not have run.")
+    msg_id = await enqueue_stats_job_safe(ds_id, workspace_id)
+    body = build_computing_response_body(ds_id, workspace_id, msg_id)
+    return JSONResponse(status_code=202, content=body)

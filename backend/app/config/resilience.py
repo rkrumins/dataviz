@@ -86,3 +86,29 @@ STATS_POLL_LARGE_THRESHOLD: int = int(os.getenv("STATS_POLL_LARGE_THRESHOLD", "1
 # Postgres (DataSourceStatsORM, populated by the stats service) is the
 # durable source of truth. Set to 0 to disable the Redis memoization.
 FALKORDB_SCHEMA_CACHE_TTL: int = int(os.getenv("FALKORDB_SCHEMA_CACHE_TTL", "300"))
+
+# ── Cache-only read path for graph introspection endpoints ──────────
+# HTTP handlers (/graph/stats, /graph/metadata/schema, /introspection,
+# /metadata/ontology) read exclusively from data_source_stats when
+# STATS_CACHE_STRICT_MODE=true. The stats service owns all provider
+# introspection; the web tier never runs a MATCH on the critical path.
+# Set to "false" to restore the legacy try-cache-then-provider fallback
+# as a one-release rollback escape hatch.
+STATS_CACHE_STRICT_MODE: bool = os.getenv("STATS_CACHE_STRICT_MODE", "true").lower() == "true"
+
+# Freshness classification — fed to X-Cache-* headers and the frontend
+# staleness banner. A cache entry is "fresh" when polled within this
+# window (default aligns with the scheduler's 5-min default interval).
+STATS_CACHE_FRESH_SECS: int = int(os.getenv("STATS_CACHE_FRESH_SECS", "300"))
+# Absolute expiry: a cache row older than this is treated as missing —
+# the handler refuses to serve it and falls through to synthetic-or-202.
+# 7 days survives weekend outages of the stats service while ensuring
+# abandoned data sources don't surface year-old numbers.
+STATS_CACHE_ABSOLUTE_EXPIRY_SECS: int = int(os.getenv("STATS_CACHE_ABSOLUTE_EXPIRY_SECS", "604800"))
+
+# Stats-service health classification — compared against
+# data_source_polling_configs.last_polled_at. Emitted as
+# X-Stats-Service-Status so the frontend can show a "updates paused"
+# banner without needing a separate health endpoint.
+STATS_SERVICE_LAGGING_THRESHOLD_SECS: int = int(os.getenv("STATS_SERVICE_LAGGING_THRESHOLD_SECS", "60"))
+STATS_SERVICE_UNREACHABLE_THRESHOLD_SECS: int = int(os.getenv("STATS_SERVICE_UNREACHABLE_THRESHOLD_SECS", "600"))

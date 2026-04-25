@@ -76,10 +76,20 @@ async def _preflight() -> None:
 
     from backend.app.db.engine import PoolRole, get_session_factory
 
-    try:
+    async def _select_one() -> None:
         factory = get_session_factory(PoolRole.READONLY)
         async with factory() as session:
             await session.execute(text("SELECT 1"))
+
+    try:
+        await asyncio.wait_for(_select_one(), timeout=5.0)
+    except asyncio.TimeoutError:
+        logger.critical(
+            "Cannot reach Postgres at MANAGEMENT_DB_URL (%s) within 5s. "
+            "Run './dev.sh infra' (or './dev.sh up') and retry.",
+            db_url,
+        )
+        sys.exit(1)
     except Exception as exc:
         logger.critical(
             "Cannot reach Postgres at MANAGEMENT_DB_URL (%s). "
@@ -90,7 +100,14 @@ async def _preflight() -> None:
 
     try:
         redis = get_redis()
-        await redis.ping()
+        await asyncio.wait_for(redis.ping(), timeout=5.0)
+    except asyncio.TimeoutError:
+        logger.critical(
+            "Cannot reach Redis at REDIS_URL=%s within 5s. Run './dev.sh infra' "
+            "(or './dev.sh up') and retry.",
+            redis_url,
+        )
+        sys.exit(1)
     except Exception as exc:
         logger.critical(
             "Cannot reach Redis at REDIS_URL=%s. Run './dev.sh infra' "
