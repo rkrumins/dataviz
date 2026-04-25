@@ -12,6 +12,7 @@ to queue two jobs for the same data source in parallel.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -68,6 +69,51 @@ async def enqueue_stats_job(
     except Exception as exc:  # pragma: no cover - defensive; claim will expire
         logger.warning(
             "Failed to XADD stats job for ds=%s (claim will expire): %s",
+            data_source_id, exc,
+        )
+        return None
+
+
+# Broad exception catch-all: ConnectionError/TimeoutError cover the bulk
+# of Redis-down failure modes without requiring redis.exceptions at type
+# check time. Anything else that bubbles up from try_claim/enqueue is
+# also caught — the whole point of "safe" is "never propagate to caller."
+_REDIS_BENIGN_ERRORS: tuple = (ConnectionError, asyncio.TimeoutError, TimeoutError, OSError)
+
+
+async def enqueue_stats_job_safe(
+    data_source_id: str,
+    workspace_id: str,
+    *,
+    dedup_ttl_secs: int = _DEFAULT_DEDUP_TTL_SECS,
+) -> Optional[str]:
+    """Redis-tolerant variant of :func:`enqueue_stats_job`.
+
+    Used by HTTP handlers on cache-miss — the handler must still return
+    a valid response (202) even when Redis is unreachable, otherwise a
+    Redis outage would cascade into 5xx errors on the web tier.
+
+    Failure modes:
+      * Redis unreachable → logs a warning, returns ``None``
+      * Dedup claim already held → returns ``None`` (existing in-flight)
+      * Successful enqueue → returns the Redis stream message ID
+
+    Callers treat ``None`` identically: "a job will complete eventually
+    OR we couldn't enqueue; either way the frontend polls and retries."
+    """
+    try:
+        return await enqueue_stats_job(
+            data_source_id, workspace_id, dedup_ttl_secs=dedup_ttl_secs,
+        )
+    except _REDIS_BENIGN_ERRORS as exc:
+        logger.warning(
+            "Redis unavailable for stats enqueue (ds=%s): %s — handler will return 202 without refresh",
+            data_source_id, exc,
+        )
+        return None
+    except Exception as exc:  # pragma: no cover - last-resort safety net
+        logger.exception(
+            "Unexpected failure in enqueue_stats_job_safe (ds=%s): %s",
             data_source_id, exc,
         )
         return None

@@ -1,11 +1,9 @@
-from typing import List, Optional, Any
-import asyncio
+from typing import List, Optional
 import hashlib
 import json
 import logging
-import uuid
 from datetime import datetime, timezone
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Body, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -14,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.graph import (
     GraphNode, GraphEdge, LineageResult,
-    NodeQuery, EdgeQuery, GraphSchemaStats,
+    NodeQuery, EdgeQuery,
     AggregatedEdgeRequest, AggregatedEdgeResult,
     CreateNodeRequest, CreateNodeResult,
     CreateEdgeRequest, UpdateEdgeRequest, EdgeMutationResult,
@@ -23,8 +21,14 @@ from backend.app.models.graph import (
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.app.services.context_engine import ContextEngine
+from backend.app.services.stats_cache import (
+    CacheMiss, build_computing_response_body, build_synthetic_schema,
+    read_stats_cache, synthetic_schema_headers,
+)
 from backend.app.db.engine import get_db_session
 from backend.app.providers.manager import provider_manager
+from backend.stats_service.enqueue import enqueue_stats_job_safe
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 router = APIRouter()
 
@@ -319,32 +323,35 @@ async def get_graph_stats(
     connectionId: Optional[str] = Query(None, description="Legacy connection ID."),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """**Deprecated:** Use `GET /introspection` instead — returns a superset of stats with full schema details."""
+    """**Deprecated:** Use `GET /introspection` instead — returns a superset of stats with full schema details.
+
+    Cache-only read: serves the latest ``data_source_stats`` row populated
+    by the stats service. On cache-miss returns 202 Accepted with a
+    pollable jobId — the handler never calls the provider, so it cannot
+    504 regardless of graph size.
+    """
     logger.warning("Deprecated endpoint GET /stats called — use GET /introspection")
-    from backend.app.db.repositories.stats_repo import get_data_source_stats
 
-    # 1. Try DB cache first (no provider needed)
     ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
-    if ds_id:
-        try:
-            stats_cache = await get_data_source_stats(session, ds_id)
-            if stats_cache:
-                return {
-                    "nodeCount": stats_cache.node_count,
-                    "edgeCount": stats_cache.edge_count,
-                    "entityTypeCounts": json.loads(stats_cache.entity_type_counts),
-                    "edgeTypeCounts": json.loads(stats_cache.edge_type_counts)
-                }
-        except Exception:
-            pass  # Cache lookup or parse failed — fall through to provider
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
 
-    # 2. Only try provider if cache miss.
-    # ContextEngine normalizes connectivity errors to ProviderUnavailable,
-    # caught by the global exception handler → 503 with Retry-After.
-    engine = await ContextEngine.for_workspace(
-        ws_id, provider_manager, session, data_source_id=dataSourceId
-    ) if ws_id else await ContextEngine.for_connection(connectionId, provider_manager, session)
-    return await engine.get_stats()
+    try:
+        payload, headers = await read_stats_cache(session, ds_id, ws_id, "node_stats")
+        return JSONResponse(content=payload, headers=headers)
+    except CacheMiss:
+        pass  # fall through to 202
+    except (OperationalError, SQLAlchemyError) as exc:
+        logger.warning("get_graph_stats: database unavailable (ds_id=%s): %s", ds_id, exc)
+        raise HTTPException(
+            status_code=503, detail="Database temporarily unavailable",
+            headers={"Retry-After": "30"},
+        )
+
+    msg_id = await enqueue_stats_job_safe(ds_id, ws_id) if ws_id else None
+    body = build_computing_response_body(ds_id, ws_id, msg_id)
+    logger.info("stats_cache.served_202 endpoint=/graph/stats ds_id=%s msg_id=%s", ds_id, msg_id)
+    return JSONResponse(status_code=202, content=body)
 
 
 @router.get("/nodes", response_model=List[GraphNode], response_model_by_alias=True,
@@ -506,29 +513,12 @@ async def save_graph(
     return {"status": "success", "message": "Graph saved successfully"}
 
 
-def _freshness_headers(updated_at_iso: Optional[str]) -> dict:
-    """Build X-Cache-* headers so the frontend can show a staleness banner.
-
-    Returns empty dict if no timestamp. Otherwise emits:
-      * X-Cache-Updated-At: ISO timestamp of last successful refresh
-      * X-Cache-Age-Seconds: integer seconds since refresh
-      * X-Cache-Source: "postgres" (persisted) or "live" (just computed)
-    """
-    if not updated_at_iso:
-        return {"X-Cache-Source": "live"}
-    try:
-        from datetime import datetime, timezone
-        ts = datetime.fromisoformat(updated_at_iso)
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        age = int((datetime.now(timezone.utc) - ts).total_seconds())
-        return {
-            "X-Cache-Updated-At": updated_at_iso,
-            "X-Cache-Age-Seconds": str(max(0, age)),
-            "X-Cache-Source": "postgres",
-        }
-    except Exception:
-        return {"X-Cache-Source": "postgres"}
+# ``_freshness_headers`` previously lived here. It now lives in
+# :mod:`backend.app.services.stats_cache` where it is emitted directly
+# from :func:`read_stats_cache` alongside the cache tier classification
+# and stats-service health signals — keeping header construction next
+# to the read path prevents drift between what the cache says and what
+# the response advertises.
 
 
 @router.get("/introspection")
@@ -540,36 +530,34 @@ async def get_graph_introspection(
 ):
     """Get detailed schema statistics for the graph.
 
-    Prefers the Postgres stats cache (populated by the background stats
-    service). Falls back to a live provider call only when no cache
-    exists. Emits ``X-Cache-*`` response headers so the frontend can
-    surface cache freshness in the UI.
+    Cache-only read: serves the latest ``data_source_stats.schema_stats``
+    row populated by the stats service. On cache-miss returns 202
+    Accepted with a pollable jobId. The handler never calls the
+    provider; 504s are impossible by construction.
+
+    Emits ``X-Cache-*`` / ``X-Stats-Service-Status`` / ``X-Provider-Health``
+    headers so the frontend can surface staleness in the UI.
     """
-    from backend.app.db.repositories.stats_repo import get_data_source_stats
-
-    # 1. Try DB cache first (no provider needed — always fast, even on 1M+ graphs)
     ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
-    if ds_id:
-        try:
-            stats_cache = await get_data_source_stats(session, ds_id)
-            if stats_cache and stats_cache.schema_stats and stats_cache.schema_stats != "{}":
-                payload = GraphSchemaStats.model_validate(json.loads(stats_cache.schema_stats))
-                return JSONResponse(
-                    content=payload.model_dump(by_alias=True),
-                    headers=_freshness_headers(stats_cache.updated_at),
-                )
-        except Exception:
-            pass  # Cache lookup or parse failed — fall through to provider
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
 
-    # 2. Only try provider if cache miss (first-ever request for this data source).
-    engine = await ContextEngine.for_workspace(
-        ws_id, provider_manager, session, data_source_id=dataSourceId
-    ) if ws_id else await ContextEngine.for_connection(connectionId, provider_manager, session)
-    result = await engine.get_schema_stats()
-    return JSONResponse(
-        content=result.model_dump(by_alias=True),
-        headers=_freshness_headers(None),
-    )
+    try:
+        payload, headers = await read_stats_cache(session, ds_id, ws_id, "schema_stats")
+        return JSONResponse(content=payload, headers=headers)
+    except CacheMiss:
+        pass
+    except (OperationalError, SQLAlchemyError) as exc:
+        logger.warning("get_graph_introspection: database unavailable (ds_id=%s): %s", ds_id, exc)
+        raise HTTPException(
+            status_code=503, detail="Database temporarily unavailable",
+            headers={"Retry-After": "30"},
+        )
+
+    msg_id = await enqueue_stats_job_safe(ds_id, ws_id) if ws_id else None
+    body = build_computing_response_body(ds_id, ws_id, msg_id)
+    logger.info("stats_cache.served_202 endpoint=/introspection ds_id=%s msg_id=%s", ds_id, msg_id)
+    return JSONResponse(status_code=202, content=body)
 
 
 @router.get("/metadata/ontology", deprecated=True)
@@ -582,32 +570,32 @@ async def get_ontology_metadata(
     """Get ontology metadata including containment edge types and entity hierarchies.
 
     **Deprecated:** Use `GET /metadata/schema` instead — returns a superset including ontology, entity types, and relationship definitions.
+
+    Cache-only read. On miss returns 202 Accepted; never calls the provider.
     """
     logger.warning("Deprecated endpoint GET /metadata/ontology called — use GET /metadata/schema")
-    from backend.app.db.repositories.stats_repo import get_data_source_stats
 
-    # 1. Try DB cache first (no provider needed)
     ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
-    if ds_id:
-        try:
-            stats_cache = await get_data_source_stats(session, ds_id)
-            if stats_cache and stats_cache.ontology_metadata and stats_cache.ontology_metadata != "{}":
-                return JSONResponse(
-                    content=json.loads(stats_cache.ontology_metadata),
-                    headers={"Cache-Control": "private, max-age=300"},
-                )
-        except Exception:
-            pass  # Cache lookup or parse failed — fall through to provider
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
 
-    # 2. Only try provider if cache miss.
-    engine = await ContextEngine.for_workspace(
-        ws_id, provider_manager, session, data_source_id=dataSourceId
-    ) if ws_id else await ContextEngine.for_connection(connectionId, provider_manager, session)
-    result = await engine.get_ontology_metadata()
-    return JSONResponse(
-        content=result.model_dump(by_alias=True),
-        headers={"Cache-Control": "private, max-age=300"},
-    )
+    try:
+        payload, headers = await read_stats_cache(session, ds_id, ws_id, "ontology_metadata")
+        headers["Cache-Control"] = "private, max-age=300"
+        return JSONResponse(content=payload, headers=headers)
+    except CacheMiss:
+        pass
+    except (OperationalError, SQLAlchemyError) as exc:
+        logger.warning("get_ontology_metadata: database unavailable (ds_id=%s): %s", ds_id, exc)
+        raise HTTPException(
+            status_code=503, detail="Database temporarily unavailable",
+            headers={"Retry-After": "30"},
+        )
+
+    msg_id = await enqueue_stats_job_safe(ds_id, ws_id) if ws_id else None
+    body = build_computing_response_body(ds_id, ws_id, msg_id)
+    logger.info("stats_cache.served_202 endpoint=/metadata/ontology ds_id=%s msg_id=%s", ds_id, msg_id)
+    return JSONResponse(status_code=202, content=body)
 
 
 def _schema_etag(payload: dict) -> str:
@@ -661,144 +649,160 @@ async def get_graph_schema(
     visual configurations, and hierarchy rules.
     This enables frontend to dynamically load schema from backend.
 
+    Cache-first: reads the latest ``data_source_stats.graph_schema`` row
+    populated by the stats service. On miss, serves a synthetic schema
+    built from the data source's assigned ontology (zero entity counts,
+    but correct types/relationships — the canvas renders immediately
+    while the real schema computes in the background). If there is no
+    ontology assigned either, returns 202 Accepted with a pollable jobId.
+
     Responds with a weak ETag computed from the canonical payload. Clients
     that send a matching If-None-Match header get a 304 Not Modified with
     no body — use this to avoid re-parsing unchanged schemas on refetch.
     """
-    from backend.app.db.repositories.stats_repo import get_data_source_stats
-
-    # 1. Try DB cache first (no provider needed — always fast, even on 1M+ graphs)
     ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
-    if ds_id:
-        try:
-            stats_cache = await get_data_source_stats(session, ds_id)
-            if stats_cache and stats_cache.graph_schema and stats_cache.graph_schema != "{}":
-                return _schema_response(
-                    json.loads(stats_cache.graph_schema), request,
-                    freshness=_freshness_headers(stats_cache.updated_at),
-                )
-        except Exception:
-            pass  # Cache lookup or parse failed — fall through to provider
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
 
-    # 2. Only try provider if cache miss (first-ever request for this data source).
-    engine = await ContextEngine.for_workspace(
-        ws_id, provider_manager, session, data_source_id=dataSourceId
-    ) if ws_id else await ContextEngine.for_connection(connectionId, provider_manager, session)
-    result = await engine.get_graph_schema()
-    return _schema_response(
-        result.model_dump(by_alias=True), request,
-        freshness=_freshness_headers(None),
-    )
+    try:
+        payload, headers = await read_stats_cache(session, ds_id, ws_id, "graph_schema")
+        return _schema_response(payload, request, freshness=headers)
+    except CacheMiss:
+        pass
+    except (OperationalError, SQLAlchemyError) as exc:
+        logger.warning("get_graph_schema: database unavailable (ds_id=%s): %s", ds_id, exc)
+        raise HTTPException(
+            status_code=503, detail="Database temporarily unavailable",
+            headers={"Retry-After": "30"},
+        )
+
+    # Synthetic fallback: render canvas from ontology-only if assigned
+    synthetic = await build_synthetic_schema(session, ds_id)
+    if ws_id:
+        # Fire-and-forget: enqueue a real refresh regardless of whether
+        # synthetic rendered. Frontend will auto-upgrade when the job
+        # completes via its polling hook.
+        await enqueue_stats_job_safe(ds_id, ws_id)
+    if synthetic:
+        logger.info(
+            "stats_cache.served_synthetic endpoint=/metadata/schema ds_id=%s",
+            ds_id,
+        )
+        return _schema_response(synthetic, request, freshness=synthetic_schema_headers())
+
+    msg_id = await enqueue_stats_job_safe(ds_id, ws_id) if ws_id else None
+    body = build_computing_response_body(ds_id, ws_id, msg_id)
+    logger.info("stats_cache.served_202 endpoint=/metadata/schema ds_id=%s msg_id=%s", ds_id, msg_id)
+    return JSONResponse(status_code=202, content=body)
 
 
 # ── Async introspection refresh ──────────────────────────────────────
 # On large graphs (1M+ nodes/edges), a live introspection can take
-# minutes. The background stats service normally keeps the Postgres
-# cache fresh on a 5-minute interval. This endpoint lets the frontend
-# explicitly trigger a refresh without blocking the HTTP request: the
-# actual work runs in a FastAPI BackgroundTask, the caller gets 202.
-
-_refresh_jobs: dict[str, dict] = {}  # job_id -> {status, ds_id, started_at, error}
-_refresh_locks: dict[str, asyncio.Lock] = {}  # per-ds_id lock
-
-
-async def _run_refresh(job_id: str, ds_id: str, workspace_id: str) -> None:
-    """Background task: recompute schema_stats / ontology / graph_schema
-    for a data source and upsert to Postgres. Never raises — errors are
-    recorded in the job status dict so the frontend can surface them.
-    """
-    from backend.app.db.engine import get_async_session
-    from backend.app.db.repositories.stats_repo import upsert_data_source_stats
-
-    # One refresh at a time per data source — prevents thundering herd
-    # if the user mashes the refresh button.
-    lock = _refresh_locks.setdefault(ds_id, asyncio.Lock())
-    if lock.locked():
-        _refresh_jobs[job_id] = {
-            "status": "skipped",
-            "data_source_id": ds_id,
-            "reason": "A refresh is already running for this data source.",
-        }
-        return
-
-    async with lock:
-        try:
-            async with get_async_session() as session:
-                engine = await ContextEngine.for_workspace(
-                    workspace_id, provider_manager, session, data_source_id=ds_id
-                )
-                provider = engine.provider
-                stats, schema_stats_obj, ontology_obj, schema_obj = await asyncio.gather(
-                    provider.get_stats(),
-                    provider.get_schema_stats(),
-                    engine.get_ontology_metadata(),
-                    engine.get_graph_schema(),
-                )
-                await upsert_data_source_stats(
-                    session=session,
-                    ds_id=ds_id,
-                    node_count=stats.get("nodeCount", 0),
-                    edge_count=stats.get("edgeCount", 0),
-                    entity_type_counts=json.dumps(stats.get("entityTypeCounts", {})),
-                    edge_type_counts=json.dumps(stats.get("edgeTypeCounts", {})),
-                    schema_stats=schema_stats_obj.model_dump_json(by_alias=True),
-                    ontology_metadata=ontology_obj.model_dump_json(by_alias=True),
-                    graph_schema=schema_obj.model_dump_json(by_alias=True),
-                )
-                await session.commit()
-            _refresh_jobs[job_id] = {
-                "status": "completed",
-                "data_source_id": ds_id,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-            }
-        except Exception as exc:
-            logger.warning("Introspection refresh failed for %s: %s", ds_id, exc)
-            _refresh_jobs[job_id] = {
-                "status": "failed",
-                "data_source_id": ds_id,
-                "error": str(exc)[:500],
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-            }
+# minutes. The background stats service keeps the Postgres cache fresh
+# on a 5-minute interval. This endpoint enqueues an on-demand refresh
+# job onto the stats-service Redis stream (``stats.jobs``) so the actual
+# work runs on the stats-worker thread pool with its own 600s timeout
+# budget — not on a FastAPI request thread where it would race against
+# ``HTTP_TIMEOUT_GRAPH_SECS``.
+#
+# Dedup: the stats service's Redis SET-NX claim prevents duplicate work
+# when the scheduler and the user-triggered refresh collide on the same
+# data source. Callers that lose the dedup race get ``status=
+# already_computing`` with a deterministic jobId; they poll the same
+# status endpoint regardless.
 
 
 @router.post("/introspection/refresh", status_code=202)
 async def refresh_introspection(
-    background_tasks: BackgroundTasks,
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Trigger a non-blocking refresh of the schema/introspection cache.
 
-    Returns ``202 Accepted`` with a job ID. Poll
-    ``GET /introspection/refresh/{job_id}`` to check status. The actual
-    introspection runs as a FastAPI BackgroundTask; the HTTP request
-    returns immediately so the frontend UI never blocks.
+    Pushes a job onto the stats-service Redis stream ``stats.jobs``. The
+    stats worker — which owns the only code path allowed to introspect
+    the provider — picks it up within seconds. Returns 202 Accepted
+    immediately.
 
-    Idempotency: only one refresh per data source runs at a time. A
-    second request while one is in flight is recorded as "skipped".
+    Idempotency: the stats service's ``try_claim`` atomic SET-NX ensures
+    only one job per data source runs at a time. If a claim is already
+    held, this endpoint returns ``already_computing`` with the
+    deterministic dedup jobId — the caller polls identically either way.
     """
     ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
     if not ds_id or not ws_id:
         raise HTTPException(status_code=400, detail="ws_id and dataSourceId required")
 
-    job_id = str(uuid.uuid4())
-    _refresh_jobs[job_id] = {
-        "status": "pending",
-        "data_source_id": ds_id,
-        "started_at": datetime.now(timezone.utc).isoformat(),
-    }
-    background_tasks.add_task(_run_refresh, job_id, ds_id, ws_id)
-    return {"job_id": job_id, "status": "pending", "data_source_id": ds_id}
+    msg_id = await enqueue_stats_job_safe(ds_id, ws_id)
+    body = build_computing_response_body(ds_id, ws_id, msg_id)
+    logger.info(
+        "stats_cache.refresh_trigger ds_id=%s msg_id=%s outcome=%s",
+        ds_id, msg_id, "enqueued" if msg_id else "dedup_or_redis_down",
+    )
+    return body
 
 
 @router.get("/introspection/refresh/{job_id}")
-async def get_refresh_status(job_id: str):
-    """Poll the status of a background introspection refresh."""
-    job = _refresh_jobs.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found or expired")
-    return job
+async def get_refresh_status(
+    job_id: str,
+    dataSourceId: Optional[str] = Query(None, description="Data source ID for completion inference."),
+    since: Optional[str] = Query(None, description="ISO timestamp the caller considers the job 'started at'. Used to decide if a later updated_at proves completion."),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Poll refresh status by comparing ``data_source_stats.updated_at``.
+
+    The stats service does not track individual job lifecycles — it just
+    upserts the cache row on completion. We infer completion: if the
+    cache row's ``updated_at`` is newer than the ``since`` timestamp the
+    caller sent, the job completed (from the caller's perspective).
+
+    Responses:
+    - ``status=completed`` if ``updated_at > since``
+    - ``status=computing`` otherwise (caller keeps polling)
+    - ``status=unknown`` if dataSourceId missing (no way to infer)
+    """
+    from backend.app.db.repositories.stats_repo import get_data_source_stats
+
+    if not dataSourceId:
+        return {"jobId": job_id, "status": "unknown", "reason": "dataSourceId query param required to infer completion"}
+
+    try:
+        cache = await get_data_source_stats(session, dataSourceId)
+    except (OperationalError, SQLAlchemyError) as exc:
+        logger.warning("get_refresh_status: database unavailable (ds_id=%s): %s", dataSourceId, exc)
+        raise HTTPException(
+            status_code=503, detail="Database temporarily unavailable",
+            headers={"Retry-After": "30"},
+        )
+
+    if not cache:
+        return {"jobId": job_id, "status": "computing", "dataSourceId": dataSourceId}
+
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since)
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+            updated_dt = datetime.fromisoformat(cache.updated_at) if cache.updated_at else None
+            if updated_dt and updated_dt.tzinfo is None:
+                updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+            if updated_dt and updated_dt > since_dt:
+                return {
+                    "jobId": job_id,
+                    "status": "completed",
+                    "dataSourceId": dataSourceId,
+                    "completedAt": cache.updated_at,
+                }
+        except (ValueError, TypeError):
+            pass  # Fall through to "computing" — caller re-submits a valid `since`
+
+    return {
+        "jobId": job_id,
+        "status": "computing",
+        "dataSourceId": dataSourceId,
+        "cacheUpdatedAt": cache.updated_at,
+    }
 
 
 @router.post("/edges/aggregated", response_model=AggregatedEdgeResult, response_model_by_alias=True)
