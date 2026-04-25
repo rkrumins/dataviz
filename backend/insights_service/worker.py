@@ -70,6 +70,13 @@ class InsightsJobConsumer:
     re-exported below so :mod:`__main__` keeps working without edits.
     """
 
+    # Per-data-source graph-key cache (data_source_id → "provider:graph").
+    # Bounded so a long-lived worker doesn't accumulate stale rows for
+    # deleted data sources; the LRU eviction path keeps memory flat at
+    # high churn. Mutated only from the worker coroutine, no lock needed.
+    _SCOPE_KEY_CACHE_MAX = 1024
+    _scope_key_cache: dict[str, str | None] = {}
+
     def __init__(self, config: StatsServiceConfig) -> None:
         self._config = config
         self._redis: aioredis.Redis = get_redis()
@@ -390,20 +397,28 @@ class InsightsJobConsumer:
     async def _resolve_scope_lock_key(self, envelope: JobEnvelope) -> str | None:
         """Return the asyncio.Semaphore key for this envelope.
 
-        For stats/schema jobs we resolve ``provider_id:graph_name`` by
-        DB lookup — same key used by the original stats worker so jobs
-        sharing one FalkorDB graph still serialise. For discovery we
-        use the envelope's scope_key directly (it is already
-        ``provider_id:asset_name``).
+        For stats/schema jobs the ``provider_id:graph_name`` identity
+        rarely changes — the data source's provider and graph are set
+        at registration and only mutate via explicit edit flows. So
+        results are cached per-process to avoid a DB round-trip on
+        every dispatch. For discovery, the envelope already carries
+        ``provider_id:asset_name``, no DB hit needed.
         """
         if isinstance(envelope, DiscoveryJobEnvelope):
             return envelope.scope_key
 
-        # stats / schema → look up the graph identity for the data source
+        ds_id = envelope.data_source_id  # type: ignore[attr-defined]
+
+        cached = self._scope_key_cache.get(ds_id)
+        # ``None`` is a valid cached value ("we looked this up and found
+        # nothing"). Use ``in`` rather than truthiness to distinguish
+        # cache-miss from cache-hit-with-None.
+        if ds_id in self._scope_key_cache:
+            return cached
+
         from backend.app.db.models import WorkspaceDataSourceORM
         from sqlalchemy import select
 
-        ds_id = envelope.data_source_id  # type: ignore[attr-defined]
         try:
             factory = get_session_factory(PoolRole.READONLY)
             async with factory() as session:
@@ -416,14 +431,25 @@ class InsightsJobConsumer:
                     )
                 ).first()
                 if not row:
-                    return None
-                provider_id, graph_name = row[0], row[1]
-                if provider_id and graph_name:
-                    return f"{provider_id}:{graph_name}"
-                return provider_id or ds_id
+                    resolved: str | None = None
+                else:
+                    provider_id, graph_name = row[0], row[1]
+                    if provider_id and graph_name:
+                        resolved = f"{provider_id}:{graph_name}"
+                    else:
+                        resolved = provider_id or ds_id
         except Exception as exc:
             logger.warning("Failed to resolve scope key for ds=%s: %s", ds_id, exc)
             return None
+
+        # Bound the cache. FIFO-eviction is fine for our access pattern
+        # (recent data sources dominate); a true LRU is overkill for
+        # ~hundreds of data sources.
+        if len(self._scope_key_cache) >= self._SCOPE_KEY_CACHE_MAX:
+            oldest = next(iter(self._scope_key_cache))
+            self._scope_key_cache.pop(oldest, None)
+        self._scope_key_cache[ds_id] = resolved
+        return resolved
 
     async def _resolve_timeout_and_bucket(
         self, envelope: JobEnvelope,

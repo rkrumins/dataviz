@@ -68,16 +68,47 @@ export function useInsightsJob(
         }
 
         let cancelled = false
+        // Tolerate up to 4 consecutive transient errors before giving up.
+        // A 502 from a rolling deploy or a brief network drop should not
+        // permanently break the poll. After this we set status='error'
+        // and stop — the consumer will surface that and the user can
+        // refresh.
+        const MAX_CONSECUTIVE_ERRORS = 4
+        const ERROR_BACKOFF_CAP_MS = 30_000
+        let consecutiveErrors = 0
+
         setStatus('running')
         setError(null)
+
+        // Compute the next delay. On error, exponential backoff bounded
+        // by the cap so a sustained outage doesn't pin one tab on a
+        // 60s+ retry loop. On success, base interval.
+        const nextDelay = (errorCount: number): number => {
+            if (errorCount === 0) return pollIntervalMs
+            return Math.min(
+                ERROR_BACKOFF_CAP_MS,
+                pollIntervalMs * Math.pow(2, errorCount - 1),
+            )
+        }
+
+        const handleTransientError = (message: string) => {
+            consecutiveErrors += 1
+            if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                setStatus('error')
+                setError(message)
+                return
+            }
+            // Stay in 'running' so the consumer (e.g. RegistryAssets)
+            // doesn't tear down the polled query while we retry.
+            timeout = window.setTimeout(poll, nextDelay(consecutiveErrors))
+        }
 
         async function poll() {
             try {
                 const res = await fetchWithTimeout(pollUrl as string, { method: 'GET' })
+                if (cancelled) return
                 if (!res.ok) {
-                    if (cancelled) return
-                    setStatus('error')
-                    setError(`Job status fetch failed: ${res.status}`)
+                    handleTransientError(`Job status fetch failed: ${res.status}`)
                     return
                 }
                 const body = (await res.json()) as JobStatusResponse
@@ -94,13 +125,13 @@ export function useInsightsJob(
                     setStatus('unknown')
                     return
                 }
-                // Still running — schedule the next tick.
+                // Successful tick — reset error budget and schedule next.
+                consecutiveErrors = 0
                 setStatus('running')
                 timeout = window.setTimeout(poll, pollIntervalMs)
             } catch (e: any) {
                 if (cancelled) return
-                setStatus('error')
-                setError(e?.message ?? 'Job status fetch failed')
+                handleTransientError(e?.message ?? 'Job status fetch failed')
             }
         }
 

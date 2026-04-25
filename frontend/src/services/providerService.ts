@@ -248,10 +248,22 @@ export const providerService = {
         )
     },
 
+    /**
+     * Sniff a Neo4j/DataHub provider's schema for the onboarding wizard's
+     * mapping-suggestion step. Synchronous live call — backend caps the
+     * provider call at 15s (see providers.py); the client waits 20s so
+     * the structured 504 surfaces here rather than a generic frontend
+     * abort. Not on a hot path: only the wizard hits this, once per
+     * provider creation.
+     */
     discoverSchema(providerId: string, assetName?: string): Promise<SchemaDiscoveryResult> {
         return request<SchemaDiscoveryResult>(
             `${ADMIN_API}/${providerId}/discover-schema`,
-            { method: 'POST', body: JSON.stringify({ assetName: assetName || null }) },
+            {
+                method: 'POST',
+                body: JSON.stringify({ assetName: assetName || null }),
+                timeoutMs: 20_000,
+            },
         )
     },
 }

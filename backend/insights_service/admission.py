@@ -30,7 +30,9 @@ whether the protected block raised.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -132,16 +134,37 @@ class _CircuitState:
 
 # ── Controller ───────────────────────────────────────────────────────
 
+_FLUSH_INTERVAL_SECS = float(os.getenv("ADMISSION_FLUSH_INTERVAL_SECS", "5"))
+
+
+@dataclass
+class _PendingOutcome:
+    """Buffered counter deltas drained by the periodic flush task."""
+    success_delta: int = 0
+    failure_delta: int = 0
+    consecutive_failures: int = 0
+
+
 class _AdmissionController:
     """Process-singleton. State is per-worker; counters in
     ``provider_health_window`` make it observable to other workers
-    without a coordination protocol."""
+    without a coordination protocol.
+
+    Outcome persistence is **batched**: every ``report_*`` call buffers
+    counter deltas in-memory and a single background task flushes them
+    every ``ADMISSION_FLUSH_INTERVAL_SECS`` (default 5s). At 50 jobs/sec
+    against 4 providers that drops 50 commits/sec to ~0.8 commits/sec
+    — which is the difference between "DB write hot path" and "noise".
+    """
 
     def __init__(self) -> None:
         self._buckets: dict[str, _TokenBucket] = {}
         self._circuits: dict[str, _CircuitState] = {}
         self._config_cache: dict[str, AdmissionConfig] = {}
         self._lock = asyncio.Lock()
+        # Coalesced outcome buffer drained by ``_flush_loop``.
+        self._pending: dict[str, _PendingOutcome] = {}
+        self._flush_task: Optional[asyncio.Task] = None
 
     # ── Config lookup ────────────────────────────────────────────
 
@@ -253,53 +276,125 @@ class _AdmissionController:
 
         await self._persist_outcome(provider_id, succeeded=False)
 
-    # ── Persistence: rolling window ─────────────────────────────
+    # ── Persistence: buffered rolling window ────────────────────
 
     async def _persist_outcome(self, provider_id: str, *, succeeded: bool) -> None:
-        """Bump ``provider_health_window`` counters in an independent
-        session so a failed-job rollback does not erase admission
-        bookkeeping."""
+        """Buffer the outcome for the periodic flush task.
+
+        Deltas accumulate in-memory; the flush task (``_flush_loop``)
+        emits one upsert per affected provider every
+        ``ADMISSION_FLUSH_INTERVAL_SECS``. This eliminates the
+        commit-per-job hot path; in exchange, counters in
+        ``provider_health_window`` lag real-time by up to one flush
+        interval. That's acceptable for an observability surface
+        (the UI's "provider health" chip refreshes on its own cadence).
+        """
+        circuit = self._circuits.get(provider_id, _CircuitState())
+        bucket = self._pending.get(provider_id)
+        if bucket is None:
+            bucket = _PendingOutcome()
+            self._pending[provider_id] = bucket
+        if succeeded:
+            bucket.success_delta += 1
+        else:
+            bucket.failure_delta += 1
+        # Last-writer-wins: the latest in-memory consecutive_failures
+        # value is the right one to persist; deltas don't apply.
+        bucket.consecutive_failures = circuit.consecutive_failures
+        self._ensure_flush_task()
+
+    def _ensure_flush_task(self) -> None:
+        """Lazily spawn the flush coroutine on the running event loop.
+
+        Tolerates "no loop" environments (some test paths exercise
+        admission state without running asyncio); persistence is
+        best-effort and missing it doesn't break admission decisions.
+        """
+        if self._flush_task is not None and not self._flush_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._flush_task = loop.create_task(
+            self._flush_loop(), name="admission-flush",
+        )
+
+    async def _flush_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(_FLUSH_INTERVAL_SECS)
+                await self.drain()
+        except asyncio.CancelledError:
+            # Final drain on shutdown so we don't lose the last window
+            # of counters when the worker stops gracefully.
+            with contextlib.suppress(Exception):
+                await self.drain()
+            raise
+        except Exception:
+            logger.exception("admission.flush_loop crashed (will not restart)")
+
+    async def drain(self) -> None:
+        """Flush all buffered outcomes to ``provider_health_window``.
+
+        Public so tests / shutdown hooks can force a flush. Atomically
+        swaps the buffer so concurrent ``report_*`` calls during the
+        flush land in the next batch.
+        """
+        if not self._pending:
+            return
+        snapshot, self._pending = self._pending, {}
         factory = get_session_factory(PoolRole.JOBS)
         try:
             async with factory() as session:
-                circuit = self._circuits.get(provider_id, _CircuitState())
-                values = {
-                    "provider_id": provider_id,
-                    "success_count": 1 if succeeded else 0,
-                    "failure_count": 0 if succeeded else 1,
-                    "window_start": datetime.now(timezone.utc).isoformat(),
-                    "consecutive_failures": circuit.consecutive_failures,
-                    "throttle_until": None,
-                }
-                dialect = session.bind.dialect.name if session.bind else "sqlite"
-                if dialect == "postgresql":
-                    stmt = pg_insert(ProviderHealthWindowORM).values(**values)
+                dialect = (
+                    session.bind.dialect.name if session.bind else "sqlite"
+                )
+                insert = pg_insert if dialect == "postgresql" else sqlite_insert
+                now_iso = datetime.now(timezone.utc).isoformat()
+                for provider_id, pending in snapshot.items():
+                    if (
+                        pending.success_delta == 0
+                        and pending.failure_delta == 0
+                    ):
+                        continue
+                    stmt = insert(ProviderHealthWindowORM).values(
+                        provider_id=provider_id,
+                        success_count=pending.success_delta,
+                        failure_count=pending.failure_delta,
+                        window_start=now_iso,
+                        consecutive_failures=pending.consecutive_failures,
+                        throttle_until=None,
+                    )
                     stmt = stmt.on_conflict_do_update(
                         index_elements=["provider_id"],
                         set_={
-                            "success_count": ProviderHealthWindowORM.success_count + (1 if succeeded else 0),
-                            "failure_count": ProviderHealthWindowORM.failure_count + (0 if succeeded else 1),
-                            "consecutive_failures": values["consecutive_failures"],
+                            "success_count": (
+                                ProviderHealthWindowORM.success_count
+                                + pending.success_delta
+                            ),
+                            "failure_count": (
+                                ProviderHealthWindowORM.failure_count
+                                + pending.failure_delta
+                            ),
+                            "consecutive_failures": pending.consecutive_failures,
                         },
                     )
-                else:
-                    stmt = sqlite_insert(ProviderHealthWindowORM).values(**values)
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=["provider_id"],
-                        set_={
-                            "success_count": ProviderHealthWindowORM.success_count + (1 if succeeded else 0),
-                            "failure_count": ProviderHealthWindowORM.failure_count + (0 if succeeded else 1),
-                            "consecutive_failures": values["consecutive_failures"],
-                        },
-                    )
-                await session.execute(stmt)
+                    await session.execute(stmt)
                 await session.commit()
         except Exception as exc:
-            # Persistence failure is informational — the in-memory
-            # state still drives admission decisions.
-            logger.warning(
-                "admission.persist_failed provider=%s err=%s", provider_id, exc
-            )
+            # If flush fails, fold the snapshot back into the pending
+            # buffer so a subsequent flush retries — losing counters
+            # because Postgres blipped is worse than a brief delay.
+            for provider_id, pending in snapshot.items():
+                existing = self._pending.get(provider_id)
+                if existing is None:
+                    self._pending[provider_id] = pending
+                else:
+                    existing.success_delta += pending.success_delta
+                    existing.failure_delta += pending.failure_delta
+                    existing.consecutive_failures = pending.consecutive_failures
+            logger.warning("admission.drain_failed err=%s", exc)
 
 
 # Process-singleton.
