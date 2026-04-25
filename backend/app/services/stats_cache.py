@@ -52,7 +52,7 @@ from backend.app.config import resilience
 from backend.app.db.models import DataSourcePollingConfigORM
 from backend.app.db.repositories import data_source_repo
 from backend.app.db.repositories.stats_repo import get_data_source_stats
-from backend.stats_service.enqueue import enqueue_stats_job_safe
+from backend.insights_service.enqueue import enqueue_stats_job_safe
 
 logger = logging.getLogger(__name__)
 

@@ -6,6 +6,9 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService, type ConnectionTestResult, type ProviderImpactResponse, type ProviderResponse } from '@/services/providerService'
+import { ProviderAdmissionEditor } from '@/components/insights/ProviderAdmissionEditor'
+import { StatusChip } from '@/components/insights/StatusChip'
+import type { InsightsMeta, ProviderHealth as InsightsProviderHealth } from '@/types/insights'
 import { useProviderHealthSweep } from '@/hooks/useProviderHealthSweep'
 import { DeleteProviderDialog } from './DeleteProviderDialog'
 import { FirstRunHero } from './FirstRunHero'
@@ -24,6 +27,44 @@ function getProviderConfig(type: string) {
 
 type HealthStatus = 'checking' | 'healthy' | 'unhealthy' | 'unknown'
 interface ProviderHealth { status: HealthStatus; latencyMs?: number; error?: string }
+
+/**
+ * Synthesise a universal insights envelope `meta` from the connectivity
+ * sweep so we can render a single <StatusChip> that matches the look of
+ * RegistryAssets / ViewWizard banners. The sweep doesn't have a real
+ * cache row, so envelope status is `unavailable` when the provider is
+ * down (no fresh data to show) and `fresh` when reachable; the
+ * provider_health field carries the sweep's actual verdict.
+ */
+function syntheticMetaFromSweep(
+    health: ProviderHealth, providerId: string,
+): InsightsMeta {
+    let providerHealth: InsightsProviderHealth = 'unknown'
+    let status: InsightsMeta['status'] = 'unavailable'
+    if (health.status === 'healthy') {
+        providerHealth = 'ok'
+        status = 'fresh'
+    } else if (health.status === 'unhealthy') {
+        providerHealth = 'down'
+        status = 'unavailable'
+    } else if (health.status === 'checking') {
+        providerHealth = 'unknown'
+        status = 'computing'
+    }
+    return {
+        status,
+        source: health.status === 'healthy' ? 'cache' : 'none',
+        updated_at: null,
+        staleness_secs: null,
+        ttl_seconds: null,
+        refreshing: health.status === 'checking',
+        job_id: null,
+        poll_url: null,
+        provider_health: providerHealth,
+        last_error: health.error ?? null,
+        provider_id: providerId,
+    }
+}
 
 function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: { provider: ProviderResponse; health: ProviderHealth; onTest: () => void; onEdit: () => void; onDelete: () => void; onScan: () => void }) {
     const config = getProviderConfig(provider.providerType)
@@ -44,6 +85,7 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
                     <div className="flex items-center gap-2">
                         <div className={cn("w-2.5 h-2.5 rounded-full", statusDot)} title={health.status} />
                         {health.latencyMs !== undefined && <span className="text-[10px] font-mono text-ink-muted">{Math.round(health.latencyMs)}ms</span>}
+                        <StatusChip meta={syntheticMetaFromSweep(health, provider.id)} compact />
                     </div>
                 </div>
                 <div className="flex items-center gap-4 text-xs text-ink-muted mb-4">
@@ -77,7 +119,7 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
                 </div>
             </div>
             {expanded && (
-                <div className="px-5 pb-5 pt-3 border-t border-glass-border animate-in slide-in-from-top-2 fade-in duration-200">
+                <div className="px-5 pb-5 pt-3 border-t border-glass-border animate-in slide-in-from-top-2 fade-in duration-200 space-y-4">
                     <dl className="grid grid-cols-2 gap-3 text-xs">
                         <div><dt className="text-ink-muted font-medium">Provider ID</dt><dd className="font-mono text-ink mt-0.5 truncate">{provider.id}</dd></div>
                         <div><dt className="text-ink-muted font-medium">Status</dt><dd className={cn("mt-0.5 font-semibold", provider.isActive ? "text-emerald-500" : "text-red-500")}>{provider.isActive ? 'Active' : 'Inactive'}</dd></div>
@@ -85,6 +127,7 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
                         <div><dt className="text-ink-muted font-medium">Last Updated</dt><dd className="text-ink mt-0.5">{new Date(provider.updatedAt).toLocaleDateString()}</dd></div>
                         {health.error && <div className="col-span-2"><dt className="text-red-500 font-medium">Error</dt><dd className="text-red-400 mt-0.5 font-mono text-[11px] break-all">{health.error}</dd></div>}
                     </dl>
+                    <ProviderAdmissionEditor providerId={provider.id} />
                 </div>
             )}
         </div>

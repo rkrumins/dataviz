@@ -36,7 +36,9 @@ import os
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response, status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -393,19 +395,35 @@ async def delete_job(
 
 @app.post(
     "/aggregation/data-sources/{ds_id}/purge",
-    summary="Purge aggregated edges",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Purge aggregated edges (asynchronous)",
 )
 async def purge_aggregation(
     ds_id: str,
+    response: Response,
+    background_tasks: BackgroundTasks,
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(_get_session),
 ):
+    """Queue a purge job and return immediately. The provider call
+    runs in a background task — see service.start_purge / execute_purge."""
     try:
-        return await svc.purge(ds_id, session)
+        job = await svc.start_purge(ds_id, session)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+    background_tasks.add_task(svc.execute_purge, job.id)
+    response.headers["Location"] = (
+        f"/aggregation/data-sources/{ds_id}/jobs/{job.id}"
+    )
+    return {
+        "deletedEdges": 0,
+        "dataSourceId": ds_id,
+        "jobId": job.id,
+        "status": "running",
+    }
 
 
 # ── POST /aggregation/data-sources/{ds_id}/skip ─────────────────────
