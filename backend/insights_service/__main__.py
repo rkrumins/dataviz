@@ -237,6 +237,15 @@ async def main() -> None:
         except (asyncio.CancelledError, Exception):
             pass
 
+        # Final drain of buffered admission counters before the
+        # process exits — the periodic flush task is cancelled below
+        # and would otherwise drop the last window of outcomes.
+        try:
+            from . import admission
+            await admission.controller.drain()
+        except Exception as exc:
+            logger.warning("admission final drain failed: %s", exc)
+
         health_server.close()
         await health_server.wait_closed()
 

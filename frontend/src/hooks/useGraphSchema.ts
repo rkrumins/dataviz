@@ -151,7 +151,13 @@ export function useGraphSchema(options?: UseGraphSchemaOptions) {
     enabled: Boolean(workspaceId && dataSourceId),
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
-    retry: false, // Failure is loud — <SchemaScope> renders the error UI.
+    // One retry buys resilience against transient blips (network drop,
+    // 502 from a rolling deploy) without masking real failures: after
+    // one retry, <SchemaScope> still renders its error UI. The 800ms
+    // delay is short enough that a failed initial mount is invisible
+    // to users on a healthy backend.
+    retry: 1,
+    retryDelay: 800,
     refetchOnWindowFocus: false,
     // While the backend cache is `computing` (worker has been kicked
     // but hasn't finished yet), poll every 2s. As soon as `meta.status`

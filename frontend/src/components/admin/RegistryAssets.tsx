@@ -824,19 +824,24 @@ export function RegistryAssets() {
                 aggregationService.purgeAggregation(ds.id)
             ))
 
-            const succeeded = results.filter(r => r.status === 'fulfilled')
+            // Purge is now asynchronous: the backend creates a `running`
+            // job row and returns 202 immediately, then runs the
+            // provider DELETE in a BackgroundTask. The actual
+            // `deletedEdges` count is unknown at this point — Job
+            // History will surface progress + the final count.
+            const succeeded = results.filter(r => r.status === 'fulfilled').length
             const failed = results.filter(r => r.status === 'rejected').length
-            const totalDeleted = succeeded.reduce((sum, r) => sum + ((r as PromiseFulfilledResult<any>).value?.deletedEdges ?? 0), 0)
 
             hideLoading('purge')
             if (failed === 0) {
-                showToast('success', `Purged ${totalDeleted.toLocaleString()} aggregated edge(s). Switching to Job History…`)
+                showToast('success', `Purge queued for ${succeeded} data source(s). Switching to Job History to monitor…`)
                 setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
-            } else if (succeeded.length > 0) {
-                showToast('warning', `Purged ${totalDeleted.toLocaleString()} edges but ${failed} source(s) failed. A job may be active.`)
+            } else if (succeeded > 0) {
+                showToast('warning', `Queued ${succeeded} purge job(s); ${failed} source(s) failed to enqueue (a job may already be active).`)
+                setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else {
                 const firstError = (results.find(r => r.status === 'rejected') as PromiseRejectedResult)?.reason
-                showToast('error', firstError?.message ?? 'Failed to purge aggregated edges')
+                showToast('error', firstError?.message ?? 'Failed to queue purge job')
             }
         } catch (e: any) {
             hideLoading('purge')
