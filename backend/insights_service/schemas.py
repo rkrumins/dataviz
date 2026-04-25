@@ -84,12 +84,19 @@ class DiscoveryJobEnvelope(BaseModel):
         )
 
 
-class SchemaJobEnvelope(BaseModel):
-    """Explicit schema cache priming. Same scope as ``StatsJobEnvelope`` but
-    only the schema field of ``data_source_stats`` is updated, so the worker
-    can target a faster code path when the caller only needs schema."""
+class PurgeJobEnvelope(BaseModel):
+    """Async aggregation-edge purge.
 
-    kind: Literal["schema_refresh"] = "schema_refresh"
+    Scope is the ``data_source_id`` so two purge requests against the
+    same source coalesce. The pre-existing ``aggregation_jobs`` row
+    (``job_id``) is the durable status / audit record; the worker
+    updates that row to ``completed`` / ``failed`` after the provider
+    DELETE finishes. We carry ``workspace_id`` along so the handler can
+    resolve a provider client without a redundant DB lookup.
+    """
+
+    kind: Literal["purge"] = "purge"
+    job_id: str           # AggregationJobORM.id (durable record)
     data_source_id: str
     workspace_id: str
     enqueued_at: datetime
@@ -102,6 +109,7 @@ class SchemaJobEnvelope(BaseModel):
     def to_stream_fields(self) -> dict[str, str]:
         return {
             "kind": self.kind,
+            "job_id": self.job_id,
             "data_source_id": self.data_source_id,
             "workspace_id": self.workspace_id,
             "enqueued_at": self.enqueued_at.isoformat(),
@@ -109,8 +117,9 @@ class SchemaJobEnvelope(BaseModel):
         }
 
     @classmethod
-    def from_stream_fields(cls, fields: dict[str, str]) -> "SchemaJobEnvelope":
+    def from_stream_fields(cls, fields: dict[str, str]) -> "PurgeJobEnvelope":
         return cls(
+            job_id=fields["job_id"],
             data_source_id=fields["data_source_id"],
             workspace_id=fields["workspace_id"],
             enqueued_at=datetime.fromisoformat(fields["enqueued_at"]),
@@ -118,13 +127,13 @@ class SchemaJobEnvelope(BaseModel):
         )
 
 
-JobEnvelope = Union[StatsJobEnvelope, DiscoveryJobEnvelope, SchemaJobEnvelope]
+JobEnvelope = Union[StatsJobEnvelope, DiscoveryJobEnvelope, PurgeJobEnvelope]
 
 
 _ENVELOPE_BY_KIND: dict[str, type[BaseModel]] = {
     "stats_poll": StatsJobEnvelope,
     "discovery": DiscoveryJobEnvelope,
-    "schema_refresh": SchemaJobEnvelope,
+    "purge": PurgeJobEnvelope,
 }
 
 

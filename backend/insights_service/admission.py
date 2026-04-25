@@ -48,6 +48,7 @@ from backend.app.db.models import (
     ProviderAdmissionConfigORM,
     ProviderHealthWindowORM,
 )
+from backend.app.services.aggregation.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -82,44 +83,111 @@ class AdmissionConfig:
 _DEFAULT_CONFIG = AdmissionConfig()
 
 
-# ── Token bucket ────────────────────────────────────────────────────
+# ── Token bucket: Redis-backed GCRA ─────────────────────────────────
+#
+# Generic Cell Rate Algorithm. One Redis key per provider holds the
+# Theoretical Arrival Time of the next allowed token; capacity and
+# refill rate are passed as args on every call so per-provider config
+# changes take effect on the next acquire without invalidation.
+#
+# Why not in-memory? With N workers each holding their own bucket,
+# the **cold-start burst** is N × bucket_capacity simultaneous calls
+# (e.g. 4 workers × 8 capacity = 32 concurrent calls to a slow
+# upstream — which is exactly the scenario `bucket_capacity=8` was
+# meant to prevent). One Redis key gives us a real cluster-wide cap.
+#
+# Falls open on Redis failures: if EVAL raises, we allow the call
+# rather than block the worker. Admission is best-effort; provider
+# circuit breakers still catch the real outage.
 
-class _TokenBucket:
-    """Standard refilling token bucket. Coroutine-safe."""
+_GCRA_LUA = """
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refill_per_sec = tonumber(ARGV[2])
+local now_ms = tonumber(ARGV[3])
 
-    __slots__ = ("_capacity", "_refill_per_sec", "_tokens", "_last_refill", "_lock")
+-- Emission interval (ms between tokens) and delay variation tolerance
+-- (max burst expressed in time units = capacity × interval).
+local emission_ms = 1000.0 / refill_per_sec
+local dvt_ms = capacity * emission_ms
 
-    def __init__(self, capacity: int, refill_per_sec: float) -> None:
-        self._capacity = max(1, capacity)
-        self._refill_per_sec = max(0.001, refill_per_sec)
-        self._tokens: float = float(self._capacity)
-        self._last_refill = time.monotonic()
-        self._lock = asyncio.Lock()
+local tat_str = redis.call('GET', key)
+local tat
+if tat_str then
+    tat = tonumber(tat_str)
+else
+    tat = 0
+end
 
-    def _refill(self, now: float) -> None:
-        elapsed = max(0.0, now - self._last_refill)
-        self._tokens = min(
-            float(self._capacity), self._tokens + elapsed * self._refill_per_sec
-        )
-        self._last_refill = now
+if tat < now_ms then
+    tat = now_ms
+end
 
-    async def acquire(self, *, wait_max_secs: float) -> bool:
-        """True on success; False if wait budget exhausted."""
-        deadline = time.monotonic() + wait_max_secs
-        while True:
-            wait = 0.0
-            async with self._lock:
-                now = time.monotonic()
-                self._refill(now)
-                if self._tokens >= 1.0:
-                    self._tokens -= 1.0
-                    return True
-                deficit = 1.0 - self._tokens
-                wait = deficit / self._refill_per_sec
-            now = time.monotonic()
-            if now + wait > deadline:
-                return False
-            await asyncio.sleep(min(wait, deadline - now))
+local new_tat = tat + emission_ms
+local diff_ms = new_tat - now_ms
+
+if diff_ms > dvt_ms then
+    -- Denied; tell caller how long to wait before the next attempt.
+    return {0, math.floor(diff_ms - dvt_ms)}
+end
+
+-- Granted; persist new TAT with a TTL bounded by max possible wait.
+local pttl = math.ceil(dvt_ms + 1000)
+redis.call('PSETEX', key, pttl, new_tat)
+return {1, 0}
+"""
+
+
+def _bucket_key(provider_id: str) -> str:
+    return f"insights:bucket:{provider_id}"
+
+
+async def _redis_acquire_token(
+    provider_id: str,
+    *,
+    capacity: int,
+    refill_per_sec: float,
+    wait_max_secs: float,
+) -> bool:
+    """Acquire one token from the Redis-backed GCRA bucket.
+
+    Returns ``True`` on grant, ``False`` if the wait budget was
+    exhausted. Falls open (returns ``True``) when Redis is unreachable
+    so admission outages don't cascade into worker errors.
+    """
+    deadline = time.monotonic() + wait_max_secs
+    redis = get_redis()
+    while True:
+        now_ms = int(time.time() * 1000)
+        try:
+            result = await redis.eval(
+                _GCRA_LUA,
+                1,
+                _bucket_key(provider_id),
+                str(int(capacity)),
+                str(float(refill_per_sec)),
+                str(now_ms),
+            )
+        except Exception as exc:
+            # Fail-open. Provider circuit breakers still gate against
+            # real outages; a Redis blip should not block all worker
+            # progress.
+            logger.warning(
+                "admission.token_acquire_redis_unavailable provider=%s err=%s — "
+                "allowing through (fail-open)",
+                provider_id, exc,
+            )
+            return True
+
+        allowed = int(result[0])
+        wait_ms = int(result[1])
+        if allowed == 1:
+            return True
+
+        wait_secs = wait_ms / 1000.0
+        if time.monotonic() + wait_secs > deadline:
+            return False
+        await asyncio.sleep(min(wait_secs, deadline - time.monotonic()))
 
 
 # ── Circuit state (per provider, in-memory) ──────────────────────────
@@ -158,7 +226,12 @@ class _AdmissionController:
     """
 
     def __init__(self) -> None:
-        self._buckets: dict[str, _TokenBucket] = {}
+        # Token buckets live in Redis (see ``_redis_acquire_token``);
+        # only circuit + config state is held per-process. The circuit
+        # is intentionally process-local — it's a fast in-memory
+        # short-circuit that prevents a single worker from hammering
+        # a known-dead provider faster than the GCRA refill rate; the
+        # cluster-wide cap is the GCRA bucket itself.
         self._circuits: dict[str, _CircuitState] = {}
         self._config_cache: dict[str, AdmissionConfig] = {}
         self._lock = asyncio.Lock()
@@ -222,10 +295,12 @@ class _AdmissionController:
             logger.info("admission.circuit_half_open provider=%s", provider_id)
             circuit.state = "half_open"
 
-        bucket = self._buckets.setdefault(
-            provider_id, _TokenBucket(cfg.bucket_capacity, cfg.refill_per_sec)
+        granted = await _redis_acquire_token(
+            provider_id,
+            capacity=cfg.bucket_capacity,
+            refill_per_sec=cfg.refill_per_sec,
+            wait_max_secs=wait_max_secs,
         )
-        granted = await bucket.acquire(wait_max_secs=wait_max_secs)
         if not granted:
             raise AdmissionDenied(provider_id, "bucket_timeout")
 
