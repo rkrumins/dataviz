@@ -2,14 +2,14 @@
 
 Three job kinds funnel through one ``enqueue_job`` core:
 
-* ``stats_poll``     — post-registration data-source poll.
+* ``stats_poll`` — post-registration data-source poll.
   Producers: insights scheduler tick, ``/graph/stats`` cache miss,
   workspace add-data-source seeding.
-* ``discovery``      — pre-registration asset list / per-asset stats.
+* ``discovery``  — pre-registration asset list / per-asset stats.
   Producers: ``/admin/providers/{id}/assets*`` cache miss,
   scheduler-driven background refreshes.
-* ``schema_refresh`` — explicit schema cache priming.
-  Producers: ``/metadata/schema`` cache miss when only schema is missing.
+* ``purge``      — async aggregation-edge purge.
+  Producers: ``/admin/data-sources/{id}/purge-aggregation``.
 
 Each kind shares a dedup key with whatever scheduler also enqueues it,
 so there is no way to queue two jobs for the same scope in parallel.
@@ -28,7 +28,7 @@ from .redis_streams import enqueue, get_stream, try_claim
 from .schemas import (
     DiscoveryJobEnvelope,
     JobEnvelope,
-    SchemaJobEnvelope,
+    PurgeJobEnvelope,
     StatsJobEnvelope,
 )
 
@@ -193,18 +193,27 @@ async def enqueue_discovery_job_safe(
     return await enqueue_job_safe(envelope, dedup_ttl_secs=dedup_ttl_secs)
 
 
-# ── Schema-only refresh ──────────────────────────────────────────────
+# ── Purge: aggregation edge deletion ─────────────────────────────────
 
-async def enqueue_schema_job_safe(
+async def enqueue_purge_job_safe(
+    job_id: str,
     data_source_id: str,
     workspace_id: str,
     *,
     dedup_ttl_secs: int = _DEFAULT_DEDUP_TTL_SECS,
 ) -> Optional[str]:
-    """Redis-tolerant enqueue for explicit schema cache priming."""
-    if not data_source_id or not workspace_id:
+    """Redis-tolerant enqueue for aggregation-edge purge jobs.
+
+    ``job_id`` is the pre-existing ``AggregationJobORM.id`` row that the
+    HTTP endpoint creates with ``status="pending"``; the worker flips
+    it to ``running`` then ``completed``/``failed``. If Redis is
+    unavailable, the row stays in ``pending`` and the operator must
+    redrive — that's surfaced via the standard Job History UI.
+    """
+    if not job_id or not data_source_id or not workspace_id:
         return None
-    envelope = SchemaJobEnvelope(
+    envelope = PurgeJobEnvelope(
+        job_id=job_id,
         data_source_id=data_source_id,
         workspace_id=workspace_id,
         enqueued_at=datetime.now(timezone.utc),
@@ -218,5 +227,5 @@ __all__ = [
     "enqueue_stats_job",
     "enqueue_stats_job_safe",
     "enqueue_discovery_job_safe",
-    "enqueue_schema_job_safe",
+    "enqueue_purge_job_safe",
 ]

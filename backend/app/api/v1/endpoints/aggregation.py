@@ -19,8 +19,7 @@ from typing import List, Optional
 
 import httpx
 from fastapi import (
-    APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request,
-    Response, status,
+    APIRouter, Body, Depends, HTTPException, Query, Request, Response, status,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -360,30 +359,35 @@ async def purge_aggregation(
     ds_id: str,
     request: Request,
     response: Response,
-    background_tasks: BackgroundTasks,
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Queue a purge job. Returns 202 with the job row immediately;
-    the actual ``MATCH ... DELETE`` runs in a FastAPI background task
-    so a multi-minute purge can't trip the frontend's request timeout.
+    """Queue a purge job. Returns 202 with the job row immediately; the
+    actual ``MATCH ... DELETE`` runs as a regular insights-service
+    Redis Streams job, which gets us retry, DLQ, and crash recovery
+    via XAUTOCLAIM (a FastAPI ``BackgroundTasks`` would die on
+    rolling restart and leave the job stuck in ``running``).
 
-    Frontend should poll the returned ``jobId`` via the standard
+    Frontend polls the returned ``jobId`` via the standard
     aggregation-jobs endpoints (Job History UI handles this).
     """
     if _PROXY_ENABLED:
         return await _proxy("POST", f"/aggregation/data-sources/{ds_id}/purge", request)
 
+    from backend.insights_service.enqueue import enqueue_purge_job_safe
+
     _, _, _, ConflictError, NotFoundError = _direct_imports()
     try:
-        job = await svc.start_purge(ds_id, session)
+        job = await svc.claim_purge_job(ds_id, session)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    # Schedule the heavy provider call to run after the response is sent.
-    background_tasks.add_task(svc.execute_purge, job.id)
+    # Hand the job off to the insights worker. Redis-down → enqueue
+    # returns None and the row stays ``pending``; an operator can
+    # redrive from Job History without losing the audit record.
+    await enqueue_purge_job_safe(job.id, ds_id, job.workspace_id)
 
     response.headers["Location"] = (
         f"/api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job.id}"
@@ -392,7 +396,7 @@ async def purge_aggregation(
         "deletedEdges": 0,
         "dataSourceId": ds_id,
         "jobId": job.id,
-        "status": "running",
+        "status": "pending",
     }
 
 
