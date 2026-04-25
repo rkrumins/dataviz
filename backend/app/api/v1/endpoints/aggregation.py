@@ -18,7 +18,10 @@ import os
 from typing import List, Optional
 
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request,
+    Response, status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.engine import get_db_session
@@ -348,22 +351,49 @@ async def delete_job(
 
 # ── POST /data-sources/{ds_id}/purge-aggregation ───────────────────
 
-@router.post("/data-sources/{ds_id}/purge-aggregation", summary="Purge aggregated edges")
+@router.post(
+    "/data-sources/{ds_id}/purge-aggregation",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Purge aggregated edges (asynchronous)",
+)
 async def purge_aggregation(
     ds_id: str,
     request: Request,
+    response: Response,
+    background_tasks: BackgroundTasks,
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(get_db_session),
 ):
+    """Queue a purge job. Returns 202 with the job row immediately;
+    the actual ``MATCH ... DELETE`` runs in a FastAPI background task
+    so a multi-minute purge can't trip the frontend's request timeout.
+
+    Frontend should poll the returned ``jobId`` via the standard
+    aggregation-jobs endpoints (Job History UI handles this).
+    """
     if _PROXY_ENABLED:
         return await _proxy("POST", f"/aggregation/data-sources/{ds_id}/purge", request)
+
     _, _, _, ConflictError, NotFoundError = _direct_imports()
     try:
-        return await svc.purge(ds_id, session)
+        job = await svc.start_purge(ds_id, session)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+    # Schedule the heavy provider call to run after the response is sent.
+    background_tasks.add_task(svc.execute_purge, job.id)
+
+    response.headers["Location"] = (
+        f"/api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job.id}"
+    )
+    return {
+        "deletedEdges": 0,
+        "dataSourceId": ds_id,
+        "jobId": job.id,
+        "status": "running",
+    }
 
 
 # ── POST /data-sources/{ds_id}/skip-aggregation ────────────────────

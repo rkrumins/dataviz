@@ -4,8 +4,15 @@
  */
 
 import { fetchWithTimeout } from './fetchWithTimeout'
+import type { Envelope, AssetListPayload, AssetStatsPayload } from '@/types/insights'
 
 const ADMIN_API = '/api/v1/admin/providers'
+
+// Pre-registration discovery (asset list, per-asset stats) goes through
+// the insights service. The web tier reads only from cache and never
+// hits a provider directly; cache-miss enqueues a background job and
+// returns a `computing` envelope.
+const INSIGHTS_API = '/api/v1/admin/insights'
 
 export type ProviderType = 'falkordb' | 'neo4j' | 'datahub' | 'mock'
 
@@ -215,18 +222,48 @@ export const providerService = {
         return request<ProviderImpactResponse>(`${ADMIN_API}/${id}/impact`)
     },
 
-    listAssets(id: string): Promise<{ assets: string[] }> {
-        return request<{ assets: string[] }>(`${ADMIN_API}/${id}/assets`)
+    /**
+     * Cache-only list of physical assets on a provider. The returned
+     * envelope's `meta.status` tells the caller whether the payload is
+     * fresh, stale, computing, or unavailable. `data` is null on
+     * computing / unavailable.
+     */
+    listAssets(id: string): Promise<Envelope<AssetListPayload>> {
+        return request<Envelope<AssetListPayload>>(
+            `${INSIGHTS_API}/providers/${id}/assets`,
+        )
     },
 
-    getAssetStats(providerId: string, assetName: string): Promise<any> {
-        return request<any>(`${ADMIN_API}/${providerId}/assets/${assetName}/stats`)
+    /**
+     * Cache-only per-asset node/edge counts. `data` is null on
+     * computing / unavailable; consumers needing live data should poll
+     * `meta.poll_url` until status flips to `fresh`.
+     */
+    getAssetStats(
+        providerId: string,
+        assetName: string,
+    ): Promise<Envelope<AssetStatsPayload>> {
+        return request<Envelope<AssetStatsPayload>>(
+            `${INSIGHTS_API}/providers/${providerId}/assets/${encodeURIComponent(assetName)}/stats`,
+        )
     },
 
+    /**
+     * Sniff a Neo4j/DataHub provider's schema for the onboarding wizard's
+     * mapping-suggestion step. Synchronous live call — backend caps the
+     * provider call at 15s (see providers.py); the client waits 20s so
+     * the structured 504 surfaces here rather than a generic frontend
+     * abort. Not on a hot path: only the wizard hits this, once per
+     * provider creation.
+     */
     discoverSchema(providerId: string, assetName?: string): Promise<SchemaDiscoveryResult> {
         return request<SchemaDiscoveryResult>(
             `${ADMIN_API}/${providerId}/discover-schema`,
-            { method: 'POST', body: JSON.stringify({ assetName: assetName || null }) },
+            {
+                method: 'POST',
+                body: JSON.stringify({ assetName: assetName || null }),
+                timeoutMs: 20_000,
+            },
         )
     },
 }

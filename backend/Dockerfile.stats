@@ -38,4 +38,4 @@ EXPOSE 8092
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
   CMD curl -sf http://localhost:8092/health || exit 1
 
-CMD ["python", "-m", "backend.stats_service"]
+CMD ["python", "-m", "backend.insights_service"]

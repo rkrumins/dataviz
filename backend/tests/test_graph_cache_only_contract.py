@@ -86,7 +86,7 @@ def _stub_out_redis_enqueue(monkeypatch):
     async def _noop(*args, **kwargs):  # noqa: ARG001
         return None
 
-    from backend.stats_service import enqueue as enqueue_mod
+    from backend.insights_service import enqueue as enqueue_mod
 
     monkeypatch.setattr(enqueue_mod, "enqueue_stats_job", _noop)
 

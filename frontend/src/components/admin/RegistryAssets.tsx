@@ -28,6 +28,9 @@ import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 import { FirstRunHero } from './FirstRunHero'
 import { RetriggerDialog } from './job-history/RetriggerDialog'
 import type { AggregationOverridesValue } from './shared/AggregationOverridesForm'
+import type { Envelope, AssetStatsPayload } from '@/types/insights'
+import { StatusChip } from '@/components/insights/StatusChip'
+import { useInsightsJob } from '@/hooks/useInsightsJob'
 
 // ─── Provider type helpers ────────────────────────────────────────────────────
 const PROVIDER_TYPES = [
@@ -66,27 +69,55 @@ function AssetRow({
     onPurge?: (name: string) => void
     boundWorkspaceName?: string
 }) {
-    const [stats, setStats] = useState<any>(null)
+    // `envelope` carries both the stats payload and meta (status + provider
+    // health) so the row can render a StatusChip with progressive disclosure
+    // instead of a perpetual spinner. `loadingStats` is only true while the
+    // HTTP request is in flight; once we have an envelope back, the
+    // envelope's `meta.status` drives the visible state.
+    const [envelope, setEnvelope] = useState<Envelope<AssetStatsPayload> | null>(null)
     const [loadingStats, setLoadingStats] = useState(false)
     const [expanded, setExpanded] = useState(false)
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
     const ref = useRef<HTMLDivElement>(null)
 
+    // Manual refetch function so both the initial visibility-trigger and
+    // the useInsightsJob completion callback share one call path.
+    const refetch = useCallback(() => {
+        setLoadingStats(true)
+        providerService.getAssetStats(providerId, assetName)
+            .then(setEnvelope)
+            .catch(() => { })
+            .finally(() => setLoadingStats(false))
+    }, [providerId, assetName])
+
     useEffect(() => {
         const observer = new IntersectionObserver((entries) => {
-            if (entries[0].isIntersecting && !stats && !loadingStats) {
-                setLoadingStats(true)
-                providerService.getAssetStats(providerId, assetName)
-                    .then(setStats)
-                    .catch(() => { })
-                    .finally(() => setLoadingStats(false))
+            if (entries[0].isIntersecting && !envelope && !loadingStats) {
+                refetch()
                 observer.disconnect()
             }
         }, { rootMargin: '200px' })
         if (ref.current) observer.observe(ref.current)
         return () => observer.disconnect()
-    }, [assetName, providerId, stats, loadingStats])
+    }, [envelope, loadingStats, refetch])
+
+    // Auto-refresh when a computing/stale job completes. The hook polls
+    // /admin/insights/jobs/{id} every 2s; on completion it fires onComplete
+    // which refetches the (now-fresh) cache row.
+    useInsightsJob(
+        envelope?.meta.job_id ?? null,
+        envelope?.meta.poll_url ?? null,
+        {
+            enabled: !!envelope?.meta.refreshing && !!envelope?.meta.job_id,
+            onComplete: refetch,
+        },
+    )
+
+    // The cached stats payload — null while computing, unavailable, or before
+    // the IntersectionObserver fires. Existing rendering below can keep
+    // referencing `stats?.foo` unchanged.
+    const stats = envelope?.data ?? null
 
     // Separate handlers: circle = select/unregister, chevron = expand
     const handleSelect = (e: React.MouseEvent) => {
@@ -171,6 +202,9 @@ function AssetRow({
                                 {boundWorkspaceName}
                             </span>
                         )}
+                        {envelope && (
+                            <StatusChip meta={envelope.meta} compact />
+                        )}
                     </div>
 
                     <div className="flex items-center gap-3">
@@ -178,6 +212,27 @@ function AssetRow({
                             <div className="flex items-center gap-1.5 text-[11px] text-ink-muted">
                                 <Loader2 className="w-3 h-3 animate-spin" />
                                 <span>Loading metrics...</span>
+                            </div>
+                        ) : envelope && !stats ? (
+                            // Cache-miss states: computing, unavailable, etc. The
+                            // chip in the header carries the visual signal; surface
+                            // a short auxiliary message here so the row isn't blank.
+                            <div className="flex items-center gap-1.5 text-[11px] text-ink-muted">
+                                {envelope.meta.status === 'computing' && (
+                                    <>
+                                        <Loader2 className="w-3 h-3 animate-spin" />
+                                        <span>Provider scan in progress…</span>
+                                    </>
+                                )}
+                                {envelope.meta.status === 'unavailable' && (
+                                    <>
+                                        <AlertTriangle className="w-3 h-3" />
+                                        <span>Refresh queue unreachable — try again shortly</span>
+                                    </>
+                                )}
+                                {envelope.meta.status === 'partial' && (
+                                    <span>Partial metadata available; full scan running</span>
+                                )}
                             </div>
                         ) : stats ? (
                             <div className="flex items-center gap-3 text-[11px] text-ink-muted">
@@ -563,7 +618,11 @@ export function RegistryAssets() {
             catalogService.list(selectedProviderId),
         ]).then(([res, existing]) => {
             if (!mounted) return
-            const assetList = res.assets || []
+            // res is now an Envelope<{ assets: string[] }>. On a cold cache
+            // (`computing` / `unavailable`) `data` is null; render an empty
+            // list and let the user retry — the worker will populate the
+            // cache shortly. The "Refresh" button reissues the call.
+            const assetList = res.data?.assets ?? []
             setAssets(assetList)
             setExistingCatalogs(existing)
             const existingSet = new Set(existing.map((c: any) => c.sourceIdentifier).filter(Boolean))
@@ -765,19 +824,24 @@ export function RegistryAssets() {
                 aggregationService.purgeAggregation(ds.id)
             ))
 
-            const succeeded = results.filter(r => r.status === 'fulfilled')
+            // Purge is now asynchronous: the backend creates a `running`
+            // job row and returns 202 immediately, then runs the
+            // provider DELETE in a BackgroundTask. The actual
+            // `deletedEdges` count is unknown at this point — Job
+            // History will surface progress + the final count.
+            const succeeded = results.filter(r => r.status === 'fulfilled').length
             const failed = results.filter(r => r.status === 'rejected').length
-            const totalDeleted = succeeded.reduce((sum, r) => sum + ((r as PromiseFulfilledResult<any>).value?.deletedEdges ?? 0), 0)
 
             hideLoading('purge')
             if (failed === 0) {
-                showToast('success', `Purged ${totalDeleted.toLocaleString()} aggregated edge(s). Switching to Job History…`)
+                showToast('success', `Purge queued for ${succeeded} data source(s). Switching to Job History to monitor…`)
                 setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
-            } else if (succeeded.length > 0) {
-                showToast('warning', `Purged ${totalDeleted.toLocaleString()} edges but ${failed} source(s) failed. A job may be active.`)
+            } else if (succeeded > 0) {
+                showToast('warning', `Queued ${succeeded} purge job(s); ${failed} source(s) failed to enqueue (a job may already be active).`)
+                setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else {
                 const firstError = (results.find(r => r.status === 'rejected') as PromiseRejectedResult)?.reason
-                showToast('error', firstError?.message ?? 'Failed to purge aggregated edges')
+                showToast('error', firstError?.message ?? 'Failed to queue purge job')
             }
         } catch (e: any) {
             hideLoading('purge')
@@ -942,7 +1006,7 @@ export function RegistryAssets() {
                                         providerService.listAssets(selectedProviderId),
                                         catalogService.list(selectedProviderId),
                                     ]).then(([res, existing]) => {
-                                        setAssets(res.assets || [])
+                                        setAssets(res.data?.assets ?? [])
                                         setExistingCatalogs(existing)
                                     }).finally(() => setAssetsLoading(false))
                                 }}

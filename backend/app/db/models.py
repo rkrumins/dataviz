@@ -716,6 +716,94 @@ class DataSourcePollingConfigORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# asset_discovery_cache (Pre-registration asset cache)                 #
+# ------------------------------------------------------------------ #
+# Caches the result of provider asset-list and per-asset stats calls
+# made during onboarding (before a workspace_data_source exists). Keyed
+# by (provider_id, asset_name); the empty-string asset_name is the
+# sentinel row for the "list all assets on this provider" payload.
+
+class AssetDiscoveryCacheORM(Base):
+    __tablename__ = "asset_discovery_cache"
+
+    provider_id = Column(
+        Text,
+        ForeignKey("providers.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    asset_name = Column(Text, primary_key=True, default="")
+    payload = Column(Text, nullable=False, default="{}")  # JSON
+    status = Column(Text, nullable=False, default="fresh")  # fresh | stale | partial
+    computed_at = Column(Text, nullable=False, default=_now)
+    expires_at = Column(Text, nullable=False)  # ISO; absolute, cleaned by scheduler
+    last_error = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_adc_expires", "expires_at"),
+        CheckConstraint(
+            "status IN ('fresh', 'stale', 'partial')",
+            name="ck_adc_status",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AssetDiscoveryCache provider={self.provider_id!r} asset={self.asset_name!r} status={self.status!r}>"
+
+
+# ------------------------------------------------------------------ #
+# provider_admission_config (Per-provider rate-limit knobs)            #
+# ------------------------------------------------------------------ #
+# Admin-tunable token-bucket + circuit-breaker parameters per provider.
+# Read by insights_service workers on each job; absence of a row falls
+# back to module defaults (see backend/insights_service/admission.py).
+
+class ProviderAdmissionConfigORM(Base):
+    __tablename__ = "provider_admission_config"
+
+    provider_id = Column(
+        Text,
+        ForeignKey("providers.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    bucket_capacity = Column(Integer, nullable=False, default=8)
+    refill_per_sec = Column(Integer, nullable=False, default=2)
+    circuit_fail_max = Column(Integer, nullable=False, default=5)
+    circuit_window_secs = Column(Integer, nullable=False, default=30)
+    half_open_after_secs = Column(Integer, nullable=False, default=60)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    def __repr__(self) -> str:
+        return f"<ProviderAdmissionConfig provider={self.provider_id!r} cap={self.bucket_capacity} refill={self.refill_per_sec}/s>"
+
+
+# ------------------------------------------------------------------ #
+# provider_health_window (Rolling success window)                      #
+# ------------------------------------------------------------------ #
+# Worker-maintained rolling-window counters for admission control.
+# `throttle_until` is set when the rolling success rate drops below
+# threshold; while in the future, workers defer enqueues for this
+# provider rather than burning capacity.
+
+class ProviderHealthWindowORM(Base):
+    __tablename__ = "provider_health_window"
+
+    provider_id = Column(
+        Text,
+        ForeignKey("providers.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    success_count = Column(Integer, nullable=False, default=0)
+    failure_count = Column(Integer, nullable=False, default=0)
+    window_start = Column(Text, nullable=False, default=_now)
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    throttle_until = Column(Text, nullable=True)
+    last_p99_ms = Column(Integer, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<ProviderHealthWindow provider={self.provider_id!r} ok={self.success_count} fail={self.failure_count}>"
+
+
+# ------------------------------------------------------------------ #
 # catalog_items  (enterprise data asset catalog)                       #
 # ------------------------------------------------------------------ #
 

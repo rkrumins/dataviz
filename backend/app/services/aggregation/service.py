@@ -642,16 +642,42 @@ class AggregationService:
         logger.info("Aggregation job %s deleted from history", job_id)
 
     # ── Purge ─────────────────────────────────────────────────────────
+    #
+    # Purge is a long-running provider operation: ``MATCH ... DELETE``
+    # against millions of aggregated edges can run for many seconds to
+    # minutes on FalkorDB / Neo4j. Doing this inside the HTTP request
+    # is the same anti-pattern the rest of the platform now avoids —
+    # the frontend's 5s ``fetchWithTimeout`` would abort long before
+    # the provider finished, leaving a partially-deleted graph and a
+    # confusing UX ("the request was killed").
+    #
+    # Split into two phases:
+    #   1. ``start_purge`` — synchronous: claim a job row with status
+    #      ``running``, return it. The HTTP handler returns this row
+    #      immediately so Job History can pick it up.
+    #   2. ``execute_purge`` — background: opens its own DB session,
+    #      runs the provider call, finalises the job to ``completed``
+    #      or ``failed``. Decoupled from the request lifecycle.
 
-    async def purge(self, ds_id: str, session: AsyncSession) -> dict:
-        """Remove all materialized AGGREGATED edges for a data source."""
+    async def start_purge(
+        self, ds_id: str, session: AsyncSession,
+    ) -> AggregationJobORM:
+        """Claim a purge slot and return a ``running`` job row.
+
+        Raises ``NotFoundError`` if the data source has no aggregation
+        state, ``ConflictError`` if another aggregation/purge job is
+        already in flight for this data source.
+
+        The caller is responsible for scheduling :meth:`execute_purge`
+        with the returned job's id (typically via
+        ``BackgroundTasks.add_task``).
+        """
         from .models import AggregationDataSourceStateORM
 
         state = await session.get(AggregationDataSourceStateORM, ds_id)
         if not state:
             raise NotFoundError(f"Data source {ds_id} not found in aggregation state")
 
-        # Guard: cannot purge while a job is running
         active = (
             await session.execute(
                 select(AggregationJobORM)
@@ -664,51 +690,126 @@ class AggregationService:
                 f"Cannot purge while aggregation job {active.id} is active"
             )
 
-        provider = await self._registry.get_provider_for_workspace(
-            state.workspace_id, session, data_source_id=ds_id,
-        )
-
-        # Resolve the data source's projection mode so we purge from
-        # the correct graph (source or dedicated projection graph).
         from backend.app.db.models import WorkspaceDataSourceORM
         ds_orm = await session.get(WorkspaceDataSourceORM, ds_id)
         actual_mode = (ds_orm.projection_mode if ds_orm else None) or "in_source"
-        await provider.set_projection_mode(actual_mode)
 
-        deleted = await provider.purge_aggregated_edges()
-
-        # Reset aggregation-owned state
-        state.aggregation_status = "none"
-        state.last_aggregated_at = None
-        state.aggregation_edge_count = 0
-        state.graph_fingerprint = None
-
-        # Create audit trail record so purge appears in job history
         now = _now()
         purge_job = AggregationJobORM(
             id=_generate_id(),
             data_source_id=ds_id,
             workspace_id=state.workspace_id,
-            status="completed",
+            status="running",
             trigger_source="purge",
             projection_mode=actual_mode,
-            progress=100,
-            total_edges=deleted,
-            processed_edges=deleted,
+            progress=0,
+            total_edges=0,
+            processed_edges=0,
             created_edges=0,
             batch_size=0,
             retry_count=0,
             max_retries=0,
             started_at=now,
-            completed_at=now,
             created_at=now,
             updated_at=now,
         )
         session.add(purge_job)
         await session.commit()
+        await session.refresh(purge_job)
 
-        logger.info("Purged %d aggregated edges from data source %s (job %s)", deleted, ds_id, purge_job.id)
-        return {"deletedEdges": deleted, "dataSourceId": ds_id, "jobId": purge_job.id}
+        logger.info(
+            "Purge job %s queued for ds=%s (mode=%s)",
+            purge_job.id, ds_id, actual_mode,
+        )
+        return purge_job
+
+    async def execute_purge(self, job_id: str) -> None:
+        """Run the deferred provider purge for a previously-claimed job.
+
+        Opens its own DB session because the HTTP request that claimed
+        the job has already returned. On any exception, marks the job
+        as ``failed`` with an error message rather than re-raising —
+        the caller (typically a FastAPI ``BackgroundTasks`` runner)
+        has nowhere useful to surface the exception to.
+        """
+        from backend.app.db.engine import PoolRole, get_session_factory
+        from backend.app.db.models import WorkspaceDataSourceORM
+
+        from .models import AggregationDataSourceStateORM
+
+        factory = get_session_factory(PoolRole.JOBS)
+        try:
+            async with factory() as session:
+                job = await session.get(AggregationJobORM, job_id)
+                if job is None:
+                    logger.error("execute_purge: job %s missing", job_id)
+                    return
+
+                state = await session.get(
+                    AggregationDataSourceStateORM, job.data_source_id,
+                )
+                if state is None:
+                    job.status = "failed"
+                    job.error_message = (
+                        "data_source_state row missing — purge aborted"
+                    )
+                    job.completed_at = _now()
+                    job.updated_at = _now()
+                    await session.commit()
+                    return
+
+                ds_orm = await session.get(WorkspaceDataSourceORM, job.data_source_id)
+                actual_mode = (
+                    job.projection_mode
+                    or (ds_orm.projection_mode if ds_orm else None)
+                    or "in_source"
+                )
+
+                try:
+                    provider = await self._registry.get_provider_for_workspace(
+                        state.workspace_id, session,
+                        data_source_id=job.data_source_id,
+                    )
+                    await provider.set_projection_mode(actual_mode)
+                    deleted = await provider.purge_aggregated_edges()
+                except Exception as exc:
+                    logger.exception(
+                        "Purge failed for ds=%s job=%s",
+                        job.data_source_id, job_id,
+                    )
+                    job.status = "failed"
+                    job.error_message = str(exc)[:2000]
+                    job.completed_at = _now()
+                    job.updated_at = _now()
+                    await session.commit()
+                    return
+
+                # Provider call succeeded — reset aggregation state and
+                # finalise the job. Both writes go in the same commit
+                # so a crash between them can't leave inconsistent state.
+                state.aggregation_status = "none"
+                state.last_aggregated_at = None
+                state.aggregation_edge_count = 0
+                state.graph_fingerprint = None
+
+                job.status = "completed"
+                job.progress = 100
+                job.total_edges = deleted
+                job.processed_edges = deleted
+                job.completed_at = _now()
+                job.updated_at = _now()
+                await session.commit()
+
+                logger.info(
+                    "Purged %d aggregated edges ds=%s job=%s",
+                    deleted, job.data_source_id, job_id,
+                )
+        except Exception:
+            # Last-resort safety net so the BackgroundTasks runner never
+            # surfaces an exception. If we crashed before updating the
+            # job row, an operator (or the orphan-recovery routine) will
+            # eventually flip it to ``failed`` based on staleness.
+            logger.exception("execute_purge crashed for job=%s", job_id)
 
     # ── Schedule ──────────────────────────────────────────────────────
 
@@ -793,6 +894,39 @@ class AggregationService:
             )
             count = 0
             for job in stale_jobs.scalars():
+                # Purge jobs are run in-process via FastAPI BackgroundTasks
+                # (see aggregation.py / controlplane.py), not through the
+                # Redis-Streams dispatcher. A purge stuck in `running` after
+                # a service restart is genuinely orphaned: re-dispatching
+                # via ``self._dispatcher.dispatch`` would route it to the
+                # aggregation worker which doesn't know how to purge. Mark
+                # it failed and let the user re-trigger if still wanted.
+                #
+                # The `started_at` staleness gate prevents racing against
+                # purge jobs that were just created during this very
+                # startup before recovery scanned the table.
+                if job.trigger_source == "purge":
+                    if (
+                        job.started_at
+                        and (
+                            datetime.now(timezone.utc) - datetime.fromisoformat(job.started_at)
+                        ) < timedelta(minutes=5)
+                    ):
+                        continue
+                    job.status = "failed"
+                    job.error_message = (
+                        "interrupted by service restart — please re-trigger purge"
+                    )
+                    job.completed_at = _now()
+                    job.updated_at = _now()
+                    await session.commit()
+                    logger.warning(
+                        "Purge job %s (ds=%s) interrupted — marked failed",
+                        job.id, job.data_source_id,
+                    )
+                    count += 1
+                    continue
+
                 was_making_progress = (
                     job.status == "running"
                     and job.last_cursor is not None

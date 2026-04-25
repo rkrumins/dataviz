@@ -25,7 +25,7 @@ from backend.common.models.management import (
     DataSourceResponse,
     WorkspaceDataSourceImpactResponse,
 )
-from backend.stats_service.enqueue import enqueue_stats_job_safe
+from backend.insights_service.enqueue import enqueue_stats_job_safe
 
 router = APIRouter()
 

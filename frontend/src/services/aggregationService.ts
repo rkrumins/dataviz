@@ -172,8 +172,20 @@ class AggregationService {
     );
   }
 
-  async purgeAggregation(dataSourceId: string): Promise<{ deletedEdges: number; dataSourceId: string; jobId: string }> {
-    return authFetch<{ deletedEdges: number; dataSourceId: string; jobId: string }>(
+  /**
+   * Queue an asynchronous purge job. Returns immediately with the job
+   * row in `running` state — `deletedEdges` is 0 at this point and gets
+   * populated once the background task finishes. Frontend should
+   * monitor progress via the standard aggregation-jobs endpoints
+   * (Job History UI handles this automatically).
+   */
+  async purgeAggregation(dataSourceId: string): Promise<{
+    deletedEdges: number
+    dataSourceId: string
+    jobId: string
+    status: 'running' | 'completed' | 'failed'
+  }> {
+    return authFetch(
       `/api/v1/admin/data-sources/${dataSourceId}/purge-aggregation`,
       { method: 'POST' }
     );
