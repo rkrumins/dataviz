@@ -1,28 +1,49 @@
 """Cache-only read helpers for graph introspection endpoints.
 
-The web tier reads ``data_source_stats`` exclusively — provider
-introspection is owned by the stats service. This module holds the
-shared machinery every cache-only handler uses:
+Every cache-reading endpoint emits the same envelope shape:
 
-* ``read_stats_cache`` — tier classification + fire-and-forget refresh
-* ``build_synthetic_schema`` — ontology-only fallback so the canvas
-  renders even when the cache is cold
-* ``classify_stats_service_health`` — drives the X-Stats-Service-Status
-  response header so the frontend can surface "updates paused"
-* ``build_computing_response_body`` — 202 envelope for cache-miss
+    {
+      "data": <payload-or-null>,
+      "meta": {
+        "status": "fresh"|"stale"|"computing"|"partial"|"error",
+        "source": "postgres"|"ontology"|"none"|"error",
+        "age_seconds": int|null,
+        "ttl_seconds": int|null,
+        "missing_fields": [str, ...],
+        "stats_service_status": "healthy"|"lagging"|"unreachable"|"unknown",
+        "provider_health": "healthy"|"unreachable"|"unknown",
+        "refreshing": bool,
+        "data_source_id": str,
+        # Optional, only present on cache-miss / partial:
+        "job_id"?: str,
+        "poll_url"?: str,
+        "updated_at"?: str ISO,
+      }
+    }
 
-Handlers never call the provider; they never have a code path that can
-take longer than a single PK lookup. The consequence is that any
-provider-side pathology (10-minute MATCH on a 1M-node graph) becomes a
-stats-service concern, not a web-tier concern, and 504s become
-impossible by construction.
+The status code is **always 200** — the response body itself communicates
+state. This unifies the frontend parser (one shape regardless of cache
+state, no special 202 handling) and keeps frontends that mishandle
+non-200 codes from breaking on a cold cache.
+
+Status values:
+* ``fresh``     — cached row younger than ``STATS_CACHE_FRESH_SECS``
+* ``stale``     — cached row older than fresh threshold but within
+                  ``STATS_CACHE_ABSOLUTE_EXPIRY_SECS``; refresh enqueued
+* ``partial``   — synthetic schema served from ontology only
+* ``computing`` — no cache row, no synthetic available; job enqueued
+* ``error``     — backend dependency unavailable (DB, etc.)
+
+Provider introspection happens only inside the stats service. The web
+tier never has a code path that calls the provider, so 504s on
+graph-size-driven slowness are impossible by construction.
 """
 from __future__ import annotations
 
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,7 +57,8 @@ from backend.stats_service.enqueue import enqueue_stats_job_safe
 logger = logging.getLogger(__name__)
 
 
-CacheTier = Literal["fresh", "stale", "expired"]
+CacheStatus = Literal["fresh", "stale", "computing", "partial", "error"]
+CacheSource = Literal["postgres", "ontology", "none", "error"]
 StatsFieldName = Literal["node_stats", "schema_stats", "ontology_metadata", "graph_schema"]
 StatsServiceStatus = Literal["healthy", "lagging", "unreachable", "unknown"]
 
@@ -45,15 +67,23 @@ class CacheMiss(Exception):
     """Raised when the cache row is absent, past absolute expiry, or has unparseable JSON.
 
     Handlers translate this to either a synthetic-from-ontology response
-    (for schema endpoints) or a 202 Accepted (for stats endpoints).
-    Crucially it is NOT translated to a 500 — a corrupt row is a cache
-    miss, not a server error.
+    (status ``partial``) or a ``computing`` envelope. Crucially it is
+    NOT translated to a 5xx — a corrupt row is a cache miss, not a
+    server error.
     """
 
 
-# ── timestamp helpers ──────────────────────────────────────────────
+# ── timestamp + freshness helpers ───────────────────────────────────
+#
+# These four primitives are the public freshness-classification API
+# used by every cache-reading endpoint. They are intentionally NOT
+# underscore-prefixed: handlers that need to assemble composite
+# envelopes (e.g. /cached-stats reading multiple fields in one call)
+# need to invoke this machinery directly instead of going through
+# read_stats_cache, which is single-field.
 
-def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+def parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO timestamp; assume UTC if naïve. Returns None on bad input."""
     if not ts:
         return None
     try:
@@ -63,13 +93,20 @@ def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def _age_seconds(ts: Optional[datetime]) -> Optional[int]:
+def age_seconds(ts: Optional[datetime]) -> Optional[int]:
+    """Seconds since ``ts``, clamped to ≥ 0. Returns None when ts is None."""
     if not ts:
         return None
     return max(0, int((datetime.now(timezone.utc) - ts).total_seconds()))
 
 
-def _classify_tier(age_secs: Optional[int]) -> CacheTier:
+def classify_tier(age_secs: Optional[int]) -> Literal["fresh", "stale", "expired"]:
+    """Map an age (seconds) to one of three freshness tiers.
+
+    * ``fresh``   — within ``STATS_CACHE_FRESH_SECS``
+    * ``stale``   — past fresh but within ``STATS_CACHE_ABSOLUTE_EXPIRY_SECS``
+    * ``expired`` — past absolute expiry, OR age unknown
+    """
     if age_secs is None:
         return "expired"
     if age_secs <= resilience.STATS_CACHE_FRESH_SECS:
@@ -79,6 +116,18 @@ def _classify_tier(age_secs: Optional[int]) -> CacheTier:
     return "stale"
 
 
+def ttl_seconds(age_secs: Optional[int]) -> Optional[int]:
+    """Time until cached data crosses the freshness boundary.
+
+    For ``fresh`` rows: positive countdown until staleness. For ``stale``
+    rows: 0 (already past freshness, refresh recommended). For unknown
+    age: ``None``.
+    """
+    if age_secs is None:
+        return None
+    return max(0, resilience.STATS_CACHE_FRESH_SECS - age_secs)
+
+
 # ── stats-service health classification ────────────────────────────
 
 async def classify_stats_service_health(
@@ -86,10 +135,10 @@ async def classify_stats_service_health(
 ) -> tuple[StatsServiceStatus, Optional[str]]:
     """Classify the stats service's behavior for this data source.
 
-    Reads ``data_source_polling_configs``. The staleness of
-    ``last_polled_at`` reveals whether the stats worker is keeping up.
-    Returns the status plus the last error (if any) so the caller can
-    surface it via ``X-Provider-Health``.
+    The staleness of ``data_source_polling_configs.last_polled_at``
+    reveals whether the stats worker is keeping up. Returns ``(status,
+    last_error)`` so the caller can surface both ``stats_service_status``
+    and ``provider_health`` in the envelope ``meta``.
     """
     result = await session.execute(
         select(DataSourcePollingConfigORM).where(
@@ -99,8 +148,7 @@ async def classify_stats_service_health(
     row = result.scalar_one_or_none()
     if not row:
         return "unknown", None
-    last_polled = _parse_iso(row.last_polled_at)
-    age = _age_seconds(last_polled)
+    age = age_seconds(parse_iso(row.last_polled_at))
     last_error = row.last_error
     if age is None:
         return "unknown", last_error
@@ -111,66 +159,131 @@ async def classify_stats_service_health(
     return "unreachable", last_error
 
 
-# ── response headers ────────────────────────────────────────────────
+# ── envelope builders ──────────────────────────────────────────────
 
-def _build_freshness_headers(
-    updated_at_iso: Optional[str],
-    tier: CacheTier,
+def build_meta(
     *,
-    refreshing: bool,
-    service_status: StatsServiceStatus,
-    provider_health: str,
+    status: CacheStatus,
+    source: CacheSource,
+    data_source_id: str,
+    age_seconds: Optional[int] = None,
+    ttl_seconds: Optional[int] = None,
+    missing_fields: Optional[list[str]] = None,
+    stats_service_status: StatsServiceStatus = "unknown",
+    provider_health: str = "unknown",
+    refreshing: bool = False,
+    job_id: Optional[str] = None,
+    poll_url: Optional[str] = None,
+    updated_at: Optional[str] = None,
 ) -> dict:
-    """Build the X-Cache-*, X-Stats-Service-Status, X-Provider-Health headers.
+    """Build the ``meta`` block of every cache response envelope.
 
-    Called only after CacheMiss has been ruled out — ``tier`` is always
-    ``fresh`` or ``stale`` here.
+    The five required keys (``status``, ``source``, ``age_seconds``,
+    ``ttl_seconds``, ``missing_fields``) are always present even when
+    null — the frontend can rely on a stable shape and unconditional
+    field access.
     """
-    headers: dict = {
-        "X-Cache-Source": "postgres",
-        "X-Cache-Tier": tier,
-        "X-Stats-Service-Status": service_status,
-        "X-Provider-Health": provider_health,
+    meta: dict[str, Any] = {
+        "status": status,
+        "source": source,
+        "age_seconds": age_seconds,
+        "ttl_seconds": ttl_seconds,
+        "missing_fields": list(missing_fields) if missing_fields else [],
+        "data_source_id": data_source_id,
+        "stats_service_status": stats_service_status,
+        "provider_health": provider_health,
+        "refreshing": refreshing,
     }
-    if updated_at_iso:
-        headers["X-Cache-Updated-At"] = updated_at_iso
-        age = _age_seconds(_parse_iso(updated_at_iso))
-        if age is not None:
-            headers["X-Cache-Age-Seconds"] = str(age)
-    if tier == "stale":
-        headers["X-Cache-Stale"] = "true"
-    if refreshing:
-        headers["X-Cache-Refreshing"] = "true"
-    return headers
+    if job_id is not None:
+        meta["job_id"] = job_id
+    if poll_url is not None:
+        meta["poll_url"] = poll_url
+    if updated_at is not None:
+        meta["updated_at"] = updated_at
+    return meta
 
 
-# ── primary read helper ─────────────────────────────────────────────
+def build_envelope(data: Optional[Any], meta: dict) -> dict:
+    """Wrap a payload + meta dict into the canonical response envelope.
+
+    Always returned with HTTP 200 — state lives in ``meta.status``.
+    """
+    return {"data": data, "meta": meta}
+
+
+def build_computing_envelope(
+    ds_id: str,
+    ws_id: Optional[str],
+    msg_id: Optional[str],
+    *,
+    missing_fields: Optional[list[str]] = None,
+) -> dict:
+    """Convenience: build a ``status=computing`` envelope for cache-miss responses.
+
+    ``msg_id`` is the Redis stream message ID from
+    ``enqueue_stats_job_safe``. ``None`` covers both "dedup claim
+    already held" (another job in flight) and "Redis unreachable" — the
+    frontend treats both identically (poll and retry).
+    """
+    job_id = msg_id or f"dedup:{ds_id}"
+    poll_url = f"/api/v1/{ws_id}/graph/introspection/refresh/{job_id}" if ws_id else None
+    meta = build_meta(
+        status="computing",
+        source="none",
+        data_source_id=ds_id,
+        missing_fields=missing_fields or [],
+        refreshing=True,
+        job_id=job_id,
+        poll_url=poll_url,
+    )
+    return build_envelope(None, meta)
+
+
+def build_error_envelope(ds_id: str, *, reason: str) -> dict:
+    """Envelope for "backend dependency unavailable" — used when DB read fails.
+
+    Frontends keep their last-known good data (React Query
+    ``placeholderData`` or persister) and back off retrying based on
+    ``meta.status == "error"``.
+    """
+    return build_envelope(
+        None,
+        build_meta(
+            status="error",
+            source="error",
+            data_source_id=ds_id,
+            missing_fields=[reason],
+        ),
+    )
+
+
+# ── primary read helper ────────────────────────────────────────────
 
 async def read_stats_cache(
     session: AsyncSession,
     ds_id: str,
     ws_id: Optional[str],
     field: StatsFieldName,
-) -> tuple[dict, dict]:
-    """Read a field from ``data_source_stats`` with freshness classification.
+) -> tuple[Optional[dict], dict]:
+    """Read one field from ``data_source_stats`` and classify freshness.
 
-    Returns ``(payload, headers)`` on fresh/stale hits. Raises
-    :class:`CacheMiss` when the row is absent, the requested field is
-    empty, the JSON is unparseable, or the row is past absolute expiry.
+    Returns ``(data, meta)`` where ``data`` is the parsed JSON payload
+    on a fresh/stale hit. Raises :class:`CacheMiss` when the row is
+    absent, the requested field is empty, the JSON is unparseable, or
+    the row is past absolute expiry.
 
     On a ``stale`` hit, fires a best-effort background refresh via
     :func:`enqueue_stats_job_safe`. If Redis is down the enqueue
-    silently fails; the handler still returns the stale cached data —
-    Redis outage must not degrade the read path.
+    silently fails; the read still returns the stale data — Redis
+    outage must not degrade the read path.
     """
     cache = await get_data_source_stats(session, ds_id)
     if not cache:
         logger.info("stats_cache.read ds_id=%s outcome=miss reason=no_row", ds_id)
         raise CacheMiss("no cache row for data source")
 
-    updated_at = _parse_iso(cache.updated_at)
-    age = _age_seconds(updated_at)
-    tier = _classify_tier(age)
+    age = age_seconds(parse_iso(cache.updated_at))
+    tier = classify_tier(age)
     if tier == "expired":
         logger.info("stats_cache.read ds_id=%s outcome=miss reason=expired age=%s", ds_id, age)
         raise CacheMiss("cache row past absolute expiry")
@@ -179,7 +292,7 @@ async def read_stats_cache(
     # columns into the shape the deprecated /graph/stats endpoint emits.
     try:
         if field == "node_stats":
-            payload: dict = {
+            data: dict = {
                 "nodeCount": cache.node_count or 0,
                 "edgeCount": cache.edge_count or 0,
                 "entityTypeCounts": json.loads(cache.entity_type_counts) if cache.entity_type_counts else {},
@@ -197,7 +310,7 @@ async def read_stats_cache(
                     ds_id, field,
                 )
                 raise CacheMiss(f"field {field} is empty")
-            payload = json.loads(raw)
+            data = json.loads(raw)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         logger.warning(
             "stats_cache.read ds_id=%s field=%s outcome=corrupt error=%s",
@@ -205,14 +318,12 @@ async def read_stats_cache(
         )
         raise CacheMiss(f"corrupt JSON in {field}: {exc}") from exc
 
-    # Fire-and-forget refresh if stale. enqueue_stats_job_safe already
-    # swallows Redis failures — the extra try/except here is belt-and-
-    # braces in case a future edit reintroduces a raise path.
+    # Best-effort background refresh on stale.
     refreshing = False
     if tier == "stale" and ws_id:
         try:
             msg_id = await enqueue_stats_job_safe(ds_id, ws_id)
-            refreshing = True  # Either we enqueued, or dedup held → work is coming
+            refreshing = True
             logger.info(
                 "stats_cache.enqueue ds_id=%s outcome=%s",
                 ds_id, "enqueued" if msg_id else "dedup_or_redis_down",
@@ -226,17 +337,23 @@ async def read_stats_cache(
     service_status, last_error = await classify_stats_service_health(session, ds_id)
     provider_health = "unreachable" if last_error else "healthy"
 
-    headers = _build_freshness_headers(
-        cache.updated_at, tier,
-        refreshing=refreshing,
-        service_status=service_status,
+    meta = build_meta(
+        status="fresh" if tier == "fresh" else "stale",
+        source="postgres",
+        data_source_id=ds_id,
+        age_seconds=age,
+        ttl_seconds=ttl_seconds(age),
+        missing_fields=[],
+        stats_service_status=service_status,
         provider_health=provider_health,
+        refreshing=refreshing,
+        updated_at=cache.updated_at,
     )
     logger.info(
         "stats_cache.read ds_id=%s field=%s tier=%s service=%s refreshing=%s",
         ds_id, field, tier, service_status, refreshing,
     )
-    return payload, headers
+    return data, meta
 
 
 # ── synthetic schema from ontology ──────────────────────────────────
@@ -251,23 +368,29 @@ async def build_synthetic_schema(
     counts) while the real schema computes in the background.
 
     Returns ``None`` when no ontology is assigned or resolution fails —
-    callers then fall through to 202. The returned dict matches the
-    frontend's ``GraphSchema`` contract with ``ontologyDigest: None``,
-    which the ViewWizard treats as "skip drift check" rather than
-    raising a false positive.
+    callers then emit ``status=computing`` instead. The returned dict
+    matches the frontend ``GraphSchema`` contract with
+    ``ontologyDigest: None``, which the ViewWizard treats as "skip
+    drift check" rather than raising a false positive.
     """
     ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if not ds or not ds.ontology_id:
         return None
 
+    # ``LocalOntologyService.resolve`` takes (workspace_id, data_source_id) —
+    # not ontology_id. The repo's underlying query filters on
+    # ``WorkspaceDataSourceORM.workspace_id``; passing the ontology_id here
+    # would silently match nothing and fall back to system defaults,
+    # producing a synthetic schema that doesn't reflect the assigned
+    # ontology at all. Use keyword args to make the contract obvious.
     try:
         from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
         from backend.app.ontology.service import LocalOntologyService
 
         repo = SQLAlchemyOntologyRepository(session)
         svc = LocalOntologyService(repo)
-        resolved = await svc.resolve(ds.ontology_id, ds_id)
-    except Exception as exc:
+        resolved = await svc.resolve(workspace_id=ds.workspace_id, data_source_id=ds_id)
+    except (ValueError, KeyError, AttributeError) as exc:
         logger.warning(
             "build_synthetic_schema: ontology resolve failed ds_id=%s error=%s",
             ds_id, exc,
@@ -362,29 +485,8 @@ async def build_synthetic_schema(
     }
 
 
-def synthetic_schema_headers() -> dict:
-    """Headers attached to a synthetic-from-ontology schema response."""
-    return {
-        "X-Cache-Source": "ontology-synthetic",
-        "X-Cache-Tier": "expired",
-        "X-Cache-Refreshing": "true",
-    }
-
-
-# ── 202 envelope ────────────────────────────────────────────────────
-
-def build_computing_response_body(ds_id: str, ws_id: Optional[str], msg_id: Optional[str]) -> dict:
-    """Build the 202 Accepted body for cache-miss responses.
-
-    ``msg_id`` comes from ``enqueue_stats_job_safe``. ``None`` means one
-    of: dedup claim already held (another job is in flight) OR Redis is
-    unreachable. The frontend treats both identically — poll and retry.
-    """
-    job_id = msg_id or f"dedup:{ds_id}"
-    poll_prefix = f"/api/v1/{ws_id}/graph" if ws_id else "/api/v1/graph"
-    return {
-        "status": "computing" if msg_id else "already_computing",
-        "jobId": job_id,
-        "dataSourceId": ds_id,
-        "pollUrl": f"{poll_prefix}/introspection/refresh/{job_id}",
-    }
+# Fields that a synthetic-from-ontology schema cannot fill in — surfaced
+# in the envelope ``meta.missing_fields`` so the frontend knows zero
+# counts mean "we haven't measured the live graph yet" rather than "the
+# real graph has zero of these."
+SYNTHETIC_SCHEMA_MISSING_FIELDS = ["entityCounts", "edgeCounts"]

@@ -19,6 +19,7 @@ import { useEffect, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { GraphSchema } from '@/providers/GraphDataProvider'
 import { useGraphProviderContext } from '@/providers/GraphProviderContext'
+import { unwrapEnvelope } from '@/services/cacheEnvelope'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useSchemaStore } from '@/store/schema'
 
@@ -33,7 +34,16 @@ export interface UseGraphSchemaOptions {
 
 /**
  * Fetch schema from the management DB cache (zero provider dependency).
- * Returns null if no cached schema is available for this exact scope.
+ *
+ * Backend returns the canonical ``{data, meta}`` envelope with HTTP 200
+ * always — state lives in ``meta.status``. We unwrap to the raw schema
+ * payload here; consumers that care about freshness (banners, retry
+ * decisions) should consume the envelope directly via a separate hook.
+ *
+ * Returns null when:
+ * - The data source row doesn't exist (404 — genuine "not found")
+ * - The envelope's meta.status is ``error`` or ``computing``
+ * - The unwrapped schema is empty / missing entity types
  */
 async function fetchCachedSchema(
   workspaceId: string,
@@ -44,7 +54,8 @@ async function fetchCachedSchema(
       `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-schema`,
     )
     if (!res.ok) return null
-    return (await res.json()) as GraphSchema
+    const json = await res.json()
+    return unwrapEnvelope<GraphSchema>(json)
   } catch {
     return null
   }
@@ -52,8 +63,16 @@ async function fetchCachedSchema(
 
 /**
  * Fetch ontology metadata from the DB (zero provider dependency).
- * Used as a last-resort fallback when cached-schema is empty and the live
- * provider is also unavailable.
+ * Used as a last-resort fallback when cached-schema is empty and the
+ * live provider is also unavailable.
+ *
+ * Like ``fetchCachedSchema``, this endpoint now returns the canonical
+ * envelope. The unwrapped payload is the OntologyMetadata shape
+ * (containmentEdgeTypes, lineageEdgeTypes, edgeTypeHierarchy, etc.) —
+ * NOT a full GraphSchema. We adapt by attaching it under ``ontology``
+ * so downstream code that walks edge-type metadata still works, and
+ * leave entity/relationship types empty (the canvas can't render
+ * without those — this branch is a degraded-mode fallback only).
  */
 async function fetchCachedOntologyAsSchema(
   workspaceId: string,
@@ -64,12 +83,13 @@ async function fetchCachedOntologyAsSchema(
       `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-ontology`,
     )
     if (!res.ok) return null
-    const ontology = await res.json()
-    // Wrap the ontology metadata into a GraphSchema-shaped envelope so
-    // useSchemaStore.loadFromBackend can consume it.
+    const json = await res.json()
+    const ontology = unwrapEnvelope<Record<string, unknown>>(json)
+    if (!ontology) return null
     return {
-      entityTypes: ontology?.entityTypes ?? [],
-      relationshipTypes: ontology?.relationshipTypes ?? [],
+      entityTypes: (ontology as { entityTypes?: unknown[] }).entityTypes ?? [],
+      relationshipTypes:
+        (ontology as { relationshipTypes?: unknown[] }).relationshipTypes ?? [],
       ontology,
     } as unknown as GraphSchema
   } catch {

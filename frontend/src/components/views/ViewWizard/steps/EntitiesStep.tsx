@@ -9,7 +9,7 @@
  */
 
 import { useState, useMemo, useCallback, useEffect } from 'react'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Search,
@@ -76,18 +76,20 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                 setIsLoadingStats(true)
                 let schemaStats: GraphSchemaStats | null = null
 
-                // 1. Try cached stats from management DB (no provider dependency)
+                // 1. Try cached stats from management DB (no provider dependency).
+                //    ``fetchEnveloped`` unwraps the {data, meta} envelope and
+                //    integrates with the same circuit breaker the provider uses.
                 if (workspaceId && dataSourceId) {
-                    try {
-                        const res = await fetchWithTimeout(`/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-stats`)
-                        if (res.ok) {
-                            const data = await res.json()
-                            if (data.schemaStats) schemaStats = data.schemaStats as GraphSchemaStats
-                        }
-                    } catch { /* cache miss — fall through */ }
+                    const data = await fetchEnveloped<{
+                        schemaStats?: GraphSchemaStats
+                    }>(
+                        `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-stats`,
+                        { circuitScope: { workspaceId, dataSourceId } },
+                    )
+                    if (data?.schemaStats) schemaStats = data.schemaStats
                 }
 
-                // 2. Fall back to provider
+                // 2. Fall back to provider (which also unwraps internally)
                 if (!schemaStats) {
                     schemaStats = await provider.getSchemaStats()
                 }

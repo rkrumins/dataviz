@@ -3,7 +3,7 @@
  * Merges the navigational landing page with system-wide Insights.
  */
 import { useState, useEffect, useCallback } from 'react'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { useNavigate } from 'react-router-dom'
 import {
     CircleDot, ArrowRightLeft, Database, Layers, Server,
@@ -54,17 +54,21 @@ export function AdminOverview() {
                 let totalNodes = 0, totalEdges = 0
                 const allTypes = new Set<string>()
                 for (const ds of ws.dataSources || []) {
-                    try {
-                        // Use cached-stats endpoint (DB-only) — no provider dependency
-                        const res = await fetchWithTimeout(`/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`)
-                        if (res.ok) {
-                            const data = await res.json()
-                            totalNodes += data.nodeCount ?? 0
-                            totalEdges += data.edgeCount ?? 0
-                            const types = Object.keys(data.entityTypeCounts ?? {})
-                            types.forEach((t: string) => allTypes.add(t))
-                        }
-                    } catch { /* ignore */ }
+                    // Use cached-stats endpoint (DB-only) — no provider dependency.
+                    // Returns the canonical {data, meta} envelope; ``fetchEnveloped``
+                    // unwraps and integrates with the per-(ws, ds) circuit breaker.
+                    const data = await fetchEnveloped<{
+                        nodeCount?: number
+                        edgeCount?: number
+                        entityTypeCounts?: Record<string, number>
+                    }>(
+                        `/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`,
+                        { circuitScope: { workspaceId: ws.id, dataSourceId: ds.id } },
+                    )
+                    if (!data) continue
+                    totalNodes += data.nodeCount ?? 0
+                    totalEdges += data.edgeCount ?? 0
+                    Object.keys(data.entityTypeCounts ?? {}).forEach(t => allTypes.add(t))
                 }
                 results.push({
                     ws,
