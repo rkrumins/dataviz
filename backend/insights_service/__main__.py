@@ -33,6 +33,7 @@ from .scheduler import get_scheduler_status, run_scheduler
 # first incoming message has a handler waiting.
 from . import collector as _collector  # noqa: F401  (registration side-effect)
 from . import discovery as _discovery  # noqa: F401  (registration side-effect)
+from . import purge as _purge  # noqa: F401  (registration side-effect)
 from . import dispatcher
 from .worker import StatsJobConsumer
 

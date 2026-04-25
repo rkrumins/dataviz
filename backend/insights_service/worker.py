@@ -34,11 +34,14 @@ import redis.asyncio as aioredis
 
 from backend.app.db.engine import PoolRole, get_session_factory
 from backend.app.services.aggregation.redis_client import get_redis
+from backend.common.adapters.circuit import ProviderUnavailable
 
 from . import dispatcher
+from .admission import AdmissionDenied
 from .collector import record_failure as stats_record_failure  # noqa: F401  (forces self-registration)
 from .config import StatsServiceConfig
 from .discovery import record_failure as discovery_record_failure  # noqa: F401
+from .purge import record_failure as purge_record_failure  # noqa: F401
 from .redis_streams import (
     ALL_STREAMS,
     SHARED_GROUP,
@@ -49,7 +52,7 @@ from .redis_streams import (
 from .schemas import (
     DiscoveryJobEnvelope,
     JobEnvelope,
-    SchemaJobEnvelope,
+    PurgeJobEnvelope,
     StatsJobEnvelope,
     parse_envelope,
 )
@@ -258,6 +261,25 @@ class InsightsJobConsumer:
             return
         except asyncio.CancelledError:
             raise
+        except (AdmissionDenied, ProviderUnavailable) as exc:
+            # Soft-retry path. The provider is rate-throttled, circuit-open,
+            # or otherwise temporarily unavailable; running this job now is
+            # guaranteed to fail. Critically: do NOT increment the delivery
+            # count, because that's how a 30-minute provider outage drains
+            # the entire backlog into the DLQ. Instead, ACK the message
+            # (drop it from PEL) and release the dedup claim so the
+            # scheduler re-enqueues on its next tick once the upstream
+            # has had a chance to recover.
+            duration = asyncio.get_event_loop().time() - start_ts
+            reason = getattr(exc, "reason", None) or "provider_unavailable"
+            logger.info(
+                "%s.soft_retry scope=%s duration_secs=%.2f reason=%s — "
+                "releasing claim, no delivery attempt counted",
+                envelope.kind, envelope.scope_key, duration, reason,
+            )
+            await self._ack(stream_cfg, msg_id)
+            await release_claim(envelope.scope_key, stream=stream_cfg)
+            return
         except Exception as exc:
             duration = asyncio.get_event_loop().time() - start_ts
             logger.error(
@@ -292,12 +314,14 @@ class InsightsJobConsumer:
         try:
             factory = get_session_factory(PoolRole.JOBS)
             async with factory() as session:
-                if isinstance(envelope, (StatsJobEnvelope, SchemaJobEnvelope)):
+                if isinstance(envelope, StatsJobEnvelope):
                     await stats_record_failure(session, envelope.data_source_id, error)
                 elif isinstance(envelope, DiscoveryJobEnvelope):
                     await discovery_record_failure(
                         session, envelope.provider_id, envelope.asset_name, error
                     )
+                elif isinstance(envelope, PurgeJobEnvelope):
+                    await purge_record_failure(session, envelope.job_id, error)
                 await session.commit()
         except Exception as exc:
             logger.warning(

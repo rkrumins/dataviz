@@ -75,6 +75,7 @@ function AssetRow({
     // HTTP request is in flight; once we have an envelope back, the
     // envelope's `meta.status` drives the visible state.
     const [envelope, setEnvelope] = useState<Envelope<AssetStatsPayload> | null>(null)
+    const [fetchError, setFetchError] = useState<string | null>(null)
     const [loadingStats, setLoadingStats] = useState(false)
     const [expanded, setExpanded] = useState(false)
     const [purgeConfirm, setPurgeConfirm] = useState(false)
@@ -82,12 +83,21 @@ function AssetRow({
     const ref = useRef<HTMLDivElement>(null)
 
     // Manual refetch function so both the initial visibility-trigger and
-    // the useInsightsJob completion callback share one call path.
+    // the useInsightsJob completion callback share one call path. We
+    // store the error so the row renders a "Retry" affordance instead
+    // of a silent empty state — a 500 from one specific asset used to
+    // be indistinguishable from "no data yet".
     const refetch = useCallback(() => {
         setLoadingStats(true)
+        setFetchError(null)
         providerService.getAssetStats(providerId, assetName)
-            .then(setEnvelope)
-            .catch(() => { })
+            .then((env) => {
+                setEnvelope(env)
+                setFetchError(null)
+            })
+            .catch((err) => {
+                setFetchError(err?.message ?? 'Failed to load asset metadata')
+            })
             .finally(() => setLoadingStats(false))
     }, [providerId, assetName])
 
@@ -212,6 +222,24 @@ function AssetRow({
                             <div className="flex items-center gap-1.5 text-[11px] text-ink-muted">
                                 <Loader2 className="w-3 h-3 animate-spin" />
                                 <span>Loading metrics...</span>
+                            </div>
+                        ) : fetchError ? (
+                            // The fetch itself failed (500, network, etc.).
+                            // Distinct from `unavailable` (Redis-down on the
+                            // backend) — show the error and let the user retry
+                            // without needing to scroll the row off-screen and
+                            // back to re-trigger the IntersectionObserver.
+                            <div className="flex items-center gap-1.5 text-[11px] text-red-500">
+                                <AlertTriangle className="w-3 h-3 shrink-0" />
+                                <span className="truncate" title={fetchError}>
+                                    Failed to load — {fetchError}
+                                </span>
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); refetch() }}
+                                    className="ml-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20 transition-colors"
+                                >
+                                    Retry
+                                </button>
                             </div>
                         ) : envelope && !stats ? (
                             // Cache-miss states: computing, unavailable, etc. The
