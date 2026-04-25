@@ -122,9 +122,14 @@ export class RemoteGraphProvider implements GraphDataProvider {
         }
 
         try {
+            // Use the global default timeout (5s). The graph endpoints
+            // are all cache-only post-insights-refactor — they read from
+            // Postgres and respond in <100ms; an empty/computing cache
+            // surfaces as `meta.status="computing"` in the body, never
+            // as a timeout. The legacy 12s window was sized for live
+            // provider calls that no longer happen here.
             const response = await fetchWithTimeout(url, {
                 ...fetchOptions,
-                timeoutMs: 12_000,
                 headers: {
                     'Content-Type': 'application/json',
                     ...fetchOptions?.headers,

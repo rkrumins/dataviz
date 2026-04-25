@@ -28,7 +28,7 @@ from backend.app.services.stats_cache import (
 )
 from backend.app.db.engine import get_db_session
 from backend.app.providers.manager import provider_manager
-from backend.stats_service.enqueue import enqueue_stats_job_safe
+from backend.insights_service.enqueue import enqueue_stats_job_safe
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 router = APIRouter()

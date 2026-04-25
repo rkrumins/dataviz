@@ -1,16 +1,17 @@
-"""Stats service entrypoint.
+"""Insights service entrypoint.
 
 Wires up three concurrent tasks:
     1. Scheduler  — every tick, enqueues due data sources to Redis.
-    2. Worker     — XREADGROUP loop, polls providers, upserts stats.
+    2. Worker     — XREADGROUP loop on three streams (stats / discovery /
+       schema), routes via the dispatcher to the registered handler.
     3. Health HTTP — minimal liveness probe on STATS_HEALTH_PORT.
 
-Gracefully drains in-flight polls on SIGTERM (up to
+Gracefully drains in-flight jobs on SIGTERM (up to
 ``STATS_DRAIN_TIMEOUT_SECS``) so container restarts do not leave
 partial upserts behind.
 
 Usage:
-    python -m backend.stats_service
+    python -m backend.insights_service
 """
 from __future__ import annotations
 
@@ -26,6 +27,13 @@ from backend.app.services.aggregation.redis_client import close_redis, get_redis
 from .config import StatsServiceConfig
 from .redis_streams import ensure_consumer_group
 from .scheduler import get_scheduler_status, run_scheduler
+# Importing the worker module pulls in collector + discovery which
+# self-register their handlers with the dispatcher. The dispatcher's
+# registry must be populated before the XREADGROUP loop starts so the
+# first incoming message has a handler waiting.
+from . import collector as _collector  # noqa: F401  (registration side-effect)
+from . import discovery as _discovery  # noqa: F401  (registration side-effect)
+from . import dispatcher
 from .worker import StatsJobConsumer
 
 logger = logging.getLogger(__name__)
@@ -152,8 +160,9 @@ async def main() -> None:
 
     config = StatsServiceConfig.from_env()
     logger.info(
-        "=== Stats Service starting ===  concurrency=%d per_graph=%d "
+        "=== Insights Service starting ===  kinds=%s concurrency=%d per_scope=%d "
         "tick=%.0fs default_interval=%ds min_interval=%ds health_port=%d",
+        dispatcher.registered_kinds(),
         config.worker_concurrency,
         config.max_per_graph,
         config.scheduler_tick_secs,
@@ -162,8 +171,18 @@ async def main() -> None:
         config.health_port,
     )
 
+    # Sanity-check registration before opening Redis loops — if a
+    # handler module silently failed to import, surface the gap here
+    # rather than DLQing every incoming message of that kind.
+    if "stats_poll" not in dispatcher.registered_kinds():
+        logger.critical(
+            "stats_poll handler not registered; collector.py failed to import. Aborting."
+        )
+        sys.exit(1)
+
     await _preflight()
 
+    # Idempotently create the shared consumer group on every stream.
     await ensure_consumer_group()
 
     shutdown = asyncio.Event()
@@ -180,16 +199,17 @@ async def main() -> None:
 
     health_server = await run_health_server(
         config.health_port,
-        role="stats-service",
+        role="insights-service",
         status_payload_fn=lambda: {
             "activeJobs": consumer.active_count,
             "consumer": consumer.consumer_name,
+            "kinds": dispatcher.registered_kinds(),
             "scheduler": get_scheduler_status(),
         },
     )
 
-    scheduler_task = asyncio.create_task(run_scheduler(config, shutdown), name="stats-scheduler")
-    worker_task = asyncio.create_task(consumer.run(), name="stats-worker")
+    scheduler_task = asyncio.create_task(run_scheduler(config, shutdown), name="insights-scheduler")
+    worker_task = asyncio.create_task(consumer.run(), name="insights-worker")
 
     try:
         done, _pending = await asyncio.wait(
@@ -221,7 +241,7 @@ async def main() -> None:
         await health_server.wait_closed()
 
         await close_redis()
-        logger.info("=== Stats Service shutdown complete ===")
+        logger.info("=== Insights Service shutdown complete ===")
 
 
 if __name__ == "__main__":

@@ -1,27 +1,30 @@
 /**
  * React Query hook for fetching and caching the graph schema from the backend.
  *
- * Design:
- * - Explicit scope: workspaceId/dataSourceId can be passed directly (used by
- *   <SchemaScope> when resolving schema for a non-active workspace, e.g.
- *   editing a view created in workspace W1 while W2 is active). Defaults to
- *   the active graph-provider context when no explicit scope is supplied.
- * - DB-first: tries the cached-schema endpoint (management DB, no provider
- *   dependency, explicit URL scope).
- * - Provider-live fallback: calls provider.getFullSchema() when the DB cache
- *   is empty. The provider is always correctly scoped because callers render
- *   inside a scope boundary (SchemaScope or ViewExecutionProvider) that
- *   provides the right provider via ProviderOverride.
- * - No silent fallback: errors surface through React Query. Consumers MUST
- *   render under <SchemaScope>, which owns the loading + error UI.
+ * Design (post-insights-refactor):
+ * - **Cache-only.** The backend's `/cached-schema` endpoint reads from
+ *   `data_source_stats.graph_schema` and never calls the upstream
+ *   provider; the insights worker is the only thing that ever
+ *   re-populates that cache. Calling `provider.getFullSchema()` from
+ *   the browser would just re-read the same cache under a different
+ *   envelope, so that path was deleted.
+ * - **Status-aware refetch.** The endpoint returns the universal
+ *   envelope `{data, meta}`; when `meta.status === 'computing'`
+ *   React Query refetches every 2s until the worker finishes the
+ *   refresh and the row flips to `fresh`.
+ * - **Ontology fallback.** When the cache row is genuinely empty
+ *   (e.g. a new data source whose first poll hasn't completed yet),
+ *   we synthesise a minimal schema from `cached-ontology` so the
+ *   wizard can still render entity-type selectors.
  */
-import { useEffect, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { GraphSchema } from '@/providers/GraphDataProvider'
 import { useGraphProviderContext } from '@/providers/GraphProviderContext'
-import { unwrapEnvelope } from '@/services/cacheEnvelope'
+import { unwrapEnvelopeWithMeta } from '@/services/cacheEnvelope'
+import type { CacheMeta } from '@/services/cacheEnvelope'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useSchemaStore } from '@/store/schema'
+import { useEffect } from 'react'
 
 export const GRAPH_SCHEMA_QUERY_KEY = ['graph', 'schema'] as const
 
@@ -32,47 +35,38 @@ export interface UseGraphSchemaOptions {
   dataSourceId?: string
 }
 
+interface SchemaFetchResult {
+  schema: GraphSchema | null
+  meta: CacheMeta | null
+}
+
 /**
  * Fetch schema from the management DB cache (zero provider dependency).
- *
- * Backend returns the canonical ``{data, meta}`` envelope with HTTP 200
- * always — state lives in ``meta.status``. We unwrap to the raw schema
- * payload here; consumers that care about freshness (banners, retry
- * decisions) should consume the envelope directly via a separate hook.
- *
- * Returns null when:
- * - The data source row doesn't exist (404 — genuine "not found")
- * - The envelope's meta.status is ``error`` or ``computing``
- * - The unwrapped schema is empty / missing entity types
+ * Returns both the unwrapped schema and the envelope `meta` so the hook
+ * can drive a refetch interval while the worker is still computing.
  */
 async function fetchCachedSchema(
   workspaceId: string,
   dataSourceId: string,
-): Promise<GraphSchema | null> {
+): Promise<SchemaFetchResult> {
   try {
     const res = await fetchWithTimeout(
       `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-schema`,
     )
-    if (!res.ok) return null
+    if (!res.ok) return { schema: null, meta: null }
     const json = await res.json()
-    return unwrapEnvelope<GraphSchema>(json)
+    const { data, meta } = unwrapEnvelopeWithMeta<GraphSchema>(json)
+    return { schema: data, meta }
   } catch {
-    return null
+    return { schema: null, meta: null }
   }
 }
 
 /**
- * Fetch ontology metadata from the DB (zero provider dependency).
- * Used as a last-resort fallback when cached-schema is empty and the
- * live provider is also unavailable.
- *
- * Like ``fetchCachedSchema``, this endpoint now returns the canonical
- * envelope. The unwrapped payload is the OntologyMetadata shape
- * (containmentEdgeTypes, lineageEdgeTypes, edgeTypeHierarchy, etc.) —
- * NOT a full GraphSchema. We adapt by attaching it under ``ontology``
- * so downstream code that walks edge-type metadata still works, and
- * leave entity/relationship types empty (the canvas can't render
- * without those — this branch is a degraded-mode fallback only).
+ * Fetch ontology metadata as a synthesised minimal GraphSchema for the
+ * wizard's entity-type selectors. Used only when the cached-schema row
+ * is empty AND has no entity types — a new data source whose first
+ * poll hasn't completed yet.
  */
 async function fetchCachedOntologyAsSchema(
   workspaceId: string,
@@ -84,7 +78,7 @@ async function fetchCachedOntologyAsSchema(
     )
     if (!res.ok) return null
     const json = await res.json()
-    const ontology = unwrapEnvelope<Record<string, unknown>>(json)
+    const { data: ontology } = unwrapEnvelopeWithMeta<Record<string, unknown>>(json)
     if (!ontology) return null
     return {
       entityTypes: (ontology as { entityTypes?: unknown[] }).entityTypes ?? [],
@@ -98,51 +92,35 @@ async function fetchCachedOntologyAsSchema(
 }
 
 /**
- * Scope-aware schema fetch. Tries DB cache first, then the live provider
- * (which is always correctly scoped via ProviderOverride), then cached
- * ontology as a last resort.
+ * Cache-first schema fetch. Tries the DB cache; if the cache is empty
+ * (no entity types yet), falls back to a synthesised schema from
+ * the ontology endpoint. The provider is intentionally NOT consulted
+ * here — that path was dead code (the matching backend endpoint is
+ * also cache-only).
  */
 async function fetchGraphSchema(
-  provider: import('@/providers/GraphDataProvider').GraphDataProvider | null,
   workspaceId: string,
   dataSourceId: string,
-): Promise<GraphSchema> {
-  // 1. Try DB cache first (fast, explicit scope, no provider dependency).
+): Promise<SchemaFetchResult> {
   const cached = await fetchCachedSchema(workspaceId, dataSourceId)
-  if (cached && cached.entityTypes && cached.entityTypes.length > 0) {
+  if (cached.schema && cached.schema.entityTypes && cached.schema.entityTypes.length > 0) {
     return cached
   }
 
-  // 2. Try the live provider. The provider is always correctly scoped because
-  //    callers render inside SchemaScope or ViewExecutionProvider, both of
-  //    which provide a ProviderOverride matching the requested scope.
-  if (provider) {
-    try {
-      const live = await provider.getFullSchema()
-      if (live && live.entityTypes && live.entityTypes.length > 0) {
-        return live
-      }
-    } catch {
-      // Provider unavailable — continue to fallback
-    }
-  }
-
-  // 3. Try the cached-ontology endpoint as a last resort. If the data source
-  //    has an ontology assigned, this builds a minimal but valid schema from
-  //    the ontology definition alone — no provider needed.
+  // Empty cache — surface a minimal ontology-derived schema so the
+  // wizard's entity-type selectors render. Carry through the cached
+  // meta so the hook still drives the refetch interval correctly.
   const ontologySchema = await fetchCachedOntologyAsSchema(workspaceId, dataSourceId)
   if (ontologySchema) {
-    return ontologySchema
+    return { schema: ontologySchema, meta: cached.meta }
   }
 
-  // 4. Accept a cached schema even with zero entity types — some data sources
-  //    legitimately have empty schemas (e.g. before ontology assignment).
-  if (cached) {
+  // Accept an empty cached schema if it exists — some new data sources
+  // legitimately have nothing yet and the wizard can show that state.
+  if (cached.schema) {
     return cached
   }
 
-  // 5. No cached schema, no ontology, provider failed — fail loudly
-  //    so <SchemaScope> can render its error UI.
   throw new Error(
     `Graph schema unavailable for workspace="${workspaceId}" dataSource="${dataSourceId}".`,
   )
@@ -151,108 +129,58 @@ async function fetchGraphSchema(
 /**
  * useGraphSchema
  *
- * Primary consumer is <SchemaScope>, which passes explicit scope so non-canvas
- * routes (Dashboard, OntologySchemaPage, wizard edits of cross-workspace
- * views) can fetch schema on demand without depending on CanvasLayout having
- * been mounted first. Legacy zero-arg callers (CanvasLayout, useViewNavigation)
- * inherit scope from the active graph-provider context.
+ * Used by <SchemaScope> (which can pass explicit scope) and the legacy
+ * zero-arg call sites in CanvasLayout / useViewNavigation that inherit
+ * scope from the active graph-provider context.
  */
 export function useGraphSchema(options?: UseGraphSchemaOptions) {
   const ctx = useGraphProviderContext()
-  const provider = ctx.provider
   const { providerVersion } = ctx
 
-  // Explicit scope (from options) overrides the active context so callers can
-  // fetch schema for a workspace other than the currently-active one.
   const workspaceId = options?.workspaceId ?? ctx.workspaceId ?? undefined
   const dataSourceId = options?.dataSourceId ?? ctx.dataSourceId ?? undefined
 
   const loadFromBackend = useSchemaStore(s => s.loadFromBackend)
   const queryClient = useQueryClient()
-  // Remembers which scope we've already background-refreshed so we don't fire
-  // the provider call repeatedly for the same (workspace, dataSource, version).
-  const backgroundRefreshDone = useRef<string | null>(null)
 
-  const query = useQuery({
+  const query = useQuery<SchemaFetchResult>({
     // Include workspaceId + dataSourceId + providerVersion so workspace A's
     // schema is never served for workspace B.
     queryKey: [...GRAPH_SCHEMA_QUERY_KEY, workspaceId, dataSourceId, providerVersion],
-    queryFn: () =>
-      fetchGraphSchema(provider, workspaceId!, dataSourceId!),
+    queryFn: () => fetchGraphSchema(workspaceId!, dataSourceId!),
     enabled: Boolean(workspaceId && dataSourceId),
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
     retry: false, // Failure is loud — <SchemaScope> renders the error UI.
     refetchOnWindowFocus: false,
+    // While the backend cache is `computing` (worker has been kicked
+    // but hasn't finished yet), poll every 2s. As soon as `meta.status`
+    // flips to `fresh`/`stale` the function returns false and React
+    // Query stops refetching automatically.
+    refetchInterval: (q) => {
+      const status = q.state.data?.meta?.status
+      return status === 'computing' ? 2000 : false
+    },
   })
 
-  // Sync query result into the Zustand store. No silent fallback: if the
-  // query errors, the effect is a no-op and React Query's `error` surfaces
-  // to <SchemaScope>, which renders the error boundary.
+  // Sync schema into the Zustand store. No silent fallback: if the
+  // query errors, the effect is a no-op and React Query's `error`
+  // surfaces to <SchemaScope>, which renders the error boundary.
   useEffect(() => {
-    if (query.data && query.data.entityTypes && query.data.entityTypes.length > 0) {
-      loadFromBackend(query.data, { workspaceId, dataSourceId })
+    const schema = query.data?.schema
+    if (schema && schema.entityTypes && schema.entityTypes.length > 0) {
+      loadFromBackend(schema, { workspaceId, dataSourceId })
     }
   }, [query.data, loadFromBackend, workspaceId, dataSourceId])
-
-  // Background refresh: after the DB-cached schema is loaded, ask the live
-  // provider once per scope to see if it has a fresher copy. The provider is
-  // always correctly scoped (via ProviderOverride from SchemaScope or
-  // ViewExecutionProvider). Race protection: the `cancelled` flag from the
-  // effect cleanup fires on any dependency change, which is sufficient to
-  // drop late responses after a scope switch.
-  useEffect(() => {
-    if (!query.data) return
-    const capturedWs = workspaceId
-    const capturedDs = dataSourceId
-    if (!capturedWs || !capturedDs) return
-
-    const scopeKey = `${capturedWs}::${capturedDs}::${providerVersion}`
-    if (backgroundRefreshDone.current === scopeKey) return
-    backgroundRefreshDone.current = scopeKey
-
-    let cancelled = false
-    if (!provider) return
-
-    provider
-      .getFullSchema()
-      .then(liveSchema => {
-        if (cancelled) return
-        if (
-          liveSchema &&
-          liveSchema.entityTypes &&
-          liveSchema.entityTypes.length > 0
-        ) {
-          loadFromBackend(liveSchema, {
-            workspaceId: capturedWs,
-            dataSourceId: capturedDs,
-          })
-        }
-      })
-      .catch(() => {
-        // Provider unavailable — the DB-cached schema is already loaded and
-        // React Query's `error` field stays clean because this is a bonus
-        // refresh, not the primary fetch.
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [
-    query.data,
-    provider,
-    loadFromBackend,
-    workspaceId,
-    dataSourceId,
-    providerVersion,
-  ])
 
   return {
     isLoading: query.isLoading,
     isFetching: query.isFetching,
     isError: query.isError,
     error: query.error,
-    data: query.data,
+    data: query.data?.schema ?? undefined,
+    /** Cache freshness/state — surface this in banners or spinners. */
+    meta: query.data?.meta ?? null,
     /** Force-refetch schema (e.g. after saving entity type changes). */
     refetch: query.refetch,
     /** Invalidate cached schema across all provider instances. */

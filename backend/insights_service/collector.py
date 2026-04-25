@@ -15,11 +15,12 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import DataSourcePollingConfigORM
+from backend.app.db.models import DataSourcePollingConfigORM, WorkspaceDataSourceORM
 from backend.app.db.repositories.stats_repo import upsert_data_source_stats
 from backend.app.registry.provider_registry import provider_registry
 from backend.app.services.context_engine import ContextEngine
 
+from . import admission
 from .schemas import StatsJobEnvelope
 
 logger = logging.getLogger(__name__)
@@ -53,12 +54,20 @@ async def collect(session: AsyncSession, envelope: StatsJobEnvelope) -> None:
             "Check the scheduler log for the preceding warning."
         )
 
-    stats, schema_stats, ontology_meta, graph_schema = await asyncio.gather(
-        provider.get_stats(),
-        provider.get_schema_stats(),
-        engine.get_ontology_metadata(),
-        engine.get_graph_schema(),
-    )
+    # Look up provider_id so the admission gate can throttle / circuit-break
+    # at the right granularity. ContextEngine.for_workspace already loaded
+    # the row to wire the provider, so this is a SELECT against the
+    # session's identity map.
+    ds_row = await session.get(WorkspaceDataSourceORM, envelope.data_source_id)
+    provider_id = ds_row.provider_id if ds_row is not None else envelope.data_source_id
+
+    async with admission.gate(provider_id, op_kind="stats_poll"):
+        stats, schema_stats, ontology_meta, graph_schema = await asyncio.gather(
+            provider.get_stats(),
+            provider.get_schema_stats(),
+            engine.get_ontology_metadata(),
+            engine.get_graph_schema(),
+        )
 
     await upsert_data_source_stats(
         session=session,
@@ -92,3 +101,11 @@ async def record_failure(
     config.last_status = "error"
     config.last_error = error[:2000]
     config.last_polled_at = datetime.now(timezone.utc).isoformat()
+
+
+# Self-register as the stats_poll handler. Worker dispatches by envelope
+# kind; ``collect`` takes the StatsJobEnvelope subtype specifically and
+# the dispatcher only ever routes stats_poll-kind messages here.
+from . import dispatcher  # noqa: E402
+
+dispatcher.register_handler("stats_poll", collect)

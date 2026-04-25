@@ -194,7 +194,21 @@ export function SemanticStep({
 
         try {
             const assetName = item.sourceIdentifier || item.name
-            const rawStats = await providerService.getAssetStats(providerId, assetName)
+            // getAssetStats returns the universal insights envelope. On a cold
+            // cache (`computing` / `unavailable`) `data` is null; surface a
+            // retriable error so the user can re-run analyze once the
+            // background scan completes (typically within ~30s).
+            const envelope = await providerService.getAssetStats(providerId, assetName)
+            if (!envelope.data) {
+                throw new Error(
+                    envelope.meta.status === 'computing'
+                        ? 'Asset metadata is still being computed in the background. Please retry analysis in a few seconds.'
+                        : envelope.meta.status === 'unavailable'
+                            ? 'Background refresh queue is unreachable. Please retry shortly.'
+                            : 'No asset metadata available yet.'
+                )
+            }
+            const rawStats = envelope.data
             const stats = transformStatsForSuggest(rawStats)
             const response = await ontologyDefinitionService.suggest(stats)
 
