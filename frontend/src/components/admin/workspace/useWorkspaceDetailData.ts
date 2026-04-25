@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -81,16 +81,25 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
 
       await Promise.all([
         ...((ws.dataSources || []).map(async (ds) => {
-          const [cachedRes, ready] = await Promise.all([
-            fetchWithTimeout(`/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`)
-              .then(res => res.ok ? res.json() : null).catch(() => null),
+          // ``fetchEnveloped`` unwraps the {data, meta} envelope and feeds
+          // the per-(ws, ds) circuit breaker — same one RemoteGraphProvider
+          // uses, so a backend outage trips both at once.
+          const [cachedData, ready] = await Promise.all([
+            fetchEnveloped<{
+              nodeCount?: number
+              edgeCount?: number
+              entityTypeCounts?: Record<string, number>
+            }>(
+              `/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`,
+              { circuitScope: { workspaceId: ws.id, dataSourceId: ds.id } },
+            ),
             aggregationService.getReadiness(ds.id).catch(() => null),
           ])
-          if (cachedRes) {
+          if (cachedData) {
             stats[ds.id] = {
-              nodeCount: cachedRes.nodeCount ?? 0,
-              edgeCount: cachedRes.edgeCount ?? 0,
-              entityTypes: Object.keys(cachedRes.entityTypeCounts ?? {}),
+              nodeCount: cachedData.nodeCount ?? 0,
+              edgeCount: cachedData.edgeCount ?? 0,
+              entityTypes: Object.keys(cachedData.entityTypeCounts ?? {}),
             }
           }
           if (ready) readiness[ds.id] = ready

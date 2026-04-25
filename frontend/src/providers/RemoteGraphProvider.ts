@@ -1,3 +1,4 @@
+import { unwrapEnvelope } from '@/services/cacheEnvelope'
 import { getCircuitBreaker, type CircuitBreaker } from '@/services/circuitBreaker'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 
@@ -425,20 +426,53 @@ export class RemoteGraphProvider implements GraphDataProvider {
         return await this.fetch<string[]>('/metadata/tags')
     }
 
+    /**
+     * The four cache-only endpoints below (`/stats`, `/introspection`,
+     * `/metadata/ontology`, `/metadata/schema`) return the canonical
+     * `{data, meta}` envelope. We unwrap to the raw payload here so
+     * callers stay envelope-unaware. Consumers that need cache
+     * freshness for UI banners should hit a separate helper that
+     * preserves the envelope.
+     *
+     * `unwrapEnvelope` returns `null` when `meta.status === 'error'`,
+     * which we let propagate so the circuit breaker / retry logic
+     * upstream can react. For `computing` / `partial` states the
+     * payload is genuinely null/synthetic; downstream code already
+     * handles that path (e.g. SchemaScope error UI).
+     */
     async getStats(): Promise<{
         nodeCount: number
         edgeCount: number
         entityTypeCounts: Record<EntityType, number>
     }> {
-        return await this.fetch<any>('/stats')
+        const raw = await this.fetch<unknown>('/stats')
+        const data = unwrapEnvelope<{
+            nodeCount: number
+            edgeCount: number
+            entityTypeCounts: Record<EntityType, number>
+        }>(raw)
+        if (!data) {
+            throw new Error('Stats unavailable: cache miss or backend error')
+        }
+        return data
     }
 
     async getSchemaStats(): Promise<GraphSchemaStats> {
-        return await this.fetch<GraphSchemaStats>('/introspection')
+        const raw = await this.fetch<unknown>('/introspection')
+        const data = unwrapEnvelope<GraphSchemaStats>(raw)
+        if (!data) {
+            throw new Error('Schema stats unavailable: cache miss or backend error')
+        }
+        return data
     }
 
     async getOntologyMetadata(): Promise<OntologyMetadata> {
-        return await this.fetch<OntologyMetadata>('/metadata/ontology')
+        const raw = await this.fetch<unknown>('/metadata/ontology')
+        const data = unwrapEnvelope<OntologyMetadata>(raw)
+        if (!data) {
+            throw new Error('Ontology metadata unavailable: cache miss or backend error')
+        }
+        return data
     }
 
     // ==========================================
@@ -457,9 +491,14 @@ export class RemoteGraphProvider implements GraphDataProvider {
     // ==========================================
 
     async getFullSchema(dataSourceId?: string): Promise<GraphSchema> {
-        return await this.fetch<GraphSchema>('/metadata/schema', {
+        const raw = await this.fetch<unknown>('/metadata/schema', {
             extraParams: dataSourceId ? { dataSourceId } : undefined,
         })
+        const data = unwrapEnvelope<GraphSchema>(raw)
+        if (!data) {
+            throw new Error('Graph schema unavailable: cache miss or backend error')
+        }
+        return data
     }
 
     // ==========================================

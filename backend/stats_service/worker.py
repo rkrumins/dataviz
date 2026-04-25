@@ -169,31 +169,56 @@ class StatsJobConsumer:
     async def _run_poll(self, msg_id: str, envelope: StatsJobEnvelope) -> None:
         ds_id = envelope.data_source_id
         node_counts = await get_known_node_counts()
-        timeout = self._config.resolve_poll_timeout(node_counts.get(ds_id, 0))
+        node_count = node_counts.get(ds_id, 0)
+        timeout = self._config.resolve_poll_timeout(node_count)
         factory = get_session_factory(PoolRole.JOBS)
 
+        # Bucket the node count so a histogram dashboard can chart by
+        # size class (small <10k, med 10k-100k, large 100k-1M, xlarge 1M+).
+        if node_count < 10_000:
+            size_bucket = "small"
+        elif node_count < 100_000:
+            size_bucket = "medium"
+        elif node_count < 1_000_000:
+            size_bucket = "large"
+        else:
+            size_bucket = "xlarge"
+
         logger.info(
-            "Polling ds=%s (workspace=%s, timeout=%.0fs, node_count=%d)",
-            ds_id, envelope.workspace_id, timeout, node_counts.get(ds_id, 0),
+            "stats_poll.start ds_id=%s workspace=%s timeout_secs=%.0f node_count=%d size_bucket=%s",
+            ds_id, envelope.workspace_id, timeout, node_count, size_bucket,
         )
+        start_ts = asyncio.get_event_loop().time()
         try:
             async with factory() as session:
                 await asyncio.wait_for(collect(session, envelope), timeout=timeout)
                 await session.commit()
         except asyncio.TimeoutError:
-            logger.warning("Poll for ds=%s timed out after %.0fs", ds_id, timeout)
+            duration = asyncio.get_event_loop().time() - start_ts
+            logger.warning(
+                "stats_poll.timeout ds_id=%s duration_secs=%.2f timeout_secs=%.0f size_bucket=%s",
+                ds_id, duration, timeout, size_bucket,
+            )
             await self._handle_failure(msg_id, envelope, f"poll timed out after {timeout:.0f}s")
             return
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.error("Poll for ds=%s failed: %s", ds_id, exc, exc_info=True)
+            duration = asyncio.get_event_loop().time() - start_ts
+            logger.error(
+                "stats_poll.failure ds_id=%s duration_secs=%.2f size_bucket=%s error=%s",
+                ds_id, duration, size_bucket, exc, exc_info=True,
+            )
             await self._handle_failure(msg_id, envelope, str(exc))
             return
 
         await self._ack(msg_id)
         await release_claim(ds_id)
-        logger.info("Poll for ds=%s succeeded", ds_id)
+        duration = asyncio.get_event_loop().time() - start_ts
+        logger.info(
+            "stats_poll.completion ds_id=%s duration_secs=%.2f size_bucket=%s",
+            ds_id, duration, size_bucket,
+        )
 
     async def _handle_failure(
         self, msg_id: str, envelope: StatsJobEnvelope, error: str
