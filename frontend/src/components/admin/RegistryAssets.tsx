@@ -31,6 +31,7 @@ import { RetriggerDialog } from './job-history/RetriggerDialog'
 import type { AggregationOverridesValue } from './shared/AggregationOverridesForm'
 import type { Envelope, AssetStatsPayload } from '@/types/insights'
 import { StatusChip } from '@/components/insights/StatusChip'
+import { RefreshControl } from '@/components/insights/RefreshControl'
 import { useInsightsJob } from '@/hooks/useInsightsJob'
 import { useSharedIntersectionObserver } from '@/hooks/useSharedIntersectionObserver'
 import { useAssetStats, ASSET_STATS_QUERY_KEY_PREFIX } from '@/hooks/useAssetStats'
@@ -75,8 +76,10 @@ function AssetRow({
     const [expanded, setExpanded] = useState(false)
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
+    const [refreshPending, setRefreshPending] = useState(false)
     const ref = useRef<HTMLDivElement>(null)
     const queryClient = useQueryClient()
+    const { showToast } = useToast()
 
     // Lazy-load: only fetch stats once the row scrolls into view (or
     // close to it). One IntersectionObserver instance is shared across
@@ -100,20 +103,42 @@ function AssetRow({
     }, [query])
 
     // Manual "Refresh now" — drops the dedup claim on the backend and
-    // force-enqueues a discovery job. Used by the per-row ⟳ icon.
-    // Invalidates the React Query so polling picks up the new state.
+    // force-enqueues a discovery job. Used by the per-row ⟳ icon. The
+    // ``refreshPending`` state gives an immediate visual confirmation
+    // (spinner + "queued" tint) before the backend's ``refreshing=true``
+    // envelope comes back on the next poll. Errors surface as a toast
+    // because a silent failure here is indistinguishable from "nothing
+    // happened" — and that's what the user reported as the original UX
+    // pain point.
     const onAssetRefresh = useCallback(async (e: React.MouseEvent) => {
         e.stopPropagation()
+        if (refreshPending) return
+        setRefreshPending(true)
         try {
-            await providerService.refreshAssetStats(providerId, assetName)
+            const res = await providerService.refreshAssetStats(providerId, assetName)
             queryClient.invalidateQueries({
                 queryKey: [ASSET_STATS_QUERY_KEY_PREFIX, providerId, assetName],
             })
-        } catch {
-            // Errors surface via the existing fetchError state on the
-            // next poll tick; no need for a toast on the per-row click.
+            if (res.status === 'redis_unavailable') {
+                showToast(
+                    'warning',
+                    `Refresh queue unreachable for ${assetName} — retry shortly.`,
+                )
+            } else {
+                showToast(
+                    'success',
+                    `Refresh queued for ${assetName} — chip will update when the worker completes.`,
+                )
+            }
+        } catch (err: any) {
+            showToast(
+                'error',
+                `Refresh failed for ${assetName}: ${err?.message ?? 'unknown error'}`,
+            )
+        } finally {
+            setRefreshPending(false)
         }
-    }, [providerId, assetName, queryClient])
+    }, [providerId, assetName, queryClient, showToast, refreshPending])
 
     // Auto-refresh when a computing/stale job completes. ``useInsightsJob``
     // polls /admin/insights/jobs/{id}; on completion we invalidate the
@@ -219,14 +244,32 @@ function AssetRow({
                         )}
                         <button
                             onClick={onAssetRefresh}
-                            disabled={loadingStats}
-                            title="Refresh stats (force re-enqueue)"
-                            className="shrink-0 p-1 rounded text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            disabled={refreshPending}
+                            title={
+                                refreshPending
+                                    ? 'Refresh queued — waiting for the worker to pick it up'
+                                    : envelope?.meta.refreshing
+                                        ? 'A refresh is already running for this asset — click to re-queue'
+                                        : `Force a fresh stats scan now (drops the in-flight dedup claim and re-enqueues a discovery job)${
+                                            envelope?.meta.updated_at
+                                                ? `\nLast refreshed: ${new Date(envelope.meta.updated_at).toLocaleString()}`
+                                                : ''
+                                        }`
+                            }
+                            aria-label={`Refresh stats for ${assetName}`}
+                            className={cn(
+                                'shrink-0 inline-flex items-center justify-center w-6 h-6 rounded',
+                                'transition-colors disabled:cursor-not-allowed',
+                                refreshPending
+                                    ? 'text-indigo-500 bg-indigo-500/10'
+                                    : 'text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10',
+                            )}
                         >
-                            <RefreshCw className={cn(
-                                'w-3 h-3',
-                                loadingStats && 'animate-spin',
-                            )} />
+                            {refreshPending || envelope?.meta.refreshing ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                                <RefreshCw className="w-3 h-3" />
+                            )}
                         </button>
                     </div>
 
@@ -921,6 +964,48 @@ export function RegistryAssets() {
 
     const selectedProvider = providers.find(p => p.id === selectedProviderId)
 
+    // Force-refresh every cached asset for the selected provider, then
+    // reload the asset list. Used by the panel-level RefreshControl.
+    // Best-effort on the enqueue: if Redis is unreachable, we still
+    // re-list the assets so the user isn't left with a stale view.
+    const handleRefreshSelectedProvider = useCallback(async () => {
+        if (!selectedProviderId) return
+        setAssetsLoading(true)
+        try {
+            const result = await providerService.refreshAllAssets(selectedProviderId)
+            const noun = result.jobs_queued === 1 ? 'asset' : 'assets'
+            const truncatedHint = result.truncated
+                ? ' (capped — re-click to catch any remaining assets)'
+                : ''
+            showToast(
+                'success',
+                `Refresh queued for ${result.jobs_queued} ${noun}${truncatedHint} — chips will update as workers complete.`,
+            )
+        } catch (err: any) {
+            showToast(
+                'warning',
+                `Refresh enqueue failed: ${err?.message ?? 'unknown'}. Re-listing assets anyway.`,
+            )
+        }
+        // Invalidate every per-row asset-stats query under this
+        // provider so polling picks up the now-pending refreshes.
+        queryClient.invalidateQueries({
+            predicate: (q) =>
+                q.queryKey[0] === ASSET_STATS_QUERY_KEY_PREFIX
+                && q.queryKey[1] === selectedProviderId,
+        })
+        try {
+            const [res, existing] = await Promise.all([
+                providerService.listAssets(selectedProviderId),
+                catalogService.list(selectedProviderId),
+            ])
+            setAssets(res.data?.assets ?? [])
+            setExistingCatalogs(existing)
+        } finally {
+            setAssetsLoading(false)
+        }
+    }, [selectedProviderId, queryClient, showToast])
+
     // ── Render ──────────────────────────────────────────────────────────────
     return (
         <div className="flex gap-6 h-full min-h-0 animate-in fade-in duration-300">
@@ -1043,48 +1128,10 @@ export function RegistryAssets() {
                                     }
                                 </p>
                             </div>
-                            <button
-                                onClick={async () => {
-                                    if (!selectedProviderId) return
-                                    setAssetsLoading(true)
-                                    // Force-refresh every cached asset for
-                                    // this provider on the backend (drops
-                                    // dedup claims, fans out new discovery
-                                    // jobs). Best-effort: log + continue if
-                                    // it fails — the listAssets refetch
-                                    // below still happens.
-                                    try {
-                                        const result = await providerService.refreshAllAssets(selectedProviderId)
-                                        showToast(
-                                            'success',
-                                            `Refresh queued for ${result.jobs_queued} asset(s) — chips will update as workers complete.`,
-                                        )
-                                    } catch (err: any) {
-                                        showToast(
-                                            'warning',
-                                            `Refresh enqueue failed: ${err?.message ?? 'unknown'}. Re-listing assets anyway.`,
-                                        )
-                                    }
-                                    // Invalidate every per-row asset-stats
-                                    // query under this provider so polling
-                                    // picks up the now-pending refreshes.
-                                    queryClient.invalidateQueries({
-                                        predicate: (q) =>
-                                            q.queryKey[0] === ASSET_STATS_QUERY_KEY_PREFIX
-                                            && q.queryKey[1] === selectedProviderId,
-                                    })
-                                    Promise.all([
-                                        providerService.listAssets(selectedProviderId),
-                                        catalogService.list(selectedProviderId),
-                                    ]).then(([res, existing]) => {
-                                        setAssets(res.data?.assets ?? [])
-                                        setExistingCatalogs(existing)
-                                    }).finally(() => setAssetsLoading(false))
-                                }}
-                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                            >
-                                <RefreshCw className="w-3.5 h-3.5" /> Refresh
-                            </button>
+                            <RefreshControl
+                                onRefreshProvider={handleRefreshSelectedProvider}
+                                disabled={assetsLoading || !selectedProviderId}
+                            />
                         </div>
 
                         {/* Toolbar */}

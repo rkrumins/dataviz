@@ -29,6 +29,7 @@ const DEFAULTS: InsightsConfig = {
     job_poll_interval_ms: 2_000,
     job_max_retries: 4,
     discovery_refresh_interval_secs: 1_800,
+    ui_stale_threshold_secs: 86_400,
 }
 
 /**

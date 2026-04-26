@@ -46,8 +46,15 @@ const DEFAULT_MAX_RETRIES = 3
 const DEFAULT_BATCH_SIZE = 5000
 
 function buildInitialOverridesFromJob(job: AggregationJobResponse): AggregationOverridesValue {
+    // Backend's AggregationTriggerRequest enforces ``batchSize >= 100``.
+    // Older purge job rows were written with ``batch_size = 0`` (now fixed
+    // server-side, but rows persist), so a plain ``?? DEFAULT`` doesn't
+    // protect us — ``??`` only falls back from null/undefined. Clamp to
+    // the default any time the stored value is below the validator's floor.
+    const storedBatchSize = job.batchSize ?? DEFAULT_BATCH_SIZE
+    const safeBatchSize = storedBatchSize < 100 ? DEFAULT_BATCH_SIZE : storedBatchSize
     return {
-        batchSize: job.batchSize ?? DEFAULT_BATCH_SIZE,
+        batchSize: safeBatchSize,
         projectionMode: (job.projectionMode === 'dedicated' ? 'dedicated' : 'in_source'),
         maxRetries: job.maxRetries ?? DEFAULT_MAX_RETRIES,
         timeoutMinutes: Math.round((job.timeoutSecs ?? DEFAULT_TIMEOUT_SECS) / 60),

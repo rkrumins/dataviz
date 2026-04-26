@@ -192,7 +192,7 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
                             aria-checked={isSelected}
                             initial={{ opacity: 0, y: 15 }}
                             animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: 0.1 + index * 0.08 }}
+                            transition={{ delay: Math.min(index * 0.01, 0.05) }}
                             whileHover={{ scale: 1.02 }}
                             whileTap={{ scale: 0.98 }}
                             onClick={() => updateFormData({ projectionMode: option.id })}
@@ -271,7 +271,7 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: 'auto' }}
                         exit={{ opacity: 0, height: 0 }}
-                        transition={{ duration: 0.2 }}
+                        transition={{ duration: 0.12 }}
                         className="overflow-hidden"
                     >
                         <div className="space-y-3">
@@ -313,7 +313,7 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: 'auto' }}
                         exit={{ opacity: 0, height: 0 }}
-                        transition={{ duration: 0.2 }}
+                        transition={{ duration: 0.12 }}
                         className="overflow-hidden"
                     >
                         <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/5 p-4 space-y-4">
@@ -424,7 +424,7 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
             <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                transition={{ delay: 0.3 }}
+                transition={{ delay: 0.05 }}
                 className="flex items-start gap-2.5 px-3.5 py-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02]"
             >
                 <Info className="w-4 h-4 text-ink-muted flex-shrink-0 mt-0.5" />
@@ -441,7 +441,7 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: 'auto' }}
                         exit={{ opacity: 0, height: 0 }}
-                        transition={{ duration: 0.2 }}
+                        transition={{ duration: 0.12 }}
                         className="overflow-hidden"
                     >
                         <AggregationOverridesForm
@@ -460,7 +460,7 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
                         initial={{ opacity: 0, y: 15 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, height: 0 }}
-                        transition={{ delay: 0.25 }}
+                        transition={{ delay: 0.05 }}
                         className="rounded-xl border border-indigo-500/20 bg-indigo-500/5 overflow-hidden"
                     >
                         {/* Section 1 — What happens */}

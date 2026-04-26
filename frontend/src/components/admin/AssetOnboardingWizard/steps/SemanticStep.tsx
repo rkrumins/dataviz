@@ -442,7 +442,7 @@ export function SemanticStep({
             <motion.div
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.08 }}
+                transition={{ delay: 0.05 }}
             >
                 {/* Hero CTA when ALL sources are unanalyzed */}
                 {unanalyzedCount === catalogItems.length && !isAnalyzingAll && (
@@ -584,7 +584,7 @@ export function SemanticStep({
                             key={item.id}
                             initial={{ opacity: 0, y: 12 }}
                             animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: Math.min(index * 0.02, 0.15) }}
+                            transition={{ delay: Math.min(index * 0.01, 0.05) }}
                             className="glass-panel rounded-xl overflow-hidden"
                         >
                             <div className="px-5 py-3.5 flex items-center gap-3">
@@ -634,7 +634,7 @@ export function SemanticStep({
                             key={item.id}
                             initial={{ opacity: 0, y: 12 }}
                             animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: Math.min(index * 0.02, 0.15) }}
+                            transition={{ delay: Math.min(index * 0.01, 0.05) }}
                             className={cn(
                                 'glass-panel rounded-xl overflow-hidden',
                                 state.phase === 'recommendations' && (() => {
@@ -690,7 +690,7 @@ export function SemanticStep({
                                         initial={{ opacity: 0, height: 0 }}
                                         animate={{ opacity: 1, height: 'auto' }}
                                         exit={{ opacity: 0, height: 0 }}
-                                        transition={{ duration: 0.2 }}
+                                        transition={{ duration: 0.12 }}
                                         className="overflow-hidden"
                                     >
                                         <div className="px-5 pb-5 pt-1 space-y-4 border-t border-glass-border/50">

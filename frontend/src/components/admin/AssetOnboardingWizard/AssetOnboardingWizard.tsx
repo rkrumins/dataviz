@@ -9,7 +9,7 @@
  * Enhancements: keyboard navigation, step summary pills, toast micro-feedback,
  * unsaved changes warning, structured error recovery, live aggregation tracking.
  */
-import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef, startTransition } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Database, Settings, BookOpen, Check, ChevronLeft, ChevronRight, Loader2, X, Wand2, AlertTriangle } from 'lucide-react'
@@ -246,27 +246,36 @@ export function AssetOnboardingWizard({
                 showToast('success', `Semantic layer configured for ${count} source${count !== 1 ? 's' : ''}`)
             }
 
-            setStepDirection(1)
-            setPreviousSteps(prev => [...prev, currentStep])
-            setCurrentStep(STEPS[nextIndex].id)
+            // startTransition keeps the click responsive while the next step
+            // mounts. Without this, INP on the Next button hits 300 ms+ on
+            // heavy steps because mount work runs synchronously before paint.
+            startTransition(() => {
+                setStepDirection(1)
+                setPreviousSteps(prev => [...prev, currentStep])
+                setCurrentStep(STEPS[nextIndex].id)
+            })
         }
     }, [canProceed, currentStepIndex, currentStep, formData, showToast])
 
     const goBack = useCallback(() => {
         if (previousSteps.length > 0) {
             const prev = previousSteps[previousSteps.length - 1]
-            setStepDirection(-1)
-            setPreviousSteps(ps => ps.slice(0, -1))
-            setCurrentStep(prev)
+            startTransition(() => {
+                setStepDirection(-1)
+                setPreviousSteps(ps => ps.slice(0, -1))
+                setCurrentStep(prev)
+            })
         }
     }, [previousSteps])
 
     const goToStep = useCallback((stepId: WizardStep) => {
         const targetIndex = STEPS.findIndex(s => s.id === stepId)
         if (targetIndex < currentStepIndex) {
-            setStepDirection(-1)
-            setPreviousSteps(prev => prev.slice(0, targetIndex))
-            setCurrentStep(stepId)
+            startTransition(() => {
+                setStepDirection(-1)
+                setPreviousSteps(prev => prev.slice(0, targetIndex))
+                setCurrentStep(stepId)
+            })
         }
     }, [currentStepIndex])
 
@@ -503,7 +512,7 @@ export function AssetOnboardingWizard({
                     initial={{ scale: 0.95, opacity: 0, y: 20 }}
                     animate={{ scale: 1, opacity: 1, y: 0 }}
                     exit={{ scale: 0.95, opacity: 0, y: 20 }}
-                    transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+                    transition={{ duration: 0.12 }}
                     className="w-full max-w-4xl mx-4 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
                 >
                     {/* Header — aligned with ViewWizard */}
@@ -594,7 +603,7 @@ export function AssetOnboardingWizard({
                                 initial={{ opacity: 0, x: stepDirection * 20 }}
                                 animate={{ opacity: 1, x: 0 }}
                                 exit={{ opacity: 0, x: stepDirection * -20 }}
-                                transition={{ duration: 0.08 }}
+                                transition={{ duration: 0.06 }}
                                 className="p-8"
                             >
                                 {wizardPhase === 'success' ? (

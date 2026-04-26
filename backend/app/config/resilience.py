@@ -137,6 +137,14 @@ INSIGHTS_FRONTEND_POLL_INTERVAL_MS: int = int(os.getenv("INSIGHTS_FRONTEND_POLL_
 INSIGHTS_FRONTEND_STALE_TIME_MS: int = int(os.getenv("INSIGHTS_FRONTEND_STALE_TIME_MS", "60000"))
 INSIGHTS_JOB_POLL_INTERVAL_MS: int = int(os.getenv("INSIGHTS_JOB_POLL_INTERVAL_MS", "2000"))
 INSIGHTS_JOB_MAX_RETRIES: int = int(os.getenv("INSIGHTS_JOB_MAX_RETRIES", "4"))
+# UI-only "Stale" presentation threshold. The backend still classifies
+# rows past STATS_CACHE_FRESH_SECS as ``stale`` (it's the read-path
+# enqueue trigger), but the frontend's StatusChip suppresses the amber
+# warning until ``staleness_secs`` exceeds this threshold. Default 24h
+# avoids the "Stale 4m ago" false-alarm UX with the 30-min discovery
+# scheduler cadence; ops can lower it for environments that need tighter
+# freshness signalling.
+INSIGHTS_UI_STALE_THRESHOLD_SECS: int = int(os.getenv("INSIGHTS_UI_STALE_THRESHOLD_SECS", "86400"))
 
 # ── Insights worker / DLQ knobs ─────────────────────────────────────
 # Cap on the per-provider Refresh button's fan-out — protects against
