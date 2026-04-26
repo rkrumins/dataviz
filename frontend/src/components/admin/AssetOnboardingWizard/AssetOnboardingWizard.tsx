@@ -154,8 +154,11 @@ export function AssetOnboardingWizard({
     }, [isOpen, catalogItems])
 
     // ─── Form Data Update ─────────────────────────────────────────────────────
-    const updateFormData = useCallback((updates: Partial<OnboardingFormData>) => {
-        setFormData(prev => ({ ...prev, ...updates }))
+    const updateFormData = useCallback((updates: Partial<OnboardingFormData> | ((prev: OnboardingFormData) => Partial<OnboardingFormData>)) => {
+        setFormData(prev => {
+            const resolved = typeof updates === 'function' ? updates(prev) : updates
+            return { ...prev, ...resolved }
+        })
     }, [])
 
     // ─── Validation ───────────────────────────────────────────────────────────
