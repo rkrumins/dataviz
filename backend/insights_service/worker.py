@@ -330,12 +330,17 @@ class InsightsJobConsumer:
             )
 
         if delivery_count >= max_attempts:
+            # Structured event so an alerting pipeline can match on
+            # `dlq.write` and surface "X DLQ entries last hour" without
+            # parsing free-text. Pair with the DLQ admin endpoints
+            # under /admin/insights/dlq for triage.
+            truncated_error = error[:200]
             logger.error(
-                "Job kind=%s scope=%s exceeded %d delivery attempts — DLQ",
-                envelope.kind, envelope.scope_key, max_attempts,
+                "dlq.write kind=%s scope=%s delivery_count=%d error=%s",
+                envelope.kind, envelope.scope_key, delivery_count, truncated_error,
             )
             await send_to_dlq(
-                msg_id, envelope.to_stream_fields(), reason=error[:200],
+                msg_id, envelope.to_stream_fields(), reason=truncated_error,
                 stream=stream_cfg,
             )
             await self._ack(stream_cfg, msg_id)

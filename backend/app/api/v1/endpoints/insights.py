@@ -335,16 +335,98 @@ async def get_job_status(job_id: str = Path(...)) -> dict:
     return {"job_id": job_id, "status": "completed"}
 
 
+# ── Dead-letter queue admin ─────────────────────────────────────────
+
+@router.get("/dlq")
+async def list_dlq(
+    cursor: str = "-",
+    limit: int = 50,
+) -> dict:
+    """Paginated list of DLQ entries.
+
+    ``cursor`` defaults to ``"-"`` for the first page; pass back the
+    ``next_cursor`` value to fetch subsequent pages. ``limit`` is
+    capped at 200 to keep responses bounded.
+    """
+    from backend.insights_service.redis_streams import list_dlq_entries
+
+    capped_limit = max(1, min(int(limit), 200))
+    entries, next_cursor = await list_dlq_entries(cursor=cursor, limit=capped_limit)
+    return {
+        "entries": [
+            {
+                "msg_id": e.msg_id,
+                "kind": e.kind,
+                "original_stream": e.original_stream,
+                "original_msg_id": e.original_msg_id,
+                "reason": e.reason,
+                "redrive_count": e.redrive_count,
+                "ts_ms": e.ts_ms,
+                "fields": e.fields,
+            }
+            for e in entries
+        ],
+        "next_cursor": next_cursor,
+    }
+
+
+@router.post("/dlq/{msg_id}/redrive")
+async def redrive_dlq(msg_id: str = Path(...)) -> dict:
+    """Re-deliver a DLQ entry to its original stream.
+
+    Status mapping:
+      * 404 — DLQ entry not found (already redriven or deleted)
+      * 422 — entry's ``original_stream`` is not in the known-streams allowlist
+      * 409 — redrive limit exceeded (operator must investigate root cause)
+      * 200 — redrive succeeded, returns new message id and updated counter
+    """
+    from backend.insights_service.redis_streams import (
+        DLQEntryNotFound,
+        InvalidOriginalStream,
+        RedriveLimitExceeded,
+        redrive_dlq_entry,
+    )
+
+    try:
+        result = await redrive_dlq_entry(msg_id)
+    except DLQEntryNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except InvalidOriginalStream as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except RedriveLimitExceeded as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    return {
+        "redriven_msg_id": result.redriven_msg_id,
+        "original_stream": result.original_stream,
+        "redrive_count": result.redrive_count,
+    }
+
+
+@router.delete("/dlq/{msg_id}", status_code=204)
+async def delete_dlq(msg_id: str = Path(...)) -> None:
+    """Drop a single DLQ entry. Idempotent: returns 204 whether or not
+    the entry existed."""
+    from backend.insights_service.redis_streams import delete_dlq_entry
+
+    await delete_dlq_entry(msg_id)
+    return None
+
+
 # ── Per-provider admission control config ───────────────────────────
 
 class AdmissionConfigBody(BaseModel):
-    """Tunable knobs read by the insights worker before each provider call."""
+    """Tunable knobs read by the insights worker before each provider call.
+
+    Circuit-breaker knobs (``circuit_fail_max``, ``circuit_window_secs``,
+    ``half_open_after_secs``) were removed when the in-memory circuit
+    was deleted in favour of the provider-proxy circuit. The DB columns
+    still exist (PR-A safety: rollback to old code requires them);
+    PR B's Alembic drops them.
+    """
 
     bucket_capacity: int = Field(8, ge=1, le=200)
     refill_per_sec: int = Field(2, ge=1, le=100)
-    circuit_fail_max: int = Field(5, ge=1, le=50)
-    circuit_window_secs: int = Field(30, ge=5, le=600)
-    half_open_after_secs: int = Field(60, ge=5, le=600)
 
 
 class AdmissionConfigResponse(AdmissionConfigBody):
@@ -355,6 +437,9 @@ class AdmissionConfigResponse(AdmissionConfigBody):
     success_count: int = 0
     failure_count: int = 0
     consecutive_failures: int = 0
+    # Most recent provider-call duration (ms) recorded by the worker.
+    # Single value, not a real percentile — see admission.record_latency.
+    last_call_duration_ms: int | None = None
 
 
 @router.get(
@@ -375,9 +460,6 @@ async def get_admission_config(
         body = AdmissionConfigBody(
             bucket_capacity=cfg_row.bucket_capacity,
             refill_per_sec=cfg_row.refill_per_sec,
-            circuit_fail_max=cfg_row.circuit_fail_max,
-            circuit_window_secs=cfg_row.circuit_window_secs,
-            half_open_after_secs=cfg_row.half_open_after_secs,
         )
         updated_at = cfg_row.updated_at
     else:
@@ -391,6 +473,11 @@ async def get_admission_config(
         failure_count=(health_row.failure_count or 0) if health_row else 0,
         consecutive_failures=(
             (health_row.consecutive_failures or 0) if health_row else 0
+        ),
+        # ``last_p99_ms`` column reused for last-call duration (ms).
+        # Renamed in PR B's Alembic to ``last_call_duration_ms``.
+        last_call_duration_ms=(
+            health_row.last_p99_ms if health_row else None
         ),
         **body.model_dump(),
     )
@@ -411,22 +498,20 @@ async def put_admission_config(
     now_iso = datetime.now(timezone.utc).isoformat()
     existing = await session.get(ProviderAdmissionConfigORM, provider_id)
     if existing is None:
+        # Insert with NOT-NULL defaults from the ORM column definitions
+        # (5 / 30 / 60). PR A doesn't read or expose these; PR B drops
+        # the columns. This INSERT path is the only place that has to
+        # know they exist while the columns remain in the schema.
         existing = ProviderAdmissionConfigORM(
             provider_id=provider_id,
             bucket_capacity=body.bucket_capacity,
             refill_per_sec=body.refill_per_sec,
-            circuit_fail_max=body.circuit_fail_max,
-            circuit_window_secs=body.circuit_window_secs,
-            half_open_after_secs=body.half_open_after_secs,
             updated_at=now_iso,
         )
         session.add(existing)
     else:
         existing.bucket_capacity = body.bucket_capacity
         existing.refill_per_sec = body.refill_per_sec
-        existing.circuit_fail_max = body.circuit_fail_max
-        existing.circuit_window_secs = body.circuit_window_secs
-        existing.half_open_after_secs = body.half_open_after_secs
         existing.updated_at = now_iso
     await session.commit()
 

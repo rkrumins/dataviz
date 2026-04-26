@@ -1,23 +1,24 @@
 """Per-provider admission control for the insights-service worker.
 
-Three layers, smallest first, each guarding a slower / scarcer resource:
+Two layers, smallest first, each guarding a slower / scarcer resource:
 
-1. **Per-provider token bucket** — caps the rate of provider IO per
-   second. Capacity and refill rate are admin-tunable per provider via
+1. **Per-provider token bucket (Redis-backed GCRA)** — caps the rate
+   of provider IO per second across the whole worker fleet. Capacity
+   and refill rate are admin-tunable per provider via
    ``provider_admission_config``; absence of a row falls back to module
-   defaults. The bucket lives in-memory per worker process; multiple
-   workers share the same provider via the same DB-backed config but
-   each worker maintains its own bucket. They converge close enough.
-2. **Per-provider operation circuit breaker** — opens after
-   ``circuit_fail_max`` timeouts inside ``circuit_window_secs``. While
-   open, ``acquire()`` short-circuits to ``AdmissionDenied`` until
-   ``half_open_after_secs`` elapses; the next call probes with one
-   request, and a successful probe closes the circuit again.
-3. **Rolling success window** persisted to ``provider_health_window``
+   defaults. One Redis key per provider gives a real cluster-wide cap
+   regardless of replica count.
+2. **Rolling success window** persisted to ``provider_health_window``
    so the UI can render a "provider degraded" surface without each
-   handler rolling its own bookkeeping. State is written through an
-   independent short session so it is not rolled back when the main
-   job's session aborts.
+   handler rolling its own bookkeeping. Buffered + flushed periodically
+   to avoid commit-per-job hot path.
+
+Circuit breaking lives in the provider proxy
+(``backend/common/adapters/circuit.py`` — ``_AsyncCircuitBreaker``
+wrapped by ``CircuitBreakerProxy``). When that breaker opens it raises
+``ProviderUnavailable`` from inside the gated block, which the worker's
+soft-retry path treats identically to ``AdmissionDenied``. Duplicating
+that logic here was redundant and made 3am triage ambiguous; gone.
 
 Use via the :func:`gate` async context manager. Handlers call::
 
@@ -34,9 +35,8 @@ import contextlib
 import logging
 import os
 import time
-from collections import deque
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
@@ -58,9 +58,11 @@ logger = logging.getLogger(__name__)
 class AdmissionDenied(Exception):
     """Raised when a job cannot acquire admission within the wait budget.
 
-    ``reason`` is a short tag — ``circuit_open`` or ``bucket_timeout`` —
-    so the worker can decide whether to NACK-and-retry (transient) or
-    DLQ early (sustained).
+    ``reason`` is a short tag (currently always ``bucket_timeout``)
+    kept structured so the worker can route soft-retry decisions
+    without parsing strings. Provider-circuit-open is now signalled
+    by ``ProviderUnavailable`` from the provider proxy, not by a
+    second admission state machine here.
     """
 
     def __init__(self, provider_id: str, reason: str):
@@ -75,9 +77,6 @@ class AdmissionDenied(Exception):
 class AdmissionConfig:
     bucket_capacity: int = 8
     refill_per_sec: float = 2.0
-    circuit_fail_max: int = 5
-    circuit_window_secs: float = 30.0
-    half_open_after_secs: float = 60.0
 
 
 _DEFAULT_CONFIG = AdmissionConfig()
@@ -190,16 +189,6 @@ async def _redis_acquire_token(
         await asyncio.sleep(min(wait_secs, deadline - time.monotonic()))
 
 
-# ── Circuit state (per provider, in-memory) ──────────────────────────
-
-@dataclass
-class _CircuitState:
-    state: str = "closed"  # closed | open | half_open
-    consecutive_failures: int = 0
-    timeout_timestamps: deque[float] = field(default_factory=deque)
-    opened_at: Optional[float] = None
-
-
 # ── Controller ───────────────────────────────────────────────────────
 
 _FLUSH_INTERVAL_SECS = float(os.getenv("ADMISSION_FLUSH_INTERVAL_SECS", "5"))
@@ -211,6 +200,8 @@ class _PendingOutcome:
     success_delta: int = 0
     failure_delta: int = 0
     consecutive_failures: int = 0
+    # Last-writer-wins; None means "no timing observed in this window".
+    last_duration_ms: Optional[int] = None
 
 
 class _AdmissionController:
@@ -227,13 +218,18 @@ class _AdmissionController:
 
     def __init__(self) -> None:
         # Token buckets live in Redis (see ``_redis_acquire_token``);
-        # only circuit + config state is held per-process. The circuit
-        # is intentionally process-local — it's a fast in-memory
-        # short-circuit that prevents a single worker from hammering
-        # a known-dead provider faster than the GCRA refill rate; the
-        # cluster-wide cap is the GCRA bucket itself.
-        self._circuits: dict[str, _CircuitState] = {}
+        # only config + per-provider consecutive-failure counters live
+        # per-process. The latter is a UI signal, not an admission
+        # decision — the provider proxy's circuit breaker handles
+        # short-circuiting cluster-wide.
         self._config_cache: dict[str, AdmissionConfig] = {}
+        self._consecutive_failures: dict[str, int] = {}
+        # Last observed call duration (ms) per provider — populated by
+        # ``record_latency`` from inside ``gate()``. A single number
+        # per provider is enough triage signal for "is this provider
+        # slow right now"; real percentile aggregation would need a
+        # proper sketch (t-digest / HDR-histogram) and is deferred.
+        self._last_durations: dict[str, int] = {}
         self._lock = asyncio.Lock()
         # Coalesced outcome buffer drained by ``_flush_loop``.
         self._pending: dict[str, _PendingOutcome] = {}
@@ -261,9 +257,6 @@ class _AdmissionController:
             AdmissionConfig(
                 bucket_capacity=row.bucket_capacity,
                 refill_per_sec=float(row.refill_per_sec),
-                circuit_fail_max=row.circuit_fail_max,
-                circuit_window_secs=float(row.circuit_window_secs),
-                half_open_after_secs=float(row.half_open_after_secs),
             )
             if row is not None
             else _DEFAULT_CONFIG
@@ -276,25 +269,42 @@ class _AdmissionController:
         the DB. Call this from the admin-config editor handler."""
         self._config_cache.pop(provider_id, None)
 
+    # ── Latency observability ────────────────────────────────────
+
+    def record_latency(self, provider_id: str, elapsed_ms: int) -> None:
+        """Record the most recent provider-call duration. Called from
+        inside ``gate()`` after the wrapped block returns.
+
+        Single most-recent value per provider — see ``__init__`` for
+        why we don't pretend to compute percentiles. The flush task
+        persists this to ``provider_health_window.last_p99_ms``
+        (column name preserved across the in-memory→last-call rename;
+        column rename lives in PR B's Alembic migration)."""
+        if elapsed_ms < 0:
+            return
+        self._last_durations[provider_id] = elapsed_ms
+
+    def last_durations_snapshot(self) -> dict[str, int]:
+        """Read-only copy for /health snapshot consumers."""
+        return dict(self._last_durations)
+
     # ── Acquire ──────────────────────────────────────────────────
 
     async def acquire(
         self, provider_id: str, *, wait_max_secs: float = 30.0
     ) -> None:
+        """Acquire one provider-IO permit.
+
+        Raises ``AdmissionDenied(reason='bucket_timeout')`` if the
+        Redis-backed GCRA bucket can't grant one within
+        ``wait_max_secs``. The worker's soft-retry path catches this
+        and re-queues without burning a delivery attempt.
+
+        Provider-level circuit-open is signalled separately by
+        ``ProviderUnavailable`` from inside the wrapped block; we
+        don't re-implement it here.
+        """
         cfg = await self._load_config(provider_id)
-        circuit = self._circuits.setdefault(provider_id, _CircuitState())
-
-        now = time.monotonic()
-        if circuit.state == "open":
-            if (
-                circuit.opened_at is not None
-                and (now - circuit.opened_at) < cfg.half_open_after_secs
-            ):
-                raise AdmissionDenied(provider_id, "circuit_open")
-            # Promote: allow a single probe.
-            logger.info("admission.circuit_half_open provider=%s", provider_id)
-            circuit.state = "half_open"
-
         granted = await _redis_acquire_token(
             provider_id,
             capacity=cfg.bucket_capacity,
@@ -307,48 +317,31 @@ class _AdmissionController:
     # ── Outcome reporting ────────────────────────────────────────
 
     async def report_success(self, provider_id: str) -> None:
-        circuit = self._circuits.setdefault(provider_id, _CircuitState())
-        if circuit.state == "half_open":
-            logger.info("admission.circuit_closed provider=%s", provider_id)
-            circuit.state = "closed"
-        circuit.consecutive_failures = 0
+        """Record a successful provider call. Resets the per-provider
+        consecutive-failure counter to 0; the value lands in
+        ``provider_health_window`` on the next flush."""
+        self._consecutive_failures[provider_id] = 0
         await self._persist_outcome(provider_id, succeeded=True)
 
     async def report_failure(
-        self, provider_id: str, *, is_timeout: bool, exc: Optional[BaseException] = None
+        self,
+        provider_id: str,
+        *,
+        is_timeout: bool,  # noqa: ARG002  (preserved on signature for forward-compat)
+        exc: Optional[BaseException] = None,  # noqa: ARG002
     ) -> None:
-        cfg = await self._load_config(provider_id)
-        circuit = self._circuits.setdefault(provider_id, _CircuitState())
-        circuit.consecutive_failures += 1
+        """Record a failed provider call. Increments the per-provider
+        consecutive-failure counter; the value lands in
+        ``provider_health_window`` on the next flush.
 
-        if is_timeout:
-            now = time.monotonic()
-            circuit.timeout_timestamps.append(now)
-            cutoff = now - cfg.circuit_window_secs
-            while (
-                circuit.timeout_timestamps
-                and circuit.timeout_timestamps[0] < cutoff
-            ):
-                circuit.timeout_timestamps.popleft()
-            if (
-                circuit.state != "open"
-                and len(circuit.timeout_timestamps) >= cfg.circuit_fail_max
-            ):
-                logger.warning(
-                    "admission.circuit_open provider=%s consecutive_timeouts_in_window=%d",
-                    provider_id, len(circuit.timeout_timestamps),
-                )
-                circuit.state = "open"
-                circuit.opened_at = now
-
-        # A half-open probe failure re-opens the circuit immediately.
-        if circuit.state == "half_open":
-            logger.warning(
-                "admission.circuit_reopened provider=%s probe_failed", provider_id
-            )
-            circuit.state = "open"
-            circuit.opened_at = time.monotonic()
-
+        ``is_timeout`` and ``exc`` are kept on the signature even
+        though the in-memory circuit is gone — callers (the gate)
+        already pass them; reusing the signature avoids a churn-y API
+        change if we later route timeouts to a metrics emitter.
+        """
+        self._consecutive_failures[provider_id] = (
+            self._consecutive_failures.get(provider_id, 0) + 1
+        )
         await self._persist_outcome(provider_id, succeeded=False)
 
     # ── Persistence: buffered rolling window ────────────────────
@@ -364,7 +357,6 @@ class _AdmissionController:
         interval. That's acceptable for an observability surface
         (the UI's "provider health" chip refreshes on its own cadence).
         """
-        circuit = self._circuits.get(provider_id, _CircuitState())
         bucket = self._pending.get(provider_id)
         if bucket is None:
             bucket = _PendingOutcome()
@@ -375,7 +367,10 @@ class _AdmissionController:
             bucket.failure_delta += 1
         # Last-writer-wins: the latest in-memory consecutive_failures
         # value is the right one to persist; deltas don't apply.
-        bucket.consecutive_failures = circuit.consecutive_failures
+        bucket.consecutive_failures = self._consecutive_failures.get(provider_id, 0)
+        # Carry latest duration into the next flush. ``record_latency``
+        # may have already updated ``_last_durations`` for this call.
+        bucket.last_duration_ms = self._last_durations.get(provider_id)
         self._ensure_flush_task()
 
     def _ensure_flush_task(self) -> None:
@@ -433,7 +428,11 @@ class _AdmissionController:
                         and pending.failure_delta == 0
                     ):
                         continue
-                    stmt = insert(ProviderHealthWindowORM).values(
+                    # ``last_p99_ms`` column is reused for last-call
+                    # duration in ms — single observed value, not a
+                    # real percentile. PR B's Alembic renames the
+                    # column to ``last_call_duration_ms``.
+                    insert_values: dict = dict(
                         provider_id=provider_id,
                         success_count=pending.success_delta,
                         failure_count=pending.failure_delta,
@@ -441,19 +440,25 @@ class _AdmissionController:
                         consecutive_failures=pending.consecutive_failures,
                         throttle_until=None,
                     )
+                    update_values: dict = {
+                        "success_count": (
+                            ProviderHealthWindowORM.success_count
+                            + pending.success_delta
+                        ),
+                        "failure_count": (
+                            ProviderHealthWindowORM.failure_count
+                            + pending.failure_delta
+                        ),
+                        "consecutive_failures": pending.consecutive_failures,
+                    }
+                    if pending.last_duration_ms is not None:
+                        insert_values["last_p99_ms"] = pending.last_duration_ms
+                        update_values["last_p99_ms"] = pending.last_duration_ms
+
+                    stmt = insert(ProviderHealthWindowORM).values(**insert_values)
                     stmt = stmt.on_conflict_do_update(
                         index_elements=["provider_id"],
-                        set_={
-                            "success_count": (
-                                ProviderHealthWindowORM.success_count
-                                + pending.success_delta
-                            ),
-                            "failure_count": (
-                                ProviderHealthWindowORM.failure_count
-                                + pending.failure_delta
-                            ),
-                            "consecutive_failures": pending.consecutive_failures,
-                        },
+                        set_=update_values,
                     )
                     await session.execute(stmt)
                 await session.commit()
@@ -482,20 +487,24 @@ controller = _AdmissionController()
 async def gate(
     provider_id: str,
     *,
-    op_kind: str = "any",
+    op_kind: str = "any",  # noqa: ARG001  (op_kind reserved for future per-op metrics)
     wait_max_secs: float = 30.0,
 ) -> AsyncIterator[None]:
     """Wrap a provider IO call. Increments success/failure counters
-    automatically. The first ``asyncio.TimeoutError`` from the wrapped
-    block counts toward the circuit-breaker window.
+    automatically and records the wrapped-block duration via
+    ``controller.record_latency`` so /health and the admission admin
+    surface "last call took X ms" without each handler duplicating
+    timing logic.
     """
     await controller.acquire(provider_id, wait_max_secs=wait_max_secs)
+    start_ts = time.monotonic()
     try:
         yield
     except asyncio.CancelledError:
         # Cancellation is operator action, not a provider failure.
         raise
     except asyncio.TimeoutError as exc:
+        controller.record_latency(provider_id, int((time.monotonic() - start_ts) * 1000))
         await controller.report_failure(provider_id, is_timeout=True, exc=exc)
         raise
     except AdmissionDenied:
@@ -503,9 +512,11 @@ async def gate(
         # path but do not double-count as a provider failure.
         raise
     except Exception as exc:
+        controller.record_latency(provider_id, int((time.monotonic() - start_ts) * 1000))
         await controller.report_failure(provider_id, is_timeout=False, exc=exc)
         raise
     else:
+        controller.record_latency(provider_id, int((time.monotonic() - start_ts) * 1000))
         await controller.report_success(provider_id)
 
 

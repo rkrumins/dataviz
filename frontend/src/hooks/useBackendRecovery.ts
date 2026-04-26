@@ -7,6 +7,10 @@
  *   - Workspace list reload (populates sidebar, active workspace selection)
  *   - Views list reload (populates sidebar & view gallery)
  *   - Graph schema invalidation (next canvas route mount will re-fetch fresh)
+ *   - Insights query invalidation: every query whose key starts with
+ *     ``insights-`` (asset stats, asset list, job status, ...) is
+ *     invalidated so stuck "Computing" StatusChips refresh once
+ *     Redis is back online.
  *
  * This eliminates the need for a full page refresh after a backend restart.
  * Mount once in AppLayout.
@@ -55,6 +59,17 @@ export function useBackendRecovery() {
 
       // Invalidate cached graph schema so it re-fetches on next canvas mount
       queryClient.invalidateQueries({ queryKey: [...GRAPH_SCHEMA_QUERY_KEY] })
+
+      // Invalidate every insights envelope/query so stuck "Computing"
+      // chips refresh once Redis is back. Tuple-key predicate form:
+      // any query whose first key is a string starting with
+      // ``insights-`` (asset stats/list, job status, etc.).
+      queryClient.invalidateQueries({
+        predicate: (q) => {
+          const head = q.queryKey[0]
+          return typeof head === 'string' && head.startsWith('insights-')
+        },
+      })
     })
 
     return unsubscribe
