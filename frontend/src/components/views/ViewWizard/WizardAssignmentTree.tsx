@@ -159,7 +159,6 @@ function TreeRow({
 
     return (
         <motion.div
-            layout
             initial={{ opacity: 0, x: -10 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -10 }}
@@ -209,7 +208,7 @@ function TreeRow({
                     ) : (
                     <motion.div
                         animate={{ rotate: node.isExpanded ? 90 : 0 }}
-                        transition={{ duration: 0.15 }}
+                        transition={{ duration: 0.12 }}
                     >
                         <ChevronRight className="w-4 h-4 text-slate-400" />
                     </motion.div>

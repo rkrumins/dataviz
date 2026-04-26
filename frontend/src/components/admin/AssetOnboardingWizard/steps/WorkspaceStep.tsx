@@ -347,7 +347,7 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
                 <motion.div
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.1 }}
+                    transition={{ delay: 0.05 }}
                     className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-emerald-500/[0.05] border border-emerald-500/15"
                 >
                     <Sparkles className="w-4 h-4 text-emerald-500 flex-shrink-0" />
@@ -426,7 +426,7 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
             <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                transition={{ delay: 0.12 }}
+                transition={{ delay: 0.05 }}
                 className="space-y-2"
             >
                 <div className="flex items-center gap-2">
@@ -434,7 +434,7 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
                         <motion.div
                             initial={{ width: 0 }}
                             animate={{ width: `${(allocatedCount / catalogItems.length) * 100}%` }}
-                            transition={{ duration: 0.4, ease: 'easeOut' }}
+                            transition={{ duration: 0.12, ease: 'easeOut' }}
                             className="h-full rounded-full bg-emerald-500"
                         />
                     </div>
@@ -458,7 +458,7 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
                                     initial={{ opacity: 0, scale: 0.9 }}
                                     animate={{ opacity: 1, scale: 1 }}
                                     exit={{ opacity: 0, scale: 0.9 }}
-                                    transition={{ duration: 0.2 }}
+                                    transition={{ duration: 0.12 }}
                                     className={cn(
                                         'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold border',
                                         entry.isNew
@@ -607,7 +607,7 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
                                     initial={{ opacity: 0, height: 0 }}
                                     animate={{ opacity: 1, height: 'auto' }}
                                     exit={{ opacity: 0, height: 0 }}
-                                    transition={{ duration: 0.2 }}
+                                    transition={{ duration: 0.12 }}
                                     className="overflow-hidden"
                                 >
                                     <div className="px-5 pb-4 pt-1 space-y-4 border-t border-glass-border/50">
