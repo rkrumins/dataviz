@@ -34,7 +34,7 @@ import {
 
 interface AggregationStepProps {
     formData: OnboardingFormData
-    updateFormData: (updates: Partial<OnboardingFormData>) => void
+    updateFormData: (updates: Partial<OnboardingFormData> | ((prev: OnboardingFormData) => Partial<OnboardingFormData>)) => void
     catalogItems: CatalogItemResponse[]
 }
 

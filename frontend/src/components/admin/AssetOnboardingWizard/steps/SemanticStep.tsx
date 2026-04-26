@@ -33,7 +33,7 @@ import { CoverageRing, MiniBar, coverageColor, coverageBarClass } from './Covera
 
 interface SemanticStepProps {
     formData: OnboardingFormData
-    updateFormData: (updates: Partial<OnboardingFormData>) => void
+    updateFormData: (updates: Partial<OnboardingFormData> | ((prev: OnboardingFormData) => Partial<OnboardingFormData>)) => void
     catalogItems: CatalogItemResponse[]
     providerId: string
     /** Map of workspace ID → workspace name for display */
@@ -172,17 +172,17 @@ export function SemanticStep({
     }, [])
 
     const updateOntologySelection = useCallback((itemId: string, ontologyId: string, coverageStats?: OntologyMatchResult | null) => {
-        updateFormData({
+        updateFormData(prev => ({
             ontologySelections: {
-                ...formData.ontologySelections,
+                ...prev.ontologySelections,
                 [itemId]: {
-                    ...formData.ontologySelections[itemId],
+                    ...prev.ontologySelections[itemId],
                     ontologyId,
-                    coverageStats: coverageStats ?? formData.ontologySelections[itemId]?.coverageStats ?? null,
+                    coverageStats: coverageStats ?? prev.ontologySelections[itemId]?.coverageStats ?? null,
                 },
             },
-        })
-    }, [formData.ontologySelections, updateFormData])
+        }))
+    }, [updateFormData])
 
     // ─── Analyze single source ──────────────────────────────────────────
 
