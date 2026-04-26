@@ -9,7 +9,7 @@
  * Also supports: "Analyze All" bulk action, "Apply best to all" global action,
  * "Skip for now" per source, and "Create from Physical Graph" new draft flow.
  */
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { memo, useState, useEffect, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     BookOpen, Sparkles, Check, X, Loader2, ChevronDown, Search, Zap,
@@ -129,8 +129,6 @@ export function SemanticStep({
     const [isAnalyzingAll, setIsAnalyzingAll] = useState(false)
     const [analysisProgress, setAnalysisProgress] = useState<Record<string, 'pending' | 'analyzing' | 'done' | 'error'>>({})
     const [showBulkSummary, setShowBulkSummary] = useState(false)
-    const sourceStatesRef = useRef(sourceStates)
-    sourceStatesRef.current = sourceStates
 
     // Load ontologies on mount
     useEffect(() => {
@@ -188,7 +186,8 @@ export function SemanticStep({
 
     // ─── Analyze single source ──────────────────────────────────────────
 
-    const analyzeSource = useCallback(async (item: CatalogItemResponse) => {
+    const analyzeSource = useCallback(async (item: CatalogItemResponse, options?: { bulk?: boolean }) => {
+        const isBulk = options?.bulk === true
         updateSource(item.id, { phase: 'analyzing', error: null })
         setAnalysisProgress(prev => ({ ...prev, [item.id]: 'analyzing' }))
 
@@ -243,7 +242,32 @@ export function SemanticStep({
                 updateOntologySelection(item.id, bestId, bestMatch)
             }
 
-            setExpandedItems(prev => new Set(prev).add(item.id))
+            // In bulk mode, collapse high-confidence sources synchronously with the phase
+            // transition so the heavy SourceRecommendations never mounts for them. Single-source
+            // analyze always expands so the user sees the result they triggered.
+            if (isBulk) {
+                const isHighConfidence = (() => {
+                    if (!bestMatch) return false
+                    const entityTotal = bestMatch.coveredEntityTypes.length + bestMatch.uncoveredEntityTypes.length
+                    const relTotal = bestMatch.coveredRelationshipTypes.length + bestMatch.uncoveredRelationshipTypes.length
+                    const totalAll = entityTotal + relTotal
+                    if (totalAll === 0) return false
+                    const totalCovered = bestMatch.coveredEntityTypes.length + bestMatch.coveredRelationshipTypes.length
+                    return Math.round((totalCovered / totalAll) * 100) >= 50
+                })()
+                if (isHighConfidence) {
+                    setExpandedItems(prev => {
+                        if (!prev.has(item.id)) return prev
+                        const next = new Set(prev)
+                        next.delete(item.id)
+                        return next
+                    })
+                } else {
+                    setExpandedItems(prev => prev.has(item.id) ? prev : new Set(prev).add(item.id))
+                }
+            } else {
+                setExpandedItems(prev => prev.has(item.id) ? prev : new Set(prev).add(item.id))
+            }
             setAnalysisProgress(prev => ({ ...prev, [item.id]: 'done' }))
         } catch (err) {
             updateSource(item.id, {
@@ -270,37 +294,8 @@ export function SemanticStep({
             return next
         })
 
-        await Promise.allSettled(unanalyzed.map(item => analyzeSource(item)))
+        await Promise.allSettled(unanalyzed.map(item => analyzeSource(item, { bulk: true })))
         setIsAnalyzingAll(false)
-
-        // Auto-collapse high-confidence sources, keep low-confidence expanded
-        setTimeout(() => {
-            const currentStates = sourceStatesRef.current
-            setExpandedItems(() => {
-                const next = new Set<string>()
-                for (const item of catalogItems) {
-                    const state = currentStates[item.id]
-                    if (state?.phase === 'recommendations') {
-                        const bestMatch = state.matches[0]
-                        if (!bestMatch) {
-                            next.add(item.id) // No matches — needs attention
-                        } else {
-                            const entityTotal = bestMatch.coveredEntityTypes.length + bestMatch.uncoveredEntityTypes.length
-                            const relTotal = bestMatch.coveredRelationshipTypes.length + bestMatch.uncoveredRelationshipTypes.length
-                            const totalAll = entityTotal + relTotal
-                            const totalCovered = bestMatch.coveredEntityTypes.length + bestMatch.coveredRelationshipTypes.length
-                            const overallPct = totalAll > 0 ? Math.round((totalCovered / totalAll) * 100) : 0
-                            if (overallPct < 50) {
-                                next.add(item.id) // Low coverage — needs attention
-                            }
-                        }
-                    } else if (state?.phase === 'initial' && !state.skipped) {
-                        next.add(item.id) // Still needs analysis
-                    }
-                }
-                return next
-            })
-        }, 100)
     }, [catalogItems, sourceStates, analyzeSource])
 
     // ─── Select ontology for a source ───────────────────────────────────
@@ -589,7 +584,7 @@ export function SemanticStep({
                             key={item.id}
                             initial={{ opacity: 0, y: 12 }}
                             animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: index * 0.05 }}
+                            transition={{ delay: Math.min(index * 0.02, 0.15) }}
                             className="glass-panel rounded-xl overflow-hidden"
                         >
                             <div className="px-5 py-3.5 flex items-center gap-3">
@@ -639,7 +634,7 @@ export function SemanticStep({
                             key={item.id}
                             initial={{ opacity: 0, y: 12 }}
                             animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: index * 0.05 }}
+                            transition={{ delay: Math.min(index * 0.02, 0.15) }}
                             className={cn(
                                 'glass-panel rounded-xl overflow-hidden',
                                 state.phase === 'recommendations' && (() => {
@@ -781,16 +776,14 @@ export function SemanticStep({
                                             {!state.skipped && state.phase === 'recommendations' && (
                                                 <SourceRecommendations
                                                     state={state}
-                                                    itemId={item.id}
-                                                    ontologies={ontologies}
+                                                    item={item}
                                                     getOntology={getOntology}
-                                                    onSelect={(ontologyId) => selectOntology(item.id, ontologyId)}
-                                                    onSelectCreate={() => selectCreateFromGraph(item.id)}
-                                                    onCreateDraft={() => createDraft(item.id)}
-                                                    onDraftNameChange={(name) => updateSource(item.id, { draftName: name })}
-                                                    onSearchChange={(search) => updateSource(item.id, { search })}
-                                                    onSkip={() => skipSource(item.id)}
-                                                    onReanalyze={() => analyzeSource(item)}
+                                                    selectOntology={selectOntology}
+                                                    selectCreateFromGraph={selectCreateFromGraph}
+                                                    createDraft={createDraft}
+                                                    updateSource={updateSource}
+                                                    skipSource={skipSource}
+                                                    analyzeSource={analyzeSource}
                                                 />
                                             )}
                                         </div>
@@ -809,43 +802,61 @@ export function SemanticStep({
 
 interface SourceRecommendationsProps {
     state: SourceState
-    itemId: string
-    ontologies: OntologyDefinitionResponse[]
+    item: CatalogItemResponse
     getOntology: (id: string) => OntologyDefinitionResponse | undefined
-    onSelect: (ontologyId: string) => void
-    onSelectCreate: () => void
-    onCreateDraft: () => void
-    onDraftNameChange: (name: string) => void
-    onSearchChange: (search: string) => void
-    onSkip: () => void
-    onReanalyze: () => void
+    selectOntology: (itemId: string, ontologyId: string) => void
+    selectCreateFromGraph: (itemId: string) => void
+    createDraft: (itemId: string) => void
+    updateSource: (itemId: string, updates: Partial<SourceState>) => void
+    skipSource: (itemId: string) => void
+    analyzeSource: (item: CatalogItemResponse) => void
 }
 
-function SourceRecommendations({
+const SourceRecommendations = memo(function SourceRecommendations({
     state,
-    itemId: _itemId,
-    ontologies: _ontologies,
+    item,
     getOntology,
-    onSelect,
-    onSelectCreate,
-    onCreateDraft,
-    onDraftNameChange,
-    onSearchChange,
-    onSkip,
-    onReanalyze,
+    selectOntology,
+    selectCreateFromGraph,
+    createDraft,
+    updateSource,
+    skipSource,
+    analyzeSource,
 }: SourceRecommendationsProps) {
+    const itemId = item.id
+    const onSelect = useCallback((ontologyId: string) => selectOntology(itemId, ontologyId), [selectOntology, itemId])
+    const onSelectCreate = useCallback(() => selectCreateFromGraph(itemId), [selectCreateFromGraph, itemId])
+    const onCreateDraft = useCallback(() => createDraft(itemId), [createDraft, itemId])
+    const onDraftNameChange = useCallback((name: string) => updateSource(itemId, { draftName: name }), [updateSource, itemId])
+    const onSearchChange = useCallback((search: string) => updateSource(itemId, { search }), [updateSource, itemId])
+    const onSkip = useCallback(() => skipSource(itemId), [skipSource, itemId])
+    const onReanalyze = useCallback(() => analyzeSource(item), [analyzeSource, item])
     const { matches, graphCounts, selectedId, draftName, search, error, isCreatingDraft } = state
 
-    // Filter by search query
+    // Filter by search query and pre-compute coverage percentages once per
+    // [matches, search] change so the map below is a pure render.
     const filteredMatches = useMemo(() => {
-        if (!search.trim()) return matches
-        const q = search.toLowerCase()
-        return matches.filter(m => {
-            const ont = getOntology(m.ontologyId)
-            return (
-                m.ontologyName.toLowerCase().includes(q) ||
-                ont?.description?.toLowerCase().includes(q)
-            )
+        const q = search.trim().toLowerCase()
+        const filtered = q
+            ? matches.filter(m => {
+                const ont = getOntology(m.ontologyId)
+                return (
+                    m.ontologyName.toLowerCase().includes(q) ||
+                    ont?.description?.toLowerCase().includes(q)
+                )
+            })
+            : matches
+        return filtered.map(match => {
+            const entityTotal = match.coveredEntityTypes.length + match.uncoveredEntityTypes.length
+            const relTotal = match.coveredRelationshipTypes.length + match.uncoveredRelationshipTypes.length
+            const totalAll = entityTotal + relTotal
+            const totalCovered = match.coveredEntityTypes.length + match.coveredRelationshipTypes.length
+            return {
+                match,
+                entityPct: entityTotal > 0 ? Math.round((match.coveredEntityTypes.length / entityTotal) * 100) : 0,
+                relPct: relTotal > 0 ? Math.round((match.coveredRelationshipTypes.length / relTotal) * 100) : 0,
+                overallPct: totalAll > 0 ? Math.round((totalCovered / totalAll) * 100) : 0,
+            }
         })
     }, [matches, search, getOntology])
 
@@ -913,7 +924,7 @@ function SourceRecommendations({
                     )}
 
                     <div className="space-y-2.5">
-                        {filteredMatches.map((match, idx) => {
+                        {filteredMatches.map(({ match, entityPct, relPct, overallPct }, idx) => {
                             const ont = getOntology(match.ontologyId)
                             const isSystem = ont?.isSystem ?? false
                             const isPublished = ont?.isPublished ?? false
@@ -921,12 +932,7 @@ function SourceRecommendations({
                             const isSelected = selectedId === match.ontologyId
 
                             const entityTotal = match.coveredEntityTypes.length + match.uncoveredEntityTypes.length
-                            const entityPct = entityTotal > 0 ? Math.round((match.coveredEntityTypes.length / entityTotal) * 100) : 0
                             const relTotal = match.coveredRelationshipTypes.length + match.uncoveredRelationshipTypes.length
-                            const relPct = relTotal > 0 ? Math.round((match.coveredRelationshipTypes.length / relTotal) * 100) : 0
-                            const totalCovered = match.coveredEntityTypes.length + match.coveredRelationshipTypes.length
-                            const totalAll = entityTotal + relTotal
-                            const overallPct = totalAll > 0 ? Math.round((totalCovered / totalAll) * 100) : 0
 
                             return (
                                 <button
@@ -1194,7 +1200,7 @@ function SourceRecommendations({
             </div>
         </div>
     )
-}
+})
 
 // ─── Bulk Confirmation Summary Sub-Component ────────────────────────────────
 

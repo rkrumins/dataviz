@@ -13,6 +13,7 @@
 import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { useInsightsConfig } from '@/hooks/useInsightsConfig'
 
 export type JobStatus = 'idle' | 'running' | 'completed' | 'unknown' | 'error'
 
@@ -25,7 +26,11 @@ interface JobStatusResponse {
 interface UseInsightsJobOptions {
     /** Stop polling and short-circuit when false. */
     enabled?: boolean
-    /** Default 2000ms — under the cache freshness window so users don't wait. */
+    /**
+     * Override the configured poll cadence. Almost always omit —
+     * defaults to ``INSIGHTS_JOB_POLL_INTERVAL_MS`` from the runtime
+     * config (env-driven on the backend).
+     */
     pollIntervalMs?: number
     /**
      * Fired exactly once per `running → completed` transition. Use it
@@ -47,10 +52,13 @@ export function useInsightsJob(
     pollUrl: string | null | undefined,
     {
         enabled = true,
-        pollIntervalMs = 2000,
+        pollIntervalMs,
         onComplete,
     }: UseInsightsJobOptions = {},
 ): { status: JobStatus; error: string | null } {
+    const config = useInsightsConfig()
+    const effectivePollMs = pollIntervalMs ?? config.job_poll_interval_ms
+    const effectiveRetries = config.job_max_retries
     const isEnabled = enabled && !!jobId && !!pollUrl
 
     const query = useQuery<JobStatusResponse, Error>({
@@ -65,13 +73,13 @@ export function useInsightsJob(
         // function returns false and React Query stops polling.
         refetchInterval: (q) => {
             const status = q.state.data?.status
-            return status === 'running' ? pollIntervalMs : false
+            return status === 'running' ? effectivePollMs : false
         },
-        // 4 transient retries with exponential backoff (capped at 30s)
-        // before surfacing the error. React Query handles the timing.
-        retry: 4,
+        // Configurable transient-error retry count with exponential
+        // backoff (capped at 30s). React Query handles the timing.
+        retry: effectiveRetries,
         retryDelay: (attempt) =>
-            Math.min(30_000, pollIntervalMs * Math.pow(2, attempt)),
+            Math.min(30_000, effectivePollMs * Math.pow(2, attempt)),
         // No window-focus refetch: a tab regaining focus shouldn't
         // re-poll a job whose status we already know. Auto-recovery
         // happens through the parent's invalidation hooks instead.

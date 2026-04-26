@@ -30,7 +30,12 @@ from .redis_streams import (
     snapshot_stream_depths,
     stream_depths_to_dict,
 )
-from .scheduler import get_scheduler_status, run_scheduler, run_trim_scheduler
+from .scheduler import (
+    get_scheduler_status,
+    run_discovery_scheduler,
+    run_scheduler,
+    run_trim_scheduler,
+)
 # Importing the worker module pulls in collector + discovery which
 # self-register their handlers with the dispatcher. The dispatcher's
 # registry must be populated before the XREADGROUP loop starts so the
@@ -250,12 +255,15 @@ async def main() -> None:
 
     scheduler_task = asyncio.create_task(run_scheduler(config, shutdown), name="insights-scheduler")
     trim_task = asyncio.create_task(run_trim_scheduler(shutdown), name="insights-trim")
+    discovery_task = asyncio.create_task(
+        run_discovery_scheduler(shutdown), name="insights-discovery-scheduler",
+    )
     health_task = asyncio.create_task(_health_snapshot_task(), name="insights-health-snapshot")
     worker_task = asyncio.create_task(consumer.run(), name="insights-worker")
 
     try:
         done, _pending = await asyncio.wait(
-            {scheduler_task, trim_task, health_task, worker_task, asyncio.create_task(shutdown.wait())},
+            {scheduler_task, trim_task, discovery_task, health_task, worker_task, asyncio.create_task(shutdown.wait())},
             return_when=asyncio.FIRST_COMPLETED,
         )
         for t in done:
@@ -274,6 +282,12 @@ async def main() -> None:
         trim_task.cancel()
         try:
             await trim_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        discovery_task.cancel()
+        try:
+            await discovery_task
         except (asyncio.CancelledError, Exception):
             pass
 

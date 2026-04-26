@@ -99,6 +99,22 @@ function AssetRow({
         void query.refetch()
     }, [query])
 
+    // Manual "Refresh now" — drops the dedup claim on the backend and
+    // force-enqueues a discovery job. Used by the per-row ⟳ icon.
+    // Invalidates the React Query so polling picks up the new state.
+    const onAssetRefresh = useCallback(async (e: React.MouseEvent) => {
+        e.stopPropagation()
+        try {
+            await providerService.refreshAssetStats(providerId, assetName)
+            queryClient.invalidateQueries({
+                queryKey: [ASSET_STATS_QUERY_KEY_PREFIX, providerId, assetName],
+            })
+        } catch {
+            // Errors surface via the existing fetchError state on the
+            // next poll tick; no need for a toast on the per-row click.
+        }
+    }, [providerId, assetName, queryClient])
+
     // Auto-refresh when a computing/stale job completes. ``useInsightsJob``
     // polls /admin/insights/jobs/{id}; on completion we invalidate the
     // asset-stats query so a fresh fetch reads the now-populated cache row.
@@ -201,6 +217,17 @@ function AssetRow({
                         {envelope && (
                             <StatusChip meta={envelope.meta} compact />
                         )}
+                        <button
+                            onClick={onAssetRefresh}
+                            disabled={loadingStats}
+                            title="Refresh stats (force re-enqueue)"
+                            className="shrink-0 p-1 rounded text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            <RefreshCw className={cn(
+                                'w-3 h-3',
+                                loadingStats && 'animate-spin',
+                            )} />
+                        </button>
                     </div>
 
                     <div className="flex items-center gap-3">
@@ -601,6 +628,10 @@ export function RegistryAssets() {
 
     // Provider asset count cache (assetId → count)
     const [providerAssetCounts, setProviderAssetCounts] = useState<Record<string, { total: number; registered: number }>>({})
+
+    // QueryClient at the parent level so the panel's Refresh button can
+    // invalidate every per-row asset-stats query for the active provider.
+    const queryClient = useQueryClient()
 
     // Load all providers
     const loadProviders = useCallback(async () => {
@@ -1013,9 +1044,35 @@ export function RegistryAssets() {
                                 </p>
                             </div>
                             <button
-                                onClick={() => {
+                                onClick={async () => {
                                     if (!selectedProviderId) return
                                     setAssetsLoading(true)
+                                    // Force-refresh every cached asset for
+                                    // this provider on the backend (drops
+                                    // dedup claims, fans out new discovery
+                                    // jobs). Best-effort: log + continue if
+                                    // it fails — the listAssets refetch
+                                    // below still happens.
+                                    try {
+                                        const result = await providerService.refreshAllAssets(selectedProviderId)
+                                        showToast(
+                                            'success',
+                                            `Refresh queued for ${result.jobs_queued} asset(s) — chips will update as workers complete.`,
+                                        )
+                                    } catch (err: any) {
+                                        showToast(
+                                            'warning',
+                                            `Refresh enqueue failed: ${err?.message ?? 'unknown'}. Re-listing assets anyway.`,
+                                        )
+                                    }
+                                    // Invalidate every per-row asset-stats
+                                    // query under this provider so polling
+                                    // picks up the now-pending refreshes.
+                                    queryClient.invalidateQueries({
+                                        predicate: (q) =>
+                                            q.queryKey[0] === ASSET_STATS_QUERY_KEY_PREFIX
+                                            && q.queryKey[1] === selectedProviderId,
+                                    })
                                     Promise.all([
                                         providerService.listAssets(selectedProviderId),
                                         catalogService.list(selectedProviderId),

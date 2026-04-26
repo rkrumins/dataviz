@@ -9,7 +9,7 @@
  * state instead of silently targeting a server default.
  */
 
-import { createContext, useContext, useState, useEffect, useRef, type ReactNode } from 'react'
+import { createContext, useContext, useMemo, useState, useEffect, useRef, type ReactNode } from 'react'
 import type { GraphDataProvider, GraphProviderContextValue } from './GraphDataProvider'
 import { RemoteGraphProvider } from './RemoteGraphProvider'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -24,17 +24,11 @@ import { useAuthStore } from '@/store/auth'
 export interface GraphProviderContextValueExtended extends GraphProviderContextValue {
     scopeKind: 'ready' | 'no-scope'
     workspaceId: string | null
-    setWorkspaceId: (id: string | null) => void
     dataSourceId: string | null
-    setDataSourceId: (id: string | null) => void
     /** True once the provider has been created AND background connectivity check has resolved (success or fail). */
     providerReady: boolean
     /** Monotonically increasing counter — increments each time a new provider instance is created. */
     providerVersion: number
-    /** @deprecated Use workspaceId — kept for backward compat */
-    connectionId: string | null
-    /** @deprecated Use setWorkspaceId — kept for backward compat */
-    setConnectionId: (id: string | null) => void
 }
 
 const GraphProviderContext = createContext<GraphProviderContextValueExtended | null>(null)
@@ -52,8 +46,6 @@ export function GraphProvider({ children }: GraphProviderProps) {
     const activeWorkspaceId = useWorkspacesStore((s) => s.activeWorkspaceId)
     const activeDataSourceId = useWorkspacesStore((s) => s.activeDataSourceId)
     const loadWorkspaces = useWorkspacesStore((s) => s.loadWorkspaces)
-    const setActiveWorkspace = useWorkspacesStore((s) => s.setActiveWorkspace)
-    const setActiveDataSource = useWorkspacesStore((s) => s.setActiveDataSource)
 
     const [isLoading, setIsLoading] = useState(true)
     const [error, setError] = useState<Error | null>(null)
@@ -176,23 +168,19 @@ export function GraphProvider({ children }: GraphProviderProps) {
         return unsubscribe
     }, [currentProvider])
 
-    const value: GraphProviderContextValueExtended = {
+    // Use provider-tracked IDs (not Zustand's activeWorkspaceId) so
+    // consumers never see a mismatch between workspace IDs and the provider.
+    // Zustand may update ahead of the provider rebuild; these stay in sync.
+    const value = useMemo<GraphProviderContextValueExtended>(() => ({
         provider: currentProvider,
         isLoading,
         error,
         scopeKind: currentProvider ? 'ready' : 'no-scope',
-        // Use provider-tracked IDs (not Zustand's activeWorkspaceId) so
-        // consumers never see a mismatch between workspace IDs and the provider.
-        // Zustand may update ahead of the provider rebuild; these stay in sync.
         workspaceId: providerWorkspaceId,
-        setWorkspaceId: setActiveWorkspace,
         dataSourceId: providerDataSourceId,
-        setDataSourceId: setActiveDataSource,
         providerReady,
         providerVersion,
-        connectionId: null,
-        setConnectionId: () => undefined,
-    }
+    }), [currentProvider, isLoading, error, providerWorkspaceId, providerDataSourceId, providerReady, providerVersion])
 
     return (
         <GraphProviderContext.Provider value={value}>
