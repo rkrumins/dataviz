@@ -365,11 +365,19 @@ class AggregationWorker:
         """
         last_commit_monotonic = time.monotonic()
         batches_since_commit = 0
+        # Force the first checkpoint to commit no matter how fast the
+        # first batch was. Without this, a fast first batch (under the
+        # _CHECKPOINT_MAX_INTERVAL_SECS=2.0 threshold and below the
+        # 5-batch count) would not commit, leaving the UI showing
+        # ``processed_edges = 0`` for up to 5 batches × batch_duration.
+        # The first commit is what flips the UI off "0" — make it
+        # happen immediately.
+        is_first_checkpoint = True
 
         async def checkpoint(
             processed: int, total: int, cursor: Optional[str], aggregated: int = 0,
         ) -> None:
-            nonlocal last_commit_monotonic, batches_since_commit
+            nonlocal last_commit_monotonic, batches_since_commit, is_first_checkpoint
             job.processed_edges = processed
             job.total_edges = total
             job.last_cursor = cursor
@@ -380,14 +388,106 @@ class AggregationWorker:
             job.last_checkpoint_at = _now()
             batches_since_commit += 1
             elapsed = time.monotonic() - last_commit_monotonic
-            if elapsed >= _CHECKPOINT_MAX_INTERVAL_SECS or batches_since_commit >= _CHECKPOINT_MAX_BATCHES:
+            should_commit = (
+                is_first_checkpoint
+                or elapsed >= _CHECKPOINT_MAX_INTERVAL_SECS
+                or batches_since_commit >= _CHECKPOINT_MAX_BATCHES
+            )
+            if not should_commit:
+                return
+
+            # Wrap commit in a recover-from-failure block. If a single
+            # commit fails (transient DB blip, conflicting transaction,
+            # etc.) without rolling back, the SQLAlchemy session enters
+            # an invalid state and EVERY subsequent operation raises —
+            # silently swallowed by the FalkorDB provider's
+            # ``progress_callback`` try/except, leaving the UI stuck on
+            # ``processed_edges = 0`` for the full duration of the
+            # aggregation while FalkorDB happily keeps materialising
+            # edges. Rollback restores the session so the next batch
+            # can re-attempt the checkpoint with the latest in-memory
+            # mutations on ``job`` (preserved across rollback because
+            # the JOBS sessionmaker uses ``expire_on_commit=False``).
+            try:
                 await session.commit()
                 last_commit_monotonic = time.monotonic()
                 batches_since_commit = 0
-                logger.debug(
-                    "Aggregation job %s: %d/%d edges (%d%%, %d materialized) [committed]",
+                is_first_checkpoint = False
+                logger.info(
+                    "Aggregation job %s checkpoint: %d/%d edges (%d%%, %d materialized) [committed]",
                     job.id, processed, total, job.progress, job.created_edges,
                 )
+            except Exception as commit_exc:
+                logger.error(
+                    "Aggregation job %s checkpoint commit failed (rolling back to "
+                    "recover session for next batch): %s",
+                    job.id, commit_exc, exc_info=True,
+                )
+                try:
+                    await session.rollback()
+                except Exception as rb_exc:
+                    logger.error(
+                        "Aggregation job %s session rollback after checkpoint commit failure also failed: %s",
+                        job.id, rb_exc, exc_info=True,
+                    )
+                # Reset the cadence counters so the next batch tries
+                # to commit again immediately. ``is_first_checkpoint``
+                # stays True until a successful commit lands.
+                last_commit_monotonic = time.monotonic()
+                batches_since_commit = 0
+
+        last_intra_commit_monotonic = time.monotonic()
+
+        async def intra_batch_heartbeat(running_aggregated: int) -> None:
+            """Called after every Cypher MERGE sub-batch within an
+            outer batch. A single outer batch fans out to 100+ sub-
+            batches and runs for several minutes; without this hook
+            the operator UI freezes between checkpoint() calls even
+            though FalkorDB is steadily writing AGGREGATED edges.
+
+            Updates ``created_edges`` (cumulative, monotonically rising)
+            and ``last_checkpoint_at`` (so the UI's "Checkpoint Xm ago"
+            badge keeps refreshing — that badge is the operator's "is
+            this thing alive?" signal). Deliberately does NOT touch
+            ``processed_edges``, ``total_edges``, or ``last_cursor``:
+            those advance only at the boundary between outer batches.
+            Coalesces commits on the same 2s cadence as the outer
+            checkpoint to avoid hammering the JOBS pool.
+            """
+            nonlocal last_intra_commit_monotonic
+            elapsed = time.monotonic() - last_intra_commit_monotonic
+            if elapsed < _CHECKPOINT_MAX_INTERVAL_SECS:
+                # Update the in-memory counters every sub-batch so
+                # the next coalesced commit captures the latest value;
+                # skip the commit itself until the cadence threshold.
+                job.created_edges = running_aggregated
+                job.last_checkpoint_at = _now()
+                job.updated_at = _now()
+                return
+
+            job.created_edges = running_aggregated
+            job.last_checkpoint_at = _now()
+            job.updated_at = _now()
+            try:
+                await session.commit()
+                last_intra_commit_monotonic = time.monotonic()
+                logger.info(
+                    "Aggregation job %s heartbeat: %d aggregated edges materialised so far [committed]",
+                    job.id, running_aggregated,
+                )
+            except Exception as commit_exc:
+                logger.error(
+                    "Aggregation job %s heartbeat commit failed (rolling back): %s",
+                    job.id, commit_exc, exc_info=True,
+                )
+                try:
+                    await session.rollback()
+                except Exception as rb_exc:
+                    logger.error(
+                        "Aggregation job %s session rollback after heartbeat failure also failed: %s",
+                        job.id, rb_exc, exc_info=True,
+                    )
+                last_intra_commit_monotonic = time.monotonic()
 
         result = await provider.materialize_aggregated_edges_batch(
             containment_edge_types=containment_types,
@@ -395,6 +495,7 @@ class AggregationWorker:
             batch_size=job.batch_size,
             last_cursor=job.last_cursor,
             progress_callback=checkpoint,
+            intra_batch_callback=intra_batch_heartbeat,
         )
 
         return result
