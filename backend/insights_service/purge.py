@@ -81,14 +81,6 @@ async def collect(session: AsyncSession, envelope: PurgeJobEnvelope) -> None:
         job.updated_at = _now()
         return
 
-    job.status = "running"
-    if not job.started_at:
-        job.started_at = _now()
-    job.updated_at = _now()
-    # Flush the state transition before the provider call so the UI
-    # sees ``running`` immediately rather than blocking until commit.
-    await session.flush()
-
     ds_orm = await session.get(WorkspaceDataSourceORM, job.data_source_id)
     if ds_orm is None:
         job.status = "failed"
@@ -109,7 +101,48 @@ async def collect(session: AsyncSession, envelope: PurgeJobEnvelope) -> None:
 
     start_ts = asyncio.get_event_loop().time()
     async with admission.gate(ds_orm.provider_id, op_kind="purge"):
-        deleted = await provider.purge_aggregated_edges()
+        # Inside the gate so admission accounts for both the COUNT and
+        # the DELETE batches. Order:
+        #   1. COUNT first  → we have a denominator for progress.
+        #   2. Commit ``running`` + ``total_edges`` so the Job History
+        #      UI flips off "Pending" the moment we have data, not
+        #      after the entire DELETE finishes (could be minutes).
+        #   3. Iterate DELETE in batches; each batch checkpoints
+        #      ``processed_edges`` / ``progress`` with a coalesced
+        #      commit so polls during the run see the count climb.
+        total = await provider.count_aggregated_edges()
+        job.status = "running"
+        if not job.started_at:
+            job.started_at = _now()
+        job.total_edges = total
+        job.processed_edges = 0
+        job.progress = 0
+        job.updated_at = _now()
+        await session.commit()
+
+        last_commit_ts = asyncio.get_event_loop().time()
+
+        async def _checkpoint(deleted_so_far: int) -> None:
+            """Per-batch progress hook handed to the provider's purge
+            loop. Mirrors the cadence used by the aggregation worker
+            (commit at most every 2s) so a multi-minute purge floods
+            neither the DB with commits nor the UI with stale numbers.
+            """
+            nonlocal last_commit_ts
+            job.processed_edges = deleted_so_far
+            job.progress = (
+                int((deleted_so_far / total) * 100) if total > 0 else 0
+            )
+            job.updated_at = _now()
+            now_ts = asyncio.get_event_loop().time()
+            if now_ts - last_commit_ts >= 2.0:
+                await session.commit()
+                last_commit_ts = now_ts
+
+        deleted = await provider.purge_aggregated_edges(
+            batch_size=10_000,
+            progress_callback=_checkpoint,
+        )
     duration = asyncio.get_event_loop().time() - start_ts
 
     # Reset aggregation-owned state alongside the job finalisation so a

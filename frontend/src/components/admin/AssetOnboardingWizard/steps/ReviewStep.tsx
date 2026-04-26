@@ -163,7 +163,7 @@ function ReviewPhase({
             <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.1 }}
+                transition={{ delay: 0.05 }}
                 className="bg-gradient-to-br from-slate-50 to-white dark:from-slate-800 dark:to-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 overflow-hidden"
             >
                 <div className="divide-y divide-slate-200 dark:divide-slate-700">
@@ -306,7 +306,7 @@ function ReviewPhase({
             <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                transition={{ delay: 0.3 }}
+                transition={{ delay: 0.05 }}
                 className="text-center text-slate-500 text-sm"
             >
                 Click <strong className="text-slate-700 dark:text-slate-300">"Complete Setup"</strong> to onboard your data sources and start aggregation
@@ -472,7 +472,7 @@ function SuccessPhase({
                 <motion.h2
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.2 }}
+                    transition={{ delay: 0.05 }}
                     className="text-2xl font-bold text-ink"
                 >
                     Setup Complete
@@ -480,7 +480,7 @@ function SuccessPhase({
                 <motion.p
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.3 }}
+                    transition={{ delay: 0.05 }}
                     className="text-sm text-ink-muted max-w-md"
                 >
                     Created {catalogItems.length} data source{catalogItems.length !== 1 ? 's' : ''} across{' '}
@@ -494,7 +494,7 @@ function SuccessPhase({
                 <motion.div
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.35 }}
+                    transition={{ delay: 0.05 }}
                     className="w-full max-w-md"
                 >
                     <div className="glass-panel rounded-xl p-4 space-y-3 text-left">
@@ -553,7 +553,7 @@ function SuccessPhase({
             <motion.div
                 initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.4 }}
+                transition={{ delay: 0.05 }}
                 className="grid grid-cols-2 gap-4 w-full"
                 onMouseEnter={() => setIsPaused(true)}
                 onMouseLeave={() => setIsPaused(false)}
@@ -595,7 +595,7 @@ function SuccessPhase({
             <motion.div
                 initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.5 }}
+                transition={{ delay: 0.05 }}
                 className="grid grid-cols-3 gap-3 w-full"
                 onMouseEnter={() => setIsPaused(true)}
                 onMouseLeave={() => setIsPaused(false)}
@@ -628,7 +628,7 @@ function SuccessPhase({
             <motion.button
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                transition={{ delay: 0.6 }}
+                transition={{ delay: 0.05 }}
                 onClick={() => handleNavigate('dismiss')}
                 className="text-xs text-ink-muted hover:text-ink-secondary transition-colors"
             >
@@ -639,7 +639,7 @@ function SuccessPhase({
             <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                transition={{ delay: 0.65 }}
+                transition={{ delay: 0.05 }}
                 className="w-full max-w-xs space-y-2"
             >
                 <div className="h-1 rounded-full bg-slate-700/50 overflow-hidden">

@@ -250,7 +250,11 @@ function AssetRow({
                                     ? 'Refresh queued — waiting for the worker to pick it up'
                                     : envelope?.meta.refreshing
                                         ? 'A refresh is already running for this asset — click to re-queue'
-                                        : 'Force a fresh stats scan now (drops the in-flight dedup claim and re-enqueues a discovery job)'
+                                        : `Force a fresh stats scan now (drops the in-flight dedup claim and re-enqueues a discovery job)${
+                                            envelope?.meta.updated_at
+                                                ? `\nLast refreshed: ${new Date(envelope.meta.updated_at).toLocaleString()}`
+                                                : ''
+                                        }`
                             }
                             aria-label={`Refresh stats for ${assetName}`}
                             className={cn(

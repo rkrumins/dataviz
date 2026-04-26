@@ -9,6 +9,7 @@
 import { CheckCircle2, Loader2, AlertTriangle, Clock, WifiOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { InsightsMeta } from '@/types/insights'
+import { useInsightsConfig } from '@/hooks/useInsightsConfig'
 
 interface Props {
     meta: InsightsMeta
@@ -27,11 +28,26 @@ function formatStaleness(secs: number | null): string | null {
 
 export function StatusChip({ meta, compact, className }: Props) {
     const { status, staleness_secs, provider_health, last_error } = meta
+    const { ui_stale_threshold_secs } = useInsightsConfig()
 
     // Provider health overrides envelope status when the upstream is
     // unreachable — users care more about "the provider is down" than
     // "the cache is stale" in that situation.
     const showProviderDown = provider_health === 'down'
+
+    // The backend's ``stale`` classification triggers read-path
+    // enqueues (see _classify_freshness in insights.py); it fires as
+    // early as STATS_CACHE_FRESH_SECS (5 min default). With a 30-min
+    // discovery scheduler, that's a constant amber alarm on data the
+    // user perceives as current. Suppress the warning visual until
+    // ``staleness_secs`` exceeds the env-driven UI threshold (default
+    // 24h). The data and refresh path are unchanged — only the chip
+    // colour + label differ.
+    const isStaleButRecent =
+        status === 'stale'
+        && staleness_secs != null
+        && staleness_secs < ui_stale_threshold_secs
+    const effectiveStatus = isStaleButRecent ? 'fresh' : status
 
     let Icon: typeof CheckCircle2 = CheckCircle2
     let label = 'Fresh'
@@ -45,35 +61,41 @@ export function StatusChip({ meta, compact, className }: Props) {
         label = compact ? 'Down' : 'Provider unreachable'
         title = last_error ?? 'Upstream provider not responding'
         tone = 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20'
-    } else if (status === 'computing') {
+    } else if (effectiveStatus === 'computing') {
         Icon = Loader2
         label = compact ? 'Computing…' : 'Computing…'
         tone = 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20'
         spin = true
-    } else if (status === 'unavailable') {
+    } else if (effectiveStatus === 'unavailable') {
         Icon = AlertTriangle
         label = compact ? 'Paused' : 'Background refresh paused'
         title = 'Refresh queue is unreachable; showing whatever cache survived'
         tone = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
-    } else if (status === 'stale') {
+    } else if (effectiveStatus === 'stale') {
         Icon = Clock
         const ago = formatStaleness(staleness_secs)
         label = compact ? `Stale${ago ? ` ${ago}` : ''}` : `Stale${ago ? ` (${ago})` : ''}`
-        title = 'Cached data; a refresh job is in flight'
+        title = 'Cached data older than the configured UI threshold; a refresh job is in flight'
         tone = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
-    } else if (status === 'partial') {
+    } else if (effectiveStatus === 'partial') {
         Icon = AlertTriangle
         label = compact ? 'Partial' : 'Partial (synthetic)'
         title = 'Showing fallback data while a full refresh runs'
         tone = 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20'
     } else {
-        // status === 'fresh'
+        // effectiveStatus === 'fresh' (covers true-fresh and stale-but-recent)
         Icon = CheckCircle2
-        label = compact ? 'Fresh' : 'Fresh'
+        const ago = formatStaleness(staleness_secs)
+        label = ago ? `Refreshed ${ago}` : 'Fresh'
+        if (isStaleButRecent) {
+            title = 'Cached data; a background refresh is in flight but the row is still recent'
+        }
         if (provider_health === 'degraded') {
             // Cache is fresh but the provider is showing intermittent failures —
             // surface that subtlety rather than a clean green.
-            label = compact ? 'Fresh ⚠' : 'Fresh (provider degraded)'
+            label = compact
+                ? `${ago ? `Refreshed ${ago}` : 'Fresh'} ⚠`
+                : `${ago ? `Refreshed ${ago}` : 'Fresh'} (provider degraded)`
             tone = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
         }
     }

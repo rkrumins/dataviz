@@ -704,6 +704,7 @@ class InsightsConfigResponse(BaseModel):
     job_poll_interval_ms: int
     job_max_retries: int
     discovery_refresh_interval_secs: int
+    ui_stale_threshold_secs: int
 
 
 @router.get("/config", response_model=InsightsConfigResponse)
@@ -719,4 +720,5 @@ async def get_insights_config() -> InsightsConfigResponse:
         job_poll_interval_ms=resilience.INSIGHTS_JOB_POLL_INTERVAL_MS,
         job_max_retries=resilience.INSIGHTS_JOB_MAX_RETRIES,
         discovery_refresh_interval_secs=resilience.DISCOVERY_REFRESH_INTERVAL_SECS,
+        ui_stale_threshold_secs=resilience.INSIGHTS_UI_STALE_THRESHOLD_SECS,
     )

@@ -22,6 +22,9 @@ export interface InsightsConfig {
     job_poll_interval_ms: number
     job_max_retries: number
     discovery_refresh_interval_secs: number
+    /** UI-only "Stale" threshold. StatusChip suppresses the amber pill
+     *  for cache rows younger than this; default 86400s (24h). */
+    ui_stale_threshold_secs: number
 }
 
 /**

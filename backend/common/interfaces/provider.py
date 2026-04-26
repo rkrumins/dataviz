@@ -3,7 +3,7 @@ Abstract GraphDataProvider interface — shared kernel.
 Both the visualization service and graph service import from here.
 """
 from abc import ABC, abstractmethod
-from typing import List, Optional, Dict, Any
+from typing import Awaitable, Callable, List, Optional, Dict, Any
 
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
@@ -365,10 +365,31 @@ class GraphDataProvider(ABC):
         """Called when a node's containment (parent) changes. Rebuilds ancestor chains."""
         pass
 
-    async def purge_aggregated_edges(self) -> int:
+    async def count_aggregated_edges(self) -> int:
+        """Return the current count of materialized AGGREGATED edges.
+
+        Used as the denominator for purge progress reporting — the
+        purge handler reads this once before deletion starts so the UI
+        can render a meaningful "X / total" indicator instead of "0 / 0"
+        until the very last batch lands. Returns 0 for providers that
+        don't materialise aggregated edges.
+        """
+        return 0
+
+    async def purge_aggregated_edges(
+        self,
+        *,
+        batch_size: int = 10_000,
+        progress_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+    ) -> int:
         """Remove ALL materialized AGGREGATED edges from the graph.
 
-        Returns the number of edges deleted.
+        Implementations should iterate the deletion in chunks of at most
+        ``batch_size`` so a multi-million-edge purge produces visible
+        progress (and so the operation cannot silently truncate at a
+        single hard-coded LIMIT). After every batch, ``progress_callback``
+        — when provided — is awaited with the running total of edges
+        deleted so far. Returns the total deleted across all batches.
         """
         return 0
 

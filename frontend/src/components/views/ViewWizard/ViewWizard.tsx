@@ -20,7 +20,7 @@
  *                             used by both the scope phase and body phase.
  */
 
-import React, { useState, useCallback, useMemo, useEffect } from 'react'
+import React, { useState, useCallback, useMemo, useEffect, startTransition } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -195,7 +195,7 @@ function WizardShell({
                 initial={{ scale: 0.95, opacity: 0, y: 20 }}
                 animate={{ scale: 1, opacity: 1, y: 0 }}
                 exit={{ scale: 0.95, opacity: 0, y: 20 }}
-                transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+                transition={{ duration: 0.12 }}
                 className={cn(
                     'relative w-full max-h-[90vh] bg-white dark:bg-slate-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col',
                     isWide ? 'max-w-[1180px]' : 'max-w-4xl',
@@ -274,7 +274,7 @@ function WizardShell({
                             initial={{ opacity: 0, x: 20 }}
                             animate={{ opacity: 1, x: 0 }}
                             exit={{ opacity: 0, x: -20 }}
-                            transition={{ duration: 0.08 }}
+                            transition={{ duration: 0.06 }}
                             className="p-8"
                         >
                             {children}
@@ -757,8 +757,13 @@ function ViewWizardBody({
     const handleNext = useCallback(() => {
         const idx = activeSteps.findIndex(s => s.id === currentStep)
         if (idx < activeSteps.length - 1) {
-            setPreviousSteps(prev => [...prev, currentStep])
-            setCurrentStep(activeSteps[idx + 1].id)
+            // startTransition keeps the UI responsive while the next step
+            // mounts (often 200-300 ms of synchronous work). The Next click
+            // registers as instant; React renders the new step in the background.
+            startTransition(() => {
+                setPreviousSteps(prev => [...prev, currentStep])
+                setCurrentStep(activeSteps[idx + 1].id)
+            })
         }
     }, [currentStep, activeSteps])
 
@@ -770,8 +775,10 @@ function ViewWizardBody({
         }
         if (previousSteps.length > 0) {
             const prev = previousSteps[previousSteps.length - 1]
-            setPreviousSteps(p => p.slice(0, -1))
-            setCurrentStep(prev)
+            startTransition(() => {
+                setPreviousSteps(p => p.slice(0, -1))
+                setCurrentStep(prev)
+            })
         }
     }, [previousSteps, currentStep, mode, onBackToScope])
 
@@ -784,7 +791,9 @@ function ViewWizardBody({
         const currentIndex = activeSteps.findIndex(s => s.id === currentStep)
         const targetIndex = activeSteps.findIndex(s => s.id === stepId)
         if (targetIndex <= currentIndex && targetIndex !== -1) {
-            setCurrentStep(stepId)
+            startTransition(() => {
+                setCurrentStep(stepId)
+            })
         }
     }, [currentStep, activeSteps, mode, onBackToScope])
 

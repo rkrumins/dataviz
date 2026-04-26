@@ -691,6 +691,15 @@ class AggregationService:
         actual_mode = (ds_orm.projection_mode if ds_orm else None) or "in_source"
 
         now = _now()
+        # Purge jobs don't use ``batch_size`` semantically — DELETE
+        # queries don't iterate in batches the way aggregation INSERTs
+        # do — but the field is non-null on the ORM model and the
+        # ``AggregationTriggerRequest`` schema enforces ``ge=100``.
+        # Storing 0 broke any downstream code that read the row back
+        # through that schema (e.g. the Retrigger dialog reading
+        # ``job.batchSize`` from history). Use the same default as
+        # ``AggregationTriggerRequest.batch_size`` so a re-read always
+        # validates.
         purge_job = AggregationJobORM(
             id=_generate_id(),
             data_source_id=ds_id,
@@ -702,7 +711,7 @@ class AggregationService:
             total_edges=0,
             processed_edges=0,
             created_edges=0,
-            batch_size=0,
+            batch_size=5000,
             retry_count=0,
             max_retries=0,
             created_at=now,

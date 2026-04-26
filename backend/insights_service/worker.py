@@ -265,20 +265,49 @@ class InsightsJobConsumer:
             # Soft-retry path. The provider is rate-throttled, circuit-open,
             # or otherwise temporarily unavailable; running this job now is
             # guaranteed to fail. Critically: do NOT increment the delivery
-            # count, because that's how a 30-minute provider outage drains
-            # the entire backlog into the DLQ. Instead, ACK the message
-            # (drop it from PEL) and release the dedup claim so the
-            # scheduler re-enqueues on its next tick once the upstream
-            # has had a chance to recover.
+            # count for scheduler-backed kinds, because that's how a
+            # 30-minute provider outage drains the entire backlog into
+            # the DLQ.
+            #
+            # Two flavours:
+            #
+            # * Scheduler-backed kinds (stats / discovery) — ACK + release
+            #   the claim. The matching scheduler re-enqueues on its
+            #   next tick once the upstream has recovered.
+            # * One-shot kinds (purge) — leave the message in PEL with
+            #   the dedup claim held. There is no scheduler to re-enqueue,
+            #   and ACKing here would silently drop the work: the DB row
+            #   stays at ``pending`` forever and the next user request
+            #   would 409 against the orphaned ``pending`` job.
+            #   XAUTOCLAIM picks the message up after ``min_idle_time``
+            #   (60s default), bumping delivery count — bounded retries
+            #   that DLQ if admission keeps refusing.
             duration = asyncio.get_event_loop().time() - start_ts
             reason = getattr(exc, "reason", None) or "provider_unavailable"
-            logger.info(
-                "%s.soft_retry scope=%s duration_secs=%.2f reason=%s — "
-                "releasing claim, no delivery attempt counted",
-                envelope.kind, envelope.scope_key, duration, reason,
-            )
-            await self._ack(stream_cfg, msg_id)
-            await release_claim(envelope.scope_key, stream=stream_cfg)
+            if isinstance(envelope, (StatsJobEnvelope, DiscoveryJobEnvelope)):
+                logger.info(
+                    "%s.soft_retry scope=%s duration_secs=%.2f reason=%s — "
+                    "ACK + release claim; scheduler will re-enqueue",
+                    envelope.kind, envelope.scope_key, duration, reason,
+                )
+                await self._ack(stream_cfg, msg_id)
+                await release_claim(envelope.scope_key, stream=stream_cfg)
+            else:
+                logger.info(
+                    "%s.soft_retry scope=%s duration_secs=%.2f reason=%s — "
+                    "leaving in PEL for XAUTOCLAIM redelivery (no scheduler to re-enqueue), "
+                    "releasing dedup claim",
+                    envelope.kind, envelope.scope_key, duration, reason,
+                )
+                # No ACK — XAUTOCLAIM (60s idle) redelivers, eventually DLQs
+                # if admission keeps refusing. DO release the claim though:
+                # duplicate-purge protection lives at the DB layer
+                # (claim_purge_job 409s on any pending/running row for the
+                # same data source), and holding the claim here would
+                # otherwise block legitimate user retries — they'd see
+                # ``enqueue_purge_job_safe`` return None for up to the
+                # claim's 20-minute TTL.
+                await release_claim(envelope.scope_key, stream=stream_cfg)
             return
         except Exception as exc:
             duration = asyncio.get_event_loop().time() - start_ts
