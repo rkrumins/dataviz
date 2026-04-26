@@ -7,6 +7,7 @@
  *         lazy stats, blast-radius unregister, and inline route step
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useSearchParams, Link } from 'react-router-dom'
 import {
     Database, Search, Filter, Loader2, Trash2,
@@ -31,6 +32,8 @@ import type { AggregationOverridesValue } from './shared/AggregationOverridesFor
 import type { Envelope, AssetStatsPayload } from '@/types/insights'
 import { StatusChip } from '@/components/insights/StatusChip'
 import { useInsightsJob } from '@/hooks/useInsightsJob'
+import { useSharedIntersectionObserver } from '@/hooks/useSharedIntersectionObserver'
+import { useAssetStats, ASSET_STATS_QUERY_KEY_PREFIX } from '@/hooks/useAssetStats'
 
 // ─── Provider type helpers ────────────────────────────────────────────────────
 const PROVIDER_TYPES = [
@@ -69,65 +72,48 @@ function AssetRow({
     onPurge?: (name: string) => void
     boundWorkspaceName?: string
 }) {
-    // `envelope` carries both the stats payload and meta (status + provider
-    // health) so the row can render a StatusChip with progressive disclosure
-    // instead of a perpetual spinner. `loadingStats` is only true while the
-    // HTTP request is in flight; once we have an envelope back, the
-    // envelope's `meta.status` drives the visible state.
-    const [envelope, setEnvelope] = useState<Envelope<AssetStatsPayload> | null>(null)
-    const [fetchError, setFetchError] = useState<string | null>(null)
-    const [loadingStats, setLoadingStats] = useState(false)
     const [expanded, setExpanded] = useState(false)
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
     const ref = useRef<HTMLDivElement>(null)
+    const queryClient = useQueryClient()
 
-    // Manual refetch function so both the initial visibility-trigger and
-    // the useInsightsJob completion callback share one call path. We
-    // store the error so the row renders a "Retry" affordance instead
-    // of a silent empty state — a 500 from one specific asset used to
-    // be indistinguishable from "no data yet".
+    // Lazy-load: only fetch stats once the row scrolls into view (or
+    // close to it). One IntersectionObserver instance is shared across
+    // every row with the same options — see ``useSharedIntersectionObserver``.
+    const isVisible = useSharedIntersectionObserver(ref, { rootMargin: '200px' })
+
+    // React Query owns the envelope state. Filter toggles that
+    // unmount/remount this row reuse the cached envelope (gcTime
+    // window), and the global useBackendRecovery hook can invalidate
+    // every ``insights-asset-stats`` key on Redis recovery.
+    const query = useAssetStats(providerId, assetName, { enabled: isVisible })
+    const envelope: Envelope<AssetStatsPayload> | null = query.data ?? null
+    const stats = envelope?.data ?? null
+    const loadingStats = query.isLoading || query.isFetching
+    const fetchError = query.error?.message ?? null
+
     const refetch = useCallback(() => {
-        setLoadingStats(true)
-        setFetchError(null)
-        providerService.getAssetStats(providerId, assetName)
-            .then((env) => {
-                setEnvelope(env)
-                setFetchError(null)
-            })
-            .catch((err) => {
-                setFetchError(err?.message ?? 'Failed to load asset metadata')
-            })
-            .finally(() => setLoadingStats(false))
-    }, [providerId, assetName])
+        // Imperative refetch shared by the Retry button and the
+        // useInsightsJob completion callback.
+        void query.refetch()
+    }, [query])
 
-    useEffect(() => {
-        const observer = new IntersectionObserver((entries) => {
-            if (entries[0].isIntersecting && !envelope && !loadingStats) {
-                refetch()
-                observer.disconnect()
-            }
-        }, { rootMargin: '200px' })
-        if (ref.current) observer.observe(ref.current)
-        return () => observer.disconnect()
-    }, [envelope, loadingStats, refetch])
-
-    // Auto-refresh when a computing/stale job completes. The hook polls
-    // /admin/insights/jobs/{id} every 2s; on completion it fires onComplete
-    // which refetches the (now-fresh) cache row.
+    // Auto-refresh when a computing/stale job completes. ``useInsightsJob``
+    // polls /admin/insights/jobs/{id}; on completion we invalidate the
+    // asset-stats query so a fresh fetch reads the now-populated cache row.
     useInsightsJob(
         envelope?.meta.job_id ?? null,
         envelope?.meta.poll_url ?? null,
         {
             enabled: !!envelope?.meta.refreshing && !!envelope?.meta.job_id,
-            onComplete: refetch,
+            onComplete: () => {
+                queryClient.invalidateQueries({
+                    queryKey: [ASSET_STATS_QUERY_KEY_PREFIX, providerId, assetName],
+                })
+            },
         },
     )
-
-    // The cached stats payload — null while computing, unavailable, or before
-    // the IntersectionObserver fires. Existing rendering below can keep
-    // referencing `stats?.foo` unchanged.
-    const stats = envelope?.data ?? null
 
     // Separate handlers: circle = select/unregister, chevron = expand
     const handleSelect = (e: React.MouseEvent) => {

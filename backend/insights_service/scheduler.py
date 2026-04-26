@@ -4,11 +4,17 @@ Runs in every stats-service replica. Duplicate-enqueue protection comes
 from the Redis ``SET NX`` dedup key — only one replica's XADD wins per
 (ds_id, tick). Auto-creates a polling config for newly-discovered data
 sources using operator-configured defaults.
+
+This module also hosts the periodic stream-trim task — see
+``run_trim_scheduler``. The trim cadence is independent of the main
+poll tick because trimming is much cheaper than polling and only
+needs to keep growth bounded over hours, not seconds.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -24,10 +30,30 @@ from backend.app.db.models import (
 )
 
 from .config import StatsServiceConfig
-from .redis_streams import enqueue, try_claim
+from .redis_streams import (
+    XAUTOCLAIM_MIN_IDLE_MS,
+    enqueue,
+    trim_streams_by_minid,
+    try_claim,
+)
 from .schemas import StatsJobEnvelope
 
 logger = logging.getLogger(__name__)
+
+
+# 1 hour default. Trim is cheap; the only reason not to run it more
+# often is the small Redis EVAL cost of XPENDING + XTRIM per stream.
+_TRIM_INTERVAL_SECS = float(os.getenv("INSIGHTS_TRIM_INTERVAL_SECS", "3600"))
+
+# 24 hours default cutoff. Anything older that's still in PEL would
+# already have been redelivered or DLQ'd many times over; if not, the
+# PEL-freshness gate inside ``trim_streams_by_minid`` skips the trim
+# anyway. Bounded below by 2× XAUTOCLAIM_MIN_IDLE_MS so a single
+# redelivery cycle can't race the trim.
+_TRIM_CUTOFF_AGE_MS = max(
+    int(os.getenv("INSIGHTS_TRIM_CUTOFF_AGE_MS", str(24 * 60 * 60 * 1000))),
+    2 * XAUTOCLAIM_MIN_IDLE_MS,
+)
 
 
 @dataclass(frozen=True)
@@ -184,3 +210,50 @@ async def get_known_node_counts() -> dict[str, int]:
     async with factory() as session:
         result = await session.execute(select(DataSourceStatsORM))
         return {row.data_source_id: (row.node_count or 0) for row in result.scalars()}
+
+
+# ── Periodic stream trim ────────────────────────────────────────────
+
+async def run_trim_scheduler(shutdown: asyncio.Event) -> None:
+    """Periodic MINID-based trim of all jobs streams.
+
+    Runs every ``INSIGHTS_TRIM_INTERVAL_SECS`` (default 1h). The trim
+    helper is PEL-safe — see ``trim_streams_by_minid``. Failures here
+    are logged and the loop continues; bounded growth is operationally
+    important but not safety-critical (DLQ length and worker progress
+    are surfaced separately via ``/health``).
+    """
+    logger.info(
+        "Trim scheduler started (interval=%.0fs, cutoff_age_ms=%d)",
+        _TRIM_INTERVAL_SECS, _TRIM_CUTOFF_AGE_MS,
+    )
+    while not shutdown.is_set():
+        # Wait first so the very first trim doesn't fight a fresh
+        # deploy still drying its consumer-group state.
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=_TRIM_INTERVAL_SECS)
+            return  # shutdown triggered while waiting
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            results = await trim_streams_by_minid(_TRIM_CUTOFF_AGE_MS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Trim tick failed: %s", exc, exc_info=True)
+            continue
+
+        for stream_name, result in results.items():
+            if result.skipped:
+                logger.info(
+                    "trim_skipped stream=%s reason=%s",
+                    stream_name, result.reason,
+                )
+            else:
+                logger.info(
+                    "trim_done stream=%s trimmed=%d",
+                    stream_name, result.trimmed,
+                )
+
+    logger.info("Trim scheduler stopped")

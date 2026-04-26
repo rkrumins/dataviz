@@ -24,11 +24,12 @@ interface Props {
 const DEFAULTS: ProviderAdmissionConfig = {
     bucket_capacity: 8,
     refill_per_sec: 2,
-    circuit_fail_max: 5,
-    circuit_window_secs: 30,
-    half_open_after_secs: 60,
 }
 
+// Circuit-breaker knobs were removed when admission's in-memory circuit
+// was deleted in favour of the provider-proxy circuit. The two layers
+// here are now: (a) Redis GCRA bucket (cluster-wide rate cap), (b)
+// rolling-window observability counters surfaced below.
 const FIELDS: Array<{
     key: keyof ProviderAdmissionConfig
     label: string
@@ -47,24 +48,6 @@ const FIELDS: Array<{
         label: 'Refill per second',
         hint: 'Sustained calls/sec (1–100).',
         min: 1, max: 100,
-    },
-    {
-        key: 'circuit_fail_max',
-        label: 'Circuit fail max',
-        hint: 'Timeouts in window before circuit opens (1–50).',
-        min: 1, max: 50,
-    },
-    {
-        key: 'circuit_window_secs',
-        label: 'Circuit window (s)',
-        hint: 'Rolling window for failure counting (5–600).',
-        min: 5, max: 600,
-    },
-    {
-        key: 'half_open_after_secs',
-        label: 'Half-open after (s)',
-        hint: 'Retry probe delay once circuit opens (5–600).',
-        min: 5, max: 600,
     },
 ]
 
@@ -85,9 +68,6 @@ export function ProviderAdmissionEditor({ providerId, embedded }: Props) {
             setDraft({
                 bucket_capacity: cfg.bucket_capacity,
                 refill_per_sec: cfg.refill_per_sec,
-                circuit_fail_max: cfg.circuit_fail_max,
-                circuit_window_secs: cfg.circuit_window_secs,
-                half_open_after_secs: cfg.half_open_after_secs,
             })
         } catch (e: any) {
             setError(e?.message ?? 'Failed to load admission config')
