@@ -274,7 +274,7 @@ function WizardShell({
                             initial={{ opacity: 0, x: 20 }}
                             animate={{ opacity: 1, x: 0 }}
                             exit={{ opacity: 0, x: -20 }}
-                            transition={{ duration: 0.2 }}
+                            transition={{ duration: 0.08 }}
                             className="p-8"
                         >
                             {children}

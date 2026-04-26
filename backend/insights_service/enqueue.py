@@ -24,7 +24,13 @@ from typing import Optional
 
 from backend.app.config import resilience
 
-from .redis_streams import enqueue, get_stream, try_claim
+from .redis_streams import (
+    DISCOVERY_STREAM,
+    enqueue,
+    get_stream,
+    release_claim,
+    try_claim,
+)
 from .schemas import (
     DiscoveryJobEnvelope,
     JobEnvelope,
@@ -172,11 +178,20 @@ async def enqueue_stats_job_safe(
 
 # ── Discovery: pre-registration asset cache miss ─────────────────────
 
+# Discovery jobs complete in seconds (list_graphs / get_stats), unlike
+# stats polls of 1M+ edge graphs which can take minutes. Using the
+# global ``_DEFAULT_DEDUP_TTL_SECS`` (1200s) here was the root cause
+# of the "Stale for X minutes" regression: a stalled worker held the
+# claim for 20 min before re-enqueue could happen. 90s default is
+# enough headroom for slow providers but recovers fast on stalls.
+_DISCOVERY_DEDUP_TTL_SECS = resilience.DISCOVERY_DEDUP_TTL_SECS
+
+
 async def enqueue_discovery_job_safe(
     provider_id: str,
     asset_name: str = "",
     *,
-    dedup_ttl_secs: int = _DEFAULT_DEDUP_TTL_SECS,
+    dedup_ttl_secs: int = _DISCOVERY_DEDUP_TTL_SECS,
 ) -> Optional[str]:
     """Redis-tolerant enqueue for asset discovery jobs.
 
@@ -191,6 +206,25 @@ async def enqueue_discovery_job_safe(
         enqueued_at=datetime.now(timezone.utc),
     )
     return await enqueue_job_safe(envelope, dedup_ttl_secs=dedup_ttl_secs)
+
+
+async def enqueue_discovery_job_force(
+    provider_id: str,
+    asset_name: str = "",
+) -> Optional[str]:
+    """Drop any existing dedup claim then re-enqueue a discovery job.
+
+    Used by the on-demand refresh endpoints (``POST .../refresh``).
+    Idempotent at the cache level: the discovery handler is an UPSERT
+    into ``asset_discovery_cache`` so a duplicate run only burns one
+    extra provider call. Race window between release and claim is
+    tolerable for an explicit user-driven action.
+    """
+    if not provider_id:
+        return None
+    scope_key = f"{provider_id}:{asset_name}"
+    await release_claim(scope_key, stream=DISCOVERY_STREAM)
+    return await enqueue_discovery_job_safe(provider_id, asset_name)
 
 
 # ── Purge: aggregation edge deletion ─────────────────────────────────
