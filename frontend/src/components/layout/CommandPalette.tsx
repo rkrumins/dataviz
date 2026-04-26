@@ -127,7 +127,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     <div className="fixed inset-0 z-[100]">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-fade-in"
+        className="absolute inset-0 bg-black/50 animate-fade-in"
         onClick={() => onOpenChange(false)}
       />
 
@@ -136,7 +136,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         <Command
           className={cn(
             "w-full max-w-2xl rounded-2xl overflow-hidden",
-            "glass-panel shadow-2xl",
+            "glass-panel shadow-lg",
             "animate-slide-up"
           )}
           loop

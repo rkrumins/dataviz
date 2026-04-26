@@ -184,7 +184,7 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
       className={cn(
         'w-80 max-w-sm rounded-xl overflow-hidden pointer-events-auto',
         'bg-white dark:bg-slate-800',
-        'border border-slate-200 dark:border-slate-700 shadow-2xl shadow-black/15 dark:shadow-black/40',
+        'border border-slate-200 dark:border-slate-700 shadow-lg shadow-black/15 dark:shadow-black/40',
       )}
     >
       <div className="flex items-center gap-3 px-4 py-3.5">

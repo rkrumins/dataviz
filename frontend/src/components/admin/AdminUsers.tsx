@@ -388,7 +388,7 @@ export function AdminUsers() {
             {/* Header */}
             <div className="flex items-center justify-between mb-10">
                 <div className="flex items-center gap-3">
-                    <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                    <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-md">
                         <Users className="w-6 h-6 text-white" />
                     </div>
                     <div>
@@ -401,7 +401,7 @@ export function AdminUsers() {
                 <div className="flex items-center gap-2">
                     <button
                         onClick={() => setModal({ kind: 'invite' })}
-                        className="px-4 py-2 rounded-xl font-medium text-sm text-white bg-accent-lineage hover:brightness-110 transition-all flex items-center gap-2 shadow-sm shadow-accent-lineage/20"
+                        className="px-4 py-2 rounded-xl font-medium text-sm text-white bg-accent-lineage hover:brightness-110 transition-colors duration-150 flex items-center gap-2 shadow-sm shadow-accent-lineage/20"
                     >
                         <Link2 className="w-4 h-4" />
                         Invite by Link
@@ -425,7 +425,7 @@ export function AdminUsers() {
                     return (
                         <div key={kpi.key} className={cn(
                             "relative overflow-hidden border border-glass-border rounded-xl p-5 bg-canvas-elevated",
-                            "hover:shadow-lg transition-all duration-200"
+                            "hover:shadow-lg transition-colors duration-150 duration-200"
                         )}>
                             <div className={cn("absolute inset-0 bg-gradient-to-br pointer-events-none", kpi.gradient)} />
                             <div className="relative">
@@ -522,7 +522,7 @@ export function AdminUsers() {
                         return (
                             <button key={tab.value} onClick={() => setFilter(tab.value)}
                                 className={cn(
-                                    "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all",
+                                    "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors duration-150",
                                     isActive ? "bg-white dark:bg-white/10 text-ink shadow-sm" : "text-ink-muted hover:text-ink"
                                 )}>
                                 <Icon className="w-3.5 h-3.5" />
@@ -673,7 +673,7 @@ export function AdminUsers() {
                                                         <button onClick={() => handleApprove(user.id)} disabled={isActing}
                                                             title="Approve"
                                                             className={cn(
-                                                                "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all",
+                                                                "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors duration-150",
                                                                 "bg-emerald-500 text-white shadow-sm shadow-emerald-500/20",
                                                                 "hover:bg-emerald-600 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
                                                             )}>
@@ -682,7 +682,7 @@ export function AdminUsers() {
                                                         </button>
                                                         <button onClick={() => setModal({ kind: 'reject', userId: user.id, name: user.displayName })}
                                                             disabled={isActing} title="Reject"
-                                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20 hover:bg-red-500/20 active:scale-[0.98] disabled:opacity-50 transition-all">
+                                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20 hover:bg-red-500/20 active:scale-[0.98] disabled:opacity-50 transition-colors duration-150">
                                                             <XCircle className="w-3.5 h-3.5" />
                                                             Reject
                                                         </button>
@@ -722,7 +722,7 @@ export function AdminUsers() {
                                                         {user.status === 'suspended' && (
                                                             <button onClick={() => handleReactivate(user.id)}
                                                                 disabled={isActing} title="Reactivate user"
-                                                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 active:scale-[0.98] disabled:opacity-50 transition-all">
+                                                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 active:scale-[0.98] disabled:opacity-50 transition-colors duration-150">
                                                                 {isActing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
                                                                 Reactivate
                                                             </button>
@@ -758,11 +758,11 @@ export function AdminUsers() {
                 {modal && (
                     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                         transition={{ duration: 0.15 }} className="fixed inset-0 z-50 flex items-center justify-center p-4">
-                        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={closeModal} />
+                        <div className="absolute inset-0 bg-black/50" onClick={closeModal} />
                         <motion.div initial={{ scale: 0.96, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
                             exit={{ scale: 0.96, opacity: 0 }} transition={{ duration: 0.2 }}
                             onClick={(e) => e.stopPropagation()}
-                            className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-md p-6">
+                            className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md p-6">
 
                             {/* ── Reject modal ── */}
                             {modal.kind === 'reject' && (
@@ -812,7 +812,7 @@ export function AdminUsers() {
                                             return (
                                                 <button key={r.value} onClick={() => setSelectedRole(r.value)}
                                                     className={cn(
-                                                        "w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left",
+                                                        "w-full flex items-center gap-3 p-3 rounded-xl border transition-colors duration-150 text-left",
                                                         isSelected
                                                             ? "border-accent-lineage bg-accent-lineage/5 shadow-sm"
                                                             : "border-glass-border hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
@@ -869,7 +869,7 @@ export function AdminUsers() {
                                             </div>
                                             <div className="flex justify-end">
                                                 <button onClick={closeModal}
-                                                    className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 transition-all">
+                                                    className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 transition-colors duration-150">
                                                     Done
                                                 </button>
                                             </div>
@@ -948,7 +948,7 @@ export function AdminUsers() {
                                             </div>
                                             <div className="flex justify-end">
                                                 <button onClick={closeModal}
-                                                    className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 transition-all">
+                                                    className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 transition-colors duration-150">
                                                     Done
                                                 </button>
                                             </div>
@@ -959,7 +959,7 @@ export function AdminUsers() {
                                             <div className="flex gap-2 mb-4">
                                                 <button onClick={() => setResetMode('token')}
                                                     className={cn(
-                                                        "flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-xs font-semibold border transition-all",
+                                                        "flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-xs font-semibold border transition-colors duration-150",
                                                         resetMode === 'token'
                                                             ? "border-accent-lineage bg-accent-lineage/5 text-accent-lineage"
                                                             : "border-glass-border text-ink-muted hover:text-ink"
@@ -969,7 +969,7 @@ export function AdminUsers() {
                                                 </button>
                                                 <button onClick={() => setResetMode('direct')}
                                                     className={cn(
-                                                        "flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-xs font-semibold border transition-all",
+                                                        "flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-xs font-semibold border transition-colors duration-150",
                                                         resetMode === 'direct'
                                                             ? "border-accent-lineage bg-accent-lineage/5 text-accent-lineage"
                                                             : "border-glass-border text-ink-muted hover:text-ink"
@@ -1072,7 +1072,7 @@ function ModalFooter({ onCancel, onConfirm, confirmLabel, confirmIcon: Icon, con
             </button>
             <button onClick={onConfirm} disabled={loading || disabled}
                 className={cn(
-                    "px-4 py-2.5 rounded-xl text-sm font-semibold text-white transition-all shadow-sm flex items-center gap-2",
+                    "px-4 py-2.5 rounded-xl text-sm font-semibold text-white transition-colors duration-150 shadow-sm flex items-center gap-2",
                     "disabled:opacity-50 disabled:cursor-not-allowed",
                     confirmClass
                 )}>

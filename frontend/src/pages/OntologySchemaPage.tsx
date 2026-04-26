@@ -1210,7 +1210,7 @@ export function OntologySchemaPage() {
                       key={t.id}
                       onClick={() => setTab(t.id)}
                       className={cn(
-                        'flex items-center gap-2 px-4 py-3 text-sm font-semibold transition-all border-b-2 relative',
+                        'flex items-center gap-2 px-4 py-3 text-sm font-semibold transition-colors duration-150 border-b-2 relative',
                         isActive
                           ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
                           : 'border-transparent text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 rounded-t-xl',
@@ -1577,8 +1577,8 @@ export function OntologySchemaPage() {
       {/* Discard Confirmation */}
       {showDiscardConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowDiscardConfirm(false)} />
-          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl animate-in fade-in zoom-in-95 p-6">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setShowDiscardConfirm(false)} />
+          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6">
             <div className="flex items-center gap-3 mb-3">
               <div className="w-10 h-10 rounded-xl bg-red-500/15 flex items-center justify-center">
                 <Trash2 className="w-5 h-5 text-red-500" />

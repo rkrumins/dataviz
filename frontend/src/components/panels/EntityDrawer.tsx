@@ -202,7 +202,7 @@ export function EntityDrawer({
         className={cn(
           "fixed right-0 top-0 bottom-0 w-[400px] z-50",
           "bg-canvas-elevated/98 backdrop-blur-2xl",
-          "border-l border-glass-border shadow-2xl shadow-black/20",
+          "border-l border-glass-border shadow-lg shadow-black/20",
           "flex flex-col overflow-hidden"
         )}
       >
@@ -234,7 +234,7 @@ export function EntityDrawer({
             </div>
             <button
               onClick={handleClose}
-              className="w-8 h-8 rounded-lg flex items-center justify-center text-ink-muted hover:text-ink hover:bg-white/10 transition-all"
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-ink-muted hover:text-ink hover:bg-white/10 transition-colors duration-150"
             >
               <LucideIcons.X className="w-4 h-4" />
             </button>
@@ -252,7 +252,7 @@ export function EntityDrawer({
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => onTraceUp?.(selectedNode.id)}
-                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20 transition-all group"
+                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20 transition-colors duration-150 group"
               >
                 <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center group-hover:bg-blue-500/30 transition-colors">
                   <LucideIcons.ArrowUpLeft className="w-5 h-5 text-blue-500" />
@@ -265,7 +265,7 @@ export function EntityDrawer({
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => onTraceDown?.(selectedNode.id)}
-                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-green-500/10 border border-green-500/20 hover:bg-green-500/20 transition-all group"
+                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-green-500/10 border border-green-500/20 hover:bg-green-500/20 transition-colors duration-150 group"
               >
                 <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center group-hover:bg-green-500/30 transition-colors">
                   <LucideIcons.ArrowDownRight className="w-5 h-5 text-green-500" />
@@ -278,7 +278,7 @@ export function EntityDrawer({
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => onFullTrace?.(selectedNode.id)}
-                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-purple-500/10 border border-purple-500/20 hover:bg-purple-500/20 transition-all group"
+                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-purple-500/10 border border-purple-500/20 hover:bg-purple-500/20 transition-colors duration-150 group"
               >
                 <div className="w-10 h-10 rounded-full bg-purple-500/20 flex items-center justify-center group-hover:bg-purple-500/30 transition-colors">
                   <LucideIcons.GitBranch className="w-5 h-5 text-purple-500" />
@@ -427,7 +427,7 @@ export function EntityDrawer({
             <div className="flex items-center justify-end gap-3">
               <button
                 onClick={handleCancel}
-                className="px-4 py-2 text-sm font-medium text-ink-muted hover:text-ink hover:bg-white/5 rounded-xl transition-all"
+                className="px-4 py-2 text-sm font-medium text-ink-muted hover:text-ink hover:bg-white/5 rounded-xl transition-colors duration-150"
               >
                 Cancel
               </button>
@@ -435,7 +435,7 @@ export function EntityDrawer({
                 onClick={handleSave}
                 disabled={!hasChanges || !!jsonError}
                 className={cn(
-                  "px-5 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all",
+                  "px-5 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 transition-colors duration-150",
                   hasChanges && !jsonError
                     ? "bg-accent-lineage text-white hover:brightness-110 shadow-lg shadow-accent-lineage/25"
                     : "bg-white/5 text-ink-muted cursor-not-allowed"
@@ -470,7 +470,7 @@ function ActionButton({ icon: Icon, label, primary, active, onClick }: ActionBut
       onClick={onClick}
       title={label}
       className={cn(
-        "h-9 px-3 rounded-xl flex items-center gap-2 text-sm font-medium transition-all duration-200",
+        "h-9 px-3 rounded-xl flex items-center gap-2 text-sm font-medium transition-colors duration-150 duration-200",
         primary
           ? "bg-accent-lineage text-white hover:brightness-110 shadow-md shadow-accent-lineage/20"
           : active
@@ -497,7 +497,7 @@ function ModeTab({ active, onClick, icon: Icon, label, badge }: ModeTabProps) {
     <button
       onClick={onClick}
       className={cn(
-        "flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200",
+        "flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors duration-150 duration-200",
         active
           ? "bg-white/10 text-ink shadow-sm"
           : "text-ink-muted hover:text-ink hover:bg-white/5"
@@ -571,7 +571,7 @@ function ViewModeContent({
           </code>
           <button
             onClick={onCopyUrn}
-            className="p-2 rounded-lg hover:bg-white/10 text-ink-muted hover:text-ink transition-all"
+            className="p-2 rounded-lg hover:bg-white/10 text-ink-muted hover:text-ink transition-colors duration-150"
             title="Copy URN"
           >
             {copiedUrn ? (
@@ -687,7 +687,7 @@ function EditModeContent({
             type="text"
             value={formData.label || formData.name || ''}
             onChange={(e) => onChange('label', e.target.value)}
-            className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 focus:bg-white/8 transition-all outline-none text-sm"
+            className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 focus:bg-white/8 transition-colors duration-150 outline-none text-sm"
             placeholder="Entity name..."
           />
         </div>
@@ -702,7 +702,7 @@ function EditModeContent({
             type="text"
             value={formData.businessLabel || ''}
             onChange={(e) => onChange('businessLabel', e.target.value)}
-            className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 focus:bg-white/8 transition-all outline-none text-sm"
+            className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 focus:bg-white/8 transition-colors duration-150 outline-none text-sm"
             placeholder="Business-friendly name..."
           />
         </div>
@@ -717,7 +717,7 @@ function EditModeContent({
             value={formData.description || ''}
             onChange={(e) => onChange('description', e.target.value)}
             rows={3}
-            className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 focus:bg-white/8 transition-all outline-none text-sm resize-none"
+            className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 focus:bg-white/8 transition-colors duration-150 outline-none text-sm resize-none"
             placeholder="Add a description..."
           />
         </div>
@@ -737,7 +737,7 @@ function EditModeContent({
             />
             <button
               onClick={onCopyUrn}
-              className="p-3 rounded-xl bg-white/5 hover:bg-white/10 text-ink-muted hover:text-ink transition-all"
+              className="p-3 rounded-xl bg-white/5 hover:bg-white/10 text-ink-muted hover:text-ink transition-colors duration-150"
               title="Copy URN"
             >
               <LucideIcons.Copy className="w-4 h-4" />
@@ -761,14 +761,14 @@ function EditModeContent({
                     value={formData[field.id] || ''}
                     onChange={(e) => onChange(field.id, e.target.value)}
                     rows={2}
-                    className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-all outline-none text-sm resize-none"
+                    className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm resize-none"
                   />
                 ) : (
                   <input
                     type="text"
                     value={formData[field.id] || ''}
                     onChange={(e) => onChange(field.id, e.target.value)}
-                    className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-all outline-none text-sm"
+                    className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm"
                   />
                 )}
               </div>
@@ -793,7 +793,7 @@ function EditModeContent({
                   type="text"
                   value={typeof formData[key] === 'object' ? JSON.stringify(formData[key]) : formData[key] || ''}
                   onChange={(e) => onChange(key, e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-all outline-none text-sm"
+                  className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm"
                 />
               </div>
             ))}
@@ -804,7 +804,7 @@ function EditModeContent({
       {/* Switch to JSON */}
       <button
         onClick={onSwitchToJson}
-        className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-ink-muted hover:text-ink text-sm font-medium transition-all"
+        className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-ink-muted hover:text-ink text-sm font-medium transition-colors duration-150"
       >
         <LucideIcons.Code className="w-4 h-4" />
         Edit as Raw JSON
@@ -844,7 +844,7 @@ function JsonModeContent({ rawJson, jsonError, onChange }: JsonModeContentProps)
         value={rawJson}
         onChange={(e) => onChange(e.target.value)}
         className={cn(
-          "w-full h-[500px] px-4 py-3 rounded-xl bg-black/10 dark:bg-white/5 border transition-all outline-none text-xs font-mono resize-none custom-scrollbar",
+          "w-full h-[500px] px-4 py-3 rounded-xl bg-black/10 dark:bg-white/5 border transition-colors duration-150 outline-none text-xs font-mono resize-none custom-scrollbar",
           jsonError
             ? "border-red-500/30 focus:border-red-500/50"
             : "border-white/10 focus:border-accent-lineage/50"
@@ -870,7 +870,7 @@ function LineagePreviewRow({ direction, count, label }: LineagePreviewRowProps) 
     <button className={cn(
       "w-full flex items-center gap-3 p-3 rounded-xl",
       "bg-black/5 dark:bg-white/5",
-      "hover:bg-black/10 dark:hover:bg-white/10 transition-all"
+      "hover:bg-black/10 dark:hover:bg-white/10 transition-colors duration-150"
     )}>
       {direction === 'upstream' ? (
         <LucideIcons.ArrowUpRight className="w-4 h-4 text-ink-muted" />

@@ -72,7 +72,7 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
     const statusDot = { checking: 'bg-amber-400 animate-pulse', healthy: 'bg-emerald-400', unhealthy: 'bg-red-400', unknown: 'bg-gray-400' }[health.status]
 
     return (
-        <div className={cn("group border border-glass-border rounded-xl bg-canvas-elevated hover:shadow-lg transition-all duration-200", health.status === 'healthy' && "hover:border-emerald-500/30", health.status === 'unhealthy' && "border-red-500/20")}>
+        <div className={cn("group border border-glass-border rounded-xl bg-canvas-elevated hover:shadow-lg transition-colors duration-150 duration-200", health.status === 'healthy' && "hover:border-emerald-500/30", health.status === 'unhealthy' && "border-red-500/20")}>
             <div className="p-5">
                 <div className="flex items-start justify-between mb-4">
                     <div className="flex items-center gap-3">

@@ -179,7 +179,7 @@ function AssetRow({
         <div
             ref={ref}
             className={cn(
-                'rounded-xl border-2 transition-all duration-150 overflow-hidden',
+                'rounded-xl border-2 transition-colors duration-150 duration-150 overflow-hidden',
                 isRegistered
                     ? 'bg-emerald-500/5 border-emerald-500/30'
                     : isSelected
@@ -195,7 +195,7 @@ function AssetRow({
                     role="checkbox"
                     aria-checked={isRegistered || isSelected}
                     className={cn(
-                        'flex-shrink-0 w-5 h-5 rounded-full border-2 flex items-center justify-center cursor-pointer transition-all duration-150 group/sel',
+                        'flex-shrink-0 w-5 h-5 rounded-full border-2 flex items-center justify-center cursor-pointer transition-colors duration-150 duration-150 group/sel',
                         isRegistered
                             ? 'border-emerald-500 bg-emerald-500 hover:border-red-400 hover:bg-red-400'
                             : isSelected
@@ -542,8 +542,8 @@ function UnregisterDialog({
     const hasImpact = impact && (impact.workspaces.length > 0 || impact.views.length > 0)
     return (
         <div className="fixed inset-0 z-[70] flex items-center justify-center">
-            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => !loading && onCancel()} />
-            <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
+            <div className="absolute inset-0 bg-black/60" onClick={() => !loading && onCancel()} />
+            <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
                 <div className="flex items-center gap-3 mb-4">
                     <div className="w-10 h-10 rounded-xl bg-red-500/10 flex items-center justify-center">
                         <Trash2 className="w-5 h-5 text-red-500" />
@@ -1041,7 +1041,7 @@ export function RegistryAssets() {
                                 key={p.id}
                                 onClick={() => handleSelectProvider(p.id)}
                                 className={cn(
-                                    'w-full flex items-center gap-3 p-3 rounded-xl border text-left transition-all duration-150',
+                                    'w-full flex items-center gap-3 p-3 rounded-xl border text-left transition-colors duration-150 duration-150',
                                     isActive
                                         ? 'bg-indigo-500/8 border-indigo-500/30 shadow-sm'
                                         : 'bg-canvas-elevated border-glass-border hover:border-indigo-400/30 hover:bg-indigo-500/5'
@@ -1165,7 +1165,7 @@ export function RegistryAssets() {
                                             key={f.id}
                                             onClick={() => setStatusFilter(f.id as any)}
                                             className={cn(
-                                                'px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all duration-150 whitespace-nowrap',
+                                                'px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-colors duration-150 duration-150 whitespace-nowrap',
                                                 statusFilter === f.id
                                                     ? 'bg-canvas shadow text-ink'
                                                     : 'text-ink-muted hover:text-ink'
@@ -1247,7 +1247,7 @@ export function RegistryAssets() {
                             <button
                                 onClick={handleRegister}
                                 disabled={assetsLoading || selected.size === 0}
-                                className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-black tracking-wide bg-indigo-500 text-white hover:bg-indigo-600 shadow-lg shadow-indigo-500/20 transition-all active:scale-95 disabled:opacity-50 disabled:active:scale-100 disabled:shadow-none"
+                                className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-black tracking-wide bg-indigo-500 text-white hover:bg-indigo-600 shadow-md transition-colors duration-150 active:scale-95 disabled:opacity-50 disabled:active:scale-100 disabled:shadow-none"
                             >
                                 <Zap className="w-4 h-4" /> Onboard Sources ({selected.size})
                             </button>

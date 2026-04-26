@@ -255,7 +255,7 @@ export function EdgeDetailPanel({
             className={cn(
                 "absolute right-0 top-0 bottom-0 w-96 z-20",
                 "bg-canvas-elevated/95 backdrop-blur-lg border-l border-glass-border",
-                "flex flex-col shadow-2xl",
+                "flex flex-col shadow-lg",
                 className
             )}
         >
@@ -357,7 +357,7 @@ export function EdgeDetailPanel({
                                         onClick={() => setDirectionFilter(filter.id)}
                                         disabled={!focusedNode && filter.id !== 'all'}
                                         className={cn(
-                                            "flex items-center gap-2 px-2.5 py-2 rounded-lg transition-all text-left",
+                                            "flex items-center gap-2 px-2.5 py-2 rounded-lg transition-colors duration-150 text-left",
                                             directionFilter === filter.id
                                                 ? "bg-cyan-500/10 border border-cyan-500/30 text-cyan-600 dark:text-cyan-400"
                                                 : "border border-transparent hover:bg-black/5 dark:hover:bg-white/5",
@@ -683,7 +683,7 @@ function EdgeCard({
         <motion.div
             layout
             className={cn(
-                "rounded-lg border transition-all cursor-pointer",
+                "rounded-lg border transition-colors duration-150 cursor-pointer",
                 "bg-canvas hover:shadow-sm",
                 isHighlighted && "ring-2 ring-amber-500/50",
                 compact ? "border-glass-border" : "border-l-2"
@@ -814,7 +814,7 @@ function EdgeCard({
                                     <span className="text-ink-secondary">{(confidence * 100).toFixed(1)}%</span>
                                     <div className="mt-1 h-1.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
                                         <div
-                                            className="h-full rounded-full transition-all"
+                                            className="h-full rounded-full transition-colors duration-150"
                                             style={{
                                                 width: `${confidence * 100}%`,
                                                 backgroundColor: color

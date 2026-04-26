@@ -243,7 +243,7 @@ export function AdminAnnouncements() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6 mb-10">
         <div className="flex items-center gap-3">
-          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-md">
             <Megaphone className="w-6 h-6 text-white" />
           </div>
           <div>
@@ -266,7 +266,7 @@ export function AdminAnnouncements() {
           <button
             type="button"
             onClick={openCreate}
-            className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-medium shadow-lg shadow-indigo-500/20 hover:shadow-indigo-500/30 transition-all flex items-center gap-2"
+            className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-medium shadow-md hover:shadow-indigo-500/30 transition-colors duration-150 flex items-center gap-2"
           >
             <Plus className="w-4 h-4" />
             New Announcement
@@ -344,7 +344,7 @@ export function AdminAnnouncements() {
                 type="button"
                 onClick={handleConfigSave}
                 disabled={configSaving}
-                className="px-5 py-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-medium shadow-lg shadow-indigo-500/20 hover:shadow-indigo-500/30 transition-all disabled:opacity-50 flex items-center gap-2"
+                className="px-5 py-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-medium shadow-md hover:shadow-indigo-500/30 transition-colors duration-150 disabled:opacity-50 flex items-center gap-2"
               >
                 {configSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
                 Save Settings
@@ -444,7 +444,7 @@ export function AdminAnnouncements() {
                         key={opt.value}
                         type="button"
                         onClick={() => updateField('bannerType', opt.value)}
-                        className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-medium transition-all ${
+                        className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-medium transition-colors duration-150 ${
                           isSelected
                             ? `${TYPE_BADGE_STYLES[opt.value]} border-current shadow-sm`
                             : 'border-glass-border text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5'
@@ -464,7 +464,7 @@ export function AdminAnnouncements() {
                 <button
                   type="button"
                   onClick={() => updateField('isActive', !form.isActive)}
-                  className={`flex items-center gap-3 p-4 rounded-xl border transition-all text-left ${
+                  className={`flex items-center gap-3 p-4 rounded-xl border transition-colors duration-150 text-left ${
                     form.isActive
                       ? 'border-emerald-500/30 bg-emerald-500/5'
                       : 'border-glass-border bg-canvas hover:bg-black/[0.02] dark:hover:bg-white/[0.02]'
@@ -488,7 +488,7 @@ export function AdminAnnouncements() {
                 </button>
 
                 {/* Snooze duration card */}
-                <div className={`flex items-center gap-3 p-4 rounded-xl border transition-all ${
+                <div className={`flex items-center gap-3 p-4 rounded-xl border transition-colors duration-150 ${
                   form.snoozeDurationMinutes > 0
                     ? 'border-indigo-500/30 bg-indigo-500/5'
                     : 'border-glass-border bg-canvas'
@@ -569,7 +569,7 @@ export function AdminAnnouncements() {
                   type="button"
                   onClick={handleSave}
                   disabled={saving || !form.title.trim() || !form.message.trim()}
-                  className="px-5 py-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-medium shadow-lg shadow-indigo-500/20 hover:shadow-indigo-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  className="px-5 py-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-medium shadow-md hover:shadow-indigo-500/30 transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                 >
                   {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
                   {editingId ? 'Save Changes' : 'Create'}
@@ -598,7 +598,7 @@ export function AdminAnnouncements() {
           <button
             type="button"
             onClick={openCreate}
-            className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-medium shadow-lg shadow-indigo-500/20 hover:shadow-indigo-500/30 transition-all inline-flex items-center gap-2"
+            className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-medium shadow-md hover:shadow-indigo-500/30 transition-colors duration-150 inline-flex items-center gap-2"
           >
             <Plus className="w-4 h-4" />
             New Announcement
@@ -617,7 +617,7 @@ export function AdminAnnouncements() {
                 layout
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                className={`rounded-2xl border p-5 transition-all ${
+                className={`rounded-2xl border p-5 transition-colors duration-150 ${
                   ann.isActive
                     ? 'border-glass-border bg-canvas-elevated'
                     : 'border-glass-border/50 bg-canvas-elevated/50 opacity-60'
@@ -731,7 +731,7 @@ export function AdminAnnouncements() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm"
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40"
             onClick={() => !deleteLoading && setDeletingId(null)}
           >
             <motion.div
@@ -739,7 +739,7 @@ export function AdminAnnouncements() {
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
               onClick={(e) => e.stopPropagation()}
-              className="bg-canvas-elevated rounded-2xl border border-glass-border shadow-2xl p-6 max-w-sm w-full mx-4"
+              className="bg-canvas-elevated rounded-2xl border border-glass-border shadow-lg p-6 max-w-sm w-full mx-4"
             >
               <h3 className="text-lg font-semibold text-ink mb-2">Delete Announcement</h3>
               <p className="text-sm text-ink-secondary mb-6">
@@ -758,7 +758,7 @@ export function AdminAnnouncements() {
                   type="button"
                   onClick={handleDelete}
                   disabled={deleteLoading}
-                  className="px-4 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white text-sm font-medium shadow-lg shadow-red-500/20 transition-all disabled:opacity-50 flex items-center gap-2"
+                  className="px-4 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white text-sm font-medium shadow-md transition-colors duration-150 disabled:opacity-50 flex items-center gap-2"
                 >
                   {deleteLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                   Delete

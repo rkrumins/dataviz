@@ -107,7 +107,7 @@ function TabBtn({ active, icon: Icon, label, count, onClick }: {
         <button
             onClick={onClick}
             className={cn(
-                "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all",
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors duration-150",
                 active
                     ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20"
                     : "text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 border border-transparent"
@@ -240,7 +240,7 @@ export function DataSourceDetailPanel({
                         className={cn(
                             'fixed right-0 top-0 h-full w-[480px] max-w-[92vw] z-[61]',
                             'bg-canvas border-l border-glass-border',
-                            'flex flex-col shadow-2xl',
+                            'flex flex-col shadow-lg',
                         )}
                         initial={{ x: 480 }}
                         animate={{ x: 0 }}
@@ -573,7 +573,7 @@ export function DataSourceDetailPanel({
                                         <div className="space-y-2">
                                             {views.map(view => (
                                                 <Link key={view.id} to={`/views/${view.id}`}
-                                                    className="flex items-center justify-between p-3 rounded-lg border border-glass-border hover:border-indigo-500/20 hover:bg-indigo-500/[0.02] transition-all group/view">
+                                                    className="flex items-center justify-between p-3 rounded-lg border border-glass-border hover:border-indigo-500/20 hover:bg-indigo-500/[0.02] transition-colors duration-150 group/view">
                                                     <div className="flex items-center gap-3 min-w-0">
                                                         <div className="w-7 h-7 rounded-lg bg-cyan-500/10 text-cyan-500 flex items-center justify-center shrink-0">
                                                             <Eye className="w-3.5 h-3.5" />

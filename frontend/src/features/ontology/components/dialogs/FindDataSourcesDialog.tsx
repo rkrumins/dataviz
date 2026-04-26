@@ -126,8 +126,8 @@ export function FindDataSourcesDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={isAssigning ? undefined : onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-xl mx-4 max-h-[80vh] flex flex-col animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+      <div className="absolute inset-0 bg-black/50" onClick={isAssigning ? undefined : onClose} />
+      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-xl mx-4 max-h-[80vh] flex flex-col animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
 
         {/* Header */}
         <div className="border-b border-glass-border/50 px-6 pt-6 pb-4 flex-shrink-0">
@@ -176,7 +176,7 @@ export function FindDataSourcesDialog({
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 placeholder="Search data sources..."
-                className="w-full pl-9 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/30 transition-all"
+                className="w-full pl-9 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/30 transition-colors duration-150"
               />
             </div>
           )}
@@ -203,7 +203,7 @@ export function FindDataSourcesDialog({
                 <div
                   key={`${r.workspaceId}-${r.dataSourceId}`}
                   className={cn(
-                    'p-4 rounded-xl border transition-all',
+                    'p-4 rounded-xl border transition-colors duration-150',
                     isAlreadyAssigned
                       ? 'border-emerald-500/30 bg-emerald-50/20 dark:bg-emerald-950/10'
                       : 'border-glass-border hover:border-glass-border-hover',
@@ -269,7 +269,7 @@ export function FindDataSourcesDialog({
                         onClick={() => onAssign(r.workspaceId, r.dataSourceId)}
                         disabled={isAssigning}
                         className={cn(
-                          'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex-shrink-0',
+                          'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors duration-150 flex-shrink-0',
                           coveragePct >= 50
                             ? 'bg-indigo-500 text-white hover:bg-indigo-600 shadow-sm shadow-indigo-500/20'
                             : 'border border-glass-border text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5',
