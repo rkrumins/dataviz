@@ -1354,6 +1354,9 @@ class FalkorDBProvider(GraphDataProvider):
         self,
         rows: list,
         ancestors_cache: Dict[str, List[str]],
+        *,
+        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+        baseline_aggregated: int = 0,
     ) -> tuple[int, int]:
         """Batch-level materialization — all Redis + Cypher ops in ~4 round-trips.
 
@@ -1459,6 +1462,33 @@ class FalkorDBProvider(GraphDataProvider):
                 params={"batch": chunk},
             )
             created += len(chunk)
+
+            # Intra-batch heartbeat. A single outer batch fans out to
+            # tens of thousands of ancestor pairs and runs ~100+ Cypher
+            # MERGE sub-batches; each sub-batch is ~1–3s, so the outer
+            # batch can take many minutes. Without an intra-batch hook
+            # the worker's checkpoint can't update ``created_edges`` /
+            # ``last_checkpoint_at`` for the duration, leaving the UI
+            # apparently frozen even though aggregation is making
+            # steady progress in FalkorDB.
+            #
+            # The callback receives the running aggregated total
+            # (across all completed outer batches up to and including
+            # this sub-batch). It deliberately doesn't touch the input
+            # cursor — that's the caller's job after the full outer
+            # batch lands, so a mid-batch crash still resumes from the
+            # last fully-committed boundary (writes are idempotent via
+            # MERGE + the SADD idempotency tracker, but we keep the
+            # boundary clean for clarity).
+            if intra_batch_callback is not None:
+                try:
+                    await intra_batch_callback(baseline_aggregated + created)
+                except Exception as cb_exc:
+                    logger.error(
+                        "Intra-batch progress callback failed at sub-batch "
+                        "ending %d (continuing): %s",
+                        chunk_start + len(chunk), cb_exc, exc_info=True,
+                    )
 
         return created, 0
 
@@ -1816,6 +1846,7 @@ class FalkorDBProvider(GraphDataProvider):
         lineage_edge_types: Optional[List[str]] = None,
         last_cursor: Optional[str] = None,
         progress_callback: Optional[Any] = None,
+        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """Batch materialization using ancestor-chain approach with cursor-based pagination.
 
@@ -1834,6 +1865,11 @@ class FalkorDBProvider(GraphDataProvider):
             lineage_edge_types: Functional edge types (from ontology)
             last_cursor: Resume point — composite key of last processed edge
             progress_callback: async fn(processed, total, cursor, created_count) for checkpointing
+            intra_batch_callback: async fn(running_aggregated_total) called after each
+                Cypher MERGE sub-batch within an outer batch. A single outer batch can
+                fan out to 100+ MERGE sub-batches running for several minutes; without
+                this hook the operator UI's ``last_checkpoint_at`` and ``created_edges``
+                would freeze for that whole window.
         """
         await self._ensure_connected()
 
@@ -1932,8 +1968,15 @@ class FalkorDBProvider(GraphDataProvider):
             # This replaces the previous per-edge loop that did 3 round-
             # trips per edge (SADD + SCARD + MERGE × N edges).
             t0 = time.monotonic()
+            # Pass ``created_count`` as the baseline so the intra-batch
+            # callback always receives the cumulative aggregated total
+            # across the whole job, not just within the current outer
+            # batch. The worker uses this as ``job.created_edges``
+            # directly so the UI sees a monotonically rising counter.
             batch_created, batch_errors = await self._materialize_edges_batched(
                 rows, ancestors_cache,
+                intra_batch_callback=intra_batch_callback,
+                baseline_aggregated=created_count,
             )
             created_count += batch_created
             errors += batch_errors
@@ -1953,12 +1996,24 @@ class FalkorDBProvider(GraphDataProvider):
                 created_count, errors,
             )
 
-            # Checkpoint via callback (for worker DB persistence)
+            # Checkpoint via callback (for worker DB persistence). The
+            # callback is the only path by which the running job's
+            # progress + cursor reach the operator UI; without ``exc_info``
+            # a silent failure here meant the user saw ``processed_edges =
+            # 0`` indefinitely while AGGREGATED edges accumulated in
+            # FalkorDB. Log the full traceback so the underlying cause is
+            # diagnosable, and continue the loop — the materialisation
+            # itself is independent of progress reporting.
             if progress_callback:
                 try:
                     await progress_callback(processed, total, current_cursor, created_count)
                 except Exception as e:
-                    logger.error(f"Progress callback failed: {e}")
+                    logger.error(
+                        "Progress callback failed at batch %d (processed=%d/%d, "
+                        "created=%d): %s — continuing materialisation",
+                        batch_num, processed, total, created_count, e,
+                        exc_info=True,
+                    )
 
             # If we got fewer rows than batch_size, we've reached the end
             if len(rows) < batch_size:
