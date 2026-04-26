@@ -22,7 +22,7 @@ import type { OnboardingFormData } from '../AssetOnboardingWizard'
 
 interface WorkspaceStepProps {
     formData: OnboardingFormData
-    updateFormData: (updates: Partial<OnboardingFormData>) => void
+    updateFormData: (updates: Partial<OnboardingFormData> | ((prev: OnboardingFormData) => Partial<OnboardingFormData>)) => void
     catalogItems: CatalogItemResponse[]
     /** Called when workspaces are loaded from the API — parent uses this to build name maps */
     onWorkspacesLoaded?: (nameMap: Record<string, string>) => void
@@ -198,16 +198,18 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
         itemId: string,
         updates: Partial<OnboardingFormData['allocations'][string]>
     ) => {
-        const current = formData.allocations[itemId] ?? {
-            workspaceId: '',
-            newWorkspaceName: '',
-            newWorkspaceDescription: '',
-        }
-        updateFormData({
-            allocations: {
-                ...formData.allocations,
-                [itemId]: { ...current, ...updates },
-            },
+        updateFormData(prev => {
+            const current = prev.allocations[itemId] ?? {
+                workspaceId: '',
+                newWorkspaceName: '',
+                newWorkspaceDescription: '',
+            }
+            return {
+                allocations: {
+                    ...prev.allocations,
+                    [itemId]: { ...current, ...updates },
+                },
+            }
         })
     }
 
@@ -225,15 +227,18 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
     }
 
     const handleGroupAll = (wsId: string) => {
-        const newAllocations = { ...formData.allocations }
-        for (const item of catalogItems) {
-            newAllocations[item.id] = {
-                ...newAllocations[item.id],
-                workspaceId: wsId,
-                // Clear stale new-workspace fields when assigning to existing
-                ...(wsId !== 'new' ? { newWorkspaceName: '', newWorkspaceDescription: '' } : {}),
+        updateFormData(prev => {
+            const newAllocations = { ...prev.allocations }
+            for (const item of catalogItems) {
+                newAllocations[item.id] = {
+                    ...newAllocations[item.id],
+                    workspaceId: wsId,
+                    // Clear stale new-workspace fields when assigning to existing
+                    ...(wsId !== 'new' ? { newWorkspaceName: '', newWorkspaceDescription: '' } : {}),
+                }
             }
-        }
+            return { allocations: newAllocations }
+        })
         setModes(prev => {
             const next = { ...prev }
             for (const item of catalogItems) {
@@ -241,20 +246,22 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
             }
             return next
         })
-        updateFormData({ allocations: newAllocations })
     }
 
     const handleGroupAllNew = (name: string) => {
         if (!name.trim()) return
-        const newAllocations = { ...formData.allocations }
-        for (const item of catalogItems) {
-            newAllocations[item.id] = {
-                ...newAllocations[item.id],
-                workspaceId: 'new',
-                newWorkspaceName: name.trim(),
-                newWorkspaceDescription: '',
+        updateFormData(prev => {
+            const newAllocations = { ...prev.allocations }
+            for (const item of catalogItems) {
+                newAllocations[item.id] = {
+                    ...newAllocations[item.id],
+                    workspaceId: 'new',
+                    newWorkspaceName: name.trim(),
+                    newWorkspaceDescription: '',
+                }
             }
-        }
+            return { allocations: newAllocations }
+        })
         setModes(prev => {
             const next = { ...prev }
             for (const item of catalogItems) {
@@ -262,7 +269,6 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
             }
             return next
         })
-        updateFormData({ allocations: newAllocations })
         setShowNewGroupForm(false)
         setNewGroupName('')
     }
