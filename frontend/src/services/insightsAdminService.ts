@@ -9,6 +9,7 @@ import { fetchWithTimeout } from './fetchWithTimeout'
 
 const BASE = '/api/v1/admin/insights/admission'
 const CONFIG_BASE = '/api/v1/admin/insights/config'
+const DISCOVERY_BASE = '/api/v1/admin/insights/discovery'
 
 /**
  * Frontend-relevant runtime config from the backend. Mirrors
@@ -21,6 +22,30 @@ export interface InsightsConfig {
     job_poll_interval_ms: number
     job_max_retries: number
     discovery_refresh_interval_secs: number
+}
+
+/**
+ * Snapshot of the most recent discovery-scheduler tick. Mirrors
+ * `DiscoverySchedulerStatusResponse` in
+ * `backend/app/api/v1/endpoints/insights.py`. `last_tick_at` is null
+ * until the first tick completes (after the bootstrap-delay elapses).
+ */
+export interface DiscoverySchedulerStatus {
+    last_tick_at: string | null
+    interval_secs: number
+    next_tick_eta_secs: number | null
+    providers: number | null
+    list_jobs: number | null
+    asset_jobs: number | null
+    dedup_skipped: number | null
+}
+
+export interface DiscoveryTickTriggerResult {
+    status: string
+    providers: number
+    list_jobs: number
+    asset_jobs: number
+    dedup_skipped: number
 }
 
 export interface ProviderAdmissionConfig {
@@ -74,5 +99,25 @@ export const insightsAdminService = {
      */
     getInsightsConfig(): Promise<InsightsConfig> {
         return request<InsightsConfig>(CONFIG_BASE)
+    },
+
+    /**
+     * Read the most recent discovery-scheduler tick snapshot. Used by
+     * `useDiscoveryStatus` to render the auto-refresh pill in the UI.
+     */
+    getDiscoveryStatus(): Promise<DiscoverySchedulerStatus> {
+        return request<DiscoverySchedulerStatus>(`${DISCOVERY_BASE}/status`)
+    },
+
+    /**
+     * Force the discovery scheduler to run one tick right now. Same
+     * dedup as the periodic tick — won't double-enqueue if workers
+     * are already processing the same scope. Useful when a user wants
+     * a global "recheck everything" from the ops UI.
+     */
+    triggerDiscoveryTick(): Promise<DiscoveryTickTriggerResult> {
+        return request<DiscoveryTickTriggerResult>(`${DISCOVERY_BASE}/trigger`, {
+            method: 'POST',
+        })
     },
 }

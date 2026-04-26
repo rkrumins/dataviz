@@ -280,6 +280,56 @@ class DiscoveryTickSummary:
     dedup_skipped: int    # enqueues blocked by an in-flight claim
 
 
+# Module-level status. The /health snapshot and the discovery-status
+# endpoint both read these — same pattern as ``_last_tick`` /
+# ``_last_tick_at`` for the stats scheduler above.
+_last_discovery_summary: Optional[DiscoveryTickSummary] = None
+_last_discovery_tick_at: Optional[datetime] = None
+
+
+def get_discovery_scheduler_status() -> dict:
+    """JSON-friendly snapshot of the most recent discovery tick.
+
+    Returned by the /health snapshot task and the
+    ``GET /admin/insights/discovery/status`` endpoint. ``None`` values
+    when the scheduler hasn't completed its first tick yet (during
+    bootstrap delay or right after process start).
+    """
+    interval = resilience.DISCOVERY_REFRESH_INTERVAL_SECS
+    if _last_discovery_summary is None or _last_discovery_tick_at is None:
+        return {
+            "last_tick_at": None,
+            "interval_secs": interval,
+            "next_tick_eta_secs": None,
+            "providers": None,
+            "list_jobs": None,
+            "asset_jobs": None,
+            "dedup_skipped": None,
+        }
+    age_secs = max(
+        0,
+        int((datetime.now(timezone.utc) - _last_discovery_tick_at).total_seconds()),
+    )
+    return {
+        "last_tick_at": _last_discovery_tick_at.isoformat(),
+        "interval_secs": interval,
+        "next_tick_eta_secs": max(0, interval - age_secs),
+        "providers": _last_discovery_summary.providers,
+        "list_jobs": _last_discovery_summary.list_jobs,
+        "asset_jobs": _last_discovery_summary.asset_jobs,
+        "dedup_skipped": _last_discovery_summary.dedup_skipped,
+    }
+
+
+# Short delay before the first discovery tick so other services
+# (DB pool, Redis, the worker's consumer-group setup) have a chance
+# to settle. Without this, a fresh deploy fires a tick against a
+# half-initialised stack and the first run looks broken in logs.
+_DISCOVERY_BOOTSTRAP_DELAY_SECS = float(
+    os.getenv("DISCOVERY_BOOTSTRAP_DELAY_SECS", "15"),
+)
+
+
 async def _discovery_tick() -> DiscoveryTickSummary:
     """Single discovery scheduler pass.
 
@@ -339,38 +389,78 @@ async def _discovery_tick() -> DiscoveryTickSummary:
     )
 
 
+async def trigger_discovery_tick_now() -> DiscoveryTickSummary:
+    """Run one discovery tick immediately, updating module-level status.
+
+    Used by the manual-trigger admin endpoint so operators can verify
+    the scheduler wiring without waiting for the next cadence. Logs
+    the same ``discovery_tick.complete`` line as a normal tick.
+    """
+    global _last_discovery_summary, _last_discovery_tick_at
+    summary = await _discovery_tick()
+    _last_discovery_summary = summary
+    _last_discovery_tick_at = datetime.now(timezone.utc)
+    logger.info(
+        "discovery_tick.complete providers=%d list_jobs=%d "
+        "asset_jobs=%d dedup_skipped=%d (manual_trigger=true)",
+        summary.providers, summary.list_jobs,
+        summary.asset_jobs, summary.dedup_skipped,
+    )
+    return summary
+
+
 async def run_discovery_scheduler(shutdown: asyncio.Event) -> None:
     """Periodic background refresh of every provider's discovery cache.
 
     Cadence: ``DISCOVERY_REFRESH_INTERVAL_SECS`` (env, default 1800).
-    Wait-then-tick semantics so a fresh deploy doesn't fight its own
-    cold-start state. Failures are logged; loop continues — discovery
-    cache freshness is operationally important but not safety-critical
-    (DLQ + worker progress are surfaced separately via ``/health``).
+
+    Lifecycle: bootstrap-delay → first tick → wait-interval → tick → ...
+    So a fresh deploy gets visible status within ~15 seconds (not 30
+    minutes), but the bootstrap delay still gives DB / Redis / worker
+    consumer-groups time to come up before the first tick fires.
     """
+    global _last_discovery_summary, _last_discovery_tick_at
+
     interval = resilience.DISCOVERY_REFRESH_INTERVAL_SECS
-    logger.info("Discovery scheduler started (interval=%ds)", interval)
+    logger.info(
+        "Discovery scheduler started (interval=%ds, bootstrap_delay=%.0fs)",
+        interval, _DISCOVERY_BOOTSTRAP_DELAY_SECS,
+    )
+
+    # Bootstrap delay before the first tick.
+    try:
+        await asyncio.wait_for(
+            shutdown.wait(), timeout=_DISCOVERY_BOOTSTRAP_DELAY_SECS,
+        )
+        return  # shutdown triggered during bootstrap
+    except asyncio.TimeoutError:
+        pass
 
     while not shutdown.is_set():
-        try:
-            await asyncio.wait_for(shutdown.wait(), timeout=interval)
-            return  # shutdown triggered while waiting
-        except asyncio.TimeoutError:
-            pass
-
+        # Tick first (so status is observable shortly after startup),
+        # then wait the configured interval before the next.
         try:
             summary = await _discovery_tick()
+            _last_discovery_summary = summary
+            _last_discovery_tick_at = datetime.now(timezone.utc)
+            logger.info(
+                "discovery_tick.complete providers=%d list_jobs=%d "
+                "asset_jobs=%d dedup_skipped=%d",
+                summary.providers, summary.list_jobs,
+                summary.asset_jobs, summary.dedup_skipped,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error("Discovery tick failed: %s", exc, exc_info=True)
-            continue
+            # Don't update status on failure — keep the last successful
+            # snapshot so /health doesn't say "0 providers" right after
+            # a transient blip.
 
-        logger.info(
-            "discovery_tick.complete providers=%d list_jobs=%d "
-            "asset_jobs=%d dedup_skipped=%d",
-            summary.providers, summary.list_jobs,
-            summary.asset_jobs, summary.dedup_skipped,
-        )
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            return  # shutdown triggered during wait
+        except asyncio.TimeoutError:
+            continue
 
     logger.info("Discovery scheduler stopped")

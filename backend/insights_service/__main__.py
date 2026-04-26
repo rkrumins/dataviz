@@ -31,6 +31,7 @@ from .redis_streams import (
     stream_depths_to_dict,
 )
 from .scheduler import (
+    get_discovery_scheduler_status,
     get_scheduler_status,
     run_discovery_scheduler,
     run_scheduler,
@@ -249,6 +250,7 @@ async def main() -> None:
             "consumer": consumer.consumer_name,
             "kinds": dispatcher.registered_kinds(),
             "scheduler": get_scheduler_status(),
+            "discovery_scheduler": get_discovery_scheduler_status(),
             **_health_snapshot,
         },
     )

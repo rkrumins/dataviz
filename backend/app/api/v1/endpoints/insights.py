@@ -620,6 +620,73 @@ async def put_admission_config(
     )
 
 
+# ── Discovery scheduler status + manual trigger ─────────────────────
+
+
+class DiscoverySchedulerStatusResponse(BaseModel):
+    """Snapshot of the most recent discovery-scheduler tick.
+
+    Surfaced in the UI's RefreshControl pill ("Auto-refreshes every X
+    · Last refresh Ym ago") and used by ops to verify the scheduler
+    is firing on cadence. ``last_tick_at`` is ``None`` until the
+    first tick completes (which happens shortly after process start
+    once the bootstrap delay elapses).
+    """
+
+    last_tick_at: Optional[str] = None
+    interval_secs: int
+    next_tick_eta_secs: Optional[int] = None
+    providers: Optional[int] = None
+    list_jobs: Optional[int] = None
+    asset_jobs: Optional[int] = None
+    dedup_skipped: Optional[int] = None
+
+
+@router.get(
+    "/discovery/status",
+    response_model=DiscoverySchedulerStatusResponse,
+)
+async def get_discovery_status() -> DiscoverySchedulerStatusResponse:
+    """Read the current discovery-scheduler status.
+
+    Reads module-level state from ``insights_service.scheduler``. In
+    deployment topologies where the insights worker runs as a
+    separate process, this endpoint reflects the *web-tier's* view
+    of that state — which is empty (the scheduler runs in the worker
+    process). For dev / single-process mode the values are live.
+
+    Frontend uses this to render "Auto-refreshes every X · Last
+    refresh Ym ago" in the RegistryAssets header.
+    """
+    # Lazy import: scheduler module touches DB engine at import time
+    # in some test paths; keep startup-time imports minimal here.
+    from backend.insights_service.scheduler import get_discovery_scheduler_status
+
+    return DiscoverySchedulerStatusResponse(**get_discovery_scheduler_status())
+
+
+@router.post("/discovery/trigger", status_code=202)
+async def trigger_discovery_now() -> dict:
+    """Run one discovery tick immediately.
+
+    Useful for ops verifying scheduler wiring without waiting for the
+    next cadence, or for kicking a global refresh after a bulk
+    provider config change. The actual fan-out goes through the same
+    SET-NX dedup as the scheduled tick — won't double-enqueue if
+    workers are already processing the same scope.
+    """
+    from backend.insights_service.scheduler import trigger_discovery_tick_now
+
+    summary = await trigger_discovery_tick_now()
+    return {
+        "status": "completed",
+        "providers": summary.providers,
+        "list_jobs": summary.list_jobs,
+        "asset_jobs": summary.asset_jobs,
+        "dedup_skipped": summary.dedup_skipped,
+    }
+
+
 # ── Frontend runtime config endpoint ────────────────────────────────
 
 
