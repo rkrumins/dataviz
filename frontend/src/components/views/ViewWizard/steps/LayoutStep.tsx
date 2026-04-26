@@ -213,7 +213,7 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                             whileTap={{ scale: 0.98 }}
                             onClick={() => handleSelectLayoutType(type.id)}
                             className={cn(
-                                'relative p-6 rounded-2xl border-2 text-left transition-all',
+                                'relative p-6 rounded-2xl border-2 text-left transition-colors duration-150',
                                 formData.layoutType === type.id
                                     ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 ring-4 ring-blue-500/10'
                                     : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 bg-white dark:bg-slate-800'

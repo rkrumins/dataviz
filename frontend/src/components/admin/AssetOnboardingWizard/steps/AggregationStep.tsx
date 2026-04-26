@@ -197,9 +197,9 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
                             whileTap={{ scale: 0.98 }}
                             onClick={() => updateFormData({ projectionMode: option.id })}
                             className={cn(
-                                'glass-panel rounded-2xl border p-4 text-left cursor-pointer transition-all',
+                                'glass-panel rounded-2xl border p-4 text-left cursor-pointer transition-colors duration-150',
                                 isSelected
-                                    ? 'border-indigo-500/40 bg-indigo-500/5 shadow-lg shadow-indigo-500/10'
+                                    ? 'border-indigo-500/40 bg-indigo-500/5 shadow-md'
                                     : 'border-glass-border hover:border-indigo-500/20'
                             )}
                         >
@@ -244,13 +244,13 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
 
                             {/* Selection Indicator */}
                             <div className={cn(
-                                'mt-3 pt-2.5 border-t flex items-center justify-center gap-2 text-xs font-medium transition-all',
+                                'mt-3 pt-2.5 border-t flex items-center justify-center gap-2 text-xs font-medium transition-colors duration-150',
                                 isSelected
                                     ? 'border-indigo-500/20 text-indigo-400'
                                     : 'border-glass-border text-ink-muted'
                             )}>
                                 <div className={cn(
-                                    'w-4 h-4 rounded-full border-2 flex items-center justify-center transition-all',
+                                    'w-4 h-4 rounded-full border-2 flex items-center justify-center transition-colors duration-150',
                                     isSelected
                                         ? 'border-indigo-500 bg-indigo-500'
                                         : 'border-glass-border'
@@ -332,7 +332,7 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
                                         type="button"
                                         onClick={() => updateFormData({ dedicatedStrategy: 'full_copy' })}
                                         className={cn(
-                                            'rounded-xl border p-3 text-left transition-all',
+                                            'rounded-xl border p-3 text-left transition-colors duration-150',
                                             formData.dedicatedStrategy === 'full_copy'
                                                 ? 'border-indigo-500/40 bg-indigo-500/10'
                                                 : 'border-glass-border hover:border-indigo-500/20'
@@ -357,7 +357,7 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
                                         type="button"
                                         onClick={() => updateFormData({ dedicatedStrategy: 'containment_only' })}
                                         className={cn(
-                                            'rounded-xl border p-3 text-left transition-all',
+                                            'rounded-xl border p-3 text-left transition-colors duration-150',
                                             formData.dedicatedStrategy === 'containment_only'
                                                 ? 'border-indigo-500/40 bg-indigo-500/10'
                                                 : 'border-glass-border hover:border-indigo-500/20'
@@ -390,7 +390,7 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
                                     value={formData.dedicatedGraphName}
                                     onChange={e => updateFormData({ dedicatedGraphName: e.target.value })}
                                     placeholder={`e.g. ${(catalogItems[0]?.name || 'source').toLowerCase().replace(/[^a-z0-9_-]/g, '_')}_aggregated`}
-                                    className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink placeholder:text-ink-muted/50 outline-none transition-all focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border"
+                                    className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink placeholder:text-ink-muted/50 outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border"
                                 />
                                 <p className="text-[10px] text-ink-muted mt-1.5 flex items-center gap-1.5">
                                     <Info className="w-3 h-3 text-indigo-500/60" />

@@ -106,7 +106,7 @@ export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
                 {/* View Header Preview */}
                 <div className="p-6 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-blue-500/5 to-indigo-500/5">
                     <div className="flex items-start gap-4">
-                        <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/25">
+                        <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white shadow-md">
                             <Layout className="w-7 h-7" />
                         </div>
                         <div className="flex-1">

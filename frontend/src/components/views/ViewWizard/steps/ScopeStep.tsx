@@ -88,7 +88,7 @@ function WorkspaceItem({
         <button
             onClick={onClick}
             className={cn(
-                'w-full text-left px-3.5 py-3 rounded-xl transition-all duration-150',
+                'w-full text-left px-3.5 py-3 rounded-xl transition-colors duration-150',
                 'border',
                 isSelected
                     ? 'bg-blue-600/8 dark:bg-blue-500/10 border-blue-500/30 shadow-sm'
@@ -157,7 +157,7 @@ function DataSourceCard({
         <button
             onClick={onClick}
             className={cn(
-                'relative w-full text-left rounded-xl border-2 p-4 transition-all duration-150',
+                'relative w-full text-left rounded-xl border-2 p-4 transition-colors duration-150',
                 'hover:shadow-md',
                 isSelected
                     ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
