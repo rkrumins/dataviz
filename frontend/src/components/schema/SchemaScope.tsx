@@ -142,11 +142,6 @@ function SchemaScopeBody({
       dataSourceId: dataSourceId ?? null,
       providerReady: true,
       providerVersion: localVersion,
-      // No-ops: scoped contexts don't mutate workspace selection
-      setWorkspaceId: () => {},
-      setDataSourceId: () => {},
-      connectionId: null,
-      setConnectionId: () => {},
     }
   }, [scopedProvider, workspaceId, dataSourceId, localVersion])
 

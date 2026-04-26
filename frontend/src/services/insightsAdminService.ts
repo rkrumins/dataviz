@@ -8,6 +8,20 @@
 import { fetchWithTimeout } from './fetchWithTimeout'
 
 const BASE = '/api/v1/admin/insights/admission'
+const CONFIG_BASE = '/api/v1/admin/insights/config'
+
+/**
+ * Frontend-relevant runtime config from the backend. Mirrors
+ * `InsightsConfigResponse` in `backend/app/api/v1/endpoints/insights.py`.
+ * Read once at app mount via `useInsightsConfig`.
+ */
+export interface InsightsConfig {
+    frontend_poll_interval_ms: number
+    frontend_stale_time_ms: number
+    job_poll_interval_ms: number
+    job_max_retries: number
+    discovery_refresh_interval_secs: number
+}
 
 export interface ProviderAdmissionConfig {
     bucket_capacity: number
@@ -51,5 +65,14 @@ export const insightsAdminService = {
             method: 'PUT',
             body: JSON.stringify(body),
         })
+    },
+
+    /**
+     * Read the env-driven frontend config. Cached forever in React
+     * Query — see `useInsightsConfig`. Changing values requires a
+     * backend restart but no frontend rebuild.
+     */
+    getInsightsConfig(): Promise<InsightsConfig> {
+        return request<InsightsConfig>(CONFIG_BASE)
     },
 }

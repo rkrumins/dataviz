@@ -14,16 +14,21 @@
  *   * Polling cadence comes from ``refetchInterval`` driven by
  *     ``meta.refreshing`` rather than a parallel setTimeout loop.
  *
- * The hook does NOT tune staleTime per envelope status — React
- * Query v5's staleTime is fixed at query-definition time. We pick
- * one value short enough to revalidate stale rows but long enough
- * that scrolling/filter toggles don't trigger spurious refetches.
- * Active refresh while a worker is mid-job is handled by
- * ``refetchInterval``, not staleTime.
+ * Polling cadence + staleTime are env-driven via
+ * ``useInsightsConfig`` so ops can tune them at the backend without
+ * a frontend rebuild. Defaults match
+ * ``backend/app/config/resilience.py``.
+ *
+ * The ``refetchInterval`` predicate also fires on ``status === 'stale'``
+ * — defensive against a backend that fails to set ``meta.refreshing``
+ * for any reason. Today the backend always pairs ``stale`` with
+ * ``refreshing=true`` so this is dead defense; tomorrow it costs
+ * nothing.
  */
 import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { providerService } from '@/services/providerService'
 import type { Envelope, AssetStatsPayload } from '@/types/insights'
+import { useInsightsConfig } from '@/hooks/useInsightsConfig'
 
 export const ASSET_STATS_QUERY_KEY_PREFIX = 'insights-asset-stats' as const
 
@@ -37,25 +42,29 @@ export function useAssetStats(
     assetName: string,
     { enabled = true }: UseAssetStatsOptions = {},
 ): UseQueryResult<Envelope<AssetStatsPayload>, Error> {
+    const config = useInsightsConfig()
+
     return useQuery<Envelope<AssetStatsPayload>, Error>({
         queryKey: [ASSET_STATS_QUERY_KEY_PREFIX, providerId, assetName],
         queryFn: () => providerService.getAssetStats(providerId, assetName),
         enabled: enabled && Boolean(providerId) && Boolean(assetName),
-        // While the backend reports a refresh job is in flight, poll
-        // every 5s. Once meta.refreshing flips to false (or status
-        // settles to fresh/stale), refetchInterval returns false and
-        // React Query stops polling automatically.
+        // While the backend reports the cache is non-fresh (mid-refresh,
+        // computing, or stale), poll at the configured interval. Once
+        // status settles to ``fresh``, refetchInterval returns false
+        // and React Query stops polling automatically.
         refetchInterval: (q) => {
             const meta = q.state.data?.meta
-            if (meta?.refreshing) return 5_000
-            if (meta?.status === 'computing') return 5_000
+            const interval = config.frontend_poll_interval_ms
+            if (meta?.refreshing) return interval
+            if (meta?.status === 'computing') return interval
+            if (meta?.status === 'stale') return interval
             return false
         },
-        // 60s is a compromise: short enough that a stale row gets
+        // staleTime tuned via env. Short enough that a stale row gets
         // revalidated sometimes; long enough that a quick filter
         // toggle doesn't trigger a refetch. Active refresh is the
         // refetchInterval's job.
-        staleTime: 60_000,
+        staleTime: config.frontend_stale_time_ms,
         gcTime: 10 * 60 * 1000,
         refetchOnWindowFocus: false,
         retry: 1,

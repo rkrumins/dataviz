@@ -22,10 +22,13 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.config import resilience
 from backend.app.db.engine import PoolRole, get_session_factory
 from backend.app.db.models import (
+    AssetDiscoveryCacheORM,
     DataSourcePollingConfigORM,
     DataSourceStatsORM,
+    ProviderORM,
     WorkspaceDataSourceORM,
 )
 
@@ -257,3 +260,117 @@ async def run_trim_scheduler(shutdown: asyncio.Event) -> None:
                 )
 
     logger.info("Trim scheduler stopped")
+
+
+# ── Discovery scheduler (background asset cache refresh) ────────────
+#
+# Refreshes ``asset_discovery_cache`` rows on a configured cadence so
+# the UI is never the thing that drives discovery. The frontend just
+# reads the cache; this scheduler keeps it warm. Eliminates the
+# "Stale for X minutes" failure mode where UI polling is responsible
+# for kicking refresh and a stalled worker leaves the cache wedged.
+
+
+@dataclass(frozen=True)
+class DiscoveryTickSummary:
+    """One discovery scheduler pass — surfaced in tick log lines."""
+    providers: int        # active providers we tried to refresh
+    list_jobs: int        # successful list-all enqueues
+    asset_jobs: int       # successful per-asset enqueues
+    dedup_skipped: int    # enqueues blocked by an in-flight claim
+
+
+async def _discovery_tick() -> DiscoveryTickSummary:
+    """Single discovery scheduler pass.
+
+    Reads active providers + every cached row and enqueues a discovery
+    refresh for each. Dedup is naturally handled by the SET NX claim
+    inside ``enqueue_discovery_job_safe``; if a worker is already
+    mid-job for ``(provider_id, asset_name)`` the call returns ``None``
+    and we count it as ``dedup_skipped``.
+    """
+    # Lazy import: avoid circular module-graph at process start.
+    from .enqueue import enqueue_discovery_job_safe
+
+    factory = get_session_factory(PoolRole.READONLY)
+    async with factory() as session:
+        provider_rows = await session.execute(
+            select(ProviderORM.id).where(ProviderORM.is_active.is_(True))
+        )
+        provider_ids = [row[0] for row in provider_rows.all()]
+
+        cached_rows = await session.execute(
+            select(
+                AssetDiscoveryCacheORM.provider_id,
+                AssetDiscoveryCacheORM.asset_name,
+            )
+        )
+        cached_pairs: list[tuple[str, str]] = [
+            (row[0], row[1]) for row in cached_rows.all()
+        ]
+
+    list_jobs = asset_jobs = dedup_skipped = 0
+
+    # 1. List-all sentinel for every active provider — refreshes the
+    #    "what assets exist on this provider" payload.
+    for provider_id in provider_ids:
+        msg_id = await enqueue_discovery_job_safe(provider_id, "")
+        if msg_id is not None:
+            list_jobs += 1
+        else:
+            dedup_skipped += 1
+
+    # 2. Per-asset stats refresh for every row already in the cache.
+    #    Skip the empty-string sentinel (already enqueued above).
+    for provider_id, asset_name in cached_pairs:
+        if not asset_name:
+            continue
+        msg_id = await enqueue_discovery_job_safe(provider_id, asset_name)
+        if msg_id is not None:
+            asset_jobs += 1
+        else:
+            dedup_skipped += 1
+
+    return DiscoveryTickSummary(
+        providers=len(provider_ids),
+        list_jobs=list_jobs,
+        asset_jobs=asset_jobs,
+        dedup_skipped=dedup_skipped,
+    )
+
+
+async def run_discovery_scheduler(shutdown: asyncio.Event) -> None:
+    """Periodic background refresh of every provider's discovery cache.
+
+    Cadence: ``DISCOVERY_REFRESH_INTERVAL_SECS`` (env, default 1800).
+    Wait-then-tick semantics so a fresh deploy doesn't fight its own
+    cold-start state. Failures are logged; loop continues — discovery
+    cache freshness is operationally important but not safety-critical
+    (DLQ + worker progress are surfaced separately via ``/health``).
+    """
+    interval = resilience.DISCOVERY_REFRESH_INTERVAL_SECS
+    logger.info("Discovery scheduler started (interval=%ds)", interval)
+
+    while not shutdown.is_set():
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            return  # shutdown triggered while waiting
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            summary = await _discovery_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Discovery tick failed: %s", exc, exc_info=True)
+            continue
+
+        logger.info(
+            "discovery_tick.complete providers=%d list_jobs=%d "
+            "asset_jobs=%d dedup_skipped=%d",
+            summary.providers, summary.list_jobs,
+            summary.asset_jobs, summary.dedup_skipped,
+        )
+
+    logger.info("Discovery scheduler stopped")

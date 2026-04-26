@@ -591,7 +591,7 @@ export function AssetOnboardingWizard({
                                 initial={{ opacity: 0, x: stepDirection * 20 }}
                                 animate={{ opacity: 1, x: 0 }}
                                 exit={{ opacity: 0, x: stepDirection * -20 }}
-                                transition={{ duration: 0.2 }}
+                                transition={{ duration: 0.08 }}
                                 className="p-8"
                             >
                                 {wizardPhase === 'success' ? (
