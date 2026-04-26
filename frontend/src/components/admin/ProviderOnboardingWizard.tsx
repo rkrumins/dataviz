@@ -229,7 +229,7 @@ function ConfirmCloseDialog({
       <motion.div
         initial={{ opacity: 0, y: 12, scale: 0.96 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
-        className="w-full max-w-md rounded-2xl border border-glass-border bg-canvas-elevated p-6 shadow-2xl"
+        className="w-full max-w-md rounded-2xl border border-glass-border bg-canvas-elevated p-6 shadow-lg"
       >
         <div className="flex items-start gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500/10 text-amber-500">
@@ -627,9 +627,9 @@ export function ProviderOnboardingWizard({
               port: defaultPortForProvider(providerOption.type),
             })}
             className={cn(
-              'rounded-2xl border p-5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg',
+              'rounded-2xl border p-5 text-left transition-[colors,transform,box-shadow] duration-150 hover:-translate-y-0.5 hover:shadow-md',
               formData.providerType === providerOption.type
-                ? 'border-indigo-500 bg-indigo-500/8 shadow-lg shadow-indigo-500/10'
+                ? 'border-indigo-500 bg-indigo-500/8 shadow-md'
                 : 'border-glass-border bg-canvas-elevated hover:border-indigo-500/30',
             )}
           >
@@ -808,7 +808,7 @@ export function ProviderOnboardingWizard({
               onChange={(event) => updateFormData({ schemaMappingEnabled: event.target.checked })}
               className="peer sr-only"
             />
-            <div className="h-5 w-9 rounded-full bg-black/10 transition-colors after:absolute after:left-[2px] after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:bg-indigo-500 peer-checked:after:translate-x-full dark:bg-white/10" />
+            <div className="h-5 w-9 rounded-full bg-black/10 transition-colors after:absolute after:left-[2px] after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-transform after:content-[''] peer-checked:bg-indigo-500 peer-checked:after:translate-x-full dark:bg-white/10" />
           </label>
         </div>
 
@@ -1182,7 +1182,7 @@ export function ProviderOnboardingWizard({
               navigate(`/ingestion?tab=assets&provider=${createdProvider.id}&onboarding=true`)
             }}
             className={cn(
-              'rounded-2xl border p-5 text-left transition-all hover:-translate-y-0.5 hover:shadow-lg',
+              'rounded-2xl border p-5 text-left transition-[colors,transform,box-shadow] duration-150 hover:-translate-y-0.5 hover:shadow-md',
               healthy
                 ? 'border-indigo-500/30 bg-indigo-500/8'
                 : 'border-glass-border bg-canvas-elevated opacity-60',
@@ -1201,7 +1201,7 @@ export function ProviderOnboardingWizard({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-2xl border border-glass-border bg-canvas-elevated p-5 text-left transition-all hover:-translate-y-0.5 hover:shadow-lg"
+            className="rounded-2xl border border-glass-border bg-canvas-elevated p-5 text-left transition-[colors,transform,box-shadow] duration-150 hover:-translate-y-0.5 hover:shadow-md"
           >
             <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-black/5 text-ink dark:bg-white/5">
               <Pencil className="h-5 w-5" />
@@ -1227,7 +1227,7 @@ export function ProviderOnboardingWizard({
       <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 px-4 py-6 animate-in fade-in duration-200">
         <div
           ref={modalRef}
-          className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-glass-border bg-canvas-elevated shadow-2xl animate-in zoom-in-95 duration-200"
+          className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-glass-border bg-canvas-elevated shadow-lg animate-in zoom-in-95 duration-200"
         >
           <div className="flex items-center justify-between border-b border-glass-border px-6 py-4">
             <div>
@@ -1273,7 +1273,7 @@ export function ProviderOnboardingWizard({
                         }
                       }}
                       className={cn(
-                        'flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition-all',
+                        'flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition-colors duration-150',
                         isComplete
                           ? 'bg-indigo-500/10 text-indigo-500'
                           : isCurrent
@@ -1290,7 +1290,7 @@ export function ProviderOnboardingWizard({
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto px-6 py-5">
+          <div className="flex-1 overflow-y-auto px-6 py-5 min-h-[480px]">
             {wizardPhase === 'steps' && <StepWarnings warnings={stepWarnings} />}
 
             <AnimatePresence mode="wait" initial={false}>
@@ -1338,9 +1338,9 @@ export function ProviderOnboardingWizard({
                   onClick={isLastStep ? primaryAction : goNext}
                   disabled={!canProceed || isSubmitting || (shouldRunConnectivityTest && connectivityCheck.state === 'checking')}
                   className={cn(
-                    'flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold transition-all',
+                    'flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold transition-[colors,box-shadow] duration-150',
                     isLastStep
-                      ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:shadow-indigo-500/30 disabled:opacity-50'
+                      ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-md hover:shadow-lg disabled:opacity-50'
                       : 'bg-indigo-500/10 text-indigo-500 hover:bg-indigo-500/20 disabled:opacity-50',
                   )}
                 >
@@ -1387,7 +1387,7 @@ export function ProviderOnboardingWizard({
                       onClose()
                       navigate(`/ingestion?tab=assets&provider=${createdProvider.id}&onboarding=true`)
                     }}
-                    className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 transition-all hover:shadow-xl hover:shadow-indigo-500/30"
+                    className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 px-5 py-2.5 text-sm font-semibold text-white shadow-md transition-[colors,box-shadow] duration-150 hover:shadow-lg"
                   >
                     <Plus className="h-4 w-4" />
                     Continue to data sources

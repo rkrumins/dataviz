@@ -112,7 +112,7 @@ export function RetriggerDialog({
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.15 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
                 onClick={() => !isLoading && onClose()}
                 role="dialog"
                 aria-modal="true"
@@ -122,9 +122,9 @@ export function RetriggerDialog({
                     initial={{ scale: 0.96, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
                     exit={{ scale: 0.96, opacity: 0 }}
-                    transition={{ duration: 0.2 }}
+                    transition={{ duration: 0.12 }}
                     onClick={e => e.stopPropagation()}
-                    className="w-full max-w-2xl rounded-2xl bg-canvas-elevated border border-glass-border shadow-xl overflow-hidden flex flex-col max-h-[90vh]"
+                    className="w-full max-w-2xl rounded-2xl bg-canvas-elevated border border-glass-border shadow-lg overflow-hidden flex flex-col max-h-[90vh]"
                 >
                     {/* Accent bar */}
                     <div className="h-1 bg-gradient-to-r from-indigo-500 to-violet-500" />
@@ -174,7 +174,7 @@ export function RetriggerDialog({
                                 disabled={isLoading}
                                 className={cn(
                                     'px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors disabled:opacity-50 flex items-center gap-2',
-                                    'bg-indigo-500 hover:bg-indigo-600 shadow-lg shadow-indigo-500/25',
+                                    'bg-indigo-500 hover:bg-indigo-600 shadow-md',
                                 )}
                             >
                                 {loading === 'resume'
@@ -189,7 +189,7 @@ export function RetriggerDialog({
                             disabled={isLoading}
                             className={cn(
                                 'px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors disabled:opacity-50 flex items-center gap-2',
-                                'bg-emerald-500 hover:bg-emerald-600 shadow-lg shadow-emerald-500/25',
+                                'bg-emerald-500 hover:bg-emerald-600 shadow-md',
                             )}
                         >
                             {loading === 'retrigger'
