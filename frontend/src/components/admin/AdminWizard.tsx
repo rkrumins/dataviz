@@ -81,7 +81,7 @@ export function AdminWizard({
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 animate-in fade-in duration-200">
-            <div className="bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-2xl mx-4 animate-in zoom-in-95 duration-200 flex flex-col max-h-[85vh]">
+            <div className="bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-2xl mx-4 animate-in zoom-in-95 duration-200 flex flex-col max-h-[85vh]">
                 {/* Header */}
                 <div className="flex items-center justify-between px-6 py-4 border-b border-glass-border shrink-0">
                     <div>
@@ -108,7 +108,7 @@ export function AdminWizard({
                             <div key={step.id} className="flex items-center gap-2">
                                 {i > 0 && <div className={cn("w-8 h-0.5 rounded-full", isComplete ? "bg-indigo-500" : "bg-glass-border")} />}
                                 <div className={cn(
-                                    "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all",
+                                    "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-colors duration-150",
                                     isComplete ? "bg-indigo-500/10 text-indigo-500" :
                                         isCurrent ? "bg-indigo-500 text-white shadow-md shadow-indigo-500/25" :
                                             "bg-black/5 dark:bg-white/5 text-ink-muted"
@@ -124,7 +124,7 @@ export function AdminWizard({
                 </div>
 
                 {/* Content */}
-                <div className="flex-1 overflow-y-auto px-6 py-5">
+                <div className="flex-1 overflow-y-auto px-6 py-5 min-h-[400px]">
                     {activeStep.content}
                     {validationError && (
                         <div className="mt-4 px-4 py-3 bg-red-500/10 border border-red-500/20 rounded-lg text-sm text-red-500">
@@ -150,9 +150,9 @@ export function AdminWizard({
                         onClick={isLast ? handleComplete : goNext}
                         disabled={isSubmitting}
                         className={cn(
-                            "flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all",
+                            "flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-colors duration-150",
                             isLast
-                                ? "bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:shadow-indigo-500/30 disabled:opacity-50"
+                                ? "bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-md disabled:opacity-50"
                                 : "bg-indigo-500/10 text-indigo-500 hover:bg-indigo-500/20"
                         )}
                     >

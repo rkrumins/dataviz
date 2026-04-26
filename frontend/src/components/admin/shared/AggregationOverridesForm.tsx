@@ -201,7 +201,7 @@ export function AggregationOverridesForm({
                             disabled={disabled}
                             onClick={() => update({ projectionMode: 'in_source' })}
                             className={cn(
-                                'rounded-xl border p-3 text-left transition-all',
+                                'rounded-xl border p-3 text-left transition-colors duration-150',
                                 value.projectionMode === 'in_source'
                                     ? 'border-indigo-500/40 bg-indigo-500/10'
                                     : 'border-glass-border hover:border-indigo-500/20',
@@ -229,7 +229,7 @@ export function AggregationOverridesForm({
                             disabled={disabled}
                             onClick={() => update({ projectionMode: 'dedicated' })}
                             className={cn(
-                                'rounded-xl border p-3 text-left transition-all',
+                                'rounded-xl border p-3 text-left transition-colors duration-150',
                                 value.projectionMode === 'dedicated'
                                     ? 'border-indigo-500/40 bg-indigo-500/10'
                                     : 'border-glass-border hover:border-indigo-500/20',
@@ -304,9 +304,9 @@ export function AggregationOverridesForm({
                                                 whileTap={disabled ? undefined : { scale: 0.98 }}
                                                 onClick={() => applyPreset(preset)}
                                                 className={cn(
-                                                    'rounded-xl border p-3 text-left transition-all',
+                                                    'rounded-xl border p-3 text-left transition-colors duration-150',
                                                     isActive
-                                                        ? 'border-indigo-500/40 bg-indigo-500/5 ring-2 ring-indigo-500/20 shadow-lg shadow-indigo-500/5'
+                                                        ? 'border-indigo-500/40 bg-indigo-500/5 ring-2 ring-indigo-500/20 shadow-md'
                                                         : 'border-glass-border hover:border-indigo-500/20',
                                                     disabled ? 'cursor-not-allowed' : 'cursor-pointer'
                                                 )}
@@ -357,7 +357,7 @@ export function AggregationOverridesForm({
                                                 const v = parseInt(e.target.value)
                                                 update({ batchSize: clampBatch(Number.isFinite(v) ? v : 1000) })
                                             }}
-                                            className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink outline-none transition-all focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
+                                            className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
                                         />
                                         <p className="text-[10px] text-ink-muted mt-1">Edges per batch (100-50,000)</p>
                                         <div className="mt-1.5">
@@ -389,7 +389,7 @@ export function AggregationOverridesForm({
                                                 const v = parseInt(e.target.value)
                                                 update({ maxRetries: clampRetries(Number.isFinite(v) ? v : 0) })
                                             }}
-                                            className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink outline-none transition-all focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
+                                            className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
                                         />
                                         <p className="text-[10px] text-ink-muted mt-1">Retry attempts on failure (0-10)</p>
                                         <div className="mt-1.5">
@@ -421,7 +421,7 @@ export function AggregationOverridesForm({
                                                 const v = parseInt(e.target.value)
                                                 update({ timeoutMinutes: clampTimeout(Number.isFinite(v) ? v : 120) })
                                             }}
-                                            className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink outline-none transition-all focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
+                                            className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
                                         />
                                         <p className="text-[10px] text-ink-muted mt-1">Max job duration (1-1440 min)</p>
                                         <div className="mt-1.5">
