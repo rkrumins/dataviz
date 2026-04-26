@@ -57,7 +57,7 @@ export function ExplorerBulkActions({
         >
           <div className={cn(
             'flex items-center gap-3 px-5 py-3',
-            'bg-white dark:bg-slate-900 rounded-2xl shadow-2xl',
+            'bg-white dark:bg-slate-900 rounded-2xl shadow-lg',
             'border border-glass-border',
           )}>
             <span className="text-sm font-semibold text-ink">
@@ -70,7 +70,7 @@ export function ExplorerBulkActions({
             <div className="relative" ref={menuRef}>
               <button
                 onClick={() => setShowVisMenu(prev => !prev)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-all"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
               >
                 <Eye className="w-3.5 h-3.5" />
                 Change Visibility
@@ -119,7 +119,7 @@ export function ExplorerBulkActions({
 
             <button
               onClick={onDelete}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-red-500 hover:bg-red-500/10 transition-all"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-red-500 hover:bg-red-500/10 transition-colors duration-150"
             >
               <Trash2 className="w-3.5 h-3.5" />
               Delete ({selectedCount})
@@ -129,7 +129,7 @@ export function ExplorerBulkActions({
 
             <button
               onClick={onClearSelection}
-              className="p-1.5 rounded-xl text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-all"
+              className="p-1.5 rounded-xl text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
               title="Clear selection"
             >
               <X className="w-4 h-4" />

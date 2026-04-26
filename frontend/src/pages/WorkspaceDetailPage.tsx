@@ -40,8 +40,8 @@ function EditDsModal({ ds, ontologies, onSave, onClose }: {
     const [ontologyId, setOntologyId] = useState(ds.ontologyId || '')
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-            <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-            <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
+            <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+            <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
                 <div className="flex items-center justify-between mb-5">
                     <h3 className="text-lg font-bold text-ink">Edit Data Source</h3>
                     <button onClick={onClose} className="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted"><X className="w-4 h-4" /></button>
@@ -426,7 +426,7 @@ export function WorkspaceDetailPage() {
                         <button key={tab.id} onClick={() => setActiveSection(tab.id)}
                             title={tab.hint}
                             className={cn(
-                                'flex items-center gap-2 px-5 py-3 text-sm font-semibold transition-all border-b-2',
+                                'flex items-center gap-2 px-5 py-3 text-sm font-semibold transition-colors duration-150 border-b-2',
                                 isActive ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
                                          : 'border-transparent text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 rounded-t-xl'
                             )}>
@@ -579,8 +579,8 @@ export function WorkspaceDetailPage() {
 
             {deleteTarget && (
                 <div className="fixed inset-0 z-[60] flex items-center justify-center">
-                    <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => !loadingImpact && setDeleteTarget(null)} />
-                    <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
+                    <div className="absolute inset-0 bg-black/60" onClick={() => !loadingImpact && setDeleteTarget(null)} />
+                    <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
                         <div className="flex items-center gap-3 mb-4">
                             <div className="w-10 h-10 rounded-xl bg-red-500/10 flex items-center justify-center">
                                 <Trash2 className="w-5 h-5 text-red-500" />

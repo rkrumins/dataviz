@@ -248,9 +248,9 @@ export function SuggestConfirmDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={isBusy ? undefined : onClose} />
+      <div className="absolute inset-0 bg-black/50" onClick={isBusy ? undefined : onClose} />
       <div className={cn(
-        'relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden flex flex-col',
+        'relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden flex flex-col',
         phase === 'recommendations' ? 'max-w-3xl max-h-[85vh]' : 'max-w-2xl max-h-[85vh]',
       )}>
         {/* Gradient top bar */}
@@ -452,7 +452,7 @@ export function SuggestConfirmDialog({
                       value={search}
                       onChange={e => setSearch(e.target.value)}
                       placeholder="Search semantic layers..."
-                      className="w-full pl-9 pr-8 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/30 transition-all"
+                      className="w-full pl-9 pr-8 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/30 transition-colors duration-150"
                     />
                     {search && (
                       <button
@@ -527,7 +527,7 @@ export function SuggestConfirmDialog({
                         type="button"
                         onClick={() => setSelectedId(match.ontologyId)}
                         className={cn(
-                          'w-full text-left rounded-xl border-2 transition-all',
+                          'w-full text-left rounded-xl border-2 transition-colors duration-150',
                           isSelected
                             ? 'border-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10 ring-1 ring-indigo-500/20'
                             : isCurrent
@@ -555,7 +555,7 @@ export function SuggestConfirmDialog({
                             {/* Selection radio + coverage donut */}
                             <div className="flex flex-col items-center gap-2 pt-0.5">
                               <div className={cn(
-                                'w-[18px] h-[18px] rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-all',
+                                'w-[18px] h-[18px] rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors duration-150',
                                 isSelected
                                   ? 'border-indigo-500 bg-indigo-500'
                                   : 'border-glass-border-hover',
@@ -718,7 +718,7 @@ export function SuggestConfirmDialog({
                 type="button"
                 onClick={() => setSelectedId('__create_from_graph__')}
                 className={cn(
-                  'w-full text-left rounded-xl border-2 transition-all',
+                  'w-full text-left rounded-xl border-2 transition-colors duration-150',
                   selectedId === '__create_from_graph__'
                     ? 'border-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10 ring-1 ring-indigo-500/20'
                     : 'border-dashed border-glass-border hover:border-indigo-500/30 hover:bg-black/[0.01] dark:hover:bg-white/[0.01]',
@@ -729,7 +729,7 @@ export function SuggestConfirmDialog({
                     {/* Selection radio + icon */}
                     <div className="flex flex-col items-center gap-2 pt-0.5">
                       <div className={cn(
-                        'w-[18px] h-[18px] rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-all',
+                        'w-[18px] h-[18px] rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors duration-150',
                         selectedId === '__create_from_graph__'
                           ? 'border-indigo-500 bg-indigo-500'
                           : 'border-glass-border-hover',
@@ -809,7 +809,7 @@ export function SuggestConfirmDialog({
                     onChange={e => setDraftName(e.target.value)}
                     placeholder="Enter schema name..."
                     className={cn(
-                      'w-full px-3 py-1.5 rounded-lg bg-white dark:bg-black/20 border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 transition-all',
+                      'w-full px-3 py-1.5 rounded-lg bg-white dark:bg-black/20 border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 transition-colors duration-150',
                       isDuplicateName
                         ? 'border-amber-400 focus:ring-amber-500/30 focus:border-amber-500/30'
                         : 'border-glass-border focus:ring-indigo-500/30 focus:border-indigo-500/30',
@@ -865,7 +865,7 @@ export function SuggestConfirmDialog({
                     onClick={handleAnalyze}
                     disabled={!pickedWsId || !pickedDsId}
                     className={cn(
-                      'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm',
+                      'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-colors duration-150 shadow-sm',
                       'bg-gradient-to-r from-indigo-500 to-purple-500 text-white',
                       'hover:from-indigo-600 hover:to-purple-600 shadow-indigo-500/25',
                       (!pickedWsId || !pickedDsId) && 'opacity-50 cursor-not-allowed',
@@ -906,7 +906,7 @@ export function SuggestConfirmDialog({
                       onClick={() => onCreateDraft(draftName.trim() || undefined, pickedWsId, pickedDsId)}
                       disabled={isCreating || !draftName.trim()}
                       className={cn(
-                        'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm',
+                        'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-colors duration-150 shadow-sm',
                         'bg-gradient-to-r from-indigo-500 to-purple-500 text-white',
                         'hover:from-indigo-600 hover:to-purple-600 shadow-indigo-500/25',
                         (isCreating || !draftName.trim()) && 'opacity-60',
@@ -920,7 +920,7 @@ export function SuggestConfirmDialog({
                       onClick={() => onUseExisting(selectedId, pickedWsId, pickedDsId)}
                       disabled={isCreating}
                       className={cn(
-                        'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm',
+                        'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold transition-colors duration-150 shadow-sm',
                         'bg-gradient-to-r from-indigo-500 to-purple-500 text-white',
                         'hover:from-indigo-600 hover:to-purple-600 shadow-indigo-500/25',
                         isCreating && 'opacity-60',
@@ -956,7 +956,7 @@ function FilterChip({ label, count, active, onClick, activeClass, badgeClass }: 
     <button
       onClick={onClick}
       className={cn(
-        'inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all',
+        'inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-colors duration-150',
         active
           ? activeClass
           : 'text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',

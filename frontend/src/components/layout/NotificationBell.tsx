@@ -25,7 +25,7 @@ export function NotificationBell({ count = 0 }: NotificationBellProps) {
 
       <Popover.Portal>
         <Popover.Content
-          className="w-72 bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl p-6 z-50 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2"
+          className="w-72 bg-canvas-elevated border border-glass-border rounded-xl shadow-lg p-6 z-50 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2"
           sideOffset={8}
           align="end"
         >

@@ -259,7 +259,7 @@ export function QuickCreateNode({
                 className={cn(
                     "fixed z-[200] w-[320px]",
                     "bg-canvas-elevated/98 backdrop-blur-xl",
-                    "border border-glass-border rounded-2xl shadow-2xl",
+                    "border border-glass-border rounded-2xl shadow-lg",
                     "overflow-hidden"
                 )}
                 style={positionStyles}
@@ -306,7 +306,7 @@ export function QuickCreateNode({
                                         "w-full pl-10 pr-4 py-2.5 rounded-xl",
                                         "bg-black/5 dark:bg-white/5 border border-transparent",
                                         "focus:border-accent-lineage focus:bg-white dark:focus:bg-canvas-elevated",
-                                        "outline-none text-sm transition-all"
+                                        "outline-none text-sm transition-colors duration-150"
                                     )}
                                 />
                             </div>
@@ -318,7 +318,7 @@ export function QuickCreateNode({
                                         key={type.id}
                                         onClick={() => selectType(type)}
                                         className={cn(
-                                            "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-all",
+                                            "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors duration-150",
                                             index === highlightedIndex
                                                 ? "bg-accent-lineage/10 text-accent-lineage"
                                                 : "hover:bg-black/5 dark:hover:bg-white/5 text-ink"
@@ -382,7 +382,7 @@ export function QuickCreateNode({
                                             "w-full px-4 py-3 rounded-xl",
                                             "bg-black/5 dark:bg-white/5 border border-transparent",
                                             "focus:border-accent-lineage focus:bg-white dark:focus:bg-canvas-elevated",
-                                            "outline-none text-sm font-medium transition-all"
+                                            "outline-none text-sm font-medium transition-colors duration-150"
                                         )}
                                     />
                                 </div>
@@ -417,7 +417,7 @@ export function QuickCreateNode({
                             onClick={handleCreate}
                             disabled={!entityName.trim() || isCreating}
                             className={cn(
-                                "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all",
+                                "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors duration-150",
                                 "bg-gradient-to-r from-accent-lineage to-accent-lineage-hover text-white",
                                 "hover:shadow-lg hover:shadow-accent-lineage/25",
                                 "disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-none"

@@ -75,7 +75,7 @@ export function ViewCardOverflowMenu({
         <div
           className={cn(
             'absolute right-0 top-full mt-1 w-52 py-1 z-50',
-            'bg-white dark:bg-slate-900 rounded-2xl shadow-2xl',
+            'bg-white dark:bg-slate-900 rounded-2xl shadow-lg',
             'border border-glass-border',
           )}
           onClick={e => { e.preventDefault(); e.stopPropagation() }}
@@ -95,7 +95,7 @@ export function ViewCardOverflowMenu({
                 ) : (
                   <button
                     onClick={() => { onEdit(); setIsOpen(false) }}
-                    className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-all rounded-xl mx-0.5"
+                    className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
                     style={{ width: 'calc(100% - 4px)' }}
                   >
                     <Pencil className="w-3.5 h-3.5" />
@@ -105,7 +105,7 @@ export function ViewCardOverflowMenu({
               )}
               <button
                 onClick={() => { onShare(); setIsOpen(false) }}
-                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-all rounded-xl mx-0.5"
+                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
                 style={{ width: 'calc(100% - 4px)' }}
               >
                 <Share2 className="w-3.5 h-3.5" />
@@ -113,7 +113,7 @@ export function ViewCardOverflowMenu({
               </button>
               <button
                 onClick={() => setVisibilitySubmenu(true)}
-                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-all rounded-xl mx-0.5"
+                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
                 style={{ width: 'calc(100% - 4px)' }}
               >
                 <Eye className="w-3.5 h-3.5" />
@@ -122,7 +122,7 @@ export function ViewCardOverflowMenu({
               <div className="border-t border-glass-border/50 my-1" />
               <button
                 onClick={() => { onDelete(); setIsOpen(false) }}
-                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-red-500 hover:bg-red-500/10 transition-all rounded-xl mx-0.5"
+                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-red-500 hover:bg-red-500/10 transition-colors duration-150 rounded-xl mx-0.5"
                 style={{ width: 'calc(100% - 4px)' }}
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -139,7 +139,7 @@ export function ViewCardOverflowMenu({
                   key={id}
                   onClick={() => handleVisibilityChange(id)}
                   className={cn(
-                    'w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium transition-all rounded-xl mx-0.5',
+                    'w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium transition-colors duration-150 rounded-xl mx-0.5',
                     visibility === id
                       ? 'text-accent-lineage bg-accent-lineage/10'
                       : 'text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5'
@@ -154,7 +154,7 @@ export function ViewCardOverflowMenu({
               <div className="border-t border-glass-border/50 my-1" />
               <button
                 onClick={() => setVisibilitySubmenu(false)}
-                className="w-full px-3.5 py-2 text-xs font-medium text-ink-muted hover:text-ink transition-all"
+                className="w-full px-3.5 py-2 text-xs font-medium text-ink-muted hover:text-ink transition-colors duration-150"
               >
                 Back
               </button>

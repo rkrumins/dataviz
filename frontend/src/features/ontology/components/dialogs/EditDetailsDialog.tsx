@@ -56,8 +56,8 @@ export function EditDetailsDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
         {/* Header */}
         <div className="border-b border-glass-border/50 px-6 pt-6 pb-4">
           <div className="flex items-center justify-between">
@@ -86,7 +86,7 @@ export function EditDetailsDialog({
               type="text"
               value={name}
               onChange={e => setName(e.target.value)}
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-all"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-colors duration-150"
               placeholder="Semantic layer name..."
             />
           </div>
@@ -98,7 +98,7 @@ export function EditDetailsDialog({
               value={description}
               onChange={e => setDescription(e.target.value)}
               rows={3}
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-all resize-none"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/40 transition-colors duration-150 resize-none"
               placeholder="Describe the purpose and scope of this semantic layer..."
             />
           </div>
@@ -117,7 +117,7 @@ export function EditDetailsDialog({
                     key={opt.value}
                     onClick={() => setEvolutionPolicy(opt.value)}
                     className={cn(
-                      'w-full text-left px-3.5 py-3 rounded-xl border-2 transition-all',
+                      'w-full text-left px-3.5 py-3 rounded-xl border-2 transition-colors duration-150',
                       isSelected
                         ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'
                         : 'border-glass-border hover:border-glass-border-hover'

@@ -134,8 +134,8 @@ export function ImportDialog({
 
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center">
-        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-        <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+        <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+        <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
           <div className="px-6 pt-6 pb-4">
             <div className="flex items-start gap-4">
               <div className={cn('w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0', accent)}>
@@ -192,8 +192,8 @@ export function ImportDialog({
   // ── Pre-import view (validation + mode selection) ────────────────
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
         {/* Header */}
         <div className="border-b border-glass-border/50 px-6 pt-6 pb-4">
           <div className="flex items-center justify-between">
@@ -254,7 +254,7 @@ export function ImportDialog({
                 <button
                   onClick={() => setMode('new')}
                   className={cn(
-                    'w-full text-left px-3.5 py-3 rounded-xl border-2 transition-all',
+                    'w-full text-left px-3.5 py-3 rounded-xl border-2 transition-colors duration-150',
                     mode === 'new'
                       ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'
                       : 'border-glass-border hover:border-glass-border-hover'
@@ -279,7 +279,7 @@ export function ImportDialog({
                   <button
                     onClick={() => setMode('into')}
                     className={cn(
-                      'w-full text-left px-3.5 py-3 rounded-xl border-2 transition-all',
+                      'w-full text-left px-3.5 py-3 rounded-xl border-2 transition-colors duration-150',
                       mode === 'into'
                         ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'
                         : 'border-glass-border hover:border-glass-border-hover'

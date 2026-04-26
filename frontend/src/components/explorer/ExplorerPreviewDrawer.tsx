@@ -340,7 +340,7 @@ export function ExplorerPreviewDrawer({
               'fixed right-0 top-0 h-full w-[440px] max-w-[90vw] z-[61]',
               'bg-canvas border-l border-glass-border',
               'flex flex-col overflow-y-auto custom-scrollbar',
-              'shadow-2xl',
+              'shadow-lg',
             )}
             initial={{ x: 440 }}
             animate={{ x: 0 }}

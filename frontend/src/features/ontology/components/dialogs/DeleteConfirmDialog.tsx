@@ -40,10 +40,10 @@ export function DeleteConfirmDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
 
       {/* Dialog */}
-      <div className="relative w-full max-w-md mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl animate-in fade-in slide-in-from-bottom-4 duration-200">
+      <div className="relative w-full max-w-md mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in slide-in-from-bottom-4 duration-200">
         {/* Close button */}
         <button
           onClick={onClose}
@@ -102,7 +102,7 @@ export function DeleteConfirmDialog({
                 value={confirmText}
                 onChange={e => setConfirmText(e.target.value)}
                 placeholder={ontology.name}
-                className="w-full px-3 py-2 rounded-lg bg-canvas border border-glass-border text-sm text-ink placeholder:text-ink-muted/40 focus:outline-none focus:ring-2 focus:ring-red-500/40 focus:border-red-500/30 transition-all"
+                className="w-full px-3 py-2 rounded-lg bg-canvas border border-glass-border text-sm text-ink placeholder:text-ink-muted/40 focus:outline-none focus:ring-2 focus:ring-red-500/40 focus:border-red-500/30 transition-colors duration-150"
                 onKeyDown={e => e.key === 'Enter' && nameMatch && handleDelete()}
               />
             </div>
@@ -121,7 +121,7 @@ export function DeleteConfirmDialog({
             onClick={handleDelete}
             disabled={blocked || !nameMatch || isDeleting}
             className={cn(
-              'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all',
+              'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors duration-150',
               blocked || !nameMatch
                 ? 'bg-red-100 dark:bg-red-950/30 text-red-300 dark:text-red-700 cursor-not-allowed'
                 : 'bg-red-500 text-white hover:bg-red-600 shadow-sm shadow-red-500/20',

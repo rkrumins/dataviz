@@ -299,7 +299,7 @@ export function CanvasContextMenu({
                     className={cn(
                         "fixed z-[100] min-w-[200px] py-1.5",
                         "bg-canvas-elevated/98 backdrop-blur-xl",
-                        "border border-glass-border rounded-xl shadow-2xl",
+                        "border border-glass-border rounded-xl shadow-lg",
                         "overflow-hidden"
                     )}
                     style={{
