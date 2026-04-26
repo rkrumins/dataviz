@@ -12,9 +12,6 @@ const BASE = '/api/v1/admin/insights/admission'
 export interface ProviderAdmissionConfig {
     bucket_capacity: number
     refill_per_sec: number
-    circuit_fail_max: number
-    circuit_window_secs: number
-    half_open_after_secs: number
 }
 
 export interface ProviderAdmissionConfigResponse extends ProviderAdmissionConfig {

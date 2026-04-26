@@ -25,8 +25,12 @@ from backend.app.common.health_server import run_health_server
 from backend.app.services.aggregation.redis_client import close_redis, get_redis
 
 from .config import StatsServiceConfig
-from .redis_streams import ensure_consumer_group
-from .scheduler import get_scheduler_status, run_scheduler
+from .redis_streams import (
+    ensure_consumer_group,
+    snapshot_stream_depths,
+    stream_depths_to_dict,
+)
+from .scheduler import get_scheduler_status, run_scheduler, run_trim_scheduler
 # Importing the worker module pulls in collector + discovery which
 # self-register their handlers with the dispatcher. The dispatcher's
 # registry must be populated before the XREADGROUP loop starts so the
@@ -198,6 +202,40 @@ async def main() -> None:
 
     consumer = StatsJobConsumer(config)
 
+    # Module-level cache of the latest queue-depth snapshot. The
+    # health server's status_payload_fn is synchronous, but the
+    # snapshot needs an async Redis call — so we keep the latest
+    # snapshot in a dict and refresh it on a 5s background tick.
+    _health_snapshot: dict = {}
+
+    async def _health_snapshot_task() -> None:
+        # Lazy import: admission imports SQLAlchemy through the engine
+        # module, which we want resolved after the preflight asyncpg
+        # check has run.
+        from . import admission
+
+        while not shutdown.is_set():
+            try:
+                snapshot = await snapshot_stream_depths()
+                payload = stream_depths_to_dict(snapshot)
+                # Per-provider last-call duration. One number per
+                # provider — see admission.record_latency. Real
+                # percentile aggregation is deferred to PR B.
+                payload["providers"] = {
+                    provider_id: {"last_call_duration_ms": ms}
+                    for provider_id, ms in admission.controller.last_durations_snapshot().items()
+                }
+                _health_snapshot.update(payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("health_snapshot.error: %s", exc)
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=5.0)
+                return
+            except asyncio.TimeoutError:
+                continue
+
     health_server = await run_health_server(
         config.health_port,
         role="insights-service",
@@ -206,15 +244,18 @@ async def main() -> None:
             "consumer": consumer.consumer_name,
             "kinds": dispatcher.registered_kinds(),
             "scheduler": get_scheduler_status(),
+            **_health_snapshot,
         },
     )
 
     scheduler_task = asyncio.create_task(run_scheduler(config, shutdown), name="insights-scheduler")
+    trim_task = asyncio.create_task(run_trim_scheduler(shutdown), name="insights-trim")
+    health_task = asyncio.create_task(_health_snapshot_task(), name="insights-health-snapshot")
     worker_task = asyncio.create_task(consumer.run(), name="insights-worker")
 
     try:
         done, _pending = await asyncio.wait(
-            {scheduler_task, worker_task, asyncio.create_task(shutdown.wait())},
+            {scheduler_task, trim_task, health_task, worker_task, asyncio.create_task(shutdown.wait())},
             return_when=asyncio.FIRST_COMPLETED,
         )
         for t in done:
@@ -227,6 +268,18 @@ async def main() -> None:
         scheduler_task.cancel()
         try:
             await scheduler_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        trim_task.cancel()
+        try:
+            await trim_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        health_task.cancel()
+        try:
+            await health_task
         except (asyncio.CancelledError, Exception):
             pass
 
