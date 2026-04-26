@@ -617,7 +617,7 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
                                                 type="button"
                                                 onClick={() => setMode(item.id, 'new')}
                                                 className={cn(
-                                                    'flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-all',
+                                                    'flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-colors duration-150',
                                                     mode === 'new'
                                                         ? 'border-indigo-500/40 bg-indigo-500/10 text-indigo-400'
                                                         : 'border-glass-border text-ink-muted hover:border-indigo-500/20 hover:text-ink-secondary'
@@ -630,7 +630,7 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
                                                 type="button"
                                                 onClick={() => setMode(item.id, 'existing')}
                                                 className={cn(
-                                                    'flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-all',
+                                                    'flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-colors duration-150',
                                                     mode === 'existing'
                                                         ? 'border-indigo-500/40 bg-indigo-500/10 text-indigo-400'
                                                         : 'border-glass-border text-ink-muted hover:border-indigo-500/20 hover:text-ink-secondary'
@@ -664,7 +664,7 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
                                                         placeholder="e.g., Finance Analytics"
                                                         className={cn(
                                                             'w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink',
-                                                            'placeholder:text-ink-muted/50 outline-none transition-all',
+                                                            'placeholder:text-ink-muted/50 outline-none transition-colors duration-150',
                                                             'focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40',
                                                             isDuplicate && !selectedPending[item.id]
                                                                 ? 'border-amber-500/40'
@@ -697,7 +697,7 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
                                                         placeholder="Optional description..."
                                                         className={cn(
                                                             'w-full px-3 py-2 text-sm rounded-lg border border-glass-border bg-transparent text-ink',
-                                                            'placeholder:text-ink-muted/50 outline-none transition-all',
+                                                            'placeholder:text-ink-muted/50 outline-none transition-colors duration-150',
                                                             'focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40'
                                                         )}
                                                     />
@@ -787,7 +787,7 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
                                                                                         setSelectedPending(prev => ({ ...prev, [item.id]: true }))
                                                                                     }}
                                                                                     className={cn(
-                                                                                        'relative flex flex-col gap-2 w-full p-3.5 rounded-xl border border-dashed text-left transition-all',
+                                                                                        'relative flex flex-col gap-2 w-full p-3.5 rounded-xl border border-dashed text-left transition-colors duration-150',
                                                                                         isThisPendingSelected
                                                                                             ? 'border-emerald-500/40 bg-emerald-500/5 shadow-md shadow-emerald-500/10 ring-1 ring-emerald-500/20'
                                                                                             : 'border-emerald-500/25 hover:border-emerald-500/40 hover:bg-emerald-500/[0.02]'
@@ -854,7 +854,7 @@ export function WorkspaceStep({ formData, updateFormData, catalogItems, onWorksp
                                                                             workspaceId: ws.id,
                                                                         })}
                                                                         className={cn(
-                                                                            'relative flex flex-col gap-2 w-full p-3.5 rounded-xl border text-left transition-all',
+                                                                            'relative flex flex-col gap-2 w-full p-3.5 rounded-xl border text-left transition-colors duration-150',
                                                                             isSelected
                                                                                 ? 'border-indigo-500/40 bg-indigo-500/5 shadow-md shadow-indigo-500/10 ring-1 ring-indigo-500/20'
                                                                                 : 'border-glass-border hover:border-indigo-500/20 hover:bg-black/[0.01] dark:hover:bg-white/[0.01]'

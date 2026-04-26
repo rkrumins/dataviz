@@ -276,13 +276,13 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
                         placeholder="Search entity types..."
-                        className="w-full pl-12 pr-4 py-3 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all outline-none"
+                        className="w-full pl-12 pr-4 py-3 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-colors duration-150 outline-none"
                     />
                 </div>
                 <button
                     onClick={() => setShowFilters(!showFilters)}
                     className={cn(
-                        'flex items-center gap-2 px-4 py-3 rounded-xl border-2 transition-all',
+                        'flex items-center gap-2 px-4 py-3 rounded-xl border-2 transition-colors duration-150',
                         showFilters
                             ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-600'
                             : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 text-slate-600 dark:text-slate-400'
@@ -424,7 +424,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                     <button
                         onClick={() => setShowScopeConfig(!showScopeConfig)}
                         className={cn(
-                            'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all',
+                            'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors duration-150',
                             showScopeConfig
                                 ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
                                 : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -475,7 +475,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                                     key={edge.id}
                                     onClick={() => toggleScopeEdge(edge.id)}
                                     className={cn(
-                                        'px-3 py-1.5 rounded-full text-xs font-medium border transition-all flex items-center gap-1.5',
+                                        'px-3 py-1.5 rounded-full text-xs font-medium border transition-colors duration-150 flex items-center gap-1.5',
                                         formData.scopeEdges?.edgeTypes.includes(edge.id)
                                             ? 'bg-amber-500 border-amber-600 text-white'
                                             : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-amber-400'
@@ -508,7 +508,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                         transition={{ delay: Math.min(index * 0.01, 0.05) }}
                         onClick={() => toggleEntityType(entityType.id)}
                         className={cn(
-                            'relative p-4 rounded-xl border-2 text-left transition-all group',
+                            'relative p-4 rounded-xl border-2 text-left transition-colors duration-150 group',
                             entityType.isSelected
                                 ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
                                 : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 bg-white dark:bg-slate-800'
@@ -602,7 +602,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                                         key={edgeType.id}
                                         onClick={() => toggleEdgeType(edgeType.id)}
                                         className={cn(
-                                            'p-3 rounded-lg border text-left transition-all flex items-center gap-2 group',
+                                            'p-3 rounded-lg border text-left transition-colors duration-150 flex items-center gap-2 group',
                                             edgeType.isSelected
                                                 ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
                                                 : 'border-slate-200 dark:border-slate-700 hover:border-slate-300'

@@ -385,6 +385,49 @@ async def purge_aggregation(
     except ConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
+    # Validate envelope fields before touching Redis. Each falsy here
+    # would make ``enqueue_purge_job_safe`` silently return None and the
+    # operator would see a generic 500. Surface the actual missing
+    # field instead — the helper's silent guards stay in place as
+    # defense-in-depth for any other accidental caller.
+    from datetime import datetime, timezone
+
+    def _now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    missing = [
+        name
+        for name, val in (
+            ("job.id", job.id),
+            ("data_source_id", ds_id),
+            ("workspace_id", job.workspace_id),
+        )
+        if not val
+    ]
+    if missing:
+        logger.error(
+            "purge_aggregation: envelope rejected — empty field(s) %s "
+            "(job.id=%r ds_id=%r workspace_id=%r)",
+            missing, job.id, ds_id, job.workspace_id,
+        )
+        job.status = "failed"
+        job.error_message = (
+            f"Purge envelope rejected: missing required field(s): "
+            f"{', '.join(missing)}"
+        )
+        now_iso = _now_iso()
+        job.completed_at = now_iso
+        job.updated_at = now_iso
+        await session.commit()
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Purge could not be queued: required field(s) empty: "
+                f"{', '.join(missing)}. Check the data source's workspace "
+                f"assignment in aggregation_data_source_state."
+            ),
+        )
+
     # Hand the job off to the insights worker. The ``force`` variant
     # drops any stale dedup claim before XADD — duplicate-purge guard
     # is enforced at the DB layer via ``claim_purge_job`` above, so
@@ -392,10 +435,9 @@ async def purge_aggregation(
     # to defer to.
     msg_id = await enqueue_purge_job_force(job.id, ds_id, job.workspace_id)
     if msg_id is None:
-        # Distinguish "Redis truly down" from "envelope guard fired
-        # because some required field is empty". Both produce a
-        # ``None`` from enqueue_purge_job_force; the operator's
-        # remediation differs.
+        # Inputs were just validated above, so a None now is either
+        # Redis-down or an XADD exception caught by enqueue_job_safe's
+        # broad handler. Distinguish via PING and surface accordingly.
         from backend.app.services.aggregation.redis_client import get_redis as _get_redis_for_ping
         redis_reachable = False
         try:
@@ -412,24 +454,24 @@ async def purge_aggregation(
         # cancel out of.
         job.status = "failed"
         if redis_reachable:
-            # Redis answered PING but the enqueue still produced None.
-            # Most likely cause is a missing field on the envelope
-            # (job_id / ds_id / workspace_id empty) — log the inputs
-            # so it's diagnosable from a single log line.
+            # PING worked but enqueue still failed. The likely cause is
+            # an XADD exception that ``enqueue_job_safe`` swallowed —
+            # check its ``logger.exception`` line for the underlying
+            # error.
             logger.error(
                 "purge_aggregation: enqueue returned None despite Redis OK "
-                "(job.id=%r ds_id=%r workspace_id=%r) — check envelope guard "
-                "in enqueue_purge_job_safe",
+                "and validated envelope (job.id=%r ds_id=%r workspace_id=%r) — "
+                "check enqueue_job_safe exception log for XADD failure",
                 job.id, ds_id, job.workspace_id,
             )
             job.error_message = (
-                "Failed to enqueue purge job: insights queue is reachable "
-                "but the request envelope was rejected (see backend logs)."
+                "Failed to enqueue purge job: insights stream rejected the XADD "
+                "(see backend logs)."
             )
             http_status = 500
             user_detail = (
-                "Purge could not be queued: the request envelope was rejected "
-                "by the insights queue. Check backend logs for the missing field."
+                "Purge could not be queued: the insights stream rejected the "
+                "write. Check backend logs for the underlying error."
             )
         else:
             job.error_message = (
@@ -441,8 +483,7 @@ async def purge_aggregation(
                 "unavailable. The job has been recorded as failed; retry "
                 "once Redis is reachable."
             )
-        from datetime import datetime, timezone
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = _now_iso()
         job.completed_at = now_iso
         job.updated_at = now_iso
         await session.commit()

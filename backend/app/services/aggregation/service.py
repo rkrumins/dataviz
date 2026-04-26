@@ -674,6 +674,31 @@ class AggregationService:
         if not state:
             raise NotFoundError(f"Data source {ds_id} not found in aggregation state")
 
+        # Resolve the canonical workspace_id from the source-of-truth
+        # row (``workspace_data_sources.workspace_id`` is nullable=False)
+        # so we can backfill the aggregation state cache when it has
+        # drifted. Without this fall-back, a state row that was written
+        # before workspace_id was being set would block every purge
+        # forever, and the insights enqueue layer's envelope guard
+        # would silently swallow the request anyway.
+        from backend.app.db.models import WorkspaceDataSourceORM
+        ds_orm = await session.get(WorkspaceDataSourceORM, ds_id)
+        if not state.workspace_id:
+            canonical_ws = ds_orm.workspace_id if ds_orm else None
+            if not canonical_ws:
+                raise NotFoundError(
+                    f"Data source {ds_id} has no workspace assignment in "
+                    "either aggregation_data_source_state or "
+                    "workspace_data_sources. Assign the data source to a "
+                    "workspace before purging."
+                )
+            logger.warning(
+                "claim_purge_job: backfilling empty workspace_id for ds=%s "
+                "from workspace_data_sources (canonical_ws=%s)",
+                ds_id, canonical_ws,
+            )
+            state.workspace_id = canonical_ws
+
         active = (
             await session.execute(
                 select(AggregationJobORM)
@@ -686,8 +711,6 @@ class AggregationService:
                 f"Cannot purge while aggregation job {active.id} is active"
             )
 
-        from backend.app.db.models import WorkspaceDataSourceORM
-        ds_orm = await session.get(WorkspaceDataSourceORM, ds_id)
         actual_mode = (ds_orm.projection_mode if ds_orm else None) or "in_source"
 
         now = _now()
