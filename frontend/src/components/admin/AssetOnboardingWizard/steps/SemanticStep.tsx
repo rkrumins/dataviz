@@ -463,7 +463,7 @@ export function SemanticStep({
                                 onClick={analyzeAll}
                                 disabled={isAnalyzingAll || loadingOntologies}
                                 className={cn(
-                                    'flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all shadow-sm',
+                                    'flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-colors duration-150 shadow-sm',
                                     'bg-gradient-to-r from-indigo-500 to-purple-500 text-white',
                                     'hover:from-indigo-600 hover:to-purple-600 shadow-indigo-500/25',
                                     'disabled:opacity-50 disabled:cursor-not-allowed',
@@ -487,7 +487,7 @@ export function SemanticStep({
                                 'flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium',
                                 'bg-gradient-to-r from-indigo-500/10 to-purple-500/10 border border-indigo-500/20',
                                 'hover:from-indigo-500/15 hover:to-purple-500/15 hover:border-indigo-500/30',
-                                'text-indigo-500 transition-all',
+                                'text-indigo-500 transition-colors duration-150',
                                 'disabled:opacity-50 disabled:cursor-not-allowed',
                             )}
                         >
@@ -501,7 +501,7 @@ export function SemanticStep({
                                 animate={{ opacity: 1, scale: 1 }}
                                 type="button"
                                 onClick={applyBestToAll}
-                                className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 hover:bg-emerald-500/15 transition-all"
+                                className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 hover:bg-emerald-500/15 transition-colors duration-150"
                             >
                                 <Zap className="w-4 h-4" />
                                 Apply &ldquo;{sharedBestName}&rdquo; to all
@@ -518,7 +518,7 @@ export function SemanticStep({
                             animate={{ opacity: 1, scale: 1 }}
                             type="button"
                             onClick={applyBestToAll}
-                            className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 hover:bg-emerald-500/15 transition-all"
+                            className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 hover:bg-emerald-500/15 transition-colors duration-150"
                         >
                             <Zap className="w-4 h-4" />
                             Apply &ldquo;{sharedBestName}&rdquo; to all
@@ -742,7 +742,7 @@ export function SemanticStep({
                                                             onClick={() => analyzeSource(item)}
                                                             disabled={loadingOntologies}
                                                             className={cn(
-                                                                'flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all shadow-sm',
+                                                                'flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors duration-150 shadow-sm',
                                                                 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white',
                                                                 'hover:from-indigo-600 hover:to-purple-600 shadow-indigo-500/25',
                                                                 'disabled:opacity-50',
@@ -904,7 +904,7 @@ const SourceRecommendations = memo(function SourceRecommendations({
                                 value={search}
                                 onChange={e => onSearchChange(e.target.value)}
                                 placeholder="Search semantic layers..."
-                                className="w-full pl-9 pr-8 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/30 transition-all"
+                                className="w-full pl-9 pr-8 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/30 transition-colors duration-150"
                             />
                             {search && (
                                 <button
@@ -940,7 +940,7 @@ const SourceRecommendations = memo(function SourceRecommendations({
                                     type="button"
                                     onClick={() => onSelect(match.ontologyId)}
                                     className={cn(
-                                        'w-full text-left rounded-xl border-2 transition-all',
+                                        'w-full text-left rounded-xl border-2 transition-colors duration-150',
                                         isSelected
                                             ? 'border-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10 ring-1 ring-indigo-500/20'
                                             : isBest
@@ -953,7 +953,7 @@ const SourceRecommendations = memo(function SourceRecommendations({
                                             {/* Radio + Coverage Ring */}
                                             <div className="flex flex-col items-center gap-2 pt-0.5">
                                                 <div className={cn(
-                                                    'w-[18px] h-[18px] rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-all',
+                                                    'w-[18px] h-[18px] rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors duration-150',
                                                     isSelected
                                                         ? 'border-indigo-500 bg-indigo-500'
                                                         : 'border-glass-border-hover',
@@ -1092,7 +1092,7 @@ const SourceRecommendations = memo(function SourceRecommendations({
                     type="button"
                     onClick={onSelectCreate}
                     className={cn(
-                        'w-full text-left rounded-xl border-2 transition-all',
+                        'w-full text-left rounded-xl border-2 transition-colors duration-150',
                         selectedId === '__create_from_graph__'
                             ? 'border-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10 ring-1 ring-indigo-500/20'
                             : 'border-dashed border-glass-border hover:border-indigo-500/30 hover:bg-black/[0.01] dark:hover:bg-white/[0.01]',
@@ -1102,7 +1102,7 @@ const SourceRecommendations = memo(function SourceRecommendations({
                         <div className="flex items-start gap-3">
                             <div className="flex flex-col items-center gap-2 pt-0.5">
                                 <div className={cn(
-                                    'w-[18px] h-[18px] rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-all',
+                                    'w-[18px] h-[18px] rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors duration-150',
                                     selectedId === '__create_from_graph__'
                                         ? 'border-indigo-500 bg-indigo-500'
                                         : 'border-glass-border-hover',
@@ -1151,14 +1151,14 @@ const SourceRecommendations = memo(function SourceRecommendations({
                         value={draftName}
                         onChange={e => onDraftNameChange(e.target.value)}
                         placeholder="Enter schema name..."
-                        className="w-full px-3 py-1.5 rounded-lg bg-white dark:bg-black/20 border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/30 transition-all"
+                        className="w-full px-3 py-1.5 rounded-lg bg-white dark:bg-black/20 border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/30 transition-colors duration-150"
                     />
                     <button
                         type="button"
                         onClick={onCreateDraft}
                         disabled={isCreatingDraft || !draftName.trim()}
                         className={cn(
-                            'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm',
+                            'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-colors duration-150 shadow-sm',
                             'bg-gradient-to-r from-indigo-500 to-purple-500 text-white',
                             'hover:from-indigo-600 hover:to-purple-600 shadow-indigo-500/25',
                             (isCreatingDraft || !draftName.trim()) && 'opacity-60',

@@ -189,7 +189,7 @@ function WizardShell({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60"
         >
             <motion.div
                 initial={{ scale: 0.95, opacity: 0, y: 20 }}
@@ -197,14 +197,14 @@ function WizardShell({
                 exit={{ scale: 0.95, opacity: 0, y: 20 }}
                 transition={{ duration: 0.12 }}
                 className={cn(
-                    'relative w-full max-h-[90vh] bg-white dark:bg-slate-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col',
+                    'relative w-full max-h-[90vh] bg-white dark:bg-slate-900 rounded-2xl shadow-lg overflow-hidden flex flex-col',
                     isWide ? 'max-w-[1180px]' : 'max-w-4xl',
                 )}
             >
                 {/* Header */}
                 <div className="flex items-center justify-between px-8 py-5 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900">
                     <div className="flex items-center gap-4">
-                        <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/25">
+                        <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white shadow-md">
                             {activeSteps[currentStepIndex]?.icon}
                         </div>
                         <div>
@@ -237,7 +237,7 @@ function WizardShell({
                                         onClick={() => isClickable && onStepClick(step.id)}
                                         disabled={!isClickable}
                                         className={cn(
-                                            'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all',
+                                            'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-colors duration-150',
                                             isActive
                                                 ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-100 dark:ring-blue-900'
                                                 : isCompleted
@@ -267,7 +267,7 @@ function WizardShell({
                 </div>
 
                 {/* Step Content */}
-                <div className="flex-1 overflow-y-auto">
+                <div className="flex-1 overflow-y-auto min-h-[520px]">
                     <AnimatePresence mode="wait">
                         <motion.div
                             key={currentStep}
@@ -288,7 +288,7 @@ function WizardShell({
                         onClick={onBack}
                         disabled={currentStepIndex === 0}
                         className={cn(
-                            'flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all',
+                            'flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors duration-150',
                             currentStepIndex > 0
                                 ? 'text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
                                 : 'text-slate-400 cursor-not-allowed',
@@ -301,7 +301,7 @@ function WizardShell({
                     <div className="flex items-center gap-3">
                         <button
                             onClick={onClose}
-                            className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all"
+                            className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150"
                         >
                             Cancel
                         </button>
@@ -311,9 +311,9 @@ function WizardShell({
                                 onClick={onSubmit}
                                 disabled={!canProceed || isSubmitting}
                                 className={cn(
-                                    'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-all',
+                                    'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
                                     canProceed && !isSubmitting
-                                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-lg shadow-blue-500/25'
+                                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md'
                                         : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
                                 )}
                             >
@@ -328,9 +328,9 @@ function WizardShell({
                                 onClick={onNext}
                                 disabled={!canProceed}
                                 className={cn(
-                                    'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-all',
+                                    'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
                                     canProceed
-                                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-lg shadow-blue-500/25'
+                                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md'
                                         : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
                                 )}
                             >
@@ -351,8 +351,8 @@ function WizardShell({
 
 function WizardLoadingShell({ label, onClose }: { label: string; onClose?: () => void }) {
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <div className="relative w-full max-w-4xl bg-white dark:bg-slate-900 rounded-2xl shadow-2xl flex flex-col items-center justify-center py-24 gap-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
+            <div className="relative w-full max-w-4xl bg-white dark:bg-slate-900 rounded-2xl shadow-lg flex flex-col items-center justify-center py-24 gap-4">
                 {onClose && (
                     <button
                         onClick={onClose}
@@ -370,8 +370,8 @@ function WizardLoadingShell({ label, onClose }: { label: string; onClose?: () =>
 
 function WizardErrorShell({ error, onClose }: { error?: Error | null; onClose: () => void }) {
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <div className="relative w-full max-w-4xl bg-white dark:bg-slate-900 rounded-2xl shadow-2xl flex flex-col items-center justify-center py-24 gap-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
+            <div className="relative w-full max-w-4xl bg-white dark:bg-slate-900 rounded-2xl shadow-lg flex flex-col items-center justify-center py-24 gap-4">
                 <button
                     onClick={onClose}
                     className="absolute top-4 right-4 p-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
