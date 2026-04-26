@@ -85,7 +85,7 @@ export function EditNodePanel() {
     }
 
     return (
-        <div className="absolute top-20 right-4 w-96 max-h-[calc(100vh-120px)] bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl overflow-hidden flex flex-col z-20 animate-in slide-in-from-right-10 fade-in duration-200">
+        <div className="absolute top-20 right-4 w-96 max-h-[calc(100vh-120px)] bg-canvas-elevated border border-glass-border rounded-xl shadow-lg overflow-hidden flex flex-col z-20 animate-in slide-in-from-right-10 fade-in duration-200">
             {/* Header - Sticky */}
             <div className="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-glass-border bg-canvas-elevated">
                 <div className="flex items-center gap-2">
@@ -145,7 +145,7 @@ export function EditNodePanel() {
                         <textarea
                             value={rawJson}
                             onChange={(e) => handleRawJsonChange(e.target.value)}
-                            className={`w-full h-[400px] px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border transition-all outline-none text-xs font-mono resize-none custom-scrollbar ${
+                            className={`w-full h-[400px] px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border transition-colors duration-150 outline-none text-xs font-mono resize-none custom-scrollbar ${
                                 jsonError 
                                     ? 'border-red-500/50 focus:border-red-500' 
                                     : 'border-transparent focus:border-accent-lineage'
@@ -168,7 +168,7 @@ export function EditNodePanel() {
                                 type="text"
                                 value={formData.label || ''}
                                 onChange={(e) => handleChange('label', e.target.value)}
-                                className="w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-transparent focus:border-accent-lineage focus:bg-white dark:focus:bg-black transition-all outline-none text-sm"
+                                className="w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-transparent focus:border-accent-lineage focus:bg-white dark:focus:bg-black transition-colors duration-150 outline-none text-sm"
                             />
                         </div>
                         
@@ -179,7 +179,7 @@ export function EditNodePanel() {
                                 value={formData.description || ''}
                                 onChange={(e) => handleChange('description', e.target.value)}
                                 rows={3}
-                                className="w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-transparent focus:border-accent-lineage focus:bg-white dark:focus:bg-black transition-all outline-none text-sm resize-none"
+                                className="w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-transparent focus:border-accent-lineage focus:bg-white dark:focus:bg-black transition-colors duration-150 outline-none text-sm resize-none"
                             />
                         </div>
                         
@@ -203,14 +203,14 @@ export function EditNodePanel() {
                                         value={formData[field.id] || ''}
                                         onChange={(e) => handleChange(field.id, e.target.value)}
                                         rows={3}
-                                        className="w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-transparent focus:border-accent-lineage focus:bg-white dark:focus:bg-black transition-all outline-none text-sm resize-none"
+                                        className="w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-transparent focus:border-accent-lineage focus:bg-white dark:focus:bg-black transition-colors duration-150 outline-none text-sm resize-none"
                                     />
                                 ) : (
                                     <input
                                         type="text"
                                         value={formData[field.id] || ''}
                                         onChange={(e) => handleChange(field.id, e.target.value)}
-                                        className="w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-transparent focus:border-accent-lineage focus:bg-white dark:focus:bg-black transition-all outline-none text-sm"
+                                        className="w-full px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-transparent focus:border-accent-lineage focus:bg-white dark:focus:bg-black transition-colors duration-150 outline-none text-sm"
                                     />
                                 )}
                             </div>

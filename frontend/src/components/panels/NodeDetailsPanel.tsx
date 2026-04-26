@@ -156,7 +156,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: 20 }}
       className={cn(
-        "absolute top-4 right-4 w-[420px] max-h-[calc(100vh-100px)] bg-canvas-elevated/98 backdrop-blur-xl border border-glass-border rounded-2xl shadow-2xl overflow-hidden flex flex-col z-30",
+        "absolute top-4 right-4 w-[420px] max-h-[calc(100vh-100px)] bg-canvas-elevated/98 backdrop-blur-xl border border-glass-border rounded-2xl shadow-lg overflow-hidden flex flex-col z-30",
         className
       )}
     >
@@ -227,7 +227,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
             <button
               onClick={() => setIsEditMode(!isEditMode)}
               className={cn(
-                "p-2 rounded-lg transition-all duration-200",
+                "p-2 rounded-lg transition-colors duration-150 duration-200",
                 isEditMode 
                   ? "bg-accent-lineage/20 text-accent-lineage shadow-lg shadow-accent-lineage/20" 
                   : "hover:bg-white/[0.08] text-ink-muted hover:text-ink"
@@ -242,7 +242,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
               <button
                 onClick={() => setIsRawMode(!isRawMode)}
                 className={cn(
-                  "p-2 rounded-lg transition-all duration-200",
+                  "p-2 rounded-lg transition-colors duration-150 duration-200",
                   isRawMode 
                     ? "bg-purple-500/20 text-purple-500" 
                     : "hover:bg-white/[0.08] text-ink-muted hover:text-ink"
@@ -256,7 +256,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
             {/* Close */}
             <button
               onClick={handleClose}
-              className="p-2 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all"
+              className="p-2 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-colors duration-150"
             >
               <LucideIcons.X className="w-4 h-4" />
             </button>
@@ -287,7 +287,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
               key={tab}
               onClick={() => setActiveTab(tab)}
               className={cn(
-                "px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 capitalize",
+                "px-3 py-1.5 rounded-lg text-xs font-medium transition-colors duration-150 duration-200 capitalize",
                 activeTab === tab
                   ? "bg-white/[0.08] text-ink"
                   : "text-ink-muted hover:text-ink hover:bg-white/[0.04]"
@@ -317,7 +317,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
               value={rawJson}
               onChange={(e) => handleRawJsonChange(e.target.value)}
               className={cn(
-                "w-full h-[400px] px-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border transition-all outline-none text-xs font-mono resize-none custom-scrollbar",
+                "w-full h-[400px] px-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border transition-colors duration-150 outline-none text-xs font-mono resize-none custom-scrollbar",
                 jsonError 
                   ? "border-red-500/30 focus:border-red-500/50" 
                   : "border-white/[0.08] focus:border-accent-lineage/40"
@@ -340,7 +340,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
                   type="text"
                   value={formData.label || ''}
                   onChange={(e) => handleChange('label', e.target.value)}
-                  className="w-full px-3 py-2.5 rounded-xl bg-white/[0.04] border border-white/[0.08] focus:border-accent-lineage/40 focus:bg-white/[0.06] transition-all outline-none text-sm"
+                  className="w-full px-3 py-2.5 rounded-xl bg-white/[0.04] border border-white/[0.08] focus:border-accent-lineage/40 focus:bg-white/[0.06] transition-colors duration-150 outline-none text-sm"
                   placeholder="Entity name..."
                 />
               </div>
@@ -355,7 +355,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
                   value={formData.description || ''}
                   onChange={(e) => handleChange('description', e.target.value)}
                   rows={3}
-                  className="w-full px-3 py-2.5 rounded-xl bg-white/[0.04] border border-white/[0.08] focus:border-accent-lineage/40 focus:bg-white/[0.06] transition-all outline-none text-sm resize-none"
+                  className="w-full px-3 py-2.5 rounded-xl bg-white/[0.04] border border-white/[0.08] focus:border-accent-lineage/40 focus:bg-white/[0.06] transition-colors duration-150 outline-none text-sm resize-none"
                   placeholder="Add a description..."
                 />
               </div>
@@ -375,7 +375,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
                   />
                   <button
                     onClick={() => navigator.clipboard.writeText(urn)}
-                    className="p-2.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all"
+                    className="p-2.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-colors duration-150"
                     title="Copy URN"
                   >
                     <LucideIcons.Copy className="w-4 h-4" />
@@ -399,14 +399,14 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
                           value={formData[field.id] || ''}
                           onChange={(e) => handleChange(field.id, e.target.value)}
                           rows={2}
-                          className="w-full px-3 py-2 rounded-xl bg-white/[0.04] border border-white/[0.08] focus:border-accent-lineage/40 transition-all outline-none text-sm resize-none"
+                          className="w-full px-3 py-2 rounded-xl bg-white/[0.04] border border-white/[0.08] focus:border-accent-lineage/40 transition-colors duration-150 outline-none text-sm resize-none"
                         />
                       ) : (
                         <input
                           type="text"
                           value={formData[field.id] || ''}
                           onChange={(e) => handleChange(field.id, e.target.value)}
-                          className="w-full px-3 py-2 rounded-xl bg-white/[0.04] border border-white/[0.08] focus:border-accent-lineage/40 transition-all outline-none text-sm"
+                          className="w-full px-3 py-2 rounded-xl bg-white/[0.04] border border-white/[0.08] focus:border-accent-lineage/40 transition-colors duration-150 outline-none text-sm"
                         />
                       )}
                     </div>
@@ -431,7 +431,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
                         type="text"
                         value={typeof formData[key] === 'object' ? JSON.stringify(formData[key]) : formData[key] || ''}
                         onChange={(e) => handleChange(key, e.target.value)}
-                        className="w-full px-3 py-2 rounded-xl bg-white/[0.04] border border-white/[0.08] focus:border-accent-lineage/40 transition-all outline-none text-sm"
+                        className="w-full px-3 py-2 rounded-xl bg-white/[0.04] border border-white/[0.08] focus:border-accent-lineage/40 transition-colors duration-150 outline-none text-sm"
                       />
                     </div>
                   ))}
@@ -442,7 +442,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
             {/* Quick JSON Access */}
             <button
               onClick={() => setIsRawMode(true)}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2.5 mt-4 rounded-xl bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] text-ink-muted hover:text-ink text-xs font-medium transition-all"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2.5 mt-4 rounded-xl bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] text-ink-muted hover:text-ink text-xs font-medium transition-colors duration-150"
             >
               <LucideIcons.Code className="w-4 h-4" />
               Edit as Raw JSON
@@ -468,7 +468,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
                     <code className="flex-1 text-xs font-mono text-ink-muted truncate">{urn}</code>
                     <button
                       onClick={() => navigator.clipboard.writeText(urn)}
-                      className="p-1.5 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all"
+                      className="p-1.5 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-colors duration-150"
                       title="Copy URN"
                     >
                       <LucideIcons.Copy className="w-3.5 h-3.5" />
@@ -597,7 +597,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
             <div className="flex items-center gap-2">
               <button
                 onClick={handleCancel}
-                className="px-4 py-2 text-sm font-medium text-ink-muted hover:text-ink hover:bg-white/[0.06] rounded-xl transition-all"
+                className="px-4 py-2 text-sm font-medium text-ink-muted hover:text-ink hover:bg-white/[0.06] rounded-xl transition-colors duration-150"
               >
                 Cancel
               </button>
@@ -605,7 +605,7 @@ export function NodeDetailsPanel({ className, onClose }: NodeDetailsPanelProps) 
                 onClick={handleSave}
                 disabled={!hasChanges || !!jsonError}
                 className={cn(
-                  "px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2 transition-all",
+                  "px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2 transition-colors duration-150",
                   hasChanges && !jsonError
                     ? "bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-lg shadow-accent-lineage/25"
                     : "bg-white/[0.06] text-ink-muted cursor-not-allowed"

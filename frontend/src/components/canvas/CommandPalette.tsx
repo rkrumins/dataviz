@@ -317,7 +317,7 @@ export function CommandPalette({
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
-                    className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+                    className="absolute inset-0 bg-black/40"
                     onClick={onClose}
                 />
                 
@@ -331,7 +331,7 @@ export function CommandPalette({
                     className={cn(
                         "relative w-full max-w-[560px]",
                         "bg-canvas-elevated/98 backdrop-blur-xl",
-                        "border border-glass-border rounded-2xl shadow-2xl",
+                        "border border-glass-border rounded-2xl shadow-lg",
                         "overflow-hidden"
                     )}
                 >

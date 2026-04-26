@@ -65,7 +65,7 @@ export function DeleteViewDialog({
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/60"
         onClick={handleClose}
       >
         <motion.div
@@ -74,7 +74,7 @@ export function DeleteViewDialog({
           exit={{ scale: 0.95, opacity: 0, y: 8 }}
           transition={{ type: 'spring', damping: 25, stiffness: 350 }}
           onClick={e => e.stopPropagation()}
-          className="w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl shadow-2xl shadow-black/20 overflow-hidden"
+          className="w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl shadow-lg shadow-black/20 overflow-hidden"
         >
           {/* Header — red accent strip */}
           <div className="relative">
@@ -137,7 +137,7 @@ export function DeleteViewDialog({
                   'w-full px-4 py-3 rounded-xl border text-sm font-medium',
                   'bg-slate-50 dark:bg-slate-800/50 text-slate-900 dark:text-white',
                   'placeholder:text-slate-300 dark:placeholder:text-slate-600',
-                  'outline-none transition-all duration-200',
+                  'outline-none transition-colors duration-150 duration-200',
                   canDelete
                     ? 'border-red-400 dark:border-red-500/50 ring-2 ring-red-100 dark:ring-red-500/10'
                     : 'border-slate-200 dark:border-slate-700 focus:border-slate-400 dark:focus:border-slate-500 focus:ring-2 focus:ring-slate-100 dark:focus:ring-slate-500/10'
@@ -168,9 +168,9 @@ export function DeleteViewDialog({
               onClick={handleDelete}
               disabled={!canDelete || deleting}
               className={cn(
-                'px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200',
+                'px-5 py-2.5 rounded-xl text-sm font-semibold transition-colors duration-150 duration-200',
                 canDelete && !deleting
-                  ? 'bg-red-500 text-white hover:bg-red-600 shadow-lg shadow-red-500/25 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0'
+                  ? 'bg-red-500 text-white hover:bg-red-600 shadow-md hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0'
                   : 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed'
               )}
             >

@@ -27,8 +27,8 @@ export function UnassignConfirmDialog({
 }: UnassignConfirmDialogProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={isLoading ? undefined : onCancel} />
-      <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl animate-in fade-in zoom-in-95 duration-200 overflow-hidden">
+      <div className="absolute inset-0 bg-black/40" onClick={isLoading ? undefined : onCancel} />
+      <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 duration-200 overflow-hidden">
         {/* Red accent bar */}
         <div className="h-1 bg-gradient-to-r from-red-500 to-orange-500" />
 

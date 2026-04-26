@@ -81,7 +81,7 @@ export function ChildReassignConfirmDialog({
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.2 }}
-                className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4"
+                className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4"
                 onClick={onCancel}
             >
                 {/* Dialog */}
@@ -95,7 +95,7 @@ export function ChildReassignConfirmDialog({
                         'relative w-full max-w-[420px] rounded-2xl overflow-hidden',
                         'bg-white dark:bg-slate-900',
                         'border border-slate-200 dark:border-slate-700/80',
-                        'shadow-2xl shadow-black/20'
+                        'shadow-lg shadow-black/20'
                     )}
                     onClick={e => e.stopPropagation()}
                 >
@@ -188,7 +188,7 @@ export function ChildReassignConfirmDialog({
                             <button
                                 onClick={onCancel}
                                 className={cn(
-                                    'flex-1 px-4 py-2.5 rounded-xl text-sm font-medium transition-all',
+                                    'flex-1 px-4 py-2.5 rounded-xl text-sm font-medium transition-colors duration-150',
                                     'text-slate-600 dark:text-slate-300',
                                     'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700',
                                     'border border-slate-200 dark:border-slate-600',
@@ -200,7 +200,7 @@ export function ChildReassignConfirmDialog({
                             <button
                                 onClick={onConfirm}
                                 className={cn(
-                                    'flex-1 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all',
+                                    'flex-1 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors duration-150',
                                     'text-white',
                                     'shadow-md hover:shadow-lg',
                                     'active:scale-[0.98]'

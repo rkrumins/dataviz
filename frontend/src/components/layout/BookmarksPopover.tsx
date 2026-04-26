@@ -83,7 +83,7 @@ export function BookmarksPopover() {
 
       <Popover.Portal>
         <Popover.Content
-          className="w-80 bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2"
+          className="w-80 bg-canvas-elevated border border-glass-border rounded-xl shadow-lg overflow-hidden z-50 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2"
           sideOffset={8}
           align="end"
         >
@@ -235,7 +235,7 @@ function FavoriteRow({
           e.stopPropagation()
           onRemove()
         }}
-        className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-all"
+        className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-colors duration-150"
         title="Remove from favorites"
       >
         <X className="w-3 h-3 text-ink-muted" />

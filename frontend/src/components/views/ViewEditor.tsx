@@ -221,7 +221,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+        className="absolute inset-0 bg-black/50"
         onClick={onClose}
       />
 
@@ -230,7 +230,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.95 }}
-        className="relative w-full max-w-3xl max-h-[85vh] glass-panel rounded-2xl shadow-2xl overflow-hidden flex flex-col"
+        className="relative w-full max-w-3xl max-h-[85vh] glass-panel rounded-2xl shadow-lg overflow-hidden flex flex-col"
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-glass-border">
@@ -327,7 +327,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                           layout: { ...prev.layout!, type: layout.value as ViewConfiguration['layout']['type'] },
                         }))}
                         className={cn(
-                          "p-4 rounded-xl border-2 text-left transition-all",
+                          "p-4 rounded-xl border-2 text-left transition-colors duration-150",
                           view.layout?.type === layout.value
                             ? "border-accent-lineage bg-accent-lineage/5"
                             : "border-glass-border hover:border-accent-lineage/50"
@@ -368,7 +368,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                         key={entityType.id}
                         onClick={() => toggleEntityType(entityType.id)}
                         className={cn(
-                          "flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-all",
+                          "flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-colors duration-150",
                           isVisible
                             ? "border-accent-lineage bg-accent-lineage/5"
                             : "border-glass-border hover:border-glass-border/80 opacity-50"
@@ -419,7 +419,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
                         key={level.value}
                         onClick={() => updateProjection('targetGranularity', level.value)}
                         className={cn(
-                          "w-full flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-all",
+                          "w-full flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-colors duration-150",
                           view.layout?.projection?.targetGranularity === level.value
                             ? "border-accent-lineage bg-accent-lineage/5"
                             : "border-glass-border hover:border-glass-border/80"
@@ -733,7 +733,7 @@ function ToggleOption({
     <button
       onClick={() => onChange(!enabled)}
       className={cn(
-        "w-full flex items-center justify-between p-4 rounded-lg border-2 text-left transition-all",
+        "w-full flex items-center justify-between p-4 rounded-lg border-2 text-left transition-colors duration-150",
         enabled
           ? "border-accent-lineage bg-accent-lineage/5"
           : "border-glass-border hover:border-glass-border/80"
@@ -1019,7 +1019,7 @@ function LayerEditor({
                           onUpdate({ entityTypes: updated })
                         }}
                         className={cn(
-                          "px-2 py-1 rounded-md text-xs font-medium transition-all",
+                          "px-2 py-1 rounded-md text-xs font-medium transition-colors duration-150",
                           isInLayer
                             ? "text-white"
                             : "bg-black/5 dark:bg-white/10 text-ink-muted hover:text-ink"

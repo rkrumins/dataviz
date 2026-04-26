@@ -120,7 +120,7 @@ export function InlineNodeEditor({
                     <div className="absolute -inset-2 bg-accent-lineage/20 rounded-xl blur-lg animate-pulse" />
                     
                     {/* Input container */}
-                    <div className="relative bg-canvas-elevated border-2 border-accent-lineage rounded-lg shadow-2xl overflow-hidden">
+                    <div className="relative bg-canvas-elevated border-2 border-accent-lineage rounded-lg shadow-lg overflow-hidden">
                         <input
                             ref={inputRef}
                             type="text"

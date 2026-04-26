@@ -18,8 +18,8 @@ export function UnsavedChangesDialog({
 }: UnsavedChangesDialogProps) {
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onCancel} />
-      <div className="relative bg-canvas-elevated rounded-2xl shadow-2xl border border-glass-border w-full max-w-md mx-4 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+      <div className="absolute inset-0 bg-black/40" onClick={onCancel} />
+      <div className="relative bg-canvas-elevated rounded-2xl shadow-lg border border-glass-border w-full max-w-md mx-4 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         {/* Header */}
         <div className="px-6 pt-6 pb-4">
           <div className="flex items-center gap-3 mb-3">

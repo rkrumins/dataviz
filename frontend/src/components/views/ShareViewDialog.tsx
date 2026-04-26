@@ -80,7 +80,7 @@ export function ShareViewDialog({
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+                className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/50"
                 onClick={onClose}
             >
                 <motion.div
@@ -88,7 +88,7 @@ export function ShareViewDialog({
                     animate={{ scale: 1, opacity: 1 }}
                     exit={{ scale: 0.95, opacity: 0 }}
                     onClick={(e) => e.stopPropagation()}
-                    className="w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl shadow-2xl overflow-hidden"
+                    className="w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl shadow-lg overflow-hidden"
                 >
                     {/* Header */}
                     <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
@@ -120,7 +120,7 @@ export function ShareViewDialog({
                                 <button
                                     onClick={handleCopy}
                                     className={cn(
-                                        'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all',
+                                        'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-150',
                                         copied
                                             ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
                                             : 'bg-blue-600 text-white hover:bg-blue-700'
@@ -153,7 +153,7 @@ export function ShareViewDialog({
                                         onClick={() => handleVisibilityChange(id)}
                                         disabled={saving}
                                         className={cn(
-                                            'w-full flex items-center gap-3 px-4 py-3 rounded-xl border-2 transition-all text-left',
+                                            'w-full flex items-center gap-3 px-4 py-3 rounded-xl border-2 transition-colors duration-150 text-left',
                                             visibility === id
                                                 ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
                                                 : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
