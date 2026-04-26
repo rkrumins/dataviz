@@ -55,8 +55,8 @@ export function PublishConfirmDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-lg mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-lg mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
         {/* Header */}
         <div className="px-6 pt-6 pb-4">
           <div className="flex items-start justify-between">
@@ -157,7 +157,7 @@ export function PublishConfirmDialog({
             onClick={onConfirm}
             disabled={!impact.allowed || isPublishing}
             className={cn(
-              'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-bold transition-all shadow-md',
+              'flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-bold transition-colors duration-150 shadow-md',
               impact.allowed && !isPublishing
                 ? 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:from-indigo-600 hover:to-purple-600 shadow-indigo-500/25'
                 : 'bg-indigo-500/40 text-white/60 cursor-not-allowed shadow-none',

@@ -27,8 +27,8 @@ export function CreateOntologyDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md mx-4 animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
         {/* Header with accent bar */}
         <div className="border-b border-glass-border/50 px-6 pt-6 pb-4">
           <div className="flex items-center justify-between">
@@ -57,7 +57,7 @@ export function CreateOntologyDialog({
               placeholder="e.g., Data Catalog Schema"
               autoFocus
               className={cn(
-                'w-full px-4 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 transition-all',
+                'w-full px-4 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 transition-colors duration-150',
                 isDuplicateName
                   ? 'border-amber-400 focus:ring-amber-500/40 focus:border-amber-500/40'
                   : 'border-glass-border focus:ring-indigo-500/40 focus:border-indigo-500/40',
@@ -80,7 +80,7 @@ export function CreateOntologyDialog({
               <button
                 onClick={() => setMode('empty')}
                 className={cn(
-                  'text-left p-4 rounded-xl border-2 transition-all',
+                  'text-left p-4 rounded-xl border-2 transition-colors duration-150',
                   mode === 'empty'
                     ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'
                     : 'border-glass-border hover:border-glass-border-hover'
@@ -100,7 +100,7 @@ export function CreateOntologyDialog({
                 onClick={() => setMode('graph')}
                 disabled={!hasGraphContext}
                 className={cn(
-                  'text-left p-4 rounded-xl border-2 transition-all',
+                  'text-left p-4 rounded-xl border-2 transition-colors duration-150',
                   !hasGraphContext && 'opacity-50 cursor-not-allowed',
                   mode === 'graph'
                     ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'

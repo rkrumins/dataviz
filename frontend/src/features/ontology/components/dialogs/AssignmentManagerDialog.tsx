@@ -170,7 +170,7 @@ export function AssignmentManagerDialog({
             </Tooltip>
             <Tooltip text="Remove this ontology from the data source">
               <button onClick={() => onUnassign(d.wsId, d.dsId)} disabled={isAssigning}
-                className="p-1.5 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-all opacity-0 group-hover:opacity-100 disabled:opacity-30">
+                className="p-1.5 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors duration-150 opacity-0 group-hover:opacity-100 disabled:opacity-30">
                 <Unlink className="w-3.5 h-3.5" />
               </button>
             </Tooltip>
@@ -242,7 +242,7 @@ export function AssignmentManagerDialog({
                   <button
                     onClick={() => setConfirmRollout({ wsId, wsName, dsCount: items.length })}
                     disabled={isAssigning}
-                    className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[9px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/[0.06] hover:bg-indigo-500/[0.12] border border-indigo-500/15 transition-all disabled:opacity-50">
+                    className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[9px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/[0.06] hover:bg-indigo-500/[0.12] border border-indigo-500/15 transition-colors duration-150 disabled:opacity-50">
                     <Layers className="w-2.5 h-2.5" /> All in {wsName}
                   </button>
                 </Tooltip>
@@ -276,8 +276,8 @@ export function AssignmentManagerDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={isAssigning ? undefined : onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-2xl mx-4 max-h-[85vh] flex flex-col animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
+      <div className="absolute inset-0 bg-black/50" onClick={isAssigning ? undefined : onClose} />
+      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-2xl mx-4 max-h-[85vh] flex flex-col animate-in zoom-in-95 fade-in duration-200 overflow-hidden">
 
         <div className="h-1 w-full bg-gradient-to-r from-emerald-500 via-indigo-500 to-purple-500 flex-shrink-0" />
 
@@ -360,7 +360,7 @@ export function AssignmentManagerDialog({
               <button
                 onClick={() => setActiveTab(t.id)}
                 className={cn(
-                  'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all',
+                  'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors duration-150',
                   activeTab === t.id
                     ? 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 ring-1 ring-indigo-500/20'
                     : 'text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
@@ -443,7 +443,7 @@ export function AssignmentManagerDialog({
       {confirmReplace && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center">
           <div className="absolute inset-0 bg-black/30" onClick={() => setConfirmReplace(null)} />
-          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl animate-in fade-in zoom-in-95 overflow-hidden">
+          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 overflow-hidden">
             <div className="h-1 w-full bg-gradient-to-r from-amber-500 to-orange-500" />
             <div className="p-6">
               <div className="flex items-center gap-3 mb-4">
@@ -502,7 +502,7 @@ export function AssignmentManagerDialog({
       {confirmRollout && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center">
           <div className="absolute inset-0 bg-black/30" onClick={() => setConfirmRollout(null)} />
-          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl animate-in fade-in zoom-in-95 p-6">
+          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6">
             <div className="flex items-center gap-3 mb-3">
               <div className="w-10 h-10 rounded-xl bg-amber-500/15 flex items-center justify-center">
                 <AlertTriangle className="w-5 h-5 text-amber-500" />

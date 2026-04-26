@@ -61,7 +61,7 @@ export function KeyboardShortcutsDialog({ isOpen, onClose }: KeyboardShortcutsDi
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.15 }}
-          className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+          className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/50"
           onClick={onClose}
           role="dialog"
           aria-modal="true"
@@ -73,7 +73,7 @@ export function KeyboardShortcutsDialog({ isOpen, onClose }: KeyboardShortcutsDi
             exit={{ opacity: 0, y: 8, scale: 0.98 }}
             transition={{ duration: 0.15, ease: 'easeOut' }}
             className={cn(
-              'w-full max-w-lg rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl',
+              'w-full max-w-lg rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg',
               'overflow-hidden',
             )}
             onClick={e => e.stopPropagation()}

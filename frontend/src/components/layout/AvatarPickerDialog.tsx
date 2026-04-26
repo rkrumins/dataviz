@@ -152,7 +152,7 @@ export function AvatarPickerDialog({ isOpen, onClose, initials }: AvatarPickerDi
           {/* Panel */}
           <motion.div
             className={cn(
-              'relative w-full max-w-sm mx-4 rounded-2xl shadow-2xl',
+              'relative w-full max-w-sm mx-4 rounded-2xl shadow-lg',
               'bg-canvas-elevated border border-glass-border',
               'p-5',
             )}

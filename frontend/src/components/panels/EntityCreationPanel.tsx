@@ -324,7 +324,7 @@ export function EntityCreationPanel({
                 initial={{ opacity: 0, x: 400 }}
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: 400 }}
-                className="fixed right-0 top-0 bottom-0 w-[400px] z-50 glass-panel border-l border-glass-border shadow-2xl flex flex-col"
+                className="fixed right-0 top-0 bottom-0 w-[400px] z-50 glass-panel border-l border-glass-border shadow-lg flex flex-col"
             >
                 {/* Header */}
                 <div className="flex-shrink-0 px-5 py-4 border-b border-glass-border bg-canvas-elevated/95">
@@ -414,7 +414,7 @@ export function EntityCreationPanel({
                                     type="button"
                                     onClick={() => handleFieldChange('entityType', et.id)}
                                     className={cn(
-                                        "p-3 rounded-lg border-2 transition-all text-left",
+                                        "p-3 rounded-lg border-2 transition-colors duration-150 text-left",
                                         formData.entityType === et.id
                                             ? "border-accent-primary bg-accent-primary/5"
                                             : "border-glass-border hover:border-ink-muted/50"
@@ -556,7 +556,7 @@ export function EntityCreationPanel({
                             onClick={handleSubmit}
                             disabled={isSubmitting || !formData.entityType || !formData.displayName.trim()}
                             className={cn(
-                                "px-4 py-2 rounded-lg text-sm font-semibold transition-all flex items-center gap-2",
+                                "px-4 py-2 rounded-lg text-sm font-semibold transition-colors duration-150 flex items-center gap-2",
                                 isSubmitting || !formData.entityType || !formData.displayName.trim()
                                     ? "bg-gray-300 dark:bg-gray-700 text-gray-500 cursor-not-allowed"
                                     : "bg-green-500 text-white hover:bg-green-600 shadow-sm hover:shadow-md"

@@ -21,8 +21,8 @@ export function SuggestDialog({
 }: SuggestDialogProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-lg mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-lg mx-4 p-6 animate-in zoom-in-95 fade-in duration-200">
         <div className="flex items-center justify-between mb-1">
           <h3 className="text-lg font-bold text-ink">Existing Ontologies Match Your Graph</h3>
           <button onClick={onClose} className="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted">
@@ -58,7 +58,7 @@ export function SuggestDialog({
                 <div className="w-full h-1.5 rounded-full bg-black/5 dark:bg-white/5 mb-2">
                   <div
                     className={cn(
-                      'h-full rounded-full transition-all',
+                      'h-full rounded-full transition-colors duration-150',
                       coveragePct >= 80 ? 'bg-emerald-500' : coveragePct >= 50 ? 'bg-amber-500' : 'bg-red-400'
                     )}
                     style={{ width: `${coveragePct}%` }}

@@ -226,10 +226,10 @@ export function ChangesReviewDialog({
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
 
       {/* Dialog */}
-      <div className="relative bg-canvas-elevated rounded-2xl shadow-2xl border border-glass-border w-full max-w-lg mx-4 overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[80vh]">
+      <div className="relative bg-canvas-elevated rounded-2xl shadow-lg border border-glass-border w-full max-w-lg mx-4 overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[80vh]">
         {/* Header */}
         <div className="px-6 pt-6 pb-4 flex items-center gap-3 flex-shrink-0">
           <div className="w-10 h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center flex-shrink-0">

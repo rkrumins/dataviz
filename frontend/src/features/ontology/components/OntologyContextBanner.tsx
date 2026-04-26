@@ -248,7 +248,7 @@ export function OntologyContextBanner({
 
           <Popover.Root open={envOpen} onOpenChange={(open) => { setEnvOpen(open); if (!open) setEnvSearch('') }}>
             <Popover.Trigger asChild>
-              <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-glass-border hover:border-indigo-300 hover:bg-indigo-500/[0.06] text-ink-secondary hover:text-indigo-600 transition-all flex-shrink-0">
+              <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-glass-border hover:border-indigo-300 hover:bg-indigo-500/[0.06] text-ink-secondary hover:text-indigo-600 transition-colors duration-150 flex-shrink-0">
                 <Database className="w-3 h-3" />
                 Select
                 <ChevronDown className={cn('w-3 h-3 text-ink-muted/40 transition-transform', envOpen && 'rotate-180')} />
@@ -257,7 +257,7 @@ export function OntologyContextBanner({
             <Popover.Portal>
               <Popover.Content
                 side="bottom" align="end" sideOffset={6}
-                className="w-[380px] bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl z-50 overflow-hidden animate-in fade-in zoom-in-95"
+                className="w-[380px] bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg z-50 overflow-hidden animate-in fade-in zoom-in-95"
               >
                 <div className="p-3 border-b border-glass-border">
                   <div className="relative">
@@ -265,7 +265,7 @@ export function OntologyContextBanner({
                     <input
                       type="text" value={envSearch} onChange={e => setEnvSearch(e.target.value)}
                       placeholder="Search environments..." autoFocus
-                      className="w-full pl-9 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-all"
+                      className="w-full pl-9 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-colors duration-150"
                     />
                   </div>
                 </div>
@@ -318,7 +318,7 @@ export function OntologyContextBanner({
               <Popover.Portal>
                 <Popover.Content
                   side="bottom" align="start" sideOffset={6}
-                  className="w-[380px] bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl z-50 overflow-hidden animate-in fade-in zoom-in-95"
+                  className="w-[380px] bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg z-50 overflow-hidden animate-in fade-in zoom-in-95"
                 >
                   <div className="p-3 border-b border-glass-border">
                     <div className="relative">
@@ -326,7 +326,7 @@ export function OntologyContextBanner({
                       <input
                         type="text" value={envSearch} onChange={e => setEnvSearch(e.target.value)}
                         placeholder="Search environments..." autoFocus
-                        className="w-full pl-9 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-all"
+                        className="w-full pl-9 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-colors duration-150"
                       />
                     </div>
                   </div>
@@ -357,7 +357,7 @@ export function OntologyContextBanner({
                 <Popover.Root open={manageOpen} onOpenChange={(open) => { setManageOpen(open); if (!open) setManageSearch('') }}>
                   <Popover.Trigger asChild>
                     <button className={cn(
-                      'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all flex-shrink-0',
+                      'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors duration-150 flex-shrink-0',
                       deploymentCount > 0
                         ? 'text-emerald-700 dark:text-emerald-400 bg-emerald-500/[0.08] hover:bg-emerald-500/[0.15] border border-emerald-500/20'
                         : 'text-ink-muted bg-black/[0.03] dark:bg-white/[0.04] hover:bg-black/[0.06] dark:hover:bg-white/[0.06] border border-glass-border',
@@ -378,7 +378,7 @@ export function OntologyContextBanner({
                   </Popover.Trigger>
                   <Popover.Portal>
                     <Popover.Content
-                      className="w-[380px] bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in zoom-in-95"
+                      className="w-[380px] bg-canvas-elevated border border-glass-border rounded-xl shadow-lg overflow-hidden z-50 animate-in fade-in zoom-in-95"
                       sideOffset={6} align="start"
                     >
                       {/* Header */}
@@ -394,7 +394,7 @@ export function OntologyContextBanner({
                           <input
                             type="text" value={manageSearch} onChange={e => setManageSearch(e.target.value)}
                             placeholder="Search data sources..." autoFocus
-                            className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-all"
+                            className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border/60 text-xs text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-colors duration-150"
                           />
                         </div>
                       </div>
@@ -428,7 +428,7 @@ export function OntologyContextBanner({
                                 <div
                                   key={ds.id}
                                   className={cn(
-                                    'flex items-center gap-2.5 px-3 py-2 rounded-lg group transition-all',
+                                    'flex items-center gap-2.5 px-3 py-2 rounded-lg group transition-colors duration-150',
                                     isAssigned
                                       ? 'bg-emerald-500/[0.06]'
                                       : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
@@ -462,7 +462,7 @@ export function OntologyContextBanner({
                                     <button
                                       onClick={() => initiateDeployAssign(ws.id, ws.name, ds.id, ds.label || ds.id, hasOtherOntology ? ds.ontologyId! : null)}
                                       disabled={isAssigning}
-                                      className="text-[10px] font-semibold text-indigo-500 hover:text-indigo-600 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-30 flex-shrink-0"
+                                      className="text-[10px] font-semibold text-indigo-500 hover:text-indigo-600 opacity-0 group-hover:opacity-100 transition-colors duration-150 disabled:opacity-30 flex-shrink-0"
                                     >
                                       Assign
                                     </button>
@@ -529,7 +529,7 @@ export function OntologyContextBanner({
                     <Popover.Trigger asChild>
                       <button
                         disabled={isAssigning}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 shadow-sm shadow-indigo-500/20 transition-all disabled:opacity-50"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 shadow-sm shadow-indigo-500/20 transition-colors duration-150 disabled:opacity-50"
                       >
                         {isAssigning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
                         Assign Schema
@@ -538,7 +538,7 @@ export function OntologyContextBanner({
                     <Popover.Portal>
                       <Popover.Content
                         side="bottom" align="end" sideOffset={6}
-                        className="w-[420px] bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl z-50 overflow-hidden animate-in fade-in zoom-in-95"
+                        className="w-[420px] bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg z-50 overflow-hidden animate-in fade-in zoom-in-95"
                       >
                         <div className="px-4 pt-4 pb-3 border-b border-glass-border">
                           <h3 className="text-sm font-bold text-ink mb-1">Assign Semantic Layer</h3>
@@ -551,7 +551,7 @@ export function OntologyContextBanner({
                               ref={assignSearchRef} type="text" value={assignSearch}
                               onChange={e => setAssignSearch(e.target.value)}
                               placeholder="Search semantic layers..."
-                              className="w-full pl-9 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-all"
+                              className="w-full pl-9 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-colors duration-150"
                             />
                           </div>
                         </div>
@@ -559,7 +559,7 @@ export function OntologyContextBanner({
                           <button
                             onClick={() => initiateBannerAssign(undefined, 'None (system defaults)')}
                             className={cn(
-                              'w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left transition-all',
+                              'w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left transition-colors duration-150',
                               !dataSource.ontologyId
                                 ? 'bg-indigo-500/[0.06] border border-indigo-500/15'
                                 : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03] border border-transparent',
@@ -587,7 +587,7 @@ export function OntologyContextBanner({
                                 onClick={() => !isCurrentlyAssigned && initiateBannerAssign(o.id, o.name)}
                                 disabled={isCurrentlyAssigned}
                                 className={cn(
-                                  'w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left transition-all',
+                                  'w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left transition-colors duration-150',
                                   isCurrentlyAssigned
                                     ? 'bg-emerald-500/[0.06] border border-emerald-500/15'
                                     : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03] border border-transparent cursor-pointer',
@@ -644,8 +644,8 @@ export function OntologyContextBanner({
       {/* ── Deployment reassignment confirmation ── */}
       {confirmTarget && onAssignToDataSource && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setConfirmTarget(null)} />
-          <div className="relative w-full max-w-md mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl animate-in fade-in zoom-in-95 p-6">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setConfirmTarget(null)} />
+          <div className="relative w-full max-w-md mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-10 h-10 rounded-xl bg-amber-500/15 flex items-center justify-center">
                 <AlertTriangle className="w-5 h-5 text-amber-500" />
@@ -694,8 +694,8 @@ export function OntologyContextBanner({
       {/* ── Unassign confirmation ── */}
       {unassignTarget && onUnassignFromDataSource && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setUnassignTarget(null)} />
-          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl animate-in fade-in zoom-in-95 p-6">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setUnassignTarget(null)} />
+          <div className="relative w-full max-w-sm mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in zoom-in-95 p-6">
             <h3 className="text-sm font-bold text-ink mb-2">Unassign schema?</h3>
             <p className="text-xs text-ink-muted mb-4">
               Remove this schema from <span className="font-semibold text-ink">{unassignTarget.dsLabel}</span>?
@@ -716,8 +716,8 @@ export function OntologyContextBanner({
       {/* ── Banner re-assignment confirmation dialog ── */}
       {bannerConfirmTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={handleCancelBannerAssign} />
-          <div className="relative w-full max-w-lg mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl animate-in fade-in slide-in-from-bottom-4 duration-200">
+          <div className="absolute inset-0 bg-black/40" onClick={handleCancelBannerAssign} />
+          <div className="relative w-full max-w-lg mx-4 rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg animate-in fade-in slide-in-from-bottom-4 duration-200">
             <button onClick={handleCancelBannerAssign} className="absolute top-4 right-4 p-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
               <X className="w-4 h-4" />
             </button>
@@ -784,7 +784,7 @@ export function OntologyContextBanner({
                   <input
                     type="text" value={confirmText} onChange={e => setConfirmText(e.target.value)}
                     placeholder='Type "change" to confirm'
-                    className="w-full px-3 py-2 rounded-lg bg-white dark:bg-black/20 border border-red-200 dark:border-red-800/50 text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-red-500/30 transition-all"
+                    className="w-full px-3 py-2 rounded-lg bg-white dark:bg-black/20 border border-red-200 dark:border-red-800/50 text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-red-500/30 transition-colors duration-150"
                   />
                 </div>
               </div>
@@ -795,7 +795,7 @@ export function OntologyContextBanner({
                 onClick={handleConfirmBannerAssign}
                 disabled={loadingImpact || isAssigning || (impactedViews.length > 0 && confirmText.toLowerCase() !== 'change')}
                 className={cn(
-                  'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all',
+                  'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-colors duration-150',
                   impactedViews.length > 0 ? 'bg-red-500 text-white hover:bg-red-600 shadow-sm shadow-red-500/20' : 'bg-indigo-500 text-white hover:bg-indigo-600 shadow-sm shadow-indigo-500/20',
                   (loadingImpact || isAssigning || (impactedViews.length > 0 && confirmText.toLowerCase() !== 'change')) && 'opacity-50 cursor-not-allowed',
                 )}
