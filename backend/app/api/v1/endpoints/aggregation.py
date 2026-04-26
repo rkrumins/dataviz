@@ -13,6 +13,7 @@ Supports two modes controlled by ``AGGREGATION_PROXY_ENABLED`` env var:
 
 This is the ONLY monolith file that imports FROM the aggregation package.
 """
+import asyncio
 import logging
 import os
 from typing import List, Optional
@@ -374,7 +375,7 @@ async def purge_aggregation(
     if _PROXY_ENABLED:
         return await _proxy("POST", f"/aggregation/data-sources/{ds_id}/purge", request)
 
-    from backend.insights_service.enqueue import enqueue_purge_job_safe
+    from backend.insights_service.enqueue import enqueue_purge_job_force
 
     _, _, _, ConflictError, NotFoundError = _direct_imports()
     try:
@@ -384,10 +385,68 @@ async def purge_aggregation(
     except ConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    # Hand the job off to the insights worker. Redis-down → enqueue
-    # returns None and the row stays ``pending``; an operator can
-    # redrive from Job History without losing the audit record.
-    await enqueue_purge_job_safe(job.id, ds_id, job.workspace_id)
+    # Hand the job off to the insights worker. The ``force`` variant
+    # drops any stale dedup claim before XADD — duplicate-purge guard
+    # is enforced at the DB layer via ``claim_purge_job`` above, so
+    # the Redis claim is just a worker-side optimization we don't need
+    # to defer to.
+    msg_id = await enqueue_purge_job_force(job.id, ds_id, job.workspace_id)
+    if msg_id is None:
+        # Distinguish "Redis truly down" from "envelope guard fired
+        # because some required field is empty". Both produce a
+        # ``None`` from enqueue_purge_job_force; the operator's
+        # remediation differs.
+        from backend.app.services.aggregation.redis_client import get_redis as _get_redis_for_ping
+        redis_reachable = False
+        try:
+            await asyncio.wait_for(_get_redis_for_ping().ping(), timeout=2.0)
+            redis_reachable = True
+        except Exception as ping_exc:
+            logger.warning(
+                "purge_aggregation: Redis PING failed for ds=%s: %s",
+                ds_id, ping_exc,
+            )
+
+        # Mark the row failed so the user sees a terminal state in
+        # Job History instead of a phantom "pending" they can never
+        # cancel out of.
+        job.status = "failed"
+        if redis_reachable:
+            # Redis answered PING but the enqueue still produced None.
+            # Most likely cause is a missing field on the envelope
+            # (job_id / ds_id / workspace_id empty) — log the inputs
+            # so it's diagnosable from a single log line.
+            logger.error(
+                "purge_aggregation: enqueue returned None despite Redis OK "
+                "(job.id=%r ds_id=%r workspace_id=%r) — check envelope guard "
+                "in enqueue_purge_job_safe",
+                job.id, ds_id, job.workspace_id,
+            )
+            job.error_message = (
+                "Failed to enqueue purge job: insights queue is reachable "
+                "but the request envelope was rejected (see backend logs)."
+            )
+            http_status = 500
+            user_detail = (
+                "Purge could not be queued: the request envelope was rejected "
+                "by the insights queue. Check backend logs for the missing field."
+            )
+        else:
+            job.error_message = (
+                "Failed to enqueue purge job: insights queue unreachable"
+            )
+            http_status = 503
+            user_detail = (
+                "Purge could not be queued: insights worker queue is "
+                "unavailable. The job has been recorded as failed; retry "
+                "once Redis is reachable."
+            )
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        job.completed_at = now_iso
+        job.updated_at = now_iso
+        await session.commit()
+        raise HTTPException(status_code=http_status, detail=user_detail)
 
     response.headers["Location"] = (
         f"/api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job.id}"

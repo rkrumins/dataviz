@@ -100,7 +100,7 @@ export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
             <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.1 }}
+                transition={{ delay: 0.05 }}
                 className="bg-gradient-to-br from-slate-50 to-white dark:from-slate-800 dark:to-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 overflow-hidden"
             >
                 {/* View Header Preview */}
@@ -265,7 +265,7 @@ export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
             <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                transition={{ delay: 0.3 }}
+                transition={{ delay: 0.05 }}
                 className="text-center text-slate-500 text-sm"
             >
                 Click <strong className="text-slate-700 dark:text-slate-300">"Create View"</strong> to save your new view

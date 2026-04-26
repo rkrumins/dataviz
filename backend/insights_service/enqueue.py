@@ -255,11 +255,51 @@ async def enqueue_purge_job_safe(
     return await enqueue_job_safe(envelope, dedup_ttl_secs=dedup_ttl_secs)
 
 
+async def enqueue_purge_job_force(
+    job_id: str,
+    data_source_id: str,
+    workspace_id: str,
+    *,
+    dedup_ttl_secs: int = _DEFAULT_DEDUP_TTL_SECS,
+) -> Optional[str]:
+    """Drop any existing dedup claim, then enqueue a purge job.
+
+    Used by the HTTP purge endpoint where the user has explicitly
+    clicked Purge — duplicate-purge protection lives at the DB layer
+    (``claim_purge_job`` 409s on any pending/running row for the same
+    data source), so the Redis dedup claim is just an optimization to
+    avoid redundant work. A stale claim from a prior crashed worker or
+    a claim still being held by a soft-retry loop would otherwise make
+    ``enqueue_purge_job_safe`` return ``None`` and the user couldn't
+    retry their purge for up to the claim's 20-minute TTL.
+
+    Race window between release and the new claim is tolerable because
+    the DB-level conflict check is authoritative.
+    """
+    if not job_id or not data_source_id or not workspace_id:
+        return None
+    cfg = get_stream("purge")
+    # Best-effort claim release. If Redis is genuinely down, the
+    # follow-up enqueue will surface that via the safe wrapper's
+    # exception swallowing — let the caller decide how to handle.
+    try:
+        await release_claim(data_source_id, stream=cfg)
+    except _REDIS_BENIGN_ERRORS as exc:
+        logger.warning(
+            "purge force-release failed (continuing to enqueue): %s", exc,
+        )
+    return await enqueue_purge_job_safe(
+        job_id, data_source_id, workspace_id, dedup_ttl_secs=dedup_ttl_secs,
+    )
+
+
 __all__ = [
     "enqueue_job",
     "enqueue_job_safe",
     "enqueue_stats_job",
     "enqueue_stats_job_safe",
     "enqueue_discovery_job_safe",
+    "enqueue_discovery_job_force",
     "enqueue_purge_job_safe",
+    "enqueue_purge_job_force",
 ]

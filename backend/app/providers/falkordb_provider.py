@@ -9,7 +9,7 @@ import logging
 import os
 import time
 from collections import defaultdict, deque
-from typing import List, Optional, Dict, Any, Set
+from typing import Awaitable, Callable, List, Optional, Dict, Any, Set
 
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
@@ -1688,7 +1688,22 @@ class FalkorDBProvider(GraphDataProvider):
 
         logger.info(f"Invalidated ancestor cache for {len(visited)} nodes under {urn}")
 
-    async def purge_aggregated_edges(self) -> int:
+    async def count_aggregated_edges(self) -> int:
+        """Cheap COUNT for purge progress reporting. Returns the current
+        number of materialized AGGREGATED edges in the projection graph.
+        """
+        await self._ensure_connected()
+        result = await self._proj_query(
+            "MATCH ()-[r:AGGREGATED]->() RETURN count(r) AS total"
+        )
+        return int(result.result_set[0][0]) if result.result_set else 0
+
+    async def purge_aggregated_edges(
+        self,
+        *,
+        batch_size: int = 10_000,
+        progress_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+    ) -> int:
         """Remove ALL materialized AGGREGATED edges from the graph.
 
         Also deletes the Redis ``{graph_name}:agg_members:*`` tracking
@@ -1702,6 +1717,13 @@ class FalkorDBProvider(GraphDataProvider):
         ``aggregated_edges_affected`` numbers that match the input
         count but 0 edges actually written to the graph.
 
+        The deletion runs in batches of ``batch_size`` so multi-million-
+        edge purges (a) report progress to the caller via
+        ``progress_callback`` and (b) cannot silently truncate at the
+        single hard-coded LIMIT 100000 the previous one-shot DELETE used.
+        Each iteration's actual deleted count is summed into the
+        running total handed to the callback.
+
         The Redis key prefix was renamed from ``agg:sourceEdgeIds:`` to
         ``agg_members:`` in an earlier refactor of
         :meth:`on_lineage_edge_written`; this method's scan pattern was
@@ -1709,17 +1731,49 @@ class FalkorDBProvider(GraphDataProvider):
         """
         await self._ensure_connected()
 
+        # Clamp to a safe, non-zero range. 0 / negative would loop
+        # forever; very large values defeat the progress-reporting
+        # purpose this method exists for.
+        if batch_size <= 0:
+            batch_size = 10_000
+        batch_size = min(batch_size, 100_000)
+
         try:
-            result = await self._proj_query(
-                "MATCH ()-[r:AGGREGATED]->() "
-                "WITH r LIMIT 100000 "
-                "DELETE r "
-                "RETURN count(r) as deleted"
-            )
-            deleted = result.result_set[0][0] if result.result_set else 0
+            total_deleted = 0
+            while True:
+                result = await self._proj_query(
+                    f"MATCH ()-[r:AGGREGATED]->() "
+                    f"WITH r LIMIT {int(batch_size)} "
+                    f"DELETE r "
+                    f"RETURN count(r) AS deleted"
+                )
+                deleted_in_batch = (
+                    int(result.result_set[0][0]) if result.result_set else 0
+                )
+                total_deleted += deleted_in_batch
+
+                if progress_callback is not None:
+                    try:
+                        await progress_callback(total_deleted)
+                    except Exception as cb_exc:
+                        # Progress reporting must never abort the actual
+                        # deletion — log and keep going.
+                        logger.warning(
+                            "purge_aggregated_edges progress_callback raised: %s",
+                            cb_exc,
+                        )
+
+                # Anything less than a full batch means we've drained
+                # the AGGREGATED relations.
+                if deleted_in_batch < batch_size:
+                    break
 
             # Clean up Redis tracking keys for this graph. Must match the
-            # prefix used by on_lineage_edge_written exactly (see docstring).
+            # prefix used by on_lineage_edge_written exactly (see
+            # docstring). Done after all graph DELETEs succeed so a
+            # mid-purge crash can't leave the tracker keys cleared while
+            # AGGREGATED edges still exist (which would silently no-op
+            # the next materialize run).
             pattern = f"{self._graph_name}:agg_members:*"
             cursor = 0
             cleaned = 0
@@ -1733,9 +1787,9 @@ class FalkorDBProvider(GraphDataProvider):
 
             logger.info(
                 "Purged %d AGGREGATED edges and %d Redis tracking keys from %s",
-                deleted, cleaned, self._graph_name,
+                total_deleted, cleaned, self._graph_name,
             )
-            return deleted
+            return total_deleted
         except Exception as e:
             logger.error("Failed to purge AGGREGATED edges: %s", e)
             raise

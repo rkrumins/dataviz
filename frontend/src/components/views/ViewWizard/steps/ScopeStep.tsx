@@ -280,7 +280,7 @@ function ScopeBanners({ ds, schemaAvailability }: { ds: DataSourceResponse | nul
                     initial={{ opacity: 0, y: -8 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -8 }}
-                    transition={{ duration: 0.15 }}
+                    transition={{ duration: 0.12 }}
                     className="flex items-center gap-3 px-4 py-2.5 rounded-xl border border-emerald-500/20 bg-emerald-500/5"
                 >
                     <Check className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
@@ -296,7 +296,7 @@ function ScopeBanners({ ds, schemaAvailability }: { ds: DataSourceResponse | nul
                     initial={{ opacity: 0, y: -8 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -8 }}
-                    transition={{ duration: 0.15 }}
+                    transition={{ duration: 0.12 }}
                     className="flex items-start gap-3 px-4 py-3 rounded-xl border border-amber-500/20 bg-amber-500/5"
                 >
                     <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
@@ -327,7 +327,7 @@ function ScopeBanners({ ds, schemaAvailability }: { ds: DataSourceResponse | nul
                     initial={{ opacity: 0, y: -8 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -8 }}
-                    transition={{ duration: 0.15 }}
+                    transition={{ duration: 0.12 }}
                     className="flex items-start gap-3 px-4 py-3 rounded-xl border border-blue-500/20 bg-blue-500/5"
                 >
                     <Loader2 className="w-4 h-4 text-blue-500 mt-0.5 shrink-0 animate-spin" />
@@ -348,7 +348,7 @@ function ScopeBanners({ ds, schemaAvailability }: { ds: DataSourceResponse | nul
                     initial={{ opacity: 0, y: -8 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -8 }}
-                    transition={{ duration: 0.15 }}
+                    transition={{ duration: 0.12 }}
                     className="flex items-start gap-3 px-4 py-3 rounded-xl border border-red-500/20 bg-red-500/5"
                 >
                     <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
@@ -485,7 +485,7 @@ export function ScopeStep({
             <motion.div
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.15 }}
+                transition={{ duration: 0.12 }}
                 className="text-center mb-2"
             >
                 <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 text-sm font-medium mb-3">
@@ -504,7 +504,7 @@ export function ScopeStep({
             <motion.div
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.2, delay: 0.05 }}
+                transition={{ duration: 0.12, delay: 0.05 }}
                 className={cn(
                     'flex rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden',
                     'bg-white dark:bg-slate-800/40',
@@ -583,7 +583,7 @@ export function ScopeStep({
                                                 key={ds.id}
                                                 initial={{ opacity: 0, y: 8 }}
                                                 animate={{ opacity: 1, y: 0 }}
-                                                transition={{ duration: 0.15, delay: i * 0.03 }}
+                                                transition={{ duration: 0.12, delay: Math.min(i * 0.01, 0.05) }}
                                             >
                                                 <DataSourceCard
                                                     ds={ds}

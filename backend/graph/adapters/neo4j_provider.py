@@ -24,7 +24,7 @@ import logging
 import os
 import time
 from collections import OrderedDict, defaultdict
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from backend.common.interfaces.provider import GraphDataProvider
 from backend.common.models.graph import (
@@ -1735,19 +1735,61 @@ class Neo4jProvider(GraphDataProvider):
 
         logger.info("Invalidated ancestor cache for %d nodes under %s", len(urns_to_invalidate), urn)
 
-    async def purge_aggregated_edges(self) -> int:
-        """Remove ALL materialized AGGREGATED edges from the graph."""
-        try:
-            rows = await self._run_write(
-                "MATCH ()-[r:AGGREGATED]->() "
-                "WITH r LIMIT 100000 "
-                "DELETE r "
-                "RETURN count(r) as deleted",
-                {},
-            )
-            deleted = rows[0]["deleted"] if rows else 0
+    async def count_aggregated_edges(self) -> int:
+        """Cheap COUNT used as the denominator for purge progress
+        reporting — see :meth:`purge_aggregated_edges`."""
+        rows = await self._run_read(
+            "MATCH ()-[r:AGGREGATED]->() RETURN count(r) AS total", {},
+        )
+        return int(rows[0]["total"]) if rows else 0
 
-            # Clean up Redis tracking keys
+    async def purge_aggregated_edges(
+        self,
+        *,
+        batch_size: int = 10_000,
+        progress_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+    ) -> int:
+        """Remove ALL materialized AGGREGATED edges from the graph.
+
+        Iterates the deletion in chunks of at most ``batch_size`` so a
+        multi-million-edge purge produces visible progress (callers
+        provide ``progress_callback`` to checkpoint each batch's running
+        total) and cannot silently truncate at the previous one-shot
+        ``LIMIT 100000``.
+        """
+        if batch_size <= 0:
+            batch_size = 10_000
+        batch_size = min(batch_size, 100_000)
+
+        try:
+            total_deleted = 0
+            while True:
+                rows = await self._run_write(
+                    f"MATCH ()-[r:AGGREGATED]->() "
+                    f"WITH r LIMIT {int(batch_size)} "
+                    f"DELETE r "
+                    f"RETURN count(r) AS deleted",
+                    {},
+                )
+                deleted_in_batch = int(rows[0]["deleted"]) if rows else 0
+                total_deleted += deleted_in_batch
+
+                if progress_callback is not None:
+                    try:
+                        await progress_callback(total_deleted)
+                    except Exception as cb_exc:
+                        logger.warning(
+                            "purge_aggregated_edges progress_callback raised: %s",
+                            cb_exc,
+                        )
+
+                if deleted_in_batch < batch_size:
+                    break
+
+            # Clean up Redis tracking keys after all DELETEs land. Crash
+            # mid-purge would otherwise leave the tracker cleared while
+            # AGGREGATED edges still exist, silently no-op'ing the next
+            # materialize run.
             if self._redis_available and self._redis:
                 pattern = f"{self._database}:agg:sourceEdgeIds:*"
                 cursor = 0
@@ -1758,8 +1800,8 @@ class Neo4jProvider(GraphDataProvider):
                     if cursor == 0:
                         break
 
-            logger.info("Purged %d AGGREGATED edges from %s", deleted, self._database)
-            return deleted
+            logger.info("Purged %d AGGREGATED edges from %s", total_deleted, self._database)
+            return total_deleted
         except Exception as e:
             logger.error("Failed to purge AGGREGATED edges: %s", e)
             raise

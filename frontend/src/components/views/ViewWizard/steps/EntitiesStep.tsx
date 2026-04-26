@@ -266,7 +266,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
             <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.1 }}
+                transition={{ delay: 0.05 }}
                 className="flex items-center gap-3"
             >
                 <div className="flex-1 relative">
@@ -412,7 +412,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
             <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                transition={{ delay: 0.2 }}
+                transition={{ delay: 0.05 }}
                 className="flex items-center justify-between"
             >
                 <div className="flex items-center gap-4">
@@ -497,7 +497,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
             <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.3 }}
+                transition={{ delay: 0.05 }}
                 className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3"
             >
                 {filteredEntityTypes.map((entityType, index) => (
@@ -505,7 +505,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
                         key={entityType.id}
                         initial={{ opacity: 0, scale: 0.9 }}
                         animate={{ opacity: 1, scale: 1 }}
-                        transition={{ delay: index * 0.02 }}
+                        transition={{ delay: Math.min(index * 0.01, 0.05) }}
                         onClick={() => toggleEntityType(entityType.id)}
                         className={cn(
                             'relative p-4 rounded-xl border-2 text-left transition-all group',
@@ -567,7 +567,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId }: Entitie
             <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                transition={{ delay: 0.4 }}
+                transition={{ delay: 0.05 }}
                 className="pt-6 border-t border-slate-200 dark:border-slate-700"
             >
                 <button

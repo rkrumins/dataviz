@@ -116,7 +116,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
             <motion.div
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0 * 0.03, duration: 0.15, ease: 'easeOut' }}
+                transition={{ duration: 0.12, ease: 'easeOut' }}
                 className="text-center"
             >
                 <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 text-sm font-medium mb-4">
@@ -136,7 +136,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                 <motion.div
                     initial={{ opacity: 0, y: 4 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.3 * 0.03, duration: 0.15, ease: 'easeOut' }}
+                    transition={{ duration: 0.12, ease: 'easeOut' }}
                     className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700"
                 >
                     <Database className="w-3.5 h-3.5 text-slate-400 shrink-0" />
@@ -162,7 +162,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                 <motion.div
                     initial={{ opacity: 0, y: 4 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.5 * 0.03, duration: 0.15, ease: 'easeOut' }}
+                    transition={{ duration: 0.12, ease: 'easeOut' }}
                     className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 flex items-start gap-3"
                 >
                     <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
@@ -190,7 +190,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
             <motion.div
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 1 * 0.03, duration: 0.15, ease: 'easeOut' }}
+                transition={{ duration: 0.12, ease: 'easeOut' }}
                 className="space-y-2"
             >
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300">
@@ -242,7 +242,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
             <motion.div
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 2 * 0.03, duration: 0.15, ease: 'easeOut' }}
+                transition={{ duration: 0.12, ease: 'easeOut' }}
                 className="space-y-2"
             >
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300">
@@ -261,7 +261,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
             <motion.div
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 3 * 0.03, duration: 0.15, ease: 'easeOut' }}
+                transition={{ duration: 0.12, ease: 'easeOut' }}
                 className="space-y-3"
             >
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300">
@@ -290,7 +290,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
             <motion.div
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 4 * 0.03, duration: 0.15, ease: 'easeOut' }}
+                transition={{ duration: 0.12, ease: 'easeOut' }}
                 className="space-y-3"
             >
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300">
@@ -320,7 +320,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
             <motion.div
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 5 * 0.03, duration: 0.15, ease: 'easeOut' }}
+                transition={{ duration: 0.12, ease: 'easeOut' }}
                 className="space-y-2"
             >
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300">
