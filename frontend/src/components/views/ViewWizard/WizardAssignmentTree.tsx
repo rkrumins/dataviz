@@ -163,7 +163,7 @@ function TreeRow({
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -10 }}
             className={cn(
-                'flex items-center gap-2 px-3 py-2 rounded-xl transition-all duration-150 group cursor-pointer',
+                'flex items-center gap-2 px-3 py-2 rounded-xl transition-colors duration-150 group cursor-pointer',
                 'hover:bg-white/60 dark:hover:bg-slate-800/60 hover:shadow-sm',
                 'border border-transparent',
                 node.isSelected && 'bg-blue-50/80 dark:bg-blue-900/30 border-blue-200 dark:border-blue-700 shadow-sm',
@@ -779,7 +779,7 @@ export function WizardAssignmentTree({
             'flex flex-col h-full rounded-2xl overflow-hidden',
             'bg-gradient-to-br from-slate-50/80 to-slate-100/80',
             'dark:from-slate-900/80 dark:to-slate-800/80',
-            'backdrop-blur-xl border border-slate-200/60 dark:border-slate-700/60',
+            'border border-slate-200/60 dark:border-slate-700/60',
             'shadow-lg',
             className
         )}>
@@ -850,7 +850,7 @@ export function WizardAssignmentTree({
                             'w-full pl-10 pr-10 py-2.5 rounded-xl text-sm',
                             'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700',
                             'focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent',
-                            'placeholder:text-slate-400 transition-all'
+                            'placeholder:text-slate-400 transition-colors duration-150'
                         )}
                     />
                     {searchQuery && (
@@ -868,7 +868,7 @@ export function WizardAssignmentTree({
                     <button
                         onClick={() => browser.setTypeFilter(null)}
                         className={cn(
-                            'px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap transition-all',
+                            'px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap transition-colors duration-150',
                             !browser.typeFilter
                                 ? 'bg-blue-500 text-white shadow-md'
                                 : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'
@@ -881,7 +881,7 @@ export function WizardAssignmentTree({
                             key={type}
                             onClick={() => browser.setTypeFilter(browser.typeFilter === type ? null : type)}
                             className={cn(
-                                'px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap transition-all flex items-center gap-1.5',
+                                'px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap transition-colors duration-150 flex items-center gap-1.5',
                                 browser.typeFilter === type
                                     ? 'text-white shadow-md'
                                     : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'

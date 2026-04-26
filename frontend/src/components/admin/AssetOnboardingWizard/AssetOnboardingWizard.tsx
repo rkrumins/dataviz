@@ -505,7 +505,7 @@ export function AssetOnboardingWizard({
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+                className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
             >
                 <motion.div
                     ref={modalRef}
@@ -513,12 +513,12 @@ export function AssetOnboardingWizard({
                     animate={{ scale: 1, opacity: 1, y: 0 }}
                     exit={{ scale: 0.95, opacity: 0, y: 20 }}
                     transition={{ duration: 0.12 }}
-                    className="w-full max-w-4xl mx-4 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+                    className="w-full max-w-4xl mx-4 bg-white dark:bg-slate-900 rounded-2xl shadow-lg overflow-hidden flex flex-col max-h-[90vh]"
                 >
                     {/* Header — aligned with ViewWizard */}
                     <div className="flex items-center justify-between px-8 py-5 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900 shrink-0">
                         <div className="flex items-center gap-4">
-                            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white shadow-lg shadow-indigo-500/25 flex-shrink-0">
+                            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white shadow-md flex-shrink-0">
                                 <Wand2 className="w-6 h-6" />
                             </div>
                             <div>
@@ -556,7 +556,7 @@ export function AssetOnboardingWizard({
                                                     onClick={() => isComplete ? goToStep(step.id) : undefined}
                                                     disabled={!isClickable}
                                                     className={cn(
-                                                        "flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all",
+                                                        "flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-colors duration-150",
                                                         isCurrent
                                                             ? "bg-indigo-600 text-white shadow-md ring-2 ring-indigo-100 dark:ring-indigo-900"
                                                             : isComplete
@@ -596,7 +596,7 @@ export function AssetOnboardingWizard({
                     )}
 
                     {/* Step Content */}
-                    <div className="flex-1 overflow-y-auto">
+                    <div className="flex-1 overflow-y-auto min-h-[520px]">
                         <AnimatePresence mode="wait">
                             <motion.div
                                 key={wizardPhase === 'success' ? 'success' : currentStep}
@@ -692,7 +692,7 @@ export function AssetOnboardingWizard({
                                 onClick={goBack}
                                 disabled={currentStepIndex === 0}
                                 className={cn(
-                                    "flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all",
+                                    "flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors duration-150",
                                     currentStepIndex > 0
                                         ? "text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
                                         : "text-slate-400 dark:text-slate-500 cursor-not-allowed",
@@ -705,7 +705,7 @@ export function AssetOnboardingWizard({
                             <div className="flex items-center gap-3">
                                 <button
                                     onClick={handleClose}
-                                    className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all"
+                                    className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150"
                                 >
                                     Cancel
                                 </button>
@@ -714,9 +714,9 @@ export function AssetOnboardingWizard({
                                     onClick={isLast ? handleSubmit : goNext}
                                     disabled={!canProceed || isSubmitting}
                                     className={cn(
-                                        "flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-all",
+                                        "flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150",
                                         canProceed && !isSubmitting
-                                            ? "bg-gradient-to-r from-indigo-600 to-violet-600 text-white hover:from-indigo-700 hover:to-violet-700 shadow-lg shadow-indigo-500/25"
+                                            ? "bg-gradient-to-r from-indigo-600 to-violet-600 text-white hover:from-indigo-700 hover:to-violet-700 shadow-md"
                                             : "bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed",
                                     )}
                                 >
@@ -746,7 +746,7 @@ export function AssetOnboardingWizard({
                                 initial={{ scale: 0.95, opacity: 0 }}
                                 animate={{ scale: 1, opacity: 1 }}
                                 exit={{ scale: 0.95, opacity: 0 }}
-                                className="bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl p-6 max-w-sm mx-4 space-y-4"
+                                className="bg-canvas-elevated border border-glass-border rounded-xl shadow-lg p-6 max-w-sm mx-4 space-y-4"
                             >
                                 <div className="flex items-start gap-3">
                                     <div className="w-9 h-9 rounded-lg bg-amber-500/10 flex items-center justify-center flex-shrink-0">

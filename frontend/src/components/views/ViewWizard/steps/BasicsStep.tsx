@@ -204,7 +204,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                         onFocus={() => setShowSuggestions(formData.name.length === 0)}
                         onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
                         placeholder="e.g., Finance Data Lineage"
-                        className="w-full px-4 py-4 text-lg rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all outline-none"
+                        className="w-full px-4 py-4 text-lg rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-colors duration-150 outline-none"
                         autoFocus
                     />
 
@@ -253,7 +253,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                     onChange={(e) => updateFormData({ description: e.target.value })}
                     placeholder="Optional: Describe what this view is for..."
                     rows={3}
-                    className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all outline-none resize-none"
+                    className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-colors duration-150 outline-none resize-none"
                 />
             </motion.div>
 
@@ -273,7 +273,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                             key={id}
                             onClick={() => updateFormData({ icon: id })}
                             className={cn(
-                                'flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 transition-all',
+                                'flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 transition-colors duration-150',
                                 formData.icon === id
                                     ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400'
                                     : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 text-slate-600 dark:text-slate-400'
@@ -302,7 +302,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                             key={id}
                             onClick={() => updateFormData({ visibility: id })}
                             className={cn(
-                                'flex flex-col items-center gap-2 px-4 py-4 rounded-xl border-2 transition-all text-center',
+                                'flex flex-col items-center gap-2 px-4 py-4 rounded-xl border-2 transition-colors duration-150 text-center',
                                 formData.visibility === id
                                     ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400'
                                     : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 text-slate-600 dark:text-slate-400'
@@ -354,13 +354,13 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                             }
                         }}
                         placeholder="Add a tag..."
-                        className="flex-1 px-4 py-2.5 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all outline-none text-sm"
+                        className="flex-1 px-4 py-2.5 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-colors duration-150 outline-none text-sm"
                     />
                     <button
                         onClick={handleAddTag}
                         disabled={!tagInput.trim()}
                         className={cn(
-                            'px-3 py-2.5 rounded-xl border-2 transition-all',
+                            'px-3 py-2.5 rounded-xl border-2 transition-colors duration-150',
                             tagInput.trim()
                                 ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-600 hover:bg-blue-100'
                                 : 'border-slate-200 dark:border-slate-700 text-slate-400 cursor-not-allowed'
