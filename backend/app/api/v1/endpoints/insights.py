@@ -289,6 +289,92 @@ async def get_asset_stats(
     )
 
 
+# ── On-demand refresh (user-driven escape hatch) ────────────────────
+#
+# The background ``run_discovery_scheduler`` keeps the cache warm on a
+# configured cadence (``DISCOVERY_REFRESH_INTERVAL_SECS``). These
+# endpoints are the manual override: the user clicks "Refresh now" in
+# the UI, we drop the dedup claim and force-enqueue. Idempotent at
+# the cache level (UPSERT into ``asset_discovery_cache``).
+
+
+@router.post(
+    "/providers/{provider_id}/assets/{asset_name}/refresh",
+    status_code=202,
+)
+async def refresh_asset(
+    provider_id: str = Path(...),
+    asset_name: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Force-refresh one asset's stats. Releases any in-flight dedup
+    claim and re-enqueues a discovery job. Returns 202 with the new
+    Redis stream message id (or ``status="redis_unavailable"`` if the
+    enqueue failed because Redis is down)."""
+    from backend.insights_service.enqueue import enqueue_discovery_job_force
+
+    await _ensure_provider_exists(session, provider_id)
+    job_id = await enqueue_discovery_job_force(provider_id, asset_name)
+    return {
+        "provider_id": provider_id,
+        "asset_name": asset_name,
+        "job_id": job_id,
+        "status": "queued" if job_id else "redis_unavailable",
+    }
+
+
+@router.post(
+    "/providers/{provider_id}/assets/refresh",
+    status_code=202,
+)
+async def refresh_all_assets(
+    provider_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Force-refresh every cached asset for one provider.
+
+    Fans out to (a) the list-all sentinel and (b) every per-asset row
+    already in ``asset_discovery_cache`` for this provider. Capped at
+    ``INSIGHTS_MAX_PROVIDER_REFRESH`` (env, default 200) so a single
+    click can't enqueue thousands of jobs.
+
+    The list-all is always included even if no per-asset rows exist
+    yet — that's the only way to discover new assets when the cache
+    is initially empty.
+    """
+    from backend.insights_service.enqueue import enqueue_discovery_job_force
+
+    await _ensure_provider_exists(session, provider_id)
+
+    # Pull every cached asset_name for this provider, capped.
+    rows = await session.execute(
+        select(AssetDiscoveryCacheORM.asset_name)
+        .where(AssetDiscoveryCacheORM.provider_id == provider_id)
+        .limit(resilience.INSIGHTS_MAX_PROVIDER_REFRESH)
+    )
+    asset_names = [row[0] for row in rows.all()]
+    if "" not in asset_names:
+        asset_names.insert(0, "")
+
+    list_job_id: Optional[str] = None
+    asset_job_ids: list[Optional[str]] = []
+    for name in asset_names:
+        msg = await enqueue_discovery_job_force(provider_id, name)
+        if name == "":
+            list_job_id = msg
+        else:
+            asset_job_ids.append(msg)
+
+    return {
+        "provider_id": provider_id,
+        "jobs_queued": int(list_job_id is not None)
+        + sum(1 for j in asset_job_ids if j is not None),
+        "list_job_id": list_job_id,
+        "asset_job_ids": asset_job_ids,
+        "truncated": len(asset_names) >= resilience.INSIGHTS_MAX_PROVIDER_REFRESH,
+    }
+
+
 # ── Job status (poll target for `useInsightsJob`) ────────────────────
 
 @router.get("/jobs/{job_id}")
@@ -531,4 +617,39 @@ async def put_admission_config(
             (health_row.consecutive_failures or 0) if health_row else 0
         ),
         **body.model_dump(),
+    )
+
+
+# ── Frontend runtime config endpoint ────────────────────────────────
+
+
+class InsightsConfigResponse(BaseModel):
+    """Frontend-relevant subset of insights configuration.
+
+    Read once at app mount via ``useInsightsConfig``; cached forever
+    in React Query. Changing any of these values requires a backend
+    restart but no frontend rebuild — the env vars live in
+    ``backend.app.config.resilience``.
+    """
+
+    frontend_poll_interval_ms: int
+    frontend_stale_time_ms: int
+    job_poll_interval_ms: int
+    job_max_retries: int
+    discovery_refresh_interval_secs: int
+
+
+@router.get("/config", response_model=InsightsConfigResponse)
+async def get_insights_config() -> InsightsConfigResponse:
+    """Return the env-driven insights config the frontend cares about.
+
+    No auth-protected fields here — this is genuine UX tuning data,
+    not secrets. Routes can mount it without role checks.
+    """
+    return InsightsConfigResponse(
+        frontend_poll_interval_ms=resilience.INSIGHTS_FRONTEND_POLL_INTERVAL_MS,
+        frontend_stale_time_ms=resilience.INSIGHTS_FRONTEND_STALE_TIME_MS,
+        job_poll_interval_ms=resilience.INSIGHTS_JOB_POLL_INTERVAL_MS,
+        job_max_retries=resilience.INSIGHTS_JOB_MAX_RETRIES,
+        discovery_refresh_interval_secs=resilience.DISCOVERY_REFRESH_INTERVAL_SECS,
     )

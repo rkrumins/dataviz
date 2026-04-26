@@ -183,11 +183,6 @@ export function ViewExecutionProvider({
     dataSourceId,
     providerReady,
     providerVersion,
-    // No-ops in view scope — views don't change workspace
-    setWorkspaceId: () => {},
-    setDataSourceId: () => {},
-    connectionId: null,
-    setConnectionId: () => {},
   }), [scopedProvider, providerError, workspaceId, dataSourceId, providerReady, providerVersion])
 
   // ── Fetch schema for the view's scope ──

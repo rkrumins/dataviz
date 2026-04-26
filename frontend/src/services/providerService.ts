@@ -249,6 +249,44 @@ export const providerService = {
     },
 
     /**
+     * Force-refresh one asset's stats. Drops any in-flight dedup
+     * claim on the backend and re-enqueues a discovery job. Idempotent
+     * at the cache level (UPSERT). Caller should invalidate the
+     * relevant React Query key after this resolves.
+     */
+    refreshAssetStats(
+        providerId: string,
+        assetName: string,
+    ): Promise<{ provider_id: string; asset_name: string; job_id: string | null; status: string }> {
+        return request(
+            `${INSIGHTS_API}/providers/${providerId}/assets/${encodeURIComponent(assetName)}/refresh`,
+            { method: 'POST' },
+        )
+    },
+
+    /**
+     * Force-refresh every cached asset for a provider, plus the
+     * list-all sentinel. Backend caps fan-out at
+     * INSIGHTS_MAX_PROVIDER_REFRESH (default 200); response includes
+     * a `truncated` flag if so. Caller should invalidate every
+     * `insights-asset-stats` query for this provider.
+     */
+    refreshAllAssets(
+        providerId: string,
+    ): Promise<{
+        provider_id: string
+        jobs_queued: number
+        list_job_id: string | null
+        asset_job_ids: (string | null)[]
+        truncated: boolean
+    }> {
+        return request(
+            `${INSIGHTS_API}/providers/${providerId}/assets/refresh`,
+            { method: 'POST' },
+        )
+    },
+
+    /**
      * Sniff a Neo4j/DataHub provider's schema for the onboarding wizard's
      * mapping-suggestion step. Synchronous live call — backend caps the
      * provider call at 15s (see providers.py); the client waits 20s so

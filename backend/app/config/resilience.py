@@ -112,3 +112,44 @@ STATS_CACHE_ABSOLUTE_EXPIRY_SECS: int = int(os.getenv("STATS_CACHE_ABSOLUTE_EXPI
 # banner without needing a separate health endpoint.
 STATS_SERVICE_LAGGING_THRESHOLD_SECS: int = int(os.getenv("STATS_SERVICE_LAGGING_THRESHOLD_SECS", "60"))
 STATS_SERVICE_UNREACHABLE_THRESHOLD_SECS: int = int(os.getenv("STATS_SERVICE_UNREACHABLE_THRESHOLD_SECS", "600"))
+
+# ── Discovery (pre-registration asset cache) ────────────────────────
+# Cadence for the background ``run_discovery_scheduler`` coroutine.
+# Each tick fans out enqueue calls for every active provider's
+# list-all sentinel + every cached asset row. Lower = fresher cache,
+# higher = less load. 30 minutes is the right default for a system
+# whose UI users rarely need second-by-second accuracy.
+DISCOVERY_REFRESH_INTERVAL_SECS: int = int(os.getenv("DISCOVERY_REFRESH_INTERVAL_SECS", "1800"))
+
+# Dedup-claim TTL for discovery jobs. Discovery handlers complete in
+# seconds (list_graphs / get_stats); the stats-poll TTL of 1200s is
+# wildly oversized here and was the root cause of the "Stale for X
+# minutes" regression — a stalled worker held the claim for 20 min
+# before re-enqueue could happen. 90s is enough headroom for a
+# legitimately slow provider call but recovers fast on stalls.
+DISCOVERY_DEDUP_TTL_SECS: int = int(os.getenv("DISCOVERY_DEDUP_TTL_SECS", "90"))
+
+# ── Insights frontend / job-poll knobs (surfaced via /admin/insights/config) ─
+# Frontend reads these once at app mount via ``useInsightsConfig``;
+# all values are env-driven on the backend. Changing requires a
+# backend restart but no frontend rebuild.
+INSIGHTS_FRONTEND_POLL_INTERVAL_MS: int = int(os.getenv("INSIGHTS_FRONTEND_POLL_INTERVAL_MS", "5000"))
+INSIGHTS_FRONTEND_STALE_TIME_MS: int = int(os.getenv("INSIGHTS_FRONTEND_STALE_TIME_MS", "60000"))
+INSIGHTS_JOB_POLL_INTERVAL_MS: int = int(os.getenv("INSIGHTS_JOB_POLL_INTERVAL_MS", "2000"))
+INSIGHTS_JOB_MAX_RETRIES: int = int(os.getenv("INSIGHTS_JOB_MAX_RETRIES", "4"))
+
+# ── Insights worker / DLQ knobs ─────────────────────────────────────
+# Cap on the per-provider Refresh button's fan-out — protects against
+# a single click firing thousands of jobs when a provider has a long
+# tail of cached assets.
+INSIGHTS_MAX_PROVIDER_REFRESH: int = int(os.getenv("INSIGHTS_MAX_PROVIDER_REFRESH", "200"))
+
+# Worker XAUTOCLAIM idle-time threshold. A pending entry must be at
+# least this old before another consumer reclaims it for redelivery.
+# Same value used by the periodic trim's PEL-freshness gate.
+XAUTOCLAIM_MIN_IDLE_MS: int = int(os.getenv("XAUTOCLAIM_MIN_IDLE_MS", "60000"))
+
+# Maximum redrive attempts per DLQ entry. Each successful redrive
+# increments ``redrive_count`` on the new envelope; the admin endpoint
+# refuses redrive past this limit so a poisoned envelope doesn't loop.
+DLQ_REDRIVE_LIMIT: int = int(os.getenv("DLQ_REDRIVE_LIMIT", "3"))

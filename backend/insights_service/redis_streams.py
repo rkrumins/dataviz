@@ -25,6 +25,7 @@ from typing import Optional
 
 import redis.asyncio as aioredis
 
+from backend.app.config import resilience
 from backend.app.services.aggregation.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
@@ -80,17 +81,12 @@ DLQ_STREAM = "insights.dlq"
 # because there are no unACKed entries that would be silently trimmed.
 DLQ_MAXLEN = 5_000
 
-# Worker XAUTOCLAIM idle-time threshold. Exported so the periodic
-# trim task in ``scheduler.py`` can compute a safe cutoff without
-# duplicating the constant or risking a value-skew.
-XAUTOCLAIM_MIN_IDLE_MS = 60_000
-
-# Hard cap on how many times a single message can be redriven from
-# DLQ. Prevents the obvious feedback loop on poisoned envelopes:
-# redrive → fail N times → DLQ → redrive → ... Each successful
-# redrive increments ``redrive_count`` on the new envelope; the
-# admin endpoint refuses redrive past this limit.
-DLQ_REDRIVE_LIMIT = 3
+# Worker XAUTOCLAIM idle-time threshold and DLQ redrive cap are
+# centralised in ``backend.app.config.resilience`` so ops can tune
+# them via env vars without code changes. Re-exported here so the
+# rest of the insights_service module-graph reads one canonical value.
+XAUTOCLAIM_MIN_IDLE_MS = resilience.XAUTOCLAIM_MIN_IDLE_MS
+DLQ_REDRIVE_LIMIT = resilience.DLQ_REDRIVE_LIMIT
 
 
 # ── Backwards-compat shims for legacy stats-only callers ─────────────
