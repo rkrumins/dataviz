@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -98,6 +99,15 @@ async def test_sqlalchemy_repo_prefers_primary_data_source_when_unspecified():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+
+    # Aggregation models declare ``__table_args__ = ({"schema": "aggregation"},)``
+    # for Postgres. Mirror the conftest fixture and attach an in-memory
+    # database aliased as ``aggregation`` so create_all can place those
+    # tables somewhere SQLite recognises.
+    @event.listens_for(engine.sync_engine, "connect")
+    def _attach_aggregation_schema(dbapi_conn, _connection_record):
+        dbapi_conn.execute("ATTACH DATABASE ':memory:' AS aggregation")
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

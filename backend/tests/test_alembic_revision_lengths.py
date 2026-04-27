@@ -17,11 +17,6 @@ def _versions_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "alembic" / "versions"
 
 
-def test_0005_revision_id_fits_alembic_version_column():
-    module = _load_revision(_versions_dir() / "0005_remove_legacy_primary_connection.py")
-    assert len(module.revision) <= 32
-
-
 @pytest.mark.parametrize(
     "migration_file",
     sorted(p.name for p in _versions_dir().glob("*.py") if not p.name.startswith("__")),
