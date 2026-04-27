@@ -59,20 +59,22 @@ def _reset_engine_cache():
 
 
 def test_each_role_gets_its_own_engine_instance():
-    """Core bulkhead invariant — the four pools are distinct objects."""
+    """Core bulkhead invariant — every pool is a distinct object."""
     web = get_engine(PoolRole.WEB)
     jobs = get_engine(PoolRole.JOBS)
     readonly = get_engine(PoolRole.READONLY)
+    provider_probe = get_engine(PoolRole.PROVIDER_PROBE)
     admin = get_engine(PoolRole.ADMIN)
 
     # Pairwise distinct.
-    engines = [web, jobs, readonly, admin]
+    engines = [web, jobs, readonly, provider_probe, admin]
     for a, b in [(e1, e2) for e1 in engines for e2 in engines if e1 is not e2]:
         assert a is not b, "per-role engines must not alias each other"
 
     # Caching within a role — asking twice returns the same instance.
     assert get_engine(PoolRole.WEB) is web
     assert get_engine(PoolRole.JOBS) is jobs
+    assert get_engine(PoolRole.PROVIDER_PROBE) is provider_probe
 
 
 def test_default_role_is_web():
@@ -90,14 +92,16 @@ def test_session_factories_bind_to_role_specific_engines():
 
 
 def test_default_pool_sizes_per_role():
-    """The four default pool sizes match the plan's recommended tuning
-    so unit tests alert us if somebody silently grew/shrunk a pool."""
+    """Each default pool size matches the plan's recommended tuning so
+    unit tests alert us if somebody silently grew/shrunk a pool."""
     assert _pool_kwargs(PoolRole.WEB)["pool_size"] == 20
     assert _pool_kwargs(PoolRole.WEB)["max_overflow"] == 10
     assert _pool_kwargs(PoolRole.JOBS)["pool_size"] == 8
     assert _pool_kwargs(PoolRole.JOBS)["max_overflow"] == 4
     assert _pool_kwargs(PoolRole.READONLY)["pool_size"] == 10
     assert _pool_kwargs(PoolRole.READONLY)["max_overflow"] == 5
+    assert _pool_kwargs(PoolRole.PROVIDER_PROBE)["pool_size"] == 4
+    assert _pool_kwargs(PoolRole.PROVIDER_PROBE)["max_overflow"] == 2
     assert _pool_kwargs(PoolRole.ADMIN)["pool_size"] == 2
     assert _pool_kwargs(PoolRole.ADMIN)["max_overflow"] == 0
 
@@ -127,6 +131,14 @@ def test_legacy_db_pool_size_affects_web_only(monkeypatch: pytest.MonkeyPatch):
 
 def test_readonly_connect_args_set_default_transaction_read_only():
     args = _asyncpg_connect_args(PoolRole.READONLY)
+    assert args.get("server_settings") == {"default_transaction_read_only": "on"}
+
+
+def test_provider_probe_connect_args_pin_read_only():
+    """PROVIDER_PROBE only reads provider config rows — pin it read-only
+    at the protocol layer the same way READONLY is pinned, so a stray
+    write attempt errors at the wire rather than mutating data."""
+    args = _asyncpg_connect_args(PoolRole.PROVIDER_PROBE)
     assert args.get("server_settings") == {"default_transaction_read_only": "on"}
 
 

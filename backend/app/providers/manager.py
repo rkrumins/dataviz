@@ -75,6 +75,14 @@ class ProviderManager:
         # fast-fails for _BREAKER_RESET_TIMEOUT seconds.
         self._instantiation_breakers: Dict[Tuple[str, str], AsyncCircuitBreaker] = {}
 
+        # Background warmup status cache (P0.7): keyed by provider_id,
+        # populated by the lifespan-launched ``run_provider_warmup_loop``
+        # in ``backend/app/providers/warmup.py``. Health/status endpoints
+        # read this for the source of truth on un-visited providers,
+        # making provider unreachability invisible to the request path.
+        # Entry shape: see warmup.py module docstring.
+        self.warmup_cache: Dict[str, dict] = {}
+
     # ------------------------------------------------------------------ #
     # Public API                                                           #
     # ------------------------------------------------------------------ #
