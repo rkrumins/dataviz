@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { memo, useState, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
@@ -210,7 +210,9 @@ const INITIAL_VISIBLE_JOBS = 5
 interface DataSourceGroupCardProps {
     group: DataSourceGroup
     expanded: boolean
-    onToggle: () => void
+    // Takes the data-source id so the parent can pass a stable callback that
+    // doesn't re-create per group (would defeat React.memo on this component).
+    onToggle: (dataSourceId: string) => void
     onCancel: (job: AggregationJobResponse) => void
     onResume: (job: AggregationJobResponse) => void
     onRetrigger: (job: AggregationJobResponse) => void
@@ -220,13 +222,14 @@ interface DataSourceGroupCardProps {
     onPurgeDataSource: (dataSourceId: string) => void
     onShowAllJobs: (dataSourceId: string) => void
     expandedRowId: string | null
-    setExpandedRowId: (id: string | null) => void
+    // Stable per-row toggle owned by the parent — same rationale as JobRow.onToggle.
+    onToggleRow: (jobId: string) => void
     purgeConfirm: string | null
     setPurgeConfirm: (id: string | null) => void
     actionLoading: string | null
 }
 
-export function DataSourceGroupCard({
+export const DataSourceGroupCard = memo(function DataSourceGroupCard({
     group,
     expanded,
     onToggle,
@@ -239,7 +242,7 @@ export function DataSourceGroupCard({
     onPurgeDataSource,
     onShowAllJobs,
     expandedRowId,
-    setExpandedRowId,
+    onToggleRow,
     purgeConfirm,
     setPurgeConfirm,
     actionLoading,
@@ -289,11 +292,11 @@ export function DataSourceGroupCard({
 
             {/* Header */}
             <div
-                onClick={onToggle}
+                onClick={() => onToggle(group.dataSourceId)}
                 className="w-full px-4 py-3.5 flex items-start gap-3 text-left cursor-pointer hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors group"
                 role="button"
                 tabIndex={0}
-                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle() } }}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(group.dataSourceId) } }}
             >
                 <motion.span
                     animate={{ rotate: expanded ? 90 : 0 }}
@@ -466,7 +469,7 @@ export function DataSourceGroupCard({
                                                         job={job}
                                                         meta={group.meta}
                                                         expanded={expandedRowId === job.id}
-                                                        onToggle={() => setExpandedRowId(expandedRowId === job.id ? null : job.id)}
+                                                        onToggle={onToggleRow}
                                                         onCancel={onCancel}
                                                         onResume={onResume}
                                                         onRetrigger={onRetrigger}
@@ -508,4 +511,4 @@ export function DataSourceGroupCard({
             </AnimatePresence>
         </div>
     )
-}
+})

@@ -36,7 +36,7 @@ from backend.common.adapters import (
 )
 from backend.common.interfaces.provider import GraphDataProvider
 
-from .state import ProbeOutcome, ProviderState, ProviderStateSnapshot
+from .state import ProbeOutcome, ProviderState
 
 logger = logging.getLogger(__name__)
 
@@ -495,21 +495,23 @@ class ProviderManager:
 
     def snapshot_state(
         self, provider_id: str, graph_name: str = "",
-    ) -> Optional[ProviderStateSnapshot]:
-        """Return a frozen snapshot of one provider's state, or None if
-        we've never observed it. Lock-free read — the underlying dict is
-        only mutated under ``_state_lock`` and reads of a single key are
-        atomic in CPython."""
-        state = self._provider_states.get((provider_id, graph_name or ""))
-        if state is None:
-            return None
-        return ProviderStateSnapshot.from_state(state)
+    ) -> Optional[ProviderState]:
+        """Return one provider's state, or None if we've never observed
+        it. Lock-free read — the underlying dict is only mutated under
+        ``_state_lock`` and reads of a single key are atomic in CPython.
 
-    def snapshot_states_for(self, provider_id: str) -> List[ProviderStateSnapshot]:
+        F1: returns the live ``ProviderState`` directly (no copy). Treat
+        as read-only by convention. Single-attribute reads are atomic;
+        the only multi-field invariants the manager relies on are written
+        atomically inside ``_state_lock``.
+        """
+        return self._provider_states.get((provider_id, graph_name or ""))
+
+    def snapshot_states_for(self, provider_id: str) -> List[ProviderState]:
         """All states matching one provider_id (across graph_names). Used
         by status endpoints that don't know the specific graph_name."""
         return [
-            ProviderStateSnapshot.from_state(state)
+            state
             for cache_key, state in self._provider_states.items()
             if cache_key[0] == provider_id
         ]
@@ -648,11 +650,12 @@ class ProviderManager:
         port: Optional[int],
         graph_name: Optional[str],
         tls_enabled: bool,
-        credentials: dict,
+        credentials: Optional[dict] = None,
         extra_config: Optional[dict] = None,
     ) -> GraphDataProvider:
         """Dispatch to the correct provider constructor."""
         ptype = provider_type.lower()
+        creds = credentials or {}
 
         if ptype == "falkordb":
             from backend.app.providers.falkordb_provider import FalkorDBProvider
@@ -666,16 +669,16 @@ class ProviderManager:
                 host=host or "localhost",
                 port=port or 6379,
                 graph_name=graph_name or "nexus_lineage",
-                username=credentials.get("username") if credentials else None,
-                password=credentials.get("password") if credentials else None,
+                username=creds.get("username"),
+                password=creds.get("password"),
             )
 
         elif ptype == "neo4j":
             from backend.graph.adapters.neo4j_provider import Neo4jProvider
             return Neo4jProvider(
                 uri=f"{'bolt+s' if tls_enabled else 'bolt'}://{host}:{port or 7687}",
-                username=credentials.get("username", "neo4j"),
-                password=credentials.get("password", ""),
+                username=creds.get("username", "neo4j"),
+                password=creds.get("password", ""),
                 database=graph_name or "neo4j",
                 extra_config=extra_config,
             )
@@ -684,7 +687,7 @@ class ProviderManager:
             from backend.graph.adapters.datahub_provider import DataHubGraphQLProvider
             return DataHubGraphQLProvider(
                 base_url=host or "",
-                token=credentials.get("token"),
+                token=creds.get("token"),
             )
 
         raise ValueError(f"Unknown provider_type: {ptype!r}")
