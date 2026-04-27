@@ -160,7 +160,18 @@ class AggregationWorker:
                 if not lineage_types:
                     raise ValueError("No lineage edge types configured — cannot aggregate")
 
-                # Get provider for this data source
+                # Get provider for this data source.
+                #
+                # P2.5 — implicit preflight gate. The manager's
+                # ``get_provider`` consults the warmup cache at the top
+                # of its method (P1.2): when the background warmup loop
+                # has recently observed this provider as unhealthy, it
+                # raises ProviderUnavailable in <1ms with NO socket I/O.
+                # The catch at line 477 maps that to status="failed",
+                # so a worker slot is occupied for ~50ms instead of
+                # 10s+ in the slow connect path. retry_eligible stays
+                # true so the job re-dispatches when the warmup loop
+                # observes recovery.
                 provider = await self._registry.get_provider_for_workspace(
                     "", session, data_source_id=job.data_source_id
                 )

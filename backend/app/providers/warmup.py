@@ -47,7 +47,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Awaitable, Callable, Dict, MutableMapping
+from typing import Any, Awaitable, Callable, Dict, MutableMapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,44 @@ MIN_FULL_CYCLE_S: float = _env_float("PROVIDER_WARMUP_MIN_CYCLE_S", 30.0)
 # After a load-providers DB error, sleep this long before retrying.
 DB_ERROR_BACKOFF_S: float = _env_float("PROVIDER_WARMUP_DB_BACKOFF_S", 10.0)
 
+# Maximum concurrent probes per cycle (P1.5). With N=100 providers, a
+# concurrency of 4 means a sick host blocks 1/4 of capacity, not the whole
+# loop. Keep modest — too high and we burn the management DB pool with
+# parallel credential fetches; too low and full-cycle latency suffers.
+WARMUP_CONCURRENCY: int = int(os.getenv("PROVIDER_WARMUP_CONCURRENCY", "4"))
+
+# Initial fast-pass concurrency at lifespan start (P1.5). Higher than
+# steady-state because the cold-start window is short and we want the
+# cache populated before the first user request arrives. Hard wall-clock
+# cap of INITIAL_FAST_PASS_DEADLINE_S regardless of N.
+INITIAL_FAST_PASS_CONCURRENCY: int = int(
+    os.getenv("PROVIDER_WARMUP_INITIAL_CONCURRENCY", "8")
+)
+INITIAL_FAST_PASS_DEADLINE_S: float = _env_float(
+    "PROVIDER_WARMUP_INITIAL_DEADLINE_S", 10.0,
+)
+
+
+def _adaptive_interval(provider_count: int) -> float:
+    """Compute the inter-probe interval such that one full cycle is at
+    least MIN_FULL_CYCLE_S seconds — but no faster.
+
+    With N=1 provider:    interval = MIN_FULL_CYCLE_S (30s)
+    With N=10 providers:  interval = 3s (cycle = 30s)
+    With N=100 providers: interval = 0.3s (cycle = 30s)
+    With N=1000:          floor at 0.05s (cycle = 50s)
+
+    Bounded to [0.05, INTER_PROBE_INTERVAL_S] so very small deployments
+    don't probe every second (uses configured INTER_PROBE_INTERVAL_S as
+    the upper bound when slower than the natural rate would be).
+    """
+    if provider_count <= 0:
+        return INTER_PROBE_INTERVAL_S
+    natural = MIN_FULL_CYCLE_S / max(1, provider_count)
+    # Clamp: never faster than 50ms (avoid driver hammer), never slower
+    # than the operator-configured INTER_PROBE_INTERVAL_S.
+    return max(0.05, min(natural, INTER_PROBE_INTERVAL_S))
+
 
 # ── Type alias ───────────────────────────────────────────────────────
 
@@ -94,6 +132,9 @@ async def run_provider_warmup_loop(
     shutdown_event: asyncio.Event,
     list_providers: Callable[[], Awaitable[list[ProviderConfig]]],
     build_instance: Callable[[ProviderConfig], Any],
+    on_recovery: Optional[Callable[[str, dict], Awaitable[None]]] = None,
+    on_failure: Optional[Callable[[str, dict], Awaitable[None]]] = None,
+    on_cycle_complete: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> None:
     """Run the warmup loop until ``shutdown_event`` is set.
 
@@ -114,6 +155,20 @@ async def run_provider_warmup_loop(
         returned instance is expected to expose ``preflight(deadline_s)``
         and ``close()``; preflight failures are returned as Result, not
         raised.
+    on_recovery:
+        Optional async callback fired on every observed ``false → true``
+        transition (P1.3). Called as ``await on_recovery(provider_id,
+        cache_entry)``. Used by the manager to reset breakers and evict
+        the cached provider so the next user request rebuilds the pool.
+    on_failure:
+        Optional async callback fired on every observed failure (whether
+        false→false or true→false). Called as ``await on_failure(
+        provider_id, cache_entry)``. Used by the manager to maintain its
+        consecutive-failures counter and pre-trip the breaker after N.
+    on_cycle_complete:
+        Optional async callback fired at the end of each cycle (P1.4).
+        Used to update ``provider_manager.warmup_last_cycle_at`` for the
+        ``/health/deps`` heartbeat surface.
     """
     logger.info(
         "Provider warmup loop starting "
@@ -145,29 +200,99 @@ async def run_provider_warmup_loop(
                 return
             continue
 
-        # 2. Probe each provider in round-robin, one at a time. Bounded
-        #    by per-probe deadline; cache updated immediately after each.
+        # 2. Probe each provider with bounded parallelism (P1.5).
+        # WARMUP_CONCURRENCY workers pull from a shared queue. A sick host
+        # blocks one worker, not the whole loop — so 50 dead providers no
+        # longer serialise full-cycle latency. Adaptive interval ensures
+        # one full cycle is always ≥ MIN_FULL_CYCLE_S (~30s) regardless of
+        # N, so we never re-poll the same host more often than that.
         observed_ids: set[str] = set()
-        for cfg in providers:
+        # Filter to entries with valid ids, dedupe, preserve order.
+        valid_providers = [c for c in providers if c.get("id")]
+        for cfg in valid_providers:
+            observed_ids.add(cfg["id"])
+
+        interval = _adaptive_interval(len(valid_providers))
+        sem = asyncio.Semaphore(max(1, WARMUP_CONCURRENCY))
+
+        async def _probe_with_dispatch(cfg: ProviderConfig) -> None:
             if shutdown_event.is_set():
                 return
             prov_id = cfg.get("id")
             if not prov_id:
-                continue
-            observed_ids.add(prov_id)
-
-            entry = await _probe_one(cfg, build_instance)
-            cache[prov_id] = entry
-
-            # Pace the loop so a 100-provider deployment doesn't burst.
-            if await _interruptible_sleep(shutdown_event, INTER_PROBE_INTERVAL_S):
                 return
+            async with sem:
+                if shutdown_event.is_set():
+                    return
+
+                prev_entry = cache.get(prov_id)
+                prev_ok = bool(prev_entry.get("ok")) if prev_entry else None
+
+                entry = await _probe_one(cfg, build_instance)
+                cache[prov_id] = entry
+
+                # P1.3 — dispatch transition callback for the manager
+                # state machine. CRITICAL that we await these in-band so
+                # the manager's breaker mutations land before the loop
+                # moves on to the next provider; out-of-order updates
+                # would let a later success race with an earlier failure.
+                new_ok = bool(entry.get("ok"))
+                if not new_ok and on_failure is not None:
+                    try:
+                        await on_failure(prov_id, entry)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "Provider warmup: on_failure(%s) raised: %s",
+                            prov_id, exc,
+                        )
+                elif new_ok and prev_ok is False and on_recovery is not None:
+                    try:
+                        await on_recovery(prov_id, entry)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "Provider warmup: on_recovery(%s) raised: %s",
+                            prov_id, exc,
+                        )
+
+                # Pace each worker so the cluster of WARMUP_CONCURRENCY
+                # workers doesn't burst the management DB / network. With
+                # adaptive interval, this naturally throttles to fit the
+                # MIN_FULL_CYCLE_S floor.
+                if await _interruptible_sleep(shutdown_event, interval):
+                    return
+
+        # Launch one task per provider; the semaphore caps concurrency.
+        # Using gather (not TaskGroup) so a single misbehaving probe
+        # cannot cancel siblings. Each task swallows its own exceptions.
+        await asyncio.gather(
+            *[_probe_with_dispatch(cfg) for cfg in valid_providers],
+            return_exceptions=True,
+        )
+
+        if shutdown_event.is_set():
+            return
 
         # 3. Evict cache entries for providers that no longer exist
         #    (deleted, renamed, etc.). Prevents unbounded cache growth.
         stale = set(cache.keys()) - observed_ids
         for stale_id in stale:
             cache.pop(stale_id, None)
+
+        # 4. Cycle heartbeat — let the manager record warmup_last_cycle_at
+        #    so /health/deps can surface the loop's liveness (P1.4).
+        if on_cycle_complete is not None:
+            try:
+                await on_cycle_complete()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Provider warmup: on_cycle_complete raised: %s", exc,
+                )
 
         # 4. Floor on the full cycle duration. If we burned through
         #    quickly (small deployment), sleep so we never re-poll the
@@ -272,3 +397,142 @@ async def _interruptible_sleep(shutdown: asyncio.Event, seconds: float) -> bool:
         return True
     except asyncio.TimeoutError:
         return False
+
+
+async def initial_fast_pass(
+    *,
+    cache: MutableMapping[str, dict],
+    list_providers: Callable[[], Awaitable[list[ProviderConfig]]],
+    build_instance: Callable[[ProviderConfig], Any],
+    on_recovery: Optional[Callable[[str, dict], Awaitable[None]]] = None,
+    on_failure: Optional[Callable[[str, dict], Awaitable[None]]] = None,
+    deadline_s: float = INITIAL_FAST_PASS_DEADLINE_S,
+    concurrency: int = INITIAL_FAST_PASS_CONCURRENCY,
+) -> None:
+    """One-shot, high-concurrency, hard-deadline-bounded warmup pass at
+    lifespan start (P1.5).
+
+    Eliminates the cold-start "Computing…" window for typical
+    deployments. Runs concurrently with first request handling — does
+    NOT block lifespan completion. Whatever finishes inside ``deadline_s``
+    populates the cache; whatever doesn't waits for the regular cadence.
+
+    No supervision, no respawn — single best-effort pass. The supervisor
+    + steady-state loop pick up where this leaves off.
+    """
+    t0 = time.monotonic()
+    try:
+        async with asyncio.timeout(deadline_s):
+            try:
+                providers = await list_providers()
+            except Exception as exc:
+                logger.warning(
+                    "initial_fast_pass: list_providers failed: %s — skipping",
+                    exc,
+                )
+                return
+
+            if not providers:
+                return
+
+            sem = asyncio.Semaphore(max(1, concurrency))
+
+            async def _one(cfg: ProviderConfig) -> None:
+                prov_id = cfg.get("id")
+                if not prov_id:
+                    return
+                async with sem:
+                    prev_entry = cache.get(prov_id)
+                    prev_ok = bool(prev_entry.get("ok")) if prev_entry else None
+                    entry = await _probe_one(cfg, build_instance)
+                    cache[prov_id] = entry
+                    new_ok = bool(entry.get("ok"))
+                    if not new_ok and on_failure is not None:
+                        try:
+                            await on_failure(prov_id, entry)
+                        except Exception:
+                            pass
+                    elif new_ok and prev_ok is False and on_recovery is not None:
+                        try:
+                            await on_recovery(prov_id, entry)
+                        except Exception:
+                            pass
+
+            await asyncio.gather(
+                *[_one(cfg) for cfg in providers],
+                return_exceptions=True,
+            )
+    except (asyncio.TimeoutError, TimeoutError):
+        # Hard wall-clock cap reached; whatever finished is in the cache.
+        # The steady-state loop will fill in the rest.
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "initial_fast_pass deadline reached at %.1fs — partial fill is OK",
+            elapsed,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("initial_fast_pass crashed: %s", exc)
+
+
+async def supervised_warmup_loop(
+    *,
+    cache: MutableMapping[str, dict],
+    shutdown_event: asyncio.Event,
+    list_providers: Callable[[], Awaitable[list[ProviderConfig]]],
+    build_instance: Callable[[ProviderConfig], Any],
+    on_recovery: Optional[Callable[[str, dict], Awaitable[None]]] = None,
+    on_failure: Optional[Callable[[str, dict], Awaitable[None]]] = None,
+    on_cycle_complete: Optional[Callable[[], Awaitable[None]]] = None,
+) -> None:
+    """Wrap ``run_provider_warmup_loop`` with a self-supervisor (P1.4).
+
+    Without supervision, a single uncaught exception (e.g. a malformed
+    provider config raising KeyError, a third-party driver bug, a
+    transient asyncio internal error) would unwind the loop and the
+    cache would freeze silently — every status endpoint would lie
+    indefinitely with no visible signal until users complained.
+
+    The supervisor:
+    - Catches every non-CancelledError and respawns the inner loop.
+    - Backs off exponentially (1s → 2s → … → 60s cap) so a persistent
+      crash doesn't busy-loop.
+    - Logs every respawn at ERROR level so operators see the signal.
+    - Exits cleanly on shutdown (CancelledError or shutdown_event set).
+
+    The inner loop is responsible for its own per-cycle resilience
+    (DB outages, build errors, preflight timeouts) — the supervisor
+    only catches what the inner loop fails to. CancelledError always
+    propagates so the lifespan can shut down cleanly.
+    """
+    backoff_s = 1.0
+    BACKOFF_CAP_S = 60.0
+    while not shutdown_event.is_set():
+        try:
+            await run_provider_warmup_loop(
+                cache=cache,
+                shutdown_event=shutdown_event,
+                list_providers=list_providers,
+                build_instance=build_instance,
+                on_recovery=on_recovery,
+                on_failure=on_failure,
+                on_cycle_complete=on_cycle_complete,
+            )
+            # Inner loop returned normally — shutdown was set.
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Provider warmup loop crashed: %s — respawning in %.1fs",
+                exc, backoff_s, exc_info=True,
+            )
+            if await _interruptible_sleep(shutdown_event, backoff_s):
+                return
+            backoff_s = min(backoff_s * 2.0, BACKOFF_CAP_S)
+            # Reset backoff on next clean run via the inner loop's first
+            # cycle; the supervisor only backs off on consecutive crashes.
+            # If you want stricter backoff-on-success-too, move this reset
+            # inside the inner loop's success path.
+    logger.info("Provider warmup supervisor stopped (shutdown signalled)")

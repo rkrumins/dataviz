@@ -16,14 +16,18 @@
  *     with the rotated cookies. Concurrent 401s share the same in-flight
  *     refresh. If refresh fails we dispatch ``'auth:session-lost'`` on
  *     ``window`` so the auth store can transition to unauthenticated.
- *   * Default 5 s timeout via AbortController; overridable per call.
+ *   * Default 8 s timeout via AbortController; overridable per call.
+ *     (P4.5 — bumped from 5 s after the SRE review found the BE's
+ *     /admin/providers/status overall budget is 6 s; a 5 s FE timeout
+ *     was aborting legitimate slow responses and silently swallowing
+ *     them in the providerStatus store's `catch` block.)
  *
  * /auth/* URLs are exempt from the refresh-on-401 dance — /auth/refresh
  * itself returning 401 means the session really is gone, and /auth/me
  * returning 401 is handled by the bootstrap flow directly.
  */
 
-const DEFAULT_TIMEOUT_MS = 5_000
+const DEFAULT_TIMEOUT_MS = 8_000
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 const CSRF_COOKIE = 'nx_csrf'
 const CSRF_HEADER = 'X-CSRF-Token'
