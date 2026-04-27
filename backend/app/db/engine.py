@@ -58,6 +58,11 @@ class PoolRole(str, Enum):
     * ``READONLY`` — Readiness probes, drift checks, stats endpoints,
       provider-status probes. Connections open ``default_transaction_
       read_only=on`` so a bug cannot accidentally write through them.
+    * ``PROVIDER_PROBE`` — Provider ``/test`` and ``/admin/providers/
+      status`` fan-out endpoints (P0.5). A high-frequency status-page
+      refresh storm can fire many concurrent probes; a dedicated pool
+      means it cannot contend with WEB-pool request handlers or with
+      READONLY-pool dashboard polls. Read-only by construction.
     * ``ADMIN`` — Alembic runner, lifespan seed/init. Small pool; used
       only at startup and during migrations.
     """
@@ -65,19 +70,21 @@ class PoolRole(str, Enum):
     WEB = "web"
     JOBS = "jobs"
     READONLY = "readonly"
+    PROVIDER_PROBE = "provider_probe"
     ADMIN = "admin"
 
 
 # Default pool sizing per role. Tuned for the web tier (~4 uvicorn
 # workers per replica); worker / control-plane tiers should override
-# via env vars in their deployment manifests. Totals: 20+10 + 8+4 +
-# 10+5 + 2+0 = 59 peak connections per process, well inside Postgres'
-# default max_connections=100.
+# via env vars in their deployment manifests. Totals (with PROVIDER_PROBE):
+# 20+10 + 8+4 + 10+5 + 4+2 + 2+0 = 65 peak connections per process,
+# still inside Postgres' default max_connections=100.
 _POOL_DEFAULTS: dict[PoolRole, dict[str, int]] = {
-    PoolRole.WEB:      {"pool_size": 20, "max_overflow": 10},
-    PoolRole.JOBS:     {"pool_size": 8,  "max_overflow": 4},
-    PoolRole.READONLY: {"pool_size": 10, "max_overflow": 5},
-    PoolRole.ADMIN:    {"pool_size": 2,  "max_overflow": 0},
+    PoolRole.WEB:            {"pool_size": 20, "max_overflow": 10},
+    PoolRole.JOBS:           {"pool_size": 8,  "max_overflow": 4},
+    PoolRole.READONLY:       {"pool_size": 10, "max_overflow": 5},
+    PoolRole.PROVIDER_PROBE: {"pool_size": 4,  "max_overflow": 2},
+    PoolRole.ADMIN:          {"pool_size": 2,  "max_overflow": 0},
 }
 
 # ------------------------------------------------------------------ #
@@ -182,7 +189,9 @@ def _asyncpg_connect_args(role: PoolRole) -> dict:
         "timeout": float(os.getenv("DB_CONNECT_TIMEOUT_SECS", "5")),
         "command_timeout": float(os.getenv("DB_COMMAND_TIMEOUT_SECS", "30")),
     }
-    if role is PoolRole.READONLY:
+    if role in (PoolRole.READONLY, PoolRole.PROVIDER_PROBE):
+        # PROVIDER_PROBE only reads provider config rows — guard at the
+        # protocol layer the same way READONLY does.
         args["server_settings"] = {"default_transaction_read_only": "on"}
     return args
 
@@ -216,7 +225,7 @@ def get_engine(role: PoolRole = PoolRole.WEB) -> AsyncEngine:
         kw["pool_size"], kw["max_overflow"], kw["pool_timeout"],
         kw["pool_recycle"], kw["pool_pre_ping"],
         connect_args["timeout"], connect_args["command_timeout"],
-        " (read_only)" if role is PoolRole.READONLY else "",
+        " (read_only)" if role in (PoolRole.READONLY, PoolRole.PROVIDER_PROBE) else "",
     )
     return engine
 
@@ -347,6 +356,38 @@ async def get_readonly_db_session() -> AsyncGenerator[AsyncSession, None]:
     depth.
     """
     factory = get_session_factory(PoolRole.READONLY)
+    async with factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+@asynccontextmanager
+async def get_provider_probe_session() -> AsyncGenerator[AsyncSession, None]:
+    """Context-manager PROVIDER_PROBE-pool session — provider /test and
+    /admin/providers/status endpoints (P0.5).
+
+    Isolates per-provider probe traffic from WEB and READONLY pools so
+    a status-page refresh storm against unreachable providers cannot
+    starve request handlers or dashboard polls. Read-only by
+    construction (any write attempt errors at the protocol boundary).
+    """
+    async with _session_scope(PoolRole.PROVIDER_PROBE) as session:
+        yield session
+
+
+async def get_provider_probe_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency — yields a PROVIDER_PROBE-pool session per request.
+
+    Use for endpoints that fan out per-provider probes:
+    ``POST /admin/providers/{id}/test`` and
+    ``GET /admin/providers/status``. The pool is small (4+2 overflow)
+    and read-only — writes in these endpoints belong on the WEB pool.
+    """
+    factory = get_session_factory(PoolRole.PROVIDER_PROBE)
     async with factory() as session:
         try:
             yield session

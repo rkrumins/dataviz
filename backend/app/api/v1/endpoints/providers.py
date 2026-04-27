@@ -9,7 +9,12 @@ from typing import List, Tuple
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.engine import get_db_session, get_readonly_db_session, with_short_session
+from backend.app.db.engine import (
+    get_db_session,
+    get_provider_probe_db_session,
+    get_provider_probe_session,
+    with_short_session,
+)
 from backend.app.db.repositories import provider_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.common.models.management import (
@@ -89,6 +94,22 @@ async def _run_connectivity_probe(
     tls_enabled: bool,
     creds: dict | None,
 ) -> ConnectionTestResult:
+    """Bounded reachability probe used by the ``/test`` endpoint.
+
+    P0.2: prefer ``provider.preflight(deadline_s=...)`` which does ONLY a
+    fast TCP / handshake check (≤2s budget). The previous implementation
+    wrapped ``get_stats()`` in a 10s timeout, but ``get_stats()`` triggered
+    eager schema reconciliation in some adapters (FalkorDB ran 15
+    ``CREATE INDEX`` queries with 3s timeouts each), so the 10s budget
+    was measuring the wrong thing entirely — connect-time would routinely
+    exceed 30s while the wait_for sat idle.
+
+    With ``preflight()``, the probe finishes in ≤2.5s for an unreachable
+    host, and ≤500ms for a reachable one.
+    """
+    PREFLIGHT_DEADLINE_S = 2.0
+    PROBE_WALL_CLOCK_S = 2.5  # PREFLIGHT_DEADLINE_S + small slack
+
     instance = provider_registry._create_provider_instance(
         _provider_type_value(provider_type),
         host,
@@ -97,53 +118,89 @@ async def _run_connectivity_probe(
         tls_enabled,
         creds,
     )
+    preflight = getattr(instance, "preflight", None)
+
+    t0 = time.monotonic()
     try:
-        t0 = time.monotonic()
-        await asyncio.wait_for(instance.get_stats(), timeout=10)
+        if callable(preflight):
+            # Outer wait_for is a backstop — preflight is contractually
+            # bounded by deadline_s, but cap the wall clock anyway.
+            result = await asyncio.wait_for(
+                preflight(deadline_s=PREFLIGHT_DEADLINE_S),
+                timeout=PROBE_WALL_CLOCK_S,
+            )
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            if result.ok:
+                return ConnectionTestResult(success=True, latencyMs=round(elapsed_ms, 1))
+            return ConnectionTestResult(success=False, error=result.reason)
+
+        # Fallback for adapters that haven't grown a preflight() yet.
+        # Use the same tight budget so we don't regress the bug we just fixed.
+        await asyncio.wait_for(instance.get_stats(), timeout=PROBE_WALL_CLOCK_S)
         latency = (time.monotonic() - t0) * 1000
         return ConnectionTestResult(success=True, latencyMs=round(latency, 1))
     except asyncio.TimeoutError:
-        return ConnectionTestResult(success=False, error="Connection timed out after 10s")
+        return ConnectionTestResult(
+            success=False,
+            error=f"Connection timed out after {PROBE_WALL_CLOCK_S:.1f}s",
+        )
     except Exception as exc:
         return ConnectionTestResult(success=False, error=str(exc))
+    finally:
+        # Best-effort cleanup so a stale instance does not pin sockets.
+        close = getattr(instance, "close", None)
+        if callable(close):
+            try:
+                await asyncio.wait_for(close(), timeout=0.5)
+            except Exception:
+                pass
 
 
 @router.get("/status")
 async def list_provider_statuses(
-    session: AsyncSession = Depends(get_readonly_db_session),
+    session: AsyncSession = Depends(get_provider_probe_db_session),
 ):
-    """Return provider readiness without affecting overall app health.
+    """Return provider readiness — STRICT structural decoupling from
+    provider state.
 
-    Resilience: bounded fan-out so one hung provider cannot stall the
-    whole response or exhaust the DB pool when many providers exist.
+    This endpoint is polled continuously by the FE status banner and
+    admin pages. The handler does ONLY:
 
-    * ``_STATUS_PROBE_CONCURRENCY`` probes run at once (DB-pool-friendly)
-    * Each probe is capped at ``_STATUS_PROBE_TIMEOUT_SECS``
-    * Overall wall-clock capped at ``_STATUS_OVERALL_TIMEOUT_SECS`` —
-      probes still pending beyond that are reported as ``unknown`` with
-      a note (never blocks the UI, never 5xx)
+      1. List registered providers from the PROVIDER_PROBE pool.
+      2. Read in-memory breaker state (``provider_manager`` cache).
+      3. Read background-warmup cache (``app.state.provider_warmup_cache``).
+      4. Merge; return immediately.
+
+    There is NO outbound work, NO provider construction, NO sockets
+    opened. A registered provider host being DNS-unresolvable / TLS-
+    broken / hung has zero effect on the response time of this endpoint
+    — the request handler can never block on it.
+
+    Provider state is OBSERVED OFFLINE by:
+      - The background warmup loop (``backend/app/providers/warmup.py``),
+        which probes each provider via ``preflight()`` in round-robin
+        and updates the cache. Default cycle: ≥30s, ≤1.5s per probe.
+      - Real traffic to the provider, which trips the per-instance
+        circuit breaker on network failures. The breaker state is
+        authoritative when present (it reflects actual user-observed
+        truth); the warmup cache is the fallback for un-visited
+        providers.
+
+    With this contract, hosting 1 or 100 providers — any number of them
+    unreachable — never affects the request path.
     """
     providers = await provider_repo.list_providers(session)
     if not providers:
         return []
 
-    sem = asyncio.Semaphore(_STATUS_PROBE_CONCURRENCY)
+    # Read in-memory state — both calls are O(1).
+    try:
+        breaker_states = provider_registry.report_provider_states()
+    except Exception:
+        breaker_states = {}
+    warmup_cache = getattr(provider_registry, "warmup_cache", {}) or {}
 
-    async def _probe(provider) -> dict:
-        # Fast path: if the registry already has an open breaker for this
-        # provider, don't probe — report unavailable and let the breaker's
-        # reset_timeout gate the next real attempt. No network I/O, no
-        # semaphore slot consumed beyond the context entry.
-        breaker_error = _breaker_open_error(provider.id)
-        if breaker_error:
-            return {
-                "id": provider.id,
-                "name": provider.name,
-                "status": "unavailable",
-                "lastCheckedAt": _iso_now(),
-                "error": breaker_error,
-            }
-
+    def _resolve_status(provider) -> dict:
         if not provider.is_active:
             return {
                 "id": provider.id,
@@ -152,60 +209,68 @@ async def list_provider_statuses(
                 "lastCheckedAt": None,
             }
 
-        async with sem:
-            try:
-                instance = await _load_provider_for_outbound(provider.id, None)
-                await asyncio.wait_for(
-                    instance.get_stats(), timeout=_STATUS_PROBE_TIMEOUT_SECS,
-                )
-                return {
-                    "id": provider.id,
-                    "name": provider.name,
-                    "status": "ready",
-                    "lastCheckedAt": _iso_now(),
-                }
-            except Exception as exc:
-                # Breaker state on cached proxies is updated automatically when
-                # they're used from the main request path. This probe uses a
-                # raw instance (short-session pattern), so failures here don't
-                # update a breaker — but they also don't need to: the main
-                # request path will observe and trip the breaker on real
-                # traffic.
-                return {
-                    "id": provider.id,
-                    "name": provider.name,
-                    "status": "unavailable",
-                    "lastCheckedAt": _iso_now(),
-                    "error": str(exc)[:200],
-                }
-
-    tasks = [asyncio.create_task(_probe(p)) for p in providers]
-    done, pending = await asyncio.wait(tasks, timeout=_STATUS_OVERALL_TIMEOUT_SECS)
-
-    results: list[dict] = []
-    for task in done:
-        try:
-            results.append(task.result())
-        except Exception:
-            continue
-
-    # Probes that exceeded the overall wall clock — surface each as
-    # ``unknown`` so the UI can distinguish "we know it's broken" from
-    # "we don't know yet" and the user doesn't see a hung response.
-    for i, task in enumerate(tasks):
-        if task in pending:
-            task.cancel()
-            p = providers[i]
-            results.append({
-                "id": p.id,
-                "name": p.name,
-                "status": "unknown",
+        # 1. Authoritative breaker state when present — this reflects
+        #    real traffic, the highest-fidelity signal.
+        breaker_key_match = next(
+            (k for k in breaker_states if k.startswith(f"{provider.id}:")),
+            None,
+        )
+        breaker = breaker_states.get(breaker_key_match) if breaker_key_match else None
+        if breaker == "healthy":
+            return {
+                "id": provider.id,
+                "name": provider.name,
+                "status": "ready",
                 "lastCheckedAt": _iso_now(),
-                "error": (
-                    f"Probe exceeded {_STATUS_OVERALL_TIMEOUT_SECS:.0f}s wall clock"
-                ),
-            })
-    return results
+            }
+        if breaker in ("unavailable", "instantiation_failed"):
+            return {
+                "id": provider.id,
+                "name": provider.name,
+                "status": "unavailable",
+                "lastCheckedAt": _iso_now(),
+                "error": f"Provider circuit: {breaker}",
+            }
+        if breaker == "degraded":
+            return {
+                "id": provider.id,
+                "name": provider.name,
+                "status": "unavailable",
+                "lastCheckedAt": _iso_now(),
+                "error": "Provider in degraded state (half-open)",
+            }
+
+        # 2. Fallback to warmup cache — populated by the background
+        #    loop, so even un-visited providers carry a status.
+        warmup = warmup_cache.get(provider.id)
+        if warmup is not None:
+            return {
+                "id": provider.id,
+                "name": provider.name,
+                "status": "ready" if warmup.get("ok") else "unavailable",
+                "lastCheckedAt": _iso_timestamp(warmup.get("checked_at")),
+                "error": (None if warmup.get("ok") else warmup.get("reason")),
+            }
+
+        # 3. Truly unknown — registered but never probed (e.g. very new
+        #    or warmup loop hasn't reached it yet).
+        return {
+            "id": provider.id,
+            "name": provider.name,
+            "status": "unknown",
+            "lastCheckedAt": None,
+        }
+
+    return [_resolve_status(p) for p in providers]
+
+
+def _iso_timestamp(epoch_seconds: float | None) -> str | None:
+    if epoch_seconds is None:
+        return None
+    try:
+        return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
 
 
 @router.get("", response_model=List[ProviderResponse])
@@ -322,8 +387,11 @@ async def test_provider(
     bypasses the cache read *and* write so a dead/recovered transition
     is reflected immediately on the next user click.
     """
-    # 1. Short DB read — close the session before the outbound call.
-    async with with_short_session() as session:
+    # 1. Short DB read on the PROVIDER_PROBE pool — close the session
+    #    before the outbound preflight (P0.5: probe traffic isolated from
+    #    WEB pool, so a status-page refresh storm cannot starve request
+    #    handlers).
+    async with get_provider_probe_session() as session:
         prov_row = await provider_repo.get_provider_orm(session, provider_id)
         if not prov_row:
             raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
@@ -377,6 +445,14 @@ async def test_provider(
             # Guard: if an uncaught exception ever bubbles, don't leave
             # awaiters hanging forever.
             future.set_exception(RuntimeError("Provider test aborted"))
+            # Mark the exception as retrieved so asyncio doesn't log
+            # ``Future exception was never retrieved`` when no caller is
+            # awaiting (common when the originating /test request was
+            # cancelled mid-flight by the upstream timeout).
+            try:
+                future.exception()
+            except Exception:
+                pass
 
 
 async def _load_provider_for_outbound(provider_id: str, asset_name: str | None):
