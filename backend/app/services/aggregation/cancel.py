@@ -195,8 +195,24 @@ class CancelListener:
     in other processes are ignored cleanly (registry returns False).
     """
 
-    def __init__(self, redis_client: Any) -> None:
+    def __init__(
+        self,
+        redis_client: Optional[Any] = None,
+        *,
+        redis_factory: Optional[Any] = None,
+    ) -> None:
+        """Subscribe to cancel events.
+
+        Pass ``redis_client`` for backwards compat (eager construction).
+        Or pass ``redis_factory`` (a sync callable returning a redis
+        client) for P2.7 — lazy construction with reconnect-on-failure.
+        With the factory, a Redis-down-at-startup scenario doesn't
+        permanently disable the cancel bridge: the run loop calls the
+        factory each cycle and recovers automatically when Redis comes
+        back.
+        """
         self._redis = redis_client
+        self._redis_factory = redis_factory
         self._task: Optional[asyncio.Task] = None
         self._shutdown = asyncio.Event()
         self._pubsub: Any = None
@@ -236,10 +252,26 @@ class CancelListener:
 
     async def _run_loop(self) -> None:
         """Subscribe + dispatch loop. Reconnects on transient errors
-        so a Redis flap doesn't permanently strand the cancel path."""
+        so a Redis flap doesn't permanently strand the cancel path.
+
+        P2.7 — when the listener was constructed with ``redis_factory``
+        instead of an eager client, this loop calls the factory each
+        cycle so a Redis-down-at-startup scenario recovers automatically.
+        """
         backoff = 1.0
         while not self._shutdown.is_set():
             try:
+                # P2.7 — late-bound Redis client. The factory may raise
+                # (Redis still down at startup); we treat that the same
+                # as any other transient connection error and retry.
+                if self._redis is None:
+                    if self._redis_factory is None:
+                        raise RuntimeError(
+                            "CancelListener has neither redis_client nor "
+                            "redis_factory; refusing to run."
+                        )
+                    self._redis = self._redis_factory()
+
                 self._pubsub = self._redis.pubsub(ignore_subscribe_messages=True)
                 await self._pubsub.subscribe(CANCEL_CONTROL_CHANNEL)
                 # Reset backoff after a successful subscribe.
@@ -257,6 +289,12 @@ class CancelListener:
                     "Cancel listener loop error (will retry in %.1fs): %s",
                     backoff, exc,
                 )
+                # P2.7 — drop the cached client on error so the next
+                # iteration calls the factory again (in case the existing
+                # client is in a bad state, e.g. closed connection pool).
+                if self._redis_factory is not None:
+                    self._redis = None
+                self._pubsub = None
                 try:
                     await asyncio.wait_for(self._shutdown.wait(), timeout=backoff)
                     return

@@ -91,17 +91,34 @@ class FalkorDBProvider(GraphDataProvider):
         graph_name: str = "nexus_lineage",
         seed_file: Optional[str] = None,
         projection_mode: str = "in_source",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
     ):
         self._host = host
         self._port = port
         self._graph_name = graph_name
         self._seed_file = seed_file
         self._projection_mode = projection_mode  # "in_source" or "dedicated"
+        # P1.6 — credentials previously dropped silently in
+        # ProviderManager._create_provider_instance, causing NOAUTH errors
+        # to be mis-classified as network failures and triggering false
+        # breaker storms. They're now plumbed end-to-end:
+        #   __init__ → preflight (RESP AUTH before PING)
+        #            → _ensure_connected (driver auth via from_url args)
+        self._username = username
+        self._password = password
         self._graph = None
         self._proj_graph = None  # Dedicated projection graph (when mode = "dedicated")
         self._pool = None       # Graph query pool (used by FalkorDB)
         self._redis_pool = None  # Separate pool for Redis data-structure ops (caching, SADD, etc.)
         self._db = None
+        # P2.3 — graceful cache-disable mode. When the cache Redis is
+        # unreachable but the FalkorDB graph is fine, set this to False
+        # so cache reads return None silently and cache writes are
+        # dropped. Provider works DEGRADED (slower reads, no
+        # materialization tracking) but does NOT fail availability —
+        # mirroring Neo4j's pattern at line 271-276 of neo4j_provider.py.
+        self._redis_available: bool = True
 
     @property
     def _proj(self):
@@ -125,10 +142,18 @@ class FalkorDBProvider(GraphDataProvider):
         invoke this before any expensive driver work, so an unreachable
         host fails fast (≤1.5s) instead of triggering 30-45s of half-
         blocking init in ``_ensure_connected``.
+
+        P1.6 — credential plumbing: when a password is configured,
+        ``redis_ping_preflight`` runs ``AUTH`` before ``PING``. Without
+        this, an auth-protected FalkorDB would fail preflight with
+        NOAUTH and trigger the same false breaker storm we're trying to
+        prevent for unreachable hosts.
         """
         from backend.common.interfaces.preflight import redis_ping_preflight
         return await redis_ping_preflight(
-            self._host, self._port, deadline_s=deadline_s,
+            self._host, self._port,
+            deadline_s=deadline_s,
+            password=self._password,
         )
 
     async def _ensure_connected(self):
@@ -162,14 +187,25 @@ class FalkorDBProvider(GraphDataProvider):
             # and killing the entire provider (including API traffic).
             graph_pool_size = int(os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24"))
             socket_timeout = float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
-            self._pool = ConnectionPool(
-                host=self._host,
-                port=self._port,
-                max_connections=graph_pool_size,
-                socket_connect_timeout=2.0,
-                socket_timeout=socket_timeout,
-                decode_responses=True,
-            )
+            # P1.6 — auth credentials propagated to the driver. When the
+            # operator has configured a password on the FalkorDB instance,
+            # the ConnectionPool issues AUTH transparently on every new
+            # connection. Without this, queries return NOAUTH, the breaker
+            # mis-classifies as a network failure, and we trip a false
+            # outage.
+            _pool_kwargs: dict = {
+                "host": self._host,
+                "port": self._port,
+                "max_connections": graph_pool_size,
+                "socket_connect_timeout": 2.0,
+                "socket_timeout": socket_timeout,
+                "decode_responses": True,
+            }
+            if self._username:
+                _pool_kwargs["username"] = self._username
+            if self._password:
+                _pool_kwargs["password"] = self._password
+            self._pool = ConnectionPool(**_pool_kwargs)
             # Redis for non-graph ops (caching, materialization tracking,
             # ancestor chains, stats). When CACHE_REDIS_URL is set, these
             # go to a DEDICATED Redis instance — fully decoupled from
@@ -179,29 +215,58 @@ class FalkorDBProvider(GraphDataProvider):
             cache_redis_url = os.getenv("CACHE_REDIS_URL")
             redis_pool_size = int(os.getenv("FALKORDB_REDIS_POOL_SIZE", "16"))
             redis_op_timeout = float(os.getenv("FALKORDB_REDIS_OP_TIMEOUT", "3"))
-            if cache_redis_url:
-                _raw_redis = Redis.from_url(
-                    cache_redis_url,
-                    max_connections=redis_pool_size,
-                    socket_connect_timeout=2.0,
-                    socket_timeout=socket_timeout,
-                    decode_responses=True,
+            # P2.3 — cache Redis is a BEST-EFFORT dependency. Wrapped in
+            # its own try/except so an unreachable cache Redis sets
+            # ``self._redis_available=False`` and degrades gracefully
+            # instead of taking the whole provider down. Graph queries
+            # (the load-bearing path) still work; cache misses just go
+            # to the source. Without this, a cache Redis outage kills
+            # FalkorDB availability even when FalkorDB itself is healthy.
+            self._redis_available = True
+            try:
+                if cache_redis_url:
+                    # CACHE_REDIS_URL embeds its own auth (e.g.
+                    # redis://:password@host:port/0) so we don't pass our
+                    # FalkorDB password here — the cache Redis is a separate
+                    # instance that may have separate credentials.
+                    _raw_redis = Redis.from_url(
+                        cache_redis_url,
+                        max_connections=redis_pool_size,
+                        socket_connect_timeout=2.0,
+                        socket_timeout=socket_timeout,
+                        decode_responses=True,
+                    )
+                    self._redis_pool = None  # managed by from_url
+                else:
+                    # Cache Redis falls back to the FalkorDB instance — same
+                    # host, same auth (P1.6).
+                    _redis_pool_kwargs: dict = {
+                        "host": self._host,
+                        "port": self._port,
+                        "max_connections": redis_pool_size,
+                        "socket_connect_timeout": 2.0,
+                        "socket_timeout": socket_timeout,
+                        "decode_responses": True,
+                    }
+                    if self._username:
+                        _redis_pool_kwargs["username"] = self._username
+                    if self._password:
+                        _redis_pool_kwargs["password"] = self._password
+                    self._redis_pool = ConnectionPool(**_redis_pool_kwargs)
+                    _raw_redis = Redis(connection_pool=self._redis_pool)
+                # Wrap in TimeoutRedis — every async call and pipeline.execute()
+                # automatically gets an asyncio.wait_for() deadline. No call-site
+                # wrapping needed. See backend/common/adapters/timeout_redis.py.
+                self._redis = TimeoutRedis(_raw_redis, timeout=redis_op_timeout)
+            except Exception as exc:
+                # Cache Redis construction failed. Provider continues
+                # without cache; queries are slower but available.
+                logger.warning(
+                    "FalkorDB cache Redis unavailable (%s) — provider running "
+                    "in cache-disabled mode (DEGRADED).", exc,
                 )
-                self._redis_pool = None  # managed by from_url
-            else:
-                self._redis_pool = ConnectionPool(
-                    host=self._host,
-                    port=self._port,
-                    max_connections=redis_pool_size,
-                    socket_connect_timeout=2.0,
-                    socket_timeout=socket_timeout,
-                    decode_responses=True,
-                )
-                _raw_redis = Redis(connection_pool=self._redis_pool)
-            # Wrap in TimeoutRedis — every async call and pipeline.execute()
-            # automatically gets an asyncio.wait_for() deadline. No call-site
-            # wrapping needed. See backend/common/adapters/timeout_redis.py.
-            self._redis = TimeoutRedis(_raw_redis, timeout=redis_op_timeout)
+                self._redis = None
+                self._redis_available = False
             self._db = FalkorDB(connection_pool=self._pool)
             self._graph = self._db.select_graph(self._graph_name)
 
@@ -3011,6 +3076,30 @@ class FalkorDBProvider(GraphDataProvider):
         # short init/teardown timeout — a stuck shutdown should fail fast,
         # not block the event loop forever.
         _close_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
+
+        # P1.7 — cancel any in-flight reconcile task FIRST so it doesn't
+        # keep using the pool we're about to close. Without this:
+        #   - shutdown can stall (reconcile holds a Redis connection that
+        #     keeps the pool's aclose() waiting)
+        #   - on eviction-then-rebuild, two reconcile tasks can race on
+        #     the same FalkorDB graph (idempotent CREATE INDEX is fine,
+        #     but the warnings spam logs)
+        reconcile_task = getattr(self, "_reconcile_task", None)
+        if reconcile_task is not None and not reconcile_task.done():
+            reconcile_task.cancel()
+            try:
+                await asyncio.wait_for(reconcile_task, timeout=0.5)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "FalkorDB reconcile task raised on close: %s", exc,
+                )
+        # Reset so a re-instantiated provider can schedule a fresh
+        # reconcile without colliding with the cancelled one.
+        self._reconcile_task = None
+        self._reconcile_started = False
+
         try:
             if hasattr(self, "_redis") and self._redis is not None:
                 await asyncio.wait_for(self._redis.aclose(), timeout=_close_timeout)

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,6 +74,66 @@ async def _degraded_recovery_loop(_app: FastAPI, interval: float = 15.0) -> None
             logger.debug("Degraded recovery probe failed: %s", exc)
 
 
+async def _db_health_loop(_app: FastAPI, interval: float = 15.0) -> None:
+    """P2.1 — permanent management-DB health probe.
+
+    The pre-existing ``_degraded_recovery_loop`` only fires on the
+    bootstrap-failure path; if Postgres goes down POST-bootstrap,
+    nothing flipped ``app.state.degraded`` and the FE banner had no
+    structured signal. This loop runs from lifespan-start to shutdown,
+    ``SELECT 1`` against the READONLY pool every ``interval`` seconds.
+
+    State transitions:
+      healthy → flip ``app.state.degraded=False``, ``degraded_reason=None``
+      unhealthy → flip ``app.state.degraded=True``, ``degraded_reason=
+                  'db_unreachable'``, log at WARN
+
+    Idempotent: only logs on transitions, not on every poll.
+    """
+    from .db.engine import get_engine, PoolRole
+    from sqlalchemy import text as _sa_text
+
+    logger.info("DB health loop started (interval=%.0fs)", interval)
+    last_state: Optional[bool] = None
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            try:
+                engine = get_engine(PoolRole.READONLY)
+                async with asyncio.timeout(2.0):
+                    async with engine.connect() as conn:
+                        await conn.execute(_sa_text("SELECT 1"))
+                healthy = True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                healthy = False
+                if last_state is not False:
+                    logger.warning(
+                        "DB health probe failed — flipping app.state.degraded=True (%s)",
+                        exc,
+                    )
+
+            if healthy and last_state is not True:
+                if getattr(_app.state, "degraded", False):
+                    logger.info(
+                        "DB recovered — clearing app.state.degraded "
+                        "(was: %s)",
+                        getattr(_app.state, "degraded_reason", "unknown"),
+                    )
+                _app.state.degraded = False
+                _app.state.degraded_reason = None
+            elif not healthy:
+                _app.state.degraded = True
+                _app.state.degraded_reason = "db_unreachable"
+
+            last_state = healthy
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("DB health loop iteration failed unexpectedly: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Startup / shutdown lifecycle.
@@ -90,6 +151,14 @@ async def lifespan(_app: FastAPI):
     _app.state.degraded = False
     _app.state.degraded_reason = None
     _app.state._recovery_task = None
+    # P1.10 — readiness gate. Until lifespan completes core initialisation
+    # (init_db, auth wiring, etc.), TimeoutMiddleware refuses non-liveness
+    # requests with 503 + Retry-After. Without this gate, a request that
+    # arrives during the lifespan window (very short, but real under
+    # cold-start traffic) can hit half-initialised global state and either
+    # hang or 500 with cryptic stack traces. Liveness probe (/health/live)
+    # always answers regardless of this flag.
+    _app.state.live = False
 
     # 1. Initialise management DB tables (idempotent — safe to run every restart)
     try:
@@ -318,13 +387,30 @@ async def lifespan(_app: FastAPI):
                 agg_dispatcher = InProcessDispatcher(agg_worker)
                 logger.info("Aggregation dispatch: InProcessDispatcher (all-in-one dev mode)")
 
-            # Get ontology service reference for monolith-mode resolution
+            # Get ontology service reference for monolith-mode resolution.
+            #
+            # The aggregation worker's ontology resolution path needs a
+            # long-lived OntologyService (no per-request session to
+            # bind to). Until the SQLAlchemyOntologyRepository was
+            # taught to accept a session_factory, this passed
+            # ``SQLAlchemyOntologyRepository(None)`` with a comment
+            # promising "session injected per-call" — but that mechanism
+            # didn't exist, so every aggregation lookup raised
+            # ``AttributeError: 'NoneType' object has no attribute
+            # 'execute'`` and silently fell back to a DB-only path.
+            #
+            # Now: the repo's ``_scope()`` opens a fresh JOBS-pool session
+            # via the factory for each call. Aggregation resolution
+            # works without falling back, and a stale-session bug in one
+            # query can't poison the next.
             ontology_svc = None
             try:
                 from .ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
                 from .ontology.service import LocalOntologyService
                 ontology_svc = LocalOntologyService(
-                    SQLAlchemyOntologyRepository(None)  # session injected per-call
+                    SQLAlchemyOntologyRepository(
+                        session_factory=get_jobs_session,
+                    )
                 )
             except Exception:
                 logger.warning("Ontology service not available for aggregation — will use DB fallback")
@@ -374,7 +460,16 @@ async def lifespan(_app: FastAPI):
             from .services.aggregation.cancel import CancelListener
             from .services.aggregation.redis_client import get_redis as _get_redis_for_cancel
             try:
-                _app.state._cancel_listener = CancelListener(_get_redis_for_cancel())
+                # P2.7 — pass the factory, NOT an eagerly-constructed
+                # client. If Redis is down at startup, the factory call
+                # inside _run_loop raises, the loop's existing reconnect
+                # logic handles it, and the listener auto-recovers when
+                # Redis comes back. Without this, a startup-time Redis
+                # outage permanently disables the cancel bridge until
+                # the next service restart.
+                _app.state._cancel_listener = CancelListener(
+                    redis_factory=_get_redis_for_cancel,
+                )
                 await _app.state._cancel_listener.start()
             except Exception as exc:
                 logger.warning(
@@ -396,7 +491,7 @@ async def lifespan(_app: FastAPI):
     # them unreachable — never affects the request path.
     _app.state._warmup_shutdown = asyncio.Event()
     try:
-        from .providers.warmup import run_provider_warmup_loop
+        from .providers.warmup import initial_fast_pass, supervised_warmup_loop
         from .db.engine import get_provider_probe_session
         from .db.repositories import provider_repo as _provider_repo
 
@@ -430,22 +525,97 @@ async def lifespan(_app: FastAPI):
                 cfg.get("creds") or {},
             )
 
+        # P1.3 — warmup→manager state-machine callbacks.
+        async def _on_recovery(provider_id: str, entry: dict) -> None:
+            await provider_manager.record_probe_success(
+                provider_id,
+                source="warmup",
+                elapsed_ms=int(entry.get("elapsed_ms", 0)),
+            )
+
+        async def _on_failure(provider_id: str, entry: dict) -> None:
+            await provider_manager.record_probe_failure(
+                provider_id,
+                reason=str(entry.get("reason", "unknown"))[:200],
+                source="warmup",
+                elapsed_ms=int(entry.get("elapsed_ms", 0)),
+            )
+
+        # P1.4 — heartbeat for /health/deps liveness signal.
+        import time as _time
+
+        async def _on_cycle_complete() -> None:
+            provider_manager.warmup_last_cycle_at = _time.monotonic()
+
+        # P1.5 — initial fast-pass: hard-deadline-bounded one-shot warmup
+        # that populates the cache for the cold-start window. Runs
+        # concurrently with first request handling; does NOT block
+        # lifespan completion. Schedule BEFORE the supervisor so it can
+        # observe transitions from the empty cache.
+        _app.state._warmup_initial_pass_task = asyncio.create_task(
+            initial_fast_pass(
+                cache=provider_manager.warmup_cache,
+                list_providers=_list_providers_for_warmup,
+                build_instance=_build_provider_for_warmup,
+                on_recovery=_on_recovery,
+                on_failure=_on_failure,
+            ),
+            name="provider-warmup-initial-pass",
+        )
+
         _app.state._warmup_task = asyncio.create_task(
-            run_provider_warmup_loop(
+            supervised_warmup_loop(
                 cache=provider_manager.warmup_cache,
                 shutdown_event=_app.state._warmup_shutdown,
                 list_providers=_list_providers_for_warmup,
                 build_instance=_build_provider_for_warmup,
+                on_recovery=_on_recovery,
+                on_failure=_on_failure,
+                on_cycle_complete=_on_cycle_complete,
             ),
-            name="provider-warmup-loop",
+            name="provider-warmup-supervisor",
         )
-        logger.info("Provider warmup loop scheduled")
+        logger.info("Provider warmup supervisor + initial fast-pass scheduled")
     except Exception as exc:
         logger.warning(
             "Provider warmup loop failed to start: %s — status endpoints "
             "will fall back to in-memory breaker state only", exc,
         )
         _app.state._warmup_task = None
+
+    # P2.1 — start the permanent DB health loop. Unlike the bootstrap-
+    # failure-only ``_degraded_recovery_loop``, this runs continuously
+    # so a steady-state Postgres outage flips ``app.state.degraded`` and
+    # the FE banner gets a structured signal.
+    _app.state._db_health_task = asyncio.create_task(
+        _db_health_loop(_app), name="db-health-loop",
+    )
+
+    # P3.1 — event-loop lag canary. Detects sync code blocking the loop
+    # (the failure mode that produced the original 5-min freeze). Stats
+    # are read by /health/deps and exposed via metrics. Running this
+    # task is the single most-valuable diagnostic for "app frozen"
+    # incidents.
+    from .observability.event_loop_monitor import (
+        EventLoopLagStats,
+        run_event_loop_monitor,
+    )
+    _app.state.event_loop_lag_stats = EventLoopLagStats()
+    _app.state._event_loop_shutdown = asyncio.Event()
+    _app.state._event_loop_task = asyncio.create_task(
+        run_event_loop_monitor(
+            stats=_app.state.event_loop_lag_stats,
+            shutdown=_app.state._event_loop_shutdown,
+        ),
+        name="event-loop-monitor",
+    )
+
+    # P1.10 — flip the readiness gate. From this point on, the
+    # TimeoutMiddleware accepts non-liveness requests; before this, it
+    # returns 503 + Retry-After: 5. Setting this AFTER all sync init
+    # finishes (DB, auth, aggregation wiring) but BEFORE we yield, so the
+    # gate is never falsely-open during partial initialisation.
+    _app.state.live = True
 
     logger.info("Synodic Visualization Service started (role=%s)", role.value)
     yield
@@ -467,6 +637,26 @@ async def lifespan(_app: FastAPI):
                 await _warmup_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+    # P2.1 — stop the DB health loop.
+    _db_health_task = getattr(_app.state, "_db_health_task", None)
+    if _db_health_task is not None and not _db_health_task.done():
+        _db_health_task.cancel()
+        try:
+            await asyncio.wait_for(_db_health_task, timeout=1.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
+
+    # P3.1 — stop the event-loop lag canary.
+    _event_loop_shutdown = getattr(_app.state, "_event_loop_shutdown", None)
+    _event_loop_task = getattr(_app.state, "_event_loop_task", None)
+    if _event_loop_shutdown is not None:
+        _event_loop_shutdown.set()
+    if _event_loop_task is not None and not _event_loop_task.done():
+        try:
+            await asyncio.wait_for(_event_loop_task, timeout=1.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
 
     # Stop the stuck-job reconciler so it doesn't try to commit during
     # DB pool teardown. Setting the shutdown event lets it exit at the
@@ -563,14 +753,57 @@ def _provider_unavailable_payload(request, exc) -> dict:
     }
 
 
+# P2.1 — paths where a generic OSError/ConnectionError/asyncio.TimeoutError
+# really IS likely a graph-provider failure. Anything outside this list,
+# we treat as a generic infra / DB / Redis issue and surface as
+# DB_UNAVAILABLE rather than the misleading PROVIDER_UNAVAILABLE code.
+_PROVIDER_BOUND_PATH_PREFIXES: tuple[str, ...] = (
+    "/api/v1/graph/",
+    "/api/v1/admin/providers/",
+    "/api/v1/aggregation/",
+    "/api/v1/views/",
+    "/api/v1/workspaces/",
+    "/api/v1/admin/workspaces/",
+    "/api/v1/ws_",                       # legacy /ws_<id>/graph routes
+)
+
+
+def _is_provider_bound_path(path: str) -> bool:
+    return any(path.startswith(p) for p in _PROVIDER_BOUND_PATH_PREFIXES)
+
+
 async def _provider_error_handler(request, exc):
     """Fallback handler for raw connectivity errors that bypass the circuit
-    breaker (e.g. during provider instantiation). Always returns structured
-    503 regardless of URL path — provider errors are provider errors."""
-    logger.warning("Provider connectivity error on %s: %s", request.url.path, exc)
+    breaker (e.g. during provider instantiation).
+
+    P2.1 — path-discriminate: a generic OSError/ConnectionError on a
+    non-provider-bound endpoint (e.g. /api/v1/announcements when Postgres
+    is down) used to be classified as ``PROVIDER_UNAVAILABLE`` which
+    misled the FE banner to blame the graph provider. Now: if the path
+    isn't provider-bound, we surface ``DB_UNAVAILABLE`` (or
+    ``INFRA_UNAVAILABLE`` for unknown causes) so the user gets an
+    accurate signal.
+    """
+    path = request.url.path
+    if _is_provider_bound_path(path):
+        logger.warning("Provider connectivity error on %s: %s", path, exc)
+        return JSONResponse(
+            status_code=503,
+            content=_provider_unavailable_payload(request, exc),
+        )
+    # Non-provider-bound path — surface as a generic infra error.
+    logger.warning(
+        "Infra/DB connectivity error on non-provider path %s: %s", path, exc,
+    )
     return JSONResponse(
         status_code=503,
-        content=_provider_unavailable_payload(request, exc),
+        headers={"Retry-After": "5"},
+        content={
+            "detail": {
+                "code": "DB_UNAVAILABLE",
+                "reason": str(exc)[:200],
+            }
+        },
     )
 
 
@@ -620,12 +853,23 @@ app.add_exception_handler(_RedisTimeoutError, _provider_error_handler)
 class _TimeoutMiddleware:
     """ASGI middleware: tiered per-path timeout for HTTP requests.
 
-    Tiers (first substring match wins):
-        /events                       exempt entirely (SSE — long-lived by design)
-        /health*                  ->  5s  (probes must be fast)
-        /graph/                   -> 15s  (read queries, bounded by per-query timeouts)
-        /aggregation/             -> 45s  (write-heavy operations)
-        everything else           -> 30s  (default — halved from the old flat 60s)
+    Tiers (P1.8 — anchored prefix match, ordered most-specific first):
+        ANY path in SSE_PATHS                exempt entirely (long-lived)
+        prefix /api/v1/health        ->  5s  (probes must be fast)
+        prefix /api/v1/graph         -> 15s  (read queries, per-query bounded)
+        prefix /api/v1/aggregation/  -> 45s  (write-heavy operations)
+        everything else              -> 30s  (default)
+
+    Why anchored prefixes (vs. substring): substring matching meant
+    ``"/health" in path`` matched ``/api/v1/internal/health-metrics``,
+    ``/api/v1/admin/aggregation-foo``, etc., classifying them into the
+    wrong tier. Anchored prefixes are unambiguous — a route is either
+    in the tier or it isn't.
+
+    Why an explicit SSE registry (vs. ``endswith("/events")``): suffix
+    matching binds us to one URL convention. If we ever add ``/stream``
+    or ``/live`` SSE endpoints, they'd silently get killed at 30s. The
+    registry is the single place to declare "this is long-lived".
 
     Response-stream invariants (P0.1, fixes the "never recovers" freeze):
 
@@ -651,26 +895,62 @@ class _TimeoutMiddleware:
     unrecoverable state.
     """
 
-    # Suffix-match: SSE endpoints are routed under ``.../events``.
-    # Suffix not substring so we don't accidentally exempt e.g.
-    # ``/api/v1/admin/events-foo`` should one ever exist.
-    _SSE_PATH_SUFFIX = "/events"
+    # P1.8 — explicit SSE path registry. Routers may extend this at
+    # startup via ``register_sse_path("/api/v1/.../my-stream")``. The
+    # default suffix ``/events`` matches today's only SSE convention but
+    # the contract is explicit registration, not endswith heuristics.
+    _SSE_PATH_SUFFIXES: tuple[str, ...] = ("/events",)
+    _SSE_EXACT_PATHS: frozenset[str] = frozenset()
 
     def __init__(self, app):
         self.app = app
-        # Read once at startup — see backend/app/config/resilience.py for reference.
+        # P1.8 — anchored prefix tiers, ordered most-specific first.
+        # Substring matching previously sorted ``/api/v1/internal/health-
+        # metrics`` into the 5s health tier and ``/api/v1/admin/aggregation-
+        # workers`` into the 45s aggregation tier. Anchored matching is
+        # unambiguous: a path either has the exact prefix or it doesn't.
+        # Tier list order matters when prefixes nest (e.g. /api/v1/health
+        # vs. /api/v1/health/providers — both legitimate; longer matches
+        # wins via list-then-startswith).
         self._tiers: list[tuple[str, float]] = [
-            ("/health",        float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))),
-            ("/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "15"))),
-            ("/aggregation/",  float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
+            ("/api/v1/health",        float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))),
+            ("/health",               float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))),
+            ("/api/v1/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "15"))),
+            ("/api/v1/aggregation/",  float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
         ]
         self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
 
     def _resolve_timeout(self, path: str) -> float:
         for pattern, timeout in self._tiers:
-            if pattern in path:
+            if path.startswith(pattern):
                 return timeout
         return self._default_timeout
+
+    def _is_sse_path(self, path: str) -> bool:
+        if path in self._SSE_EXACT_PATHS:
+            return True
+        for suffix in self._SSE_PATH_SUFFIXES:
+            if path.endswith(suffix):
+                return True
+        return False
+
+    # P1.10 — paths that are ALWAYS allowed through, even when the app
+    # has not flipped its readiness gate. Liveness probes must answer
+    # regardless of init state; the back-compat alias /health gets the
+    # same treatment for the FE banner.
+    _LIVE_GATE_EXEMPT_PREFIXES: tuple[str, ...] = (
+        "/health/live",
+        "/api/v1/health/live",
+        "/health",            # alias for /health/live
+        "/api/v1/health",     # alias for /health/live
+    )
+
+    @staticmethod
+    def _is_live_gate_exempt(path: str) -> bool:
+        for prefix in _TimeoutMiddleware._LIVE_GATE_EXEMPT_PREFIXES:
+            if path.startswith(prefix):
+                return True
+        return False
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -683,9 +963,27 @@ class _TimeoutMiddleware:
         # or the worker emits a terminal event and the handler closes
         # the response. No timeout, no cancellation, no spurious
         # "Request timed out after response started" log noise.
-        if path.endswith(self._SSE_PATH_SUFFIX):
+        if self._is_sse_path(path):
             await self.app(scope, receive, send)
             return
+
+        # P1.10 — readiness gate. Until lifespan flips ``app.state.live``,
+        # refuse non-liveness requests with 503 + Retry-After. Eliminates
+        # the lifespan-incomplete request race where a user request hits
+        # half-initialised global state. Exempt paths get through always.
+        if not self._is_live_gate_exempt(path):
+            try:
+                live = bool(getattr(scope.get("app").state, "live", True))
+            except Exception:
+                live = True   # belt-and-braces: never refuse on attribute lookup error
+            if not live:
+                response = JSONResponse(
+                    {"detail": "Service is starting up. Please retry shortly."},
+                    status_code=503,
+                    headers={"Retry-After": "5"},
+                )
+                await response(scope, receive, send)
+                return
 
         timeout = self._resolve_timeout(path)
         original_send = send
@@ -894,6 +1192,56 @@ async def dependency_health():
     except Exception as exc:
         result["providers"] = {"_error": str(exc)[:200]}
 
+    # P3.1 — event-loop lag surface. p99 lag > 500ms implies the loop
+    # is wedged; > 50ms implies coroutines are queueing.
+    lag_stats = getattr(app.state, "event_loop_lag_stats", None)
+    if lag_stats is not None:
+        result["dependencies"]["event_loop_lag_p99_ms"] = round(
+            lag_stats.p99_s * 1000, 1,
+        )
+        result["dependencies"]["event_loop_lag_peak_ms"] = round(
+            lag_stats.peak_s * 1000, 1,
+        )
+        if lag_stats.p99_s >= 0.5:
+            result["dependencies"]["event_loop"] = (
+                f"critical: p99={lag_stats.p99_s * 1000:.0f}ms"
+            )
+            if result["status"] == "healthy":
+                result["status"] = "degraded"
+                result.setdefault("reason", "event_loop_wedged")
+        elif lag_stats.p99_s >= 0.05:
+            result["dependencies"]["event_loop"] = (
+                f"degraded: p99={lag_stats.p99_s * 1000:.0f}ms"
+            )
+        else:
+            result["dependencies"]["event_loop"] = "healthy"
+
+    # P3.3 — warmup-loop heartbeat surface.
+    # warmup_last_cycle_at is None until the first cycle finishes; any age
+    # greater than ~3× MIN_FULL_CYCLE_S indicates the supervisor is not
+    # making progress (DB outage, persistent crash, deadlock).
+    import time as _time
+    last_cycle = getattr(provider_manager, "warmup_last_cycle_at", None)
+    if last_cycle is None:
+        result["dependencies"]["warmup_loop"] = "starting"
+    else:
+        age_s = _time.monotonic() - last_cycle
+        # 90s threshold = 3× default MIN_FULL_CYCLE_S; tune via env if needed.
+        warmup_stale_threshold_s = float(
+            os.getenv("WARMUP_HEARTBEAT_STALE_THRESHOLD_S", "90")
+        )
+        if age_s > warmup_stale_threshold_s:
+            result["dependencies"]["warmup_loop"] = (
+                f"degraded: stalled {age_s:.0f}s"
+            )
+            if result["status"] == "healthy":
+                result["status"] = "degraded"
+                result.setdefault("reason", "warmup_loop_stalled")
+        else:
+            result["dependencies"]["warmup_loop"] = (
+                f"healthy (cycle {age_s:.0f}s ago)"
+            )
+
     if degraded:
         result["status"] = "degraded"
         result["reason"] = degraded_reason or "database_unavailable"
@@ -943,129 +1291,190 @@ async def readiness_check():
     return result
 
 
+# P2.2 — workspace×data_source enumeration cache, populated lazily by
+# ``provider_health_check`` and TTL'd. With 50+ workspaces × 67 RPS of
+# FE polling, the previous N+1 query pattern was a scaling cliff. The
+# cache + single JOIN brings it to one DB roundtrip every 5s regardless
+# of poll rate. Invalidation is implicit via TTL — workspace/datasource
+# CRUD is rare enough that 5s staleness is acceptable; the warmup loop
+# itself doesn't depend on this cache.
+_DS_INDEX_CACHE: dict = {"data": None, "ts": 0.0}
+_DS_INDEX_TTL_S: float = float(os.getenv("PROVIDER_HEALTH_DS_INDEX_TTL_S", "5"))
+_DS_INDEX_LOAD_DEADLINE_S: float = float(
+    os.getenv("PROVIDER_HEALTH_DS_INDEX_DEADLINE_S", "1.0"),
+)
+
+# Last-known last-good response for /health/providers. Used when DB is
+# down so the FE preserves its provider map instead of seeing an empty
+# 200 (which the FE store interprets as "no providers").
+_LAST_KNOWN_HEALTH_PROVIDERS: dict = {"data": None, "ts": 0.0}
+
+
+async def _load_ds_index() -> list[tuple[str, str, str]]:
+    """One-shot JOIN that returns ``(workspace_id, data_source_id,
+    provider_id)`` for every active data source.
+
+    Replaces the N+1 pattern (1 + N queries for N workspaces). At 50+
+    workspaces × 67 RPS poll, the previous version saturated the
+    PROVIDER_PROBE pool; this one issues exactly one roundtrip.
+    """
+    import time as _time
+    cached = _DS_INDEX_CACHE.get("data")
+    cache_ts = _DS_INDEX_CACHE.get("ts", 0.0)
+    if cached is not None and (_time.monotonic() - cache_ts) < _DS_INDEX_TTL_S:
+        return cached  # type: ignore[return-value]
+
+    from .db.engine import get_provider_probe_session
+    from .db.models import WorkspaceORM, WorkspaceDataSourceORM
+    from sqlalchemy import select
+
+    async with asyncio.timeout(_DS_INDEX_LOAD_DEADLINE_S):
+        async with get_provider_probe_session() as session:
+            stmt = (
+                select(
+                    WorkspaceORM.id,
+                    WorkspaceDataSourceORM.id,
+                    WorkspaceDataSourceORM.provider_id,
+                )
+                .join(
+                    WorkspaceDataSourceORM,
+                    WorkspaceDataSourceORM.workspace_id == WorkspaceORM.id,
+                )
+                .where(WorkspaceORM.deleted_at.is_(None))
+            )
+            rows = (await session.execute(stmt)).all()
+
+    result: list[tuple[str, str, str]] = [
+        (str(ws_id), str(ds_id), str(prov_id))
+        for ws_id, ds_id, prov_id in rows
+    ]
+    _DS_INDEX_CACHE["data"] = result
+    _DS_INDEX_CACHE["ts"] = _time.monotonic()
+    return result
+
+
 @app.get("/api/v1/health/providers", tags=["health"])
 async def provider_health_check():
     """
     Per-workspace provider health — STRICT structural decoupling from
     provider state.
 
-    This endpoint is polled continuously by the frontend's status banner
-    and admin pages. It MUST NOT do any outbound work — every prior
-    iteration that did (live ``get_stats``, then live ``preflight``)
-    became a chokepoint that froze the whole app under hostile-host
-    conditions.
+    Polled continuously by the FE banner. MUST NOT do any outbound work
+    and MUST NOT blank the FE state under DB pressure (G5 fix).
 
-    The contract now:
-
-      - Read the data-source list from the PROVIDER_PROBE pool (1s
-        deadline; cached on a tiny TTL so a poll storm dedupes).
-      - Read in-memory breaker / cached-status state from
-        ``provider_manager.report_provider_states()`` and the background
-        warmup cache (``_provider_status_cache``). NO outbound work, NO
-        provider construction, NO sockets opened.
-      - Return immediately with the best-known status per data source.
-        Never times out, never 504s, never affects the event loop.
-
-    A background warmup loop (started in lifespan) periodically probes
-    each registered provider via ``preflight()`` and updates the cache,
-    so even un-visited providers carry a status. Provider unreachability
-    is observable, but it is OBSERVED OFFLINE — never on a request path.
+    Contract:
+      - Single JOIN on the PROVIDER_PROBE pool, cached 5s (P2.2 — fixes
+        the N+1 query that previously saturated the pool at scale).
+      - Reads breaker + warmup state with timestamp-aware tie-breaking
+        via the unified ``ProviderState`` (P1.1, fixes G7 — stale negative
+        on recovery).
+      - On DB timeout / failure: return last-known map with stalenessSecs,
+        NOT an empty 200 (G5 fix).
+      - NO outbound work, NO provider construction, NO sockets opened.
     """
-    from .db.repositories.workspace_repo import list_workspaces
-    from .db.repositories.data_source_repo import list_data_sources
-    from .db.engine import get_provider_probe_session
+    import time as _time
 
-    READ_DEADLINE = 1.0  # seconds — DB read budget; never extends past this
-
+    # 1. Enumerate data sources via the cached single-JOIN. On failure,
+    #    fall back to last-known so the FE never sees an empty 200.
+    ds_meta: list[tuple[str, str, str]]
+    db_error: Optional[str] = None
     try:
-        # 1. Enumerate data sources from the PROVIDER_PROBE pool.
-        ds_meta: list[tuple[str, str, str]] = []
-        async with asyncio.timeout(READ_DEADLINE):
-            async with get_provider_probe_session() as session:
-                workspaces = await list_workspaces(session)
-                for ws in workspaces:
-                    sources = await list_data_sources(session, ws.id)
-                    for ds in sources:
-                        ds_meta.append((ws.id, ds.id, ds.provider_id))
+        ds_meta = await _load_ds_index()
     except (asyncio.TimeoutError, TimeoutError):
-        # DB slow — return "configured: false" so the FE doesn't blank
-        # the UI. Better to show stale than to 504.
-        return {
-            "providers": {},
-            "dataSourceCount": 0,
-            "configured": False,
-            "error": "DB read deadline exceeded",
-        }
+        db_error = "db_read_deadline_exceeded"
+        ds_meta = []
     except Exception as exc:
-        return {"providers": {}, "error": str(exc)[:200]}
+        db_error = f"db_error: {str(exc)[:160]}"
+        ds_meta = []
+
+    if db_error and _LAST_KNOWN_HEALTH_PROVIDERS["data"] is not None:
+        # Serve last-known with staleness so the FE preserves continuity.
+        last = _LAST_KNOWN_HEALTH_PROVIDERS["data"]
+        staleness_s = max(0.0, _time.monotonic() - _LAST_KNOWN_HEALTH_PROVIDERS["ts"])
+        return {
+            **last,
+            "stalenessSecs": int(staleness_s),
+            "error": db_error,
+        }
 
     if not ds_meta:
-        return {
+        empty = {
             "providers": {},
             "dataSourceCount": 0,
             "configured": False,
         }
+        if db_error:
+            empty["error"] = db_error
+        return empty
 
-    # 2. Read in-memory breaker state — O(1), no I/O.
+    # 2. Read in-memory breaker state and warmup cache — O(1), no I/O.
     try:
         breaker_states = provider_manager.report_provider_states()
     except Exception:
         breaker_states = {}
-
-    # 3. Read background-warmup cache — O(1), no I/O.
     warmup_cache = getattr(provider_manager, "warmup_cache", {}) or {}
 
-    # 4. Map each (ws_id, ds_id, prov_id) to its best-known status.
+    # 3. Map each (ws_id, ds_id, prov_id) to its best-known status with
+    #    timestamp-aware tie-breaking (G7 fix).
     providers: dict = {}
     for ws_id, ds_id, prov_id in ds_meta:
         ds_key = f"{ws_id}:{ds_id}"
-        # Prefer breaker state when present (means the provider has been
-        # actually exercised and we know its current truth).
-        breaker_key = f"{prov_id}:"           # graph_name="" for default
-        breaker_key_alt = next(
+
+        # Breaker state — keyed on (prov_id, graph_name); pick first match.
+        # NOTE: removed dead `breaker_key = f"{prov_id}:"` lookup (G25 fix —
+        # the trailing-colon key never existed because graph_name is always
+        # non-empty for FalkorDB/Neo4j).
+        breaker_key = next(
             (k for k in breaker_states if k.startswith(f"{prov_id}:")),
             None,
         )
-        breaker = breaker_states.get(breaker_key) or (
-            breaker_states.get(breaker_key_alt) if breaker_key_alt else None
-        )
-
+        breaker = breaker_states.get(breaker_key) if breaker_key else None
         warmup = warmup_cache.get(prov_id)
 
-        # Resolution order: breaker (live truth from real traffic) →
-        # warmup (background probe) → unknown (never observed).
-        if breaker == "healthy":
+        # Timestamp-aware tie-break: if the manager has a unified state for
+        # this (prov_id, graph_name) AND the warmup observation is more
+        # recent than the breaker's open transition, trust warmup. This
+        # closes G7: a recovered provider with a stale OPEN breaker no
+        # longer reports unhealthy when warmup has confirmed recovery.
+        prefer_warmup = False
+        if breaker_key:
+            graph_name = breaker_key[len(prov_id) + 1:]
+            snapshot = provider_manager.snapshot_state(prov_id, graph_name)
+            if snapshot is not None and snapshot.warmup_overrides_breaker():
+                prefer_warmup = True
+
+        # Resolution order: breaker (real traffic) → warmup (offline obs) →
+        # unknown. Reversed when timestamp tie-break says warmup is fresher.
+        if not prefer_warmup and breaker == "healthy":
             providers[ds_key] = {"status": "healthy", "providerId": prov_id}
-        elif breaker in ("unavailable", "instantiation_failed"):
+        elif not prefer_warmup and breaker in ("unavailable", "instantiation_failed"):
             providers[ds_key] = {
                 "status": "unhealthy",
                 "providerId": prov_id,
-                "error": f"Provider circuit: {breaker}",
+                "error": f"provider_circuit: {breaker}",
             }
-        elif breaker == "degraded":
+        elif not prefer_warmup and breaker == "degraded":
             providers[ds_key] = {
                 "status": "unhealthy",
                 "providerId": prov_id,
-                "error": "Provider in degraded state (half-open)",
+                "error": "provider_circuit: degraded (half-open)",
             }
         elif warmup is not None:
             providers[ds_key] = {
                 "status": "healthy" if warmup.get("ok") else "unhealthy",
                 "providerId": prov_id,
-                "error": warmup.get("reason"),
+                "error": warmup.get("reason") if not warmup.get("ok") else None,
                 "checkedAt": warmup.get("checked_at"),
             }
         else:
             providers[ds_key] = {"status": "unknown", "providerId": prov_id}
 
-    return {
+    response = {
         "providers": providers,
         "dataSourceCount": len(ds_meta),
         "configured": True,
     }
-
-    return {
-        "providers": providers,
-        "dataSourceCount": len(ds_meta),
-        "configured": True,
-    }
+    # Cache last-known so DB outages don't blank the FE map.
+    _LAST_KNOWN_HEALTH_PROVIDERS["data"] = response
+    _LAST_KNOWN_HEALTH_PROVIDERS["ts"] = _time.monotonic()
+    return response

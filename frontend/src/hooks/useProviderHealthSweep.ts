@@ -1,20 +1,29 @@
 /**
- * useProviderHealthSweep — bounded, abortable provider health probing.
+ * useProviderHealthSweep — user-gesture-only provider health probing.
  *
- * Replaces the naive `providers.forEach(p => testProvider(p.id))` stampede
- * that used to fire N unbounded, unabortable POSTs per mount. Known pain:
- * when a single provider hung, every subsequent probe piled a 10s-held DB
- * session onto the backend and the page froze.
+ * Post-P0.4: this hook NO LONGER auto-sweeps on mount. The auto-sweep
+ * stampeded N unbounded /test calls on every page mount, which under
+ * hostile-host conditions amplified BE per-provider slowness back into
+ * a frozen UI. Baseline status now flows from the bounded, cache-only
+ * ``/admin/providers/status`` endpoint via the global ``providerStatus``
+ * store; per-provider /test calls fire ONLY on explicit user gesture.
  *
- * Guarantees:
- *  - At most `concurrency` probes in flight at once.
- *  - Each probe gets its own AbortController with `perCallTimeoutMs`.
- *  - Dead providers are short-circuited by `getCircuitBreaker` after
- *    three consecutive failures, skipping the network entirely until the
- *    breaker transitions to half-open.
- *  - The initial sweep fires exactly once per mount; resets per provider
- *    set identity.
- *  - Unmount aborts every in-flight probe.
+ * What this hook still provides:
+ *  - ``testOne(id)`` — fire one /test for the per-row "Test" button.
+ *  - ``refresh()`` — fire /test for every provider for "Re-test All".
+ *    Bounded by ``concurrency`` (default 3), each call gets its own
+ *    AbortController with ``perCallTimeoutMs``, dead providers are
+ *    short-circuited by the FE circuit breaker.
+ *  - ``healthMap`` — local sweep results keyed by provider id. Empty
+ *    until a user gesture lands; consumers should fall back to the
+ *    global ``providerStatus`` store for baseline state.
+ *  - ``setHealth(id, health)`` — manual update path (used by the
+ *    onboarding wizard after a successful test).
+ *
+ * Unmount aborts every in-flight probe.
+ *
+ * (Consider renaming to ``useTestableProviders`` in a follow-up — the
+ * "sweep" semantics are gone but call sites pin the existing name.)
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
