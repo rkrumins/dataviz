@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, memo } from 'react'
 import { aggregationService, type AggregationJobResponse } from '@/services/aggregationService'
 import { Loader2, CheckCircle2, AlertCircle, Clock, PlayCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -22,22 +22,18 @@ export function AggregationHistory({ dataSourceId }: AggregationHistoryProps) {
         }
     }, [dataSourceId])
 
+    useEffect(() => { fetchJobs() }, [fetchJobs])
+
+    // Poll every 3s only while a job is active. Splitting the interval out of
+    // the fetch effect avoids the previous bug where ``jobs.length`` /
+    // ``jobs.some(...)`` in the dep array re-fired ``fetchJobs`` immediately
+    // after the first response and on every status transition.
+    const isPolling = jobs.some(j => j.status === 'pending' || j.status === 'running')
     useEffect(() => {
-        fetchJobs()
-
-        let interval: ReturnType<typeof setInterval> | null = null;
-        
-        // If there is ANY active job, we poll every 3 seconds to update the progress live
-        const hasActiveJob = jobs.some(j => j.status === 'pending' || j.status === 'running')
-        
-        if (hasActiveJob) {
-            interval = setInterval(fetchJobs, 3000)
-        }
-
-        return () => {
-            if (interval) clearInterval(interval)
-        }
-    }, [fetchJobs, jobs.length, jobs.some(j => j.status === 'pending' || j.status === 'running')])
+        if (!isPolling) return
+        const id = setInterval(fetchJobs, 3000)
+        return () => clearInterval(id)
+    }, [isPolling, fetchJobs])
 
     if (isLoading && jobs.length === 0) {
         return (
@@ -68,7 +64,7 @@ export function AggregationHistory({ dataSourceId }: AggregationHistoryProps) {
     )
 }
 
-function JobCard({ job }: { job: AggregationJobResponse }) {
+const JobCard = memo(function JobCard({ job }: { job: AggregationJobResponse }) {
     const progressPercent = Math.round(job.progress || 0)
     
     // Status visual mapping
@@ -152,4 +148,4 @@ function JobCard({ job }: { job: AggregationJobResponse }) {
             </div>
         </div>
     )
-}
+})
