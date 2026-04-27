@@ -97,16 +97,15 @@ export const useHealthStore = create<HealthState>()((set, get) => ({
         return
       }
 
-      const body = await res.json()
+      // P4.6 — dropped the dead `body.status === 'unhealthy'` branch.
+      // Post-P0.3, /health is an alias for /health/live which only returns
+      // {status: 'live'} — the unhealthy branch was unreachable. DB-
+      // unhealthy signals now flow through the per-request failure
+      // path: actual DB-backed endpoints return 503 and the FE classifies
+      // the failure via classifyError() in catch(err) below.
+      const _body = await res.json()
+      void _body
       const prevStatus = get().status
-
-      if (body.status === 'unhealthy') {
-        const detail = typeof body.dependencies?.management_db === 'string'
-          ? body.dependencies.management_db
-          : 'The backend management database is unavailable.'
-        applyFailure(get, set, 'backend-down', detail)
-        return
-      }
 
       // Healthy response
       if (prevStatus === 'unreachable') {
