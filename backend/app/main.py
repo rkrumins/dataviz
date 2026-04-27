@@ -351,6 +351,38 @@ async def lifespan(_app: FastAPI):
                 asyncio.create_task(agg_scheduler.start())
                 logger.info("Aggregation scheduler started")
 
+            # Stuck-job reconciler — runs wherever the aggregation worker
+            # lives. Detects rows whose worker died without writing a
+            # terminal status (deploy mid-job, OOM, segfault) and marks
+            # them ``failed`` with a clear reason so operators get a
+            # working Resume button instead of a perpetual "running"
+            # state. Sweep-only; auto-redispatch is Phase 2 work when
+            # the dispatch substrate is XAUTOCLAIM-safe.
+            from .services.aggregation.reconciler import run_reconciler
+            _app.state._reconciler_shutdown = asyncio.Event()
+            _app.state._reconciler_task = asyncio.create_task(
+                run_reconciler(get_jobs_session, _app.state._reconciler_shutdown),
+                name="aggregation-stuck-job-reconciler",
+            )
+            logger.info("Stuck-job reconciler started")
+
+            # Cross-process cancel bridge. The web tier subscribes so
+            # InProcessDispatcher-hosted jobs get cancelled instantly;
+            # cancel broadcasts to OTHER processes (insights workers,
+            # standalone aggregation workers) reach those processes via
+            # their own CancelListeners.
+            from .services.aggregation.cancel import CancelListener
+            from .services.aggregation.redis_client import get_redis as _get_redis_for_cancel
+            try:
+                _app.state._cancel_listener = CancelListener(_get_redis_for_cancel())
+                await _app.state._cancel_listener.start()
+            except Exception as exc:
+                logger.warning(
+                    "Cancel listener failed to start (cancels will fall back "
+                    "to local + direct DB write only): %s", exc,
+                )
+                _app.state._cancel_listener = None
+
             logger.info("Aggregation service started (role=%s)", role.value)
         except Exception as exc:
             logger.warning("Aggregation service startup warning: %s", exc)
@@ -359,6 +391,32 @@ async def lifespan(_app: FastAPI):
     yield
 
     # Shutdown — stop event listener, release providers, close connections.
+
+    # Stop the stuck-job reconciler so it doesn't try to commit during
+    # DB pool teardown. Setting the shutdown event lets it exit at the
+    # next sleep boundary; the cancel + await is the belt-and-braces
+    # path for the case where it's mid-sweep.
+    _reconciler_shutdown = getattr(_app.state, "_reconciler_shutdown", None)
+    _reconciler_task = getattr(_app.state, "_reconciler_task", None)
+    if _reconciler_shutdown is not None:
+        _reconciler_shutdown.set()
+    if _reconciler_task is not None and not _reconciler_task.done():
+        try:
+            await asyncio.wait_for(_reconciler_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _reconciler_task.cancel()
+            try:
+                await _reconciler_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the cross-process cancel listener.
+    _cancel_listener = getattr(_app.state, "_cancel_listener", None)
+    if _cancel_listener is not None:
+        try:
+            await _cancel_listener.stop()
+        except Exception:
+            pass
 
     # Stop aggregation event listener (if running in proxy mode)
     _agg_listener = getattr(_app.state, "_agg_event_listener", None)
@@ -487,11 +545,24 @@ class _TimeoutMiddleware:
     """ASGI middleware: tiered per-path timeout for HTTP requests.
 
     Tiers (first substring match wins):
+        /events     SSE streams — exempt entirely (long-lived by design)
         /health*                    ->  5s  (probes must be fast)
         /graph/                     -> 15s  (read queries, bounded by per-query timeouts)
         /aggregation/               -> 45s  (write-heavy operations)
         everything else             -> 30s  (default — halved from the old flat 60s)
+
+    SSE bypass. Server-Sent Events endpoints stay open for the
+    duration of a job — minutes to hours. Wrapping them in
+    ``asyncio.wait_for(timeout=30s)`` kills the connection mid-
+    stream and the client reconnects forever in a 30-second loop.
+    Any path matching ``/events`` (the platform's SSE endpoint
+    suffix) skips the timeout entirely.
     """
+
+    # Suffix-match: SSE endpoints are routed under ``.../events``.
+    # Suffix not substring so we don't accidentally exempt e.g.
+    # ``/api/v1/admin/events-foo`` should one ever exist.
+    _SSE_PATH_SUFFIX = "/events"
 
     def __init__(self, app):
         self.app = app
@@ -515,6 +586,15 @@ class _TimeoutMiddleware:
             return
 
         path = scope.get("path", "")
+
+        # SSE bypass — let the stream run until the client disconnects
+        # or the worker emits a terminal event and the handler closes
+        # the response. No wait_for, no timeout error, no spurious
+        # "Request timed out after response started" log noise.
+        if path.endswith(self._SSE_PATH_SUFFIX):
+            await self.app(scope, receive, send)
+            return
+
         timeout = self._resolve_timeout(path)
 
         response_started = False
