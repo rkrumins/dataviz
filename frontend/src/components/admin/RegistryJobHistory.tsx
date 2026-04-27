@@ -321,20 +321,27 @@ export function RegistryJobHistory() {
     // user picks the action inside (Resume preserves last_cursor; Re-trigger
     // starts from scratch). This keeps the headline timeout-recovery flow on
     // a single path so users can always tweak timeout/batch_size before retry.
-    const handleResume = useCallback((job: AggregationJobResponse) =>
-        setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job) }),
-        [],
-    )
+    //
+    // Wrapping the dialog-opening setters in startTransition keeps the click
+    // event from blocking on the modal mount (RetriggerDialog pulls in
+    // AggregationOverridesForm, three radix tooltip providers, and a few
+    // framer-motion roots — easily 150–250ms of synchronous work). The dialog
+    // appears one frame later, which still reads as instant.
+    const handleResume = useCallback((job: AggregationJobResponse) => {
+        startTransition(() => {
+            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job) })
+        })
+    }, [])
 
-    const handleRetrigger = useCallback((job: AggregationJobResponse) =>
-        setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job) }),
-        [],
-    )
+    const handleRetrigger = useCallback((job: AggregationJobResponse) => {
+        startTransition(() => {
+            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job) })
+        })
+    }, [])
 
-    const handleDelete = useCallback((job: AggregationJobResponse) =>
-        setConfirmDelete(job),
-        [],
-    )
+    const handleDelete = useCallback((job: AggregationJobResponse) => {
+        startTransition(() => setConfirmDelete(job))
+    }, [])
 
     const executeConfirmedDelete = () => {
         if (!confirmDelete) return
@@ -413,13 +420,16 @@ export function RegistryJobHistory() {
     }, [showToast, fetchJobs])
 
     // Data source-level actions (for grouped view) — opens the overrides dialog.
+    // startTransition rationale: same as handleResume/handleRetrigger above.
     const handleTriggerAggregation = useCallback((dataSourceId: string) => {
         const meta = dsLookup.get(dataSourceId)
-        setRetriggerCtx({
-            kind: 'dataSource',
-            dataSourceId,
-            dataSourceLabel: meta?.label ?? dataSourceId,
-            initialValue: buildInitialOverridesForDataSource(meta?.projectionMode),
+        startTransition(() => {
+            setRetriggerCtx({
+                kind: 'dataSource',
+                dataSourceId,
+                dataSourceLabel: meta?.label ?? dataSourceId,
+                initialValue: buildInitialOverridesForDataSource(meta?.projectionMode),
+            })
         })
     }, [dsLookup])
 
