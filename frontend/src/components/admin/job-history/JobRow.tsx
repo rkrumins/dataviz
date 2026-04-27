@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
     Loader2, AlertCircle, ChevronRight, RotateCcw, StopCircle, Play, Trash2,
@@ -68,7 +69,9 @@ export interface JobRowProps {
     job: AggregationJobResponse
     meta?: DataSourceMeta
     expanded: boolean
-    onToggle: () => void
+    // Takes the row's job id so the parent can pass a stable callback that
+    // doesn't re-create per row (which would defeat React.memo on JobRow).
+    onToggle: (jobId: string) => void
     onCancel: (job: AggregationJobResponse) => void
     onResume: (job: AggregationJobResponse) => void
     onRetrigger: (job: AggregationJobResponse) => void
@@ -81,7 +84,7 @@ export interface JobRowProps {
     previousJob?: AggregationJobResponse
 }
 
-export function JobRow({ job: jobFromList, meta, expanded, onToggle, onCancel, onResume, onRetrigger, onDelete, onPurge, purgeConfirm, setPurgeConfirm, actionLoading, compact, previousJob }: JobRowProps) {
+export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, onToggle, onCancel, onResume, onRetrigger, onDelete, onPurge, purgeConfirm, setPurgeConfirm, actionLoading, compact, previousJob }: JobRowProps) {
     // Open the SSE stream only for actively-running jobs so terminal
     // rows (the bulk of Job History) don't open dead EventSources.
     // Phase 3's useJobsLive(scope) consolidates this to one connection
@@ -137,7 +140,7 @@ export function JobRow({ job: jobFromList, meta, expanded, onToggle, onCancel, o
     return (
         <>
             <tr
-                onClick={onToggle}
+                onClick={() => onToggle(jobFromList.id)}
                 className={cn(
                     'group border-b border-glass-border/40 cursor-pointer transition-all duration-200',
                     'hover:bg-gradient-to-r hover:from-transparent hover:via-black/[0.02] hover:to-transparent',
@@ -551,4 +554,4 @@ export function JobRow({ job: jobFromList, meta, expanded, onToggle, onCancel, o
             </AnimatePresence>
         </>
     )
-}
+})

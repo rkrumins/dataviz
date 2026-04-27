@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import {
     Activity, TrendingUp, Timer, AlertTriangle, AlertCircle,
@@ -16,7 +16,7 @@ interface JobHistoryKPIsProps {
     onShowFailed: () => void
 }
 
-export function JobHistoryKPIs({ summary, filteredJobs, hasActiveFilters, allDataSources, onShowFailed }: JobHistoryKPIsProps) {
+export const JobHistoryKPIs = memo(function JobHistoryKPIs({ summary, filteredJobs, hasActiveFilters, allDataSources, onShowFailed }: JobHistoryKPIsProps) {
     // When filters are active, compute KPIs from the filtered data
     // When no filters, use the global server-side summary (more accurate with pagination)
     const displayStats = useMemo(() => {
@@ -57,17 +57,20 @@ export function JobHistoryKPIs({ summary, filteredJobs, hasActiveFilters, allDat
     }, [summary, filteredJobs, hasActiveFilters])
 
     // System health summary from data source statuses
-    const healthCounts = allDataSources.reduce(
-        (acc, ds) => {
-            const status = ds.aggregationStatus ?? 'none'
-            if (status === 'ready') acc.healthy++
-            else if (status === 'running') acc.running++
-            else if (status === 'pending') acc.pending++
-            else if (status === 'failed') acc.attention++
-            else acc.other++
-            return acc
-        },
-        { healthy: 0, running: 0, pending: 0, attention: 0, other: 0 },
+    const healthCounts = useMemo(
+        () => allDataSources.reduce(
+            (acc, ds) => {
+                const status = ds.aggregationStatus ?? 'none'
+                if (status === 'ready') acc.healthy++
+                else if (status === 'running') acc.running++
+                else if (status === 'pending') acc.pending++
+                else if (status === 'failed') acc.attention++
+                else acc.other++
+                return acc
+            },
+            { healthy: 0, running: 0, pending: 0, attention: 0, other: 0 },
+        ),
+        [allDataSources],
     )
 
     const failedCount = displayStats?.failedCount ?? 0
@@ -172,4 +175,4 @@ export function JobHistoryKPIs({ summary, filteredJobs, hasActiveFilters, allDat
             )}
         </>
     )
-}
+})

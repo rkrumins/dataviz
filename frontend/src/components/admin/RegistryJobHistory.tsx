@@ -7,7 +7,7 @@
  *
  * All sub-components live in ./job-history/
  */
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, useTransition } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
     Loader2, Activity, RotateCcw, Trash2,
@@ -84,10 +84,15 @@ export function RegistryJobHistory() {
         () => (searchParams.get('view') as ViewMode) || 'grouped'
     )
     const setViewMode = useCallback((mode: ViewMode) => {
-        setViewModeRaw(mode)
-        const p = new URLSearchParams(searchParams)
-        p.set('view', mode)
-        setSearchParams(p, { replace: true })
+        // Wrap in startTransition so the click commits without blocking on the
+        // refetch + full subtree rerender that follows from the viewMode dep
+        // chain (fetchJobs → useEffect → setData).
+        startTransition(() => {
+            setViewModeRaw(mode)
+            const p = new URLSearchParams(searchParams)
+            p.set('view', mode)
+            setSearchParams(p, { replace: true })
+        })
     }, [searchParams, setSearchParams])
 
     // Filters from URL
@@ -110,18 +115,23 @@ export function RegistryJobHistory() {
     >(null)
     const [searchInput, setSearchInput] = useState(filters.search ?? '')
     const [, setTick] = useState(0)
+    const [, startTransition] = useTransition()
     const { showToast, showLoading, hideLoading } = useToast()
     const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
-    // Sync filters -> URL
+    // Sync filters -> URL. Wrapped in startTransition for the same reason as
+    // setViewMode — filter changes trigger a refetch via fetchJobs, and we
+    // want the click to commit immediately.
     const setFilters = useCallback((updater: JobHistoryFilters | ((prev: JobHistoryFilters) => JobHistoryFilters)) => {
-        setFiltersRaw(prev => {
-            const next = typeof updater === 'function' ? updater(prev) : updater
-            const newParams = filtersToParams(next)
-            newParams.set('tab', 'jobs')
-            newParams.set('view', viewMode)
-            setSearchParams(newParams, { replace: true })
-            return next
+        startTransition(() => {
+            setFiltersRaw(prev => {
+                const next = typeof updater === 'function' ? updater(prev) : updater
+                const newParams = filtersToParams(next)
+                newParams.set('tab', 'jobs')
+                newParams.set('view', viewMode)
+                setSearchParams(newParams, { replace: true })
+                return next
+            })
         })
     }, [setSearchParams, viewMode])
 
@@ -150,15 +160,6 @@ export function RegistryJobHistory() {
         const interval = setInterval(() => setTick(t => t + 1), 30_000)
         return () => clearInterval(interval)
     }, [])
-
-    // Debounced search
-    const handleSearchInput = (value: string) => {
-        setSearchInput(value)
-        clearTimeout(searchTimerRef.current)
-        searchTimerRef.current = setTimeout(() => {
-            updateFilter({ search: value || undefined })
-        }, 400)
-    }
 
     // Derived dropdown options
     const workspaceOptions = useMemo<DropdownOption[]>(
@@ -194,7 +195,11 @@ export function RegistryJobHistory() {
         }
     }, [filters, viewMode])
 
-    useEffect(() => { setIsLoading(true); fetchJobs() }, [fetchJobs])
+    // Intentionally do NOT set isLoading=true here — that would force a
+    // synchronous re-render before the transition commits. The previous data
+    // stays visible while the new fetch runs; the refresh button still owns
+    // its own spinner via handleRefresh.
+    useEffect(() => { fetchJobs() }, [fetchJobs])
 
     // Poll while active jobs exist. Cadence relaxed from 3s → 10s
     // because per-row ``useJob`` now drives live progress via SSE.
@@ -204,31 +209,56 @@ export function RegistryJobHistory() {
     // Redis-down fallback path. Live counter freshness is owned by
     // SSE; this poll only refreshes the durable shape of the list.
     const mountedAtRef = useRef(Date.now())
+    // Derived boolean — depending on this instead of ``data?.items``
+    // (a fresh array reference on every poll) keeps the interval from
+    // being torn down + reinstalled every 10s while polling.
+    const isPolling = useMemo(
+        () => !!data?.items.some(j => j.status === 'pending' || j.status === 'running'),
+        [data?.items],
+    )
     useEffect(() => {
-        const hasActive = data?.items.some(j => j.status === 'pending' || j.status === 'running')
         const withinStartupWindow = Date.now() - mountedAtRef.current < 15_000
-        if (!hasActive && !withinStartupWindow) return
+        if (!isPolling && !withinStartupWindow) return
         const interval = setInterval(() => {
             fetchJobs()
             aggregationService.getJobsSummary().then(setSummary).catch(() => {})
         }, 10_000)
         return () => clearInterval(interval)
-    }, [data?.items, fetchJobs])
+    }, [isPolling, fetchJobs])
 
-    // Filter helpers
-    const updateFilter = (patch: Partial<JobHistoryFilters>) =>
-        setFilters(prev => ({ ...prev, ...patch, offset: 0 }))
+    // Filter helpers — memoized so memo'd children (FilterBar, KPIs, GroupedView)
+    // don't re-render purely because callback identity changed.
+    const updateFilter = useCallback((patch: Partial<JobHistoryFilters>) =>
+        setFilters(prev => ({ ...prev, ...patch, offset: 0 })),
+        [setFilters],
+    )
 
-    const toggleStatusFilter = (s: string) => {
+    const toggleStatusFilter = useCallback((s: string) => {
         const current = filters.status ?? []
         const next = current.includes(s) ? current.filter(x => x !== s) : [...current, s]
         updateFilter({ status: next.length > 0 ? next : undefined })
-    }
+    }, [filters.status, updateFilter])
 
-    const clearFilters = () => {
+    const clearFilters = useCallback(() => {
         setFilters({ limit: PAGE_SIZE, offset: 0 })
         setSearchInput('')
-    }
+    }, [setFilters])
+
+    // Debounced search
+    const handleSearchInput = useCallback((value: string) => {
+        setSearchInput(value)
+        clearTimeout(searchTimerRef.current)
+        searchTimerRef.current = setTimeout(() => {
+            updateFilter({ search: value || undefined })
+        }, 400)
+    }, [updateFilter])
+
+    // Stable callback for the KPIs "Show failed" button — passing an inline
+    // arrow defeats JobHistoryKPIs' React.memo.
+    const handleShowFailed = useCallback(
+        () => updateFilter({ status: ['failed'] }),
+        [updateFilter],
+    )
 
     // Active filter chips
     const activeChips = useMemo(() => {
@@ -256,7 +286,7 @@ export function RegistryJobHistory() {
         return chips
     }, [filters, workspaces, dataSourceOptions])
 
-    const removeChip = (key: string) => {
+    const removeChip = useCallback((key: string) => {
         if (key === 'workspace') updateFilter({ workspaceId: undefined, dataSourceId: undefined })
         else if (key.startsWith('ds-')) updateFilter({ dataSourceId: (filters.dataSourceId ?? []).filter(d => d !== key.replace('ds-', '')) || undefined })
         else if (key === 'mode') updateFilter({ projectionMode: undefined })
@@ -265,10 +295,10 @@ export function RegistryJobHistory() {
         else if (key === 'dateFrom') updateFilter({ dateFrom: undefined })
         else if (key === 'dateTo') updateFilter({ dateTo: undefined })
         else if (key === 'search') { updateFilter({ search: undefined }); setSearchInput('') }
-    }
+    }, [filters.dataSourceId, updateFilter, toggleStatusFilter])
 
     // Job actions
-    const withAction = async (jobId: string, fn: () => Promise<unknown>, successMsg: string) => {
+    const withAction = useCallback(async (jobId: string, fn: () => Promise<unknown>, successMsg: string) => {
         setActionLoading(jobId)
         try {
             await fn()
@@ -280,23 +310,31 @@ export function RegistryJobHistory() {
         } finally {
             setActionLoading(null)
         }
-    }
+    }, [showToast, fetchJobs])
 
-    const handleCancel = (job: AggregationJobResponse) =>
-        withAction(job.id, () => aggregationService.cancelJob(job.dataSourceId, job.id), 'Job cancelled')
+    const handleCancel = useCallback((job: AggregationJobResponse) =>
+        withAction(job.id, () => aggregationService.cancelJob(job.dataSourceId, job.id), 'Job cancelled'),
+        [withAction],
+    )
 
     // Both Resume and Re-trigger buttons on JobRow open the same dialog. The
     // user picks the action inside (Resume preserves last_cursor; Re-trigger
     // starts from scratch). This keeps the headline timeout-recovery flow on
     // a single path so users can always tweak timeout/batch_size before retry.
-    const handleResume = (job: AggregationJobResponse) =>
-        setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job) })
+    const handleResume = useCallback((job: AggregationJobResponse) =>
+        setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job) }),
+        [],
+    )
 
-    const handleRetrigger = (job: AggregationJobResponse) =>
-        setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job) })
+    const handleRetrigger = useCallback((job: AggregationJobResponse) =>
+        setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job) }),
+        [],
+    )
 
-    const handleDelete = (job: AggregationJobResponse) =>
-        setConfirmDelete(job)
+    const handleDelete = useCallback((job: AggregationJobResponse) =>
+        setConfirmDelete(job),
+        [],
+    )
 
     const executeConfirmedDelete = () => {
         if (!confirmDelete) return
@@ -359,7 +397,7 @@ export function RegistryJobHistory() {
         )
     }, [retriggerCtx, runDialogAction])
 
-    const handlePurge = async (job: AggregationJobResponse) => {
+    const handlePurge = useCallback(async (job: AggregationJobResponse) => {
         setPurgeConfirm(null)
         setActionLoading(job.id)
         try {
@@ -372,10 +410,10 @@ export function RegistryJobHistory() {
         } finally {
             setActionLoading(null)
         }
-    }
+    }, [showToast, fetchJobs])
 
     // Data source-level actions (for grouped view) — opens the overrides dialog.
-    const handleTriggerAggregation = (dataSourceId: string) => {
+    const handleTriggerAggregation = useCallback((dataSourceId: string) => {
         const meta = dsLookup.get(dataSourceId)
         setRetriggerCtx({
             kind: 'dataSource',
@@ -383,9 +421,9 @@ export function RegistryJobHistory() {
             dataSourceLabel: meta?.label ?? dataSourceId,
             initialValue: buildInitialOverridesForDataSource(meta?.projectionMode),
         })
-    }
+    }, [dsLookup])
 
-    const handlePurgeDataSource = async (dataSourceId: string) => {
+    const handlePurgeDataSource = useCallback(async (dataSourceId: string) => {
         setActionLoading(dataSourceId)
         try {
             const result = await aggregationService.purgeAggregation(dataSourceId)
@@ -397,27 +435,36 @@ export function RegistryJobHistory() {
         } finally {
             setActionLoading(null)
         }
-    }
+    }, [showToast, fetchJobs])
 
     // "Show all jobs" for a specific data source (switches to flat view with filter)
-    const handleShowAllJobs = (dataSourceId: string) => {
+    const handleShowAllJobs = useCallback((dataSourceId: string) => {
         setViewMode('flat')
         updateFilter({ dataSourceId: [dataSourceId] })
-    }
+    }, [setViewMode, updateFilter])
 
     // Pagination (flat view only)
     const total = data?.total ?? 0
     const currentPage = Math.floor((filters.offset ?? 0) / PAGE_SIZE) + 1
     const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
-    const goToPage = (page: number) => setFilters(prev => ({ ...prev, offset: (page - 1) * PAGE_SIZE }))
+    const goToPage = useCallback((page: number) =>
+        setFilters(prev => ({ ...prev, offset: (page - 1) * PAGE_SIZE })),
+        [setFilters],
+    )
 
-    const isPolling = !!data?.items.some(j => j.status === 'pending' || j.status === 'running')
-
-    const handleRefresh = () => {
+    const handleRefresh = useCallback(() => {
         setIsLoading(true)
         fetchJobs()
         aggregationService.getJobsSummary().then(setSummary).catch(() => {})
-    }
+    }, [fetchJobs])
+
+    // Stable per-row toggle so the inline arrow at the JobRow callsite doesn't
+    // get recreated every render (which would defeat JobRow's React.memo and
+    // re-render all 25-100 rows on any parent state change — the cause of the
+    // 264ms td-click and the row-cascade after Play/Resume opens the dialog).
+    const handleToggleRow = useCallback((id: string) => {
+        setExpandedRowId(prev => prev === id ? null : id)
+    }, [])
 
     return (
         <div className="flex flex-col h-full animate-in fade-in duration-300">
@@ -487,7 +534,7 @@ export function RegistryJobHistory() {
                         filteredJobs={data?.items ?? []}
                         hasActiveFilters={activeChips.length > 0}
                         allDataSources={allDataSources}
-                        onShowFailed={() => updateFilter({ status: ['failed'] })}
+                        onShowFailed={handleShowFailed}
                     />
 
                     {/* Filters */}
@@ -585,7 +632,7 @@ export function RegistryJobHistory() {
                                                 job={job}
                                                 meta={dsLookup.get(job.dataSourceId)}
                                                 expanded={expandedRowId === job.id}
-                                                onToggle={() => setExpandedRowId(prev => prev === job.id ? null : job.id)}
+                                                onToggle={handleToggleRow}
                                                 onCancel={handleCancel}
                                                 onResume={handleResume}
                                                 onRetrigger={handleRetrigger}
