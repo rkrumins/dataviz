@@ -468,6 +468,12 @@ class AggregationWorker:
                     emitter=emitter,
                     scope=scope,
                 )
+            except JobCancelled:
+                # Cooperative cancel — control-flow signal, not a transient
+                # failure. Skip the retry mill and bubble straight up to the
+                # outer run() handler, which marks the job 'cancelled' and
+                # emits the terminal event with last_cursor preserved.
+                raise
             except ProviderUnavailable as e:
                 last_error = e
                 provider_unavailable_count += 1
