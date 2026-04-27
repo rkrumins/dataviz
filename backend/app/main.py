@@ -351,14 +351,148 @@ async def lifespan(_app: FastAPI):
                 asyncio.create_task(agg_scheduler.start())
                 logger.info("Aggregation scheduler started")
 
+            # Stuck-job reconciler — runs wherever the aggregation worker
+            # lives. Detects rows whose worker died without writing a
+            # terminal status (deploy mid-job, OOM, segfault) and marks
+            # them ``failed`` with a clear reason so operators get a
+            # working Resume button instead of a perpetual "running"
+            # state. Sweep-only; auto-redispatch is Phase 2 work when
+            # the dispatch substrate is XAUTOCLAIM-safe.
+            from .services.aggregation.reconciler import run_reconciler
+            _app.state._reconciler_shutdown = asyncio.Event()
+            _app.state._reconciler_task = asyncio.create_task(
+                run_reconciler(get_jobs_session, _app.state._reconciler_shutdown),
+                name="aggregation-stuck-job-reconciler",
+            )
+            logger.info("Stuck-job reconciler started")
+
+            # Cross-process cancel bridge. The web tier subscribes so
+            # InProcessDispatcher-hosted jobs get cancelled instantly;
+            # cancel broadcasts to OTHER processes (insights workers,
+            # standalone aggregation workers) reach those processes via
+            # their own CancelListeners.
+            from .services.aggregation.cancel import CancelListener
+            from .services.aggregation.redis_client import get_redis as _get_redis_for_cancel
+            try:
+                _app.state._cancel_listener = CancelListener(_get_redis_for_cancel())
+                await _app.state._cancel_listener.start()
+            except Exception as exc:
+                logger.warning(
+                    "Cancel listener failed to start (cancels will fall back "
+                    "to local + direct DB write only): %s", exc,
+                )
+                _app.state._cancel_listener = None
+
             logger.info("Aggregation service started (role=%s)", role.value)
         except Exception as exc:
             logger.warning("Aggregation service startup warning: %s", exc)
+
+    # Background provider warmup loop — the single source of provider
+    # health observability. The loop probes each registered provider via
+    # preflight() in round-robin and updates ``app.state.provider_warmup_cache``
+    # so that EVERY status / health endpoint can read state from memory
+    # instead of triggering live outbound work on the request path. With
+    # this loop in place, hosting 1 or 100 providers — any number of
+    # them unreachable — never affects the request path.
+    _app.state._warmup_shutdown = asyncio.Event()
+    try:
+        from .providers.warmup import run_provider_warmup_loop
+        from .db.engine import get_provider_probe_session
+        from .db.repositories import provider_repo as _provider_repo
+
+        async def _list_providers_for_warmup():
+            async with get_provider_probe_session() as session:
+                rows = await _provider_repo.list_providers(session)
+                out = []
+                for row in rows:
+                    creds = await _provider_repo.get_credentials(session, row.id)
+                    out.append({
+                        "id": row.id,
+                        "provider_type": (
+                            row.provider_type.value
+                            if hasattr(row.provider_type, "value")
+                            else str(row.provider_type)
+                        ),
+                        "host": row.host,
+                        "port": row.port,
+                        "tls": row.tls_enabled,
+                        "creds": creds,
+                    })
+                return out
+
+        def _build_provider_for_warmup(cfg):
+            return provider_manager._create_provider_instance(
+                cfg["provider_type"],
+                cfg.get("host"),
+                cfg.get("port"),
+                None,
+                cfg.get("tls", False),
+                cfg.get("creds") or {},
+            )
+
+        _app.state._warmup_task = asyncio.create_task(
+            run_provider_warmup_loop(
+                cache=provider_manager.warmup_cache,
+                shutdown_event=_app.state._warmup_shutdown,
+                list_providers=_list_providers_for_warmup,
+                build_instance=_build_provider_for_warmup,
+            ),
+            name="provider-warmup-loop",
+        )
+        logger.info("Provider warmup loop scheduled")
+    except Exception as exc:
+        logger.warning(
+            "Provider warmup loop failed to start: %s — status endpoints "
+            "will fall back to in-memory breaker state only", exc,
+        )
+        _app.state._warmup_task = None
 
     logger.info("Synodic Visualization Service started (role=%s)", role.value)
     yield
 
     # Shutdown — stop event listener, release providers, close connections.
+
+    # Stop the background warmup loop FIRST so it doesn't try to probe
+    # providers during DB / pool teardown.
+    _warmup_shutdown = getattr(_app.state, "_warmup_shutdown", None)
+    _warmup_task = getattr(_app.state, "_warmup_task", None)
+    if _warmup_shutdown is not None:
+        _warmup_shutdown.set()
+    if _warmup_task is not None and not _warmup_task.done():
+        try:
+            await asyncio.wait_for(_warmup_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _warmup_task.cancel()
+            try:
+                await _warmup_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the stuck-job reconciler so it doesn't try to commit during
+    # DB pool teardown. Setting the shutdown event lets it exit at the
+    # next sleep boundary; the cancel + await is the belt-and-braces
+    # path for the case where it's mid-sweep.
+    _reconciler_shutdown = getattr(_app.state, "_reconciler_shutdown", None)
+    _reconciler_task = getattr(_app.state, "_reconciler_task", None)
+    if _reconciler_shutdown is not None:
+        _reconciler_shutdown.set()
+    if _reconciler_task is not None and not _reconciler_task.done():
+        try:
+            await asyncio.wait_for(_reconciler_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _reconciler_task.cancel()
+            try:
+                await _reconciler_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the cross-process cancel listener.
+    _cancel_listener = getattr(_app.state, "_cancel_listener", None)
+    if _cancel_listener is not None:
+        try:
+            await _cancel_listener.stop()
+        except Exception:
+            pass
 
     # Stop aggregation event listener (if running in proxy mode)
     _agg_listener = getattr(_app.state, "_agg_event_listener", None)
@@ -487,11 +621,40 @@ class _TimeoutMiddleware:
     """ASGI middleware: tiered per-path timeout for HTTP requests.
 
     Tiers (first substring match wins):
-        /health*                    ->  5s  (probes must be fast)
-        /graph/                     -> 15s  (read queries, bounded by per-query timeouts)
-        /aggregation/               -> 45s  (write-heavy operations)
-        everything else             -> 30s  (default — halved from the old flat 60s)
+        /events                       exempt entirely (SSE — long-lived by design)
+        /health*                  ->  5s  (probes must be fast)
+        /graph/                   -> 15s  (read queries, bounded by per-query timeouts)
+        /aggregation/             -> 45s  (write-heavy operations)
+        everything else           -> 30s  (default — halved from the old flat 60s)
+
+    Response-stream invariants (P0.1, fixes the "never recovers" freeze):
+
+        T-1  Exactly one terminal ``http.response.body`` (more_body=False) is
+             sent per request, regardless of inner-app behaviour.
+        T-2  If the inner app started a response and the deadline fires, we
+             emit a final empty body chunk to close the stream cleanly. We
+             never re-issue ``http.response.start``, never raise.
+        T-3  If the inner app finished a response and the deadline fires
+             *afterwards* (race), we emit nothing further.
+        T-4  ``send`` is never called after a terminal body chunk has been
+             sent — ``tracked_send`` short-circuits in that state.
+        T-5  We use ``asyncio.timeout()`` (Python 3.11+, lexically scoped,
+             integrates cleanly with cancellation) — NOT ``asyncio.wait_for``,
+             which wrapped the wrong shape and orphaned the response stream.
+        T-6  First state transition wins; subsequent transitions are no-ops.
+
+    Without these invariants, a single timeout-after-response-started leaves
+    the ASGI stream half-open, ``BaseHTTPMiddleware`` raises ``RuntimeError:
+    No response returned`` cascading through every middleware layer, and
+    uvicorn raises ``Response content shorter than Content-Length`` — which
+    poisons the keepalive connection and ratchets the backend toward an
+    unrecoverable state.
     """
+
+    # Suffix-match: SSE endpoints are routed under ``.../events``.
+    # Suffix not substring so we don't accidentally exempt e.g.
+    # ``/api/v1/admin/events-foo`` should one ever exist.
+    _SSE_PATH_SUFFIX = "/events"
 
     def __init__(self, app):
         self.app = app
@@ -515,33 +678,77 @@ class _TimeoutMiddleware:
             return
 
         path = scope.get("path", "")
-        timeout = self._resolve_timeout(path)
 
-        response_started = False
+        # SSE bypass — let the stream run until the client disconnects
+        # or the worker emits a terminal event and the handler closes
+        # the response. No timeout, no cancellation, no spurious
+        # "Request timed out after response started" log noise.
+        if path.endswith(self._SSE_PATH_SUFFIX):
+            await self.app(scope, receive, send)
+            return
+
+        timeout = self._resolve_timeout(path)
         original_send = send
 
+        # ASGI guarantees sends within a single request are sequential within
+        # the inner task — no concurrent ``tracked_send`` invocations. The
+        # timeout handler below runs ONLY after the inner task is cancelled,
+        # so there is no shared-state race; flat dict suffices.
+        state = {"started": False, "terminal": False}
+
         async def tracked_send(message):
-            nonlocal response_started
-            if message["type"] == "http.response.start":
-                response_started = True
+            # T-4: refuse any send after the response is terminal. Protects
+            # the wire if the inner task somehow keeps emitting after we've
+            # closed the stream from the timeout handler.
+            if state["terminal"]:
+                return
+            msg_type = message["type"]
+            if msg_type == "http.response.start":
+                state["started"] = True
+            elif msg_type == "http.response.body" and not message.get("more_body", False):
+                # Terminal body chunk — happy path.
+                state["terminal"] = True
             await original_send(message)
 
         try:
-            await asyncio.wait_for(
-                self.app(scope, receive, tracked_send), timeout=timeout,
-            )
-        except asyncio.TimeoutError:
-            if not response_started:
+            async with asyncio.timeout(timeout):
+                await self.app(scope, receive, tracked_send)
+        except TimeoutError:
+            # ``asyncio.timeout()`` converts the inner CancelledError to a
+            # TimeoutError. The inner task is already torn down — no more
+            # ``tracked_send`` calls will arrive.
+            if state["terminal"]:
+                # T-3: race — inner finished cleanly just before the deadline.
+                return
+            if not state["started"]:
+                # T-2 (clean case): we own the wire. Send a fresh 504.
                 response = JSONResponse(
                     {"detail": f"Request timed out after {timeout:.0f}s — the graph provider may be unreachable."},
                     status_code=504,
                 )
                 await response(scope, receive, original_send)
-            else:
-                logger.warning(
-                    "Request timed out after response started: %s (timeout=%.0fs)",
-                    path, timeout,
-                )
+                state["terminal"] = True
+                return
+            # T-2 (stream-corruption case): the inner app already sent
+            # ``http.response.start`` (and possibly partial body) before the
+            # deadline fired. Emit a terminal empty body chunk to satisfy the
+            # ASGI/HTTP protocol so uvicorn does not raise
+            # "Response content shorter than Content-Length" and Starlette
+            # does not raise "No response returned" upstream.
+            try:
+                await original_send({
+                    "type": "http.response.body",
+                    "body": b"",
+                    "more_body": False,
+                })
+            except Exception:
+                # Client connection already torn down — nothing further to do.
+                pass
+            state["terminal"] = True
+            logger.warning(
+                "Request timed out after response started: %s (timeout=%.0fs)",
+                path, timeout,
+            )
 
 # Must be added FIRST so it wraps all other middleware.
 app.add_middleware(_TimeoutMiddleware)
@@ -598,19 +805,64 @@ app.include_router(db_metrics_router)
 # Health endpoint                                                       #
 # ------------------------------------------------------------------ #
 
+# ────────────────────────────────────────────────────────────────────
+# Three-tier health endpoints (P0.3).
+#
+#   /health/live   — process liveness. NO I/O, NO DB, NO providers.
+#                    Constant-time. Used by k8s livenessProbe and the
+#                    frontend's banner — must NEVER fail unless the
+#                    event loop is dead.
+#   /health/ready  — readiness. Single 1s-budgeted DB ping (READONLY
+#                    pool). Provider state does NOT affect readiness.
+#                    Used by k8s readinessProbe.
+#   /health/deps   — deep dependency report. DB ping + in-memory
+#                    breaker state. For dashboards / on-call only.
+#                    NEVER on a probe hot path.
+#
+#   /health        — back-compat alias for /health/live (one-release
+#                    deprecation; CHANGELOG documents migration).
+# ────────────────────────────────────────────────────────────────────
+
+
+@app.get("/health/live", tags=["health"])
+@app.get("/api/v1/health/live", tags=["health"], include_in_schema=False)
+async def liveness_check():
+    """Process liveness — constant-time, zero I/O. Always 200.
+
+    A failure of /health/live means the event loop is wedged or the
+    process is shutting down. By construction it can never be a 5xx
+    because we don't await anything; uvicorn returning 5xx implies
+    the process itself is unable to schedule a coroutine.
+    """
+    return {"status": "live", "version": "0.2.0"}
+
+
 @app.get("/health", tags=["health"])
 @app.get("/api/v1/health", tags=["health"], include_in_schema=False)
-async def health_check():
-    """
-    Management-plane health check. Always returns HTTP 200 so container
-    liveness probes pass even when the DB is temporarily unreachable
-    (degraded mode). The `status` field carries the real verdict:
+async def health_alias():
+    """Back-compat alias for /health/live.
 
-      - "healthy"   — fully operational
-      - "degraded"  — lifespan bootstrap failed; recovery loop is probing;
-                      DB-backed endpoints will 503 until recovery clears
-      - "unhealthy" — bootstrap succeeded historically but the DB is
-                      unreachable right now
+    Existing infrastructure (k8s manifests, load-balancer probes, the
+    frontend banner) historically polled /health expecting a status
+    field. Returning the same lightweight shape preserves that contract
+    while migrating new deployments to the explicit /health/live path.
+    """
+    return {"status": "live", "version": "0.2.0"}
+
+
+@app.get("/health/deps", tags=["health"])
+@app.get("/api/v1/health/deps", tags=["health"], include_in_schema=False)
+async def dependency_health():
+    """Deep dependency report — for dashboards and on-call.
+
+    Includes:
+      - Management DB ping (1s budget; READONLY pool)
+      - Provider breaker states (in-memory, no I/O)
+      - Degraded-mode flag + reason
+
+    NEVER call this from a hot probe path. K8s probes use /health/live
+    and /health/ready; this endpoint is for humans investigating an
+    incident.
     """
     from .db.engine import get_engine
     from sqlalchemy import text
@@ -622,17 +874,25 @@ async def health_check():
         "status": "healthy",
         "version": "0.2.0",
         "dependencies": {},
+        "providers": {},
     }
 
-    # Management DB ping
+    # Management DB ping (bounded; never blocks the response indefinitely).
     try:
         engine = get_engine()
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
+        async with asyncio.timeout(1.0):
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
         result["dependencies"]["management_db"] = "healthy"
     except Exception as exc:
         result["dependencies"]["management_db"] = f"unhealthy: {exc}"
         result["status"] = "unhealthy"
+
+    # Provider breaker state (O(1), in-memory only — no provider I/O).
+    try:
+        result["providers"] = provider_manager.report_provider_states()
+    except Exception as exc:
+        result["providers"] = {"_error": str(exc)[:200]}
 
     if degraded:
         result["status"] = "degraded"
@@ -686,108 +946,123 @@ async def readiness_check():
 @app.get("/api/v1/health/providers", tags=["health"])
 async def provider_health_check():
     """
-    Per-workspace provider health — returns status for each data source.
-    The frontend uses this to show health badges and warn users before
-    navigating to a workspace with a dead provider.
+    Per-workspace provider health — STRICT structural decoupling from
+    provider state.
 
-    Phase 2 §2.4: bounded fan-out so one hung provider can't take the
-    whole endpoint down. Concurrency cap of 5, per-probe timeout of 4s,
-    overall wall-clock cap of 12s. Probes that exceed the wall clock are
-    returned as `{"status": "unknown"}` — the endpoint is always 200 OK
-    with partial results, never a 5xx because of slow upstreams.
+    This endpoint is polled continuously by the frontend's status banner
+    and admin pages. It MUST NOT do any outbound work — every prior
+    iteration that did (live ``get_stats``, then live ``preflight``)
+    became a chokepoint that froze the whole app under hostile-host
+    conditions.
+
+    The contract now:
+
+      - Read the data-source list from the PROVIDER_PROBE pool (1s
+        deadline; cached on a tiny TTL so a poll storm dedupes).
+      - Read in-memory breaker / cached-status state from
+        ``provider_manager.report_provider_states()`` and the background
+        warmup cache (``_provider_status_cache``). NO outbound work, NO
+        provider construction, NO sockets opened.
+      - Return immediately with the best-known status per data source.
+        Never times out, never 504s, never affects the event loop.
+
+    A background warmup loop (started in lifespan) periodically probes
+    each registered provider via ``preflight()`` and updates the cache,
+    so even un-visited providers carry a status. Provider unreachability
+    is observable, but it is OBSERVED OFFLINE — never on a request path.
     """
     from .db.repositories.workspace_repo import list_workspaces
     from .db.repositories.data_source_repo import list_data_sources
+    from .db.engine import get_provider_probe_session
 
-    PROBE_CONCURRENCY = 5
-    PER_PROBE_TIMEOUT = 4.0     # seconds — tightened from 5s
-    OVERALL_TIMEOUT = 12.0      # seconds — partial results returned past this
-
-    providers: dict = {}
+    READ_DEADLINE = 1.0  # seconds — DB read budget; never extends past this
 
     try:
-        # Resilience: enumerate data sources under a SHORT session, then
-        # close it before spawning concurrent probes. Each probe opens its
-        # own short session for its DB portion — SQLAlchemy AsyncSession
-        # is not concurrency-safe, so sharing one session across the fan-
-        # out could silently corrupt state or deadlock under a slow
-        # provider. Closing the outer session first also keeps the
-        # management-DB pool drained during the outbound probe storm.
-        # READONLY pool (plan Gap 3): this endpoint is polled by K8s
-        # readiness + the UI banner and only reads — isolating it from
-        # the WEB pool means high-frequency probes cannot contend with
-        # request-handler writes.
-        from .db.engine import get_readonly_session
+        # 1. Enumerate data sources from the PROVIDER_PROBE pool.
         ds_meta: list[tuple[str, str, str]] = []
-        async with get_readonly_session() as session:
-            workspaces = await list_workspaces(session)
-            for ws in workspaces:
-                sources = await list_data_sources(session, ws.id)
-                for ds in sources:
-                    ds_meta.append((ws.id, ds.id, ds.provider_id))
-
-        if not ds_meta:
-            # Explicit "nothing configured" signal so the frontend can
-            # render a first-run CTA instead of interpreting ``{}`` as
-            # "all healthy" (which would be wrong for both observability
-            # dashboards and new-install UX).
-            return {
-                "providers": {},
-                "dataSourceCount": 0,
-                "configured": False,
-            }
-
-        sem = asyncio.Semaphore(PROBE_CONCURRENCY)
-
-        async def check_provider(ws_id: str, ds_id: str, ds_provider_id: str):
-            key = f"{ws_id}:{ds_id}"
-            async with sem:
-                try:
-                    # Each probe owns its own session for the DB portion of
-                    # get_provider_for_workspace; the outbound provider call
-                    # that follows does NOT hold a session. READONLY pool —
-                    # the probe only reads provider config from Postgres.
-                    async with get_readonly_session() as probe_session:
-                        provider = await asyncio.wait_for(
-                            provider_manager.get_provider_for_workspace(
-                                ws_id, probe_session, ds_id,
-                            ),
-                            timeout=PER_PROBE_TIMEOUT,
-                        )
-                    await asyncio.wait_for(provider.get_stats(), timeout=PER_PROBE_TIMEOUT)
-                    return key, {"status": "healthy", "providerId": ds_provider_id}
-                except Exception as exc:
-                    return key, {"status": "unhealthy", "error": str(exc)[:200]}
-
-        tasks = [
-            asyncio.create_task(check_provider(ws_id, ds_id, prov_id))
-            for ws_id, ds_id, prov_id in ds_meta
-        ]
-        done, pending = await asyncio.wait(tasks, timeout=OVERALL_TIMEOUT)
-
-        for task in done:
-            try:
-                key, status = task.result()
-                providers[key] = status
-            except Exception:
-                # Per-task failure already encoded by check_provider's
-                # try/except — anything reaching here is unexpected.
-                continue
-
-        # Probes that exceeded the wall clock — cancel and surface
-        # as "unknown" so the UI can distinguish "broken" from
-        # "we don't know yet".
-        for i, task in enumerate(tasks):
-            if task in pending:
-                task.cancel()
-                ws_id, ds_id, _ = ds_meta[i]
-                providers[f"{ws_id}:{ds_id}"] = {
-                    "status": "unknown",
-                    "error": f"Probe exceeded {OVERALL_TIMEOUT:.0f}s wall clock",
-                }
-
+        async with asyncio.timeout(READ_DEADLINE):
+            async with get_provider_probe_session() as session:
+                workspaces = await list_workspaces(session)
+                for ws in workspaces:
+                    sources = await list_data_sources(session, ws.id)
+                    for ds in sources:
+                        ds_meta.append((ws.id, ds.id, ds.provider_id))
+    except (asyncio.TimeoutError, TimeoutError):
+        # DB slow — return "configured: false" so the FE doesn't blank
+        # the UI. Better to show stale than to 504.
+        return {
+            "providers": {},
+            "dataSourceCount": 0,
+            "configured": False,
+            "error": "DB read deadline exceeded",
+        }
     except Exception as exc:
         return {"providers": {}, "error": str(exc)[:200]}
+
+    if not ds_meta:
+        return {
+            "providers": {},
+            "dataSourceCount": 0,
+            "configured": False,
+        }
+
+    # 2. Read in-memory breaker state — O(1), no I/O.
+    try:
+        breaker_states = provider_manager.report_provider_states()
+    except Exception:
+        breaker_states = {}
+
+    # 3. Read background-warmup cache — O(1), no I/O.
+    warmup_cache = getattr(provider_manager, "warmup_cache", {}) or {}
+
+    # 4. Map each (ws_id, ds_id, prov_id) to its best-known status.
+    providers: dict = {}
+    for ws_id, ds_id, prov_id in ds_meta:
+        ds_key = f"{ws_id}:{ds_id}"
+        # Prefer breaker state when present (means the provider has been
+        # actually exercised and we know its current truth).
+        breaker_key = f"{prov_id}:"           # graph_name="" for default
+        breaker_key_alt = next(
+            (k for k in breaker_states if k.startswith(f"{prov_id}:")),
+            None,
+        )
+        breaker = breaker_states.get(breaker_key) or (
+            breaker_states.get(breaker_key_alt) if breaker_key_alt else None
+        )
+
+        warmup = warmup_cache.get(prov_id)
+
+        # Resolution order: breaker (live truth from real traffic) →
+        # warmup (background probe) → unknown (never observed).
+        if breaker == "healthy":
+            providers[ds_key] = {"status": "healthy", "providerId": prov_id}
+        elif breaker in ("unavailable", "instantiation_failed"):
+            providers[ds_key] = {
+                "status": "unhealthy",
+                "providerId": prov_id,
+                "error": f"Provider circuit: {breaker}",
+            }
+        elif breaker == "degraded":
+            providers[ds_key] = {
+                "status": "unhealthy",
+                "providerId": prov_id,
+                "error": "Provider in degraded state (half-open)",
+            }
+        elif warmup is not None:
+            providers[ds_key] = {
+                "status": "healthy" if warmup.get("ok") else "unhealthy",
+                "providerId": prov_id,
+                "error": warmup.get("reason"),
+                "checkedAt": warmup.get("checked_at"),
+            }
+        else:
+            providers[ds_key] = {"status": "unknown", "providerId": prov_id}
+
+    return {
+        "providers": providers,
+        "dataSourceCount": len(ds_meta),
+        "configured": True,
+    }
 
     return {
         "providers": providers,

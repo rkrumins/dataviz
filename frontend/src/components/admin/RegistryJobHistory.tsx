@@ -196,7 +196,13 @@ export function RegistryJobHistory() {
 
     useEffect(() => { setIsLoading(true); fetchJobs() }, [fetchJobs])
 
-    // Poll while active jobs exist
+    // Poll while active jobs exist. Cadence relaxed from 3s → 10s
+    // because per-row ``useJob`` now drives live progress via SSE.
+    // Polling here is the safety-net for: (a) list-level changes
+    // (new job appearing, status flipping to terminal so the row
+    // can be re-rendered with durable values), and (b) the
+    // Redis-down fallback path. Live counter freshness is owned by
+    // SSE; this poll only refreshes the durable shape of the list.
     const mountedAtRef = useRef(Date.now())
     useEffect(() => {
         const hasActive = data?.items.some(j => j.status === 'pending' || j.status === 'running')
@@ -205,7 +211,7 @@ export function RegistryJobHistory() {
         const interval = setInterval(() => {
             fetchJobs()
             aggregationService.getJobsSummary().then(setSummary).catch(() => {})
-        }, 3000)
+        }, 10_000)
         return () => clearInterval(interval)
     }, [data?.items, fetchJobs])
 

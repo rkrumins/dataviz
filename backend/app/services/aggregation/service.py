@@ -603,7 +603,23 @@ class AggregationService:
     async def cancel(
         self, ds_id: str, job_id: str, session: AsyncSession
     ) -> AggregationJobResponse:
-        """Cancel a pending or running aggregation job."""
+        """Cancel a pending or running aggregation job.
+
+        Cooperative-first: requests the worker to exit at the next safe
+        boundary (between MERGE sub-batches or at an outer-batch
+        commit), so the in-flight FalkorDB MERGE completes cleanly and
+        ``last_cursor`` reflects durably-committed work. The worker
+        itself flips status='cancelled' when it observes the request,
+        emits the ``job_cancelled`` event, and unregisters.
+
+        For pending jobs (no worker is running), we mark cancelled
+        directly and emit the event — there's nothing to coordinate
+        with. For running jobs we keep the dispatcher's
+        ``cancel_task`` as a hard fallback that fires after a grace
+        period, but the cooperative path should win in practice.
+        """
+        from .cancel import request_cancel as request_cooperative_cancel
+
         job = await session.get(AggregationJobORM, job_id)
         if not job or job.data_source_id != ds_id:
             raise NotFoundError(f"Aggregation job {job_id} not found")
@@ -611,16 +627,80 @@ class AggregationService:
         if job.status not in ("pending", "running"):
             raise ValueError(f"Job {job_id} cannot be cancelled (status: {job.status})")
 
+        # Cooperative cancel — fire on TWO paths in parallel:
+        #
+        #   1. Local CancelRegistry (in-process). Immediate effect for
+        #      jobs hosted in this same process (web tier under
+        #      InProcessDispatcher, or — when this code runs in the
+        #      worker process via a callback — for jobs that worker
+        #      owns). No Redis round-trip; the event flips
+        #      synchronously.
+        #
+        #   2. Redis Pub/Sub broadcast. Reaches every other process
+        #      that has a CancelListener subscribed (aggregation
+        #      worker process, insights worker process, additional
+        #      web-tier replicas). Each listener forwards to its own
+        #      local registry, so the worker hosting the job sees its
+        #      event get set even though the request landed somewhere
+        #      else.
+        #
+        # We always publish to Redis even when the local registry
+        # claims the job — broadcasts are cheap, and the alternative
+        # (skip publish on local hit) breaks if a duplicate
+        # registration ever happens cross-process. The listener's
+        # local-registry check is idempotent.
+        if job.status == "running":
+            local_hit = request_cooperative_cancel(job_id)
+            try:
+                from .redis_client import get_redis
+                from .cancel import publish_cancel
+                await publish_cancel(get_redis(), job_id)
+            except Exception as exc:
+                # Pub/Sub publish failed; fall back to direct DB write
+                # below. Not fatal — local cancel may still have
+                # landed, and the dispatcher's hard task.cancel()
+                # remains as the last-resort escape hatch.
+                logger.warning(
+                    "Aggregation job %s: cross-process cancel publish failed "
+                    "(falling back to local + direct DB write): %s",
+                    job_id, exc,
+                )
+                local_hit = local_hit  # no change; DB-write path follows
+
+            if local_hit:
+                logger.info(
+                    "Aggregation job %s: cooperative cancel requested locally "
+                    "+ broadcast; worker will transition at next safe boundary",
+                    job_id,
+                )
+                await session.refresh(job)
+                return self._to_response(job)
+            # No local hit — the worker is in another process. The
+            # broadcast we just fired should reach it; flip the DB
+            # row to ``cancelled`` now so the UI reflects the user's
+            # intent immediately, and the dispatcher's hard
+            # task.cancel() fallback fires below as a belt-and-braces
+            # path for the very unlikely case where pub/sub silently
+            # dropped the message AND the worker keeps running.
+            logger.info(
+                "Aggregation job %s: no local registry hit; cross-process "
+                "cancel broadcast + direct DB write",
+                job_id,
+            )
+
+        # Pending job, or no worker registered (e.g. the worker process
+        # crashed and the row is orphaned). Mark cancelled directly.
         job.status = "cancelled"
         job.completed_at = _now()
         job.updated_at = _now()
         await session.commit()
 
-        # Also cancel the asyncio task as backup (double defence)
+        # Hard fallback for the orphaned-row case where there's no
+        # cooperative consumer to honour the event.
         if hasattr(self._dispatcher, "cancel_task"):
             self._dispatcher.cancel_task(job_id)
 
-        logger.info("Aggregation job %s cancelled", job_id)
+        logger.info("Aggregation job %s cancelled (direct path)", job_id)
 
         return self._to_response(job)
 

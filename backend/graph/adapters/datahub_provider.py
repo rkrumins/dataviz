@@ -51,6 +51,23 @@ class DataHubGraphQLProvider(GraphDataProvider):
     # Lifecycle                                                            #
     # ------------------------------------------------------------------ #
 
+    async def preflight(self, *, deadline_s: float = 1.5):
+        """Fast reachability probe — HTTP HEAD against the GraphQL
+        endpoint within ``deadline_s``. Does NOT construct the long-lived
+        httpx client, does NOT issue the health GraphQL query. Returns a
+        ``PreflightResult``; never raises for network failure.
+
+        Any HTTP reply with a status code (200, 401, 404, ...) counts as
+        reachable — only transport-level failures (DNS, TCP, TLS,
+        timeout) are reported as failure.
+        """
+        from backend.common.interfaces.preflight import http_head_preflight
+        url = f"{self._base_url}/api/graphql"
+        headers = {"Authorization": f"Bearer {self._token}"} if self._token else None
+        return await http_head_preflight(
+            url, deadline_s=deadline_s, headers=headers,
+        )
+
     def _get_client(self):
         if self._client is None:
             import httpx

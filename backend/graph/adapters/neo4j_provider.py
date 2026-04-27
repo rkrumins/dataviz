@@ -199,6 +199,36 @@ class Neo4jProvider(GraphDataProvider):
     # Lifecycle                                                            #
     # ------------------------------------------------------------------ #
 
+    async def preflight(self, *, deadline_s: float = 1.5):
+        """Fast reachability probe — TCP connect to the Bolt port within
+        ``deadline_s``. Does NOT instantiate the driver, does NOT touch
+        the connection pool. Returns a ``PreflightResult``; never raises
+        for network failure.
+
+        Bolt's full handshake involves a 4-byte magic preamble + version
+        negotiation, but for P0 a TCP-open is sufficient: we only need
+        to distinguish "host unreachable" (fail fast) from "host alive,
+        defer to connect()".
+        """
+        from urllib.parse import urlparse
+
+        from backend.common.interfaces.preflight import (
+            PreflightResult,
+            tcp_preflight,
+        )
+
+        try:
+            parsed = urlparse(self._uri)
+        except Exception as exc:
+            return PreflightResult.failure(
+                reason=f"invalid_uri: {exc}", elapsed_ms=0,
+            )
+        host = parsed.hostname
+        port = parsed.port or 7687
+        if not host:
+            return PreflightResult.failure(reason="no_host_in_uri", elapsed_ms=0)
+        return await tcp_preflight(host, port, deadline_s=deadline_s)
+
     async def _get_driver(self):
         """Double-checked locking lazy driver init."""
         if self._driver is not None:
@@ -1748,6 +1778,7 @@ class Neo4jProvider(GraphDataProvider):
         *,
         batch_size: int = 10_000,
         progress_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> int:
         """Remove ALL materialized AGGREGATED edges from the graph.
 
@@ -1755,7 +1786,9 @@ class Neo4jProvider(GraphDataProvider):
         multi-million-edge purge produces visible progress (callers
         provide ``progress_callback`` to checkpoint each batch's running
         total) and cannot silently truncate at the previous one-shot
-        ``LIMIT 100000``.
+        ``LIMIT 100000``. The ``should_cancel`` predicate is checked
+        between batches; raising ``JobCancelled`` from there exits the
+        loop cleanly without orphaning the in-flight Cypher.
         """
         if batch_size <= 0:
             batch_size = 10_000
@@ -1764,6 +1797,14 @@ class Neo4jProvider(GraphDataProvider):
         try:
             total_deleted = 0
             while True:
+                if should_cancel is not None and should_cancel():
+                    from backend.app.services.aggregation.cancel import JobCancelled
+                    from datetime import datetime, timezone
+                    raise JobCancelled(
+                        job_id="<provider-cancel>",
+                        observed_at=datetime.now(timezone.utc).isoformat(),
+                    )
+
                 rows = await self._run_write(
                     f"MATCH ()-[r:AGGREGATED]->() "
                     f"WITH r LIMIT {int(batch_size)} "

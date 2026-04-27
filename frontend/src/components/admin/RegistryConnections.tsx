@@ -10,6 +10,7 @@ import { ProviderAdmissionEditor } from '@/components/insights/ProviderAdmission
 import { StatusChip } from '@/components/insights/StatusChip'
 import type { InsightsMeta, ProviderHealth as InsightsProviderHealth } from '@/types/insights'
 import { useProviderHealthSweep } from '@/hooks/useProviderHealthSweep'
+import { useProviderStatusStore } from '@/store/providerStatus'
 import { DeleteProviderDialog } from './DeleteProviderDialog'
 import { FirstRunHero } from './FirstRunHero'
 import { ProviderOnboardingWizard } from './ProviderOnboardingWizard'
@@ -40,7 +41,12 @@ function syntheticMetaFromSweep(
     health: ProviderHealth, providerId: string,
 ): InsightsMeta {
     let providerHealth: InsightsProviderHealth = 'unknown'
-    let status: InsightsMeta['status'] = 'unavailable'
+    // Default for the "we don't know yet" / "awaiting backend warmup"
+    // state is ``computing`` — NOT ``unavailable``. ``unavailable`` maps
+    // to a yellow "Paused" badge in StatusChip and gives the impression
+    // every provider is broken on a fresh page load before the backend
+    // warmup loop has had a chance to publish a result.
+    let status: InsightsMeta['status'] = 'computing'
     if (health.status === 'healthy') {
         providerHealth = 'ok'
         status = 'fresh'
@@ -57,7 +63,7 @@ function syntheticMetaFromSweep(
         updated_at: null,
         staleness_secs: null,
         ttl_seconds: null,
-        refreshing: health.status === 'checking',
+        refreshing: health.status === 'checking' || health.status === 'unknown',
         job_id: null,
         poll_url: null,
         provider_health: providerHealth,
@@ -138,6 +144,13 @@ export function RegistryConnections() {
     const navigate = useNavigate()
     const [providers, setProviders] = useState<ProviderResponse[]>([])
     const { healthMap, testOne, refresh: refreshHealth, setHealth } = useProviderHealthSweep(providers)
+    // Backend-published per-provider status — populated by the global
+    // ``providerStatus`` poll of /admin/providers/status (cache-only,
+    // backed by the warmup loop). Used as the FALLBACK status when the
+    // user has not personally clicked Test on a provider yet, so the
+    // initial render shows the truth observed by the platform instead
+    // of a stale "Paused" placeholder.
+    const backendStatuses = useProviderStatusStore(s => s.statuses)
     const [isLoading, setIsLoading] = useState(true)
     const [showWizard, setShowWizard] = useState(false)
     const [editingProvider, setEditingProvider] = useState<ProviderResponse | null>(null)
@@ -196,8 +209,19 @@ export function RegistryConnections() {
         await loadProviders()
     }
 
-    const healthyCount = Object.values(healthMap).filter(h => h.status === 'healthy').length
-    const unhealthyCount = Object.values(healthMap).filter(h => h.status === 'unhealthy').length
+    // Counts merge backend-published status with the local user-gesture
+    // sweep so the header reflects the truth even on cold load (before
+    // any user has clicked Test). Local takes precedence when present.
+    const healthyCount = providers.filter(p => {
+        const local = healthMap[p.id]
+        if (local) return local.status === 'healthy'
+        return backendStatuses[p.id]?.status === 'ready'
+    }).length
+    const unhealthyCount = providers.filter(p => {
+        const local = healthMap[p.id]
+        if (local) return local.status === 'unhealthy'
+        return backendStatuses[p.id]?.status === 'unavailable'
+    }).length
 
     return (
         <div className="space-y-6 animate-in fade-in duration-500">
@@ -300,9 +324,37 @@ export function RegistryConnections() {
                 </div>
             ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {providers.map(p => (
-                        <ConnectionCard key={p.id} provider={p} health={healthMap[p.id] || { status: 'unknown' }} onTest={() => { void testOne(p.id) }} onEdit={() => handleEditProvider(p)} onDelete={() => handleDeleteClick(p)} onScan={() => navigate(`/ingestion?tab=assets&provider=${p.id}`)} />
-                    ))}
+                    {providers.map(p => {
+                        // Resolution order:
+                        //   1. Local user-gesture sweep (Test button result) — freshest truth.
+                        //   2. Backend-published warmup status from /admin/providers/status.
+                        //   3. Fallback: 'unknown' (waiting for backend warmup cycle).
+                        const local = healthMap[p.id]
+                        const backend = backendStatuses[p.id]
+                        let resolved: ProviderHealth
+                        if (local) {
+                            resolved = local
+                        } else if (backend) {
+                            const status: HealthStatus =
+                                backend.status === 'ready' ? 'healthy'
+                                : backend.status === 'unavailable' ? 'unhealthy'
+                                : 'unknown'
+                            resolved = { status, error: backend.error }
+                        } else {
+                            resolved = { status: 'unknown' }
+                        }
+                        return (
+                            <ConnectionCard
+                                key={p.id}
+                                provider={p}
+                                health={resolved}
+                                onTest={() => { void testOne(p.id) }}
+                                onEdit={() => handleEditProvider(p)}
+                                onDelete={() => handleDeleteClick(p)}
+                                onScan={() => navigate(`/ingestion?tab=assets&provider=${p.id}`)}
+                            />
+                        )
+                    })}
                 </div>
             )}
 

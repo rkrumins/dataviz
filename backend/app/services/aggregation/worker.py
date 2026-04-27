@@ -39,6 +39,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.common.adapters import ProviderUnavailable
 
+from backend.app.jobs import (
+    JobScope as PlatformJobScope,
+    get_emitter,
+)
+from backend.app.jobs.audit import record_terminal
+from backend.app.jobs.metrics import increment as metrics_increment
+
+from .cancel import JobCancelled, get_registry as get_cancel_registry
 from .models import AggregationJobORM
 from .fingerprint import compute_graph_fingerprint
 
@@ -103,6 +111,42 @@ class AggregationWorker:
             job.updated_at = _now()
             await session.commit()
 
+            # Register a cooperative cancel event before any heavy work so
+            # ``service.cancel`` can request a clean exit between sub-batches
+            # rather than ``task.cancel()``-ing mid-Cypher and orphaning the
+            # FalkorDB transaction. The event is unregistered in the finally
+            # block below.
+            cancel_registry = get_cancel_registry()
+            cancel_event = cancel_registry.register(job_id)
+
+            # Platform JobEmitter — the only path for live progress
+            # updates. Seed its per-job sequence counter from the
+            # durable high-water-mark in PG so resume-after-crash
+            # never re-uses a sequence already published.
+            emitter = get_emitter()
+            emitter.seed_sequence(job_id, job.last_sequence or 0)
+            scope = PlatformJobScope(
+                workspace_id=job.workspace_id or "",
+                data_source_id=job.data_source_id,
+            )
+            await emitter.publish(
+                job_id=job_id,
+                kind="aggregation",
+                scope=scope,
+                type="state",
+                payload={"status": "running", "trigger_source": job.trigger_source},
+                live_state={
+                    "status": "running",
+                    "started_at": job.started_at or "",
+                    "processed_edges": job.processed_edges,
+                    "total_edges": job.total_edges,
+                    "created_edges": job.created_edges,
+                    "progress": job.progress,
+                    "last_cursor": job.last_cursor or "",
+                    "trigger_source": job.trigger_source,
+                },
+            )
+
             logger.info(
                 "Aggregation job %s started for data source %s (resume from: %s)",
                 job_id, job.data_source_id, job.last_cursor or "beginning",
@@ -148,6 +192,9 @@ class AggregationWorker:
                         provider=provider,
                         containment_types=containment_types,
                         lineage_types=lineage_types,
+                        cancel_event=cancel_event,
+                        emitter=emitter,
+                        scope=scope,
                     ),
                     timeout=job_timeout,
                 )
@@ -167,6 +214,43 @@ class AggregationWorker:
                     last_aggregated_at=job.completed_at,
                     aggregation_edge_count=job.created_edges,
                     graph_fingerprint=job.graph_fingerprint_after,
+                )
+
+                # Audit-log row written in this same transaction so the
+                # durable status flip + the audit trail land or roll
+                # back together. Sequence is the next one the emitter
+                # would assign — we don't actually emit yet (the
+                # platform terminal event below does), but the audit
+                # row needs a stable monotonic seq.
+                terminal_seq = emitter.current_sequence(job_id) + 1
+                await record_terminal(
+                    session,
+                    job_id=job_id,
+                    kind="aggregation",
+                    scope=scope,
+                    sequence=terminal_seq,
+                    status="completed",
+                    payload={
+                        "edge_count": job.created_edges,
+                        "fingerprint": job.graph_fingerprint_after,
+                        "completed_at": job.completed_at,
+                    },
+                )
+
+                # Platform terminal event — closes the SSE stream
+                # cleanly so frontend ``useJob`` unsubscribes and
+                # the row's React-Query cache flips to the durable
+                # API response.
+                await emitter.terminal(
+                    job_id=job_id,
+                    kind="aggregation",
+                    scope=scope,
+                    status="completed",
+                    payload={
+                        "edge_count": job.created_edges,
+                        "fingerprint": job.graph_fingerprint_after,
+                        "completed_at": job.completed_at,
+                    },
                 )
 
                 # Publish event for viz-service to sync its own tables
@@ -195,11 +279,88 @@ class AggregationWorker:
                 logger.error("Aggregation job %s timed out after %ds", job_id, timeout)
 
                 await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
+
+                terminal_seq = emitter.current_sequence(job_id) + 1
+                await record_terminal(
+                    session,
+                    job_id=job_id,
+                    kind="aggregation",
+                    scope=scope,
+                    sequence=terminal_seq,
+                    status="failed",
+                    payload={"error_message": job.error_message, "reason": "timeout"},
+                )
+                await emitter.terminal(
+                    job_id=job_id,
+                    kind="aggregation",
+                    scope=scope,
+                    status="failed",
+                    payload={"error_message": job.error_message, "reason": "timeout"},
+                )
+
                 if self._events:
                     await self._events.job_failed(
                         job_id=job_id,
                         data_source_id=job.data_source_id,
                         error_message=job.error_message,
+                    )
+
+            except JobCancelled as cancel_exc:
+                # Cooperative cancel observed at a safe boundary. The
+                # cursor + processed_edges committed by the last
+                # successful checkpoint reflect work that durably
+                # landed; resume from there is sound. We mark the row
+                # cancelled here rather than letting the API tier do
+                # it pre-emptively, so the terminal state lines up
+                # with the moment the worker actually stopped.
+                job.status = "cancelled"
+                job.completed_at = _now()
+                job.error_message = (
+                    f"Cancelled at {cancel_exc.observed_at}. "
+                    f"Progress preserved: {job.processed_edges}/{job.total_edges} edges. "
+                    "Resume from last_cursor is possible."
+                )
+                logger.info(
+                    "Aggregation job %s cancelled cooperatively (cursor=%s, processed=%d)",
+                    job_id, job.last_cursor, job.processed_edges,
+                )
+                metrics_increment(
+                    "cooperative_cancels_observed_total",
+                    kind="aggregation",
+                )
+
+                await self._update_ds_state(session, job.data_source_id, aggregation_status="cancelled")
+
+                terminal_seq = emitter.current_sequence(job_id) + 1
+                await record_terminal(
+                    session,
+                    job_id=job_id,
+                    kind="aggregation",
+                    scope=scope,
+                    sequence=terminal_seq,
+                    status="cancelled",
+                    payload={
+                        "observed_at": cancel_exc.observed_at,
+                        "last_cursor": job.last_cursor,
+                        "processed_edges": job.processed_edges,
+                    },
+                )
+                await emitter.terminal(
+                    job_id=job_id,
+                    kind="aggregation",
+                    scope=scope,
+                    status="cancelled",
+                    payload={
+                        "observed_at": cancel_exc.observed_at,
+                        "last_cursor": job.last_cursor,
+                        "processed_edges": job.processed_edges,
+                    },
+                )
+
+                if self._events:
+                    await self._events.job_cancelled(
+                        job_id=job_id,
+                        data_source_id=job.data_source_id,
                     )
 
             except Exception as e:
@@ -208,6 +369,25 @@ class AggregationWorker:
                 logger.error("Aggregation job %s failed: %s", job_id, e, exc_info=True)
 
                 await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
+
+                terminal_seq = emitter.current_sequence(job_id) + 1
+                await record_terminal(
+                    session,
+                    job_id=job_id,
+                    kind="aggregation",
+                    scope=scope,
+                    sequence=terminal_seq,
+                    status="failed",
+                    payload={"error_message": job.error_message},
+                )
+                await emitter.terminal(
+                    job_id=job_id,
+                    kind="aggregation",
+                    scope=scope,
+                    status="failed",
+                    payload={"error_message": job.error_message},
+                )
+
                 if self._events:
                     await self._events.job_failed(
                         job_id=job_id,
@@ -218,6 +398,10 @@ class AggregationWorker:
             finally:
                 job.updated_at = _now()
                 await session.commit()
+                # Always unregister the cancel event, including on
+                # uncaught exceptions, so a future job re-using this
+                # job_id (resume) starts with a fresh event.
+                cancel_registry.unregister(job_id)
 
     async def _update_ds_state(
         self,
@@ -253,6 +437,9 @@ class AggregationWorker:
         provider: Any,
         containment_types: list[str],
         lineage_types: list[str],
+        cancel_event: asyncio.Event,
+        emitter: Any,
+        scope: PlatformJobScope,
     ) -> dict:
         """Retry wrapper around _materialize_with_checkpoints.
 
@@ -277,7 +464,16 @@ class AggregationWorker:
                     provider=provider,
                     containment_types=containment_types,
                     lineage_types=lineage_types,
+                    cancel_event=cancel_event,
+                    emitter=emitter,
+                    scope=scope,
                 )
+            except JobCancelled:
+                # Cooperative cancel — control-flow signal, not a transient
+                # failure. Skip the retry mill and bubble straight up to the
+                # outer run() handler, which marks the job 'cancelled' and
+                # emits the terminal event with last_cursor preserved.
+                raise
             except ProviderUnavailable as e:
                 last_error = e
                 provider_unavailable_count += 1
@@ -354,6 +550,9 @@ class AggregationWorker:
         provider: Any,
         containment_types: list[str],
         lineage_types: list[str],
+        cancel_event: asyncio.Event,
+        emitter: Any,
+        scope: PlatformJobScope,
     ) -> dict:
         """Run batch materialization with coalesced DB checkpointing.
 
@@ -378,6 +577,13 @@ class AggregationWorker:
             processed: int, total: int, cursor: Optional[str], aggregated: int = 0,
         ) -> None:
             nonlocal last_commit_monotonic, batches_since_commit, is_first_checkpoint
+            # Cooperative cancel point at the outer-batch boundary. The
+            # checkpoint that just fired captured ``cursor`` for the
+            # batch we've now committed; raising here means the next
+            # outer batch never starts, the FalkorDB MERGE just
+            # completed cleanly, and resume from ``cursor`` is sound.
+            if cancel_event.is_set():
+                raise JobCancelled(job.id, _now())
             job.processed_edges = processed
             job.total_edges = total
             job.last_cursor = cursor
@@ -408,14 +614,22 @@ class AggregationWorker:
             # can re-attempt the checkpoint with the latest in-memory
             # mutations on ``job`` (preserved across rollback because
             # the JOBS sessionmaker uses ``expire_on_commit=False``).
+            # Advance the per-job sequence counter at outer-batch
+            # boundaries. ``job.last_sequence`` is the durable
+            # high-water-mark Phase-1's JobEmitter will use as the
+            # ``(job_id, sequence)`` idempotency key on every event;
+            # bumping it here means a crash + resume hands the new
+            # worker a counter that won't collide with sequences
+            # already published from this same boundary.
+            job.last_sequence = (job.last_sequence or 0) + 1
             try:
                 await session.commit()
                 last_commit_monotonic = time.monotonic()
                 batches_since_commit = 0
                 is_first_checkpoint = False
                 logger.info(
-                    "Aggregation job %s checkpoint: %d/%d edges (%d%%, %d materialized) [committed]",
-                    job.id, processed, total, job.progress, job.created_edges,
+                    "Aggregation job %s checkpoint: %d/%d edges (%d%%, %d materialized) [committed seq=%d]",
+                    job.id, processed, total, job.progress, job.created_edges, job.last_sequence,
                 )
             except Exception as commit_exc:
                 logger.error(
@@ -436,58 +650,74 @@ class AggregationWorker:
                 last_commit_monotonic = time.monotonic()
                 batches_since_commit = 0
 
-        last_intra_commit_monotonic = time.monotonic()
+            # Publish the outer-batch progress event AFTER the PG
+            # commit lands. SSE clients merge this with their cached
+            # API response; the live HSET captures the same fields so
+            # late-arriving subscribers see the correct snapshot
+            # immediately.
+            await emitter.publish(
+                job_id=job.id,
+                kind="aggregation",
+                scope=scope,
+                type="progress",
+                payload={
+                    "boundary": "outer_batch",
+                    "processed_edges": processed,
+                    "total_edges": total,
+                    "created_edges": job.created_edges,
+                    "progress": job.progress,
+                    "last_cursor": cursor or "",
+                },
+                live_state={
+                    "status": "running",
+                    "processed_edges": processed,
+                    "total_edges": total,
+                    "created_edges": job.created_edges,
+                    "progress": job.progress,
+                    "last_cursor": cursor or "",
+                    "last_checkpoint_at": job.last_checkpoint_at or "",
+                },
+            )
 
         async def intra_batch_heartbeat(running_aggregated: int) -> None:
-            """Called after every Cypher MERGE sub-batch within an
-            outer batch. A single outer batch fans out to 100+ sub-
-            batches and runs for several minutes; without this hook
-            the operator UI freezes between checkpoint() calls even
-            though FalkorDB is steadily writing AGGREGATED edges.
+            """Per Cypher MERGE sub-batch heartbeat. **Redis-only** —
+            no PG writes mid-batch. The previous PG-writing version
+            put ~30× sustained write pressure on the JOBS pool during
+            a long aggregation; the platform's liveness/durability
+            split makes those writes purely transient and they belong
+            in Redis HSET, not PostgreSQL.
 
-            Updates ``created_edges`` (cumulative, monotonically rising)
-            and ``last_checkpoint_at`` (so the UI's "Checkpoint Xm ago"
-            badge keeps refreshing — that badge is the operator's "is
-            this thing alive?" signal). Deliberately does NOT touch
+            Updates ``created_edges`` (cumulative, monotonically
+            rising) and ``last_heartbeat_at`` so the UI's "Checkpoint
+            Xm ago" badge stays current. Deliberately does NOT touch
             ``processed_edges``, ``total_edges``, or ``last_cursor``:
-            those advance only at the boundary between outer batches.
-            Coalesces commits on the same 2s cadence as the outer
-            checkpoint to avoid hammering the JOBS pool.
+            those advance only at the boundary between outer batches
+            and live in PG.
             """
-            nonlocal last_intra_commit_monotonic
-            elapsed = time.monotonic() - last_intra_commit_monotonic
-            if elapsed < _CHECKPOINT_MAX_INTERVAL_SECS:
-                # Update the in-memory counters every sub-batch so
-                # the next coalesced commit captures the latest value;
-                # skip the commit itself until the cadence threshold.
-                job.created_edges = running_aggregated
-                job.last_checkpoint_at = _now()
-                job.updated_at = _now()
-                return
+            await emitter.publish(
+                job_id=job.id,
+                kind="aggregation",
+                scope=scope,
+                type="progress",
+                payload={
+                    "boundary": "intra_batch",
+                    "created_edges": running_aggregated,
+                },
+                live_state={
+                    "created_edges": running_aggregated,
+                    "last_heartbeat_at": _now(),
+                },
+            )
 
-            job.created_edges = running_aggregated
-            job.last_checkpoint_at = _now()
-            job.updated_at = _now()
-            try:
-                await session.commit()
-                last_intra_commit_monotonic = time.monotonic()
-                logger.info(
-                    "Aggregation job %s heartbeat: %d aggregated edges materialised so far [committed]",
-                    job.id, running_aggregated,
-                )
-            except Exception as commit_exc:
-                logger.error(
-                    "Aggregation job %s heartbeat commit failed (rolling back): %s",
-                    job.id, commit_exc, exc_info=True,
-                )
-                try:
-                    await session.rollback()
-                except Exception as rb_exc:
-                    logger.error(
-                        "Aggregation job %s session rollback after heartbeat failure also failed: %s",
-                        job.id, rb_exc, exc_info=True,
-                    )
-                last_intra_commit_monotonic = time.monotonic()
+        # Cooperative cancel hook handed to the provider. FalkorDB's
+        # ``_materialize_edges_batched`` checks this between MERGE
+        # sub-batches inside a single outer batch; True there raises
+        # JobCancelled out of the provider, which the worker's outer
+        # try/except catches and converts to a terminal ``cancelled``.
+        # Cheap synchronous predicate — no asyncio import in the
+        # provider, no coupling to this module's specific event type.
+        def should_cancel() -> bool:
+            return cancel_event.is_set()
 
         result = await provider.materialize_aggregated_edges_batch(
             containment_edge_types=containment_types,
@@ -496,6 +726,7 @@ class AggregationWorker:
             last_cursor=job.last_cursor,
             progress_callback=checkpoint,
             intra_batch_callback=intra_batch_heartbeat,
+            should_cancel=should_cancel,
         )
 
         return result

@@ -132,15 +132,23 @@ export function useProviderHealthSweep(
         return runProbe(id, true)
     }, [runProbe])
 
-    // Initial sweep — fires once per mount when providers first arrive.
-    // Uses the 10s cache (fresh=false) so simultaneous mounts collapse
-    // onto one real probe per provider.
-    useEffect(() => {
-        if (initialSweepDone.current) return
-        if (providers.length === 0) return
-        initialSweepDone.current = true
-        void runSweep(providers.map(p => p.id), false)
-    }, [providers, runSweep])
+    // P0.4: NO auto-mount sweep.
+    //
+    // The previous implementation fired ``concurrency``-bounded /test
+    // calls for every provider on every mount. With 6 providers, 5 of
+    // them DNS-unreachable, this storm hit the backend on every cold
+    // boot and amplified any per-provider slowness back into a perceived
+    // app freeze — even with the backend fully fixed.
+    //
+    // Baseline status now comes from the bounded ``/admin/providers/status``
+    // and ``/api/v1/health/providers`` aggregate endpoints (polled by the
+    // ``providerStatus`` and ``providerHealth`` stores). Per-provider
+    // /test calls fire ONLY on explicit user gesture: ``testOne(id)`` for
+    // the per-row Test button, ``refresh()`` for the "Re-test All" button.
+    //
+    // ``initialSweepDone`` is retained as a no-op anchor so existing
+    // dependency arrays in callers don't break.
+    void initialSweepDone
 
     // Cleanup — abort anything in flight on unmount.
     useEffect(() => {
