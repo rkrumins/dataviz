@@ -115,8 +115,31 @@ class FalkorDBProvider(GraphDataProvider):
             return self._proj_graph
         return self._graph
 
+    async def preflight(self, *, deadline_s: float = 1.5):
+        """Fast reachability probe — TCP connect + Redis PING within
+        ``deadline_s``. Does NOT touch the production pool, does NOT run
+        any DDL. Returns a ``PreflightResult``; never raises for network
+        failure.
+
+        The ``/test`` admin endpoint and the manager's preflight gate
+        invoke this before any expensive driver work, so an unreachable
+        host fails fast (≤1.5s) instead of triggering 30-45s of half-
+        blocking init in ``_ensure_connected``.
+        """
+        from backend.common.interfaces.preflight import redis_ping_preflight
+        return await redis_ping_preflight(
+            self._host, self._port, deadline_s=deadline_s,
+        )
+
     async def _ensure_connected(self):
-        """Lazy connection to FalkorDB."""
+        """Lazy connection to FalkorDB.
+
+        Schema reconciliation (``ensure_indices``, ``ensure_projections``)
+        is intentionally NOT run here — it is dispatched as a fire-and-
+        forget background task on first successful connect so a slow DDL
+        sweep cannot extend the request-path budget. See
+        ``_schedule_reconcile_once`` below.
+        """
         if self._graph is not None:
             return
         try:
@@ -186,12 +209,25 @@ class FalkorDBProvider(GraphDataProvider):
             if self._projection_mode == "dedicated":
                 self._proj_graph = self._db.select_graph(f"{self._graph_name}_proj")
 
-            # Ensure indices exist
-            await self.ensure_indices()
-            await self.ensure_projections()
-
-            # Optional lazy seed
+            # Verify the pool with one cheap round-trip — if this fails, we
+            # treat the connect as failed and the caller's circuit breaker
+            # records it. Bounded so a half-open socket cannot stall the
+            # connect path.
             _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
+            await asyncio.wait_for(
+                self._graph.ro_query("RETURN 1", params={}),
+                timeout=_init_timeout,
+            )
+
+            # Schema reconciliation runs OFF the request path. Fire-and-
+            # forget background task; failures are logged but do not affect
+            # connect outcome. Subsequent connects are no-ops because of the
+            # ``_graph is not None`` guard above, so reconcile fires once
+            # per provider instance, not once per query.
+            self._schedule_reconcile_once()
+
+            # Optional lazy seed (cheap when graph is non-empty; bounded by
+            # the same init_timeout for the count query).
             if self._seed_file:
                 count_result = await asyncio.wait_for(
                     self._graph.ro_query("MATCH (n) RETURN count(n) AS c", params={}),
@@ -202,6 +238,38 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception as e:
             logger.error(f"FalkorDB connection failed: {e}")
             raise
+
+    def _schedule_reconcile_once(self) -> None:
+        """Schedule ``ensure_indices`` + ``ensure_projections`` as a
+        background task. Idempotent — guarded by ``_reconcile_started``.
+
+        Failures are logged at WARNING and do NOT raise into the connect
+        path. The next call requiring a missing index will surface a
+        logical error from the query, which is the correct signal — not
+        a 30-45s connect-time stall.
+        """
+        if getattr(self, "_reconcile_started", False):
+            return
+        self._reconcile_started = True
+
+        async def _run():
+            try:
+                await self.ensure_indices()
+                await self.ensure_projections()
+                logger.info("FalkorDB reconcile complete (host=%s port=%s)", self._host, self._port)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "FalkorDB reconcile failed (host=%s port=%s): %s — provider remains usable",
+                    self._host, self._port, exc,
+                )
+
+        # Detach the task — we don't await it. Hold a reference to prevent
+        # GC under Python's "task may be GC'd before completion" rule.
+        self._reconcile_task = asyncio.create_task(
+            _run(), name=f"falkordb-reconcile-{self._host}:{self._port}"
+        )
 
     # ── Timeout-guarded query helpers ────────────────────────────────
     # Every Cypher query routed through these methods gets an
@@ -1357,6 +1425,7 @@ class FalkorDBProvider(GraphDataProvider):
         *,
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
         baseline_aggregated: int = 0,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> tuple[int, int]:
         """Batch-level materialization — all Redis + Cypher ops in ~4 round-trips.
 
@@ -1445,6 +1514,21 @@ class FalkorDBProvider(GraphDataProvider):
 
         created = 0
         for chunk_start in range(0, len(merge_batch), self._MERGE_SUB_BATCH_SIZE):
+            # Cooperative cancel between MERGE sub-batches. The previous
+            # sub-batch's MERGE has fully landed in FalkorDB before we
+            # reach this check, so raising here cannot orphan a Cypher
+            # transaction. Without this hook, a single outer batch
+            # (~100+ sub-batches over several minutes) cannot be
+            # cancelled without ``task.cancel()`` interrupting a
+            # mid-flight MERGE.
+            if should_cancel is not None and should_cancel():
+                from backend.app.services.aggregation.cancel import JobCancelled
+                from datetime import datetime, timezone
+                raise JobCancelled(
+                    job_id="<provider-cancel>",
+                    observed_at=datetime.now(timezone.utc).isoformat(),
+                )
+
             chunk = merge_batch[chunk_start:chunk_start + self._MERGE_SUB_BATCH_SIZE]
             await self._proj_query(
                 "UNWIND $batch AS item "
@@ -1733,6 +1817,7 @@ class FalkorDBProvider(GraphDataProvider):
         *,
         batch_size: int = 10_000,
         progress_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> int:
         """Remove ALL materialized AGGREGATED edges from the graph.
 
@@ -1771,6 +1856,20 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             total_deleted = 0
             while True:
+                # Cooperative cancel between DELETE batches. The previous
+                # batch's DELETE already landed in FalkorDB, so raising
+                # here cannot orphan a Cypher transaction. Without this
+                # hook a multi-million-edge purge cannot be cancelled
+                # without ``task.cancel()`` interrupting a mid-flight
+                # DELETE — same pattern as the materialise path.
+                if should_cancel is not None and should_cancel():
+                    from backend.app.services.aggregation.cancel import JobCancelled
+                    from datetime import datetime, timezone
+                    raise JobCancelled(
+                        job_id="<provider-cancel>",
+                        observed_at=datetime.now(timezone.utc).isoformat(),
+                    )
+
                 result = await self._proj_query(
                     f"MATCH ()-[r:AGGREGATED]->() "
                     f"WITH r LIMIT {int(batch_size)} "
@@ -1847,6 +1946,7 @@ class FalkorDBProvider(GraphDataProvider):
         last_cursor: Optional[str] = None,
         progress_callback: Optional[Any] = None,
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """Batch materialization using ancestor-chain approach with cursor-based pagination.
 
@@ -1967,6 +2067,22 @@ class FalkorDBProvider(GraphDataProvider):
             # MERGE in 4 round-trips total, regardless of batch size.
             # This replaces the previous per-edge loop that did 3 round-
             # trips per edge (SADD + SCARD + MERGE × N edges).
+            # Cooperative cancel check at the start of each outer batch
+            # — cheap, predicate-only, no exception out of this provider
+            # if the worker hasn't asked us to bail. Inside
+            # ``_materialize_edges_batched`` the same predicate fires
+            # between MERGE sub-batches so a multi-minute outer batch
+            # can be aborted cleanly without orphaning a Cypher
+            # transaction. Importing locally keeps the provider free of
+            # an aggregation-package coupling at module load.
+            if should_cancel is not None and should_cancel():
+                from backend.app.services.aggregation.cancel import JobCancelled
+                from datetime import datetime, timezone
+                raise JobCancelled(
+                    job_id=last_cursor or "<no-cursor>",
+                    observed_at=datetime.now(timezone.utc).isoformat(),
+                )
+
             t0 = time.monotonic()
             # Pass ``created_count`` as the baseline so the intra-batch
             # callback always receives the cumulative aggregated total
@@ -1977,6 +2093,7 @@ class FalkorDBProvider(GraphDataProvider):
                 rows, ancestors_cache,
                 intra_batch_callback=intra_batch_callback,
                 baseline_aggregated=created_count,
+                should_cancel=should_cancel,
             )
             created_count += batch_created
             errors += batch_errors

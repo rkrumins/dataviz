@@ -453,6 +453,20 @@ async def main() -> None:
     except Exception as e:
         logger.warning("Health endpoint failed to start: %s (continuing without it)", e)
 
+    # Cross-process cancel bridge — subscribes to the Redis Pub/Sub
+    # control channel and forwards into this process's local
+    # CancelRegistry. Without this, cancel requests issued by the web
+    # tier never reach jobs running in this worker process.
+    from .cancel import CancelListener
+    cancel_listener = CancelListener(redis_client)
+    try:
+        await cancel_listener.start()
+    except Exception as e:
+        logger.warning(
+            "Cancel listener failed to start: %s (cancels for jobs hosted "
+            "in this worker will fall back to dispatcher.task.cancel())", e,
+        )
+
     # Register signal handlers for graceful shutdown
     loop = asyncio.get_running_loop()
 
@@ -469,6 +483,10 @@ async def main() -> None:
     finally:
         logger.info("Consumer stopped — draining active jobs...")
         await consumer.drain(timeout=60.0)
+        try:
+            await cancel_listener.stop()
+        except Exception:
+            pass
         await registry.evict_all()
         await close_redis()
         logger.info("=== Aggregation Worker shutdown complete ===")

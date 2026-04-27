@@ -75,6 +75,17 @@ class AggregationJobORM(Base):
     # ── Idempotency ─────────────────────────────────────────────────
     idempotency_key = Column(Text, nullable=True)
 
+    # Per-emit sequence counter for the platform JobEmitter. Strictly
+    # monotonic per job_id. The worker increments it on every progress
+    # / heartbeat / terminal event published, and persists the highest
+    # value at outer-batch boundaries. On crash + resume, the recovered
+    # worker reads ``last_sequence`` and continues numbering from there
+    # so downstream consumers (SSE clients, audit log) can detect gaps
+    # and dedup retried events via ``(job_id, sequence)``. Nullable for
+    # back-compat with rows created before this column existed; treat
+    # NULL as 0.
+    last_sequence = Column(Integer, nullable=True, default=0)
+
     # ── Timestamps ───────────────────────────────────────────────────
     started_at = Column(Text, nullable=True)
     completed_at = Column(Text, nullable=True)

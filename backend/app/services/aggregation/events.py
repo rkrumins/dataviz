@@ -1,12 +1,38 @@
 """
-Aggregation event publisher and consumer.
+Aggregation event publisher (legacy cross-service sync path).
 
-Uses Redis Pub/Sub for real-time status propagation:
-  - Workers publish: job.started, job.progress, job.completed, job.failed
-  - Control Plane publishes: job.pending, job.cancelled, state.updated
-  - Viz-service subscribes: syncs workspace_data_sources.aggregation_status
+Uses Redis Pub/Sub channel ``aggregation.events`` for cross-service
+status propagation. The single consumer is
+``backend/app/services/aggregation/event_listener.py``, which mirrors
+state into ``workspace_data_sources.aggregation_status`` so the viz-
+service has fresh data for its own endpoints.
 
-Event structure:
+Co-existence with the new platform. Phase 1 introduced the Job
+Platform (``backend/app/jobs/``) which delivers events via
+``JobBroker`` (Redis Streams) for SSE clients. The two paths are
+intentionally independent:
+
+* **This file (legacy)** — Redis Pub/Sub, single channel, single
+  consumer, used for cross-service state sync. ``event_listener.py``
+  subscribes here.
+* **JobBroker (new)** — Redis Streams, per-job + per-tenant
+  fan-out, replay-able, used for live SSE delivery.
+
+The aggregation worker calls both in parallel on terminal events:
+``self._events.job_completed(...)`` writes here (for the listener),
+``await emitter.terminal(...)`` writes to the broker (for SSE).
+There's no double-counting because the consumer sets are disjoint.
+
+When this file retires. Phase 4 cleanup will migrate
+``event_listener.py`` to consume from the broker directly (via
+``JobEventConsumer``); at that point the Pub/Sub channel can retire
+and this class deletes. Until then it stays as-is — refactoring
+``AggregationEventPublisher`` to delegate through ``JobEmitter``
+without breaking the listener requires a dual-write knob inside
+``JobEmitter`` that pollutes the broker abstraction with a
+legacy-channel name. Not worth it for Phase 1.
+
+Event structure (unchanged from before):
     {
         "type": "job.completed",
         "payload": {
