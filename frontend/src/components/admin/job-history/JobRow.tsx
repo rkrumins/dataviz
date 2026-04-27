@@ -6,6 +6,7 @@ import {
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
 import type { AggregationJobResponse } from '@/services/aggregationService'
+import { useJob } from '@/hooks/useJob'
 import { getProviderLogo } from '../ProviderLogos'
 import { formatDuration, timeAgo, STATUS_CONFIG, type DataSourceMeta } from './shared'
 
@@ -80,7 +81,38 @@ export interface JobRowProps {
     previousJob?: AggregationJobResponse
 }
 
-export function JobRow({ job, meta, expanded, onToggle, onCancel, onResume, onRetrigger, onDelete, onPurge, purgeConfirm, setPurgeConfirm, actionLoading, compact, previousJob }: JobRowProps) {
+export function JobRow({ job: jobFromList, meta, expanded, onToggle, onCancel, onResume, onRetrigger, onDelete, onPurge, purgeConfirm, setPurgeConfirm, actionLoading, compact, previousJob }: JobRowProps) {
+    // Open the SSE stream only for actively-running jobs so terminal
+    // rows (the bulk of Job History) don't open dead EventSources.
+    // Phase 3's useJobsLive(scope) consolidates this to one connection
+    // per workspace; for Phase 1 we accept N connections per visible
+    // running row (HTTP/1.1 caps at 6, sufficient in practice).
+    const isActive = jobFromList.status === 'running' || jobFromList.status === 'pending'
+    const liveOverlay = useJob(
+        jobFromList.dataSourceId,
+        jobFromList.id,
+        isActive,
+    )
+
+    // Merge the live snapshot onto the polling-derived job so the
+    // rest of the component reads from a single ``job`` object. The
+    // snapshot only carries fields that landed in events; any field
+    // it doesn't touch falls through to the polling value. After a
+    // ``terminal`` event lands, defer entirely to the polling-fetched
+    // row (DB is the source of truth post-terminal).
+    const job: AggregationJobResponse =
+        isActive && !liveOverlay.terminal && Object.keys(liveOverlay.snapshot).length > 0
+            ? {
+                ...jobFromList,
+                processedEdges: liveOverlay.snapshot.processed_edges ?? jobFromList.processedEdges,
+                totalEdges: liveOverlay.snapshot.total_edges ?? jobFromList.totalEdges,
+                createdEdges: liveOverlay.snapshot.created_edges ?? jobFromList.createdEdges,
+                progress: liveOverlay.snapshot.progress ?? jobFromList.progress,
+                lastCursor: liveOverlay.snapshot.last_cursor ?? jobFromList.lastCursor,
+                lastCheckpointAt: liveOverlay.snapshot.last_heartbeat_at ?? jobFromList.lastCheckpointAt,
+            }
+            : jobFromList
+
     const cfg = STATUS_CONFIG[job.status] ?? STATUS_CONFIG.pending
     const StatusIcon = cfg.icon
     const isRunning = job.status === 'running'

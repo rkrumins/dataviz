@@ -20,8 +20,9 @@ from typing import List, Optional
 
 import httpx
 from fastapi import (
-    APIRouter, Body, Depends, HTTPException, Query, Request, Response, status,
+    APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response, status,
 )
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.engine import get_db_session
@@ -152,7 +153,7 @@ async def list_jobs_global(
 ):
     if _PROXY_ENABLED:
         return await _proxy("GET", "/aggregation/jobs", request)
-    return await svc.list_jobs_global(
+    paginated = await svc.list_jobs_global(
         session,
         status=job_status,
         workspace_id=workspace_id,
@@ -165,6 +166,57 @@ async def list_jobs_global(
         limit=limit,
         offset=offset,
     )
+
+    # Overlay live Redis HSET state on the running rows. Without this,
+    # Job History (which calls this list endpoint at the relaxed 10s
+    # cadence) sees the frozen DB values for any job currently inside
+    # an outer batch — the durable counters only advance at outer-
+    # batch boundaries by design. Per-row JobRow components also open
+    # their own SSE for sub-second updates, but the list response is
+    # the first paint and the polling-fallback source.
+    #
+    # Cost analysis: only running/pending rows hit Redis. Terminal
+    # rows fall through to the durable DB values directly. Even at
+    # the limit=100 cap, in practice the active subset is small
+    # (operators don't run more than ~10 jobs concurrently). HSET
+    # reads pipelined for cardinality-resilience.
+    try:
+        active_items = [
+            it for it in paginated.items
+            if it.status in ("running", "pending")
+        ]
+        if active_items:
+            from backend.app.jobs import get_state_store
+            store = get_state_store()
+            for it in active_items:
+                snap = await store.get(it.id)
+                if not snap:
+                    continue
+                for field in (
+                    "processed_edges", "total_edges", "created_edges", "progress",
+                ):
+                    raw = snap.get(field)
+                    if raw is None:
+                        continue
+                    try:
+                        parsed = int(raw)
+                    except (TypeError, ValueError):
+                        continue
+                    current = getattr(it, field, 0) or 0
+                    if parsed > current:
+                        setattr(it, field, parsed)
+                last_heartbeat = snap.get("last_heartbeat_at")
+                if last_heartbeat and not it.last_checkpoint_at:
+                    it.last_checkpoint_at = last_heartbeat
+    except Exception as exc:
+        # List-endpoint overlay must never fail the request. Per-row
+        # SSE remains the primary path; this is best-effort enrichment.
+        logger.debug(
+            "list_jobs_global: live-state overlay failed (DB rows only): %s",
+            exc,
+        )
+
+    return paginated
 
 
 # ── POST /data-sources/{ds_id}/aggregation-jobs ─────────────────────
@@ -261,9 +313,137 @@ async def get_job(
         return await _proxy("GET", f"/aggregation/data-sources/{ds_id}/jobs/{job_id}", request)
     _, _, _, _, NotFoundError = _direct_imports()
     try:
-        return await svc.get_job(ds_id, job_id, session)
+        response = await svc.get_job(ds_id, job_id, session)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+    # Overlay live state from Redis HSET. Between outer-batch PG
+    # commits the DB row is "stale by design" (the platform's
+    # liveness/durability split puts mid-batch counters in Redis).
+    # Polling clients that hit this endpoint between outer-batch
+    # boundaries get the live ``processed_edges`` / ``created_edges``
+    # / ``progress`` from the HSET, falling through to the DB
+    # values when the snapshot is absent (job already terminal,
+    # TTL expired, or Redis down).
+    try:
+        from backend.app.jobs import get_state_store
+        snapshot = await get_state_store().get(job_id)
+        if snapshot:
+            for field in (
+                "processed_edges", "total_edges", "created_edges", "progress",
+            ):
+                raw = snapshot.get(field)
+                if raw is None:
+                    continue
+                try:
+                    parsed = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                # Only overlay when the live value is *ahead* of the
+                # durable one. For terminal jobs, the DB row is the
+                # source of truth and we don't want a stale Redis
+                # snapshot to walk back the final number.
+                current = getattr(response, field, 0) or 0
+                if parsed > current:
+                    setattr(response, field, parsed)
+            last_heartbeat = snapshot.get("last_heartbeat_at")
+            if last_heartbeat and not response.last_checkpoint_at:
+                response.last_checkpoint_at = last_heartbeat
+    except Exception as exc:
+        # Live overlay must never fail a GET. Log + return the DB row.
+        logger.debug(
+            "get_job: live-state overlay failed (returning DB row only): %s",
+            exc,
+        )
+
+    return response
+
+
+# ── SSE: GET /data-sources/{ds_id}/aggregation-jobs/{job_id}/events ──
+
+
+@router.get(
+    "/data-sources/{ds_id}/aggregation-jobs/{job_id}/events",
+    summary="Server-Sent Events stream of job progress",
+)
+async def stream_job_events(
+    ds_id: str,
+    job_id: str,
+    request: Request,
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
+):
+    """Server-Sent Events stream of platform ``JobEvent``s for one
+    aggregation/purge job.
+
+    Backed by ``JobEventConsumer``: backfills via the broker's
+    replay path from ``Last-Event-ID`` (the consumer-emitted
+    sequence number) then live-tails. The connection closes
+    automatically when a ``terminal`` event lands.
+
+    No authentication beyond the existing ``/api/v1/admin``
+    middleware. Frame format follows the SSE spec: each event
+    has ``id:`` (sequence), ``event:`` (type), and ``data:`` (JSON
+    envelope) lines, terminated by a blank line.
+    """
+    # The consumer subscribes via ``broker.JobScope`` (single-job
+    # scope) — separate type from the ``schemas.JobScope`` that
+    # carries workspace_id/data_source_id on event envelopes. They
+    # share a name in their respective namespaces by intent; import
+    # by alias to disambiguate.
+    from backend.app.jobs import get_consumer
+    from backend.app.jobs.broker import JobScope as BrokerJobScope
+    consumer = get_consumer()
+    broker_scope = BrokerJobScope(job_id=job_id)
+
+    from_seq: Optional[int]
+    if last_event_id:
+        try:
+            from_seq = int(last_event_id)
+        except ValueError:
+            from_seq = 0
+    else:
+        from_seq = None
+
+    async def _frames():
+        try:
+            async for event in consumer.stream(broker_scope, from_seq):
+                if await request.is_disconnected():
+                    return
+                payload = event.model_dump_json()
+                # SSE frame format. ``id`` is the sequence so a
+                # client reconnecting via Last-Event-ID can resume
+                # from where it left off. ``event`` is the type
+                # (state/progress/phase/terminal/resync).
+                yield (
+                    f"id: {event.sequence}\n"
+                    f"event: {event.type}\n"
+                    f"data: {payload}\n\n"
+                ).encode("utf-8")
+        except Exception as exc:
+            logger.warning(
+                "SSE stream %s: error during streaming: %s",
+                job_id, exc, exc_info=True,
+            )
+            # Send a final ``error`` frame so the client surfaces
+            # something rather than appearing to hang.
+            yield (
+                f"event: error\n"
+                f"data: {{\"detail\": \"stream error\"}}\n\n"
+            ).encode("utf-8")
+
+    return StreamingResponse(
+        _frames(),
+        media_type="text/event-stream",
+        headers={
+            # ``no-cache`` is mandatory on SSE; nginx and friends will
+            # otherwise buffer the entire response. ``X-Accel-Buffering``
+            # disables Nginx's proxy_buffering specifically so frames
+            # flow within sub-second latency.
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # ── POST .../resume ─────────────────────────────────────────────────

@@ -263,6 +263,21 @@ async def main() -> None:
     health_task = asyncio.create_task(_health_snapshot_task(), name="insights-health-snapshot")
     worker_task = asyncio.create_task(consumer.run(), name="insights-worker")
 
+    # Cross-process cancel bridge — purges (and any other job kinds
+    # hosted in this process) need to receive cancel signals from the
+    # web tier. Subscribes to the Redis Pub/Sub control channel and
+    # forwards into this process's local CancelRegistry, which the
+    # purge handler's checkpoint callback observes.
+    from backend.app.services.aggregation.cancel import CancelListener
+    cancel_listener = CancelListener(get_redis())
+    try:
+        await cancel_listener.start()
+    except Exception as exc:
+        logger.warning(
+            "Cancel listener failed to start: %s (cancels for purges hosted "
+            "in this process will fall back to direct DB-write only)", exc,
+        )
+
     try:
         done, _pending = await asyncio.wait(
             {scheduler_task, trim_task, discovery_task, health_task, worker_task, asyncio.create_task(shutdown.wait())},
@@ -305,6 +320,12 @@ async def main() -> None:
         try:
             await worker_task
         except (asyncio.CancelledError, Exception):
+            pass
+
+        # Stop the cross-process cancel listener.
+        try:
+            await cancel_listener.stop()
+        except Exception:
             pass
 
         # Final drain of buffered admission counters before the

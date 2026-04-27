@@ -1357,6 +1357,7 @@ class FalkorDBProvider(GraphDataProvider):
         *,
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
         baseline_aggregated: int = 0,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> tuple[int, int]:
         """Batch-level materialization — all Redis + Cypher ops in ~4 round-trips.
 
@@ -1445,6 +1446,21 @@ class FalkorDBProvider(GraphDataProvider):
 
         created = 0
         for chunk_start in range(0, len(merge_batch), self._MERGE_SUB_BATCH_SIZE):
+            # Cooperative cancel between MERGE sub-batches. The previous
+            # sub-batch's MERGE has fully landed in FalkorDB before we
+            # reach this check, so raising here cannot orphan a Cypher
+            # transaction. Without this hook, a single outer batch
+            # (~100+ sub-batches over several minutes) cannot be
+            # cancelled without ``task.cancel()`` interrupting a
+            # mid-flight MERGE.
+            if should_cancel is not None and should_cancel():
+                from backend.app.services.aggregation.cancel import JobCancelled
+                from datetime import datetime, timezone
+                raise JobCancelled(
+                    job_id="<provider-cancel>",
+                    observed_at=datetime.now(timezone.utc).isoformat(),
+                )
+
             chunk = merge_batch[chunk_start:chunk_start + self._MERGE_SUB_BATCH_SIZE]
             await self._proj_query(
                 "UNWIND $batch AS item "
@@ -1733,6 +1749,7 @@ class FalkorDBProvider(GraphDataProvider):
         *,
         batch_size: int = 10_000,
         progress_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> int:
         """Remove ALL materialized AGGREGATED edges from the graph.
 
@@ -1771,6 +1788,20 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             total_deleted = 0
             while True:
+                # Cooperative cancel between DELETE batches. The previous
+                # batch's DELETE already landed in FalkorDB, so raising
+                # here cannot orphan a Cypher transaction. Without this
+                # hook a multi-million-edge purge cannot be cancelled
+                # without ``task.cancel()`` interrupting a mid-flight
+                # DELETE — same pattern as the materialise path.
+                if should_cancel is not None and should_cancel():
+                    from backend.app.services.aggregation.cancel import JobCancelled
+                    from datetime import datetime, timezone
+                    raise JobCancelled(
+                        job_id="<provider-cancel>",
+                        observed_at=datetime.now(timezone.utc).isoformat(),
+                    )
+
                 result = await self._proj_query(
                     f"MATCH ()-[r:AGGREGATED]->() "
                     f"WITH r LIMIT {int(batch_size)} "
@@ -1847,6 +1878,7 @@ class FalkorDBProvider(GraphDataProvider):
         last_cursor: Optional[str] = None,
         progress_callback: Optional[Any] = None,
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """Batch materialization using ancestor-chain approach with cursor-based pagination.
 
@@ -1967,6 +1999,22 @@ class FalkorDBProvider(GraphDataProvider):
             # MERGE in 4 round-trips total, regardless of batch size.
             # This replaces the previous per-edge loop that did 3 round-
             # trips per edge (SADD + SCARD + MERGE × N edges).
+            # Cooperative cancel check at the start of each outer batch
+            # — cheap, predicate-only, no exception out of this provider
+            # if the worker hasn't asked us to bail. Inside
+            # ``_materialize_edges_batched`` the same predicate fires
+            # between MERGE sub-batches so a multi-minute outer batch
+            # can be aborted cleanly without orphaning a Cypher
+            # transaction. Importing locally keeps the provider free of
+            # an aggregation-package coupling at module load.
+            if should_cancel is not None and should_cancel():
+                from backend.app.services.aggregation.cancel import JobCancelled
+                from datetime import datetime, timezone
+                raise JobCancelled(
+                    job_id=last_cursor or "<no-cursor>",
+                    observed_at=datetime.now(timezone.utc).isoformat(),
+                )
+
             t0 = time.monotonic()
             # Pass ``created_count`` as the baseline so the intra-batch
             # callback always receives the cumulative aggregated total
@@ -1977,6 +2025,7 @@ class FalkorDBProvider(GraphDataProvider):
                 rows, ancestors_cache,
                 intra_batch_callback=intra_batch_callback,
                 baseline_aggregated=created_count,
+                should_cancel=should_cancel,
             )
             created_count += batch_created
             errors += batch_errors
