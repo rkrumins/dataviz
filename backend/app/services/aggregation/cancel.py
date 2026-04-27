@@ -71,6 +71,20 @@ class JobCancelled(Exception):
         self.observed_at = observed_at
 
 
+# Register with the circuit breaker so providers wrapped in CircuitBreakerProxy
+# pass JobCancelled through untouched instead of wrapping it as
+# ProviderUnavailable and counting it as a downstream failure. Done here (not
+# inside circuit.py) to avoid a circular import: circuit.py is imported by
+# worker.py before this module, and reaching back from circuit.py into the
+# aggregation package at its own load time would trip a partial-init cycle.
+try:
+    from backend.common.adapters.circuit import register_logical_exception
+
+    register_logical_exception(JobCancelled)
+except Exception:  # pragma: no cover - import-time best-effort
+    logger.exception("Failed to register JobCancelled with circuit breaker")
+
+
 class CancelRegistry:
     """Per-process map of ``job_id -> asyncio.Event``.
 

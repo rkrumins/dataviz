@@ -68,6 +68,24 @@ try:
 except Exception:  # pragma: no cover - import-time only
     pass
 
+def register_logical_exception(exc_type: type[BaseException]) -> None:
+    """Register a domain exception as a logical/control-flow signal.
+
+    Exceptions registered here are re-raised untouched by guarded proxies —
+    they are not counted as breaker failures and are not wrapped as
+    :class:`ProviderUnavailable`. Use for cooperative-cancel signals and
+    other control-flow exceptions that happen to inherit from ``Exception``.
+
+    Idempotent. Must be called *before* the provider's
+    :class:`CircuitBreakerProxy` is constructed; proxies snapshot the
+    ignored set at ``__init__`` time. Calling from the defining module's
+    top level (after the class is defined) is the supported pattern —
+    that avoids the circular-import trap of having ``circuit.py`` reach
+    sideways into application packages at its own import time.
+    """
+    if exc_type not in _DEFAULT_IGNORED_EXCEPTIONS:
+        _DEFAULT_IGNORED_EXCEPTIONS.append(exc_type)
+
 
 def _default_network_exceptions() -> tuple[type[BaseException], ...]:
     """Build the tuple of exception classes treated as "downstream is sick"."""
