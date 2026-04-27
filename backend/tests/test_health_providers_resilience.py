@@ -91,7 +91,7 @@ async def test_load_ds_index_refetches_after_ttl_expiry():
         fake_result.all = MagicMock(return_value=[("ws_2", "ds_2", "prov_2")])
         fake_session.execute = AsyncMock(return_value=fake_result)
 
-        with patch.object(main_module, "get_provider_probe_session") as get_sess:
+        with patch("backend.app.db.engine.get_provider_probe_session") as get_sess:
             get_sess.return_value = fake_session
             result = await main_module._load_ds_index()
 

@@ -650,11 +650,12 @@ class ProviderManager:
         port: Optional[int],
         graph_name: Optional[str],
         tls_enabled: bool,
-        credentials: dict,
+        credentials: Optional[dict] = None,
         extra_config: Optional[dict] = None,
     ) -> GraphDataProvider:
         """Dispatch to the correct provider constructor."""
         ptype = provider_type.lower()
+        creds = credentials or {}
 
         if ptype == "falkordb":
             from backend.app.providers.falkordb_provider import FalkorDBProvider
@@ -668,16 +669,16 @@ class ProviderManager:
                 host=host or "localhost",
                 port=port or 6379,
                 graph_name=graph_name or "nexus_lineage",
-                username=credentials.get("username") if credentials else None,
-                password=credentials.get("password") if credentials else None,
+                username=creds.get("username"),
+                password=creds.get("password"),
             )
 
         elif ptype == "neo4j":
             from backend.graph.adapters.neo4j_provider import Neo4jProvider
             return Neo4jProvider(
                 uri=f"{'bolt+s' if tls_enabled else 'bolt'}://{host}:{port or 7687}",
-                username=credentials.get("username", "neo4j"),
-                password=credentials.get("password", ""),
+                username=creds.get("username", "neo4j"),
+                password=creds.get("password", ""),
                 database=graph_name or "neo4j",
                 extra_config=extra_config,
             )
@@ -686,7 +687,7 @@ class ProviderManager:
             from backend.graph.adapters.datahub_provider import DataHubGraphQLProvider
             return DataHubGraphQLProvider(
                 base_url=host or "",
-                token=credentials.get("token"),
+                token=creds.get("token"),
             )
 
         raise ValueError(f"Unknown provider_type: {ptype!r}")
