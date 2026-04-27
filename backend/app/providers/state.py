@@ -152,6 +152,21 @@ class ProviderStateSnapshot:
     breaker_opened_at: Optional[float]
     last_warmup_at: Optional[float]
 
+    def warmup_overrides_breaker(self) -> bool:
+        """Mirror of ``ProviderState.warmup_overrides_breaker`` — see that
+        docstring. Duplicated here because callers on the read path receive
+        the snapshot, not the live state. (This duplication is exactly the
+        over-engineering I called out: snapshot vs live having to keep
+        their predicates in sync. Fold these into one class on the next
+        simplification pass.)
+        """
+        obs = self.last_observation
+        if obs is None or self.breaker_opened_at is None:
+            return False
+        if self.breaker_state != "open":
+            return False
+        return obs.ok and obs.observed_at > self.breaker_opened_at
+
     @classmethod
     def from_state(cls, state: ProviderState) -> "ProviderStateSnapshot":
         return cls(
