@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from 'react'
+import { memo, useCallback, useState, useMemo, useEffect, useRef } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
     Activity, Loader2, ArrowUpDown, AlertTriangle,
@@ -77,7 +77,7 @@ interface JobHistoryGroupedViewProps {
     setPurgeConfirm: (id: string | null) => void
 }
 
-export function JobHistoryGroupedView({
+export const JobHistoryGroupedView = memo(function JobHistoryGroupedView({
     jobs,
     dsLookup,
     allDataSources,
@@ -118,17 +118,31 @@ export function JobHistoryGroupedView({
 
     const failureCorrelation = useMemo(() => detectFailureCorrelation(groups), [groups])
 
-    const toggleGroup = (dsId: string) => {
+    // Stable handlers — passing inline arrows to memo'd children
+    // (DataSourceGroupCard, JobRow) re-creates the prop on every render and
+    // defeats memoization, causing all groups + all rows to re-render on any
+    // state change (e.g. opening a row, changing sort, polling).
+    const toggleGroup = useCallback((dsId: string) => {
         setExpandedGroups(prev => {
             const next = new Set(prev)
             if (next.has(dsId)) next.delete(dsId)
             else next.add(dsId)
             return next
         })
-    }
+    }, [])
 
-    const expandAll = () => setExpandedGroups(new Set(groups.map(g => g.dataSourceId)))
-    const collapseAll = () => { setExpandedGroups(new Set()); setExpandedRowId(null) }
+    const handleToggleRow = useCallback((id: string) => {
+        setExpandedRowId(prev => prev === id ? null : id)
+    }, [])
+
+    const expandAll = useCallback(
+        () => setExpandedGroups(new Set(groups.map(g => g.dataSourceId))),
+        [groups],
+    )
+    const collapseAll = useCallback(() => {
+        setExpandedGroups(new Set())
+        setExpandedRowId(null)
+    }, [])
 
     const hiddenCount = allDataSources.length - groups.length
 
@@ -219,7 +233,7 @@ export function JobHistoryGroupedView({
                             key={group.dataSourceId}
                             group={group}
                             expanded={expandedGroups.has(group.dataSourceId)}
-                            onToggle={() => toggleGroup(group.dataSourceId)}
+                            onToggle={toggleGroup}
                             onCancel={onCancel}
                             onResume={onResume}
                             onRetrigger={onRetrigger}
@@ -229,7 +243,7 @@ export function JobHistoryGroupedView({
                             onPurgeDataSource={onPurgeDataSource}
                             onShowAllJobs={onShowAllJobs}
                             expandedRowId={expandedRowId}
-                            setExpandedRowId={setExpandedRowId}
+                            onToggleRow={handleToggleRow}
                             purgeConfirm={purgeConfirm}
                             setPurgeConfirm={setPurgeConfirm}
                             actionLoading={actionLoading}
@@ -246,4 +260,4 @@ export function JobHistoryGroupedView({
             )}
         </div>
     )
-}
+})

@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
     Search, X, Users, Database, Zap, Settings,
@@ -22,7 +23,7 @@ interface JobHistoryFilterBarProps {
     removeChip: (key: string) => void
 }
 
-export function JobHistoryFilterBar({
+export const JobHistoryFilterBar = memo(function JobHistoryFilterBar({
     filters,
     searchInput,
     onSearchInput,
@@ -160,4 +161,4 @@ export function JobHistoryFilterBar({
             </div>
         </>
     )
-}
+})

@@ -18,11 +18,13 @@ DB) and patch ``asyncio.sleep`` so the suite runs in milliseconds.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
+from backend.app.jobs import JobScope as PlatformJobScope
 from backend.app.services.aggregation.worker import AggregationWorker
 from backend.common.adapters import ProviderUnavailable
 
@@ -69,6 +71,18 @@ def _make_worker() -> AggregationWorker:
     return AggregationWorker(session_factory=None, registry=None, event_publisher=None)
 
 
+def _retry_call_kwargs() -> dict[str, Any]:
+    """Stub values for the three runtime args added to
+    ``_materialize_with_retries``: cancel_event, emitter, scope.
+    ``_materialize_with_checkpoints`` is mocked in every test, so the
+    cancel signal is never read and the emitter is never invoked."""
+    return {
+        "cancel_event": asyncio.Event(),
+        "emitter": AsyncMock(),
+        "scope": PlatformJobScope(workspace_id="ws_test", data_source_id="ds_test"),
+    }
+
+
 # ── Tests ────────────────────────────────────────────────────────────────
 
 
@@ -102,6 +116,7 @@ async def test_first_provider_unavailable_triggers_extended_sleep(
         provider=object(),
         containment_types=[],
         lineage_types=["TRANSFORMS"],
+        **_retry_call_kwargs(),
     )
 
     assert result == {"aggregated_edges_affected": 7}
@@ -147,6 +162,7 @@ async def test_second_provider_unavailable_with_circuit_open_aborts_immediately(
             provider=object(),
             containment_types=[],
             lineage_types=["TRANSFORMS"],
+            **_retry_call_kwargs(),
         )
 
     # Exactly two attempts (not the full max_retries+1).
@@ -194,6 +210,7 @@ async def test_first_circuit_open_still_gets_one_retry_then_aborts(
             provider=object(),
             containment_types=[],
             lineage_types=["TRANSFORMS"],
+            **_retry_call_kwargs(),
         )
 
     # Same fast-fail behaviour: 2 attempts, 1 sleep, abort message set.
@@ -235,6 +252,7 @@ async def test_non_provider_unavailable_errors_use_exponential_backoff(
         provider=object(),
         containment_types=[],
         lineage_types=["TRANSFORMS"],
+        **_retry_call_kwargs(),
     )
 
     assert result == {"aggregated_edges_affected": 1}

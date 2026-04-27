@@ -13,6 +13,7 @@ from sqlalchemy import (
     Identity,
     Index,
     Integer,
+    JSON,
     Text,
     TIMESTAMP,
     text,
@@ -59,7 +60,9 @@ class JobEventLogORM(Base):
         server_default=text("now()"),
         index=True,
     )
-    payload = Column(JSONB, nullable=False)
+    # JSONB on Postgres (production); JSON on other dialects so SQLite-
+    # backed test fixtures can still create_all this table.
+    payload = Column(JSON().with_variant(JSONB(), "postgresql"), nullable=False)
 
     __table_args__ = (
         Index("ix_job_event_log_job_id_seq", "job_id", "sequence"),

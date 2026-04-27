@@ -158,8 +158,12 @@ class TestResolveThreeLayerMerge:
         for src in resolved.resolution_sources.values():
             assert src == "system_default"
 
-    async def test_resolve_assigned_overrides_system(self):
-        """Assigned ontology types override same keys from system default."""
+    async def test_resolve_assigned_replaces_system_entirely(self):
+        """When an assigned ontology exists, system defaults are gated
+        out — the assigned ontology defines the full namespace. See
+        ``LocalOntologyService.resolve`` (service.py:82-87): system
+        defaults are an opt-in fallback only when ``assigned is None``,
+        deliberately so they don't pollute custom workspace ontologies."""
         system = _minimal_system_ontology()
         assigned = OntologyData(
             id="ws_ont", name="WS Ontology", version=1,
@@ -175,12 +179,11 @@ class TestResolveThreeLayerMerge:
         svc = LocalOntologyService(repository=repo)
         resolved = await svc.resolve(workspace_id="ws_test")
 
-        # dataset should come from assigned layer
+        # dataset comes from the assigned layer.
         assert resolved.entity_type_definitions["dataset"].name == "Custom Dataset"
         assert resolved.resolution_sources["dataset"] == "assigned"
-        # container should still come from system_default
-        assert "container" in resolved.entity_type_definitions
-        assert resolved.resolution_sources["container"] == "system_default"
+        # container is NOT pulled from system_default — assigned gates it out.
+        assert "container" not in resolved.entity_type_definitions
 
     async def test_resolve_introspection_gap_fills(self):
         """Introspected types not in system or assigned get synthetic defs."""

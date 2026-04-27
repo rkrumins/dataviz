@@ -22,6 +22,7 @@ from typing import AsyncGenerator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -90,6 +91,18 @@ def db_engine() -> AsyncEngine:
         # SQLite requires this for async usage with multiple statements
         connect_args={"check_same_thread": False},
     )
+
+    # Production models in backend/app/services/aggregation/models.py and
+    # backend/app/jobs/models.py declare ``__table_args__ = ({"schema":
+    # "aggregation"},)`` for Postgres. SQLite has no schemas but does
+    # support attached databases addressed with the same ``db.table``
+    # syntax — attach an in-memory db aliased as ``aggregation`` on every
+    # new connection so ``Base.metadata.create_all`` and downstream
+    # queries against ``aggregation.<table>`` resolve.
+    @event.listens_for(engine.sync_engine, "connect")
+    def _attach_aggregation_schema(dbapi_conn, _connection_record):
+        dbapi_conn.execute("ATTACH DATABASE ':memory:' AS aggregation")
+
     return engine
 
 
