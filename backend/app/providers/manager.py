@@ -36,7 +36,7 @@ from backend.common.adapters import (
 )
 from backend.common.interfaces.provider import GraphDataProvider
 
-from .state import ProbeOutcome, ProviderState, ProviderStateSnapshot
+from .state import ProbeOutcome, ProviderState
 
 logger = logging.getLogger(__name__)
 
@@ -495,21 +495,23 @@ class ProviderManager:
 
     def snapshot_state(
         self, provider_id: str, graph_name: str = "",
-    ) -> Optional[ProviderStateSnapshot]:
-        """Return a frozen snapshot of one provider's state, or None if
-        we've never observed it. Lock-free read — the underlying dict is
-        only mutated under ``_state_lock`` and reads of a single key are
-        atomic in CPython."""
-        state = self._provider_states.get((provider_id, graph_name or ""))
-        if state is None:
-            return None
-        return ProviderStateSnapshot.from_state(state)
+    ) -> Optional[ProviderState]:
+        """Return one provider's state, or None if we've never observed
+        it. Lock-free read — the underlying dict is only mutated under
+        ``_state_lock`` and reads of a single key are atomic in CPython.
 
-    def snapshot_states_for(self, provider_id: str) -> List[ProviderStateSnapshot]:
+        F1: returns the live ``ProviderState`` directly (no copy). Treat
+        as read-only by convention. Single-attribute reads are atomic;
+        the only multi-field invariants the manager relies on are written
+        atomically inside ``_state_lock``.
+        """
+        return self._provider_states.get((provider_id, graph_name or ""))
+
+    def snapshot_states_for(self, provider_id: str) -> List[ProviderState]:
         """All states matching one provider_id (across graph_names). Used
         by status endpoints that don't know the specific graph_name."""
         return [
-            ProviderStateSnapshot.from_state(state)
+            state
             for cache_key, state in self._provider_states.items()
             if cache_key[0] == provider_id
         ]
