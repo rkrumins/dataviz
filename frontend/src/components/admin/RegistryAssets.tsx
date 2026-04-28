@@ -24,7 +24,7 @@ import { catalogService, type CatalogItemResponse } from '@/services/catalogServ
 import { workspaceService } from '@/services/workspaceService'
 import { aggregationService } from '@/services/aggregationService'
 import { useToast } from '@/components/ui/toast'
-import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
+import { Neo4jLogo, FalkorDBLogo, DataHubLogo, SpannerGraphLogo } from './ProviderLogos'
 import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 import { FirstRunHero } from './FirstRunHero'
 import { RetriggerDialog } from './job-history/RetriggerDialog'
@@ -41,6 +41,7 @@ const PROVIDER_TYPES = [
     { type: 'falkordb', label: 'FalkorDB', Logo: FalkorDBLogo, color: 'text-amber-500 bg-amber-500/10 border-amber-500/20' },
     { type: 'neo4j', label: 'Neo4j', Logo: Neo4jLogo, color: 'text-blue-500 bg-blue-500/10 border-blue-500/20' },
     { type: 'datahub', label: 'DataHub', Logo: DataHubLogo, color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20' },
+    { type: 'spanner_graph', label: 'Google Spanner Graph', Logo: SpannerGraphLogo, color: 'text-sky-500 bg-sky-500/10 border-sky-500/20' },
 ]
 function getProviderConfig(type: string) {
     return PROVIDER_TYPES.find(p => p.type === type) || PROVIDER_TYPES[0]

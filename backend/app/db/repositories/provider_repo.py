@@ -123,6 +123,16 @@ async def update_provider(
     if getattr(req, "permitted_workspaces", None) is not None:
         row.permitted_workspaces = json.dumps(req.permitted_workspaces)
 
+    # Per-provider-type ``extra_config`` validation runs against the merged
+    # state — if the caller patched ``extra_config`` we must re-check the
+    # whole shape, not just the patch. Same registry the create-path
+    # validator uses, so rules stay in one place.
+    from backend.common.models.management import validate_provider_extra_config
+    merged_cfg = json.loads(row.extra_config) if row.extra_config else None
+    err = validate_provider_extra_config(row.provider_type, merged_cfg)
+    if err:
+        raise ValueError(err)
+
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
     return _to_response(row)

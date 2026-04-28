@@ -3,6 +3,7 @@ Admin Provider endpoints — CRUD for physical database server registrations.
 Providers are pure infrastructure: host/port/credentials, no graph or ontology.
 """
 import asyncio
+import json
 import time
 from datetime import datetime, timezone
 from typing import List, Tuple
@@ -17,6 +18,7 @@ from backend.app.db.engine import (
 )
 from backend.app.db.repositories import provider_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
+from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.management import (
     ProviderCreateRequest,
     ProviderUpdateRequest,
@@ -93,6 +95,7 @@ async def _run_connectivity_probe(
     port: int | None,
     tls_enabled: bool,
     creds: dict | None,
+    extra_config: dict | None = None,
 ) -> ConnectionTestResult:
     """Bounded reachability probe used by the ``/test`` endpoint.
 
@@ -106,18 +109,30 @@ async def _run_connectivity_probe(
 
     With ``preflight()``, the probe finishes in ≤2.5s for an unreachable
     host, and ≤500ms for a reachable one.
+
+    ``extra_config`` is forwarded to providers that require it for
+    construction (Spanner Graph: project_id / auth_method; Neo4j: schema
+    mapping; etc.). Without it the wizard's ``Test Connection`` button
+    would 500 for any provider type whose dispatch validates the config.
     """
     PREFLIGHT_DEADLINE_S = 2.0
     PROBE_WALL_CLOCK_S = 2.5  # PREFLIGHT_DEADLINE_S + small slack
 
-    instance = provider_registry._create_provider_instance(
-        _provider_type_value(provider_type),
-        host,
-        port,
-        None,
-        tls_enabled,
-        creds,
-    )
+    try:
+        instance = provider_registry._create_provider_instance(
+            _provider_type_value(provider_type),
+            host,
+            port,
+            None,
+            tls_enabled,
+            creds,
+            extra_config,
+        )
+    except (ValueError, ProviderConfigurationError) as exc:
+        # Configuration errors (missing project_id, malformed JSON, unknown
+        # auth method, …) must come back as a clean failure result, not a
+        # 500 — the wizard surfaces ``error`` inline next to the button.
+        return ConnectionTestResult(success=False, error=str(exc))
     preflight = getattr(instance, "preflight", None)
 
     t0 = time.monotonic()
@@ -292,6 +307,7 @@ async def test_unsaved_provider_connection(
         port=req.port,
         tls_enabled=req.tls_enabled,
         creds=creds,
+        extra_config=req.extra_config,
     )
 
 
@@ -323,10 +339,21 @@ async def update_provider(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Update a provider. Evicts any cached provider instances."""
-    prov = await provider_repo.update_provider(session, provider_id, req)
+    try:
+        prov = await provider_repo.update_provider(session, provider_id, req)
+    except ValueError as exc:
+        # Per-provider-type ``extra_config`` validation surfaces here when
+        # the merged config (existing row + patch) is incomplete. Return
+        # 422 so the wizard renders the message inline next to the field.
+        raise HTTPException(status_code=422, detail=str(exc))
     if not prov:
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
     await provider_registry.evict_provider(provider_id)
+    # Drop the warmup loop's misconfigured-dedup state so an updated row
+    # gets a fresh WARN if it still fails (or stops logging entirely if
+    # the user fixed it). Self-heal on update without operator intervention.
+    from backend.app.providers.warmup import forget_misconfigured_provider
+    forget_misconfigured_provider(provider_id)
     return prov
 
 
@@ -345,6 +372,8 @@ async def delete_provider(
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
     await provider_registry.evict_provider(provider_id)
+    from backend.app.providers.warmup import forget_misconfigured_provider
+    forget_misconfigured_provider(provider_id)
 
 
 @router.get("/{provider_id}/impact", response_model=ProviderImpactResponse)
@@ -401,6 +430,8 @@ async def test_provider(
         port = prov_row.port
         tls = prov_row.tls_enabled
         creds = await provider_repo.get_credentials(session, provider_id)
+        extra_cfg_raw = prov_row.extra_config
+    extra_cfg = json.loads(extra_cfg_raw) if extra_cfg_raw else None
     # 2. Cache + in-flight dedup — pure in-memory, no DB. Explicit user
     #    clicks (fresh=True) bypass entirely and also invalidate the
     #    cache entry so subsequent background polls see the new truth.
@@ -429,6 +460,7 @@ async def test_provider(
             port=port,
             tls_enabled=tls,
             creds=creds,
+            extra_config=extra_cfg,
         )
 
         # Always write the freshest result so any in-flight callers and
@@ -460,6 +492,8 @@ async def _load_provider_for_outbound(provider_id: str, asset_name: str | None):
 
     Centralises the Phase 2.5 §2.5.2 pattern shared by every endpoint
     below this comment. Returns a ready-to-instantiate provider object.
+    Includes ``extra_config`` so providers that depend on it (Neo4j schema
+    mapping, Spanner Graph project/auth/region) construct correctly.
     """
     async with with_short_session() as session:
         prov_row = await provider_repo.get_provider_orm(session, provider_id)
@@ -469,7 +503,10 @@ async def _load_provider_for_outbound(provider_id: str, asset_name: str | None):
         ptype, host, port, tls = (
             prov_row.provider_type, prov_row.host, prov_row.port, prov_row.tls_enabled,
         )
-    return provider_registry._create_provider_instance(ptype, host, port, asset_name, tls, creds)
+        extra_cfg = json.loads(prov_row.extra_config) if prov_row.extra_config else None
+    return provider_registry._create_provider_instance(
+        ptype, host, port, asset_name, tls, creds, extra_cfg,
+    )
 
 
 # ── Cache-only discovery endpoints moved to endpoints/insights.py ─────
@@ -494,6 +531,31 @@ async def discover_schema(
         return schema
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Provider timed out while discovering schema")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/{provider_id}/diagnostics")
+async def get_provider_diagnostics(
+    provider_id: str = Path(...),
+):
+    """Return provider-specific diagnostic signals for the admin panel.
+
+    Dispatches through the generic ``GraphDataProvider.get_diagnostics()``
+    optional method. Providers that don't override it return ``{}`` and the
+    UI hides the panel. Spanner Graph populates edition / dialect / region /
+    session pool / latency / IAM / schema fingerprint / drift / capabilities.
+    """
+    instance = await _load_provider_for_outbound(provider_id, asset_name=None)
+    try:
+        diag = await asyncio.wait_for(instance.get_diagnostics(), timeout=10)
+        # Surface a minimal envelope so the UI can distinguish "not supported"
+        # from "supported but currently empty".
+        return {"diagnostics": diag or {}, "supported": bool(diag)}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Provider diagnostics timed out")
+    except NotImplementedError:
+        return {"diagnostics": {}, "supported": False}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

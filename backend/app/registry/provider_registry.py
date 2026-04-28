@@ -314,6 +314,44 @@ class ProviderRegistry:
                 token=credentials.get("token"),
             )
 
+        elif ptype == "spanner_graph":
+            # Workspace-scoped Spanner instantiation (ContextEngine path).
+            # Mirrors the dispatch in
+            # ``backend.app.providers.manager._create_provider_instance``: the
+            # data source's ``graph_name`` carries the qualified
+            # ``"<database_id>.<property_graph_name>"``; required GCP fields
+            # come from ``extra_config``. Same registry-driven validation as
+            # the manager so misconfigured rows fail with a typed
+            # ``ProviderConfigurationError`` instead of an untyped 500.
+            from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+            from backend.common.interfaces.provider import ProviderConfigurationError
+            from backend.common.models.management import validate_provider_extra_config
+
+            qualified = (graph_name or "").strip()
+            if "." in qualified:
+                database_id, property_graph_name = qualified.split(".", 1)
+            else:
+                database_id = (extra_config or {}).get("database_id") or ""
+                property_graph_name = qualified
+            cfg = extra_config or {}
+            err = validate_provider_extra_config("spanner_graph", cfg)
+            if err:
+                raise ProviderConfigurationError(err)
+            return SpannerGraphProvider(
+                project_id=cfg["project_id"],
+                instance_id=host or "",
+                database_id=database_id,
+                property_graph_name=property_graph_name,
+                auth_method=cfg.get("auth_method", "adc"),
+                credentials_json=(credentials or {}).get("token"),
+                impersonate_service_account=cfg.get("impersonate_service_account"),
+                gcp_region=cfg.get("gcp_region"),
+                read_staleness_s=cfg.get("read_staleness_s"),
+                change_stream_name=cfg.get("change_stream_name"),
+                embed_endpoint=cfg.get("embed_endpoint"),
+                extra_config=cfg,
+            )
+
         raise ValueError(f"Unknown provider_type: {ptype!r}")
 
 # Module-level singleton — used by FastAPI dependency and ContextEngine.

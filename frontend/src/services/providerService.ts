@@ -14,7 +14,34 @@ const ADMIN_API = '/api/v1/admin/providers'
 // returns a `computing` envelope.
 const INSIGHTS_API = '/api/v1/admin/insights'
 
-export type ProviderType = 'falkordb' | 'neo4j' | 'datahub' | 'mock'
+export type ProviderType = 'falkordb' | 'neo4j' | 'datahub' | 'spanner_graph' | 'mock'
+
+export interface ProviderCapabilities {
+    time_travel?: boolean
+    vector_search?: boolean
+    full_text_search?: boolean
+    change_streams?: boolean
+}
+
+export interface ProviderDiagnostics {
+    edition?: string | null
+    dialect?: string | null
+    region?: string | null
+    session_pool?: { size?: number; in_use?: number } | null
+    last_query_p50_ms?: number | null
+    last_query_p95_ms?: number | null
+    last_successful_query_at?: number | null
+    schema_fingerprint?: string | null
+    schema_drift_detected?: boolean
+    iam_permissions?: Record<string, boolean>
+    capabilities?: ProviderCapabilities
+    [key: string]: any
+}
+
+export interface ProviderDiagnosticsResponse {
+    diagnostics: ProviderDiagnostics
+    supported: boolean
+}
 
 export interface ProviderCreateRequest {
     name: string
@@ -347,6 +374,20 @@ export const providerService = {
                 body: JSON.stringify({ assetName: assetName || null }),
                 timeoutMs: 20_000,
             },
+        )
+    },
+
+    /**
+     * Fetch provider-specific diagnostic signals (edition, dialect, region,
+     * session pool, latency p50/p95, IAM checks, schema fingerprint, drift,
+     * capabilities). Providers that don't override the optional
+     * ``get_diagnostics()`` method return ``supported=false`` — UI hides
+     * the panel in that case.
+     */
+    getDiagnostics(providerId: string): Promise<ProviderDiagnosticsResponse> {
+        return request<ProviderDiagnosticsResponse>(
+            `${ADMIN_API}/${providerId}/diagnostics`,
+            { method: 'GET', timeoutMs: 12_000 },
         )
     },
 }

@@ -690,6 +690,52 @@ class ProviderManager:
                 token=creds.get("token"),
             )
 
+        elif ptype == "spanner_graph":
+            # Spanner addressing: project_id → instance_id → database_id → property_graph_name.
+            #
+            # The provider record stores instance_id (in ``host``) and the
+            # project + auth in ``extra_config``. The data source's
+            # ``graph_name`` carries the qualified
+            # ``"<database_id>.<property_graph_name>"`` so one provider can
+            # fan out across every database+graph on the instance — matching
+            # the "one server, many graphs" convention used by FalkorDB and
+            # Neo4j.
+            from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+            from backend.common.interfaces.provider import ProviderConfigurationError
+            from backend.common.models.management import validate_provider_extra_config
+
+            qualified = (graph_name or "").strip()
+            if "." in qualified:
+                database_id, property_graph_name = qualified.split(".", 1)
+            else:
+                # Allow instantiation without a graph (e.g. for ``list_graphs``).
+                database_id = (extra_config or {}).get("database_id") or ""
+                property_graph_name = qualified
+            cfg = extra_config or {}
+            # Defence-in-depth: API boundary already validates this, but a
+            # row written via SQL (seed scripts, manual edits) can still
+            # reach the dispatch with bad config. Raise the typed
+            # ``ProviderConfigurationError`` so the warmup loop can
+            # classify it as a permanent failure (vs. transient network).
+            err = validate_provider_extra_config("spanner_graph", cfg)
+            if err:
+                raise ProviderConfigurationError(err)
+            project_id = cfg["project_id"]
+            return SpannerGraphProvider(
+                project_id=project_id,
+                instance_id=host or "",
+                database_id=database_id,
+                property_graph_name=property_graph_name,
+                auth_method=cfg.get("auth_method", "adc"),
+                credentials_json=(creds or {}).get("token"),
+                impersonate_service_account=cfg.get("impersonate_service_account"),
+                gcp_region=cfg.get("gcp_region"),
+                read_staleness_s=cfg.get("read_staleness_s"),
+                change_stream_name=cfg.get("change_stream_name"),
+                embed_endpoint=cfg.get("embed_endpoint"),
+                extra_config=cfg,
+            )
+
         raise ValueError(f"Unknown provider_type: {ptype!r}")
 
     # ------------------------------------------------------------------ #

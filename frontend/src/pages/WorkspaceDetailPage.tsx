@@ -356,7 +356,8 @@ export function WorkspaceDetailPage() {
     }
 
     return (
-        <div className="p-8 max-w-5xl mx-auto animate-in fade-in duration-500">
+        <div className="absolute inset-0 overflow-y-auto">
+            <div className="p-8 max-w-5xl mx-auto animate-in fade-in duration-500">
             {/* Breadcrumb */}
             <div className="flex items-center justify-between mb-6">
                 <nav aria-label="Breadcrumb" className="flex items-center gap-2 text-sm">
@@ -655,6 +656,7 @@ export function WorkspaceDetailPage() {
                 }}
                 onClose={() => setSelectedDsId(null)}
             />
+            </div>
         </div>
     )
 }

@@ -265,7 +265,7 @@ class ProviderORM(Base):
     __table_args__ = (
         Index("idx_providers_type", "provider_type"),
         CheckConstraint(
-            "provider_type IN ('falkordb', 'neo4j', 'datahub', 'mock')",
+            "provider_type IN ('falkordb', 'neo4j', 'datahub', 'mock', 'spanner_graph')",
             name="ck_providers_provider_type",
         ),
     )
