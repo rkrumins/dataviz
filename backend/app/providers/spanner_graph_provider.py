@@ -1689,13 +1689,16 @@ class SpannerGraphProvider(GraphDataProvider):
         cached = self._stats_cache.get()
         if cached is not None:
             return cached
+        # Spanner GQL forbids ``COUNT(<graph_var>)`` — graph elements are
+        # ZetaSQL-typed and the COUNT signature requires a value type.
+        # ``COUNT(*)`` returns one-per-match, which is the same total here.
         rows = await self._ro_gql(
-            "MATCH (n) RETURN COUNT(n) AS node_count",
+            "MATCH (n) RETURN COUNT(*) AS node_count",
             request_tag="get_stats_nodes",
         )
         node_count = int(rows[0][0]) if rows else 0
         rows = await self._ro_gql(
-            "MATCH ()-[r]->() RETURN COUNT(r) AS edge_count",
+            "MATCH ()-[r]->() RETURN COUNT(*) AS edge_count",
             request_tag="get_stats_edges",
         )
         edge_count = int(rows[0][0]) if rows else 0
@@ -1824,9 +1827,14 @@ class SpannerGraphProvider(GraphDataProvider):
         cont_types = list(self._require_containment_types())
         if not cont_types:
             return []
+        # Spanner GQL filters edges along a quantified path via a WHERE
+        # clause INSIDE the edge bracket — Cypher's ``ALL r IN r SATISFIES``
+        # has no equivalent. Inside the bracket ``r`` is a single edge being
+        # matched at each step; outside it is ARRAY<EDGE>. So the
+        # containment-types filter goes inline with the edge pattern.
         rows = await self._ro_gql(
-            "MATCH (a)-[r]->{1,25}(c) "
-            "WHERE c.urn = @urn AND ALL r IN r SATISFIES LABELS(r) && @cont_types "
+            "MATCH (a)-[r WHERE LABELS(r) && @cont_types]->{1,25}(c) "
+            "WHERE c.urn = @urn "
             "RETURN DISTINCT SAFE_TO_JSON(a) AS node, LABELS(a) AS labels "
             "ORDER BY a.displayName "
             f"LIMIT {max(1, int(limit))} OFFSET {max(0, int(offset))}",
@@ -1856,7 +1864,9 @@ class SpannerGraphProvider(GraphDataProvider):
         cont_types = list(self._require_containment_types())
         if not cont_types:
             return []
-        clauses = ["a.urn = @urn", "ALL r IN r SATISFIES LABELS(r) && @cont_types"]
+        # Containment-types filter is pushed INSIDE the edge bracket — see
+        # the comment on get_ancestors() above for why.
+        clauses = ["a.urn = @urn"]
         params: Dict[str, Any] = {"urn": urn, "cont_types": cont_types}
         ptypes: Dict[str, Any] = {
             "urn": param_types.STRING,
@@ -1868,7 +1878,8 @@ class SpannerGraphProvider(GraphDataProvider):
             ptypes["entity_types"] = param_types.Array(param_types.STRING)
         d = max(1, min(int(depth), 25))
         rows = await self._ro_gql(
-            f"MATCH (a)-[r]->{{1,{d}}}(d) WHERE {' AND '.join(clauses)} "
+            f"MATCH (a)-[r WHERE LABELS(r) && @cont_types]->{{1,{d}}}(d) "
+            f"WHERE {' AND '.join(clauses)} "
             f"RETURN DISTINCT SAFE_TO_JSON(d) AS node, LABELS(d) AS labels "
             f"ORDER BY d.displayName "
             f"LIMIT {max(1, int(limit))} OFFSET {max(0, int(offset))}",
@@ -2293,7 +2304,7 @@ class SpannerGraphProvider(GraphDataProvider):
         try:
             total_rows = await self._ro_gql(
                 f"MATCH (s)-[r]->(t) WHERE {' AND '.join(clauses)} "
-                f"RETURN COUNT(r) AS c",
+                f"RETURN COUNT(*) AS c",
                 params=params, param_types_=ptypes,
                 max_staleness_s=0.0,
                 request_tag="aggr_total",
@@ -2582,7 +2593,7 @@ class SpannerGraphProvider(GraphDataProvider):
                     label_details.setdefault(lbl, {"properties": {}, "count": 0, "sample": {}})
                     label_details[lbl]["sample"] = _coerce_spanner_value(sample[0][0])
                 count_rows = await self._ro_gql(
-                    f"MATCH (n:{_sanitize_identifier(lbl)}) RETURN COUNT(n) AS c",
+                    f"MATCH (n:{_sanitize_identifier(lbl)}) RETURN COUNT(*) AS c",
                     max_staleness_s=self._read_staleness_s,
                 )
                 if count_rows:

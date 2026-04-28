@@ -47,9 +47,29 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Awaitable, Callable, Dict, MutableMapping, Optional
+from typing import Any, Awaitable, Callable, Dict, MutableMapping, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# Dedup map for permanent ``ProviderConfigurationError`` build failures —
+# keyed by ``(provider_id, error_message)`` so the same broken row only
+# WARNs once per process per distinct error. Subsequent identical failures
+# drop to DEBUG. Cleared per-provider via ``forget_misconfigured_provider``
+# so an updated config gets a fresh WARN if it fails for a *different*
+# reason. See ``_probe_one``.
+_LOGGED_MISCONFIG_KEYS: Set[Tuple[str, str]] = set()
+
+
+def forget_misconfigured_provider(provider_id: str) -> None:
+    """Drop dedup state for ``provider_id`` so the next misconfiguration
+    surfaces a fresh WARN. Called by the manager when a provider row is
+    updated or deleted, so the loop self-heals on user action.
+    """
+    if not provider_id:
+        return
+    stale = {k for k in _LOGGED_MISCONFIG_KEYS if k[0] == provider_id}
+    _LOGGED_MISCONFIG_KEYS.difference_update(stale)
 
 
 # ── Tunables ─────────────────────────────────────────────────────────
@@ -311,11 +331,50 @@ async def _probe_one(
     build_instance: Callable[[ProviderConfig], Any],
 ) -> dict:
     """Run one preflight against the provider described by ``cfg``.
-    Returns a cache entry dict; never raises (network errors classified)."""
+    Returns a cache entry dict; never raises (network errors classified).
+
+    Build failures are classified into two flavours:
+
+    * ``ProviderConfigurationError`` — permanent / not transient. The row's
+      ``extra_config`` is missing required fields, or some other config
+      problem the loop can't recover from until the user fixes the row.
+      Logged at WARN **once** per (provider_id, message); subsequent
+      identical failures log at DEBUG so the loop doesn't drown the logs.
+      Cache entry uses ``reason="misconfigured: …"`` so the status endpoint
+      can render a distinct UX state ("misconfigured" vs. "unreachable").
+
+    * Anything else — treated as a transient build failure (driver crash,
+      socket exhaustion, etc.). Existing behavior preserved: WARN every
+      time, ``reason="build_failed: …"``.
+    """
+    # Local import — avoids circular: provider.py → manager.py → warmup.py.
+    from backend.common.interfaces.provider import ProviderConfigurationError
+
     t0 = time.monotonic()
     instance = None
     try:
         instance = build_instance(cfg)
+    except ProviderConfigurationError as exc:
+        prov_id = cfg.get("id") or ""
+        msg = str(exc)
+        key = (prov_id, msg)
+        if key not in _LOGGED_MISCONFIG_KEYS:
+            _LOGGED_MISCONFIG_KEYS.add(key)
+            logger.warning(
+                "Provider warmup: %s misconfigured (will log subsequent identical "
+                "failures at DEBUG until config changes): %s",
+                prov_id, msg,
+            )
+        else:
+            logger.debug("Provider warmup: %s still misconfigured: %s", prov_id, msg)
+        return {
+            "ok": False,
+            "reason": f"misconfigured: {msg}"[:200],
+            "elapsed_ms": int((time.monotonic() - t0) * 1000),
+            "checked_at": time.time(),
+            "provider_type": cfg.get("provider_type"),
+            "host": cfg.get("host"),
+        }
     except Exception as exc:
         logger.warning(
             "Provider warmup: build failed for %s: %s",

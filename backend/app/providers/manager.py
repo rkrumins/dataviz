@@ -701,6 +701,8 @@ class ProviderManager:
             # the "one server, many graphs" convention used by FalkorDB and
             # Neo4j.
             from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+            from backend.common.interfaces.provider import ProviderConfigurationError
+            from backend.common.models.management import validate_provider_extra_config
 
             qualified = (graph_name or "").strip()
             if "." in qualified:
@@ -710,11 +712,15 @@ class ProviderManager:
                 database_id = (extra_config or {}).get("database_id") or ""
                 property_graph_name = qualified
             cfg = extra_config or {}
-            project_id = cfg.get("project_id")
-            if not project_id:
-                raise ValueError(
-                    "spanner_graph provider requires extra_config.project_id"
-                )
+            # Defence-in-depth: API boundary already validates this, but a
+            # row written via SQL (seed scripts, manual edits) can still
+            # reach the dispatch with bad config. Raise the typed
+            # ``ProviderConfigurationError`` so the warmup loop can
+            # classify it as a permanent failure (vs. transient network).
+            err = validate_provider_extra_config("spanner_graph", cfg)
+            if err:
+                raise ProviderConfigurationError(err)
+            project_id = cfg["project_id"]
             return SpannerGraphProvider(
                 project_id=project_id,
                 instance_id=host or "",

@@ -3,8 +3,56 @@ Pydantic models for the management database layer.
 Covers: graph connections, ontology configs, assignment rule sets, saved views.
 """
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from enum import Enum
+
+
+# ============================================
+# Per-provider-type extra_config requirements
+# ============================================
+#
+# Generic registry: each provider type declares which ``extra_config`` keys
+# are mandatory at row-write time. Centralised here (rather than in each
+# adapter) so the same rules fire on both ``POST /admin/providers`` and
+# ``PUT /admin/providers/{id}`` without bespoke per-endpoint checks. The
+# Pydantic ``model_validator`` below enforces these rules at the API
+# boundary; the dispatch in ``ProviderManager._create_provider_instance``
+# enforces them again as a defence-in-depth (in case a row gets written
+# directly via SQL, e.g. seed scripts or manual DB edits).
+#
+# A truthiness check (``not value``) is used — empty-string values are
+# treated the same as missing keys, which matches what every consumer of
+# ``extra_config`` actually needs. To extend, add an entry here; no other
+# code change required.
+
+_REQUIRED_EXTRA_CONFIG_KEYS: Dict[str, List[str]] = {
+    "spanner_graph": ["project_id"],
+}
+
+
+def validate_provider_extra_config(
+    provider_type: str,
+    extra_config: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Return a human-readable error message if the config is invalid for
+    this provider type, or ``None`` if it's complete.
+
+    Generic — never references a specific provider type by name. Pure
+    function so it's safe to call from anywhere (request validators,
+    manager dispatch, tests).
+    """
+    required = _REQUIRED_EXTRA_CONFIG_KEYS.get(provider_type)
+    if not required:
+        return None
+    cfg = extra_config or {}
+    missing = [key for key in required if not cfg.get(key)]
+    if missing:
+        joined = ", ".join(f"extra_config.{k}" for k in missing)
+        return (
+            f"{provider_type!r} provider requires {joined} to be set. "
+            "Fill this in the wizard's connection step or supply it via the API."
+        )
+    return None
 
 
 class ProviderType(str, Enum):
@@ -157,6 +205,17 @@ class ProviderCreateRequest(BaseModel):
     class Config:
         populate_by_name = True
 
+    @model_validator(mode="after")
+    def _check_extra_config(self) -> "ProviderCreateRequest":
+        # Per-provider-type ``extra_config`` requirements (e.g. Spanner Graph
+        # needs ``project_id``). Pure-function check — registry-driven, no
+        # per-provider branching here. Pydantic surfaces the message as a
+        # 422 to the API caller.
+        err = validate_provider_extra_config(self.provider_type.value, self.extra_config)
+        if err:
+            raise ValueError(err)
+        return self
+
 
 class ProviderUpdateRequest(BaseModel):
     name: Optional[str] = None
@@ -169,6 +228,13 @@ class ProviderUpdateRequest(BaseModel):
 
     class Config:
         populate_by_name = True
+
+    # Update requests don't carry ``provider_type``, so we can't validate
+    # ``extra_config`` against a registry here — the route handler does it
+    # after merging the persisted row's provider_type with the patch (see
+    # ``backend/app/db/repositories/provider_repo.update_provider``). Keeping
+    # it out of the model avoids false negatives for partial updates that
+    # don't touch ``extra_config``.
 
 
 class ProviderResponse(BaseModel):

@@ -512,6 +512,12 @@ async def lifespan(_app: FastAPI):
                         "port": row.port,
                         "tls": row.tls_enabled,
                         "creds": creds,
+                        # ``extra_config`` is required for any provider whose
+                        # construction depends on it (Spanner Graph: project_id /
+                        # auth_method; Neo4j: schemaMapping). Dropping it here
+                        # causes the warmup dispatch to fail validation for every
+                        # such row even when the persisted config is correct.
+                        "extra_config": row.extra_config,
                     })
                 return out
 
@@ -523,6 +529,7 @@ async def lifespan(_app: FastAPI):
                 None,
                 cfg.get("tls", False),
                 cfg.get("creds") or {},
+                cfg.get("extra_config"),
             )
 
         # P1.3 — warmup→manager state-machine callbacks.

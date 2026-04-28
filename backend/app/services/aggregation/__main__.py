@@ -406,7 +406,16 @@ async def main() -> None:
     )
 
     concurrency = int(os.getenv("WORKER_CONCURRENCY", "4"))
-    max_per_graph = int(os.getenv("MAX_CONCURRENT_PER_GRAPH", "2"))
+    # Default 1: provider instances are cached and shared by (provider_id,
+    # graph_name). Two concurrent jobs on the same graph share the same
+    # provider and silently corrupt each other through (a) the
+    # graph-scoped Redis idempotency set `{graph}:agg_members:*` (the 2nd
+    # job sees pairs as already-materialized and reports created=0) and
+    # (b) provider-instance state mutated per-job (projection_mode,
+    # containment edge types). Until the materialize path becomes fully
+    # argument-driven, per-graph aggregation MUST serialize. Different
+    # graphs still run in parallel up to WORKER_CONCURRENCY.
+    max_per_graph = int(os.getenv("MAX_CONCURRENT_PER_GRAPH", "1"))
 
     logger.info("=== Aggregation Worker (standalone) starting ===")
     logger.info(

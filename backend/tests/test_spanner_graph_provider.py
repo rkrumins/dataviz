@@ -593,9 +593,15 @@ def test_manager_create_provider_instance_returns_spanner_provider_for_valid_ext
 
 
 def test_manager_create_provider_instance_rejects_missing_project_id():
+    """Defence-in-depth: the API boundary already validates extra_config,
+    but a row written via SQL or a buggy seed script can still hit the
+    dispatch with bad config. The manager raises the platform's typed
+    ``ProviderConfigurationError`` (NOT a generic ValueError) so the warmup
+    loop can classify it as a permanent — not transient — failure."""
     from backend.app.providers.manager import provider_manager
+    from backend.common.interfaces.provider import ProviderConfigurationError
 
-    with pytest.raises(ValueError, match="project_id"):
+    with pytest.raises(ProviderConfigurationError, match="project_id"):
         provider_manager._create_provider_instance(
             provider_type="spanner_graph",
             host="my-instance",
@@ -605,6 +611,131 @@ def test_manager_create_provider_instance_rejects_missing_project_id():
             credentials={},
             extra_config={"auth_method": "adc"},
         )
+
+
+# ---------------------------------------------------------------------- #
+# Pydantic boundary validation — the registry-driven check that runs on   #
+# every POST /admin/providers and PUT /admin/providers/{id}.              #
+# ---------------------------------------------------------------------- #
+
+
+def test_validate_provider_extra_config_returns_none_for_complete_spanner():
+    from backend.common.models.management import validate_provider_extra_config
+    assert validate_provider_extra_config(
+        "spanner_graph", {"project_id": "my-project"}
+    ) is None
+
+
+def test_validate_provider_extra_config_flags_missing_project_id():
+    from backend.common.models.management import validate_provider_extra_config
+    err = validate_provider_extra_config("spanner_graph", {})
+    assert err is not None
+    assert "project_id" in err
+
+
+def test_validate_provider_extra_config_flags_empty_string_project_id():
+    """Empty string is treated the same as missing — matches the registry's
+    truthiness check and the dispatch's behaviour."""
+    from backend.common.models.management import validate_provider_extra_config
+    err = validate_provider_extra_config("spanner_graph", {"project_id": ""})
+    assert err is not None
+    assert "project_id" in err
+
+
+def test_validate_provider_extra_config_no_op_for_unregistered_provider_types():
+    """Generic registry — provider types without entries are unaffected."""
+    from backend.common.models.management import validate_provider_extra_config
+    assert validate_provider_extra_config("falkordb", None) is None
+    assert validate_provider_extra_config("neo4j", {}) is None
+    assert validate_provider_extra_config("datahub", None) is None
+
+
+def test_provider_create_request_rejects_spanner_without_project_id():
+    """Pydantic surface: bad rows can't be created via the API at all."""
+    from backend.common.models.management import ProviderCreateRequest
+
+    with pytest.raises(Exception) as exc_info:
+        ProviderCreateRequest(
+            name="Test",
+            providerType="spanner_graph",
+            extraConfig={"auth_method": "adc"},  # no project_id
+        )
+    assert "project_id" in str(exc_info.value)
+
+
+def test_provider_create_request_accepts_spanner_with_project_id():
+    from backend.common.models.management import ProviderCreateRequest
+
+    req = ProviderCreateRequest(
+        name="Test",
+        providerType="spanner_graph",
+        extraConfig={"project_id": "my-project", "auth_method": "adc"},
+    )
+    assert req.extra_config["project_id"] == "my-project"
+
+
+# ---------------------------------------------------------------------- #
+# Warmup-loop misconfiguration dedup                                     #
+# ---------------------------------------------------------------------- #
+
+
+def test_forget_misconfigured_provider_clears_only_targeted_keys():
+    from backend.app.providers.warmup import (
+        _LOGGED_MISCONFIG_KEYS,
+        forget_misconfigured_provider,
+    )
+
+    _LOGGED_MISCONFIG_KEYS.clear()
+    _LOGGED_MISCONFIG_KEYS.add(("prov_a", "msg-1"))
+    _LOGGED_MISCONFIG_KEYS.add(("prov_a", "msg-2"))
+    _LOGGED_MISCONFIG_KEYS.add(("prov_b", "msg-1"))
+
+    forget_misconfigured_provider("prov_a")
+    assert ("prov_a", "msg-1") not in _LOGGED_MISCONFIG_KEYS
+    assert ("prov_a", "msg-2") not in _LOGGED_MISCONFIG_KEYS
+    assert ("prov_b", "msg-1") in _LOGGED_MISCONFIG_KEYS
+
+    forget_misconfigured_provider("")  # safe no-op
+    assert len(_LOGGED_MISCONFIG_KEYS) == 1
+
+
+@pytest.mark.asyncio
+async def test_warmup_probe_classifies_provider_configuration_error_as_misconfigured(caplog):
+    """``ProviderConfigurationError`` from build_instance must produce a
+    cache entry with ``reason='misconfigured: …'`` and emit at most one
+    WARN per (provider_id, message) per process.
+    """
+    import logging
+    from backend.common.interfaces.provider import ProviderConfigurationError
+    from backend.app.providers.warmup import _LOGGED_MISCONFIG_KEYS, _probe_one
+
+    _LOGGED_MISCONFIG_KEYS.clear()
+
+    def _build_failing(_cfg):
+        raise ProviderConfigurationError(
+            "spanner_graph provider requires extra_config.project_id"
+        )
+
+    cfg = {"id": "prov_test", "provider_type": "spanner_graph", "host": "x"}
+
+    with caplog.at_level(logging.WARNING, logger="backend.app.providers.warmup"):
+        first = await _probe_one(cfg, _build_failing)
+        warn_records_first = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        # Re-probe the same row with the same error
+        second = await _probe_one(cfg, _build_failing)
+        warn_records_second = [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    # Cache shape: distinct ``misconfigured:`` reason
+    assert first["ok"] is False
+    assert first["reason"].startswith("misconfigured:")
+    assert "project_id" in first["reason"]
+    assert second["ok"] is False
+    assert second["reason"].startswith("misconfigured:")
+
+    # Dedup: WARN only once. Second probe should not have added a new WARN.
+    assert len(warn_records_second) == len(warn_records_first), (
+        "ProviderConfigurationError dedup failed — repeat WARNs on identical failure"
+    )
 
 
 # ---------------------------------------------------------------------- #

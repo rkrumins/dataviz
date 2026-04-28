@@ -605,24 +605,45 @@ export function ProviderOnboardingWizard({
     })
   }, [formData.name, mode, provider?.id, providers])
 
+  const spannerValidationErrors = useMemo<string[]>(() => {
+    if (!isSpannerGraph(formData.providerType)) return []
+    const errs: string[] = []
+    const s = formData.spanner
+    if (!s.projectId.trim()) errs.push('GCP project ID is required.')
+    if (!s.instanceId.trim()) errs.push('Spanner instance ID is required.')
+    if (s.authMethod === 'service_account_json') {
+      const jsonErr = validateServiceAccountJson(s.credentialsJson)
+      if (jsonErr) errs.push(jsonErr)
+    }
+    if (s.authMethod === 'impersonation' && !s.impersonateServiceAccount.trim()) {
+      errs.push('Target service-account email is required for impersonation.')
+    }
+    return errs
+  }, [formData.providerType, formData.spanner])
+
   const canProceed = useMemo(() => {
     switch (currentStep) {
       case 'type':
         return Boolean(formData.providerType)
       case 'connection':
-        return Boolean(formData.name.trim()) && !nameDuplicate
+        return (
+          Boolean(formData.name.trim()) &&
+          !nameDuplicate &&
+          spannerValidationErrors.length === 0
+        )
       case 'schema':
         return true
       case 'review':
         return true
     }
-  }, [currentStep, formData.name, formData.providerType, nameDuplicate])
+  }, [currentStep, formData.name, formData.providerType, nameDuplicate, spannerValidationErrors])
 
   const stepWarnings = useMemo(() => {
     if (currentStep === 'connection') {
       const warnings: string[] = []
       if (!formData.name.trim()) warnings.push('Provider name is required.')
       if (nameDuplicate) warnings.push(`A provider named "${formData.name.trim()}" already exists.`)
+      warnings.push(...spannerValidationErrors)
       return warnings
     }
 
@@ -631,7 +652,7 @@ export function ProviderOnboardingWizard({
     }
 
     return []
-  }, [currentStep, formData.name, formData.schemaMappingEnabled, nameDuplicate, schemaDiscovery])
+  }, [currentStep, formData.name, formData.schemaMappingEnabled, nameDuplicate, schemaDiscovery, spannerValidationErrors])
 
   const isDirty = useMemo(() => isMeaningfullyDirty(formData, initialStateRef.current), [formData])
   const connectivityFingerprint = useMemo(() => JSON.stringify({
@@ -643,6 +664,10 @@ export function ProviderOnboardingWizard({
     password: formData.password,
     schemaMappingEnabled: formData.schemaMappingEnabled,
     schemaMapping: formData.schemaMapping,
+    // Include the Spanner-specific fields so that editing project/instance/auth
+    // invalidates the cached connectivity-test result and the wizard re-runs
+    // the probe before the user is allowed to save.
+    spanner: formData.spanner,
   }), [formData])
 
   useEffect(() => {
@@ -810,14 +835,19 @@ export function ProviderOnboardingWizard({
 
     try {
       if (mode === 'edit' && provider) {
+        const isSpanner = isSpannerGraph(formData.providerType)
         const req: ProviderUpdateRequest = {
           name: formData.name.trim(),
-          host: formData.host || undefined,
-          port: formData.port || undefined,
-          tlsEnabled: formData.tlsEnabled,
-          credentials: (formData.username || formData.password)
-            ? { username: formData.username || undefined, password: formData.password || undefined }
-            : undefined,
+          host: isSpanner
+            ? (formData.spanner.instanceId || undefined)
+            : (formData.host || undefined),
+          port: isSpanner ? undefined : (formData.port || undefined),
+          tlsEnabled: isSpanner ? true : formData.tlsEnabled,
+          credentials: isSpanner
+            ? buildSpannerCredentials(formData)
+            : ((formData.username || formData.password)
+              ? { username: formData.username || undefined, password: formData.password || undefined }
+              : undefined),
           extraConfig: buildExtraConfig(formData),
         }
         const updated = await providerService.update(provider.id, req)
