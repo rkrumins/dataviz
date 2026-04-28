@@ -365,7 +365,8 @@ export function WorkspacesPage() {
 
     /* ── Render ── */
     return (
-        <div className="p-8 max-w-7xl mx-auto space-y-6 animate-in fade-in duration-500">
+        <div className="absolute inset-0 overflow-y-auto">
+            <div className="p-8 max-w-7xl mx-auto space-y-6 animate-in fade-in duration-500">
             <style>{`
 @keyframes card-in {
     from { opacity: 0; transform: translateY(12px); }
@@ -597,6 +598,7 @@ export function WorkspacesPage() {
 
             {/* Create Workspace Wizard */}
             <AdminWizard title="Create Workspace" steps={wizardSteps} isOpen={showWizard} onClose={() => { setShowWizard(false); resetWizard() }} onComplete={handleWizardComplete} isSubmitting={wizSubmitting} completionLabel="Create Workspace" />
+            </div>
         </div>
     )
 }
