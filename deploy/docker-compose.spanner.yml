@@ -1,0 +1,18 @@
+services:
+  spanner-emulator:
+    image: gcr.io/cloud-spanner-emulator/emulator:latest
+    container_name: synodic-spanner-emulator
+    ports:
+      # gRPC API — what the python google-cloud-spanner client talks to.
+      - "9010:9010"
+      # REST gateway — used by gcloud / curl bootstraps.
+      - "9020:9020"
+    healthcheck:
+      # Hit the REST gateway's instance-list endpoint; emulator is
+      # ready as soon as it answers HTTP 200 (the project is implicit).
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9020/v1/projects/synodic-test/instances >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped

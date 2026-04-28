@@ -60,6 +60,15 @@ _PROVIDERS: List[ProviderCapabilities] = [
         supportsWriteBack=False,
         defaultPort=None,
     ),
+    ProviderCapabilities(
+        name="spanner_graph",
+        displayName="Google Spanner Graph",
+        supportsMultiGraph=True,
+        supportsLineage=True,
+        supportsContainment=True,
+        supportsWriteBack=True,
+        defaultPort=None,  # Spanner is serverless; addressing is via project/instance/database
+    ),
 ]
 
 

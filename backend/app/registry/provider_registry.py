@@ -323,7 +323,7 @@ class ProviderRegistry:
             # come from ``extra_config``. Same registry-driven validation as
             # the manager so misconfigured rows fail with a typed
             # ``ProviderConfigurationError`` instead of an untyped 500.
-            from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+            from backend.app.providers.spanner import SpannerGraphProvider
             from backend.common.interfaces.provider import ProviderConfigurationError
             from backend.common.models.management import validate_provider_extra_config
 

@@ -96,7 +96,12 @@ async def tcp_preflight(host: str, port: int, *, deadline_s: float) -> Preflight
 
 
 async def redis_ping_preflight(
-    host: str, port: int, *, deadline_s: float, password: str | None = None
+    host: str,
+    port: int,
+    *,
+    deadline_s: float,
+    password: str | None = None,
+    username: str | None = None,
 ) -> PreflightResult:
     """TCP-connect + send RESP ``PING`` + read the reply within
     ``deadline_s``. Confirms the peer is actually a Redis-protocol server,
@@ -104,6 +109,11 @@ async def redis_ping_preflight(
 
     Used by FalkorDB (which speaks Redis protocol) and any other
     Redis-compatible backend.
+
+    AUTH form must match what the production driver pool will send, otherwise
+    onboarding's "test connection" can succeed against an auth model the pool
+    cannot actually use. ``username`` + ``password`` → ``AUTH <user> <pw>``
+    (Redis 6+ ACL). ``password`` only → legacy ``AUTH <pw>`` (``requirepass``).
     """
     t0 = time.monotonic()
     writer = None
@@ -113,16 +123,34 @@ async def redis_ping_preflight(
             timeout=deadline_s,
         )
 
-        # AUTH first if a password is configured. We send and discard the
-        # reply — a wrong password surfaces as PING returning -NOAUTH.
+        # AUTH first if credentials are configured. We capture the reply so
+        # an auth rejection ("invalid username-password pair") surfaces
+        # here instead of slipping past preflight and tripping the
+        # provider breaker on the first real query.
         if password:
             pw = password.encode()
-            auth = b"*2\r\n$4\r\nAUTH\r\n$" + str(len(pw)).encode() + b"\r\n" + pw + b"\r\n"
+            if username:
+                un = username.encode()
+                auth = (
+                    b"*3\r\n$4\r\nAUTH\r\n"
+                    + b"$" + str(len(un)).encode() + b"\r\n" + un + b"\r\n"
+                    + b"$" + str(len(pw)).encode() + b"\r\n" + pw + b"\r\n"
+                )
+            else:
+                auth = (
+                    b"*2\r\n$4\r\nAUTH\r\n"
+                    + b"$" + str(len(pw)).encode() + b"\r\n" + pw + b"\r\n"
+                )
             writer.write(auth)
             await writer.drain()
-            # Read just enough to clear the reply line. Bound by remaining budget.
             remaining = max(0.05, deadline_s - (time.monotonic() - t0))
-            await asyncio.wait_for(reader.readline(), timeout=remaining)
+            auth_reply = await asyncio.wait_for(reader.readline(), timeout=remaining)
+            if auth_reply.startswith(b"-"):
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                return PreflightResult.failure(
+                    reason=f"redis_error: {auth_reply.decode(errors='replace').strip()}"[:120],
+                    elapsed_ms=elapsed_ms,
+                )
 
         writer.write(b"*1\r\n$4\r\nPING\r\n")
         await writer.drain()

@@ -148,11 +148,20 @@ class FalkorDBProvider(GraphDataProvider):
         this, an auth-protected FalkorDB would fail preflight with
         NOAUTH and trigger the same false breaker storm we're trying to
         prevent for unreachable hosts.
+
+        The AUTH wire form must match what the production pool in
+        ``_ensure_connected`` will send: pool uses ``AUTH <user> <pw>``
+        when both are configured, ``AUTH <pw>`` when only password is.
+        Pass both to preflight so onboarding's test-connection step
+        catches auth-mode mismatches (e.g. user typed a username but the
+        FalkorDB has only ``requirepass``) instead of letting them slip
+        through to the first discovery.
         """
         from backend.common.interfaces.preflight import redis_ping_preflight
         return await redis_ping_preflight(
             self._host, self._port,
             deadline_s=deadline_s,
+            username=self._username,
             password=self._password,
         )
 

@@ -385,11 +385,14 @@ class Neo4jProvider(GraphDataProvider):
     # Containment edge type resolution                                     #
     # ------------------------------------------------------------------ #
 
-    def set_containment_edge_types(self, types: List[str]) -> None:
+    def set_containment_edge_types(self, types: List[str], from_ontology: bool = True) -> None:
         """Called by ContextEngine after ontology resolution.
 
         An empty list is valid — it means no containment types (flat graph).
+        ``from_ontology`` is accepted for signature parity with the base
+        contract; this provider does not vary behaviour on its value.
         """
+        del from_ontology  # accepted for contract parity
         self._resolved_containment_types: Set[str] = {t.upper() for t in types}
         self._resolved_containment_types_set = True  # sentinel: distinguishes "set to empty" from "never set"
 

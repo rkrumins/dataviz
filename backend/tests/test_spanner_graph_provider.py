@@ -33,6 +33,7 @@ from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.graph import (
     FilterOperator,
     GraphNode,
+    NodeQuery,
     PropertyFilter,
     TagFilter,
     TextFilter,
@@ -45,7 +46,7 @@ from backend.common.models.graph import (
 
 
 def test_coerce_spanner_value_primitives():
-    from backend.app.providers.spanner_graph_provider import _coerce_spanner_value
+    from backend.app.providers.spanner.mapping import coerce_spanner_value as _coerce_spanner_value
 
     assert _coerce_spanner_value(None) is None
     assert _coerce_spanner_value("hello") == "hello"
@@ -55,7 +56,7 @@ def test_coerce_spanner_value_primitives():
 
 
 def test_coerce_spanner_value_timestamps():
-    from backend.app.providers.spanner_graph_provider import _coerce_spanner_value
+    from backend.app.providers.spanner.mapping import coerce_spanner_value as _coerce_spanner_value
 
     naive = datetime(2026, 4, 27, 12, 0, 0)
     aware = datetime(2026, 4, 27, 12, 0, 0, tzinfo=timezone.utc)
@@ -67,7 +68,7 @@ def test_coerce_spanner_value_timestamps():
 
 
 def test_coerce_spanner_value_bytes_to_base64():
-    from backend.app.providers.spanner_graph_provider import _coerce_spanner_value
+    from backend.app.providers.spanner.mapping import coerce_spanner_value as _coerce_spanner_value
 
     raw = b"\x00\x01\x02hello"
     out = _coerce_spanner_value(raw)
@@ -76,7 +77,7 @@ def test_coerce_spanner_value_bytes_to_base64():
 
 
 def test_coerce_spanner_value_array_and_dict_recursion():
-    from backend.app.providers.spanner_graph_provider import _coerce_spanner_value
+    from backend.app.providers.spanner.mapping import coerce_spanner_value as _coerce_spanner_value
 
     nested = {
         "ts": datetime(2026, 4, 27, tzinfo=timezone.utc),
@@ -94,7 +95,7 @@ def test_coerce_spanner_value_array_and_dict_recursion():
 
 
 def test_node_from_props_minimal():
-    from backend.app.providers.spanner_graph_provider import _node_from_props
+    from backend.app.providers.spanner.mapping import node_from_props as _node_from_props
 
     node = _node_from_props({
         "urn": "urn:dataset:foo",
@@ -108,7 +109,7 @@ def test_node_from_props_minimal():
 
 
 def test_node_from_props_handles_json_string_props_and_tags():
-    from backend.app.providers.spanner_graph_provider import _node_from_props
+    from backend.app.providers.spanner.mapping import node_from_props as _node_from_props
 
     node = _node_from_props({
         "urn": "urn:x",
@@ -123,7 +124,7 @@ def test_node_from_props_handles_json_string_props_and_tags():
 
 
 def test_node_from_props_returns_none_without_urn():
-    from backend.app.providers.spanner_graph_provider import _node_from_props
+    from backend.app.providers.spanner.mapping import node_from_props as _node_from_props
 
     assert _node_from_props({"displayName": "no urn"}) is None
     assert _node_from_props({}) is None
@@ -131,7 +132,7 @@ def test_node_from_props_returns_none_without_urn():
 
 
 def test_edge_from_row_synthesizes_id_when_missing():
-    from backend.app.providers.spanner_graph_provider import _edge_from_row
+    from backend.app.providers.spanner.mapping import edge_from_row as _edge_from_row
 
     edge = _edge_from_row(
         source_urn="urn:a", target_urn="urn:b",
@@ -144,7 +145,7 @@ def test_edge_from_row_synthesizes_id_when_missing():
 
 
 def test_sanitize_identifier_strips_unsafe_chars():
-    from backend.app.providers.spanner_graph_provider import _sanitize_identifier
+    from backend.app.providers.spanner.mapping import sanitize_identifier as _sanitize_identifier
 
     assert _sanitize_identifier("FinGraph") == "FinGraph"
     assert _sanitize_identifier("my-graph.v2") == "my_graph_v2"
@@ -153,7 +154,7 @@ def test_sanitize_identifier_strips_unsafe_chars():
 
 
 def test_suggest_mapping_picks_canonical_aliases():
-    from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+    from backend.app.providers.spanner import SpannerGraphProvider
 
     suggested = SpannerGraphProvider._suggest_mapping({"uuid", "name", "fullName", "summary", "categories"})
     assert suggested["identity_field"] == "uuid"
@@ -164,7 +165,7 @@ def test_suggest_mapping_picks_canonical_aliases():
 
 
 def test_suggest_mapping_falls_back_to_canonical_names_when_nothing_matches():
-    from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+    from backend.app.providers.spanner import SpannerGraphProvider
 
     suggested = SpannerGraphProvider._suggest_mapping({"random", "fields"})
     assert suggested["identity_field"] == "urn"
@@ -177,7 +178,7 @@ def test_suggest_mapping_falls_back_to_canonical_names_when_nothing_matches():
 
 
 def test_ttl_cache_returns_value_within_ttl():
-    from backend.app.providers.spanner_graph_provider import _TTLCache
+    from backend.app.providers.spanner.provider import _TTLCache
 
     c = _TTLCache(ttl_seconds=10.0)
     assert c.get() is None
@@ -188,7 +189,7 @@ def test_ttl_cache_returns_value_within_ttl():
 
 
 def test_urn_label_cache_evicts_lru():
-    from backend.app.providers.spanner_graph_provider import _URNLabelCache
+    from backend.app.providers.spanner.provider import _URNLabelCache
 
     cache = _URNLabelCache(max_size=10)
     for i in range(20):
@@ -199,7 +200,7 @@ def test_urn_label_cache_evicts_lru():
 
 
 def test_urn_label_cache_move_to_end_on_get():
-    from backend.app.providers.spanner_graph_provider import _URNLabelCache
+    from backend.app.providers.spanner.provider import _URNLabelCache
 
     cache = _URNLabelCache(max_size=3)
     cache.put("a", "A")
@@ -218,7 +219,7 @@ def test_urn_label_cache_move_to_end_on_get():
 
 
 def _build_provider(**overrides: Any):
-    from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+    from backend.app.providers.spanner import SpannerGraphProvider
 
     defaults = dict(
         project_id="my-project",
@@ -232,7 +233,7 @@ def _build_provider(**overrides: Any):
 
 
 def test_constructor_requires_project_id():
-    from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+    from backend.app.providers.spanner import SpannerGraphProvider
 
     with pytest.raises(ValueError, match="project_id"):
         SpannerGraphProvider(
@@ -242,7 +243,7 @@ def test_constructor_requires_project_id():
 
 
 def test_constructor_requires_instance_id():
-    from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+    from backend.app.providers.spanner import SpannerGraphProvider
 
     with pytest.raises(ValueError, match="instance_id"):
         SpannerGraphProvider(
@@ -329,7 +330,7 @@ def test_build_credentials_unknown_method():
 
 
 def test_classify_spanner_error_auth():
-    from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+    from backend.app.providers.spanner import SpannerGraphProvider
 
     code = SpannerGraphProvider._classify_spanner_error(
         Exception("PermissionDenied: caller does not have permission")
@@ -338,7 +339,7 @@ def test_classify_spanner_error_auth():
 
 
 def test_classify_spanner_error_database_not_found():
-    from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+    from backend.app.providers.spanner import SpannerGraphProvider
 
     code = SpannerGraphProvider._classify_spanner_error(
         Exception("NotFound: Database my-db not found")
@@ -347,7 +348,7 @@ def test_classify_spanner_error_database_not_found():
 
 
 def test_classify_spanner_error_edition_unsupported():
-    from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+    from backend.app.providers.spanner import SpannerGraphProvider
 
     code = SpannerGraphProvider._classify_spanner_error(
         Exception("Object PROPERTY_GRAPHS does not exist in Spanner Standard")
@@ -356,7 +357,7 @@ def test_classify_spanner_error_edition_unsupported():
 
 
 def test_classify_spanner_error_dialect():
-    from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+    from backend.app.providers.spanner import SpannerGraphProvider
 
     code = SpannerGraphProvider._classify_spanner_error(
         Exception("PostgreSQL dialect does not support property graphs")
@@ -365,7 +366,7 @@ def test_classify_spanner_error_dialect():
 
 
 def test_classify_spanner_error_timeout_and_unavailable():
-    from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+    from backend.app.providers.spanner import SpannerGraphProvider
 
     assert SpannerGraphProvider._classify_spanner_error(Exception("DeadlineExceeded")).startswith(
         ("connect_timeout", "error: ")
@@ -574,7 +575,7 @@ async def test_preflight_returns_failure_when_connection_fails(monkeypatch):
 
 def test_manager_create_provider_instance_returns_spanner_provider_for_valid_extra_config():
     from backend.app.providers.manager import provider_manager
-    from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+    from backend.app.providers.spanner import SpannerGraphProvider
 
     instance = provider_manager._create_provider_instance(
         provider_type="spanner_graph",
@@ -819,5 +820,105 @@ async def test_emulator_preflight_succeeds_for_existing_database():
         # reason. Don't fail the suite on the latter — the test asserts
         # the contract is honoured, not the emulator state.
         assert isinstance(res, PreflightResult)
+    finally:
+        await p.close()
+
+
+@requires_spanner_emulator
+@pytest.mark.asyncio
+async def test_emulator_bootstrap_creates_managed_schema():
+    """First connect against a clean database must auto-create the
+    managed tables and the property graph; preflight + list_graphs
+    must observe the new graph."""
+    from backend.app.providers.spanner import SpannerGraphProvider
+    from backend.app.providers.spanner.schema import schema_exists
+
+    p = SpannerGraphProvider(
+        project_id=os.getenv("SPANNER_TEST_PROJECT", "synodic-test"),
+        instance_id=os.getenv("SPANNER_TEST_INSTANCE", "test-instance"),
+        database_id=os.getenv("SPANNER_TEST_DATABASE", "test-database"),
+        property_graph_name=os.getenv("SPANNER_TEST_GRAPH", "TestGraph"),
+        auth_method="adc",
+        auto_bootstrap=True,
+    )
+    try:
+        res = await p.preflight(deadline_s=10.0)
+        assert isinstance(res, PreflightResult)
+        # Trigger a read so _ensure_ready runs the bootstrap.
+        nodes = await p.get_nodes(NodeQuery(limit=1))
+        assert isinstance(nodes, list)
+        # Bootstrap is idempotent; second connect must observe the schema.
+        assert await schema_exists(p._conn, p._graph_name) is True
+    finally:
+        await p.close()
+
+
+@requires_spanner_emulator
+@pytest.mark.asyncio
+async def test_emulator_create_node_get_node_round_trip():
+    """save_custom_graph → get_node round-trip must persist a node
+    through the managed schema."""
+    from backend.app.providers.spanner import SpannerGraphProvider
+    from backend.common.models.graph import GraphNode
+
+    p = SpannerGraphProvider(
+        project_id=os.getenv("SPANNER_TEST_PROJECT", "synodic-test"),
+        instance_id=os.getenv("SPANNER_TEST_INSTANCE", "test-instance"),
+        database_id=os.getenv("SPANNER_TEST_DATABASE", "test-database"),
+        property_graph_name=os.getenv("SPANNER_TEST_GRAPH", "TestGraph"),
+        auth_method="adc",
+    )
+    try:
+        node = GraphNode(
+            urn="urn:test:node-roundtrip",
+            entityType="dataset",
+            displayName="Round-trip Dataset",
+            qualifiedName="warehouse.roundtrip",
+            description="created by test_emulator_create_node_get_node_round_trip",
+            properties={"owner": "qa"},
+            tags=["pii"],
+        )
+        await p.save_custom_graph([node], [])
+        got = await p.get_node("urn:test:node-roundtrip")
+        assert got is not None
+        assert got.urn == "urn:test:node-roundtrip"
+        assert got.display_name == "Round-trip Dataset"
+        assert got.entity_type == "dataset"
+        assert "pii" in got.tags
+    finally:
+        await p.close()
+
+
+@requires_spanner_emulator
+@pytest.mark.asyncio
+async def test_emulator_lineage_traversal():
+    """Two-node graph with a lineage edge — get_downstream(start, depth=1)
+    must return the target."""
+    from backend.app.providers.spanner import SpannerGraphProvider
+    from backend.common.models.graph import GraphEdge, GraphNode
+
+    p = SpannerGraphProvider(
+        project_id=os.getenv("SPANNER_TEST_PROJECT", "synodic-test"),
+        instance_id=os.getenv("SPANNER_TEST_INSTANCE", "test-instance"),
+        database_id=os.getenv("SPANNER_TEST_DATABASE", "test-database"),
+        property_graph_name=os.getenv("SPANNER_TEST_GRAPH", "TestGraph"),
+        auth_method="adc",
+    )
+    try:
+        a = GraphNode(urn="urn:test:lineage:a", entityType="dataset", displayName="A")
+        b = GraphNode(urn="urn:test:lineage:b", entityType="dataset", displayName="B")
+        e = GraphEdge(
+            id="urn:test:lineage:a|DERIVES_FROM|urn:test:lineage:b",
+            sourceUrn="urn:test:lineage:a",
+            targetUrn="urn:test:lineage:b",
+            edgeType="DERIVES_FROM",
+        )
+        await p.save_custom_graph([a, b], [e])
+        # Containment is empty for this isolated test pair, so the
+        # lineage traversal needs an explicit empty cont set.
+        p.set_containment_edge_types([], from_ontology=False)
+        result = await p.get_downstream("urn:test:lineage:a", depth=1)
+        urns = {n.urn for n in result.nodes}
+        assert "urn:test:lineage:b" in urns
     finally:
         await p.close()

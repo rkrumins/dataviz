@@ -700,7 +700,7 @@ class ProviderManager:
             # fan out across every database+graph on the instance — matching
             # the "one server, many graphs" convention used by FalkorDB and
             # Neo4j.
-            from backend.app.providers.spanner_graph_provider import SpannerGraphProvider
+            from backend.app.providers.spanner import SpannerGraphProvider
             from backend.common.interfaces.provider import ProviderConfigurationError
             from backend.common.models.management import validate_provider_extra_config
 

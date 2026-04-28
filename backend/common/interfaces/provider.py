@@ -11,6 +11,7 @@ from ..models.graph import (
     LineageResult, GraphSchemaStats, OntologyMetadata,
     ChildrenWithEdgesResult, TopLevelNodesResult,
 )
+from .preflight import PreflightResult
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -321,9 +322,57 @@ class GraphDataProvider(ABC):
         pass
 
     # ==========================================
-    # Optional Extension Methods
-    # (concrete implementations are optional — default no-ops)
+    # Connection lifecycle / ontology contract
+    # (concrete defaults — providers override as needed)
+    #
+    # These four methods are part of the platform-level provider contract:
+    # the warmup loop and the connection-test UI invoke ``preflight``;
+    # ContextEngine eagerly injects the resolved ontology via
+    # ``set_containment_edge_types`` / ``set_resolved_edge_metadata``;
+    # ``ensure_indices`` is called per-ontology so providers with index
+    # DDL can keep up with new entity types. Providing concrete defaults
+    # here makes the contract explicit and removes the ``hasattr(...)``
+    # duck-typing that was previously the only entry point.
     # ==========================================
+
+    async def preflight(self, *, deadline_s: float = 1.5) -> PreflightResult:
+        """Bounded reachability probe. Returns a Result; never raises for
+        connectivity failures. Providers that talk to a network backend
+        must override; the default response signals "not implemented" so
+        callers can distinguish a missing implementation from a real
+        connection failure.
+        """
+        return PreflightResult.failure(reason="preflight_not_implemented", elapsed_ms=0)
+
+    def set_containment_edge_types(self, types: List[str], from_ontology: bool = True) -> None:
+        """Inject the authoritative containment edge type set resolved from
+        the workspace's ontology. Default no-op for providers without
+        containment semantics (e.g. flat-graph backends).
+
+        ``from_ontology`` records whether the types came from a real
+        ontology (True) or a fallback. Providers that need the
+        distinction (to gate "no hierarchy" UI states) can read it; others
+        ignore it. The keyword argument exists on the base method so the
+        ContextEngine can pass it uniformly to every provider.
+        """
+        return None
+
+    def set_resolved_edge_metadata(
+        self,
+        edge_type_metadata: Dict[str, Any],
+        lineage_edge_types: List[str],
+    ) -> None:
+        """Inject the ontology-resolved edge classification (lineage vs
+        containment vs custom). Default no-op for providers that don't
+        re-derive ontology metadata from env vars.
+        """
+        return None
+
+    async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None) -> None:
+        """Ensure provider-side indices exist for the given entity type set.
+        Default no-op for providers without index DDL (mock, DataHub).
+        """
+        return None
 
     # ==========================================
     # Projection / Materialization Lifecycle Hooks

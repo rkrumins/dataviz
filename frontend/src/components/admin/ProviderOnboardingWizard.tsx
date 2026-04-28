@@ -1041,6 +1041,11 @@ export function ProviderOnboardingWizard({
                   />
                 </div>
               </div>
+              {formData.providerType === 'falkordb' && (
+                <p className="-mt-1 text-xs text-ink-muted">
+                  Leave username blank if your FalkorDB uses <code className="rounded bg-black/5 px-1 py-0.5 font-mono dark:bg-white/5">requirepass</code> (legacy auth). Fill it in only if your server has Redis ACL configured — otherwise the server will reject the connection with <span className="font-mono">invalid username-password pair</span>.
+                </p>
+              )}
             </>
           ) : (
             <SpannerConnectionFields
