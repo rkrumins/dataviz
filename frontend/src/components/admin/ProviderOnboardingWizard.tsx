@@ -567,6 +567,11 @@ export function ProviderOnboardingWizard({
   const [showCloseConfirm, setShowCloseConfirm] = useState(false)
   const [createdProvider, setCreatedProvider] = useState<ProviderResponse | null>(null)
   const [connectionResult, setConnectionResult] = useState<ConnectionTestResult | null>(null)
+  // Edit-mode only: explicit "wipe stored credentials" intent. Distinct from
+  // empty fields — empty fields mean "don't touch", because the form starts
+  // empty for security (creds are never round-tripped). Without this flag,
+  // there is no way to express "clear stored creds" from the UI.
+  const [clearCredentials, setClearCredentials] = useState(false)
   const [connectivityCheck, setConnectivityCheck] = useState<ConnectivityCheck>({
     state: 'idle',
     fingerprint: null,
@@ -836,6 +841,18 @@ export function ProviderOnboardingWizard({
     try {
       if (mode === 'edit' && provider) {
         const isSpanner = isSpannerGraph(formData.providerType)
+        // Three-way credentials intent on update:
+        //   clearCredentials toggle on        → send ``credentials: null`` (explicit clear)
+        //   user typed username or password   → send ``{ username, password }`` (overwrite)
+        //   neither                           → send ``undefined`` (no change)
+        // The backend uses ``model_fields_set`` to distinguish "absent" from "null".
+        const credsForUpdate: ProviderUpdateRequest['credentials'] = clearCredentials
+          ? null
+          : isSpanner
+            ? buildSpannerCredentials(formData)
+            : ((formData.username || formData.password)
+              ? { username: formData.username || undefined, password: formData.password || undefined }
+              : undefined)
         const req: ProviderUpdateRequest = {
           name: formData.name.trim(),
           host: isSpanner
@@ -843,11 +860,7 @@ export function ProviderOnboardingWizard({
             : (formData.host || undefined),
           port: isSpanner ? undefined : (formData.port || undefined),
           tlsEnabled: isSpanner ? true : formData.tlsEnabled,
-          credentials: isSpanner
-            ? buildSpannerCredentials(formData)
-            : ((formData.username || formData.password)
-              ? { username: formData.username || undefined, password: formData.password || undefined }
-              : undefined),
+          credentials: credsForUpdate,
           extraConfig: buildExtraConfig(formData),
         }
         const updated = await providerService.update(provider.id, req)
@@ -1026,8 +1039,9 @@ export function ProviderOnboardingWizard({
                   <input
                     value={formData.username}
                     onChange={(event) => updateFormData({ username: event.target.value })}
-                    placeholder="optional"
-                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                    placeholder={mode === 'edit' ? 'leave blank to keep stored value' : 'optional'}
+                    disabled={clearCredentials}
+                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5 disabled:opacity-50"
                   />
                 </div>
                 <div>
@@ -1036,11 +1050,23 @@ export function ProviderOnboardingWizard({
                     type="password"
                     value={formData.password}
                     onChange={(event) => updateFormData({ password: event.target.value })}
-                    placeholder="optional"
-                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                    placeholder={mode === 'edit' ? 'leave blank to keep stored value' : 'optional'}
+                    disabled={clearCredentials}
+                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5 disabled:opacity-50"
                   />
                 </div>
               </div>
+              {mode === 'edit' && (
+                <label className="flex items-center gap-2 text-xs text-ink-muted cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={clearCredentials}
+                    onChange={(event) => setClearCredentials(event.target.checked)}
+                    className="h-3.5 w-3.5 rounded border-glass-border bg-black/5 text-indigo-500 focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                  />
+                  Clear stored credentials on save (provider will connect without authentication)
+                </label>
+              )}
               {formData.providerType === 'falkordb' && (
                 <p className="-mt-1 text-xs text-ink-muted">
                   Leave username blank if your FalkorDB uses <code className="rounded bg-black/5 px-1 py-0.5 font-mono dark:bg-white/5">requirepass</code> (legacy auth). Fill it in only if your server has Redis ACL configured — otherwise the server will reject the connection with <span className="font-mono">invalid username-password pair</span>.

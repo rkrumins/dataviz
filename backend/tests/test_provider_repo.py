@@ -94,6 +94,71 @@ async def test_update_provider_returns_none_for_missing(db_session):
     assert result is None
 
 
+# ── update: credentials three-way semantics ──────────────────────────
+# absent / null / object are three distinct intents; the repo must not
+# conflate them. Regression guard for the bug where clearing credentials
+# from the UI silently kept the old encrypted blob and the next AUTH
+# round-trip surfaced ``WRONGPASS``.
+
+async def test_update_credentials_absent_preserves_existing(db_session):
+    """``credentials`` field omitted from the patch → no change. Old
+    credentials must remain intact (this is what makes "rename only"
+    edits safe)."""
+    created = await provider_repo.create_provider(
+        db_session,
+        _make_create_req(credentials=ConnectionCredentials(username="admin", password="secret")),
+    )
+
+    # Patch that does NOT mention credentials at all.
+    await provider_repo.update_provider(db_session, created.id, ProviderUpdateRequest(name="renamed"))
+
+    creds = await provider_repo.get_credentials(db_session, created.id)
+    assert creds.get("username") == "admin"
+    assert creds.get("password") == "secret"
+
+
+async def test_update_credentials_null_clears_blob(db_session):
+    """``credentials: null`` → explicit clear. Stored blob round-trips
+    to an empty mapping so ``creds.get('username')`` and
+    ``creds.get('password')`` both return ``None`` and the provider
+    constructs a pool without AUTH."""
+    created = await provider_repo.create_provider(
+        db_session,
+        _make_create_req(credentials=ConnectionCredentials(username="admin", password="secret")),
+    )
+
+    # The frontend's "Clear stored credentials" toggle sends ``null`` for this
+    # field. Pydantic's ``model_fields_set`` lets the repo see this as
+    # explicitly-provided-null, distinct from omitted.
+    update_req = ProviderUpdateRequest.model_validate({"credentials": None})
+    assert "credentials" in update_req.model_fields_set
+    assert update_req.credentials is None
+
+    await provider_repo.update_provider(db_session, created.id, update_req)
+
+    creds = await provider_repo.get_credentials(db_session, created.id)
+    assert creds.get("username") is None
+    assert creds.get("password") is None
+
+
+async def test_update_credentials_replace_overwrites(db_session):
+    """New credentials object → replaces the stored blob. Sanity check
+    that the third path of the three-way switch still works."""
+    created = await provider_repo.create_provider(
+        db_session,
+        _make_create_req(credentials=ConnectionCredentials(username="old", password="oldpw")),
+    )
+
+    update_req = ProviderUpdateRequest(
+        credentials=ConnectionCredentials(username="new", password="newpw"),
+    )
+    await provider_repo.update_provider(db_session, created.id, update_req)
+
+    creds = await provider_repo.get_credentials(db_session, created.id)
+    assert creds.get("username") == "new"
+    assert creds.get("password") == "newpw"
+
+
 # ── delete ────────────────────────────────────────────────────────────
 
 async def test_delete_provider_success(db_session):

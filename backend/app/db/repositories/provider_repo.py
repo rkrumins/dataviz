@@ -112,8 +112,18 @@ async def update_provider(
         row.host = req.host
     if req.port is not None:
         row.port = req.port
-    if req.credentials is not None:
-        row.credentials = _encrypt(req.credentials.model_dump())
+    # Distinguish *absent* from *explicitly null*: absent → no change,
+    # ``credentials: null`` → user clicked "Clear stored credentials" in
+    # the edit form and we wipe the stored blob. Pre-fix the truthy-only
+    # ``is not None`` check made it impossible to clear creds from the
+    # UI: the frontend coerced empty fields to ``undefined`` → JSON
+    # dropped the key → backend treated it as "no change" → old AUTH
+    # kept being sent → ``WRONGPASS``.
+    if "credentials" in req.model_fields_set:
+        if req.credentials is None:
+            row.credentials = _encrypt({})
+        else:
+            row.credentials = _encrypt(req.credentials.model_dump())
     if req.tls_enabled is not None:
         row.tls_enabled = req.tls_enabled
     if req.is_active is not None:

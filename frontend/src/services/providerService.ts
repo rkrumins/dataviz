@@ -62,11 +62,14 @@ export interface ProviderUpdateRequest {
     name?: string
     host?: string
     port?: number
+    // ``null`` is meaningful here: it signals "clear stored credentials".
+    // ``undefined`` (field absent in the JSON body) means "no change".
+    // The backend distinguishes the two via Pydantic's ``model_fields_set``.
     credentials?: {
         username?: string
         password?: string
         token?: string
-    }
+    } | null
     tlsEnabled?: boolean
     isActive?: boolean
     extraConfig?: Record<string, any>
