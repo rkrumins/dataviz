@@ -3,6 +3,7 @@ Abstract GraphDataProvider interface — shared kernel.
 Both the visualization service and graph service import from here.
 """
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Awaitable, Callable, List, Optional, Dict, Any
 
 from ..models.graph import (
@@ -417,6 +418,47 @@ class GraphDataProvider(ABC):
         Returns empty list by default.
         """
         return []
+
+    async def get_diagnostics(self) -> Dict[str, Any]:
+        """Return provider-specific diagnostic signals.
+
+        Surfaced via ``GET /admin/providers/{id}/diagnostics`` for the admin
+        diagnostics panel. Implementations may include any of:
+        ``edition``, ``dialect``, ``region``, ``session_pool``,
+        ``last_query_p50_ms``, ``last_query_p95_ms``, ``last_successful_query_at``,
+        ``schema_fingerprint``, ``schema_drift_detected``, ``iam_permissions``,
+        ``capabilities`` (a dict of feature flags such as ``time_travel``,
+        ``vector_search``, ``full_text_search``, ``change_streams``).
+
+        Returns empty dict by default — the UI hides the panel when empty.
+        Stays a non-abstract method (matching ``discover_schema``) so existing
+        providers automatically inherit a no-op.
+        """
+        return {}
+
+    async def get_full_lineage_as_of(
+        self,
+        urn: str,
+        as_of_timestamp: datetime,
+        upstream_depth: int,
+        downstream_depth: int,
+        include_column_lineage: bool = False,
+        descendant_types: Optional[List[str]] = None,
+    ) -> LineageResult:
+        """Return lineage as it existed at a past instant.
+
+        Implementations require a back-end with point-in-time consistency
+        (e.g. Spanner PITR). Providers without time-travel raise
+        ``NotImplementedError`` — UI gates the date picker on whether
+        ``get_diagnostics()`` advertises ``capabilities.time_travel``.
+
+        Default raises NotImplementedError, matching the pattern used by
+        :meth:`get_top_level_or_orphan_nodes`.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support time-travel lineage. "
+            "Override get_full_lineage_as_of to enable."
+        )
 
     async def close(self) -> None:
         """

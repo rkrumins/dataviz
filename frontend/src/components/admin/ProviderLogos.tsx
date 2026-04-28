@@ -88,6 +88,39 @@ export const DataHubLogo: React.FC<LogoProps> = ({ className }) => (
 );
 
 /**
+ * Google Spanner Graph logo — stylized "S" monogram on a hexagon
+ * background using GCP brand colors (blue #4285F4 → red #EA4335 →
+ * yellow #FBBC04 → green #34A853 gradient).
+ */
+export const SpannerGraphLogo: React.FC<LogoProps> = ({ className }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    className={className}
+  >
+    <defs>
+      <linearGradient id="spanner-grad" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stopColor="#4285F4" />
+        <stop offset="35%" stopColor="#34A853" />
+        <stop offset="70%" stopColor="#FBBC04" />
+        <stop offset="100%" stopColor="#EA4335" />
+      </linearGradient>
+    </defs>
+    {/* Hexagon background */}
+    <path
+      d="M12 2L21 7V17L12 22L3 17V7L12 2Z"
+      fill="url(#spanner-grad)"
+    />
+    {/* Stylized "S" monogram + small graph node accents */}
+    <path
+      d="M9 9.5C9 8.4 9.9 7.5 11 7.5H14C14.55 7.5 15 7.95 15 8.5C15 9.05 14.55 9.5 14 9.5H11.5C11.22 9.5 11 9.72 11 10C11 10.28 11.22 10.5 11.5 10.5H13.5C14.6 10.5 15.5 11.4 15.5 12.5V14.5C15.5 15.6 14.6 16.5 13.5 16.5H10C9.45 16.5 9 16.05 9 15.5C9 14.95 9.45 14.5 10 14.5H13C13.28 14.5 13.5 14.28 13.5 14C13.5 13.72 13.28 13.5 13 13.5H11C9.9 13.5 9 12.6 9 11.5V9.5Z"
+      fill="white"
+    />
+  </svg>
+);
+
+/**
  * Returns the matching provider logo component for a given provider type string.
  * Falls back to FalkorDBLogo for unknown types.
  */
@@ -99,6 +132,7 @@ export function getProviderLogo(
   if (key.includes("neo4j")) return Neo4jLogo;
   if (key.includes("falkor")) return FalkorDBLogo;
   if (key.includes("datahub")) return DataHubLogo;
+  if (key.includes("spanner")) return SpannerGraphLogo;
 
   return FalkorDBLogo;
 }

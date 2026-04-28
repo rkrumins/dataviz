@@ -460,7 +460,10 @@ async def _load_provider_for_outbound(provider_id: str, asset_name: str | None):
 
     Centralises the Phase 2.5 §2.5.2 pattern shared by every endpoint
     below this comment. Returns a ready-to-instantiate provider object.
+    Includes ``extra_config`` so providers that depend on it (Neo4j schema
+    mapping, Spanner Graph project/auth/region) construct correctly.
     """
+    import json as _json
     async with with_short_session() as session:
         prov_row = await provider_repo.get_provider_orm(session, provider_id)
         if not prov_row:
@@ -469,7 +472,10 @@ async def _load_provider_for_outbound(provider_id: str, asset_name: str | None):
         ptype, host, port, tls = (
             prov_row.provider_type, prov_row.host, prov_row.port, prov_row.tls_enabled,
         )
-    return provider_registry._create_provider_instance(ptype, host, port, asset_name, tls, creds)
+        extra_cfg = _json.loads(prov_row.extra_config) if prov_row.extra_config else None
+    return provider_registry._create_provider_instance(
+        ptype, host, port, asset_name, tls, creds, extra_cfg,
+    )
 
 
 # ── Cache-only discovery endpoints moved to endpoints/insights.py ─────
@@ -494,6 +500,31 @@ async def discover_schema(
         return schema
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Provider timed out while discovering schema")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/{provider_id}/diagnostics")
+async def get_provider_diagnostics(
+    provider_id: str = Path(...),
+):
+    """Return provider-specific diagnostic signals for the admin panel.
+
+    Dispatches through the generic ``GraphDataProvider.get_diagnostics()``
+    optional method. Providers that don't override it return ``{}`` and the
+    UI hides the panel. Spanner Graph populates edition / dialect / region /
+    session pool / latency / IAM / schema fingerprint / drift / capabilities.
+    """
+    instance = await _load_provider_for_outbound(provider_id, asset_name=None)
+    try:
+        diag = await asyncio.wait_for(instance.get_diagnostics(), timeout=10)
+        # Surface a minimal envelope so the UI can distinguish "not supported"
+        # from "supported but currently empty".
+        return {"diagnostics": diag or {}, "supported": bool(diag)}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Provider diagnostics timed out")
+    except NotImplementedError:
+        return {"diagnostics": {}, "supported": False}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

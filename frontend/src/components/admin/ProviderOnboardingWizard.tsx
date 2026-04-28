@@ -34,7 +34,7 @@ import {
 } from '@/services/providerService'
 import { useToast } from '@/components/ui/toast'
 import { useWizardKeyboard } from './AssetOnboardingWizard/hooks/useWizardKeyboard'
-import { DataHubLogo, FalkorDBLogo, Neo4jLogo } from './ProviderLogos'
+import { DataHubLogo, FalkorDBLogo, Neo4jLogo, SpannerGraphLogo } from './ProviderLogos'
 
 type ProviderWizardStep = 'type' | 'connection' | 'schema' | 'review'
 type WizardPhase = 'steps' | 'success'
@@ -51,6 +51,21 @@ interface SchemaMappingState {
   entityTypeField: string
 }
 
+type GcpAuthMethod = 'adc' | 'service_account_json' | 'impersonation'
+
+interface SpannerGraphState {
+  projectId: string
+  instanceId: string
+  databaseId: string
+  propertyGraphName: string
+  authMethod: GcpAuthMethod
+  credentialsJson: string  // raw JSON paste — base64-encoded into credentials.token at submit time
+  impersonateServiceAccount: string
+  region: string
+  readStalenessS: string  // form input as string for free-form numeric editing
+  changeStreamName: string
+}
+
 interface ProviderOnboardingFormData {
   providerType: ProviderType | ''
   name: string
@@ -61,6 +76,7 @@ interface ProviderOnboardingFormData {
   password: string
   schemaMappingEnabled: boolean
   schemaMapping: SchemaMappingState
+  spanner: SpannerGraphState
 }
 
 interface ConnectivityCheck {
@@ -107,7 +123,27 @@ const PROVIDER_TYPES: Array<{
     color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20',
     desc: 'LinkedIn metadata platform',
   },
+  {
+    type: 'spanner_graph',
+    label: 'Google Spanner Graph',
+    Logo: SpannerGraphLogo,
+    color: 'text-sky-500 bg-sky-500/10 border-sky-500/20',
+    desc: 'GCP Spanner property graph',
+  },
 ]
+
+const DEFAULT_SPANNER_STATE: SpannerGraphState = {
+  projectId: '',
+  instanceId: '',
+  databaseId: '',
+  propertyGraphName: '',
+  authMethod: 'adc',
+  credentialsJson: '',
+  impersonateServiceAccount: '',
+  region: '',
+  readStalenessS: '',
+  changeStreamName: '',
+}
 
 const DEFAULT_SCHEMA_MAPPING: SchemaMappingState = {
   identityField: 'urn',
@@ -126,11 +162,34 @@ function getProviderConfig(type: string) {
 function defaultPortForProvider(type: ProviderType | ''): number {
   if (type === 'neo4j') return 7687
   if (type === 'datahub') return 8080
+  if (type === 'spanner_graph') return 0  // hidden in UI; Spanner is fully managed
   return 6379
+}
+
+function isSpannerGraph(type: ProviderType | ''): boolean {
+  return type === 'spanner_graph'
+}
+
+/** Validate a pasted service-account JSON key. Returns ``null`` if valid,
+ *  otherwise a human-readable error message for inline display.
+ */
+export function validateServiceAccountJson(raw: string): string | null {
+  if (!raw.trim()) return 'Paste your service-account JSON key.'
+  let parsed: any
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return 'Could not parse — make sure you pasted the full JSON file.'
+  }
+  if (parsed.type !== 'service_account') return 'Not a service-account key (type field missing or wrong).'
+  if (!parsed.client_email) return 'Missing client_email — this does not look like a Google service-account key.'
+  if (!parsed.private_key) return 'Missing private_key — paste the full file, not just the metadata.'
+  return null
 }
 
 function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboardingFormData {
   const schemaMapping = provider?.extraConfig?.schemaMapping
+  const xc = provider?.extraConfig ?? {}
 
   return {
     providerType: provider?.providerType ?? '',
@@ -150,14 +209,33 @@ function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboa
       entityTypeStrategy: schemaMapping?.entity_type_strategy ?? DEFAULT_SCHEMA_MAPPING.entityTypeStrategy,
       entityTypeField: schemaMapping?.entity_type_field ?? DEFAULT_SCHEMA_MAPPING.entityTypeField,
     },
+    spanner: {
+      ...DEFAULT_SPANNER_STATE,
+      projectId: xc.project_id ?? DEFAULT_SPANNER_STATE.projectId,
+      // For Spanner the provider's ``host`` field stores instance_id.
+      instanceId: provider?.providerType === 'spanner_graph'
+        ? (provider?.host ?? DEFAULT_SPANNER_STATE.instanceId)
+        : DEFAULT_SPANNER_STATE.instanceId,
+      databaseId: xc.database_id ?? DEFAULT_SPANNER_STATE.databaseId,
+      authMethod: (xc.auth_method as GcpAuthMethod) ?? DEFAULT_SPANNER_STATE.authMethod,
+      // credentialsJson is never round-tripped: stored encrypted server-side,
+      // blank on edit so users must re-paste to change it.
+      impersonateServiceAccount:
+        xc.impersonate_service_account ?? DEFAULT_SPANNER_STATE.impersonateServiceAccount,
+      region: xc.gcp_region ?? DEFAULT_SPANNER_STATE.region,
+      readStalenessS: xc.read_staleness_s != null
+        ? String(xc.read_staleness_s)
+        : DEFAULT_SPANNER_STATE.readStalenessS,
+      changeStreamName: xc.change_stream_name ?? DEFAULT_SPANNER_STATE.changeStreamName,
+    },
   }
 }
 
 function buildExtraConfig(formData: ProviderOnboardingFormData) {
-  if (!formData.schemaMappingEnabled) return undefined
+  const out: Record<string, unknown> = {}
 
-  return {
-    schemaMapping: {
+  if (formData.schemaMappingEnabled) {
+    out.schemaMapping = {
       identity_field: formData.schemaMapping.identityField,
       display_name_field: formData.schemaMapping.displayNameField,
       qualified_name_field: formData.schemaMapping.qualifiedNameField,
@@ -165,20 +243,59 @@ function buildExtraConfig(formData: ProviderOnboardingFormData) {
       tags_field: formData.schemaMapping.tagsField,
       entity_type_strategy: formData.schemaMapping.entityTypeStrategy,
       entity_type_field: formData.schemaMapping.entityTypeField,
-    },
+    }
   }
+
+  if (isSpannerGraph(formData.providerType)) {
+    const s = formData.spanner
+    out.project_id = s.projectId.trim()
+    if (s.databaseId.trim()) out.database_id = s.databaseId.trim()
+    out.auth_method = s.authMethod
+    if (s.authMethod === 'impersonation' && s.impersonateServiceAccount.trim()) {
+      out.impersonate_service_account = s.impersonateServiceAccount.trim()
+    }
+    if (s.region.trim()) out.gcp_region = s.region.trim()
+    if (s.readStalenessS.trim()) {
+      const n = Number(s.readStalenessS)
+      if (Number.isFinite(n) && n >= 0) out.read_staleness_s = n
+    }
+    if (s.changeStreamName.trim()) out.change_stream_name = s.changeStreamName.trim()
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+function buildSpannerCredentials(formData: ProviderOnboardingFormData):
+  ProviderCreateRequest['credentials'] {
+  const s = formData.spanner
+  if (s.authMethod === 'service_account_json' && s.credentialsJson.trim()) {
+    // Base64-wrap the pasted JSON so it survives transport unchanged.
+    // The backend (manager._create_provider_instance) decodes and parses
+    // it back into a service_account.Credentials object.
+    const b64 = typeof window !== 'undefined' && typeof window.btoa === 'function'
+      ? window.btoa(unescape(encodeURIComponent(s.credentialsJson.trim())))
+      : ''
+    return { token: b64 }
+  }
+  return undefined
 }
 
 function buildConnectivityRequest(formData: ProviderOnboardingFormData): ProviderCreateRequest {
+  const isSpanner = isSpannerGraph(formData.providerType)
   return {
     name: formData.name.trim() || 'Connectivity Check',
     providerType: formData.providerType as ProviderType,
-    host: formData.host || undefined,
-    port: formData.port || undefined,
-    tlsEnabled: formData.tlsEnabled,
-    credentials: (formData.username || formData.password)
-      ? { username: formData.username || undefined, password: formData.password || undefined }
-      : undefined,
+    // For Spanner, ``host`` carries the instance_id; port is unused.
+    host: isSpanner
+      ? (formData.spanner.instanceId || undefined)
+      : (formData.host || undefined),
+    port: isSpanner ? undefined : (formData.port || undefined),
+    tlsEnabled: isSpanner ? true : formData.tlsEnabled,
+    credentials: isSpanner
+      ? buildSpannerCredentials(formData)
+      : ((formData.username || formData.password)
+        ? { username: formData.username || undefined, password: formData.password || undefined }
+        : undefined),
     extraConfig: buildExtraConfig(formData),
   }
 }
@@ -263,6 +380,168 @@ function ConfirmCloseDialog({
   )
 }
 
+function SpannerConnectionFields({
+  spanner,
+  onChange,
+}: {
+  spanner: SpannerGraphState
+  onChange: (patch: Partial<SpannerGraphState>) => void
+}) {
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const jsonError = spanner.authMethod === 'service_account_json' && spanner.credentialsJson.trim()
+    ? validateServiceAccountJson(spanner.credentialsJson)
+    : null
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div>
+          <label className="mb-1.5 block text-sm font-medium text-ink">GCP project ID</label>
+          <input
+            value={spanner.projectId}
+            onChange={(event) => onChange({ projectId: event.target.value })}
+            placeholder="my-project"
+            className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+          />
+        </div>
+        <div>
+          <label className="mb-1.5 block text-sm font-medium text-ink">Spanner instance ID</label>
+          <input
+            value={spanner.instanceId}
+            onChange={(event) => onChange({ instanceId: event.target.value })}
+            placeholder="my-instance"
+            className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+          />
+        </div>
+      </div>
+
+      <div>
+        <label className="mb-1.5 block text-sm font-medium text-ink">Default database ID (optional)</label>
+        <input
+          value={spanner.databaseId}
+          onChange={(event) => onChange({ databaseId: event.target.value })}
+          placeholder="my-database (used when a data-source graph_name is unqualified)"
+          className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+        />
+        <p className="mt-1 text-xs text-ink-muted">
+          One Spanner provider covers every database on the instance — pick which graph during data-source registration.
+        </p>
+      </div>
+
+      <div>
+        <label className="mb-2 block text-sm font-medium text-ink">Authentication</label>
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+          {([
+            { v: 'adc', label: 'Application Default', desc: 'GKE / Cloud Run / gcloud ADC — no key stored' },
+            { v: 'service_account_json', label: 'Service-account key', desc: 'Paste JSON below' },
+            { v: 'impersonation', label: 'SA impersonation', desc: 'Backend ADC impersonates the target SA' },
+          ] as const).map((opt) => {
+            const active = spanner.authMethod === opt.v
+            return (
+              <button
+                key={opt.v}
+                type="button"
+                onClick={() => onChange({ authMethod: opt.v })}
+                className={`rounded-xl border px-3 py-2.5 text-left text-xs transition-all ${
+                  active
+                    ? 'border-indigo-500 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300'
+                    : 'border-glass-border bg-black/5 text-ink hover:bg-black/10 dark:bg-white/5 dark:hover:bg-white/10'
+                }`}
+              >
+                <div className="font-semibold">{opt.label}</div>
+                <div className="mt-0.5 text-ink-muted">{opt.desc}</div>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      {spanner.authMethod === 'service_account_json' && (
+        <div>
+          <label className="mb-1.5 block text-sm font-medium text-ink">
+            Service-account JSON
+          </label>
+          <textarea
+            value={spanner.credentialsJson}
+            onChange={(event) => onChange({ credentialsJson: event.target.value })}
+            placeholder='{"type": "service_account", "project_id": "...", "client_email": "...", "private_key": "..."}'
+            rows={6}
+            spellCheck={false}
+            className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 font-mono text-xs text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+          />
+          {jsonError ? (
+            <p className="mt-1 text-xs text-red-600 dark:text-red-400">{jsonError}</p>
+          ) : (
+            <p className="mt-1 text-xs text-ink-muted">
+              Paste the entire JSON key file. It is stored encrypted server-side and never sent back to the browser.
+            </p>
+          )}
+        </div>
+      )}
+
+      {spanner.authMethod === 'impersonation' && (
+        <div>
+          <label className="mb-1.5 block text-sm font-medium text-ink">
+            Target service-account email
+          </label>
+          <input
+            value={spanner.impersonateServiceAccount}
+            onChange={(event) => onChange({ impersonateServiceAccount: event.target.value })}
+            placeholder="my-spanner-reader@my-project.iam.gserviceaccount.com"
+            className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+          />
+          <p className="mt-1 text-xs text-ink-muted">
+            The Synodic backend's runtime ADC must have <span className="font-mono">roles/iam.serviceAccountTokenCreator</span> on this account.
+          </p>
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={() => setAdvancedOpen((v) => !v)}
+        className="text-xs font-semibold text-indigo-600 hover:underline dark:text-indigo-400"
+      >
+        {advancedOpen ? '▾ Hide advanced settings' : '▸ Advanced settings'}
+      </button>
+
+      {advancedOpen && (
+        <div className="grid grid-cols-1 gap-3 rounded-xl border border-glass-border bg-black/5 p-4 dark:bg-white/5 md:grid-cols-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-ink">Preferred region</label>
+            <input
+              value={spanner.region}
+              onChange={(event) => onChange({ region: event.target.value })}
+              placeholder="us-central1"
+              className="w-full rounded-lg border border-glass-border bg-canvas-elevated px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-ink">Read staleness (s)</label>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={spanner.readStalenessS}
+              onChange={(event) => onChange({ readStalenessS: event.target.value })}
+              placeholder="10"
+              className="w-full rounded-lg border border-glass-border bg-canvas-elevated px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-ink">Change stream name</label>
+            <input
+              value={spanner.changeStreamName}
+              onChange={(event) => onChange({ changeStreamName: event.target.value })}
+              placeholder="optional"
+              className="w-full rounded-lg border border-glass-border bg-canvas-elevated px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ProviderOnboardingWizard({
   isOpen,
   mode = 'create',
@@ -305,7 +584,7 @@ export function ProviderOnboardingWizard({
 
     flow.push({ id: 'connection', title: 'Connection', icon: Globe })
 
-    if (formData.providerType === 'neo4j') {
+    if (formData.providerType === 'neo4j' || formData.providerType === 'spanner_graph') {
       flow.push({ id: 'schema', title: 'Schema Mapping', icon: Scan })
     }
 
@@ -688,48 +967,57 @@ export function ProviderOnboardingWizard({
             />
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
-            <div className="col-span-2">
-              <label className="mb-1.5 block text-sm font-medium text-ink">Host</label>
-              <input
-                value={formData.host}
-                onChange={(event) => updateFormData({ host: event.target.value })}
-                placeholder="localhost"
-                className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-              />
-            </div>
-            <div>
-              <label className="mb-1.5 block text-sm font-medium text-ink">Port</label>
-              <input
-                type="number"
-                value={formData.port}
-                onChange={(event) => updateFormData({ port: Number(event.target.value) })}
-                className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-              />
-            </div>
-          </div>
+          {!isSpannerGraph(formData.providerType) ? (
+            <>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-2">
+                  <label className="mb-1.5 block text-sm font-medium text-ink">Host</label>
+                  <input
+                    value={formData.host}
+                    onChange={(event) => updateFormData({ host: event.target.value })}
+                    placeholder="localhost"
+                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-ink">Port</label>
+                  <input
+                    type="number"
+                    value={formData.port}
+                    onChange={(event) => updateFormData({ port: Number(event.target.value) })}
+                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                  />
+                </div>
+              </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="mb-1.5 block text-sm font-medium text-ink">Username</label>
-              <input
-                value={formData.username}
-                onChange={(event) => updateFormData({ username: event.target.value })}
-                placeholder="optional"
-                className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-              />
-            </div>
-            <div>
-              <label className="mb-1.5 block text-sm font-medium text-ink">Password</label>
-              <input
-                type="password"
-                value={formData.password}
-                onChange={(event) => updateFormData({ password: event.target.value })}
-                placeholder="optional"
-                className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-              />
-            </div>
-          </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-ink">Username</label>
+                  <input
+                    value={formData.username}
+                    onChange={(event) => updateFormData({ username: event.target.value })}
+                    placeholder="optional"
+                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-ink">Password</label>
+                  <input
+                    type="password"
+                    value={formData.password}
+                    onChange={(event) => updateFormData({ password: event.target.value })}
+                    placeholder="optional"
+                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                  />
+                </div>
+              </div>
+            </>
+          ) : (
+            <SpannerConnectionFields
+              spanner={formData.spanner}
+              onChange={(patch) => updateFormData({ spanner: { ...formData.spanner, ...patch } })}
+            />
+          )}
         </div>
 
         <div className="space-y-4 rounded-2xl border border-glass-border bg-gradient-to-br from-slate-50 to-white p-5 dark:from-slate-800 dark:to-slate-900">
@@ -758,18 +1046,24 @@ export function ProviderOnboardingWizard({
             </li>
           </ul>
 
-          <label className="flex items-center justify-between rounded-xl border border-glass-border bg-black/5 px-4 py-3 dark:bg-white/5">
-            <div>
-              <p className="text-sm font-medium text-ink">Use TLS</p>
-              <p className="text-xs text-ink-muted">Enable secure transport when your provider expects it.</p>
+          {isSpannerGraph(formData.providerType) ? (
+            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/8 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300">
+              Spanner is fully managed and always uses TLS — no transport configuration needed.
             </div>
-            <input
-              type="checkbox"
-              checked={formData.tlsEnabled}
-              onChange={(event) => updateFormData({ tlsEnabled: event.target.checked })}
-              className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
-            />
-          </label>
+          ) : (
+            <label className="flex items-center justify-between rounded-xl border border-glass-border bg-black/5 px-4 py-3 dark:bg-white/5">
+              <div>
+                <p className="text-sm font-medium text-ink">Use TLS</p>
+                <p className="text-xs text-ink-muted">Enable secure transport when your provider expects it.</p>
+              </div>
+              <input
+                type="checkbox"
+                checked={formData.tlsEnabled}
+                onChange={(event) => updateFormData({ tlsEnabled: event.target.checked })}
+                className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
+              />
+            </label>
+          )}
         </div>
       </div>
     </div>

@@ -23,6 +23,8 @@ slowapi>=0.1.9           # Rate limiting for auth endpoints
 # Graph adapter dependencies
 neo4j>=5.14.0            # Neo4j async driver (Phase 4)
 httpx>=0.26.0            # DataHub GraphQL HTTP client + async test client
+google-cloud-spanner>=3.50.0   # Spanner Graph provider (sync; wrapped in run_in_executor)
+google-auth>=2.30.0      # ADC + service-account JSON + impersonation
 
 # Structured logging
 python-json-logger>=2.0.7
