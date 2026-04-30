@@ -3,6 +3,7 @@
  * one workspace. Maps to ``/api/v1/admin/workspaces/{ws}/members``.
  */
 import { authFetch } from './apiClient'
+import type { ImpactPreviewResponse } from './permissionsService'
 
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -55,5 +56,20 @@ export const workspaceMembersService = {
 
     revoke(wsId: string, bindingId: string): Promise<void> {
         return authFetch<void>(url(wsId, `/${bindingId}`), { method: 'DELETE' })
+    },
+
+    /**
+     * Phase 4.4 — read-only sibling of revoke: compute the user
+     * (or every group member's) gained/lost permissions before
+     * actually committing the revoke.
+     */
+    previewRevoke(
+        wsId: string,
+        bindingId: string,
+    ): Promise<ImpactPreviewResponse> {
+        return authFetch<ImpactPreviewResponse>(
+            url(wsId, `/${bindingId}/preview-revoke`),
+            { method: 'POST', body: JSON.stringify({}) },
+        )
     },
 }

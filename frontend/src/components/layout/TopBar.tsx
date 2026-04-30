@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil } from 'lucide-react'
+import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { BookmarksPopover } from '@/components/layout/BookmarksPopover'
@@ -210,6 +210,15 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
                     </span>
                   </div>
                 </div>
+
+                {/* My access — every authenticated user can read their own permissions */}
+                <DropdownMenu.Item
+                  className="flex items-center gap-2 px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-lineage/10 focus:text-accent-lineage transition-colors"
+                  onSelect={() => navigate('/my/access')}
+                >
+                  <Shield className="w-4 h-4" />
+                  <span>My access</span>
+                </DropdownMenu.Item>
 
                 {/* Change Avatar action */}
                 <DropdownMenu.Item

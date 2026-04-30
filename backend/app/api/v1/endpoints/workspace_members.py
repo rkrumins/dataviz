@@ -21,8 +21,11 @@ from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import GroupORM, UserORM, WorkspaceORM
 from backend.app.db.repositories import binding_repo, group_repo, role_repo, user_repo
+from backend.app.services.permission_service import simulate_for_user
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
+    ImpactPreviewResponse,
+    ImpactPreviewUser,
     WorkspaceMemberCreateRequest,
     WorkspaceMemberResponse,
     WorkspaceMemberSubject,
@@ -243,4 +246,87 @@ async def revoke_member_binding(
     logger.info(
         "Binding %s revoked from workspace %s by %s",
         binding_id, ws_id, admin.id,
+    )
+
+
+# ── Impact preview (Phase 4.4) ──────────────────────────────────────
+
+
+@router.post(
+    "/{binding_id}/preview-revoke",
+    response_model=ImpactPreviewResponse,
+    response_model_by_alias=True,
+)
+async def preview_revoke_binding(
+    ws_id: str,
+    binding_id: str,
+    _admin: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+) -> ImpactPreviewResponse:
+    """Read-only sibling of ``DELETE /admin/workspaces/{ws_id}/members/{binding_id}``.
+
+    Computes which users would lose what permissions if the named
+    binding were revoked. For a user binding, only one user is
+    affected; for a group binding, every group member is.
+    """
+    binding = await binding_repo.get_binding(session, binding_id)
+    if binding is None or binding.scope_type != "workspace" or binding.scope_id != ws_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Binding not found in this workspace",
+        )
+
+    if binding.subject_type == "user":
+        user_ids = [binding.subject_id]
+    elif binding.subject_type == "group":
+        members = await group_repo.list_group_members(session, binding.subject_id)
+        user_ids = [m.user_id for m in members]
+    else:
+        user_ids = []
+
+    aggregate_gained: set[str] = set()
+    aggregate_lost: set[str] = set()
+    affected_ws: set[str] = set()
+    user_impact: list[ImpactPreviewUser] = []
+
+    for uid in user_ids:
+        before_g, before_w = await simulate_for_user(session, uid)
+        after_g, after_w = await simulate_for_user(
+            session, uid, excluded_binding_id=binding_id,
+        )
+        # Diff identical to the role-preview helpers.
+        gained = (after_g - before_g)
+        lost = (before_g - after_g)
+        for w in before_w.keys() | after_w.keys():
+            gained |= (after_w.get(w, set()) - before_w.get(w, set()))
+            lost |= (before_w.get(w, set()) - after_w.get(w, set()))
+            if before_w.get(w, set()) != after_w.get(w, set()):
+                affected_ws.add(w)
+        if not gained and not lost:
+            continue
+        user_orm = await user_repo.get_user_by_id(session, uid)
+        display_name = None
+        email = None
+        if user_orm is not None:
+            full = f"{user_orm.first_name} {user_orm.last_name}".strip()
+            display_name = full or user_orm.email
+            email = user_orm.email
+        user_impact.append(
+            ImpactPreviewUser(
+                user_id=uid,
+                display_name=display_name,
+                email=email,
+                gained=sorted(gained),
+                lost=sorted(lost),
+            )
+        )
+        aggregate_gained.update(gained)
+        aggregate_lost.update(lost)
+
+    return ImpactPreviewResponse(
+        affected_users=len(user_impact),
+        affected_workspaces=len(affected_ws),
+        gained_perms=sorted(aggregate_gained),
+        lost_perms=sorted(aggregate_lost),
+        user_impact=user_impact,
     )

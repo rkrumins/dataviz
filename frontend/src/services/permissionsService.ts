@@ -182,4 +182,53 @@ export const permissionsService = {
             `/api/v1/admin/users/${encodeURIComponent(userId)}/access`,
         )
     },
+
+    /**
+     * Self-service variant — returns the caller's own access map.
+     * No admin gate; the backend pulls ``user_id`` from the session.
+     */
+    getMyAccess(): Promise<UserAccessResponse> {
+        return authFetch<UserAccessResponse>('/api/v1/me/access')
+    },
+
+    /**
+     * Phase 4.4 impact preview — read-only siblings of the role
+     * mutating endpoints. Compute the gained/lost permission diff
+     * before the admin commits a destructive change.
+     */
+    previewRoleUpdate(
+        name: string,
+        permissions: string[],
+    ): Promise<ImpactPreviewResponse> {
+        return authFetch<ImpactPreviewResponse>(
+            `/api/v1/admin/roles/${encodeURIComponent(name)}/preview-update`,
+            { method: 'POST', body: JSON.stringify({ permissions }) },
+        )
+    },
+
+    previewRoleDelete(name: string): Promise<ImpactPreviewResponse> {
+        return authFetch<ImpactPreviewResponse>(
+            `/api/v1/admin/roles/${encodeURIComponent(name)}/preview-delete`,
+            { method: 'POST', body: JSON.stringify({}) },
+        )
+    },
+}
+
+
+// ── Impact preview (Phase 4.4) ──────────────────────────────────────
+
+export interface ImpactPreviewUser {
+    userId: string
+    displayName: string | null
+    email: string | null
+    gained: string[]
+    lost: string[]
+}
+
+export interface ImpactPreviewResponse {
+    affectedUsers: number
+    affectedWorkspaces: number
+    gainedPerms: string[]
+    lostPerms: string[]
+    userImpact: ImpactPreviewUser[]
 }

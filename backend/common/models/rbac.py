@@ -273,3 +273,125 @@ class UserAccessResponse(BaseModel):
     groups: list[UserAccessGroup]
     effective_global: list[str] = Field(alias="effectiveGlobal")
     effective_ws: dict[str, list[str]] = Field(alias="effectiveWs")
+
+
+# ── Access requests (Phase 4.3) ─────────────────────────────────────
+
+class AccessRequestRequester(BaseModel):
+    """Lightweight requester DTO embedded in inbox responses.
+
+    Best-effort: every field except ``id`` may be ``None`` if the user
+    row was deleted between request creation and resolution. The
+    inbox should still render the row so the admin can act on it.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    email: Optional[str] = None
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+
+
+class AccessRequestTarget(BaseModel):
+    """Inline target description so the FE doesn't need a second
+    round-trip to label the request."""
+    model_config = ConfigDict(populate_by_name=True)
+    type: str  # 'workspace'
+    id: str
+    label: Optional[str] = None  # workspace name when resolvable
+
+
+class AccessRequestResponse(BaseModel):
+    """Wire shape returned by every access-request endpoint.
+
+    Pending rows have ``resolvedAt`` / ``resolvedBy`` /
+    ``resolutionNote`` set to ``None``. Approved rows carry the
+    resolver id and timestamp; denied rows additionally tend to carry
+    a free-form note explaining why.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    requester: AccessRequestRequester
+    target: AccessRequestTarget
+    requested_role: str = Field(alias="requestedRole")
+    justification: Optional[str] = None
+    status: str  # 'pending' | 'approved' | 'denied'
+    created_at: str = Field(alias="createdAt")
+    resolved_at: Optional[str] = Field(default=None, alias="resolvedAt")
+    resolved_by: Optional[str] = Field(default=None, alias="resolvedBy")
+    resolution_note: Optional[str] = Field(default=None, alias="resolutionNote")
+
+
+class AccessRequestCreate(BaseModel):
+    """Body for ``POST /api/v1/access-requests`` — submit a new ask."""
+    model_config = ConfigDict(populate_by_name=True)
+    target_type: str = Field(alias="targetType")  # only 'workspace' for now
+    target_id: str = Field(alias="targetId")
+    requested_role: str = Field(alias="requestedRole")
+    justification: Optional[str] = None
+
+
+class AccessRequestResolve(BaseModel):
+    """Body for the approve / deny endpoints. ``note`` is optional but
+    typically populated on denial."""
+    model_config = ConfigDict(populate_by_name=True)
+    note: Optional[str] = None
+
+
+# ── Impact preview (Phase 4.4) ──────────────────────────────────────
+
+class ImpactPreviewUser(BaseModel):
+    """Per-user breakdown returned by every preview endpoint.
+
+    ``before`` and ``after`` contain only the permissions that
+    *changed* — the FE renders them as a green/red diff list. The
+    full effective set isn't returned to keep the response compact
+    when many users are affected.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    user_id: str = Field(alias="userId")
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+    email: Optional[str] = None
+    gained: list[str] = Field(default_factory=list)
+    lost: list[str] = Field(default_factory=list)
+
+
+class ImpactPreviewResponse(BaseModel):
+    """Aggregate response for ``preview-*`` endpoints.
+
+    ``affectedUsers`` is the count of users whose effective
+    permissions actually change (``gained`` ∪ ``lost`` non-empty).
+    ``affectedWorkspaces`` is the count of distinct workspace ids
+    where any change occurred. Both are pre-computed so the FE can
+    surface "X users in Y workspaces" without re-counting.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    affected_users: int = Field(alias="affectedUsers")
+    affected_workspaces: int = Field(alias="affectedWorkspaces")
+    gained_perms: list[str] = Field(default_factory=list, alias="gainedPerms")
+    lost_perms: list[str] = Field(default_factory=list, alias="lostPerms")
+    user_impact: list[ImpactPreviewUser] = Field(
+        default_factory=list, alias="userImpact",
+    )
+
+
+class RolePreviewUpdateRequest(BaseModel):
+    """Body for ``POST /admin/roles/{name}/preview-update``."""
+    model_config = ConfigDict(populate_by_name=True)
+    permissions: list[str]
+
+
+# ── RBAC search (Phase 4.5) ─────────────────────────────────────────
+
+class RBACSearchHit(BaseModel):
+    """One result row in the unified search response.
+
+    ``type`` tells the frontend which navigation handler to invoke.
+    ``score`` is the server-side ranking number (3=exact id, 2=prefix,
+    1=substring) — useful for UI grouping but not strictly required
+    for rendering, since hits are returned pre-sorted.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    type: str  # 'user' | 'group' | 'workspace' | 'role' | 'permission'
+    id: str
+    display_name: str = Field(alias="displayName")
+    secondary: Optional[str] = None
+    score: int
