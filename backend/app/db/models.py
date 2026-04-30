@@ -972,12 +972,19 @@ class PermissionORM(Base):
     deliberately so role_permissions rows and JWT claims can reference
     the permission by name, not by surrogate key. Seeded once by the
     Phase 1 migration; not user-editable in Phase 1.
+
+    Phase 4.1 added ``long_description`` (paragraph-form explanation
+    surfaced in the admin UI tooltip) and ``examples`` (JSON-encoded
+    list of concrete example actions). Both backfilled by the
+    ``20260430_1700_permission_descriptions`` migration.
     """
     __tablename__ = "permissions"
 
     id = Column(Text, primary_key=True)        # e.g. "workspace:view:edit"
     description = Column(Text, nullable=False)
     category = Column(Text, nullable=False)    # system | workspace | resource
+    long_description = Column(Text, nullable=True)
+    examples = Column(Text, nullable=True)     # JSON-encoded list[str]
 
     __table_args__ = (
         CheckConstraint(

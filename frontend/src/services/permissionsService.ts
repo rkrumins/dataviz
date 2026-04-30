@@ -11,6 +11,13 @@ export interface PermissionResponse {
     id: string                  // e.g. "workspace:view:edit"
     description: string
     category: 'system' | 'workspace' | 'resource'
+    /** Phase 4.1: paragraph-form explanation surfaced in tooltips
+     *  and the permission detail drawer. Falls back to ``description``
+     *  when null (e.g. for permissions added pre-backfill). */
+    longDescription: string | null
+    /** Phase 4.1: 1-3 concrete example actions, rendered as a
+     *  bulleted list. Always present; empty for un-backfilled rows. */
+    examples: string[]
 }
 
 export interface RoleDefinitionResponse {
@@ -42,6 +49,18 @@ export interface RoleCreateRequest {
 export interface RoleUpdateRequest {
     description?: string | null
     permissions?: string[]
+}
+
+/**
+ * Body for ``PUT /admin/permissions/{id}``. All fields optional —
+ * ``null`` / ``undefined`` leaves them unchanged. Pass an empty
+ * array to ``examples`` or empty string to ``longDescription`` to
+ * clear those fields.
+ */
+export interface PermissionUpdateRequest {
+    description?: string | null
+    longDescription?: string | null
+    examples?: string[] | null
 }
 
 
@@ -103,6 +122,22 @@ export interface UserAccessResponse {
 export const permissionsService = {
     listPermissions(): Promise<PermissionResponse[]> {
         return authFetch<PermissionResponse[]>('/api/v1/admin/permissions')
+    },
+
+    /**
+     * Edit the documentation fields of a permission. Only
+     * ``description`` / ``longDescription`` / ``examples`` are
+     * mutable — the id and category are part of the system
+     * contract and locked server-side.
+     */
+    updatePermission(
+        permissionId: string,
+        req: PermissionUpdateRequest,
+    ): Promise<PermissionResponse> {
+        return authFetch<PermissionResponse>(
+            `/api/v1/admin/permissions/${encodeURIComponent(permissionId)}`,
+            { method: 'PUT', body: JSON.stringify(req) },
+        )
     },
 
     /**

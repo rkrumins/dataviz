@@ -313,6 +313,125 @@ async def test_role_bindings_audit_rejects_bad_scope_type(
     assert r.status_code == 400
 
 
+# ── Role lifecycle (Phase 3) ────────────────────────────────────────
+
+async def _seed_perms(session):
+    """Seed enough permissions for the role-lifecycle tests."""
+    from backend.app.db.models import PermissionORM
+    needed = [
+        ("workspace:view:read", "workspace"),
+        ("workspace:view:edit", "workspace"),
+    ]
+    for pid, cat in needed:
+        existing = await session.get(PermissionORM, pid)
+        if existing is None:
+            session.add(PermissionORM(id=pid, description=pid, category=cat))
+    await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_list_roles_returns_seeded_system_roles(test_client: AsyncClient):
+    r = await test_client.get("/api/v1/admin/roles")
+    assert r.status_code == 200, r.text
+    by_name = {row["name"]: row for row in r.json()}
+    for name in ("admin", "user", "viewer"):
+        assert name in by_name
+        assert by_name[name]["isSystem"] is True
+        assert by_name[name]["scopeType"] == "global"
+
+
+@pytest.mark.asyncio
+async def test_create_role_round_trip_and_reject_system_name(
+    test_client: AsyncClient, db_session,
+):
+    await _seed_perms(db_session)
+    # Happy path
+    r = await test_client.post(
+        "/api/v1/admin/roles",
+        json={
+            "name": "auditor",
+            "description": "Read-only across the platform",
+            "scopeType": "global",
+            "permissions": ["workspace:view:read"],
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["isSystem"] is False
+    assert body["bindingCount"] == 0
+    # Reject reserved name
+    r = await test_client.post(
+        "/api/v1/admin/roles",
+        json={"name": "admin", "scopeType": "global", "permissions": []},
+    )
+    assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_workspace_scoped_role_only_bindable_in_its_workspace(
+    test_client: AsyncClient, db_session,
+):
+    await _seed_perms(db_session)
+    ws_a = await _seed_workspace(db_session, ws_id="ws_alpha", name="Alpha")
+    ws_b = await _seed_workspace(db_session, ws_id="ws_beta", name="Beta")
+    bob = await _seed_user(db_session, user_id="usr_b3", email="b3@example.com")
+
+    create = await test_client.post(
+        "/api/v1/admin/roles",
+        json={
+            "name": "alpha-auditor",
+            "scopeType": "workspace",
+            "scopeId": ws_a,
+            "permissions": ["workspace:view:read"],
+        },
+    )
+    assert create.status_code == 201, create.text
+
+    ok = await test_client.post(
+        f"/api/v1/admin/workspaces/{ws_a}/members",
+        json={"subjectType": "user", "subjectId": bob, "role": "alpha-auditor"},
+    )
+    assert ok.status_code == 201
+
+    bad = await test_client.post(
+        f"/api/v1/admin/workspaces/{ws_b}/members",
+        json={"subjectType": "user", "subjectId": bob, "role": "alpha-auditor"},
+    )
+    assert bad.status_code == 409
+    assert "scoped" in bad.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_update_and_delete_lifecycle_guards(
+    test_client: AsyncClient, db_session,
+):
+    await _seed_perms(db_session)
+
+    # System role rejects edit
+    r = await test_client.put(
+        "/api/v1/admin/roles/admin",
+        json={"description": "tampered"},
+    )
+    assert r.status_code == 409
+
+    # Custom role can be created and updated
+    create = await test_client.post(
+        "/api/v1/admin/roles",
+        json={"name": "ed", "scopeType": "global", "permissions": ["workspace:view:read"]},
+    )
+    assert create.status_code == 201
+    upd = await test_client.put(
+        "/api/v1/admin/roles/ed",
+        json={"permissions": ["workspace:view:read", "workspace:view:edit"]},
+    )
+    assert upd.status_code == 200
+    assert sorted(upd.json()["permissions"]) == ["workspace:view:edit", "workspace:view:read"]
+
+    # Delete unused custom role
+    delete = await test_client.delete("/api/v1/admin/roles/ed")
+    assert delete.status_code == 204
+
+
 # ── view three-layer evaluator (unit-level) ─────────────────────────
 
 @pytest.mark.asyncio

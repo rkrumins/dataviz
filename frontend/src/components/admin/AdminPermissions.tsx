@@ -42,6 +42,7 @@ import { adminUserService, type AdminUserResponse } from '@/services/adminUserSe
 import { useToast } from '@/components/ui/toast'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
+import { PermissionTooltip } from './PermissionTooltip'
 
 
 // ── Shared types ─────────────────────────────────────────────────────
@@ -288,6 +289,7 @@ export function AdminPermissions() {
                             permissions={permissions}
                             roles={roles}
                             onEditRole={setEditingRole}
+                            onPermissionUpdated={() => void fetchCatalogue()}
                         />
                     )}
                     {permissions && roles && tab === 'catalog' && (
@@ -335,11 +337,12 @@ export function AdminPermissions() {
 // ─────────────────────────────────────────────────────────────────────
 
 function RoleMatrixTab({
-    permissions, roles, onEditRole,
+    permissions, roles, onEditRole, onPermissionUpdated,
 }: {
     permissions: PermissionResponse[]
     roles: RoleDefinitionResponse[]
     onEditRole: (role: RoleDefinitionResponse) => void
+    onPermissionUpdated: () => void
 }) {
     const [selectedPerm, setSelectedPerm] = useState<PermissionResponse | null>(null)
     const [hoverPermId, setHoverPermId] = useState<string | null>(null)
@@ -500,9 +503,18 @@ function RoleMatrixTab({
                                                     {/* Permission cell */}
                                                     <td className="px-5 py-2.5 sticky left-0 z-10 bg-canvas-elevated">
                                                         <div className="flex flex-col gap-0.5 min-w-0">
-                                                            <code className="text-xs font-mono font-semibold text-ink truncate">
-                                                                {p.id}
-                                                            </code>
+                                                            <div className="flex items-center gap-1.5 min-w-0">
+                                                                <code className="text-xs font-mono font-semibold text-ink truncate">
+                                                                    {p.id}
+                                                                </code>
+                                                                <PermissionTooltip
+                                                                    permission={p}
+                                                                    grantedToRoles={roles
+                                                                        .filter(r => rolePerms[r.name]?.has(p.id))
+                                                                        .map(r => r.isSystem ? r.name : r.name)}
+                                                                    placement="right"
+                                                                />
+                                                            </div>
                                                             <span className="text-[11px] text-ink-muted truncate">
                                                                 {p.description}
                                                             </span>
@@ -551,6 +563,10 @@ function RoleMatrixTab({
                         permission={selectedPerm}
                         roles={roles}
                         onClose={() => setSelectedPerm(null)}
+                        onUpdated={(updated) => {
+                            setSelectedPerm(updated)
+                            onPermissionUpdated()
+                        }}
                     />
                 )}
             </AnimatePresence>
@@ -560,15 +576,60 @@ function RoleMatrixTab({
 
 
 function PermissionDetailDrawer({
-    permission, roles, onClose,
+    permission, roles, onClose, onUpdated,
 }: {
     permission: PermissionResponse
     roles: RoleDefinitionResponse[]
     onClose: () => void
+    onUpdated: (updated: PermissionResponse) => void
 }) {
     const grantedTo = roles.filter(r => r.permissions.includes(permission.id))
     const cv = CATEGORY_VISUAL[permission.category] ?? CATEGORY_VISUAL.system
     const CatIcon = cv.icon
+
+    // ── Edit mode state ──────────────────────────────────────────
+    const [editing, setEditing] = useState(false)
+    const [editDescription, setEditDescription] = useState(permission.description)
+    const [editLong, setEditLong] = useState(permission.longDescription ?? '')
+    const [editExamples, setEditExamples] = useState((permission.examples ?? []).join('\n'))
+    const [saving, setSaving] = useState(false)
+    const { showToast } = useToast()
+
+    const startEdit = () => {
+        setEditDescription(permission.description)
+        setEditLong(permission.longDescription ?? '')
+        setEditExamples((permission.examples ?? []).join('\n'))
+        setEditing(true)
+    }
+
+    const cancelEdit = () => setEditing(false)
+
+    const handleSave = async () => {
+        const trimmed = editDescription.trim()
+        if (!trimmed) {
+            showToast('error', 'Short description is required.')
+            return
+        }
+        setSaving(true)
+        try {
+            const examples = editExamples
+                .split('\n')
+                .map(s => s.trim())
+                .filter(Boolean)
+            const updated = await permissionsService.updatePermission(permission.id, {
+                description: trimmed,
+                longDescription: editLong.trim() || '',
+                examples,
+            })
+            showToast('success', `Updated ${permission.id}`)
+            setEditing(false)
+            onUpdated(updated)
+        } catch (err) {
+            showToast('error', err instanceof Error ? err.message : 'Save failed')
+        } finally {
+            setSaving(false)
+        }
+    }
 
     return (
         <motion.div
@@ -587,22 +648,124 @@ function PermissionDetailDrawer({
                 onClick={(e) => e.stopPropagation()}
                 className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md p-6"
             >
-                <div className="flex items-start justify-between mb-4">
-                    <div className="flex items-start gap-3">
-                        <div className={cn('w-10 h-10 rounded-xl border flex items-center justify-center', cv.pill)}>
+                <div className="flex items-start justify-between mb-4 gap-2">
+                    <div className="flex items-start gap-3 min-w-0 flex-1">
+                        <div className={cn('w-10 h-10 rounded-xl border flex items-center justify-center shrink-0', cv.pill)}>
                             <CatIcon className="w-5 h-5" />
                         </div>
-                        <div>
-                            <code className="text-sm font-mono font-bold text-ink">{permission.id}</code>
+                        <div className="min-w-0">
+                            <code className="text-sm font-mono font-bold text-ink break-all">{permission.id}</code>
                             <p className="text-xs text-ink-muted mt-0.5">{permission.description}</p>
                         </div>
                     </div>
-                    <button onClick={onClose} className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5">
-                        <X className="w-4 h-4" />
-                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                        {!editing && (
+                            <button
+                                onClick={startEdit}
+                                title="Edit description and examples"
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold text-ink-secondary hover:text-ink bg-glass-base/40 border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                            >
+                                <Pencil className="w-3 h-3" />
+                                Edit
+                            </button>
+                        )}
+                        <button onClick={onClose} className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5">
+                            <X className="w-4 h-4" />
+                        </button>
+                    </div>
                 </div>
 
                 <div className="space-y-4">
+                    {editing ? (
+                        <>
+                            {/* Edit mode: short description */}
+                            <div>
+                                <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted mb-2 block">
+                                    Short description <span className="text-red-500 normal-case font-normal">required</span>
+                                </label>
+                                <input
+                                    value={editDescription}
+                                    onChange={(e) => setEditDescription(e.target.value)}
+                                    placeholder="One-line summary"
+                                    className="input w-full text-sm"
+                                    disabled={saving}
+                                />
+                                <p className="text-[10px] text-ink-muted mt-1">
+                                    Shown next to the permission id in tables and pickers.
+                                </p>
+                            </div>
+
+                            {/* Edit mode: long description */}
+                            <div>
+                                <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted mb-2 block">
+                                    What this allows
+                                </label>
+                                <textarea
+                                    value={editLong}
+                                    onChange={(e) => setEditLong(e.target.value)}
+                                    placeholder="Paragraph explaining what this permission lets a user do, including any caveats or related permissions."
+                                    rows={4}
+                                    className="input w-full text-sm resize-none"
+                                    disabled={saving}
+                                />
+                                <p className="text-[10px] text-ink-muted mt-1">
+                                    Surfaced in the hover tooltip. Leave blank to fall back to the short description.
+                                </p>
+                            </div>
+
+                            {/* Edit mode: examples (one per line) */}
+                            <div>
+                                <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted mb-2 flex items-center gap-1">
+                                    <Sparkles className="w-3 h-3 text-emerald-500" />
+                                    Example actions
+                                </label>
+                                <textarea
+                                    value={editExamples}
+                                    onChange={(e) => setEditExamples(e.target.value)}
+                                    placeholder={'One example per line. e.g.\nEdit any view in the workspace\nRename a view someone else created'}
+                                    rows={5}
+                                    className="input w-full text-sm font-mono resize-none"
+                                    disabled={saving}
+                                />
+                                <p className="text-[10px] text-ink-muted mt-1">
+                                    One bullet per line. Empty lines are ignored.
+                                </p>
+                            </div>
+                        </>
+                    ) : (
+                        <>
+                            {/* Read mode: long-form explanation. Falls back to
+                                the short description for permissions that pre-date
+                                the backfill. */}
+                            <div>
+                                <h4 className="text-xs font-semibold uppercase tracking-wider text-ink-muted mb-2">
+                                    What this allows
+                                </h4>
+                                <p className="text-sm text-ink-secondary leading-relaxed">
+                                    {permission.longDescription ?? permission.description}
+                                </p>
+                            </div>
+
+                            {/* Read mode: concrete example actions */}
+                            {permission.examples.length > 0 && (
+                                <div>
+                                    <h4 className="text-xs font-semibold uppercase tracking-wider text-ink-muted mb-2 flex items-center gap-1">
+                                        <Sparkles className="w-3 h-3 text-emerald-500" />
+                                        Example actions
+                                    </h4>
+                                    <ul className="space-y-1.5 rounded-xl border border-glass-border bg-glass-base/30 p-3">
+                                        {permission.examples.map((ex, i) => (
+                                            <li key={i} className="text-xs text-ink-secondary leading-relaxed flex items-start gap-2">
+                                                <span className="text-emerald-500 shrink-0 mt-px">•</span>
+                                                <span className="min-w-0">{ex}</span>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+                        </>
+                    )}
+
                     <div>
                         <h4 className="text-xs font-semibold uppercase tracking-wider text-ink-muted mb-2">
                             Category
@@ -641,6 +804,27 @@ function PermissionDetailDrawer({
                         )}
                     </div>
                 </div>
+
+                {/* Edit-mode footer */}
+                {editing && (
+                    <div className="mt-5 pt-4 border-t border-glass-border flex items-center justify-end gap-2">
+                        <button
+                            onClick={cancelEdit}
+                            disabled={saving}
+                            className="px-4 py-2 rounded-xl text-sm font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={() => void handleSave()}
+                            disabled={saving || !editDescription.trim()}
+                            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-accent-lineage hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm shadow-accent-lineage/20"
+                        >
+                            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+                            Save changes
+                        </button>
+                    </div>
+                )}
             </motion.div>
         </motion.div>
     )
@@ -782,9 +966,17 @@ function PermissionCatalogTab({
                                                         <CatIcon className="w-4 h-4" />
                                                     </div>
                                                     <div className="min-w-0 flex-1">
-                                                        <code className="block text-sm font-mono font-bold text-ink truncate">
-                                                            {p.id}
-                                                        </code>
+                                                        <div className="flex items-center gap-1.5 min-w-0">
+                                                            <code className="block text-sm font-mono font-bold text-ink truncate">
+                                                                {p.id}
+                                                            </code>
+                                                            <PermissionTooltip
+                                                                permission={p}
+                                                                grantedToRoles={inRoles}
+                                                                placement="below"
+                                                                size="md"
+                                                            />
+                                                        </div>
                                                         <p className="text-xs text-ink-muted mt-0.5 leading-relaxed">{p.description}</p>
                                                     </div>
                                                 </div>
@@ -1722,14 +1914,24 @@ function RoleEditorDrawer({
                                         {list.map(p => {
                                             const on = selectedPerms.has(p.id)
                                             return (
-                                                <button
+                                                <div
                                                     key={p.id}
-                                                    onClick={() => togglePerm(p.id)}
-                                                    disabled={isSystem}
+                                                    role="button"
+                                                    tabIndex={isSystem ? -1 : 0}
+                                                    aria-pressed={on}
+                                                    aria-disabled={isSystem}
+                                                    onClick={() => { if (!isSystem) togglePerm(p.id) }}
+                                                    onKeyDown={(e) => {
+                                                        if (isSystem) return
+                                                        if (e.key === ' ' || e.key === 'Enter') {
+                                                            e.preventDefault()
+                                                            togglePerm(p.id)
+                                                        }
+                                                    }}
                                                     className={cn(
                                                         'w-full flex items-start gap-2.5 px-3 py-2 border-b last:border-b-0 border-glass-border text-left transition-colors',
                                                         on ? 'bg-emerald-500/5' : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
-                                                        isSystem && 'cursor-default',
+                                                        isSystem ? 'cursor-default' : 'cursor-pointer',
                                                     )}
                                                 >
                                                     <div className={cn(
@@ -1741,12 +1943,15 @@ function RoleEditorDrawer({
                                                         {on && <Check className="w-2.5 h-2.5 text-white" />}
                                                     </div>
                                                     <div className="min-w-0 flex-1">
-                                                        <code className="text-[11px] font-mono font-semibold text-ink truncate block">
-                                                            {p.id}
-                                                        </code>
+                                                        <div className="flex items-center gap-1.5 min-w-0">
+                                                            <code className="text-[11px] font-mono font-semibold text-ink truncate block">
+                                                                {p.id}
+                                                            </code>
+                                                            <PermissionTooltip permission={p} placement="right" />
+                                                        </div>
                                                         <p className="text-[10px] text-ink-muted truncate">{p.description}</p>
                                                     </div>
-                                                </button>
+                                                </div>
                                             )
                                         })}
                                     </div>
@@ -2097,11 +2302,20 @@ function CreateRoleModal({
                                         {list.map(p => {
                                             const on = selectedPerms.has(p.id)
                                             return (
-                                                <button
+                                                <div
                                                     key={p.id}
+                                                    role="button"
+                                                    tabIndex={0}
+                                                    aria-pressed={on}
                                                     onClick={() => togglePerm(p.id)}
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === ' ' || e.key === 'Enter') {
+                                                            e.preventDefault()
+                                                            togglePerm(p.id)
+                                                        }
+                                                    }}
                                                     className={cn(
-                                                        'w-full flex items-start gap-2.5 px-3 py-2 border-b last:border-b-0 border-glass-border text-left transition-colors',
+                                                        'w-full flex items-start gap-2.5 px-3 py-2 border-b last:border-b-0 border-glass-border text-left transition-colors cursor-pointer',
                                                         on ? 'bg-emerald-500/5' : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
                                                     )}
                                                 >
@@ -2112,12 +2326,15 @@ function CreateRoleModal({
                                                         {on && <Check className="w-2.5 h-2.5 text-white" />}
                                                     </div>
                                                     <div className="min-w-0 flex-1">
-                                                        <code className="text-[11px] font-mono font-semibold text-ink truncate block">
-                                                            {p.id}
-                                                        </code>
+                                                        <div className="flex items-center gap-1.5 min-w-0">
+                                                            <code className="text-[11px] font-mono font-semibold text-ink truncate block">
+                                                                {p.id}
+                                                            </code>
+                                                            <PermissionTooltip permission={p} placement="right" />
+                                                        </div>
                                                         <p className="text-[10px] text-ink-muted truncate">{p.description}</p>
                                                     </div>
-                                                </button>
+                                                </div>
                                             )
                                         })}
                                     </div>

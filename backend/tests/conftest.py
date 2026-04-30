@@ -37,8 +37,22 @@ from backend.app.db.repositories.refresh_token_repo import make_refresh_store
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
+    get_permission_claims,
     require_admin,
 )
+from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.revocation_service import (
+    InMemoryBackend,
+    RevocationService,
+    configure_revocation_service,
+)
+
+
+# RBAC Phase 2: install the in-memory revocation backend for the whole
+# test session so ``requires(...)`` doesn't hit the fail-closed Redis
+# path (which would 503 every test that touches a fail-closed
+# permission like ``workspace:admin``).
+configure_revocation_service(RevocationService(InMemoryBackend()))
 from backend.auth_service.csrf import CSRF_HEADER_NAME
 from backend.auth_service.cookies import CSRF_COOKIE_NAME
 from backend.auth_service.interface import User
@@ -126,6 +140,27 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
         expire_on_commit=False,
     )
 
+    # RBAC Phase 3: seed the canonical ``roles`` table with the three
+    # built-in system roles so binding endpoints (which validate
+    # against the table) can find them. Production seeds via the
+    # 20260430_1500_roles_lifecycle migration; tests use create_all
+    # so we mirror the seed here.
+    async with session_factory() as _seed_session:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        for name, desc in (
+            ("admin", "Full system access across every workspace and resource."),
+            ("user", "Standard workspace member — manage views and data sources."),
+            ("viewer", "Read-only access to views and data sources."),
+        ):
+            _seed_session.add(_models.RoleORM(
+                name=name, description=desc,
+                scope_type="global", scope_id=None,
+                is_system=True,
+                created_at=now, updated_at=now, created_by=None,
+            ))
+        await _seed_session.commit()
+
     async with session_factory() as session:
         yield session
         await session.rollback()
@@ -203,11 +238,27 @@ async def test_client(
     async def _override_require_admin():
         return _FAKE_USER
 
+    # RBAC Phase 2: ``requires(...)`` reads permission claims from the
+    # JWT cookie. The test client doesn't carry a JWT, so we synthesize
+    # claims for the fake admin here. ``system:admin`` in the global
+    # permission set triggers the implicit-allow shortcut in
+    # ``has_permission``, so every ``requires(...)`` dependency passes
+    # for the fake user without each test having to thread a real JWT
+    # through. Tests that need to verify 403 behaviour for non-admins
+    # can override this fixture per-test.
+    def _override_get_permission_claims():
+        return PermissionClaims(
+            sid="sess_test",
+            global_perms=("system:admin",),
+            ws_perms={},
+        )
+
     app.dependency_overrides[get_db_session] = _override_get_db_session
     app.dependency_overrides[get_readonly_db_session] = _override_get_db_session
     app.dependency_overrides[get_current_user] = _override_get_current_user
     app.dependency_overrides[get_optional_user] = _override_get_optional_user
     app.dependency_overrides[require_admin] = _override_require_admin
+    app.dependency_overrides[get_permission_claims] = _override_get_permission_claims
 
     # Wire a real IdentityService against the per-test session so
     # /api/v1/auth/* endpoints can be exercised end-to-end.

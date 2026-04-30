@@ -201,13 +201,18 @@ async def test_binding_repo_validates_scope_consistency(db_session):
 
 
 @pytest.mark.asyncio
-async def test_binding_repo_validates_role_name(db_session):
+async def test_binding_repo_validates_role_name_shape(db_session):
+    """Phase 3 moved role-existence validation to the endpoint layer
+    (the canonical ``roles`` table is now the source of truth). The
+    repo still rejects shape errors — empty / non-string role names —
+    because those would slip past the DB unique constraint with a
+    confusing IntegrityError."""
     user_id = await _seed_user(db_session)
     with pytest.raises(ValueError):
         await binding_repo.create_binding(
             db_session,
             subject_type="user", subject_id=user_id,
-            role_name="superuser",  # not in Phase 1 enum
+            role_name="",  # empty role name
             scope_type="global",
         )
 

@@ -44,6 +44,7 @@ from backend.app.services.permission_service import resolve as resolve_claims
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
     PermissionResponse,
+    PermissionUpdateRequest,
     RoleCreateRequest,
     RoleDefinitionResponse,
     RoleUpdateRequest,
@@ -59,6 +60,30 @@ from backend.common.models.rbac import (
 router = APIRouter()
 
 
+def _permission_to_response(p) -> PermissionResponse:
+    """Convert a ``PermissionORM`` row to its API representation,
+    decoding the JSON-encoded ``examples`` blob defensively."""
+    import json as _json
+    examples: list[str] = []
+    raw = getattr(p, "examples", None)
+    if raw:
+        try:
+            decoded = _json.loads(raw)
+            if isinstance(decoded, list):
+                examples = [str(e) for e in decoded]
+        except (ValueError, TypeError):
+            # Stored value was malformed — surface empty rather than
+            # 500 so the admin can re-save through the edit flow.
+            pass
+    return PermissionResponse(
+        id=p.id,
+        description=p.description,
+        category=p.category,
+        long_description=getattr(p, "long_description", None),
+        examples=examples,
+    )
+
+
 @router.get(
     "/permissions",
     response_model=list[PermissionResponse],
@@ -68,12 +93,59 @@ async def list_permissions(
     _admin: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Return the full permission catalogue."""
+    """Return the full permission catalogue.
+
+    Includes the Phase-4.1 ``longDescription`` and ``examples`` fields
+    so the admin UI can render plain-English tooltips. Permissions
+    without backfill data render with empty examples and a null
+    long_description — the FE falls back to the short ``description``.
+    """
     perms = await permission_repo.list_permissions(session)
-    return [
-        PermissionResponse(id=p.id, description=p.description, category=p.category)
-        for p in perms
-    ]
+    return [_permission_to_response(p) for p in perms]
+
+
+@router.put(
+    "/permissions/{permission_id}",
+    response_model=PermissionResponse,
+    response_model_by_alias=True,
+)
+async def update_permission(
+    permission_id: str,
+    body: PermissionUpdateRequest,
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Update a permission's description / long-description / examples.
+
+    Only the documentation fields are editable. The ``id`` (referenced
+    by ``role_permissions`` rows + JWT claims) and ``category``
+    (drives UX grouping and badge colour) are part of the system
+    contract and locked.
+
+    Each field is optional in the request body. ``None`` leaves the
+    field unchanged. ``""`` clears the long_description (the FE
+    falls back to the short description). ``examples=[]`` clears
+    the list.
+    """
+    try:
+        updated = await permission_repo.update_permission(
+            session,
+            permission_id,
+            description=body.description,
+            long_description=body.long_description,
+            examples=body.examples,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Permission '{permission_id}' not found")
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="rbac.permission.updated",
+        payload={"permission_id": permission_id, "actor_id": admin.id},
+    )
+    return _permission_to_response(updated)
 
 
 # ── Role lifecycle ───────────────────────────────────────────────────
