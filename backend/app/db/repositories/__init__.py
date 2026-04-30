@@ -12,6 +12,7 @@ from . import (
     binding_repo,
     grant_repo,
     role_repo,
+    access_request_repo,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "binding_repo",
     "grant_repo",
     "role_repo",
+    "access_request_repo",
 ]

@@ -1,4 +1,4 @@
-import { Database, FolderOpen, Shield, Trash2, ChevronRight, CircleDot, ArrowRightLeft, Layers } from 'lucide-react'
+import { Database, FolderOpen, Shield, Trash2, ChevronRight, CircleDot, ArrowRightLeft, Layers, Users } from 'lucide-react'
 import { type WorkspaceResponse } from '@/services/workspaceService'
 import { WorkspaceHealthBadge } from './WorkspaceHealthBadge'
 import { getProviderLogo } from '../ProviderLogos'
@@ -19,9 +19,12 @@ interface WorkspaceListRowProps {
     onOpen: () => void
     onDelete: () => void
     onSetDefault: () => void
+    /** Optional — when provided, the row exposes a "Members" action
+     *  that jumps to the workspace's Members tab. */
+    onManageMembers?: () => void
 }
 
-export function WorkspaceListRow({ ws, index: _index, stats, healthStatus, dsProviders, onOpen, onDelete, onSetDefault }: WorkspaceListRowProps) {
+export function WorkspaceListRow({ ws, index: _index, stats, healthStatus, dsProviders, onOpen, onDelete, onSetDefault, onManageMembers }: WorkspaceListRowProps) {
     const uniqueProviderTypes = Array.from(new Set(dsProviders.map(p => p.providerType).filter(t => t !== 'unknown')))
 
     return (
@@ -86,6 +89,11 @@ export function WorkspaceListRow({ ws, index: _index, stats, healthStatus, dsPro
             <span className="text-[11px] text-ink-muted">{new Date(ws.updatedAt).toLocaleDateString()}</span>
 
             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                {onManageMembers && (
+                    <button onClick={(e) => { e.stopPropagation(); onManageMembers() }} className="p-1 rounded-lg text-ink-muted hover:text-emerald-500 hover:bg-emerald-500/10 transition-colors" title="Manage members">
+                        <Users className="w-3 h-3" />
+                    </button>
+                )}
                 {!ws.isDefault && (
                     <button onClick={(e) => { e.stopPropagation(); onSetDefault() }} className="p-1 rounded-lg text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors" title="Set Default">
                         <Shield className="w-3 h-3" />

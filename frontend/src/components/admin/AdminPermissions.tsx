@@ -23,15 +23,15 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
     KeyRound, Shield, UserCog, Eye, Users2, Users, Database, Briefcase,
     RefreshCw, Search, Loader2, AlertCircle, Check, X, Info, Sparkles,
-    ChevronRight, GitBranch, Layers, Lock, Zap, BookOpen, Mail,
-    Plus, Pencil, Trash2, Globe, AlertTriangle,
+    ChevronRight, GitBranch, Layers, Lock, Zap, BookOpen,
+    Plus, Pencil, Trash2, Globe, AlertTriangle, ExternalLink,
 } from 'lucide-react'
 import {
     permissionsService,
     type PermissionResponse,
     type RoleDefinitionResponse,
     type UserAccessResponse,
-    type AccessBinding,
+    type ImpactPreviewResponse,
 } from '@/services/permissionsService'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import {
@@ -43,6 +43,10 @@ import { useToast } from '@/components/ui/toast'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
 import { PermissionTooltip } from './PermissionTooltip'
+import { ImpactPreviewModal } from './ImpactPreviewModal'
+import { RBACSearchBar, type RBACSearchTarget } from './RBACSearchBar'
+import { AccessSummary } from '@/components/access/AccessSummary'
+import { Link, useNavigate } from 'react-router-dom'
 
 
 // ── Shared types ─────────────────────────────────────────────────────
@@ -178,6 +182,43 @@ export function AdminPermissions() {
     const [showCreateRole, setShowCreateRole] = useState(false)
     const [editingRole, setEditingRole] = useState<RoleDefinitionResponse | null>(null)
 
+    // Phase 4.5: pre-selection from the RBAC search bar. Setting this
+    // re-mounts the relevant tab with the entity already chosen.
+    const [selectedUserId, setSelectedUserId] = useState<string | null>(null)
+    const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
+    const [highlightedPermissionId, setHighlightedPermissionId] = useState<string | null>(null)
+    const navigate = useNavigate()
+
+    const handleSearchNavigate = useCallback((target: RBACSearchTarget) => {
+        switch (target.kind) {
+            case 'user':
+                setSelectedUserId(target.userId)
+                setTab('byUser')
+                break
+            case 'workspace':
+                setSelectedWorkspaceId(target.workspaceId)
+                setTab('byWorkspace')
+                break
+            case 'role': {
+                const match = (roles ?? []).find(r => r.name === target.roleName)
+                if (match) {
+                    setTab('roles')
+                    setEditingRole(match)
+                } else {
+                    setTab('roles')
+                }
+                break
+            }
+            case 'permission':
+                setHighlightedPermissionId(target.permissionId)
+                setTab('catalog')
+                break
+            case 'group':
+                navigate('/admin/groups')
+                break
+        }
+    }, [roles, navigate])
+
     const fetchCatalogue = useCallback(async () => {
         setReloading(true)
         setLoadError(null)
@@ -232,6 +273,11 @@ export function AdminPermissions() {
                         Refresh
                     </button>
                 </div>
+            </div>
+
+            {/* Unified RBAC search (Phase 4.5) */}
+            <div className="mb-6">
+                <RBACSearchBar onNavigate={handleSearchNavigate} />
             </div>
 
             {/* Tabs */}
@@ -293,12 +339,21 @@ export function AdminPermissions() {
                         />
                     )}
                     {permissions && roles && tab === 'catalog' && (
-                        <PermissionCatalogTab permissions={permissions} roles={roles} />
+                        <PermissionCatalogTab
+                            permissions={permissions}
+                            roles={roles}
+                            highlightedPermissionId={highlightedPermissionId}
+                        />
                     )}
                     {permissions && tab === 'byUser' && (
-                        <ByUserTab permissions={permissions} />
+                        <ByUserTab
+                            permissions={permissions}
+                            initialUserId={selectedUserId}
+                        />
                     )}
-                    {tab === 'byWorkspace' && <ByWorkspaceTab />}
+                    {tab === 'byWorkspace' && (
+                        <ByWorkspaceTab initialWorkspaceId={selectedWorkspaceId} />
+                    )}
                 </>
             )}
 
@@ -836,13 +891,22 @@ function PermissionDetailDrawer({
 // ─────────────────────────────────────────────────────────────────────
 
 function PermissionCatalogTab({
-    permissions, roles,
+    permissions, roles, highlightedPermissionId,
 }: {
     permissions: PermissionResponse[]
     roles: RoleDefinitionResponse[]
+    /** Phase 4.5 — set by the unified search bar to scroll a hit
+     *  into view and pre-select it for the detail drawer. */
+    highlightedPermissionId?: string | null
 }) {
     const [search, setSearch] = useState('')
     const [activeCategory, setActiveCategory] = useState<'all' | 'system' | 'workspace' | 'resource'>('all')
+
+    // When the search bar pre-selects a permission, seed the search
+    // box so the row is visible and shows up in the filtered grid.
+    useEffect(() => {
+        if (highlightedPermissionId) setSearch(highlightedPermissionId)
+    }, [highlightedPermissionId])
 
     const filtered = useMemo(() => {
         const q = search.trim().toLowerCase()
@@ -1020,11 +1084,25 @@ function PermissionCatalogTab({
 // Tab 3 — By user (subject lens)
 // ─────────────────────────────────────────────────────────────────────
 
-function ByUserTab({ permissions: _permissions }: { permissions: PermissionResponse[] }) {
+function ByUserTab({
+    permissions: _permissions, initialUserId,
+}: {
+    permissions: PermissionResponse[]
+    /** When set (e.g. from the unified RBAC search bar), auto-selects
+     *  the user on mount so the access detail loads immediately. */
+    initialUserId?: string | null
+}) {
     void _permissions
     const [users, setUsers] = useState<AdminUserResponse[] | null>(null)
     const [search, setSearch] = useState('')
-    const [selectedId, setSelectedId] = useState<string | null>(null)
+    const [selectedId, setSelectedId] = useState<string | null>(initialUserId ?? null)
+
+    // Sync incoming initialUserId changes (e.g. user clicks a second
+    // search result while the tab is already mounted).
+    useEffect(() => {
+        if (initialUserId) setSelectedId(initialUserId)
+    }, [initialUserId])
+
     const [access, setAccess] = useState<UserAccessResponse | null>(null)
     const [loadingAccess, setLoadingAccess] = useState(false)
     const [error, setError] = useState<string | null>(null)
@@ -1144,7 +1222,7 @@ function ByUserTab({ permissions: _permissions }: { permissions: PermissionRespo
                         </div>
                     )
                 ) : (
-                    <UserAccessDetail access={access} />
+                    <AccessSummary access={access} mode="admin" />
                 )}
             </div>
         </div>
@@ -1152,184 +1230,7 @@ function ByUserTab({ permissions: _permissions }: { permissions: PermissionRespo
 }
 
 
-function UserAccessDetail({ access }: { access: UserAccessResponse }) {
-    const totalBindings = access.directBindings.length + access.inheritedBindings.length
-    const wsCount = Object.keys(access.effectiveWs).length
-    const isAdmin = access.effectiveGlobal.includes('system:admin')
-
-    // Group inherited bindings by group for cleaner display.
-    const byGroup = useMemo(() => {
-        const out: Record<string, AccessBinding[]> = {}
-        for (const b of access.inheritedBindings) {
-            const g = b.viaGroup
-            if (!g) continue
-            ;(out[g.id] ??= []).push(b)
-        }
-        return out
-    }, [access.inheritedBindings])
-
-    return (
-        <div className="overflow-y-auto p-6 space-y-6">
-            {/* User header */}
-            <div className="flex items-start gap-4">
-                <div className={cn(
-                    'w-14 h-14 rounded-2xl bg-gradient-to-br flex items-center justify-center text-base font-bold text-white shrink-0 shadow-md',
-                    avatarGradient(access.user.displayName),
-                )}>
-                    {initialsOf(access.user.displayName)}
-                </div>
-                <div className="min-w-0 flex-1">
-                    <h2 className="text-xl font-bold text-ink truncate">{access.user.displayName}</h2>
-                    <div className="flex items-center gap-1 mt-0.5">
-                        <Mail className="w-3.5 h-3.5 text-ink-muted" />
-                        <p className="text-sm text-ink-muted truncate">{access.user.email}</p>
-                    </div>
-                    <div className="flex items-center gap-2 mt-2">
-                        {isAdmin && (
-                            <span className={cn('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border', ROLE_VISUAL.admin.badge)}>
-                                <Shield className="w-3 h-3" />
-                                System admin
-                            </span>
-                        )}
-                        <span className={cn(
-                            'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border',
-                            access.user.status === 'active'
-                                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
-                                : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
-                        )}>
-                            <span className={cn('w-1.5 h-1.5 rounded-full', access.user.status === 'active' ? 'bg-emerald-500' : 'bg-amber-500')} />
-                            {access.user.status}
-                        </span>
-                    </div>
-                </div>
-            </div>
-
-            {/* Mini KPI strip */}
-            <div className="grid grid-cols-3 gap-3">
-                <KpiTile label="Total bindings" value={totalBindings} icon={GitBranch} accent="emerald" />
-                <KpiTile label="Workspaces reached" value={wsCount} icon={Briefcase} accent="indigo" />
-                <KpiTile label="Group memberships" value={access.groups.length} icon={Users2} accent="violet" />
-            </div>
-
-            {/* Effective permissions */}
-            <Section
-                title="Effective access"
-                hint="What this user can actually do, after merging direct + group bindings."
-                icon={Sparkles}
-                accent="emerald"
-            >
-                {access.effectiveGlobal.length === 0 && Object.keys(access.effectiveWs).length === 0 && !isAdmin ? (
-                    <EmptyHint icon={Lock} text="No effective permissions — the user can't access anything until granted a binding." />
-                ) : (
-                    <div className="space-y-3">
-                        {/* Global */}
-                        {access.effectiveGlobal.length > 0 && (
-                            <ScopeCard
-                                scopeIcon={Lock}
-                                scopeLabel="Global"
-                                scopeSublabel="System-wide permissions"
-                                accent="violet"
-                                permissions={access.effectiveGlobal}
-                            />
-                        )}
-                        {/* Per-workspace */}
-                        {Object.entries(access.effectiveWs).map(([wsId, perms]) => (
-                            <ScopeCard
-                                key={wsId}
-                                scopeIcon={Briefcase}
-                                scopeLabel={wsId}
-                                scopeSublabel="Workspace permissions"
-                                accent="indigo"
-                                permissions={perms}
-                            />
-                        ))}
-                    </div>
-                )}
-            </Section>
-
-            {/* Direct bindings */}
-            <Section
-                title="Direct bindings"
-                hint="Bindings attached to the user directly — independent of group membership."
-                icon={UserCog}
-                accent="sky"
-                count={access.directBindings.length}
-            >
-                {access.directBindings.length === 0 ? (
-                    <EmptyHint icon={UserCog} text="No direct bindings. All access comes via group membership." />
-                ) : (
-                    <BindingList bindings={access.directBindings} />
-                )}
-            </Section>
-
-            {/* Inherited via groups */}
-            <Section
-                title="Inherited via groups"
-                hint="Bindings the user picks up because they belong to a group with workspace access."
-                icon={Users2}
-                accent="violet"
-                count={access.inheritedBindings.length}
-            >
-                {access.inheritedBindings.length === 0 ? (
-                    <EmptyHint icon={Users2} text="No inherited bindings — the user isn't in any group with bindings." />
-                ) : (
-                    <div className="space-y-3">
-                        {Object.entries(byGroup).map(([gid, list]) => {
-                            const group = list[0].viaGroup!
-                            return (
-                                <div key={gid} className="rounded-xl border border-violet-500/20 bg-violet-500/[0.03]">
-                                    <div className="flex items-center gap-2.5 px-3 py-2 border-b border-violet-500/15">
-                                        <div className="w-7 h-7 rounded-full bg-violet-500/10 border border-violet-500/20 flex items-center justify-center">
-                                            <Users2 className="w-3.5 h-3.5 text-violet-500" />
-                                        </div>
-                                        <div className="min-w-0">
-                                            <p className="text-sm font-semibold text-violet-700 dark:text-violet-300">{group.name}</p>
-                                            <p className="text-[10px] text-violet-600/70 dark:text-violet-400/70">via group membership</p>
-                                        </div>
-                                        <span className="ml-auto text-[10px] font-semibold text-ink-muted">
-                                            {list.length} binding{list.length !== 1 ? 's' : ''}
-                                        </span>
-                                    </div>
-                                    <BindingList bindings={list} suppressViaGroup />
-                                </div>
-                            )
-                        })}
-                    </div>
-                )}
-            </Section>
-
-            {/* Group memberships summary */}
-            <Section
-                title="Group memberships"
-                hint="Every group this user belongs to."
-                icon={Users}
-                accent="violet"
-                count={access.groups.length}
-            >
-                {access.groups.length === 0 ? (
-                    <EmptyHint icon={Users} text="The user isn't in any groups yet." />
-                ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                        {access.groups.map(g => (
-                            <div key={g.id} className="flex items-center gap-2.5 p-2.5 rounded-lg border border-glass-border bg-glass-base/30">
-                                <div className="w-8 h-8 rounded-full bg-violet-500/10 border border-violet-500/20 flex items-center justify-center shrink-0">
-                                    <Users2 className="w-3.5 h-3.5 text-violet-500" />
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                    <p className="text-sm font-semibold text-ink truncate">{g.name}</p>
-                                    <p className="text-[11px] text-ink-muted">{g.memberCount} member{g.memberCount !== 1 ? 's' : ''}</p>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                )}
-            </Section>
-        </div>
-    )
-}
-
-
-// ── Section / KPI helpers used by the access detail panel ──────────
+// ── Section / KPI helpers (also reused by ByWorkspaceTab) ──────────
 
 function KpiTile({
     label, value, icon: Icon, accent,
@@ -1391,113 +1292,23 @@ function EmptyHint({ icon: Icon, text }: { icon: typeof KeyRound; text: string }
 }
 
 
-function ScopeCard({
-    scopeIcon: Icon, scopeLabel, scopeSublabel, accent, permissions,
-}: {
-    scopeIcon: typeof KeyRound
-    scopeLabel: string
-    scopeSublabel: string
-    accent: string
-    permissions: string[]
-}) {
-    return (
-        <div className={cn('rounded-xl border bg-glass-base/30 overflow-hidden', `border-${accent}-500/20`)}>
-            <div className="flex items-center gap-2.5 px-3 py-2 border-b border-glass-border">
-                <div className={cn('w-7 h-7 rounded-lg border flex items-center justify-center', `bg-${accent}-500/10 border-${accent}-500/20`)}>
-                    <Icon className={cn('w-3.5 h-3.5', `text-${accent}-500`)} />
-                </div>
-                <div className="min-w-0 flex-1">
-                    <code className="text-xs font-mono font-semibold text-ink truncate block">{scopeLabel}</code>
-                    <p className="text-[10px] text-ink-muted">{scopeSublabel}</p>
-                </div>
-                <span className="text-[10px] font-semibold text-ink-muted">
-                    {permissions.length} perm{permissions.length !== 1 ? 's' : ''}
-                </span>
-            </div>
-            <div className="flex flex-wrap gap-1.5 p-3">
-                {permissions.length === 0 ? (
-                    <span className="text-xs italic text-ink-muted">None</span>
-                ) : (
-                    permissions.map(p => (
-                        <code
-                            key={p}
-                            className={cn(
-                                'inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold border',
-                                `bg-${accent}-500/5 text-${accent}-700 dark:text-${accent}-300 border-${accent}-500/20`,
-                            )}
-                        >
-                            {p}
-                        </code>
-                    ))
-                )}
-            </div>
-        </div>
-    )
-}
-
-
-function BindingList({
-    bindings, suppressViaGroup = false,
-}: {
-    bindings: AccessBinding[]
-    suppressViaGroup?: boolean
-}) {
-    return (
-        <div className="rounded-xl border border-glass-border bg-glass-base/30 divide-y divide-glass-border">
-            {bindings.map(b => {
-                const v = ROLE_VISUAL[b.role] ?? ROLE_VISUAL.user
-                const RoleIcon = v.icon
-                return (
-                    <div key={b.bindingId} className="flex items-center gap-3 px-3 py-2.5">
-                        {/* Role badge */}
-                        <span className={cn('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border shrink-0', v.badge)}>
-                            <RoleIcon className="w-2.5 h-2.5" />
-                            {v.label}
-                        </span>
-                        {/* Scope */}
-                        <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                            {b.scope.type === 'global' ? (
-                                <>
-                                    <Lock className="w-3 h-3 text-violet-500 shrink-0" />
-                                    <span className="text-xs font-semibold text-ink">Global</span>
-                                </>
-                            ) : (
-                                <>
-                                    <Briefcase className="w-3 h-3 text-indigo-500 shrink-0" />
-                                    <div className="min-w-0">
-                                        <p className="text-xs font-semibold text-ink truncate">
-                                            {b.scope.label ?? b.scope.id}
-                                        </p>
-                                        {b.scope.label && (
-                                            <code className="text-[10px] text-ink-muted truncate block">{b.scope.id}</code>
-                                        )}
-                                    </div>
-                                </>
-                            )}
-                        </div>
-                        {/* Via group chip */}
-                        {!suppressViaGroup && b.viaGroup && (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20 shrink-0">
-                                <Users2 className="w-2.5 h-2.5" />
-                                {b.viaGroup.name}
-                            </span>
-                        )}
-                    </div>
-                )
-            })}
-        </div>
-    )
-}
-
-
 // ─────────────────────────────────────────────────────────────────────
 // Tab 4 — By workspace (scope lens)
 // ─────────────────────────────────────────────────────────────────────
 
-function ByWorkspaceTab() {
+function ByWorkspaceTab({
+    initialWorkspaceId,
+}: {
+    initialWorkspaceId?: string | null
+} = {}) {
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[] | null>(null)
     const [search, setSearch] = useState('')
-    const [selectedId, setSelectedId] = useState<string | null>(null)
+    const [selectedId, setSelectedId] = useState<string | null>(initialWorkspaceId ?? null)
+
+    useEffect(() => {
+        if (initialWorkspaceId) setSelectedId(initialWorkspaceId)
+    }, [initialWorkspaceId])
+
     const [members, setMembers] = useState<WorkspaceMemberResponse[] | null>(null)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
@@ -1651,7 +1462,17 @@ function WorkspaceMembersDetail({
                     <Briefcase className="w-7 h-7 text-white" />
                 </div>
                 <div className="min-w-0 flex-1">
-                    <h2 className="text-xl font-bold text-ink truncate">{workspace.name}</h2>
+                    <div className="flex items-center gap-2">
+                        <h2 className="text-xl font-bold text-ink truncate">{workspace.name}</h2>
+                        <Link
+                            to={`/workspaces/${workspace.id}`}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 hover:bg-indigo-500/15 transition-colors"
+                            title="Open workspace"
+                        >
+                            <ExternalLink className="w-2.5 h-2.5" />
+                            Open
+                        </Link>
+                    </div>
                     {workspace.description && (
                         <p className="text-sm text-ink-muted mt-0.5">{workspace.description}</p>
                     )}
@@ -1745,7 +1566,13 @@ function RoleEditorDrawer({
     const [description, setDescription] = useState(role.description ?? '')
     const [selectedPerms, setSelectedPerms] = useState<Set<string>>(new Set(role.permissions))
     const [saving, setSaving] = useState(false)
-    const [confirmDelete, setConfirmDelete] = useState(false)
+    // Phase 4.4: gate destructive saves/deletes on an impact preview.
+    const [previewState, setPreviewState] = useState<{
+        kind: 'save' | 'delete'
+        loading: boolean
+        preview: ImpactPreviewResponse | null
+        error: string | null
+    } | null>(null)
     const { showToast } = useToast()
 
     const grouped = useMemo(() => groupByCategory(permissions), [permissions])
@@ -1767,7 +1594,7 @@ function RoleEditorDrawer({
         })
     }
 
-    const handleSave = async () => {
+    const commitSave = async () => {
         if (isSystem) return
         setSaving(true)
         try {
@@ -1776,6 +1603,7 @@ function RoleEditorDrawer({
                 permissions: Array.from(selectedPerms),
             })
             showToast('success', `Updated role "${role.name}"`)
+            setPreviewState(null)
             await onChanged()
         } catch (err) {
             showToast('error', err instanceof Error ? err.message : 'Save failed')
@@ -1784,18 +1612,56 @@ function RoleEditorDrawer({
         }
     }
 
-    const handleDelete = async () => {
+    const commitDelete = async () => {
         if (isSystem) return
         setSaving(true)
         try {
             await permissionsService.deleteRole(role.name)
             showToast('success', `Deleted role "${role.name}"`)
+            setPreviewState(null)
             await onChanged()
         } catch (err) {
             showToast('error', err instanceof Error ? err.message : 'Delete failed')
-            setConfirmDelete(false)
         } finally {
             setSaving(false)
+        }
+    }
+
+    const handleSave = async () => {
+        if (isSystem) return
+        setPreviewState({ kind: 'save', loading: true, preview: null, error: null })
+        try {
+            const preview = await permissionsService.previewRoleUpdate(
+                role.name, Array.from(selectedPerms),
+            )
+            setPreviewState(prev => prev?.kind === 'save'
+                ? { ...prev, loading: false, preview }
+                : prev,
+            )
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Failed to compute impact'
+            setPreviewState(prev => prev?.kind === 'save'
+                ? { ...prev, loading: false, error: msg }
+                : prev,
+            )
+        }
+    }
+
+    const handleDelete = async () => {
+        if (isSystem) return
+        setPreviewState({ kind: 'delete', loading: true, preview: null, error: null })
+        try {
+            const preview = await permissionsService.previewRoleDelete(role.name)
+            setPreviewState(prev => prev?.kind === 'delete'
+                ? { ...prev, loading: false, preview }
+                : prev,
+            )
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Failed to compute impact'
+            setPreviewState(prev => prev?.kind === 'delete'
+                ? { ...prev, loading: false, error: msg }
+                : prev,
+            )
         }
     }
 
@@ -1969,44 +1835,17 @@ function RoleEditorDrawer({
                                     Danger zone
                                 </h4>
                             </div>
-                            {confirmDelete ? (
-                                <div className="space-y-2">
-                                    <p className="text-xs text-red-700 dark:text-red-400">
-                                        {role.bindingCount > 0
-                                            ? `This role is in ${role.bindingCount} active binding(s). Revoke them first.`
-                                            : `Permanently delete the role "${role.name}"? This cannot be undone.`}
-                                    </p>
-                                    <div className="flex gap-2">
-                                        <button
-                                            onClick={() => setConfirmDelete(false)}
-                                            disabled={saving}
-                                            className="flex-1 px-3 py-1.5 rounded-lg text-xs font-semibold border border-glass-border bg-canvas-elevated hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
-                                        >
-                                            Cancel
-                                        </button>
-                                        <button
-                                            onClick={() => void handleDelete()}
-                                            disabled={saving || role.bindingCount > 0}
-                                            className="flex-1 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500 text-white hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-1.5"
-                                        >
-                                            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
-                                            Delete role
-                                        </button>
-                                    </div>
-                                </div>
-                            ) : (
-                                <button
-                                    onClick={() => setConfirmDelete(true)}
-                                    disabled={role.bindingCount > 0}
-                                    title={role.bindingCount > 0 ? 'Revoke active bindings before deleting' : 'Delete this role'}
-                                    className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20 hover:bg-red-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                                >
-                                    <Trash2 className="w-3 h-3" />
-                                    {role.bindingCount > 0
-                                        ? `In use (${role.bindingCount} binding${role.bindingCount === 1 ? '' : 's'})`
-                                        : 'Delete role'}
-                                </button>
-                            )}
+                            <button
+                                onClick={() => void handleDelete()}
+                                disabled={role.bindingCount > 0}
+                                title={role.bindingCount > 0 ? 'Revoke active bindings before deleting' : 'Delete this role'}
+                                className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20 hover:bg-red-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            >
+                                <Trash2 className="w-3 h-3" />
+                                {role.bindingCount > 0
+                                    ? `In use (${role.bindingCount} binding${role.bindingCount === 1 ? '' : 's'})`
+                                    : 'Delete role'}
+                            </button>
                         </div>
                     )}
                 </div>
@@ -2032,6 +1871,29 @@ function RoleEditorDrawer({
                     </div>
                 )}
             </motion.aside>
+
+            {/* Phase 4.4 — impact preview gates the destructive write. */}
+            <ImpactPreviewModal
+                open={previewState !== null}
+                title={
+                    previewState?.kind === 'delete'
+                        ? `Delete role "${role.name}"?`
+                        : `Save changes to "${role.name}"?`
+                }
+                intent={previewState?.kind === 'delete' ? 'destructive' : 'caution'}
+                confirmLabel={
+                    previewState?.kind === 'delete' ? 'Delete role' : 'Save changes'
+                }
+                preview={previewState?.preview ?? null}
+                loading={previewState?.loading ?? false}
+                error={previewState?.error ?? null}
+                confirming={saving}
+                onCancel={() => setPreviewState(null)}
+                onConfirm={() => {
+                    if (previewState?.kind === 'delete') void commitDelete()
+                    else if (previewState?.kind === 'save') void commitSave()
+                }}
+            />
         </motion.div>
     )
 }

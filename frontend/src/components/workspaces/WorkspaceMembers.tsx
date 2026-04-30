@@ -16,7 +16,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
     Users, Shield, UserCog, Eye, UserPlus, Trash2, RefreshCw,
     Search, Loader2, X, AlertCircle, AlertTriangle, Mail, Users2,
-    ChevronDown, ChevronUp,
+    ChevronDown, ChevronUp, Inbox, Check, XCircle, Clock,
 } from 'lucide-react'
 import {
     workspaceMembersService,
@@ -28,6 +28,12 @@ import {
     permissionsService,
     type RoleDefinitionResponse,
 } from '@/services/permissionsService'
+import {
+    accessRequestsService,
+    type AccessRequestResponse,
+} from '@/services/accessRequestsService'
+import type { ImpactPreviewResponse } from '@/services/permissionsService'
+import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
 import { useToast } from '@/components/ui/toast'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
@@ -48,7 +54,6 @@ type SubjectType = 'user' | 'group'
 
 type ModalType =
     | { kind: 'add' }
-    | { kind: 'revoke'; member: WorkspaceMemberResponse }
     | null
 
 interface RoleVisual {
@@ -233,6 +238,13 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
     const [sortDir, setSortDir] = useState<SortDir>('asc')
     const [actionLoading, setActionLoading] = useState<string | null>(null)
     const [modal, setModal] = useState<ModalType>(null)
+    // Phase 4.4: revoke confirms now go through an impact preview.
+    const [revokePreview, setRevokePreview] = useState<{
+        member: WorkspaceMemberResponse
+        loading: boolean
+        preview: ImpactPreviewResponse | null
+        error: string | null
+    } | null>(null)
     const { showToast } = useToast()
 
 
@@ -320,12 +332,37 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
             await fetchMembers()
             showToast('success', `Revoked ${member.subject.displayName ?? member.subject.id}`)
             setModal(null)
+            setRevokePreview(null)
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to revoke binding'
             showToast('error', msg)
             setError(msg)
         } finally {
             setActionLoading(null)
+        }
+    }
+
+    /**
+     * Phase 4.4: open the revoke flow with an impact preview. Replaces
+     * the bare "are you sure?" modal with a real diff so admins see
+     * what each member is about to lose.
+     */
+    const handleRequestRevoke = async (member: WorkspaceMemberResponse) => {
+        setRevokePreview({ member, loading: true, preview: null, error: null })
+        try {
+            const preview = await workspaceMembersService.previewRevoke(
+                workspaceId, member.bindingId,
+            )
+            setRevokePreview(prev => prev && prev.member.bindingId === member.bindingId
+                ? { ...prev, loading: false, preview }
+                : prev,
+            )
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Failed to compute impact'
+            setRevokePreview(prev => prev && prev.member.bindingId === member.bindingId
+                ? { ...prev, loading: false, error: msg }
+                : prev,
+            )
         }
     }
 
@@ -532,7 +569,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                                         {/* Actions */}
                                         <td className="px-5 py-4 text-right">
                                             <button
-                                                onClick={() => setModal({ kind: 'revoke', member: m })}
+                                                onClick={() => void handleRequestRevoke(m)}
                                                 disabled={isActing}
                                                 title="Revoke binding"
                                                 className="p-2 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/5 transition-colors disabled:opacity-50"
@@ -555,6 +592,12 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                     </div>
                 </div>
             )}
+
+            {/* Pending access requests inbox (Phase 4.3) */}
+            <PendingRequestsPanel
+                workspaceId={workspaceId}
+                onResolved={fetchMembers}
+            />
 
             {/* Modals */}
             <AnimatePresence>
@@ -587,18 +630,32 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                                     submitting={actionLoading === 'add'}
                                 />
                             )}
-                            {modal.kind === 'revoke' && (
-                                <RevokeMemberModal
-                                    member={modal.member}
-                                    onClose={() => setModal(null)}
-                                    onConfirm={() => handleRevoke(modal.member)}
-                                    submitting={actionLoading === `revoke-${modal.member.bindingId}`}
-                                />
-                            )}
                         </motion.div>
                     </motion.div>
                 )}
             </AnimatePresence>
+
+            {/* Revoke confirmation with impact preview (Phase 4.4) */}
+            <ImpactPreviewModal
+                open={revokePreview !== null}
+                title={revokePreview
+                    ? `Revoke ${revokePreview.member.subject.displayName ?? revokePreview.member.subject.id}?`
+                    : ''}
+                intent="destructive"
+                confirmLabel="Revoke binding"
+                preview={revokePreview?.preview ?? null}
+                loading={revokePreview?.loading ?? false}
+                error={revokePreview?.error ?? null}
+                confirming={
+                    revokePreview
+                        ? actionLoading === `revoke-${revokePreview.member.bindingId}`
+                        : false
+                }
+                onCancel={() => setRevokePreview(null)}
+                onConfirm={() => {
+                    if (revokePreview) void handleRevoke(revokePreview.member)
+                }}
+            />
         </div>
     )
 }
@@ -907,77 +964,203 @@ function AddMemberModal({
 }
 
 
-// ── Revoke confirm modal ────────────────────────────────────────────
+// ── Pending access requests inbox (Phase 4.3) ────────────────────────
 
-function RevokeMemberModal({
-    member, onClose, onConfirm, submitting,
+function PendingRequestsPanel({
+    workspaceId, onResolved,
 }: {
-    member: WorkspaceMemberResponse
-    onClose: () => void
-    onConfirm: () => Promise<void>
-    submitting: boolean
+    workspaceId: string
+    onResolved: () => void | Promise<void>
 }) {
-    const role = resolveRoleVisual(member.role)
-    const RoleIcon = role.icon
-    const name = member.subject.displayName ?? member.subject.id
+    const [requests, setRequests] = useState<AccessRequestResponse[] | null>(null)
+    const [error, setError] = useState<string | null>(null)
+    const [acting, setActing] = useState<string | null>(null)
+    const [denyingId, setDenyingId] = useState<string | null>(null)
+    const [denyNote, setDenyNote] = useState('')
+    const { showToast } = useToast()
+
+    const fetchPending = useCallback(async () => {
+        setError(null)
+        try {
+            const data = await accessRequestsService.listForWorkspace(workspaceId, {
+                status: 'pending',
+            })
+            setRequests(data)
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to load requests')
+        }
+    }, [workspaceId])
+
+    useEffect(() => { void fetchPending() }, [fetchPending])
+
+    const handleApprove = async (req: AccessRequestResponse) => {
+        setActing(req.id)
+        try {
+            await accessRequestsService.approve(req.id)
+            showToast('success', `Approved access for ${req.requester.displayName ?? req.requester.id}`)
+            await fetchPending()
+            await onResolved()
+        } catch (err) {
+            showToast('error', err instanceof Error ? err.message : 'Approve failed')
+        } finally {
+            setActing(null)
+        }
+    }
+
+    const handleDeny = async (req: AccessRequestResponse) => {
+        setActing(req.id)
+        try {
+            await accessRequestsService.deny(req.id, { note: denyNote.trim() || null })
+            showToast('success', `Denied request from ${req.requester.displayName ?? req.requester.id}`)
+            setDenyingId(null)
+            setDenyNote('')
+            await fetchPending()
+        } catch (err) {
+            showToast('error', err instanceof Error ? err.message : 'Deny failed')
+        } finally {
+            setActing(null)
+        }
+    }
+
+    if (requests === null && !error) {
+        return null  // initial silent load — keep the page calm
+    }
+
+    if (error) {
+        return (
+            <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-4 flex items-start gap-3">
+                <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-red-600 dark:text-red-400">Couldn't load access requests</p>
+                    <p className="text-xs text-ink-muted mt-0.5">{error}</p>
+                </div>
+                <button
+                    onClick={() => void fetchPending()}
+                    className="text-xs font-semibold text-red-600 dark:text-red-400 hover:underline"
+                >
+                    Retry
+                </button>
+            </div>
+        )
+    }
+
+    const list = requests ?? []
+    if (list.length === 0) {
+        return null  // empty state suppressed — admins don't need a no-news panel
+    }
 
     return (
-        <>
-            <div className="flex items-center justify-between mb-5">
-                <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl border bg-red-500/10 border-red-500/20 flex items-center justify-center">
-                        <AlertTriangle className="w-5 h-5 text-red-500" />
-                    </div>
-                    <div>
-                        <h3 className="text-lg font-bold text-ink">Revoke access</h3>
-                        <p className="text-xs text-ink-muted">Effective on the next request</p>
-                    </div>
-                </div>
-                <button onClick={onClose} className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
-                    <X className="w-4 h-4" />
-                </button>
-            </div>
-
-            <div className="flex items-center gap-3 p-3 rounded-xl bg-glass-base/40 border border-glass-border mb-4">
-                <SubjectAvatar type={member.subject.type as SubjectType} displayName={name} />
-                <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-ink truncate">{name}</p>
-                    {member.subject.secondary && (
-                        <p className="text-xs text-ink-muted truncate">{member.subject.secondary}</p>
-                    )}
-                </div>
-                <span className={cn(
-                    'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border shrink-0',
-                    role.badge,
-                )}>
-                    <RoleIcon className="w-3 h-3" />
-                    {role.label}
+        <motion.div
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.18 }}
+            className="rounded-2xl border border-amber-500/20 bg-gradient-to-br from-amber-500/[0.04] to-amber-500/0 overflow-hidden"
+        >
+            <div className="px-5 py-3 border-b border-amber-500/15 flex items-center gap-2">
+                <Inbox className="w-4 h-4 text-amber-500" />
+                <h3 className="text-sm font-bold text-ink">Pending access requests</h3>
+                <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-700 dark:text-amber-300">
+                    {list.length}
                 </span>
             </div>
+            <div className="divide-y divide-amber-500/10">
+                {list.map(req => {
+                    const isActing = acting === req.id
+                    const denying = denyingId === req.id
+                    const v = resolveRoleVisual(req.requestedRole)
+                    return (
+                        <div key={req.id} className="px-5 py-3.5 flex items-start gap-3">
+                            <div className={cn(
+                                'w-9 h-9 rounded-full bg-gradient-to-br flex items-center justify-center text-xs font-bold text-white shrink-0',
+                                avatarGradient(req.requester.displayName ?? req.requester.id),
+                            )}>
+                                {initialsOf(req.requester.displayName ?? req.requester.email ?? req.requester.id)}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                    <p className="text-sm font-semibold text-ink truncate">
+                                        {req.requester.displayName ?? req.requester.id}
+                                    </p>
+                                    {req.requester.email && (
+                                        <p className="text-xs text-ink-muted truncate">{req.requester.email}</p>
+                                    )}
+                                    <span className={cn(
+                                        'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border',
+                                        v.badge,
+                                    )}>
+                                        wants {v.label}
+                                    </span>
+                                </div>
+                                {req.justification && (
+                                    <p className="text-xs text-ink-secondary mt-1 break-words">
+                                        “{req.justification}”
+                                    </p>
+                                )}
+                                <p className="text-[10px] text-ink-muted mt-1 flex items-center gap-1">
+                                    <Clock className="w-2.5 h-2.5" />
+                                    Requested {timeAgo(req.createdAt)}
+                                </p>
 
-            <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-600/90 dark:text-red-400/90">
-                {member.subject.type === 'group'
-                    ? 'Every member of this group loses their workspace access via this binding. They keep any direct user bindings or other group memberships.'
-                    : 'This user loses workspace access via this binding. They keep any other bindings (direct or via group memberships).'}
+                                {denying && (
+                                    <motion.div
+                                        initial={{ opacity: 0, height: 0 }}
+                                        animate={{ opacity: 1, height: 'auto' }}
+                                        className="mt-2 space-y-2"
+                                    >
+                                        <textarea
+                                            value={denyNote}
+                                            onChange={e => setDenyNote(e.target.value)}
+                                            disabled={isActing}
+                                            placeholder="Why are you denying? (optional, shown to the requester)"
+                                            rows={2}
+                                            className="w-full text-xs px-2.5 py-1.5 rounded-lg bg-canvas-elevated border border-glass-border focus:border-red-500/40 focus:ring-1 focus:ring-red-500/30 outline-none resize-none"
+                                        />
+                                        <div className="flex gap-2 justify-end">
+                                            <button
+                                                onClick={() => { setDenyingId(null); setDenyNote('') }}
+                                                disabled={isActing}
+                                                className="text-xs font-semibold px-3 py-1.5 rounded-lg text-ink-secondary hover:text-ink"
+                                            >
+                                                Cancel
+                                            </button>
+                                            <button
+                                                onClick={() => void handleDeny(req)}
+                                                disabled={isActing}
+                                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500/15 text-red-700 dark:text-red-300 border border-red-500/30 hover:bg-red-500/20 disabled:opacity-50"
+                                            >
+                                                {isActing ? <Loader2 className="w-3 h-3 animate-spin" /> : <XCircle className="w-3 h-3" />}
+                                                Confirm deny
+                                            </button>
+                                        </div>
+                                    </motion.div>
+                                )}
+                            </div>
+                            {!denying && (
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                    <button
+                                        onClick={() => void handleApprove(req)}
+                                        disabled={isActing}
+                                        title="Approve"
+                                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20 disabled:opacity-50 transition-colors"
+                                    >
+                                        {isActing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                                        Approve
+                                    </button>
+                                    <button
+                                        onClick={() => { setDenyingId(req.id); setDenyNote('') }}
+                                        disabled={isActing}
+                                        title="Deny"
+                                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-500/10 border border-transparent hover:border-red-500/20 disabled:opacity-50 transition-colors"
+                                    >
+                                        <XCircle className="w-3 h-3" />
+                                        Deny
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    )
+                })}
             </div>
-
-            <div className="mt-6 flex items-center justify-end gap-2">
-                <button
-                    onClick={onClose}
-                    disabled={submitting}
-                    className="px-4 py-2 rounded-xl text-sm font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
-                >
-                    Cancel
-                </button>
-                <button
-                    onClick={() => void onConfirm()}
-                    disabled={submitting}
-                    className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-red-500 hover:bg-red-600 disabled:opacity-50 transition-colors shadow-sm shadow-red-500/20"
-                >
-                    {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
-                    Revoke binding
-                </button>
-            </div>
-        </>
+        </motion.div>
     )
 }

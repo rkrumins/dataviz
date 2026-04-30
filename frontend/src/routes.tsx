@@ -23,6 +23,7 @@ const IngestionPage = lazy(() => import('@/pages/IngestionPage').then(m => ({ de
 const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
 const WorkspaceDetailPage = lazy(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
 const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
+const MyAccessPage = lazy(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
 
 // Auth pages (unauthenticated)
 const LoginPage = lazy(() => import('@/components/auth/LoginPage').then(m => ({ default: m.LoginPage })))
@@ -80,6 +81,9 @@ export const router = createBrowserRouter([
       // are view-driven — see /views and /explorer; there is no standalone canvas.
       { path: 'workspaces', element: <Lazy><WorkspacesPage /></Lazy> },
       { path: 'workspaces/:wsId', element: <Lazy><WorkspaceDetailPage /></Lazy> },
+
+      // Self-service "what can I do?" page — every authenticated user.
+      { path: 'my/access', element: <Lazy><MyAccessPage /></Lazy> },
 
       // Schema/Semantic Layer pages — independent of workspace context.
       // They manage global ontology resources and read data source context

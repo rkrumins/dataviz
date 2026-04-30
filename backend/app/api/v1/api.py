@@ -5,7 +5,7 @@ from .endpoints import (
     auth, users, announcements, aggregation, stats_admin,
     insights, me,
     groups, workspace_members, view_grants, role_bindings,
-    permissions_admin,
+    permissions_admin, access_requests, rbac_search,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -87,6 +87,39 @@ api_router.include_router(
     view_grants.router,
     prefix="/views/{view_id}/grants",
     tags=["views:grants"],
+)
+
+# RBAC Phase 4.3 — self-service access requests.
+# Mounted on three different prefixes so the auth gate is naturally
+# scoped: any-user submit, any-user "my requests", and admin inbox.
+api_router.include_router(
+    access_requests.public_router,
+    prefix="/access-requests",
+    tags=["access-requests"],
+)
+api_router.include_router(
+    access_requests.me_router,
+    prefix="/me",
+    tags=["me:access-requests"],
+)
+api_router.include_router(
+    access_requests.admin_ws_router,
+    prefix="/admin/workspaces/{ws_id}/access-requests",
+    tags=["admin:access-requests:inbox"],
+)
+api_router.include_router(
+    access_requests.admin_router,
+    prefix="/admin/access-requests",
+    tags=["admin:access-requests"],
+)
+
+# RBAC Phase 4.5 — unified RBAC search across users, groups,
+# workspaces, roles, and permissions. Backs the search bar at the
+# top of the Permissions admin surface.
+api_router.include_router(
+    rbac_search.router,
+    prefix="/admin/rbac/search",
+    tags=["admin:rbac:search"],
 )
 
 # ── Public announcements (no auth — all users see banners) ────────────

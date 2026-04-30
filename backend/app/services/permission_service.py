@@ -229,9 +229,69 @@ def has_permission(
     return False
 
 
+async def simulate_for_user(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    role_perm_override: dict[str, list[str]] | None = None,
+    excluded_binding_id: str | None = None,
+    excluded_role_name: str | None = None,
+) -> tuple[set[str], dict[str, set[str]]]:
+    """Compute hypothetical effective permissions for a user.
+
+    Used by the Phase 4.4 impact-preview endpoints to answer
+    questions like "if I drop ``workspace:view:edit`` from the User
+    role, what does Alice lose?" without writing to the DB.
+
+    Hooks:
+
+    * ``role_perm_override`` — temporarily replace the permission set
+      for one or more roles. Useful for ``preview-update``.
+    * ``excluded_binding_id`` — pretend the named binding doesn't
+      exist. Used by ``preview-revoke``.
+    * ``excluded_role_name`` — pretend every binding to this role
+      doesn't exist. Used by ``preview-delete``.
+
+    Returns the same ``(global_perms, ws_perms)`` shape as
+    ``resolve`` but as raw sets (no wildcard collapse) so callers can
+    diff cleanly.
+    """
+    group_ids = await user_repo.get_groups_for_user(session, user_id)
+    bindings = await binding_repo.list_for_user_with_groups(
+        session, user_id=user_id, group_ids=group_ids
+    )
+
+    if excluded_binding_id is not None:
+        bindings = [b for b in bindings if b.id != excluded_binding_id]
+    if excluded_role_name is not None:
+        bindings = [b for b in bindings if b.role_name != excluded_role_name]
+
+    role_names = sorted({b.role_name for b in bindings})
+    role_perms = await permission_repo.get_role_permissions_for_roles(
+        session, role_names
+    )
+    if role_perm_override:
+        for name, perms in role_perm_override.items():
+            role_perms[name] = list(perms)
+
+    global_set: set[str] = set()
+    ws_sets: dict[str, set[str]] = {}
+    for b in bindings:
+        perms_for_role = role_perms.get(b.role_name, [])
+        if b.scope_type == "global":
+            global_set.update(perms_for_role)
+        else:
+            ws_id = b.scope_id or ""
+            if not ws_id:
+                continue
+            ws_sets.setdefault(ws_id, set()).update(perms_for_role)
+    return global_set, ws_sets
+
+
 __all__ = [
     "PermissionClaims",
     "resolve",
     "new_session_id",
     "has_permission",
+    "simulate_for_user",
 ]

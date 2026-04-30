@@ -1281,6 +1281,74 @@ class ResourceGrantORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# access_requests  (Phase 4.3 — self-service workspace access asks)    #
+# ------------------------------------------------------------------ #
+
+class AccessRequestORM(Base):
+    """A user asking a workspace admin for access at a specific role.
+
+    State machine: ``pending`` → ``approved`` | ``denied``. Approval
+    atomically creates the corresponding role binding (handled in the
+    endpoint). The row stays around in either resolved state so the
+    requester can see the resolution + reason on their My Access page.
+
+    No FKs on ``requester_id`` / ``target_id`` — they reference users
+    and workspaces respectively but rely on application-level guards
+    (and on-delete cascades) the same way ``role_bindings`` does. The
+    matching ``role_bindings`` row is the one that actually grants
+    access; this table is metadata about the *ask*.
+    """
+    __tablename__ = "access_requests"
+
+    id = Column(Text, primary_key=True, default=lambda: f"req_{uuid.uuid4().hex[:12]}")
+    requester_id = Column(Text, nullable=False)
+    target_type = Column(Text, nullable=False)        # only 'workspace' for now
+    target_id = Column(Text, nullable=False)
+    requested_role = Column(Text, nullable=False)     # must exist in roles table
+    justification = Column(Text, nullable=True)
+    status = Column(Text, nullable=False, default="pending")
+    created_at = Column(Text, nullable=False, default=_now)
+    resolved_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "idx_access_requests_target_status",
+            "target_type", "target_id", "status",
+        ),
+        Index(
+            "idx_access_requests_requester_status",
+            "requester_id", "status",
+        ),
+        CheckConstraint(
+            "target_type IN ('workspace')",
+            name="ck_access_requests_target_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'denied')",
+            name="ck_access_requests_status",
+        ),
+        CheckConstraint(
+            # Pending rows have no resolution; resolved rows have both
+            # a timestamp and (usually) a resolver id.
+            "(status = 'pending' AND resolved_at IS NULL AND resolved_by IS NULL) "
+            "OR (status IN ('approved', 'denied') AND resolved_at IS NOT NULL)",
+            name="ck_access_requests_state_consistency",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AccessRequest id={self.id!r} "
+            f"requester={self.requester_id!r} "
+            f"{self.target_type}={self.target_id!r} "
+            f"role={self.requested_role!r} "
+            f"status={self.status!r}>"
+        )
+
+
+# ------------------------------------------------------------------ #
 # revoked_refresh_jti  (refresh-token rotation tracking)               #
 # ------------------------------------------------------------------ #
 # Each row records a refresh-token jti that has been consumed (rotated)

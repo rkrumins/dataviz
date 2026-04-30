@@ -41,12 +41,16 @@ from backend.app.db.repositories.role_repo import (
     UnknownPermissionError,
 )
 from backend.app.services.permission_service import resolve as resolve_claims
+from backend.app.services.permission_service import simulate_for_user
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
+    ImpactPreviewResponse,
+    ImpactPreviewUser,
     PermissionResponse,
     PermissionUpdateRequest,
     RoleCreateRequest,
     RoleDefinitionResponse,
+    RolePreviewUpdateRequest,
     RoleUpdateRequest,
     UserAccessBinding,
     UserAccessGroup,
@@ -383,26 +387,21 @@ def _binding_to_response(
     )
 
 
-@router.get(
-    "/users/{user_id}/access",
-    response_model=UserAccessResponse,
-    response_model_by_alias=True,
-)
-async def get_user_access(
-    user_id: str = Path(...),
-    _admin: User = Depends(requires("system:admin")),
-    session: AsyncSession = Depends(get_db_session),
-):
-    """Compute every binding the user holds (direct or via group) and
-    the resulting effective permissions.
+async def compute_user_access(
+    session: AsyncSession, user_id: str
+) -> UserAccessResponse | None:
+    """Build the full access picture for one user.
 
-    This is the source of truth for the FE's "By user" tab — admins
-    can answer "why does Alice see Workspace-Finance?" by reading the
-    response's ``directBindings`` + ``inheritedBindings`` arrays.
+    Returns ``None`` when the user does not exist. Shared between the
+    admin endpoint (``GET /admin/users/{user_id}/access``, gated by
+    ``system:admin``) and the self-service endpoint
+    (``GET /me/access`` in ``me.py``, gated only by
+    ``get_current_user``). Single source of truth for the binding +
+    effective-permission unions so the two surfaces never drift.
     """
     user_orm = await user_repo.get_user_by_id(session, user_id)
     if user_orm is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        return None
 
     user_roles = await user_repo.get_user_roles(session, user_orm.id)
     primary_role = "admin" if "admin" in user_roles else (user_roles[0] if user_roles else "user")
@@ -490,4 +489,229 @@ async def get_user_access(
         groups=group_payload,
         effective_global=list(claims.global_perms),
         effective_ws={ws: list(perms) for ws, perms in claims.ws_perms.items()},
+    )
+
+
+@router.get(
+    "/users/{user_id}/access",
+    response_model=UserAccessResponse,
+    response_model_by_alias=True,
+)
+async def get_user_access(
+    user_id: str = Path(...),
+    _admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Compute every binding the user holds (direct or via group) and
+    the resulting effective permissions.
+
+    This is the source of truth for the FE's "By user" tab — admins
+    can answer "why does Alice see Workspace-Finance?" by reading the
+    response's ``directBindings`` + ``inheritedBindings`` arrays. The
+    business logic lives in ``compute_user_access`` so the
+    self-service ``/me/access`` endpoint can reuse it.
+    """
+    response = await compute_user_access(session, user_id)
+    if response is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return response
+
+
+# ── Impact preview (Phase 4.4) ──────────────────────────────────────
+
+
+async def _affected_users_for_role(
+    session: AsyncSession, role_name: str
+) -> list[str]:
+    """Distinct user ids whose effective permissions reference the role.
+
+    Includes users with a direct binding to the role AND users in any
+    group that has a binding to the role. Used by both preview-update
+    and preview-delete to scope the simulation.
+    """
+    # Direct bindings.
+    direct = await session.execute(
+        select(RoleBindingORM.subject_id).where(
+            RoleBindingORM.subject_type == "user",
+            RoleBindingORM.role_name == role_name,
+        )
+    )
+    user_ids: set[str] = set(direct.scalars().all())
+
+    # Group bindings → group members.
+    grouped = await session.execute(
+        select(RoleBindingORM.subject_id).where(
+            RoleBindingORM.subject_type == "group",
+            RoleBindingORM.role_name == role_name,
+        )
+    )
+    group_ids = list(grouped.scalars().all())
+    if group_ids:
+        for gid in group_ids:
+            members = await group_repo.list_group_members(session, gid)
+            for m in members:
+                user_ids.add(m.user_id)
+    return sorted(user_ids)
+
+
+async def _hydrate_user_impact(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    before_global: set[str], before_ws: dict[str, set[str]],
+    after_global: set[str], after_ws: dict[str, set[str]],
+) -> ImpactPreviewUser | None:
+    """Build the per-user diff. Returns ``None`` when nothing changed
+    so the caller can omit the row from the response.
+    """
+    # Diff at every scope and union the deltas. Workspace ids only
+    # surface on either side count as scope changes.
+    gained: set[str] = (after_global - before_global)
+    lost: set[str] = (before_global - after_global)
+    all_ws = before_ws.keys() | after_ws.keys()
+    for ws in all_ws:
+        gained |= (after_ws.get(ws, set()) - before_ws.get(ws, set()))
+        lost |= (before_ws.get(ws, set()) - after_ws.get(ws, set()))
+    if not gained and not lost:
+        return None
+
+    user_orm = await user_repo.get_user_by_id(session, user_id)
+    display_name = None
+    email = None
+    if user_orm is not None:
+        full = f"{user_orm.first_name} {user_orm.last_name}".strip()
+        display_name = full or user_orm.email
+        email = user_orm.email
+    return ImpactPreviewUser(
+        user_id=user_id,
+        display_name=display_name,
+        email=email,
+        gained=sorted(gained),
+        lost=sorted(lost),
+    )
+
+
+def _ws_changes_count(
+    before_ws: dict[str, set[str]], after_ws: dict[str, set[str]]
+) -> set[str]:
+    """Workspace ids where the permission set changed."""
+    out: set[str] = set()
+    for ws in before_ws.keys() | after_ws.keys():
+        if before_ws.get(ws, set()) != after_ws.get(ws, set()):
+            out.add(ws)
+    return out
+
+
+@router.post(
+    "/roles/{role_name}/preview-update",
+    response_model=ImpactPreviewResponse,
+    response_model_by_alias=True,
+)
+async def preview_role_update(
+    role_name: str,
+    body: RolePreviewUpdateRequest,
+    _admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Read-only sibling of ``PUT /admin/roles/{name}``.
+
+    Computes the diff between the role's current permission bundle
+    and the proposed one, then simulates each affected user's
+    resulting effective permissions. The FE shows this as a
+    confirmation modal before the destructive write — admins see
+    "12 users affected; will lose: edit any view in this workspace"
+    rather than acting blind.
+    """
+    role_def = await role_repo.get_role(session, role_name)
+    if role_def is None:
+        raise HTTPException(status_code=404, detail="Role not found")
+
+    current_perms = set(await permission_repo.get_role_permissions(session, role_name))
+    proposed_perms = set(body.permissions)
+    user_ids = await _affected_users_for_role(session, role_name)
+
+    aggregate_gained: set[str] = set()
+    aggregate_lost: set[str] = set()
+    affected_ws: set[str] = set()
+    user_impact: list[ImpactPreviewUser] = []
+
+    for uid in user_ids:
+        before_g, before_w = await simulate_for_user(
+            session, uid,
+            role_perm_override={role_name: list(current_perms)},
+        )
+        after_g, after_w = await simulate_for_user(
+            session, uid,
+            role_perm_override={role_name: list(proposed_perms)},
+        )
+        impact = await _hydrate_user_impact(
+            session, uid,
+            before_global=before_g, before_ws=before_w,
+            after_global=after_g, after_ws=after_w,
+        )
+        if impact is None:
+            continue
+        user_impact.append(impact)
+        aggregate_gained.update(impact.gained)
+        aggregate_lost.update(impact.lost)
+        affected_ws |= _ws_changes_count(before_w, after_w)
+
+    return ImpactPreviewResponse(
+        affected_users=len(user_impact),
+        affected_workspaces=len(affected_ws),
+        gained_perms=sorted(aggregate_gained),
+        lost_perms=sorted(aggregate_lost),
+        user_impact=user_impact,
+    )
+
+
+@router.post(
+    "/roles/{role_name}/preview-delete",
+    response_model=ImpactPreviewResponse,
+    response_model_by_alias=True,
+)
+async def preview_role_delete(
+    role_name: str,
+    _admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Read-only sibling of ``DELETE /admin/roles/{name}``.
+
+    The actual delete is rejected when the role still has bindings.
+    This preview answers the prerequisite question: "if I cascade-
+    revoke the bindings first, what does each user lose?"
+    """
+    role_def = await role_repo.get_role(session, role_name)
+    if role_def is None:
+        raise HTTPException(status_code=404, detail="Role not found")
+
+    user_ids = await _affected_users_for_role(session, role_name)
+    aggregate_gained: set[str] = set()
+    aggregate_lost: set[str] = set()
+    affected_ws: set[str] = set()
+    user_impact: list[ImpactPreviewUser] = []
+
+    for uid in user_ids:
+        before_g, before_w = await simulate_for_user(session, uid)
+        after_g, after_w = await simulate_for_user(
+            session, uid, excluded_role_name=role_name,
+        )
+        impact = await _hydrate_user_impact(
+            session, uid,
+            before_global=before_g, before_ws=before_w,
+            after_global=after_g, after_ws=after_w,
+        )
+        if impact is None:
+            continue
+        user_impact.append(impact)
+        aggregate_gained.update(impact.gained)
+        aggregate_lost.update(impact.lost)
+        affected_ws |= _ws_changes_count(before_w, after_w)
+
+    return ImpactPreviewResponse(
+        affected_users=len(user_impact),
+        affected_workspaces=len(affected_ws),
+        gained_perms=sorted(aggregate_gained),
+        lost_perms=sorted(aggregate_lost),
+        user_impact=user_impact,
     )

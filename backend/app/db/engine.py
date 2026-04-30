@@ -30,6 +30,8 @@ handlers drain from. Bulkhead within a single process, no new infra.
 Role-level Postgres grants (plan Gap 2) can layer on top without
 changing the shape here.
 """
+import asyncio
+import contextlib
 import os
 import logging
 from contextlib import asynccontextmanager
@@ -249,15 +251,38 @@ def get_session_factory(role: PoolRole = PoolRole.WEB) -> async_sessionmaker[Asy
 @asynccontextmanager
 async def _session_scope(role: PoolRole) -> AsyncGenerator[AsyncSession, None]:
     """Shared commit-on-success / rollback-on-error boilerplate for every
-    role-specific session helper below."""
+    role-specific session helper below.
+
+    Cancellation handling: ``asyncio.CancelledError`` derives from
+    ``BaseException`` (not ``Exception``) since Python 3.8, so a bare
+    ``except Exception`` would skip the rollback entirely and let the
+    asyncpg connection leak — exactly the warning we observed on
+    background warmup paths under ``asyncio.timeout``. We catch it
+    explicitly and shield the rollback / close so the connection is
+    returned to the pool before the cancellation propagates.
+    """
     factory = get_session_factory(role)
-    async with factory() as session:
+    session = factory()
+    try:
         try:
             yield session
-            await session.commit()
+            await asyncio.shield(session.commit())
+        except asyncio.CancelledError:
+            # Cancellation arrived (e.g. asyncio.timeout fired or the
+            # parent task was cancelled). Roll back under shield so the
+            # connection is checked back into the pool even though the
+            # current task is about to die.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(session.rollback())
+            raise
         except Exception:
             await session.rollback()
             raise
+    finally:
+        # ``session.close()`` releases the underlying connection. Shield
+        # so a follow-on cancellation can't interrupt the release.
+        with contextlib.suppress(Exception):
+            await asyncio.shield(session.close())
 
 
 @asynccontextmanager
@@ -336,15 +361,12 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     Readonly endpoints (readiness, drift, stats) should use
     :func:`get_readonly_db_session` instead so their traffic does not
     contend with WEB-pool writes.
+
+    Cleanup is shielded against cancellation so a client disconnect
+    mid-request can't orphan the asyncpg connection.
     """
-    factory = get_session_factory(PoolRole.WEB)
-    async with factory() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
+    async with _session_scope(PoolRole.WEB) as session:
+        yield session
 
 
 async def get_readonly_db_session() -> AsyncGenerator[AsyncSession, None]:
@@ -355,14 +377,8 @@ async def get_readonly_db_session() -> AsyncGenerator[AsyncSession, None]:
     are opened ``default_transaction_read_only=on`` for defence in
     depth.
     """
-    factory = get_session_factory(PoolRole.READONLY)
-    async with factory() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
+    async with _session_scope(PoolRole.READONLY) as session:
+        yield session
 
 
 @asynccontextmanager
@@ -387,14 +403,8 @@ async def get_provider_probe_db_session() -> AsyncGenerator[AsyncSession, None]:
     ``GET /admin/providers/status``. The pool is small (4+2 overflow)
     and read-only — writes in these endpoints belong on the WEB pool.
     """
-    factory = get_session_factory(PoolRole.PROVIDER_PROBE)
-    async with factory() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
+    async with _session_scope(PoolRole.PROVIDER_PROBE) as session:
+        yield session
 
 
 # ------------------------------------------------------------------ #
