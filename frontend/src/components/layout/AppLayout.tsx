@@ -25,6 +25,7 @@ import { useRouteSync } from '@/hooks/useRouteSync'
 import { useBackendRecovery } from '@/hooks/useBackendRecovery'
 import { ViewEditorContext, useViewEditorModal } from './viewEditorContext'
 import { ToastContainer } from '@/components/ui/toast'
+import { AccessDeniedModal } from '@/components/auth/AccessDeniedModal'
 
 export { useViewEditorModal }
 
@@ -141,6 +142,7 @@ export function AppLayout() {
         />
 
         <ToastContainer />
+        <AccessDeniedModal />
       </div>
     </ViewEditorContext.Provider>
   )

@@ -7,6 +7,11 @@ from . import (
     feature_flags_repo,
     feature_registry_repo,
     user_repo,
+    permission_repo,
+    group_repo,
+    binding_repo,
+    grant_repo,
+    role_repo,
 )
 
 __all__ = [
@@ -18,4 +23,9 @@ __all__ = [
     "feature_flags_repo",
     "feature_registry_repo",
     "user_repo",
+    "permission_repo",
+    "group_repo",
+    "binding_repo",
+    "grant_repo",
+    "role_repo",
 ]

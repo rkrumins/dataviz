@@ -290,13 +290,23 @@ async def lifespan(_app: FastAPI):
     async def _emit_user_event(session, event_type: str, payload: dict) -> None:
         await user_repo.create_outbox_event(session, event_type=event_type, payload=payload)
 
+    # RBAC Phase 1: resolve permission claims at login/refresh and embed
+    # them in the access JWT. The auth service forwards the dict
+    # opaquely; the FastAPI ``requires(...)`` dependency reads it back.
+    from backend.app.services import permission_service
+
+    async def _resolve_claims(session, user_id: str) -> dict:
+        claims = await permission_service.resolve(session, user_id)
+        return claims.to_jwt_dict()
+
     _app.state.identity_service = LocalIdentityService(
         session_factory=get_async_session,
         user_repo=user_repo,
         refresh_store_factory=make_refresh_store,
         outbox_emit=_emit_user_event,
+        claims_resolver=_resolve_claims,
     )
-    logger.info("Auth service initialised (provider=local)")
+    logger.info("Auth service initialised (provider=local, rbac_claims=on)")
 
     # 5. Wire up the aggregation service (role-gated)
     from .runtime.role import current_role, runs_scheduler, runs_recovery

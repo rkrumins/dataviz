@@ -23,15 +23,17 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
 
-        # Swagger UI / ReDoc load scripts and styles from cdn.jsdelivr.net
+        # Swagger UI / ReDoc load scripts and styles from cdn.jsdelivr.net.
+        # 'unsafe-inline' in script-src is required because FastAPI's default
+        # docs HTML bootstraps Swagger UI via an inline <script> block.
         if request.url.path in _DOCS_PATHS:
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
-                "script-src 'self' https://cdn.jsdelivr.net; "
+                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
                 "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
                 "img-src 'self' data: https://fastapi.tiangolo.com; "
                 "font-src 'self' https://cdn.jsdelivr.net; "
-                "connect-src 'self'; "
+                "connect-src 'self' https://cdn.jsdelivr.net; "
                 "frame-ancestors 'none'"
             )
         else:

@@ -7,7 +7,7 @@ import { NotificationBell } from '@/components/layout/NotificationBell'
 import { AvatarPickerDialog, useAvatarContent } from '@/components/layout/AvatarPickerDialog'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaStore } from '@/store/persona'
-import { useAuthStore } from '@/store/auth'
+import { useAuthStore, usePermission } from '@/store/auth'
 import { useSchemaStore } from '@/store/schema'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { cn } from '@/lib/utils'
@@ -34,6 +34,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   const { theme, setTheme } = usePreferencesStore()
   const persona = usePersonaStore((s) => s.mode)
   const { user, logout } = useAuthStore()
+  const isSystemAdmin = usePermission('system:admin')
   const searchPlaceholder = useSearchPlaceholder()
   const navigate = useNavigate()
   const avatar = useAvatarContent()
@@ -145,13 +146,15 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
           {/* Group 3: System / Account */}
           <ThemeSwitcher theme={theme} onChange={setTheme} />
 
-          <button
-            className="btn btn-ghost p-2 rounded-lg"
-            onClick={() => navigate('/admin')}
-            title="Administration"
-          >
-            <Settings className="w-5 h-5 text-ink-secondary" />
-          </button>
+          {isSystemAdmin && (
+            <button
+              className="btn btn-ghost p-2 rounded-lg"
+              onClick={() => navigate('/admin')}
+              title="Administration"
+            >
+              <Settings className="w-5 h-5 text-ink-secondary" />
+            </button>
+          )}
 
           {/* User Menu */}
           <DropdownMenu.Root>

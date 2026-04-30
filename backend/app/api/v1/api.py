@@ -3,7 +3,9 @@ from .endpoints import (
     graph, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, stats_admin,
-    insights,
+    insights, me,
+    groups, workspace_members, view_grants, role_bindings,
+    permissions_admin,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -28,6 +30,10 @@ api_router.include_router(
 api_router.include_router(
     users.admin_router, prefix="/admin/users", tags=["admin:users"],
 )
+# RBAC Phase 1: /me/permissions for FE permission hydration.
+api_router.include_router(
+    me.router, prefix="/me", tags=["me"],
+)
 
 # ── Admin routers (workspace-centric) ───────────────────────────────
 api_router.include_router(
@@ -51,6 +57,36 @@ api_router.include_router(
 )
 api_router.include_router(
     announcements.admin_router, prefix="/admin/announcements", tags=["admin:announcements"],
+)
+
+# ── RBAC Phase 2 admin surface ───────────────────────────────────────
+# Group CRUD + membership; per-workspace member bindings; per-view
+# explicit grants; and the role-binding audit endpoint. All require
+# the appropriate RBAC permission via ``requires(...)``.
+api_router.include_router(
+    groups.router, prefix="/admin/groups", tags=["admin:rbac:groups"],
+)
+api_router.include_router(
+    workspace_members.router,
+    prefix="/admin/workspaces/{ws_id}/members",
+    tags=["admin:rbac:workspace-members"],
+)
+api_router.include_router(
+    role_bindings.router,
+    prefix="/admin/role-bindings",
+    tags=["admin:rbac:audit"],
+)
+# Permissions catalogue + role definitions + per-user access map.
+# Backs the Permissions admin page (Role matrix, By-user lens).
+api_router.include_router(
+    permissions_admin.router,
+    prefix="/admin",
+    tags=["admin:rbac:permissions"],
+)
+api_router.include_router(
+    view_grants.router,
+    prefix="/views/{view_id}/grants",
+    tags=["views:grants"],
 )
 
 # ── Public announcements (no auth — all users see banners) ────────────

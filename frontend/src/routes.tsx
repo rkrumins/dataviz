@@ -3,6 +3,7 @@ import { createBrowserRouter, Navigate } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { CanvasLayout } from '@/components/layout/CanvasLayout'
 import { NotFoundPage } from '@/pages/NotFoundPage'
+import { RequirePermission } from '@/components/auth/RequirePermission'
 
 // Lazy-load all page-level components so their module code and hooks only
 // run when the user actually navigates to that route.
@@ -15,6 +16,8 @@ const AdminPage = lazy(() => import('@/pages/AdminPage').then(m => ({ default: m
 const AdminOverview = lazy(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
 const AdminFeatures = lazy(() => import('@/components/admin/AdminFeatures/index').then(m => ({ default: m.AdminFeatures })))
 const AdminUsers = lazy(() => import('@/components/admin/AdminUsers').then(m => ({ default: m.AdminUsers })))
+const AdminGroups = lazy(() => import('@/components/admin/AdminGroups').then(m => ({ default: m.AdminGroups })))
+const AdminPermissions = lazy(() => import('@/components/admin/AdminPermissions').then(m => ({ default: m.AdminPermissions })))
 const AdminAnnouncements = lazy(() => import('@/components/admin/AdminAnnouncements/index').then(m => ({ default: m.AdminAnnouncements })))
 const IngestionPage = lazy(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
@@ -96,12 +99,18 @@ export const router = createBrowserRouter([
       },
       {
         path: 'admin',
-        element: <Lazy><AdminPage /></Lazy>,
+        element: (
+          <RequirePermission perm="system:admin">
+            <Lazy><AdminPage /></Lazy>
+          </RequirePermission>
+        ),
         children: [
           { index: true, element: <Navigate to="overview" replace /> },
           { path: 'overview', element: <Lazy><AdminOverview /></Lazy> },
           { path: 'features', element: <Lazy><AdminFeatures /></Lazy> },
           { path: 'users', element: <Lazy><AdminUsers /></Lazy> },
+          { path: 'groups', element: <Lazy><AdminGroups /></Lazy> },
+          { path: 'permissions', element: <Lazy><AdminPermissions /></Lazy> },
           { path: 'announcements', element: <Lazy><AdminAnnouncements /></Lazy> },
         ],
       },

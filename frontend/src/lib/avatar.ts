@@ -46,3 +46,39 @@ export function avatarPaletteFor(seed: string | null | undefined): AvatarPalette
   }
   return AVATAR_PALETTE[hash % AVATAR_PALETTE.length]
 }
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Gradient avatars — used by AdminUsers and the RBAC admin surface
+// (AdminGroups, WorkspaceMembers, ShareViewDialog grant rows).
+//
+// These are visually heavier than ``AVATAR_PALETTE`` above (full-bleed
+// gradient circle with white initials) and are reserved for places
+// where the avatar is the primary identifier of a row, not a chip.
+// ─────────────────────────────────────────────────────────────────────
+
+export const AVATAR_GRADIENTS = [
+  'from-indigo-500 to-violet-500',
+  'from-emerald-500 to-teal-500',
+  'from-amber-500 to-orange-500',
+  'from-rose-500 to-pink-500',
+  'from-sky-500 to-blue-500',
+  'from-fuchsia-500 to-purple-500',
+] as const
+
+/** Two-character uppercase initials from a (firstName, lastName) pair. */
+export function getInitials(first: string, last: string): string {
+  return `${(first || '?')[0]}${(last || '?')[0]}`.toUpperCase()
+}
+
+/**
+ * Pick a deterministic gradient class for ``name`` so the same input
+ * always renders with the same colour across mounts.
+ */
+export function avatarGradient(name: string): string {
+  let hash = 0
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  return AVATAR_GRADIENTS[Math.abs(hash) % AVATAR_GRADIENTS.length]
+}

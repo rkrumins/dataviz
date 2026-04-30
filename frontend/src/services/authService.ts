@@ -15,6 +15,7 @@
 import { fetchWithTimeout } from './fetchWithTimeout'
 
 const AUTH_API = '/api/v1/auth'
+const ME_API = '/api/v1/me'
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -49,6 +50,20 @@ export type UserPublicResponse = AuthUser
 
 export interface SessionResponse {
     user: AuthUser
+}
+
+/**
+ * Permission claims for the current session. Mirrors the JWT claim
+ * embedded by the backend — same shape, same field names.
+ *
+ * Lives in this module rather than the store so other services can
+ * import it without dragging the Zustand machinery along, and so the
+ * store → service direction of imports stays one-way.
+ */
+export interface PermissionClaims {
+    sid: string
+    global: string[]
+    ws: Record<string, string[]>
 }
 
 // ── HTTP helper ───────────────────────────────────────────────────────
@@ -94,6 +109,17 @@ export const authService = {
     /** Validate the access cookie and return the current user. */
     me(): Promise<SessionResponse> {
         return request<SessionResponse>(`${AUTH_API}/me`)
+    },
+
+    /**
+     * Fetch the caller's effective permissions (decoded JWT claims).
+     *
+     * Used by the auth store on bootstrap and after login to hydrate
+     * the permission slice that drives ``<RequirePermission>`` and the
+     * ``can()`` helpers.
+     */
+    myPermissions(): Promise<PermissionClaims> {
+        return request<PermissionClaims>(`${ME_API}/permissions`)
     },
 
     /** Revoke the refresh-token family and clear cookies. Idempotent. */
