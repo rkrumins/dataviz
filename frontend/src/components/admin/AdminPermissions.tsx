@@ -24,7 +24,7 @@ import {
     KeyRound, Shield, UserCog, Eye, Users2, Users, Database, Briefcase,
     RefreshCw, Search, Loader2, AlertCircle, Check, X, Info, Sparkles,
     ChevronRight, GitBranch, Layers, Lock, Zap, BookOpen,
-    Plus, Pencil, Trash2, Globe, AlertTriangle,
+    Plus, Pencil, Trash2, Globe, AlertTriangle, ExternalLink,
 } from 'lucide-react'
 import {
     permissionsService,
@@ -46,7 +46,7 @@ import { PermissionTooltip } from './PermissionTooltip'
 import { ImpactPreviewModal } from './ImpactPreviewModal'
 import { RBACSearchBar, type RBACSearchTarget } from './RBACSearchBar'
 import { AccessSummary } from '@/components/access/AccessSummary'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 
 
 // ── Shared types ─────────────────────────────────────────────────────
@@ -1462,7 +1462,17 @@ function WorkspaceMembersDetail({
                     <Briefcase className="w-7 h-7 text-white" />
                 </div>
                 <div className="min-w-0 flex-1">
-                    <h2 className="text-xl font-bold text-ink truncate">{workspace.name}</h2>
+                    <div className="flex items-center gap-2">
+                        <h2 className="text-xl font-bold text-ink truncate">{workspace.name}</h2>
+                        <Link
+                            to={`/workspaces/${workspace.id}`}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 hover:bg-indigo-500/15 transition-colors"
+                            title="Open workspace"
+                        >
+                            <ExternalLink className="w-2.5 h-2.5" />
+                            Open
+                        </Link>
+                    </div>
                     {workspace.description && (
                         <p className="text-sm text-ink-muted mt-0.5">{workspace.description}</p>
                     )}

@@ -5,7 +5,7 @@
  */
 import { useState, useEffect, useMemo } from 'react'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import {
     ChevronLeft, Plus, Database, Loader2, Settings2, X, Save,
     Trash2, GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
@@ -120,12 +120,34 @@ export function WorkspaceDetailPage() {
 
     // ── Selection + tab state ──────────────────────────────
     const [selectedDsId, setSelectedDsId] = useState<string | null>(null)
-    const [activeSection, setActiveSection] = useState<'sources' | 'views' | 'aggregation' | 'ontology' | 'members'>('sources')
+    const [searchParams, setSearchParams] = useSearchParams()
+    // Pick up ``?tab=members`` (and friends) so other pages can deep
+    // link straight to a specific tab — used by the WorkspacesPage
+    // "Members" shortcut.
+    const tabParam = searchParams.get('tab') as
+        | 'sources' | 'views' | 'aggregation' | 'ontology' | 'members' | null
+    const [activeSection, setActiveSection] = useState<'sources' | 'views' | 'aggregation' | 'ontology' | 'members'>(
+        tabParam ?? 'sources',
+    )
 
     // Workspace admin permission gates the Members tab. The store's
     // `usePermission` re-renders this component on permission changes
     // (e.g. after silent refresh), so the tab appears/disappears live.
     const canManageMembers = usePermission('workspace:admin', wsId ?? null)
+
+    // Sync activeSection back to the URL so refresh / back navigation
+    // preserves the tab. Only writes when the value actually differs to
+    // avoid history spam.
+    useEffect(() => {
+        const current = searchParams.get('tab')
+        const desired = activeSection === 'sources' ? null : activeSection
+        if (current === desired) return
+        const next = new URLSearchParams(searchParams)
+        if (desired === null) next.delete('tab')
+        else next.set('tab', desired)
+        setSearchParams(next, { replace: true })
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeSection])
 
     // ── Sync editName/editDesc when workspace loads ────────
     useEffect(() => {

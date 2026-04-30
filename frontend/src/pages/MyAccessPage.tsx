@@ -17,6 +17,7 @@
  *     in ``mode='self'`` so copy is second-person.
  */
 import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import {
     Loader2, AlertCircle, Shield, RefreshCw, Sparkles, Clock,
@@ -86,7 +87,7 @@ export function MyAccessPage() {
     }
 
     return (
-        <div className="min-h-full bg-canvas">
+        <div className="absolute inset-0 overflow-y-auto bg-canvas">
             <div className="max-w-5xl mx-auto p-6 space-y-6">
                 {/* Hero */}
                 <div className="flex items-center justify-between gap-4">
@@ -257,14 +258,20 @@ function PlainEnglishSummary({
                                     <li key={wsId} className="text-xs text-ink-secondary flex items-start gap-1.5">
                                         <span className="text-emerald-500 shrink-0 mt-px">•</span>
                                         <span className="min-w-0">
-                                            {friendly ? (
-                                                <>
-                                                    <span className="font-semibold text-ink">{friendly}</span>
-                                                    <code className="font-mono text-ink-muted ml-1.5 text-[10px]">{wsId}</code>
-                                                </>
-                                            ) : (
-                                                <code className="font-mono font-semibold text-ink">{wsId}</code>
-                                            )}
+                                            <Link
+                                                to={`/workspaces/${wsId}`}
+                                                className="hover:underline"
+                                                title={`Open ${friendly ?? wsId}`}
+                                            >
+                                                {friendly ? (
+                                                    <>
+                                                        <span className="font-semibold text-ink">{friendly}</span>
+                                                        <code className="font-mono text-ink-muted ml-1.5 text-[10px]">{wsId}</code>
+                                                    </>
+                                                ) : (
+                                                    <code className="font-mono font-semibold text-ink">{wsId}</code>
+                                                )}
+                                            </Link>
                                             {' — '}
                                             {summariseCapabilities(perms, permDesc)}
                                         </span>

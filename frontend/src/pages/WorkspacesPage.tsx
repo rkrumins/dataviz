@@ -6,6 +6,7 @@ import {
     CircleDot, ArrowRightLeft, Eye, Sparkles, Boxes,
 } from 'lucide-react'
 import { listViews } from '@/services/viewApiService'
+import { useAuthStore } from '@/store/auth'
 import { workspaceService, type WorkspaceResponse, type WorkspaceCreateRequest } from '@/services/workspaceService'
 import { catalogService, type CatalogItemResponse, type CatalogItemBindingResponse } from '@/services/catalogService'
 import { providerService, type ProviderResponse } from '@/services/providerService'
@@ -35,6 +36,10 @@ function providerLabel(type: string): string {
 export function WorkspacesPage() {
     const navigate = useNavigate()
     const [searchParams, setSearchParams] = useSearchParams()
+    // Per-card permission check — read the resolver fn from the auth
+    // store so we can call it inline for each row without violating
+    // the rules of hooks.
+    const can = useAuthStore(s => s.can)
 
     useEffect(() => {
         document.title = 'Workspaces · Synodic'
@@ -570,6 +575,11 @@ export function WorkspacesPage() {
                                 onOpen={() => navigate(`/workspaces/${ws.id}`)}
                                 onDelete={() => handleDelete(ws.id)}
                                 onSetDefault={() => handleSetDefault(ws.id)}
+                                onManageMembers={
+                                    can('workspace:admin', ws.id)
+                                        ? () => navigate(`/workspaces/${ws.id}?tab=members`)
+                                        : undefined
+                                }
                             />
                         </div>
                     ))}
@@ -590,6 +600,11 @@ export function WorkspacesPage() {
                             onOpen={() => navigate(`/workspaces/${ws.id}`)}
                             onDelete={() => handleDelete(ws.id)}
                             onSetDefault={() => handleSetDefault(ws.id)}
+                            onManageMembers={
+                                can('workspace:admin', ws.id)
+                                    ? () => navigate(`/workspaces/${ws.id}?tab=members`)
+                                    : undefined
+                            }
                         />
                     ))}
                 </div>

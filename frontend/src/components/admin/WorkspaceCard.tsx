@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Shield, Trash2, ChevronRight, ChevronDown, ChevronUp, FolderOpen, CircleDot, ArrowRightLeft, GitBranch, Eye, Layers, Star, ExternalLink } from 'lucide-react'
+import { Shield, Trash2, ChevronRight, ChevronDown, ChevronUp, FolderOpen, CircleDot, ArrowRightLeft, GitBranch, Eye, Layers, Star, ExternalLink, Users } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { type WorkspaceResponse } from '@/services/workspaceService'
 import { WorkspaceHealthBadge } from './workspace/WorkspaceHealthBadge'
@@ -41,6 +41,10 @@ interface WorkspaceCardProps {
     onOpen: () => void
     onDelete: () => void
     onSetDefault: () => void
+    /** Optional — when provided, the card surfaces a "Members" button
+     *  that jumps straight to the workspace's Members tab. Only shown
+     *  to callers with ``workspace:admin``; the parent decides. */
+    onManageMembers?: () => void
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -72,6 +76,7 @@ export function WorkspaceCard({
     onOpen,
     onDelete,
     onSetDefault,
+    onManageMembers,
 }: WorkspaceCardProps) {
     const [showSources, setShowSources] = useState(false)
     const gradient = GRADIENT_ACCENTS[index % GRADIENT_ACCENTS.length]
@@ -250,6 +255,15 @@ export function WorkspaceCard({
                     Updated {new Date(ws.updatedAt).toLocaleDateString()}
                 </span>
                 <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {onManageMembers && (
+                        <button
+                            onClick={(e) => { e.stopPropagation(); onManageMembers() }}
+                            className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded-lg text-ink-muted hover:text-emerald-500 hover:bg-emerald-500/10 transition-colors"
+                            title="Manage workspace members"
+                        >
+                            <Users className="w-3 h-3" /> Members
+                        </button>
+                    )}
                     {!ws.isDefault && (
                         <button onClick={(e) => { e.stopPropagation(); onSetDefault() }} className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded-lg text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors">
                             <Shield className="w-3 h-3" /> Default
