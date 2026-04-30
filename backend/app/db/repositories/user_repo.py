@@ -280,3 +280,34 @@ async def replace_roles(session: AsyncSession, user_id: str, new_role: str) -> N
     role = UserRoleORM(user_id=user_id, role_name=new_role)
     session.add(role)
     await session.flush()
+
+
+# ── Group membership shortcuts (RBAC Phase 1) ─────────────────────────
+# Thin wrappers around group_repo so call sites that already have the
+# user repo handy don't need to import group_repo directly. Kept here
+# rather than as new top-level helpers because the typical caller is
+# user-centric ("add this user to a group", "what groups is this user
+# in?"). For full group lifecycle (CRUD, member listing) use
+# ``group_repo`` directly.
+
+async def add_to_group(
+    session: AsyncSession,
+    user_id: str,
+    group_id: str,
+    added_by: Optional[str] = None,
+):
+    from . import group_repo  # local import to avoid circular import
+    return await group_repo.add_member(session, group_id, user_id, added_by=added_by)
+
+
+async def remove_from_group(
+    session: AsyncSession, user_id: str, group_id: str
+) -> bool:
+    from . import group_repo
+    return await group_repo.remove_member(session, group_id, user_id)
+
+
+async def get_groups_for_user(session: AsyncSession, user_id: str) -> list[str]:
+    """Group ids the user belongs to. Hot path; called on every login."""
+    from . import group_repo
+    return await group_repo.get_user_groups(session, user_id)

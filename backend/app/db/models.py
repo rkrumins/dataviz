@@ -432,6 +432,9 @@ class WorkspaceORM(Base):
     description = Column(Text, nullable=True)
     is_default = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
+    # Audit-only attribution; does not grant any permission. Resolved
+    # access lives in role_bindings.
+    created_by = Column(Text, nullable=True, default=None)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     # Soft delete (Phase 1 policy: user-visible + cross-referenced → soft)
@@ -499,6 +502,8 @@ class WorkspaceDataSourceORM(Base):
     aggregation_edge_count = Column(Integer, nullable=False, default=0)  # count of AGGREGATED edges created
     graph_fingerprint = Column(Text, nullable=True)  # JSON hash of node/edge counts by type (change detection)
     aggregation_schedule = Column(Text, nullable=True)  # Cron expression (e.g., "0 */6 * * *") for periodic checks
+    # Audit-only attribution; does not grant any permission.
+    created_by = Column(Text, nullable=True, default=None)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     # Soft delete (Phase 1 policy: user-visible + cross-referenced → soft)
@@ -940,6 +945,339 @@ class UserApprovalORM(Base):
 
     def __repr__(self) -> str:
         return f"<UserApproval user={self.user_id!r} status={self.status!r}>"
+
+
+# ====================================================================== #
+# RBAC — Subject-Role-Scope binding model                                  #
+# ====================================================================== #
+# Six tables implement the binding model documented in the Enterprise
+# RBAC plan (docs/superpowers/specs/...). The shape is:
+#
+#     subject (user|group)  ──╮
+#                              ├── role_binding ──> role ──> permissions
+#     scope   (global|ws_*)  ──╯
+#
+# Resource-level grants on Views (the only resource that supports
+# explicit per-row sharing in Phase 1) live in ``resource_grants``.
+# Data Sources are workspace-inherited and have no explicit grants.
+
+# ------------------------------------------------------------------ #
+# permissions  (catalogue of every permission the system enforces)     #
+# ------------------------------------------------------------------ #
+
+class PermissionORM(Base):
+    """Single permission identifier and human description.
+
+    The id is a stable string like ``workspace:view:edit`` — chosen
+    deliberately so role_permissions rows and JWT claims can reference
+    the permission by name, not by surrogate key. Seeded once by the
+    Phase 1 migration; not user-editable in Phase 1.
+
+    Phase 4.1 added ``long_description`` (paragraph-form explanation
+    surfaced in the admin UI tooltip) and ``examples`` (JSON-encoded
+    list of concrete example actions). Both backfilled by the
+    ``20260430_1700_permission_descriptions`` migration.
+    """
+    __tablename__ = "permissions"
+
+    id = Column(Text, primary_key=True)        # e.g. "workspace:view:edit"
+    description = Column(Text, nullable=False)
+    category = Column(Text, nullable=False)    # system | workspace | resource
+    long_description = Column(Text, nullable=True)
+    examples = Column(Text, nullable=True)     # JSON-encoded list[str]
+
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('system', 'workspace', 'resource')",
+            name="ck_permissions_category",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Permission id={self.id!r} category={self.category!r}>"
+
+
+# ------------------------------------------------------------------ #
+# role_permissions  (which permissions belong to which role)           #
+# ------------------------------------------------------------------ #
+
+class RolePermissionORM(Base):
+    """Role → permission mapping.
+
+    Phase 3 promoted ``role_name`` from a CHECK-constrained enum into
+    a foreign-key-ish reference to the canonical ``roles`` table. The
+    DB-level CHECK on the role name is dropped by the
+    ``20260430_1500_roles_lifecycle`` migration; ``role_repo`` enforces
+    referential integrity at the application boundary so a future
+    Postgres-native FK is a non-breaking change.
+    """
+    __tablename__ = "role_permissions"
+
+    role_name = Column(Text, primary_key=True)
+    permission_id = Column(
+        Text,
+        ForeignKey("permissions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    __table_args__ = (
+        Index("idx_role_permissions_role", "role_name"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<RolePermission role={self.role_name!r} perm={self.permission_id!r}>"
+
+
+# ------------------------------------------------------------------ #
+# roles  (canonical role definitions — Phase 3 lifecycle)              #
+# ------------------------------------------------------------------ #
+
+class RoleORM(Base):
+    """A role definition.
+
+    Phase 1 baked admin/user/viewer into CHECK constraints on the
+    role-permission and role-binding tables. Phase 3 promotes the
+    role name into a real entity so:
+
+      * Custom roles can be created and edited in the admin UI.
+      * Each role can be ``global`` (usable in any binding) or
+        ``workspace``-scoped (only assignable inside that workspace).
+      * The ``is_system`` flag marks built-in roles that the UI
+        renders read-only.
+
+    Application-level guards in ``role_repo`` and ``binding_repo``
+    enforce that bindings can only reference a role whose scope
+    matches the binding's scope (a workspace-scoped role cannot be
+    bound globally, etc.).
+    """
+    __tablename__ = "roles"
+
+    name = Column(Text, primary_key=True)
+    description = Column(Text, nullable=True)
+    scope_type = Column(Text, nullable=False, default="global")  # global | workspace
+    scope_id = Column(Text, nullable=True)
+    is_system = Column(Boolean, nullable=False, default=False)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    created_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_roles_scope", "scope_type", "scope_id"),
+        Index("idx_roles_is_system", "is_system"),
+        CheckConstraint(
+            "scope_type IN ('global', 'workspace')",
+            name="ck_roles_scope_type",
+        ),
+        CheckConstraint(
+            "(scope_type = 'global' AND scope_id IS NULL) "
+            "OR (scope_type = 'workspace' AND scope_id IS NOT NULL)",
+            name="ck_roles_scope_consistency",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Role name={self.name!r} scope={self.scope_type}:{self.scope_id} "
+            f"system={self.is_system}>"
+        )
+
+
+# ------------------------------------------------------------------ #
+# groups  (named collections of users — the second Subject type)       #
+# ------------------------------------------------------------------ #
+
+class GroupORM(Base):
+    """A named group of users.
+
+    Groups are global (not workspace-scoped) so the same group can be
+    bound to many workspaces with different roles, matching how
+    Okta/Entra/SCIM directories work.
+    """
+    __tablename__ = "groups"
+
+    id = Column(Text, primary_key=True, default=lambda: f"grp_{uuid.uuid4().hex[:12]}")
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    # Provenance: 'local' = created in-app; 'scim' = synced from an
+    # external IdP. external_id is the SCIM subject when source='scim'.
+    # These two columns are placeholders for Phase 2 SSO sync.
+    source = Column(Text, nullable=False, default="local")
+    external_id = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    deleted_at = Column(Text, nullable=True, default=None)
+
+    members = relationship(
+        "GroupMemberORM", back_populates="group",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_groups_name"),
+        Index("idx_groups_deleted_at", "deleted_at"),
+        Index("idx_groups_external_id", "external_id"),
+        CheckConstraint(
+            "source IN ('local', 'scim')",
+            name="ck_groups_source",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Group id={self.id!r} name={self.name!r}>"
+
+
+# ------------------------------------------------------------------ #
+# group_members  (user × group membership)                             #
+# ------------------------------------------------------------------ #
+
+class GroupMemberORM(Base):
+    __tablename__ = "group_members"
+
+    group_id = Column(
+        Text,
+        ForeignKey("groups.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id = Column(
+        Text,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    added_at = Column(Text, nullable=False, default=_now)
+    added_by = Column(Text, nullable=True)
+
+    group = relationship("GroupORM", back_populates="members")
+
+    __table_args__ = (
+        # Hot path: "what groups is this user in?" — used by the
+        # PermissionResolver on every login.
+        Index("idx_group_members_user", "user_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<GroupMember group={self.group_id!r} user={self.user_id!r}>"
+
+
+# ------------------------------------------------------------------ #
+# role_bindings  (the central binding table)                           #
+# ------------------------------------------------------------------ #
+
+class RoleBindingORM(Base):
+    """Binds a Subject (user|group) to a Role within a Scope (global|workspace).
+
+    No FK on subject_id — it's polymorphic (users.id OR groups.id).
+    Referential integrity is enforced in repository code; orphaned
+    bindings are pruned by the on-delete handlers on users/groups.
+
+    No FK on scope_id either: it's NULL for global scope and references
+    workspaces.id for workspace scope. CASCADE deletion of workspace_id
+    bindings is handled in repository code (Phase 2 wires the
+    workspace-delete event handler to revoke and remove bindings).
+    """
+    __tablename__ = "role_bindings"
+
+    id = Column(Text, primary_key=True, default=lambda: f"bnd_{uuid.uuid4().hex[:12]}")
+    subject_type = Column(Text, nullable=False)   # user | group
+    subject_id = Column(Text, nullable=False)
+    role_name = Column(Text, nullable=False)
+    scope_type = Column(Text, nullable=False)     # global | workspace
+    scope_id = Column(Text, nullable=True)        # NULL for global
+    granted_at = Column(Text, nullable=False, default=_now)
+    granted_by = Column(Text, nullable=True)      # user_id who created the binding
+    # Time-bound bindings: schema-ready in Phase 1, not enforced until Phase 2.
+    expires_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "subject_type", "subject_id", "role_name", "scope_type", "scope_id",
+            name="uq_role_binding",
+        ),
+        # Hot path: PermissionResolver pulls all bindings for a subject.
+        Index("idx_role_bindings_subject", "subject_id", "scope_type", "scope_id"),
+        # Reverse lookup: "who has access to this workspace?"
+        Index("idx_role_bindings_scope", "scope_type", "scope_id"),
+        Index("idx_role_bindings_role", "role_name"),
+        CheckConstraint(
+            "subject_type IN ('user', 'group')",
+            name="ck_role_bindings_subject_type",
+        ),
+        CheckConstraint(
+            "scope_type IN ('global', 'workspace')",
+            name="ck_role_bindings_scope_type",
+        ),
+        CheckConstraint(
+            # Global scope has NULL scope_id; workspace scope has a value.
+            "(scope_type = 'global' AND scope_id IS NULL) "
+            "OR (scope_type = 'workspace' AND scope_id IS NOT NULL)",
+            name="ck_role_bindings_scope_consistency",
+        ),
+        # Phase 3 dropped the role_name CHECK constraint — the canonical
+        # ``roles`` table is now the source of truth and ``role_repo``
+        # enforces referential integrity in app code.
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<RoleBinding id={self.id!r} "
+            f"{self.subject_type}={self.subject_id!r} "
+            f"role={self.role_name!r} "
+            f"{self.scope_type}={self.scope_id!r}>"
+        )
+
+
+# ------------------------------------------------------------------ #
+# resource_grants  (per-View explicit shares — Layer 3 of view ACL)    #
+# ------------------------------------------------------------------ #
+
+class ResourceGrantORM(Base):
+    """Explicit grant of access to a single resource (Phase 1: views only).
+
+    Additive only — a grant extends access to a subject regardless of
+    workspace membership. The role_name enum here is intentionally
+    narrower than the global role enum: only 'editor' or 'viewer' make
+    sense at the resource level. It is NOT FK'd to role_permissions.
+    """
+    __tablename__ = "resource_grants"
+
+    id = Column(Text, primary_key=True, default=lambda: f"grt_{uuid.uuid4().hex[:12]}")
+    resource_type = Column(Text, nullable=False)  # 'view' for now
+    resource_id = Column(Text, nullable=False)
+    subject_type = Column(Text, nullable=False)   # user | group
+    subject_id = Column(Text, nullable=False)
+    role_name = Column(Text, nullable=False)      # editor | viewer (narrow)
+    granted_at = Column(Text, nullable=False, default=_now)
+    granted_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "resource_type", "resource_id", "subject_type", "subject_id",
+            name="uq_resource_grant_subject",
+        ),
+        # Hot path: "what grants exist on this view?"
+        Index("idx_resource_grants_resource", "resource_type", "resource_id"),
+        # Reverse: "what views does Bob have explicit access to?"
+        Index("idx_resource_grants_subject", "subject_type", "subject_id"),
+        CheckConstraint(
+            "resource_type IN ('view')",
+            name="ck_resource_grants_resource_type",
+        ),
+        CheckConstraint(
+            "subject_type IN ('user', 'group')",
+            name="ck_resource_grants_subject_type",
+        ),
+        CheckConstraint(
+            "role_name IN ('editor', 'viewer')",
+            name="ck_resource_grants_role_name",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ResourceGrant id={self.id!r} "
+            f"{self.resource_type}={self.resource_id!r} "
+            f"{self.subject_type}={self.subject_id!r} "
+            f"role={self.role_name!r}>"
+        )
 
 
 # ------------------------------------------------------------------ #

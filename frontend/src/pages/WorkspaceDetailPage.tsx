@@ -9,6 +9,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
     ChevronLeft, Plus, Database, Loader2, Settings2, X, Save,
     Trash2, GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
+    Users,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { ShieldAlert } from 'lucide-react'
@@ -17,6 +18,7 @@ import { workspaceService, type DataSourceResponse, type WorkspaceDataSourceImpa
 import { aggregationService } from '@/services/aggregationService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { useToast } from '@/components/ui/toast'
+import { usePermission } from '@/store/auth'
 import { AdminWizard, type WizardStep } from '@/components/admin/AdminWizard'
 import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
@@ -25,6 +27,7 @@ import { DataSourceDetailPanel } from '@/components/admin/workspace/DataSourceDe
 import WorkspaceViewsSection from '@/components/admin/workspace/WorkspaceViewsSection'
 import { WorkspaceAggregationDashboard } from '@/components/admin/workspace/WorkspaceAggregationDashboard'
 import { WorkspaceOntologyTimeline } from '@/components/admin/workspace/WorkspaceOntologyTimeline'
+import { WorkspaceMembers } from '@/components/workspaces/WorkspaceMembers'
 
 // ─────────────────────────────────────────────────────────────────────
 // Edit Data Source Modal
@@ -117,7 +120,12 @@ export function WorkspaceDetailPage() {
 
     // ── Selection + tab state ──────────────────────────────
     const [selectedDsId, setSelectedDsId] = useState<string | null>(null)
-    const [activeSection, setActiveSection] = useState<'sources' | 'views' | 'aggregation' | 'ontology'>('sources')
+    const [activeSection, setActiveSection] = useState<'sources' | 'views' | 'aggregation' | 'ontology' | 'members'>('sources')
+
+    // Workspace admin permission gates the Members tab. The store's
+    // `usePermission` re-renders this component on permission changes
+    // (e.g. after silent refresh), so the tab appears/disappears live.
+    const canManageMembers = usePermission('workspace:admin', wsId ?? null)
 
     // ── Sync editName/editDesc when workspace loads ────────
     useEffect(() => {
@@ -419,6 +427,9 @@ export function WorkspaceDetailPage() {
                     { id: 'views' as const, label: 'Views', icon: Eye, count: allWorkspaceViews.length, hint: 'Saved visual perspectives on your data' },
                     { id: 'aggregation' as const, label: 'Aggregation', icon: Settings2, hint: 'Edge materialization and job monitoring' },
                     { id: 'ontology' as const, label: 'Ontology', icon: GitBranch, hint: 'Semantic type system and change history' },
+                    ...(canManageMembers
+                        ? [{ id: 'members' as const, label: 'Members', icon: Users, hint: 'Workspace role bindings — admins / users / viewers' }]
+                        : []),
                 ]).map(tab => {
                     const Icon = tab.icon
                     const isActive = activeSection === tab.id
@@ -564,6 +575,11 @@ export function WorkspaceDetailPage() {
                     </div>
                     <WorkspaceOntologyTimeline dataSources={workspace.dataSources} ontologyMap={ontologyMap} />
                 </>
+            )}
+
+            {/* ── Members Tab (RBAC) ──────────────────────── */}
+            {activeSection === 'members' && canManageMembers && wsId && (
+                <WorkspaceMembers workspaceId={wsId} />
             )}
 
             {/* ── Modals ──────────────────────────────────── */}

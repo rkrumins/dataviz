@@ -3,17 +3,40 @@ View endpoints (top-level, cross-workspace).
 
 Views are visual renderings of context models (or ad-hoc graphs).
 Mounted at /api/v1/views
+
+RBAC Phase 2C: each route enforces the three-layer view evaluator
+(``backend.app.services.view_access``). Reads pass when ANY of:
+workspace binding, visibility tier, or explicit ``resource_grants``.
+Mutations (create / edit / delete / change-visibility / restore /
+hard-delete) check the corresponding action predicate.
+
+The list endpoint filters its items post-fetch when enforcement is on.
+That means ``total``/``hasMore`` can overestimate for non-admins
+(callers see fewer rows than the count claims). A Phase 3 SQL refactor
+will push the filter into the query for accurate paging; for now the
+trade-off is acceptable because the kill-switch
+``RBAC_ENFORCE_VIEWS=false`` reverts to the legacy behaviour.
 """
 import logging
+import os
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.auth.dependencies import (
+    get_optional_user,
+    get_permission_claims,
+    rbac_flag,
+    requires,
+)
 from backend.app.db.engine import get_db_session
+from backend.app.db.models import ViewORM
 from backend.app.db.repositories import view_repo
-from backend.app.auth.dependencies import get_optional_user
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
+from backend.app.services.permission_service import PermissionClaims
+from backend.app.services import view_access
+from backend.auth_service.interface import User
 from backend.common.models.management import (
     ViewCreateRequest,
     ViewUpdateRequest,
@@ -25,6 +48,68 @@ from backend.common.models.management import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+async def _viewer_context(
+    session: AsyncSession,
+    user: Optional[User],
+    claims: PermissionClaims,
+) -> view_access.ViewerContext:
+    """Build the per-request ViewerContext used by every guarded route."""
+    return await view_access.ViewerContext.build(session, user=user, claims=claims)
+
+
+async def _load_view_orm(session: AsyncSession, view_id: str) -> ViewORM:
+    """Fetch the raw ORM row (the access predicates need it).
+
+    The endpoint then calls ``view_repo.get_view_enriched`` to return
+    the response shape — kept separate so the access check happens
+    against the authoritative row and not a lossy DTO projection.
+    """
+    from sqlalchemy import select
+    row = await session.execute(
+        select(ViewORM).where(ViewORM.id == view_id)
+    )
+    view = row.scalar_one_or_none()
+    if view is None:
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    return view
+
+
+class _ViewProxy:
+    """Adapter that exposes the access-predicate fields off a
+    ``ViewResponse``-shaped object.
+
+    The list endpoint receives DTOs from the repo, not ORM rows. The
+    predicates only need ``id``, ``workspace_id``, ``visibility``, and
+    ``created_by`` — all present on the response shape. We wrap the
+    DTO in this lightweight proxy so the predicate functions stay
+    typed against ``ViewORM`` without forcing a re-fetch.
+    """
+
+    __slots__ = ("id", "workspace_id", "visibility", "created_by")
+
+    def __init__(self, *, id, workspace_id, visibility, created_by):
+        self.id = id
+        self.workspace_id = workspace_id
+        self.visibility = visibility
+        self.created_by = created_by
+
+    @classmethod
+    def from_response(cls, item) -> "_ViewProxy":
+        # Pydantic models expose snake-case attrs; legacy ORM responses
+        # via ``from_attributes`` do too. Both paths funnel here.
+        return cls(
+            id=getattr(item, "id"),
+            workspace_id=getattr(item, "workspace_id", None),
+            visibility=getattr(item, "visibility", "private"),
+            created_by=getattr(item, "created_by", None),
+        )
+
+
+# Suppress the "imported but unused" hint while os is referenced via
+# rbac_flag. The flag wrapper itself reads os.environ.
+_ = os
 
 # Fallback user_id when no auth token is present (backward compatibility).
 _ANONYMOUS_USER = "anonymous"
@@ -160,6 +245,7 @@ async def list_views(
     deleted_only: bool = Query(False, alias="deletedOnly"),
     attention_only: bool = Query(False, alias="attentionOnly"),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ) -> ViewListResponse:
     """List accessible views as a paginated envelope.
@@ -181,7 +267,7 @@ async def list_views(
       broken data source reference. Mirrors the frontend health model
       so pagination stays accurate on large catalogs.
     """
-    return await view_repo.list_views_filtered(
+    response = await view_repo.list_views_filtered(
         session,
         visibility=visibility,
         visibility_in=visibility_in,
@@ -205,11 +291,29 @@ async def list_views(
         attention_only=attention_only,
     )
 
+    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
+        return response
+
+    # Three-layer post-filter. ``response.items`` is a list of
+    # ViewResponse-shaped objects from the repo, NOT ORM rows — but
+    # they carry the fields our predicates need (id, workspace_id,
+    # visibility, created_by). We adapt them here rather than re-
+    # querying the DB.
+    ctx = await _viewer_context(session, user, claims)
+    keep = []
+    for item in response.items:
+        proxy = _ViewProxy.from_response(item)
+        if await view_access.can_read_view(session, ctx, proxy):
+            keep.append(item)
+    response.items = keep
+    return response
+
 
 @router.post("/", response_model=ViewResponse, status_code=201)
 async def create_view(
     req: ViewCreateRequest = Body(...),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Create a new view. workspaceId is required.
@@ -217,7 +321,20 @@ async def create_view(
     Captures the current ontology digest on the new row so later edits
     can detect ontology drift. Records created_by as the authenticated
     user's ID so views can be filtered by creator in the Explorer.
+
+    Authorization: requires ``workspace:view:create`` in the target
+    workspace. Phase 2C enforces; Phase 1 left this open.
     """
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        from backend.app.services.permission_service import has_permission
+        if not has_permission(
+            claims, "workspace:view:create", workspace_id=req.workspace_id,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Missing permission: workspace:view:create",
+            )
+
     digest = await _compute_ontology_digest(
         session, req.workspace_id, req.data_source_id,
     )
@@ -230,9 +347,18 @@ async def create_view(
 async def get_view(
     view_id: str = Path(...),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Get a single view by ID, enriched with workspace context and favourite data."""
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        view_orm = await _load_view_orm(session, view_id)
+        ctx = await _viewer_context(session, user, claims)
+        if not await view_access.can_read_view(session, ctx, view_orm):
+            # 404 (not 403) so view existence stays private from
+            # users with no access path.
+            raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
     view = await view_repo.get_view_enriched(
         session, view_id, user_id=_user_id(user),
     )
@@ -245,6 +371,8 @@ async def get_view(
 async def update_view(
     view_id: str = Path(...),
     req: ViewUpdateRequest = Body(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Update an existing view.
@@ -256,6 +384,16 @@ async def update_view(
     existing = await view_repo.get_view(session, view_id)
     if not existing:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        view_orm = await _load_view_orm(session, view_id)
+        ctx = await _viewer_context(session, user, claims)
+        if not await view_access.can_edit_view(session, ctx, view_orm):
+            raise HTTPException(
+                status_code=403,
+                detail="Missing permission: workspace:view:edit",
+            )
+
     digest = await _compute_ontology_digest(
         session, existing.workspace_id, existing.data_source_id,
     )
@@ -269,9 +407,27 @@ async def update_view(
 async def delete_view(
     view_id: str = Path(...),
     permanent: bool = Query(False),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Delete a view. Soft-deletes by default; pass ?permanent=true to remove from DB."""
+    """Delete a view. Soft-deletes by default; pass ?permanent=true to remove from DB.
+
+    Soft-delete: creator OR ``workspace:view:delete``.
+    Hard-delete: ``workspace:admin`` only (per the action matrix).
+    """
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        view_orm = await _load_view_orm(session, view_id)
+        ctx = await _viewer_context(session, user, claims)
+        if permanent:
+            allowed = view_access.can_hard_delete_view(ctx, view_orm)
+            need = "workspace:admin"
+        else:
+            allowed = view_access.can_delete_view(ctx, view_orm)
+            need = "workspace:view:delete"
+        if not allowed:
+            raise HTTPException(status_code=403, detail=f"Missing permission: {need}")
+
     if permanent:
         deleted = await view_repo.permanently_delete_view(session, view_id)
     else:
@@ -284,9 +440,19 @@ async def delete_view(
 async def restore_view(
     view_id: str = Path(...),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Restore a soft-deleted view."""
+    """Restore a soft-deleted view (workspace admin only)."""
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        view_orm = await _load_view_orm(session, view_id)
+        ctx = await _viewer_context(session, user, claims)
+        if not view_access.can_restore_view(ctx, view_orm):
+            raise HTTPException(
+                status_code=403,
+                detail="Missing permission: workspace:admin",
+            )
+
     restored = await view_repo.restore_view(session, view_id)
     if not restored:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found or not deleted")
@@ -299,11 +465,25 @@ async def update_view_visibility(
     view_id: str = Path(...),
     visibility: str = Body(..., embed=True),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Change the visibility of a view (private | workspace | enterprise)."""
+    """Change the visibility of a view (private | workspace | enterprise).
+
+    Creator or workspace admin only — see the action matrix.
+    """
     if visibility not in ("private", "workspace", "enterprise"):
         raise HTTPException(status_code=422, detail="visibility must be one of: private, workspace, enterprise")
+
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        view_orm = await _load_view_orm(session, view_id)
+        ctx = await _viewer_context(session, user, claims)
+        if not view_access.can_change_visibility(ctx, view_orm):
+            raise HTTPException(
+                status_code=403,
+                detail="Only the creator or a workspace admin can change visibility",
+            )
+
     view = await view_repo.update_visibility(
         session, view_id, visibility, user_id=_user_id(user),
     )

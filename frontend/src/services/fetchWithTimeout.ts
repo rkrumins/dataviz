@@ -33,6 +33,7 @@ const CSRF_COOKIE = 'nx_csrf'
 const CSRF_HEADER = 'X-CSRF-Token'
 const REFRESH_URL = '/api/v1/auth/refresh'
 const SESSION_LOST_EVENT = 'auth:session-lost'
+const ACCESS_DENIED_EVENT = 'auth:access-denied'
 
 function readCookie(name: string): string | null {
   if (typeof document === 'undefined') return null
@@ -104,6 +105,43 @@ async function tryRefresh(): Promise<boolean> {
 function notifySessionLost(): void {
   if (typeof window === 'undefined') return
   window.dispatchEvent(new CustomEvent(SESSION_LOST_EVENT))
+}
+
+
+/**
+ * Notify the AppLayout-mounted access-denied modal that a request was
+ * 403'd. The detail object carries enough for the modal to render a
+ * useful message; the missing-permission name comes from the backend's
+ * ``detail`` field which is shaped by the ``requires(...)`` factory as
+ * ``"Missing permission: <perm>"``.
+ *
+ * The event handler is fire-and-forget — calling code still receives
+ * the underlying ``Response`` (or thrown error from ``apiClient``) so
+ * per-call error handling can remain in place.
+ */
+async function notifyAccessDenied(res: Response, requestPath: string): Promise<void> {
+  if (typeof window === 'undefined') return
+  let detail: string | null = null
+  // Clone before reading so the caller can still consume the body.
+  try {
+    const clone = res.clone()
+    const text = await clone.text()
+    if (text) {
+      try {
+        const body = JSON.parse(text) as { detail?: string }
+        detail = body.detail ?? null
+      } catch {
+        detail = text
+      }
+    }
+  } catch {
+    // ignore — we'll dispatch with detail=null
+  }
+  window.dispatchEvent(
+    new CustomEvent(ACCESS_DENIED_EVENT, {
+      detail: { detail, path: requestPath, status: res.status },
+    }),
+  )
 }
 
 /**
@@ -201,6 +239,15 @@ export async function fetchWithTimeout(
       }
     }
     notifySessionLost()
+  }
+
+  // 403 surfaces as a non-blocking modal mounted by AppLayout. We do
+  // NOT short-circuit the request — the calling service still gets the
+  // Response and can shape its own error handling — we just announce
+  // the denial centrally so the user sees a clear "you don't have X"
+  // message instead of a generic toast.
+  if (res.status === 403) {
+    void notifyAccessDenied(res, urlPath(input))
   }
 
   return res

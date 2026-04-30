@@ -8,12 +8,20 @@
 import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
-    BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone
+    BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
+    UserCog, Users2, KeyRound,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-// Administration is scoped to system-level concerns. Workspaces and data ingestion
-// live as their own top-level sidebar destinations (/workspaces, /ingestion).
+// Administration sidebar is split into two sections — "System" for
+// platform-wide configuration and "Identity & Access" for the people
+// + groups + role-binding surface. The split mirrors every IAM tool
+// (Okta, Entra, AWS IAM): operators looking for IAM things expect a
+// dedicated section, not items intermingled with feature flags.
+//
+// Workspaces and data ingestion live as their own top-level sidebar
+// destinations (/workspaces, /ingestion) — they're not platform-admin
+// concerns.
 const adminGroups = [
     {
         id: 'system',
@@ -23,8 +31,18 @@ const adminGroups = [
         items: [
             { path: 'overview', label: 'Global Overview', icon: BarChart3, description: 'System health & scale' },
             { path: 'features', label: 'Features', icon: ToggleLeft, description: 'Feature flags & behaviour' },
-            { path: 'users', label: 'User Management', icon: Users, description: 'Accounts & approvals' },
             { path: 'announcements', label: 'Announcements', icon: Megaphone, description: 'Global banner messages' },
+        ]
+    },
+    {
+        id: 'identity',
+        label: 'Identity & Access',
+        icon: UserCog,
+        path: '',
+        items: [
+            { path: 'users', label: 'User Management', icon: Users, description: 'Accounts & approvals' },
+            { path: 'groups', label: 'Groups', icon: Users2, description: 'Bundle members for bulk role grants' },
+            { path: 'permissions', label: 'Permissions', icon: KeyRound, description: 'Roles, permissions, and who has access where' },
         ]
     }
 ]

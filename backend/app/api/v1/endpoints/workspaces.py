@@ -2,20 +2,37 @@
 Admin Workspace endpoints — CRUD for workspaces and their data sources.
 A workspace is an operational context containing one or more data sources,
 each binding a Provider + Graph Name + Ontology.
+
+RBAC Phase 2: each route declares its required permission via
+``Depends(requires(...))``. List endpoints filter their results by the
+caller's effective permissions so non-admins only see workspaces they
+have a binding into. The legacy "everyone sees everything" behaviour
+returns when ``RBAC_ENFORCE_WORKSPACES=false`` / ``RBAC_ENFORCE_DATASOURCES=false``.
 """
 from typing import List
 from fastapi import APIRouter, Body, Depends, HTTPException, Path
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.auth.dependencies import (
+    get_current_user,
+    get_permission_claims,
+    rbac_flag,
+    requires,
+)
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import workspace_repo, provider_repo, ontology_definition_repo, data_source_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
+from backend.app.services.permission_service import (
+    PermissionClaims,
+    has_permission,
+)
 from backend.app.services.stats_cache import (
     SYNTHETIC_SCHEMA_MISSING_FIELDS, CacheMiss,
     build_computing_envelope, build_envelope, build_meta,
     build_synthetic_schema, read_stats_cache,
 )
+from backend.auth_service.interface import User
 from backend.common.models.management import (
     WorkspaceCreateRequest,
     WorkspaceUpdateRequest,
@@ -30,21 +47,52 @@ from backend.insights_service.enqueue import enqueue_stats_job_safe
 router = APIRouter()
 
 
+def _can_read_workspace(claims: PermissionClaims, ws_id: str) -> bool:
+    """A user can read a workspace if they hold any binding into it
+    (any non-empty permission entry under that ws_id) OR are global
+    admin. Used for list filtering and the GET-by-id check."""
+    if has_permission(claims, "system:admin"):
+        return True
+    return bool(claims.ws_perms.get(ws_id))
+
+
+def _ensure_can_read_workspace(claims: PermissionClaims, ws_id: str) -> None:
+    if rbac_flag("RBAC_ENFORCE_WORKSPACES") and not _can_read_workspace(claims, ws_id):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Workspace '{ws_id}' not found",
+        )
+
+
 # ================================================================== #
 # Workspace CRUD                                                       #
 # ================================================================== #
 
 @router.get("", response_model=List[WorkspaceResponse])
 async def list_workspaces(
+    _user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """List all workspaces (with nested data sources)."""
-    return await workspace_repo.list_workspaces(session)
+    """List workspaces the caller has any binding into.
+
+    System admins see every workspace; everyone else sees only the
+    workspaces their role bindings (direct or via group) reach.
+    Filtering happens after the repo fetch — fine at current scale,
+    can move into a SQL JOIN if the workspace count becomes large.
+    """
+    workspaces = await workspace_repo.list_workspaces(session)
+    if not rbac_flag("RBAC_ENFORCE_WORKSPACES"):
+        return workspaces
+    if has_permission(claims, "system:admin"):
+        return workspaces
+    return [w for w in workspaces if claims.ws_perms.get(w.id)]
 
 
 @router.post("", response_model=WorkspaceResponse, status_code=201)
 async def create_workspace(
     req: WorkspaceCreateRequest = Body(...),
+    _user: User = Depends(requires("workspaces:create")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Create a new workspace with one or more data sources."""
@@ -72,9 +120,16 @@ async def create_workspace(
 @router.get("/{workspace_id}", response_model=WorkspaceResponse)
 async def get_workspace(
     workspace_id: str = Path(...),
+    _user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Get a single workspace with its data sources."""
+    """Get a single workspace with its data sources.
+
+    Returns 404 (not 403) when the caller has no binding — keeps
+    workspace existence private from non-members.
+    """
+    _ensure_can_read_workspace(claims, workspace_id)
     ws = await workspace_repo.get_workspace(session, workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
@@ -85,6 +140,7 @@ async def get_workspace(
 async def update_workspace(
     workspace_id: str = Path(...),
     req: WorkspaceUpdateRequest = Body(...),
+    _user: User = Depends(requires("workspace:admin", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Update workspace metadata (name, description, is_active)."""
@@ -97,6 +153,7 @@ async def update_workspace(
 @router.delete("/{workspace_id}", status_code=204)
 async def delete_workspace(
     workspace_id: str = Path(...),
+    _user: User = Depends(requires("workspace:admin", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Delete a workspace (cascades data sources, views, and rule-sets)."""
@@ -112,9 +169,14 @@ async def delete_workspace(
 @router.post("/{workspace_id}/set-default", response_model=WorkspaceResponse)
 async def set_default_workspace(
     workspace_id: str = Path(...),
+    _user: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Promote a workspace to the default (used when no ws_id specified)."""
+    """Promote a workspace to the default (used when no ws_id specified).
+
+    Affects every user globally, so requires ``system:admin`` rather
+    than the per-workspace admin permission.
+    """
     success = await workspace_repo.set_default(session, workspace_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
@@ -131,6 +193,7 @@ async def set_default_workspace(
 @router.get("/{workspace_id}/data-sources", response_model=List[DataSourceResponse])
 async def list_data_sources(
     workspace_id: str = Path(...),
+    _user: User = Depends(requires("workspace:datasource:read", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """List all data sources for a workspace."""
@@ -144,6 +207,7 @@ async def list_data_sources(
 async def add_data_source(
     workspace_id: str = Path(...),
     req: DataSourceCreateRequest = Body(...),
+    _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Add a data source to a workspace."""
@@ -191,6 +255,7 @@ async def update_data_source(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
     req: DataSourceUpdateRequest = Body(...),
+    _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Update a data source. Evicts cached provider if provider/graph changed."""
@@ -232,6 +297,7 @@ async def update_data_source(
 async def remove_data_source(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
+    _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Remove a data source. Rejects if it's the last one in the workspace."""
@@ -250,6 +316,7 @@ async def remove_data_source(
 async def get_data_source_impact(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
+    _user: User = Depends(requires("workspace:datasource:read", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Return the blast radius of deleting a data source (e.g. affected semantic views)."""
@@ -263,6 +330,7 @@ async def get_data_source_impact(
 async def set_primary_data_source(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
+    _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Promote a data source to primary within its workspace."""
@@ -278,6 +346,7 @@ async def set_projection_mode(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
     mode: str = Body(..., embed=True),
+    _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Set the aggregation edge projection mode for a data source.
@@ -325,6 +394,7 @@ async def set_projection_mode(
 async def get_cached_stats(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
+    _user: User = Depends(requires("workspace:datasource:read", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Return cached graph statistics for a data source.
@@ -408,6 +478,7 @@ async def get_cached_stats(
 async def get_cached_schema(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
+    _user: User = Depends(requires("workspace:datasource:read", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Return cached graph schema for a data source.
@@ -457,6 +528,7 @@ async def get_cached_schema(
 async def get_cached_ontology(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
+    _user: User = Depends(requires("workspace:datasource:read", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Return cached ontology metadata for a data source.

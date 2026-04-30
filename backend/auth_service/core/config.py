@@ -12,7 +12,12 @@ import secrets
 logger = logging.getLogger(__name__)
 
 _DEFAULT_ALGORITHM = "HS256"
-_DEFAULT_ACCESS_EXPIRY_MINUTES = 15
+# RBAC Phase 1: short access-token TTL paired with Redis revocation
+# set. Old default was 15 minutes; the design plan calls for ≤5 min so
+# revocation lag stays within enterprise tolerances. Operators can
+# override JWT_EXPIRY_MINUTES to fall back to the longer window if the
+# revocation set is unavailable in their environment.
+_DEFAULT_ACCESS_EXPIRY_MINUTES = 5
 _DEFAULT_REFRESH_EXPIRY_DAYS = 7
 
 

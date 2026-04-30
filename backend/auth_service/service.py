@@ -13,7 +13,7 @@ do not change.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import jwt as pyjwt
 
@@ -62,16 +62,26 @@ class LocalIdentityService:
         user_repo,
         refresh_store_factory,
         outbox_emit=None,
+        claims_resolver: Optional[Callable[..., Awaitable[dict]]] = None,
     ):
         # ``user_repo`` is injected as a module so this class doesn't need
         # to import the concrete repository directly. The shape used:
         #   get_user_by_id(session, id) -> ORM | None
         #   get_user_by_email(session, email) -> ORM | None
         #   get_user_roles(session, id) -> list[str]
+        #
+        # ``claims_resolver`` (RBAC Phase 1) is an optional callable
+        # ``(session, user_id, *, sid) -> dict`` that returns the
+        # permission claim payload to embed in the access JWT. The
+        # auth service doesn't know the shape of the dict — it only
+        # forwards it to ``create_access_token(extra=...)``. When None,
+        # tokens carry only identity (no permission claims), preserving
+        # pre-Phase-1 behaviour.
         self._session_factory = session_factory
         self._user_repo = user_repo
         self._refresh_store_factory = refresh_store_factory
         self._outbox_emit = outbox_emit
+        self._claims_resolver = claims_resolver
 
     # ── Service protocol ──────────────────────────────────────────────
 
@@ -97,6 +107,7 @@ class LocalIdentityService:
     async def login(self, email: str, password: str) -> tuple[User, SessionTokens]:
         provider = get_provider("local")
 
+        claims_extra: dict = {}
         async with self._session_factory() as session:
             async def _get_user_by_email(em: str):
                 return await self._user_repo.get_user_by_email(session, em)
@@ -113,6 +124,9 @@ class LocalIdentityService:
                 raise InvalidCredentials("Invalid email or password")
             roles = await self._user_repo.get_user_roles(session, orm.id)
 
+            if self._claims_resolver is not None:
+                claims_extra = await self._claims_resolver(session, orm.id)
+
             if self._outbox_emit is not None:
                 await self._outbox_emit(
                     session, "user.logged_in",
@@ -120,7 +134,7 @@ class LocalIdentityService:
                 )
 
         user = _orm_to_user(orm, role=_primary_role(roles))
-        tokens = self._issue_tokens(user, family_id=None)
+        tokens = self._issue_tokens(user, family_id=None, claims_extra=claims_extra)
         return user, tokens
 
     async def logout(self, refresh_token: Optional[str]) -> None:
@@ -146,6 +160,7 @@ class LocalIdentityService:
         except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError) as exc:
             raise InvalidRefreshToken(str(exc)) from exc
 
+        claims_extra: dict = {}
         async with self._session_factory() as session:
             store = self._refresh_store_factory(session)
             err = await check_and_record_rotation(
@@ -165,8 +180,14 @@ class LocalIdentityService:
                 raise InvalidRefreshToken("user_inactive")
             roles = await self._user_repo.get_user_roles(session, orm.id)
 
+            if self._claims_resolver is not None:
+                # Refresh re-resolves claims so a binding/group change made
+                # since the previous access token still rolls forward on
+                # the next rotation, even if the revocation set has expired.
+                claims_extra = await self._claims_resolver(session, orm.id)
+
         user = _orm_to_user(orm, role=_primary_role(roles))
-        tokens = self._issue_tokens(user, family_id=claims.family_id)
+        tokens = self._issue_tokens(user, family_id=claims.family_id, claims_extra=claims_extra)
         return user, tokens
 
     async def get_user(self, user_id: str) -> Optional[User]:
@@ -179,9 +200,18 @@ class LocalIdentityService:
 
     # ── Internals ─────────────────────────────────────────────────────
 
-    def _issue_tokens(self, user: User, *, family_id: Optional[str]) -> SessionTokens:
+    def _issue_tokens(
+        self,
+        user: User,
+        *,
+        family_id: Optional[str],
+        claims_extra: Optional[dict] = None,
+    ) -> SessionTokens:
         access = create_access_token(
-            user_id=user.id, email=user.email, role=user.role,
+            user_id=user.id,
+            email=user.email,
+            role=user.role,
+            extra=claims_extra or None,
         )
         refresh, _ = create_refresh_token(user_id=user.id, family_id=family_id)
         return SessionTokens(
