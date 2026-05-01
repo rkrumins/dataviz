@@ -13,6 +13,9 @@ import type {
     LineageResult,
     ContainmentResult,
     TraceOptions,
+    TraceV2Request,
+    TraceV2Result,
+    ExpandAggregatedRequest,
     LayerAssignmentRequest,
     LayerAssignmentResult,
     GraphSchemaStats,
@@ -25,6 +28,31 @@ import type {
     TopLevelNodesQuery,
     TopLevelNodesResult,
 } from './GraphDataProvider'
+
+// Wire shape from POST /trace/v2 — `upstreamUrns`/`downstreamUrns` arrive as
+// JSON arrays (Pydantic serializes Set as list); we re-hydrate to Set on read.
+interface RawTraceV2Result {
+    nodes: GraphNode[]
+    edges: GraphEdge[]
+    containmentEdges: GraphEdge[]
+    upstreamUrns: URN[]
+    downstreamUrns: URN[]
+    focus: { urn: URN; level: number; entityType: string }
+    effectiveLevel: number
+    isInherited: boolean
+    inheritedFromUrn?: string | null
+    truncated: boolean
+    truncationReason?: string | null
+}
+
+function normalizeTraceV2(raw: RawTraceV2Result): TraceV2Result {
+    return {
+        ...raw,
+        upstreamUrns: new Set(raw.upstreamUrns ?? []),
+        downstreamUrns: new Set(raw.downstreamUrns ?? []),
+        containmentEdges: raw.containmentEdges ?? [],
+    }
+}
 
 const API_BASE = '/api/v1'
 
@@ -405,6 +433,30 @@ export class RemoteGraphProvider implements GraphDataProvider {
                 ...(options?.lineageEdgeTypes?.length ? { lineageEdgeTypes: options.lineageEdgeTypes } : {}),
             })
         })
+    }
+
+    /**
+     * Trace v2 — POST /trace/v2. Server-side level filter via n.level index;
+     * per-hop set-based BFS in Cypher. See plan: trace refactor.
+     *
+     * Hard caps (max_nodes/timeout_ms) live on the server; truncation surfaces
+     * as `truncated: true` in the response. Always HTTP 200 unless input is
+     * malformed — clients render partial results without retrying.
+     */
+    async traceAtLevel(request: TraceV2Request): Promise<TraceV2Result> {
+        const raw = await this.fetch<RawTraceV2Result>('/trace/v2', {
+            method: 'POST',
+            body: JSON.stringify(request),
+        })
+        return normalizeTraceV2(raw)
+    }
+
+    async expandAggregated(request: ExpandAggregatedRequest): Promise<TraceV2Result> {
+        const raw = await this.fetch<RawTraceV2Result>('/trace/expand', {
+            method: 'POST',
+            body: JSON.stringify(request),
+        })
+        return normalizeTraceV2(raw)
     }
 
     // ==========================================

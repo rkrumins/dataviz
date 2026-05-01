@@ -33,6 +33,14 @@ export interface UseEdgeProjectionOptions {
   isContainmentEdge: (edgeType: string) => boolean
   /** Currently hovered node — expanded parents show edges on hover */
   hoveredNodeId?: string | null
+  /**
+   * URN-pair keys (`${sourceUrn}->${targetUrn}`) for parent AGGREGATED edges
+   * that have been drilled into and currently have at least one finer-level
+   * edge visible. Suppresses the parent AGG so the canvas doesn't render the
+   * same lineage twice (rolled-up + detailed). Restored automatically when
+   * either endpoint is collapsed. Only consulted in trace mode.
+   */
+  suppressedAggEdgeKeys?: Set<string>
 }
 
 // ============================================
@@ -139,6 +147,7 @@ export function useEdgeProjection({
   traceContextSet,
   isContainmentEdge,
   hoveredNodeId,
+  suppressedAggEdgeKeys,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[] } {
 
   // ── Flat node index — O(1) lookup replacing O(N) tree search ──────────
@@ -279,6 +288,8 @@ export function useEdgeProjection({
       .filter(e => e.state === 'collapsed')
       .forEach(e => {
         const agg = e.aggregated
+        // Suppress parent AGG when its drill is producing visible finer-level edges.
+        if (isTracing && suppressedAggEdgeKeys?.has(`${agg.sourceUrn}->${agg.targetUrn}`)) return
         let sId = displayMap.has(agg.sourceUrn) ? agg.sourceUrn : ancestorMap.get(agg.sourceUrn)
         let tId = displayMap.has(agg.targetUrn) ? agg.targetUrn : ancestorMap.get(agg.targetUrn)
         if (!sId) sId = urnToIdMap.get(agg.sourceUrn)
@@ -307,6 +318,12 @@ export function useEdgeProjection({
         const tId = ancestorMap.get(edge.target) || (displayMap.has(edge.target) ? edge.target : null)
         if (sId && tId && sId !== tId) {
           if (isTracing && (!traceContextSet.has(sId) || !traceContextSet.has(tId))) return
+          // Suppress drilled parent AGG edges (URN-pair match on the original endpoints).
+          if (
+            isTracing
+            && String((edge.data?.edgeType) ?? '').toUpperCase() === 'AGGREGATED'
+            && suppressedAggEdgeKeys?.has(`${edge.source}->${edge.target}`)
+          ) return
           addEdgeToGroup(sId, tId, { ...edge, data: edge.data || {} }, normalizeEdgeType(edge))
         }
       })
@@ -371,7 +388,7 @@ export function useEdgeProjection({
     })
 
     return projected
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, suppressedAggEdgeKeys])
 
   // ── Edge delegation — separate memo so hoveredNodeId changes are O(E) not O(expensive) ──
   //

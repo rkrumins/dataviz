@@ -33,6 +33,7 @@ import { useCanvasStore, useCanvasVersion } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useGraphProvider } from '@/providers'
+import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useAggregatedLineage } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
@@ -64,6 +65,7 @@ import { useLayerAssignment } from '@/hooks/useLayerAssignment'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
 import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
+import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay } from './LineageFlowOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
@@ -156,11 +158,30 @@ export function ContextViewCanvas({
           addEdges(newCanvasEdges as any[])
         }
 
+        // Containment edges hydrated by /trace/v2 — these are the parent→child
+        // edges that link returned trace nodes (and their ancestors) into the
+        // canvas hierarchy. Without them deep lineage URNs (e.g. column-level
+        // schemaFields whose Datasets aren't loaded) render as orphans.
+        const newContainmentEdges = (result.containmentEdges ?? []).map(ge => ({
+          id: ge.id,
+          source: ge.sourceUrn,
+          target: ge.targetUrn,
+          data: {
+            edgeType: ge.edgeType,
+            relationship: ge.edgeType,
+            confidence: ge.confidence,
+          },
+        }))
+        if (newContainmentEdges.length > 0) {
+          addEdges(newContainmentEdges as any[])
+        }
+
         // Auto-expand ancestors of traced nodes
         const nodesToExpand = new Set(expandedNodes)
 
-        // Build parent map from ALL edges (including newly added)
-        const allCurrentEdges = [...edges, ...newCanvasEdges]
+        // Build parent map from ALL edges (including newly added — both
+        // lineage edges and the freshly-hydrated containment edges).
+        const allCurrentEdges = [...edges, ...newCanvasEdges, ...newContainmentEdges]
         const traceParentMap = new Map<string, string>()
         allCurrentEdges.forEach(e => {
           if (isContainmentEdge(normalizeEdgeType(e))) {
@@ -196,6 +217,12 @@ export function ContextViewCanvas({
     },
     onCloseEntityDrawer: () => {
       if (selectedNodeId) { clearSelection(); return true }
+      return false
+    },
+    // ESC exits an active trace before any other panel close — gives the
+    // user a single, predictable escape from a busy trace view.
+    onExitTrace: () => {
+      if (trace.isTracing) { trace.clearTrace(); setExpandedNodes(new Set()); return true }
       return false
     },
   })
@@ -330,10 +357,14 @@ export function ContextViewCanvas({
 
   // Granularity options for the lineage aggregation selector — driven by the
   // active ontology's entity types, sorted coarsest-first (lowest level first).
+  // Filtered to types that are valid lineage anchors (behavior.traceable=true)
+  // — matches the trace v2 contract where only traceable entities can be the
+  // level a trace runs at. Tags / glossary terms are excluded.
   const schemaEntityTypes = useViewEntityTypes()
   const granularityOptions = useMemo(
     () => schemaEntityTypes
       .filter(et => et.hierarchy?.level !== undefined)
+      .filter(et => et.behavior?.traceable !== false)
       .map(et => ({ id: et.id, name: et.name, level: et.hierarchy.level })),
     [schemaEntityTypes]
   )
@@ -529,6 +560,56 @@ export function ContextViewCanvas({
     nodeMap, childMap, parentMap,
   })
 
+  // Trace filter — when a trace is active, hides everything outside the trace
+  // context (traced URNs + drilldown URNs + their containment ancestors).
+  // When trace is off, returns the inputs unchanged with no allocation.
+  // Used by LayerColumn / edge projection so expansion reveals only traced
+  // descendants, recursively to any depth.
+  const {
+    filteredByLayer, filteredFlat, filteredMap, contextSet: traceContextSet,
+  } = useTraceFilteredHierarchy({
+    nodesByLayer, displayFlat, displayMap,
+    isTracing: trace.isTracing,
+    traceNodes: trace.result?.traceNodes ?? new Set<string>(),
+    drilldowns: trace.drilldowns,
+    parentMap,
+    expandedNodes,
+  })
+
+  // The hook returns the inputs unchanged when !isTracing, so these
+  // assignments are effectively a no-op outside trace mode.
+  const renderByLayer = trace.isTracing ? filteredByLayer : nodesByLayer
+  const renderFlat = trace.isTracing ? filteredFlat : displayFlat
+  const renderMap = trace.isTracing ? filteredMap : displayMap
+
+  // Suppress parent AGGREGATED edges whose drill currently has at least one
+  // finer-level edge visible. Without this the canvas renders the same
+  // lineage twice — once at the parent level (e.g. Dataset↔Dataset AGG) and
+  // once at the child level (Column↔Column). Keying on the URN pair lets
+  // useEdgeProjection skip both Section A (`aggregatedEdges`-derived) and
+  // Section B (canvas-store) AGG edges in one pass. Restoration is
+  // automatic: when either endpoint collapses, no drilled edge has both
+  // endpoints in renderMap, the key drops out of the set, and the AGG edge
+  // re-appears next render.
+  const suppressedAggEdgeKeys = useMemo(() => {
+    const keys = new Set<string>()
+    if (!trace.isTracing) return keys
+    trace.drilldowns.forEach((result, key) => {
+      const at = key.indexOf('@')
+      const pair = at >= 0 ? key.slice(0, at) : key
+      const arrow = pair.indexOf('->')
+      if (arrow < 0) return
+      const s = pair.slice(0, arrow)
+      const t = pair.slice(arrow + 2)
+      const anyVisible = result.edges.some(
+        e => renderMap.has(e.sourceUrn) && renderMap.has(e.targetUrn),
+      )
+      if (anyVisible) keys.add(`${s}->${t}`)
+    })
+    return keys
+  }, [trace.isTracing, trace.drilldowns, renderMap])
+
+
   // Search results
   const searchResults = useMemo(() => {
     if (!searchQuery.trim()) return []
@@ -642,6 +723,126 @@ export function ContextViewCanvas({
   // A ref (not state) because we need synchronous reads inside the toggle callback.
   const pendingLoadRef = useRef<Set<string>>(new Set())
 
+  // Merge a drill-down result into the canvas store: adds new nodes/edges
+  // (idempotent — addNodes/addEdges merge by ID), then auto-expands every
+  // containment ancestor so the new finer-level nodes are revealed within
+  // their hosts. Used by both manual edge double-click and auto-drill on
+  // node expansion.
+  const mergeDrilldownIntoCanvas = useCallback((expanded: TraceV2Result) => {
+    const newCanvasNodes = expanded.nodes.map(gn => ({
+      id: gn.urn,
+      type: 'default' as const,
+      position: { x: 0, y: 0 },
+      data: {
+        label: gn.displayName,
+        urn: gn.urn,
+        type: gn.entityType,
+        classifications: gn.tags ?? [],
+        metadata: {
+          ...gn.properties,
+          childCount: gn.childCount,
+          sourceSystem: gn.sourceSystem,
+        },
+      },
+    }))
+    if (newCanvasNodes.length > 0) addNodes(newCanvasNodes as any[])
+
+    const newCanvasEdges = expanded.edges.map(ge => ({
+      id: ge.id,
+      source: ge.sourceUrn,
+      target: ge.targetUrn,
+      data: {
+        edgeType: ge.edgeType,
+        relationship: ge.edgeType,
+        confidence: ge.confidence,
+      },
+    }))
+    if (newCanvasEdges.length > 0) addEdges(newCanvasEdges as any[])
+
+    // Hydrated containment edges from /trace/expand — link new nodes into
+    // the canvas hierarchy alongside the lineage edges. Without these the
+    // drilled-into nodes are floating; useContainmentHierarchy can't put
+    // them under their parents and they end up filtered out by layer
+    // assignment.
+    const newContainmentCanvasEdges = (expanded.containmentEdges ?? []).map(ge => ({
+      id: ge.id,
+      source: ge.sourceUrn,
+      target: ge.targetUrn,
+      data: {
+        edgeType: ge.edgeType,
+        relationship: ge.edgeType,
+        confidence: ge.confidence,
+      },
+    }))
+    if (newContainmentCanvasEdges.length > 0) addEdges(newContainmentCanvasEdges as any[])
+
+    const drillContainmentMap = new Map<string, string>()
+    expanded.containmentEdges?.forEach(ce => {
+      drillContainmentMap.set(ce.targetUrn, ce.sourceUrn)
+    })
+    setExpandedNodes(prev => {
+      const next = new Set(prev)
+      expanded.nodes.forEach(n => {
+        let p = drillContainmentMap.get(n.urn) ?? parentMap.get(n.urn)
+        while (p) {
+          next.add(p)
+          p = drillContainmentMap.get(p) ?? parentMap.get(p)
+        }
+      })
+      return next
+    })
+  }, [addNodes, addEdges, parentMap])
+
+  // Entity-type → hierarchy.level lookup for auto-drill. The drill-down
+  // RPC takes the *current* level and returns one level finer; we derive
+  // the current level from the expanded node's entity type via the schema.
+  const entityTypeLevels = useMemo(() => {
+    const map = new Map<string, number>()
+    schemaEntityTypes.forEach(et => {
+      if (typeof et.hierarchy?.level === 'number') map.set(et.id, et.hierarchy.level)
+    })
+    return map
+  }, [schemaEntityTypes])
+
+  // Auto-drill on expand: when a traced node is expanded, drill into every
+  // AGGREGATED edge incident to it. Each drill returns the next-finer level
+  // of nodes/edges between this node's subtree and the peer's subtree;
+  // mergeDrilldownIntoCanvas merges them, and `useTraceFilteredHierarchy`
+  // (which reads `trace.drilldowns`) reveals them in the canvas — recursively
+  // at any depth.
+  //
+  // Idempotent: `trace.expandAggregatedEdge` caches results by
+  // `${s}->${t}@${nextLevel}`, so re-expanding a previously-drilled node
+  // is a no-op against the network.
+  const autoDrillOnExpand = useCallback(async (nodeId: string) => {
+    if (!trace.isTracing) return
+    const node = nodes.find(n => n.id === nodeId)
+    if (!node) return
+    const nodeUrn = (node.data?.urn as string) ?? nodeId
+    const entityType = (node.data?.type as string) ?? ''
+    const currentLevel = entityTypeLevels.get(entityType)
+    if (currentLevel === undefined) return  // not a leveled entity (logical/tag/etc)
+
+    // Find AGGREGATED edges incident to this node (canvas-store edges already
+    // carry the trace result's edges via the post-trace merge).
+    const incidentEdges = edges.filter(e => {
+      const isAgg = String(((e as any).data?.edgeType) ?? '').toUpperCase() === 'AGGREGATED'
+      if (!isAgg) return false
+      const s = (e as any).source ?? (e as any).sourceUrn
+      const t = (e as any).target ?? (e as any).targetUrn
+      return s === nodeUrn || t === nodeUrn
+    })
+    if (incidentEdges.length === 0) return
+
+    // Drill all incident edges in parallel; merge each result.
+    const results = await Promise.all(incidentEdges.map(edge => {
+      const s = (edge as any).source ?? (edge as any).sourceUrn
+      const t = (edge as any).target ?? (edge as any).targetUrn
+      return trace.expandAggregatedEdge(s, t, currentLevel)
+    }))
+    results.forEach(r => { if (r) mergeDrilldownIntoCanvas(r) })
+  }, [trace, nodes, edges, entityTypeLevels, mergeDrilldownIntoCanvas])
+
   const toggleNode = useCallback(async (nodeId: string) => {
     const node = displayMap.get(nodeId)
 
@@ -669,12 +870,19 @@ export function ContextViewCanvas({
     if (!wasExpanded && !pendingLoadRef.current.has(nodeId)) {
       pendingLoadRef.current.add(nodeId)
       try {
-        await loadChildren(nodeId)
+        // In trace mode, auto-drill so the next-finer level of trace nodes
+        // becomes visible inside the expanded container. Outside trace mode
+        // this is a no-op. Both run in parallel — they touch independent
+        // pieces of state.
+        await Promise.all([
+          loadChildren(nodeId),
+          trace.isTracing ? autoDrillOnExpand(nodeId) : Promise.resolve(),
+        ])
       } finally {
         pendingLoadRef.current.delete(nodeId)
       }
     }
-  }, [displayMap, loadChildren])
+  }, [displayMap, loadChildren, trace.isTracing, autoDrillOnExpand])
 
   // Expand all / collapse all
   const expandAll = useCallback(() => {
@@ -688,52 +896,22 @@ export function ContextViewCanvas({
 
 
 
-  // Style: Enhanced Trace Context using unified trace hook
-  // Compute the set of all "Contextual Nodes" for the active trace.
-  // This includes:
-  // 1. The traced nodes themselves (from trace.visibleTraceNodes)
-  // 2. ALL ancestors of traced nodes (so containers stay lit)
-  const traceContextSet = useMemo(() => {
-    const set = new Set<string>()
-
-    if (!trace.isTracing) return set
-
-    // Add focus node
-    if (trace.focusId) set.add(trace.focusId)
-
-    // Add ancestors for the focus node
-    if (trace.focusId) {
-      let curr = parentMap.get(trace.focusId)
-      while (curr) {
-        set.add(curr)
-        curr = parentMap.get(curr)
-      }
-    }
-
-    // Add visible traced nodes and their ancestors
-    trace.visibleTraceNodes.forEach(id => {
-      set.add(id) // Add the node itself
-
-      let curr = parentMap.get(id)
-      while (curr) {
-        set.add(curr)
-        curr = parentMap.get(curr)
-      }
-    })
-
-    return set
-  }, [trace.isTracing, trace.focusId, trace.visibleTraceNodes, parentMap])
+  // `traceContextSet` now comes directly from useTraceFilteredHierarchy above
+  // (single source of truth for both filtering and edge projection).
 
   // Hovered node — needed by both edge projection (delegation) and hover highlight
   const hoveredNodeId = useHoveredNodeId()
 
   // Edge projection: lineageEdges, visibleLineageEdges
+  // Pass the trace-filtered views so projected edges only reference visible
+  // nodes; outside trace mode these are pass-through to the originals.
   const { visibleLineageEdges } = useEdgeProjection({
-    edges, aggregatedEdges, nodesByLayer, expandedNodes,
-    displayFlat, displayMap, urnToIdMap,
+    edges, aggregatedEdges, nodesByLayer: renderByLayer, expandedNodes,
+    displayFlat: renderFlat, displayMap: renderMap, urnToIdMap,
     showLineageFlow, isTracing: trace.isTracing,
     traceContextSet, isContainmentEdge,
     hoveredNodeId,
+    suppressedAggEdgeKeys,
   })
 
   // Highlight state: connected nodes/edges for selected node
@@ -757,6 +935,26 @@ export function ContextViewCanvas({
   const mergedHighlightEdges = isClickHighlightActive ? highlightState.edges : hoverHighlight.edges
 
   const clearSelection = useCanvasStore((s) => s.clearSelection)
+
+  // Drill-down: double-click an AGGREGATED edge to fetch finer-level lineage
+  // between the two ancestors and merge it into the canvas. The trace store
+  // tracks each drilldown by `${sourceUrn}->${targetUrn}@${atLevel}` so collapse
+  // can revert. Single-click still selects/opens the EdgeDetailPanel.
+  const handleEdgeDoubleClick = useCallback(async (edgeId: string) => {
+    if (!trace.isTracing) return
+    const edge = edges.find(e => e.id === edgeId)
+    if (!edge) return
+    const isAggregated = String(((edge as any).data?.edgeType) ?? '').toUpperCase() === 'AGGREGATED'
+    if (!isAggregated) return
+
+    const sourceUrn = (edge as any).source ?? (edge as any).sourceUrn
+    const targetUrn = (edge as any).target ?? (edge as any).targetUrn
+    if (!sourceUrn || !targetUrn) return
+
+    const currentLevel = trace.result?.effectiveLevel ?? 0
+    const expanded = await trace.expandAggregatedEdge(sourceUrn, targetUrn, currentLevel)
+    if (expanded) mergeDrilldownIntoCanvas(expanded)
+  }, [trace, edges, mergeDrilldownIntoCanvas])
 
   // Background click handler to clear selection/highlight
   const handleBackgroundClick = useCallback((e: React.MouseEvent) => {
@@ -815,6 +1013,42 @@ export function ContextViewCanvas({
       />
 
       <div className="flex-1 w-full h-full relative overflow-hidden bg-canvas flex flex-col">
+        {/* Trace mode banner — persistent, always-visible exit affordance.
+            Sits above the layer columns (not floating like TraceToolbar) so
+            the user can never lose it via scroll/pan. ESC also exits via
+            useCanvasInteractions.onExitTrace. */}
+        {trace.isTracing && (
+          <div
+            data-canvas-interactive
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-accent-lineage/10 border border-accent-lineage/40 text-accent-lineage text-xs flex items-center gap-2 z-20"
+          >
+            <span className="inline-block w-2 h-2 rounded-full bg-accent-lineage animate-pulse" aria-hidden="true" />
+            <span className="font-medium">Tracing</span>
+            <span className="text-accent-lineage/80 truncate" title={trace.focusId ?? undefined}>
+              {displayMap.get(trace.focusId || '')?.name || trace.focusId || 'Unknown'}
+            </span>
+            {(() => {
+              const focusNode = trace.focusId ? displayMap.get(trace.focusId) : null
+              const focusType = focusNode?.typeId
+              const level = trace.result?.effectiveLevel
+              if (!focusType && typeof level !== 'number') return null
+              return (
+                <span className="text-accent-lineage/60">
+                  · {focusType ?? ''}{typeof level === 'number' ? ` (L${level})` : ''}
+                </span>
+              )
+            })()}
+            <span className="ml-auto text-[10px] text-accent-lineage/50 hidden md:inline">Press ESC to exit</span>
+            <button
+              type="button"
+              onClick={() => { trace.clearTrace(); setExpandedNodes(new Set()) }}
+              className="ml-2 px-2 py-0.5 rounded border border-accent-lineage/40 hover:bg-accent-lineage/20 transition-colors duration-150 font-medium"
+              title="Exit trace (ESC)"
+            >
+              Exit Trace ✕
+            </button>
+          </div>
+        )}
         {/* Warning: missing ontology configuration */}
         {schema && containmentEdgeTypes.length === 0 && edges.length > 0 && (
           <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 text-xs flex items-center gap-2 z-20">
@@ -886,7 +1120,7 @@ export function ContextViewCanvas({
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them (z-index managed in component to 0, cols should be higher) */}
           {(showLineageFlow || trace.isTracing) && (
             <LineageFlowOverlay
-              nodes={displayFlat}
+              nodes={renderFlat}
               edges={visibleLineageEdges}
               expandedNodes={expandedNodes}
               selectEdge={selectEdge}
@@ -898,6 +1132,7 @@ export function ContextViewCanvas({
               highlightedEdges={mergedHighlightEdges}
               isHighlightActive={isHighlightActive}
               resolveEdgeColor={resolveEdgeColor}
+              onEdgeDoubleClick={handleEdgeDoubleClick}
             />
           )}
 
@@ -906,7 +1141,7 @@ export function ContextViewCanvas({
               <LayerColumn
                 key={layer.id}
                 layer={layer}
-                nodes={nodesByLayer.get(layer.id) ?? []}
+                nodes={renderByLayer.get(layer.id) ?? []}
                 schema={schema}
                 selectedNodeId={selectedNodeId}
                 expandedNodes={expandedNodes}

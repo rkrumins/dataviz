@@ -24,8 +24,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
 
         # Swagger UI / ReDoc load scripts and styles from cdn.jsdelivr.net.
-        # 'unsafe-inline' in script-src is required because FastAPI's default
-        # docs HTML bootstraps Swagger UI via an inline <script> block.
+        # The /docs and /redoc HTML pages contain an inline bootstrap <script>
+        # that calls SwaggerUIBundle/Redoc, so 'unsafe-inline' is required for
+        # script-src. connect-src must include the CDN for source-map fetches.
         if request.url.path in _DOCS_PATHS:
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "

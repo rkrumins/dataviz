@@ -15,7 +15,10 @@
 
 import { create } from 'zustand'
 import { useCallback, useMemo, useEffect, useRef } from 'react'
-import type { GraphDataProvider, LineageResult, TraceOptions } from '@/providers/GraphDataProvider'
+import type {
+    GraphDataProvider, GraphEdge, LineageResult, TraceOptions,
+    TraceV2Result, TraceV2Request,
+} from '@/providers/GraphDataProvider'
 import { useCanvasStore } from '@/store/canvas'
 
 // ============================================
@@ -30,7 +33,7 @@ export interface TraceConfig {
     upstreamDepth: number
     /** Maximum depth for downstream traversal (1-99) */
     downstreamDepth: number
-    /** Include column-level lineage in trace */
+    /** Include column-level lineage in trace (legacy /trace path) */
     includeColumnLineage: boolean
     /** Exclude containment edges for pure data lineage (default: true) */
     excludeContainmentEdges: boolean
@@ -42,10 +45,19 @@ export interface TraceConfig {
     pathOnly: boolean
     /** Auto-sync traced nodes to canvas store */
     autoSyncToStore: boolean
-    /** Optional granularity override (default: 'column' for full detail) */
+    /** Legacy granularity override — superseded by `level` for /trace/v2 */
     granularity?: 'column' | 'table' | 'schema' | 'system' | 'domain'
+    /**
+     * Trace v2 hierarchy level.
+     * - "auto" = peer rollup at source's own hierarchy.level (default)
+     * - integer = literal level (0 = coarsest)
+     * - string = entity-type-id ("dataset"); resolved to that type's level
+     */
+    level: 'auto' | number | string
     /** Optional whitelist of lineage edge types to trace (empty = all ontology lineage types) */
     lineageEdgeTypes: string[]
+    /** Also fetch parent-child edges between returned nodes (single round-trip) */
+    includeContainmentEdges: boolean
 }
 
 export interface TraceResult {
@@ -59,9 +71,40 @@ export interface TraceResult {
     downstreamNodes: Set<string>
     /** All edges in the trace */
     traceEdges: Set<string>
-    /** Raw lineage result from backend */
+    /** Raw lineage result from backend (legacy shape — synthesized from v2 result for back-compat) */
     lineageResult: LineageResult | null
+    // ---- v2 fields (server-resolved, populated when /trace/v2 is used) ----
+    /** Hierarchy level the trace ran at */
+    effectiveLevel?: number
+    /** True if focus had no direct lineage and an ancestor was used as anchor */
+    isInherited?: boolean
+    /** Ancestor URN that was used when isInherited=true */
+    inheritedFromUrn?: string
+    /** True if hard caps tripped */
+    truncated?: boolean
+    /** "max_nodes" | "timeout" | undefined */
+    truncationReason?: string | null
+    /**
+     * Containment edges (parent → child) returned by the backend. Always
+     * populated by /trace/v2 — needed so the canvas can position trace
+     * nodes (especially deep ones like columns) in the layered hierarchy.
+     * Without these, deep trace nodes render as orphans.
+     */
+    containmentEdges?: GraphEdge[]
+    /**
+     * Ancestor nodes (Domain → Container → Dataset …) that the backend
+     * hydrated alongside the lineage participants. They're already in
+     * `lineageResult.nodes` for back-compat; this set lets consumers tell
+     * "lineage participant" from "ancestor for hierarchy context" when it
+     * matters (e.g. for a "Show only direct lineage" toggle).
+     */
+    ancestorUrns?: Set<string>
 }
+
+/** Drill-down state — keyed by `${sourceUrn}->${targetUrn}@${atLevel}`. */
+export type DrilldownKey = string
+export const drilldownKey = (sourceUrn: string, targetUrn: string, atLevel: number): DrilldownKey =>
+    `${sourceUrn}->${targetUrn}@${atLevel}`
 
 export interface TraceState {
     /** Current trace status */
@@ -77,6 +120,8 @@ export interface TraceState {
     /** Direction toggle states */
     showUpstream: boolean
     showDownstream: boolean
+    /** Drill-down results keyed by `${sourceUrn}->${targetUrn}@${atLevel}` */
+    drilldowns: Map<DrilldownKey, TraceV2Result>
 
     // Actions
     setFocus: (nodeId: string | null) => void
@@ -84,6 +129,15 @@ export interface TraceState {
     setShowUpstream: (show: boolean) => void
     setShowDownstream: (show: boolean) => void
     fetchTrace: (nodeId: string, provider: GraphDataProvider, urnResolver?: (id: string) => string) => Promise<TraceResult | null>
+    /** Drill into an AGGREGATED edge — fetch finer-level lineage between subtrees. */
+    expandAggregatedEdge: (
+        sourceUrn: string,
+        targetUrn: string,
+        currentLevel: number,
+        provider: GraphDataProvider,
+    ) => Promise<TraceV2Result | null>
+    /** Collapse a previously-opened drilldown (reverts to the original AGGREGATED edge). */
+    collapseDrilldown: (key: DrilldownKey) => void
     clearTrace: () => void
     reset: () => void
 }
@@ -102,7 +156,14 @@ const DEFAULT_CONFIG: TraceConfig = {
     pathOnly: false,
     autoSyncToStore: true,
     lineageEdgeTypes: [],  // Empty = use all ontology-classified lineage types
-    granularity: 'column', // Default to column to ensure we see the full path
+    level: 'auto',         // v2: peer rollup at source's own hierarchy.level
+    // ContextView positions every node by walking containment from a layer
+    // root to its descendants. /trace/v2 returning lineage participants but
+    // NOT their containment chains makes deep participants (e.g. schemaField
+    // upstream of focus) orphans — invisible in the canvas. Default to true
+    // so trace results are always positionable in the hierarchy.
+    includeContainmentEdges: true,
+    granularity: 'column', // legacy /trace path only — superseded by `level` for v2
 }
 
 // ============================================
@@ -117,11 +178,11 @@ export const useTraceStore = create<TraceState>((set, get) => ({
     config: DEFAULT_CONFIG,
     showUpstream: true,
     showDownstream: true,
+    drilldowns: new Map(),
 
     setFocus: (nodeId) => {
         if (nodeId === null) {
-            // Clear trace
-            set({ focusId: null, result: null, status: 'idle' })
+            set({ focusId: null, result: null, status: 'idle', drilldowns: new Map() })
         } else {
             set({ focusId: nodeId })
         }
@@ -139,75 +200,49 @@ export const useTraceStore = create<TraceState>((set, get) => ({
     fetchTrace: async (nodeId, provider, urnResolver) => {
         const { config } = get()
 
-        set({ status: 'loading', error: null, focusId: nodeId })
+        // New trace clears any drilldowns from a previous focus.
+        set({ status: 'loading', error: null, focusId: nodeId, drilldowns: new Map() })
 
         try {
-            // Resolve URN from node ID
             const urn = urnResolver ? urnResolver(nodeId) : nodeId
 
-            // Build trace options from config — ontology-driven edge classification
-            const traceOptions: TraceOptions = {
-                includeColumnLineage: config.includeColumnLineage,
-                excludeContainmentEdges: config.excludeContainmentEdges,
-                includeInheritedLineage: config.includeInheritedLineage,
-                // Pass lineage edge type filter if user has selected specific types
-                ...(config.lineageEdgeTypes.length > 0 ? { lineageEdgeTypes: config.lineageEdgeTypes } : {}),
-                granularity: config.granularity ?? 'column',
+            // Direction-aware depths: when a preset (traceUpstream/traceDownstream)
+            // sets one depth to 0, the request should reflect that.
+            const upDepth = config.upstreamDepth
+            const downDepth = config.downstreamDepth
+            const direction: 'upstream' | 'downstream' | 'both' =
+                upDepth > 0 && downDepth === 0 ? 'upstream' :
+                downDepth > 0 && upDepth === 0 ? 'downstream' : 'both'
+
+            // Prefer /trace/v2 — Cypher-native, ontology-aware peer-level rollup.
+            let traceResult: TraceResult
+            if (typeof provider.traceAtLevel === 'function') {
+                const req: TraceV2Request = {
+                    urn,
+                    direction,
+                    upstreamDepth: upDepth,
+                    downstreamDepth: downDepth,
+                    level: config.level,
+                    lineageEdgeTypes: config.lineageEdgeTypes.length > 0 ? config.lineageEdgeTypes : null,
+                    includeContainmentEdges: config.includeContainmentEdges,
+                    includeInheritedLineage: config.includeInheritedLineage,
+                }
+                const v2 = await provider.traceAtLevel(req)
+                traceResult = traceResultFromV2(nodeId, urn, v2)
+            } else {
+                // Legacy /trace path — only providers that don't implement v2.
+                const traceOptions: TraceOptions = {
+                    includeColumnLineage: config.includeColumnLineage,
+                    excludeContainmentEdges: config.excludeContainmentEdges,
+                    includeInheritedLineage: config.includeInheritedLineage,
+                    ...(config.lineageEdgeTypes.length > 0 ? { lineageEdgeTypes: config.lineageEdgeTypes } : {}),
+                    granularity: config.granularity ?? 'column',
+                }
+                const lineage = await provider.getFullLineage(urn, upDepth, downDepth, traceOptions)
+                traceResult = traceResultFromLegacy(nodeId, urn, lineage)
             }
 
-            // Fetch full lineage from provider
-            const result = await provider.getFullLineage(
-                urn,
-                config.upstreamDepth,
-                config.downstreamDepth,
-                traceOptions
-            )
-
-            // Build trace result with URN-to-ID mapping
-            const traceNodes = new Set<string>()
-            const upstreamNodes = new Set<string>()
-            const downstreamNodes = new Set<string>()
-            const traceEdges = new Set<string>()
-
-            // Add focus node (use both node ID and URN for matching flexibility)
-            traceNodes.add(nodeId)
-            traceNodes.add(urn)
-
-            // Process nodes - add URNs (GraphNode uses `urn` as identifier)
-            result.nodes.forEach(n => {
-                traceNodes.add(n.urn)
-            })
-
-            // Process upstream/downstream URNs
-            result.upstreamUrns.forEach(urn => {
-                traceNodes.add(urn)
-                upstreamNodes.add(urn)
-            })
-
-            result.downstreamUrns.forEach(urn => {
-                traceNodes.add(urn)
-                downstreamNodes.add(urn)
-            })
-
-            // Process edges
-            result.edges.forEach(e => {
-                traceEdges.add(e.id)
-            })
-
-            const traceResult: TraceResult = {
-                focusId: nodeId,
-                traceNodes,
-                upstreamNodes,
-                downstreamNodes,
-                traceEdges,
-                lineageResult: result,
-            }
-
-            set({
-                status: 'success',
-                result: traceResult,
-            })
-
+            set({ status: 'success', result: traceResult })
             return traceResult
         } catch (err) {
             set({
@@ -218,6 +253,44 @@ export const useTraceStore = create<TraceState>((set, get) => ({
         }
     },
 
+    expandAggregatedEdge: async (sourceUrn, targetUrn, currentLevel, provider) => {
+        if (typeof provider.expandAggregated !== 'function') {
+            // Provider doesn't support drill-down — caller should disable the UI affordance.
+            return null
+        }
+        const { config, drilldowns } = get()
+        const nextLevel = currentLevel + 1
+        const key = drilldownKey(sourceUrn, targetUrn, nextLevel)
+        if (drilldowns.has(key)) return drilldowns.get(key) ?? null
+
+        try {
+            const v2 = await provider.expandAggregated({
+                sourceUrn,
+                targetUrn,
+                nextLevel,
+                lineageEdgeTypes: config.lineageEdgeTypes.length > 0 ? config.lineageEdgeTypes : null,
+                includeContainmentEdges: config.includeContainmentEdges,
+            })
+            // Merge into the drilldowns map (immutable replacement so React selectors notice).
+            const next = new Map(drilldowns)
+            next.set(key, v2)
+            set({ drilldowns: next })
+            return v2
+        } catch (err) {
+            // Drill-down failure is non-fatal — keep the trace state, surface error.
+            set({ error: err instanceof Error ? err.message : 'Failed to expand aggregated edge' })
+            return null
+        }
+    },
+
+    collapseDrilldown: (key) => {
+        const { drilldowns } = get()
+        if (!drilldowns.has(key)) return
+        const next = new Map(drilldowns)
+        next.delete(key)
+        set({ drilldowns: next })
+    },
+
     clearTrace: () => {
         set({
             focusId: null,
@@ -226,6 +299,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
             error: null,
             showUpstream: true,
             showDownstream: true,
+            drilldowns: new Map(),
         })
     },
 
@@ -238,9 +312,88 @@ export const useTraceStore = create<TraceState>((set, get) => ({
             config: DEFAULT_CONFIG,
             showUpstream: true,
             showDownstream: true,
+            drilldowns: new Map(),
         })
     },
 }))
+
+// ----- Result builders ------------------------------------------------------
+
+function traceResultFromV2(focusId: string, focusUrn: string, v2: TraceV2Result): TraceResult {
+    const traceNodes = new Set<string>()
+    const upstreamNodes = new Set<string>(v2.upstreamUrns)
+    const downstreamNodes = new Set<string>(v2.downstreamUrns)
+    const traceEdges = new Set<string>()
+
+    traceNodes.add(focusId)
+    traceNodes.add(focusUrn)
+    v2.nodes.forEach(n => traceNodes.add(n.urn))
+    v2.upstreamUrns.forEach(u => traceNodes.add(u))
+    v2.downstreamUrns.forEach(u => traceNodes.add(u))
+    v2.edges.forEach(e => traceEdges.add(e.id))
+
+    // Identify ancestor-only nodes: those returned by the backend purely for
+    // hierarchy positioning (Domain/Container/Dataset chains around deep
+    // lineage participants). They aren't lineage members themselves, so we
+    // exclude them from upstream/downstream sets but keep them in the
+    // canvas merge so the layered hierarchy can host the trace nodes.
+    const lineageMembers = new Set<string>([focusUrn])
+    v2.upstreamUrns.forEach(u => lineageMembers.add(u))
+    v2.downstreamUrns.forEach(u => lineageMembers.add(u))
+    const ancestorUrns = new Set<string>()
+    v2.nodes.forEach(n => {
+        if (!lineageMembers.has(n.urn)) ancestorUrns.add(n.urn)
+    })
+
+    // Synthesize a legacy-shape LineageResult so existing consumers
+    // (ContextViewCanvas merge, EdgeLegend, etc.) keep working unchanged.
+    const lineageResult: LineageResult = {
+        nodes: v2.nodes,
+        edges: v2.edges,
+        upstreamUrns: v2.upstreamUrns,
+        downstreamUrns: v2.downstreamUrns,
+        totalCount: v2.nodes.length,
+        hasMore: false,
+        ...(v2.isInherited && v2.inheritedFromUrn ? { inheritedFrom: v2.inheritedFromUrn } : {}),
+    }
+
+    return {
+        focusId,
+        traceNodes,
+        upstreamNodes,
+        downstreamNodes,
+        traceEdges,
+        lineageResult,
+        effectiveLevel: v2.effectiveLevel,
+        isInherited: v2.isInherited,
+        inheritedFromUrn: v2.inheritedFromUrn ?? undefined,
+        truncated: v2.truncated,
+        truncationReason: v2.truncationReason ?? undefined,
+        containmentEdges: v2.containmentEdges,
+        ancestorUrns,
+    }
+}
+
+function traceResultFromLegacy(focusId: string, focusUrn: string, lineage: LineageResult): TraceResult {
+    const traceNodes = new Set<string>([focusId, focusUrn])
+    const upstreamNodes = new Set<string>()
+    const downstreamNodes = new Set<string>()
+    const traceEdges = new Set<string>()
+
+    lineage.nodes.forEach(n => traceNodes.add(n.urn))
+    lineage.upstreamUrns.forEach(u => { traceNodes.add(u); upstreamNodes.add(u) })
+    lineage.downstreamUrns.forEach(u => { traceNodes.add(u); downstreamNodes.add(u) })
+    lineage.edges.forEach(e => traceEdges.add(e.id))
+
+    return {
+        focusId,
+        traceNodes,
+        upstreamNodes,
+        downstreamNodes,
+        traceEdges,
+        lineageResult: lineage,
+    }
+}
 
 // ============================================
 // Hook
@@ -335,6 +488,13 @@ export interface UseUnifiedTraceResult {
 
     /** Full trace statistics */
     statistics: TraceStatistics
+
+    /** Drill-down state — keyed by `${sourceUrn}->${targetUrn}@${atLevel}` */
+    drilldowns: Map<DrilldownKey, TraceV2Result>
+    /** Drill into an AGGREGATED edge */
+    expandAggregatedEdge: (sourceUrn: string, targetUrn: string, currentLevel: number) => Promise<TraceV2Result | null>
+    /** Collapse a drilldown by key */
+    collapseDrilldown: (key: DrilldownKey) => void
 }
 
 export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTraceResult {
@@ -348,6 +508,7 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
     const config = useTraceStore(s => s.config)
     const showUpstream = useTraceStore(s => s.showUpstream)
     const showDownstream = useTraceStore(s => s.showDownstream)
+    const drilldowns = useTraceStore(s => s.drilldowns)
 
     // Actions
     const setConfig = useTraceStore(s => s.setConfig)
@@ -356,6 +517,8 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
     const fetchTrace = useTraceStore(s => s.fetchTrace)
     const clearTrace = useTraceStore(s => s.clearTrace)
     const setFocus = useTraceStore(s => s.setFocus)
+    const expandAggregatedEdgeAction = useTraceStore(s => s.expandAggregatedEdge)
+    const collapseDrilldown = useTraceStore(s => s.collapseDrilldown)
 
     // Canvas store for auto-sync
     const { nodes: canvasNodes } = useCanvasStore()
@@ -416,6 +579,14 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
             await startTrace(nodeId)
         }
     }, [focusId, clearTrace, startTrace])
+
+    // Drill into an AGGREGATED edge — provider-bound wrapper
+    const expandAggregatedEdge = useCallback(async (
+        sourceUrn: string, targetUrn: string, currentLevel: number,
+    ): Promise<TraceV2Result | null> => {
+        if (!provider) return null
+        return expandAggregatedEdgeAction(sourceUrn, targetUrn, currentLevel, provider)
+    }, [provider, expandAggregatedEdgeAction])
 
     // Check functions - support both node ID and URN matching
     const isInTrace = useCallback((nodeId: string) => {
@@ -512,6 +683,14 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         const lineageResult = result.lineageResult
         const edgeTypeSet = new Set<string>()
         lineageResult.edges.forEach(e => edgeTypeSet.add(e.edgeType))
+        // Drill-down edges count toward stats too
+        drilldowns.forEach(d => d.edges.forEach(e => edgeTypeSet.add(e.edgeType)))
+
+        // Prefer v2 first-class fields; fall back to legacy aggregatedEdges sentinel.
+        const isInherited = result.isInherited
+            ?? !!lineageResult.aggregatedEdges?.['_inheritedFrom']
+        const inheritedFrom = result.inheritedFromUrn
+            ?? (lineageResult.aggregatedEdges?.['_inheritedFrom'] as string | undefined)
 
         return {
             totalNodes: result.traceNodes.size,
@@ -519,10 +698,10 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
             downstreamCount,
             totalEdges: result.traceEdges.size,
             edgeTypes: Array.from(edgeTypeSet),
-            isInherited: !!lineageResult.aggregatedEdges?.['_inheritedFrom'],
-            inheritedFrom: lineageResult.aggregatedEdges?.['_inheritedFrom'] as string | undefined,
+            isInherited,
+            inheritedFrom,
         }
-    }, [result, upstreamCount, downstreamCount])
+    }, [result, upstreamCount, downstreamCount, drilldowns])
 
     return {
         status,
@@ -553,6 +732,9 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         upstreamCount,
         downstreamCount,
         statistics,
+        drilldowns,
+        expandAggregatedEdge,
+        collapseDrilldown,
     }
 }
 
