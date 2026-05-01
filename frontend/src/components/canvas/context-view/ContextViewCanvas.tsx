@@ -330,10 +330,14 @@ export function ContextViewCanvas({
 
   // Granularity options for the lineage aggregation selector — driven by the
   // active ontology's entity types, sorted coarsest-first (lowest level first).
+  // Filtered to types that are valid lineage anchors (behavior.traceable=true)
+  // — matches the trace v2 contract where only traceable entities can be the
+  // level a trace runs at. Tags / glossary terms are excluded.
   const schemaEntityTypes = useViewEntityTypes()
   const granularityOptions = useMemo(
     () => schemaEntityTypes
       .filter(et => et.hierarchy?.level !== undefined)
+      .filter(et => et.behavior?.traceable !== false)
       .map(et => ({ id: et.id, name: et.name, level: et.hierarchy.level })),
     [schemaEntityTypes]
   )
@@ -693,36 +697,28 @@ export function ContextViewCanvas({
   // This includes:
   // 1. The traced nodes themselves (from trace.visibleTraceNodes)
   // 2. ALL ancestors of traced nodes (so containers stay lit)
+  // 3. Drill-down nodes from `trace.drilldowns` and their ancestors — so edges
+  //    surfaced by /trace/expand pass the same context filter and remain visible.
   const traceContextSet = useMemo(() => {
     const set = new Set<string>()
 
     if (!trace.isTracing) return set
 
-    // Add focus node
-    if (trace.focusId) set.add(trace.focusId)
-
-    // Add ancestors for the focus node
-    if (trace.focusId) {
-      let curr = parentMap.get(trace.focusId)
+    const addWithAncestors = (id: string) => {
+      set.add(id)
+      let curr = parentMap.get(id)
       while (curr) {
         set.add(curr)
         curr = parentMap.get(curr)
       }
     }
 
-    // Add visible traced nodes and their ancestors
-    trace.visibleTraceNodes.forEach(id => {
-      set.add(id) // Add the node itself
-
-      let curr = parentMap.get(id)
-      while (curr) {
-        set.add(curr)
-        curr = parentMap.get(curr)
-      }
-    })
+    if (trace.focusId) addWithAncestors(trace.focusId)
+    trace.visibleTraceNodes.forEach(addWithAncestors)
+    trace.drilldowns.forEach(d => d.nodes.forEach(n => addWithAncestors(n.urn)))
 
     return set
-  }, [trace.isTracing, trace.focusId, trace.visibleTraceNodes, parentMap])
+  }, [trace.isTracing, trace.focusId, trace.visibleTraceNodes, trace.drilldowns, parentMap])
 
   // Hovered node — needed by both edge projection (delegation) and hover highlight
   const hoveredNodeId = useHoveredNodeId()
@@ -757,6 +753,73 @@ export function ContextViewCanvas({
   const mergedHighlightEdges = isClickHighlightActive ? highlightState.edges : hoverHighlight.edges
 
   const clearSelection = useCanvasStore((s) => s.clearSelection)
+
+  // Drill-down: double-click an AGGREGATED edge to fetch finer-level lineage
+  // between the two ancestors and merge it into the canvas. The trace store
+  // tracks each drilldown by `${sourceUrn}->${targetUrn}@${atLevel}` so collapse
+  // can revert. Single-click still selects/opens the EdgeDetailPanel.
+  const handleEdgeDoubleClick = useCallback(async (edgeId: string) => {
+    if (!trace.isTracing) return
+    const edge = edges.find(e => e.id === edgeId)
+    if (!edge) return
+    const isAggregated = String(((edge as any).data?.edgeType) ?? '').toUpperCase() === 'AGGREGATED'
+    if (!isAggregated) return
+
+    const sourceUrn = (edge as any).source ?? (edge as any).sourceUrn
+    const targetUrn = (edge as any).target ?? (edge as any).targetUrn
+    if (!sourceUrn || !targetUrn) return
+
+    const currentLevel = trace.result?.effectiveLevel ?? 0
+    const expanded = await trace.expandAggregatedEdge(sourceUrn, targetUrn, currentLevel)
+    if (!expanded) return
+
+    // Merge drill-down nodes/edges into canvas store so they render.
+    // Same shape conversion as the initial trace merge above.
+    const newCanvasNodes = expanded.nodes.map(gn => ({
+      id: gn.urn,
+      type: 'default' as const,
+      position: { x: 0, y: 0 },
+      data: {
+        label: gn.displayName,
+        urn: gn.urn,
+        type: gn.entityType,
+        classifications: gn.tags ?? [],
+        metadata: {
+          ...gn.properties,
+          childCount: gn.childCount,
+          sourceSystem: gn.sourceSystem,
+        },
+      },
+    }))
+    if (newCanvasNodes.length > 0) addNodes(newCanvasNodes as any[])
+
+    const newCanvasEdges = expanded.edges.map(ge => ({
+      id: ge.id,
+      source: ge.sourceUrn,
+      target: ge.targetUrn,
+      data: {
+        edgeType: ge.edgeType,
+        relationship: ge.edgeType,
+        confidence: ge.confidence,
+      },
+    }))
+    if (newCanvasEdges.length > 0) addEdges(newCanvasEdges as any[])
+
+    // Auto-expand parents of drilled-into nodes so they're visible in the layout
+    const drillContainmentMap = new Map<string, string>()
+    expanded.containmentEdges?.forEach(ce => {
+      drillContainmentMap.set(ce.targetUrn, ce.sourceUrn)
+    })
+    const next = new Set(expandedNodes)
+    expanded.nodes.forEach(n => {
+      let p = drillContainmentMap.get(n.urn) ?? parentMap.get(n.urn)
+      while (p) {
+        next.add(p)
+        p = drillContainmentMap.get(p) ?? parentMap.get(p)
+      }
+    })
+    setExpandedNodes(next)
+  }, [trace, edges, addNodes, addEdges, expandedNodes, parentMap])
 
   // Background click handler to clear selection/highlight
   const handleBackgroundClick = useCallback((e: React.MouseEvent) => {
@@ -898,6 +961,7 @@ export function ContextViewCanvas({
               highlightedEdges={mergedHighlightEdges}
               isHighlightActive={isHighlightActive}
               resolveEdgeColor={resolveEdgeColor}
+              onEdgeDoubleClick={handleEdgeDoubleClick}
             />
           )}
 

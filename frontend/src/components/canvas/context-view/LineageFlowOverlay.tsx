@@ -17,6 +17,7 @@ export function LineageFlowOverlay({
   highlightedEdges,
   isHighlightActive = false,
   resolveEdgeColor,
+  onEdgeDoubleClick,
 }: {
   nodes: any[],
   edges: any[],
@@ -30,6 +31,8 @@ export function LineageFlowOverlay({
   highlightedEdges?: Set<string>,
   isHighlightActive?: boolean,
   resolveEdgeColor?: (edgeType: string) => string,
+  /** Double-click handler — used for AGGREGATED-edge drill-down. */
+  onEdgeDoubleClick?: (edgeId: string) => void,
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
@@ -852,6 +855,11 @@ export function LineageFlowOverlay({
                 selectEdge(edge.id)
                 if (!isEdgePanelOpen) toggleEdgePanel()
               }}
+              onDoubleClick={onEdgeDoubleClick ? (e) => {
+                e.stopPropagation()
+                e.preventDefault()
+                onEdgeDoubleClick(edge.id)
+              } : undefined}
             />
           )
         })}

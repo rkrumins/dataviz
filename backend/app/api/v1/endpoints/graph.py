@@ -18,6 +18,7 @@ from backend.app.models.graph import (
     CreateEdgeRequest, UpdateEdgeRequest, EdgeMutationResult,
     BatchCommandRequest, BatchCommandResult, BatchResponse,
     ChildrenWithEdgesResult, TopLevelNodesResult,
+    TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.app.services.context_engine import ContextEngine
@@ -142,6 +143,50 @@ async def get_lineage_trace(
         include_inherited_lineage=include_inherited_lineage,
         lineage_edge_types=lineage_edge_types,
     )
+
+
+# ----------------------------------------------------------------------------- #
+# Trace v2 — Cypher-native, ontology-aware lineage                             #
+#                                                                               #
+# Companion to the legacy /trace endpoint above. Pushes all traversal +        #
+# aggregation work into Cypher (per-hop set-based BFS), returns nodes already  #
+# at the requested hierarchy level, supports drill-down via /trace/expand.     #
+# Cost is proportional to result size, not graph size — safe for million-node  #
+# graphs. See plan: /Users/.../plans/i-want-you-to-fluttering-badger.md         #
+# ----------------------------------------------------------------------------- #
+
+
+@router.post("/trace/v2", response_model=TraceResult, response_model_by_alias=True)
+async def trace_v2(
+    request: TraceRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+) -> TraceResult:
+    """Trace lineage at a hierarchy level using AGGREGATED edges.
+
+    Returns nodes already at the requested level (peer rollup) plus the
+    AGGREGATED edges between them. Filters by ``s.level``/``t.level`` at
+    the database — never explodes a Domain-level trace down to Columns.
+
+    Hard caps: ``TRACE_MAX_NODES=2000`` nodes, ``TRACE_TIMEOUT_MS=8000`` ms
+    (server config; not per-request). On trip, returns ``truncated: true``
+    with ``truncationReason``. Always HTTP 200 unless input is malformed.
+    """
+    return await engine.trace(request)
+
+
+@router.post("/trace/expand", response_model=TraceResult, response_model_by_alias=True)
+async def trace_expand(
+    request: ExpandRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+) -> TraceResult:
+    """Drill into an AGGREGATED edge: return finer-level nodes + edges
+    within (source-subtree × target-subtree) at ``nextLevel``.
+
+    Set-based, no Cartesian. When ``nextLevel`` is the finest level in
+    the ontology, the engine bypasses AGGREGATED and reads raw lineage
+    edges directly.
+    """
+    return await engine.expand_aggregated_edge(request)
 
 
 @router.get(
