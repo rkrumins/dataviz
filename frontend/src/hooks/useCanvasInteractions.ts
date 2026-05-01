@@ -65,6 +65,8 @@ export interface UseCanvasInteractionsOptions {
     onCloseEdgePanel?: () => boolean
     /** Callback to close the entity drawer (ESC cascade). Should return true if it handled the close. */
     onCloseEntityDrawer?: () => boolean
+    /** Callback to exit an active trace (ESC cascade). Should return true if it handled the exit. */
+    onExitTrace?: () => boolean
 }
 
 export interface UseCanvasInteractionsResult {
@@ -136,6 +138,7 @@ export function useCanvasInteractions(
         onTraceNode,
         onCloseEdgePanel,
         onCloseEntityDrawer,
+        onExitTrace,
     } = options
     
     const provider = useGraphProvider()
@@ -390,6 +393,10 @@ export function useCanvasInteractions(
                 closeCommandPalette()
             } else if (contextMenu.isOpen) {
                 closeContextMenu()
+            } else if (onExitTrace?.()) {
+                // Active trace was exited — takes priority over panel/drawer
+                // closes so users always have a single-key escape from a busy
+                // trace view, regardless of what else is open underneath.
             } else if (onCloseEdgePanel?.()) {
                 // Edge panel was open and closed
             } else if (onCloseEntityDrawer?.()) {

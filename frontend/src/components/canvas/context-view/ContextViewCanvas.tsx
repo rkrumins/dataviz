@@ -200,6 +200,12 @@ export function ContextViewCanvas({
       if (selectedNodeId) { clearSelection(); return true }
       return false
     },
+    // ESC exits an active trace before any other panel close — gives the
+    // user a single, predictable escape from a busy trace view.
+    onExitTrace: () => {
+      if (trace.isTracing) { trace.clearTrace(); setExpandedNodes(new Set()); return true }
+      return false
+    },
   })
 
   // Keyboard shortcuts
@@ -942,6 +948,42 @@ export function ContextViewCanvas({
       />
 
       <div className="flex-1 w-full h-full relative overflow-hidden bg-canvas flex flex-col">
+        {/* Trace mode banner — persistent, always-visible exit affordance.
+            Sits above the layer columns (not floating like TraceToolbar) so
+            the user can never lose it via scroll/pan. ESC also exits via
+            useCanvasInteractions.onExitTrace. */}
+        {trace.isTracing && (
+          <div
+            data-canvas-interactive
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-accent-lineage/10 border border-accent-lineage/40 text-accent-lineage text-xs flex items-center gap-2 z-20"
+          >
+            <span className="inline-block w-2 h-2 rounded-full bg-accent-lineage animate-pulse" aria-hidden="true" />
+            <span className="font-medium">Tracing</span>
+            <span className="text-accent-lineage/80 truncate" title={trace.focusId ?? undefined}>
+              {displayMap.get(trace.focusId || '')?.name || trace.focusId || 'Unknown'}
+            </span>
+            {(() => {
+              const focusNode = trace.focusId ? displayMap.get(trace.focusId) : null
+              const focusType = focusNode?.typeId
+              const level = trace.result?.effectiveLevel
+              if (!focusType && typeof level !== 'number') return null
+              return (
+                <span className="text-accent-lineage/60">
+                  · {focusType ?? ''}{typeof level === 'number' ? ` (L${level})` : ''}
+                </span>
+              )
+            })()}
+            <span className="ml-auto text-[10px] text-accent-lineage/50 hidden md:inline">Press ESC to exit</span>
+            <button
+              type="button"
+              onClick={() => { trace.clearTrace(); setExpandedNodes(new Set()) }}
+              className="ml-2 px-2 py-0.5 rounded border border-accent-lineage/40 hover:bg-accent-lineage/20 transition-colors duration-150 font-medium"
+              title="Exit trace (ESC)"
+            >
+              Exit Trace ✕
+            </button>
+          </div>
+        )}
         {/* Warning: missing ontology configuration */}
         {schema && containmentEdgeTypes.length === 0 && edges.length > 0 && (
           <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 text-xs flex items-center gap-2 z-20">
