@@ -108,19 +108,24 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
 
         </div>
 
-        {/* Center: Search Bar */}
-        <div className="flex-1 max-w-xl mx-8">
+        {/* Center: Search Bar — visually paired with the Dashboard hero search */}
+        <div className="flex-1 max-w-xl mx-8 relative group">
+          {/* Soft gradient halo on hover, mirrors the Hero's focus glow at smaller scale */}
+          <div className={cn(
+            'absolute -inset-0.5 rounded-xl blur-sm opacity-0 group-hover:opacity-100 transition-opacity duration-300',
+            'bg-gradient-to-r from-accent-business/30 via-accent-explore/20 to-accent-lineage/30'
+          )} />
           <button
             onClick={onOpenCommandPalette}
             className={cn(
-              "w-full flex items-center gap-3 px-4 py-2 rounded-lg",
+              "relative w-full flex items-center gap-3 px-4 py-2 rounded-xl",
               "bg-canvas border border-glass-border",
-              "text-ink-muted hover:text-ink-secondary hover:border-ink-muted/30",
-              "transition-all duration-150"
+              "text-ink-muted hover:border-accent-business/40 hover:bg-canvas-elevated",
+              "transition-all duration-200"
             )}
           >
-            <Search className="w-4 h-4" />
-            <span className="flex-1 text-left text-sm">
+            <Search className="w-4 h-4 group-hover:text-accent-business transition-colors duration-200" />
+            <span className="flex-1 text-left text-sm group-hover:text-ink-secondary transition-colors">
               {searchPlaceholder}
             </span>
             <div className="flex items-center gap-1">
