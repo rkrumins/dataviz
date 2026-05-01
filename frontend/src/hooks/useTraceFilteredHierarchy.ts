@@ -36,6 +36,10 @@
  * know about the trace filter). The fallback degrades gracefully: precise
  * trace subset when the data supports it, full subtree otherwise. The user
  * always sees something when they explicitly drill into a traced node.
+ *
+ * Pass-through nodes are added to `contextSet` so their lineage edges clear
+ * `useEdgeProjection`'s trace gate (which checks contextSet membership of
+ * both endpoints).
  */
 
 import { useMemo } from 'react'
@@ -106,9 +110,6 @@ export function useTraceFilteredHierarchy(
     // 2. Recursively prune the hierarchy tree.
     //    Keep a node iff its id/urn is in the context OR any descendant is.
     //    Returns the rebuilt subtree, or null when the entire subtree is pruned.
-    //
-    //    `passThrough` propagates down from a relaxed ancestor: under such an
-    //    ancestor, every node is kept verbatim (no further filtering).
     const filteredFlat: HierarchyNode[] = []
     const filteredMap = new Map<string, HierarchyNode>()
 
@@ -122,23 +123,17 @@ export function useTraceFilteredHierarchy(
       // map so search/edge-projection see them. Also add the URN to the
       // context set — pass-through nodes are visible, so edges between them
       // must clear `useEdgeProjection`'s trace gate (which checks contextSet
-      // membership of both endpoints). Without this, expanding a leaf with
-      // pass-through fallback shows nodes but no lineage between them.
+      // membership of both endpoints).
       contextSet.add(node.id)
       if (node.urn && node.urn !== node.id) contextSet.add(node.urn)
       recordKept(node)
       for (const c of node.children) collectSubtree(c)
     }
 
-    const pruneTree = (node: HierarchyNode, passThrough: boolean): HierarchyNode | null => {
-      if (passThrough) {
-        collectSubtree(node)
-        return node
-      }
-
+    const pruneTree = (node: HierarchyNode): HierarchyNode | null => {
       const filteredChildren: HierarchyNode[] = []
       for (const child of node.children) {
-        const kept = pruneTree(child, false)
+        const kept = pruneTree(child)
         if (kept) filteredChildren.push(kept)
       }
 
@@ -146,7 +141,9 @@ export function useTraceFilteredHierarchy(
 
       // PASS-THROUGH FALLBACK: traced node, user-expanded, has children but
       // none of them passed the normal filter. Show everything inside —
-      // descendants inherit pass-through so we don't double-walk.
+      // descendants are emitted verbatim so the user always sees something
+      // when they explicitly drill into a traced node, even when the trace
+      // data doesn't extend to finer levels.
       const shouldRelax =
         inContext
         && expandedNodes.has(node.id)
@@ -156,7 +153,7 @@ export function useTraceFilteredHierarchy(
       if (shouldRelax) {
         for (const c of node.children) collectSubtree(c)
         recordKept(node)
-        return node  // original node with its original children — no rebuild
+        return node
       }
 
       if (!inContext && filteredChildren.length === 0) return null
@@ -174,7 +171,7 @@ export function useTraceFilteredHierarchy(
     nodesByLayer.forEach((layerNodes, layerId) => {
       const kept: HierarchyNode[] = []
       for (const root of layerNodes) {
-        const subtree = pruneTree(root, false)
+        const subtree = pruneTree(root)
         if (subtree) kept.push(subtree)
       }
       filteredByLayer.set(layerId, kept)

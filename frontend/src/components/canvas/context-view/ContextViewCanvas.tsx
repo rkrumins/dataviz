@@ -158,11 +158,30 @@ export function ContextViewCanvas({
           addEdges(newCanvasEdges as any[])
         }
 
+        // Containment edges hydrated by /trace/v2 — these are the parent→child
+        // edges that link returned trace nodes (and their ancestors) into the
+        // canvas hierarchy. Without them deep lineage URNs (e.g. column-level
+        // schemaFields whose Datasets aren't loaded) render as orphans.
+        const newContainmentEdges = (result.containmentEdges ?? []).map(ge => ({
+          id: ge.id,
+          source: ge.sourceUrn,
+          target: ge.targetUrn,
+          data: {
+            edgeType: ge.edgeType,
+            relationship: ge.edgeType,
+            confidence: ge.confidence,
+          },
+        }))
+        if (newContainmentEdges.length > 0) {
+          addEdges(newContainmentEdges as any[])
+        }
+
         // Auto-expand ancestors of traced nodes
         const nodesToExpand = new Set(expandedNodes)
 
-        // Build parent map from ALL edges (including newly added)
-        const allCurrentEdges = [...edges, ...newCanvasEdges]
+        // Build parent map from ALL edges (including newly added — both
+        // lineage edges and the freshly-hydrated containment edges).
+        const allCurrentEdges = [...edges, ...newCanvasEdges, ...newContainmentEdges]
         const traceParentMap = new Map<string, string>()
         allCurrentEdges.forEach(e => {
           if (isContainmentEdge(normalizeEdgeType(e))) {
@@ -563,6 +582,34 @@ export function ContextViewCanvas({
   const renderFlat = trace.isTracing ? filteredFlat : displayFlat
   const renderMap = trace.isTracing ? filteredMap : displayMap
 
+  // Suppress parent AGGREGATED edges whose drill currently has at least one
+  // finer-level edge visible. Without this the canvas renders the same
+  // lineage twice — once at the parent level (e.g. Dataset↔Dataset AGG) and
+  // once at the child level (Column↔Column). Keying on the URN pair lets
+  // useEdgeProjection skip both Section A (`aggregatedEdges`-derived) and
+  // Section B (canvas-store) AGG edges in one pass. Restoration is
+  // automatic: when either endpoint collapses, no drilled edge has both
+  // endpoints in renderMap, the key drops out of the set, and the AGG edge
+  // re-appears next render.
+  const suppressedAggEdgeKeys = useMemo(() => {
+    const keys = new Set<string>()
+    if (!trace.isTracing) return keys
+    trace.drilldowns.forEach((result, key) => {
+      const at = key.indexOf('@')
+      const pair = at >= 0 ? key.slice(0, at) : key
+      const arrow = pair.indexOf('->')
+      if (arrow < 0) return
+      const s = pair.slice(0, arrow)
+      const t = pair.slice(arrow + 2)
+      const anyVisible = result.edges.some(
+        e => renderMap.has(e.sourceUrn) && renderMap.has(e.targetUrn),
+      )
+      if (anyVisible) keys.add(`${s}->${t}`)
+    })
+    return keys
+  }, [trace.isTracing, trace.drilldowns, renderMap])
+
+
   // Search results
   const searchResults = useMemo(() => {
     if (!searchQuery.trim()) return []
@@ -712,6 +759,23 @@ export function ContextViewCanvas({
     }))
     if (newCanvasEdges.length > 0) addEdges(newCanvasEdges as any[])
 
+    // Hydrated containment edges from /trace/expand — link new nodes into
+    // the canvas hierarchy alongside the lineage edges. Without these the
+    // drilled-into nodes are floating; useContainmentHierarchy can't put
+    // them under their parents and they end up filtered out by layer
+    // assignment.
+    const newContainmentCanvasEdges = (expanded.containmentEdges ?? []).map(ge => ({
+      id: ge.id,
+      source: ge.sourceUrn,
+      target: ge.targetUrn,
+      data: {
+        edgeType: ge.edgeType,
+        relationship: ge.edgeType,
+        confidence: ge.confidence,
+      },
+    }))
+    if (newContainmentCanvasEdges.length > 0) addEdges(newContainmentCanvasEdges as any[])
+
     const drillContainmentMap = new Map<string, string>()
     expanded.containmentEdges?.forEach(ce => {
       drillContainmentMap.set(ce.targetUrn, ce.sourceUrn)
@@ -847,6 +911,7 @@ export function ContextViewCanvas({
     showLineageFlow, isTracing: trace.isTracing,
     traceContextSet, isContainmentEdge,
     hoveredNodeId,
+    suppressedAggEdgeKeys,
   })
 
   // Highlight state: connected nodes/edges for selected node
