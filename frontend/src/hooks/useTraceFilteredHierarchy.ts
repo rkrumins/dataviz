@@ -119,7 +119,13 @@ export function useTraceFilteredHierarchy(
 
     const collectSubtree = (node: HierarchyNode) => {
       // Used by pass-through: emit every descendant unchanged into the flat
-      // map so search/edge-projection see them.
+      // map so search/edge-projection see them. Also add the URN to the
+      // context set — pass-through nodes are visible, so edges between them
+      // must clear `useEdgeProjection`'s trace gate (which checks contextSet
+      // membership of both endpoints). Without this, expanding a leaf with
+      // pass-through fallback shows nodes but no lineage between them.
+      contextSet.add(node.id)
+      if (node.urn && node.urn !== node.id) contextSet.add(node.urn)
       recordKept(node)
       for (const c of node.children) collectSubtree(c)
     }
