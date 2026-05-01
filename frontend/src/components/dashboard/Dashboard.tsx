@@ -1,18 +1,20 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDashboardData } from '@/hooks/useDashboardData'
+import { useGlobalSearch, type SearchHit, type SearchCategory } from '@/hooks/useGlobalSearch'
+import { useRecentSearches } from '@/hooks/useRecentSearches'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { useNavigationStore } from '@/store/navigation'
-import { DashboardHero, type DashboardSearchResult } from './DashboardHero'
+import { DashboardHero } from './DashboardHero'
 import { InsightCards } from './InsightCards'
 import { WorkspaceGrid } from './WorkspaceGrid'
 import { ViewGrid } from './ViewGrid'
 import { TemplateGrid as BlueprintGrid } from './TemplateGrid'
 import { DashboardOnboarding } from './DashboardOnboarding'
 import { motion } from 'framer-motion'
-import { Monitor, LayoutTemplate, Globe, Database, Eye, BookOpen } from 'lucide-react'
+import { Monitor, LayoutTemplate, BookOpen } from 'lucide-react'
 import { MOTION } from '@/lib/motion'
 
 export function Dashboard() {
@@ -40,102 +42,67 @@ export function Dashboard() {
     const dismissOnboarding = usePreferencesStore(s => s.dismissOnboarding)
 
     const [searchQuery, setSearchQuery] = useState('')
+    const searchResult = useGlobalSearch(searchQuery)
+    const { recents: recentSearches, record: recordRecentSearch, remove: removeRecentSearch, clear: clearRecentSearches } = useRecentSearches()
 
     const isOnboarding = dashboardTier === 'new' && !onboardingDismissedAt
 
-    // ── Compute live search results ────────────────────────────────────────────
-    const searchResults = useMemo<DashboardSearchResult[]>(() => {
-        const q = searchQuery.trim().toLowerCase()
-        if (!q) return []
-
-        const results: DashboardSearchResult[] = []
-
-        // Workspaces
-        workspaces.forEach(ws => {
-            if (ws.name.toLowerCase().includes(q) || ws.description?.toLowerCase().includes(q)) {
-                results.push({
-                    id: `ws-${ws.id}`,
-                    label: ws.name,
-                    sublabel: ws.description ?? `${ws.dataSources?.length ?? 0} data sources`,
-                    category: 'Workspace',
-                    icon: Globe,
-                    onSelect: () => {
-                        setActiveWorkspace(ws.id)
-                    },
+    const handleSelectHit = useCallback((hit: SearchHit) => {
+        if (searchQuery.trim()) recordRecentSearch(searchQuery)
+        switch (hit.category) {
+            case 'Workspace':
+                setActiveWorkspace(hit.workspace.id)
+                navigate(`/workspaces/${hit.workspace.id}`)
+                break
+            case 'Data Source':
+                setActiveWorkspace(hit.workspace.id)
+                setActiveDataSource(hit.dataSource.id)
+                navigate(`/workspaces/${hit.workspace.id}`)
+                break
+            case 'View':
+                setActiveView(hit.view.id)
+                navigate(`/views/${hit.view.id}`)
+                break
+            case 'Template':
+                // Templates have no dedicated detail route — scroll to the
+                // dashboard's templates section so the user sees the matching card.
+                requestAnimationFrame(() => {
+                    document.getElementById('dashboard-templates')
+                        ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
                 })
-            }
+                break
+            case 'Semantic Layer':
+                navigate(`/schema/${hit.ontology.id}`)
+                break
+        }
+        setSearchQuery('')
+    }, [searchQuery, recordRecentSearch, setActiveWorkspace, setActiveDataSource, setActiveView, navigate])
 
-            // Data sources within each workspace
-            ws.dataSources?.forEach(ds => {
-                if ((ds.label ?? '').toLowerCase().includes(q)) {
-                    results.push({
-                        id: `ds-${ds.id}`,
-                        label: ds.label ?? ds.id,
-                        sublabel: `Data source in ${ws.name}`,
-                        category: 'Data Source',
-                        icon: Database,
-                        onSelect: () => {
-                            setActiveWorkspace(ws.id)
-                            setActiveDataSource(ds.id)
-                            navigate(`/workspaces/${ws.id}`)
-                        },
-                    })
-                }
-            })
-        })
-
-        // Views
-        recentViews.forEach(v => {
-            if (v.name.toLowerCase().includes(q) || v.description?.toLowerCase().includes(q)) {
-                results.push({
-                    id: `view-${v.id}`,
-                    label: v.name,
-                    sublabel: v.description ?? `${v.layout?.type ?? 'graph'} view`,
-                    category: 'View',
-                    icon: Eye,
-                    onSelect: () => {
-                        setActiveView(v.id)
-                        navigate(`/views/${v.id}`)
-                    },
+    const handleShowAll = useCallback((category: SearchCategory) => {
+        if (searchResult.query) recordRecentSearch(searchResult.query)
+        switch (category) {
+            case 'View':
+                navigate(`/explorer?search=${encodeURIComponent(searchResult.query)}`)
+                break
+            case 'Workspace':
+                navigate('/workspaces')
+                break
+            case 'Semantic Layer':
+                navigate('/schema')
+                break
+            case 'Template':
+                requestAnimationFrame(() => {
+                    document.getElementById('dashboard-templates')
+                        ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
                 })
-            }
-        })
-
-        // Templates
-        templates.forEach(t => {
-            if (t.name.toLowerCase().includes(q)) {
-                results.push({
-                    id: `tpl-${t.id}`,
-                    label: t.name,
-                    sublabel: t.description,
-                    category: 'Template',
-                    icon: LayoutTemplate,
-                    onSelect: () => {/* templates don't navigate */ },
-                })
-            }
-        })
-
-        // Semantic Layers (ontologies)
-        ontologies.forEach(o => {
-            if (o.name.toLowerCase().includes(q)) {
-                results.push({
-                    id: `sl-${o.id}`,
-                    label: o.name,
-                    sublabel: o.description ?? `v${o.version ?? 1}`,
-                    category: 'Semantic Layer',
-                    icon: BookOpen,
-                    onSelect: () => { setActiveTab('schema') },
-                })
-            }
-        })
-
-        // Cap at 12 results, stable order
-        const ORDER: DashboardSearchResult['category'][] = ['Workspace', 'Data Source', 'View', 'Template', 'Semantic Layer']
-        return results
-            .sort((a, b) => ORDER.indexOf(a.category) - ORDER.indexOf(b.category))
-            .slice(0, 12)
-    }, [searchQuery, workspaces, recentViews, templates, ontologies,
-        setActiveWorkspace, setActiveDataSource, setActiveView, navigate])
+                break
+            case 'Data Source':
+                // No dedicated index — fall through to workspaces list.
+                navigate('/workspaces')
+                break
+        }
+        setSearchQuery('')
+    }, [navigate, searchResult.query, recordRecentSearch])
 
     // ── Loading state: show spinner only while workspaces load ─────────────────
     if (isLoadingWorkspaces) {
@@ -201,7 +168,12 @@ export function Dashboard() {
                     <DashboardHero
                         value={searchQuery}
                         onChange={setSearchQuery}
-                        results={searchResults}
+                        result={searchResult}
+                        onSelectHit={handleSelectHit}
+                        onShowAll={handleShowAll}
+                        recentSearches={recentSearches}
+                        onRemoveRecentSearch={removeRecentSearch}
+                        onClearRecentSearches={clearRecentSearches}
                     />
                 </motion.div>
 
@@ -248,6 +220,7 @@ export function Dashboard() {
 
                 {/* 5. Starter Templates — templates only */}
                 <motion.div
+                    id="dashboard-templates"
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: MOTION.sectionStagger * 4, ...MOTION.sectionEntry }}
