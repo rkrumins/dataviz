@@ -828,7 +828,6 @@ export const LayerColumn = React.memo(function LayerColumn({
                         isExpanded={expandedNodes.has(node.id)}
                         isLoading={loadingNodes?.has(node.id) ?? false}
                         isSearchResult={searchResults.includes(node.id)}
-                        isTraceActive={traceFocusId !== null}
                         isHighlighted={traceContextSet.has(node.id)}
                         isFocusNode={traceFocusId === node.id}
                         isClickHighlighted={isHighlightActive && !isHoverHighlight && (highlightedNodes?.has(node.id) ?? false)}

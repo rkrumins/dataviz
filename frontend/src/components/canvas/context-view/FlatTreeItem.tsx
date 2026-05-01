@@ -19,7 +19,6 @@ interface FlatTreeItemProps {
   isExpanded: boolean
   isLoading?: boolean
   isSearchResult: boolean
-  isTraceActive: boolean
   isHighlighted: boolean
   isFocusNode: boolean
   isClickHighlighted?: boolean
@@ -47,7 +46,6 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   isExpanded,
   isLoading = false,
   isSearchResult,
-  isTraceActive,
   isHighlighted,
   isFocusNode,
   isClickHighlighted = false,
@@ -87,8 +85,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const iconSize = isRoot ? 'w-5 h-5' : 'w-4 h-4'
   const iconContainerSize = isRoot ? 'w-9 h-9' : 'w-7 h-7'
 
-  // Calculate dimming — trace takes priority over click-highlight
-  const isDimmed = (isTraceActive && !isHighlighted) || isDimmedByHighlight
+  // Dimming applies only to the click-highlight feature now. Trace mode used
+  // to dim non-traced nodes here, but ContextViewCanvas's
+  // `useTraceFilteredHierarchy` removes them from the render tree entirely
+  // — so anything that reaches FlatTreeItem during trace IS in the trace
+  // context and should render at full opacity.
+  const isDimmed = isDimmedByHighlight
 
   // Tree line indent - reduced to save horizontal space
   const indentWidth = depth * 16
