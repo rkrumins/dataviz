@@ -111,6 +111,66 @@ class LineageResult(BaseModel):
     class Config:
         populate_by_name = True
 
+# ============================================
+# Trace v2 Models — Cypher-native, ontology-aware lineage
+# ============================================
+
+class TraceFocus(BaseModel):
+    """Identifies the focus node of a trace, with its resolved hierarchy level."""
+    urn: str
+    level: int
+    entity_type: str = Field(alias="entityType")
+
+    class Config:
+        populate_by_name = True
+
+
+class TraceRequest(BaseModel):
+    urn: str
+    direction: str = "both"  # upstream | downstream | both
+    upstream_depth: int = Field(3, alias="upstreamDepth", ge=0)
+    downstream_depth: int = Field(3, alias="downstreamDepth", ge=0)
+    # "auto" = peer rollup (source's own hierarchy.level)
+    # int    = literal level
+    # str    = entity-type-id ("dataset"); resolved to that type's level
+    level: Union[str, int] = "auto"
+    lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
+    include_containment_edges: bool = Field(False, alias="includeContainmentEdges")
+    include_inherited_lineage: bool = Field(True, alias="includeInheritedLineage")
+
+    class Config:
+        populate_by_name = True
+
+
+class ExpandRequest(BaseModel):
+    source_urn: str = Field(alias="sourceUrn")
+    target_urn: str = Field(alias="targetUrn")
+    next_level: Union[str, int] = Field(alias="nextLevel")
+    lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
+    include_containment_edges: bool = Field(False, alias="includeContainmentEdges")
+
+    class Config:
+        populate_by_name = True
+
+
+class TraceResult(BaseModel):
+    nodes: List[GraphNode]
+    edges: List[GraphEdge]
+    containment_edges: List[GraphEdge] = Field(default_factory=list, alias="containmentEdges")
+    upstream_urns: Set[str] = Field(default_factory=set, alias="upstreamUrns")
+    downstream_urns: Set[str] = Field(default_factory=set, alias="downstreamUrns")
+    focus: TraceFocus
+    effective_level: int = Field(alias="effectiveLevel")
+    is_inherited: bool = Field(False, alias="isInherited")
+    inherited_from_urn: Optional[str] = Field(None, alias="inheritedFromUrn")
+    truncated: bool = False
+    # "max_nodes" | "timeout" | None
+    truncation_reason: Optional[str] = Field(None, alias="truncationReason")
+
+    class Config:
+        populate_by_name = True
+
+
 class ContainmentResult(BaseModel):
     parent: Optional[GraphNode]
     children: List[GraphNode]

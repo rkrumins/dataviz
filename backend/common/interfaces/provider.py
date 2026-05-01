@@ -9,6 +9,7 @@ from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
     LineageResult, GraphSchemaStats, OntologyMetadata,
     ChildrenWithEdgesResult, TopLevelNodesResult,
+    TraceResult,
 )
 
 
@@ -244,6 +245,69 @@ class GraphDataProvider(ABC):
         lineage_edges: List[str],
     ) -> LineageResult:
         pass
+
+    # ------------------------------------------------------------------ #
+    # Trace v2 — Cypher-native, ontology-aware                           #
+    # ------------------------------------------------------------------ #
+
+    async def trace_at_level(
+        self,
+        urn: str,
+        level: int,
+        upstream_depth: int,
+        downstream_depth: int,
+        lineage_edge_types: List[str],
+        containment_edge_types: List[str],
+        max_nodes: int,
+        timeout_ms: int,
+        include_containment_edges: bool = False,
+        include_inherited_lineage: bool = True,
+    ) -> TraceResult:
+        """Trace at a specific hierarchy level using AGGREGATED edges.
+
+        Per-hop set-based BFS (orchestrated in Python, executed in Cypher).
+        Returns nodes already at ``level`` plus AGGREGATED edges between
+        them, scoped to ``upstream_depth`` / ``downstream_depth`` hops.
+
+        Inherited lineage: if ``include_inherited_lineage=True`` and the
+        focus has no AGGREGATED edges at the requested level, the trace
+        anchors at the nearest containment ancestor that does, with
+        ``isInherited=True`` in the result.
+
+        Default implementation raises NotImplementedError — override in
+        concrete providers (Neo4j, FalkorDB).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement trace_at_level. "
+            "Required for the /trace/v2 endpoint."
+        )
+
+    async def expand_aggregated(
+        self,
+        source_urn: str,
+        target_urn: str,
+        next_level: int,
+        lineage_edge_types: List[str],
+        containment_edge_types: List[str],
+        max_nodes: int,
+        timeout_ms: int,
+        use_raw_edges: bool = False,
+        include_containment_edges: bool = False,
+    ) -> TraceResult:
+        """Drill into an AGGREGATED edge: return finer-level nodes + edges
+        within (source_subtree × target_subtree) at ``next_level``.
+
+        Set-based, no Cartesian: collect descendants at the target level
+        for each anchor, then match edges between the two URN sets.
+
+        When ``use_raw_edges=True`` (typically for the finest level where
+        AGGREGATED == raw lineage), the implementation skips AGGREGATED
+        and reads raw lineage edges directly.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement expand_aggregated. "
+            "Required for the /trace/expand endpoint."
+        )
 
     # ==========================================
     # Metadata Operations

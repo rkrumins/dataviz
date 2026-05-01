@@ -9,6 +9,7 @@ from ..models.graph import (
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
     CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult, TopLevelNodesResult,
+    TraceRequest, TraceResult, ExpandRequest,
 )
 
 from ..providers.base import GraphDataProvider
@@ -276,6 +277,17 @@ class ContextEngine:
                             resolved.edge_type_metadata,
                             resolved.lineage_edge_types,
                         )
+                    if hasattr(self.provider, 'set_entity_type_levels'):
+                        # Build entity-type → hierarchy.level mapping. Used by the
+                        # provider to write n.level at upsert time, enabling
+                        # level-indexed trace queries without a per-query ontology join.
+                        levels: Dict[str, int] = {}
+                        for et_id, et_def in (resolved.entity_type_definitions or {}).items():
+                            hierarchy = getattr(et_def, "hierarchy", None)
+                            level = getattr(hierarchy, "level", None) if hierarchy else None
+                            if isinstance(level, int):
+                                levels[et_id] = level
+                        self.provider.set_entity_type_levels(levels)
                     # Ensure indices exist for all ontology-defined entity types.
                     if hasattr(self.provider, 'ensure_indices') and resolved.entity_type_definitions:
                         try:
@@ -889,6 +901,130 @@ class ContextEngine:
                 aggregated_map[key]["confidence"] = min(1.0, count / 5.0) # Arbitrary scaling
 
         return list(aggregated_map.values())
+
+    # ------------------------------------------------------------------ #
+    # Trace v2 — thin pass-through to the provider primitives             #
+    #                                                                     #
+    # The provider does the BFS in Cypher (per-hop set-based) — the      #
+    # engine just resolves config (level, lineage types, max_nodes,      #
+    # timeout) and forwards. No Python aggregation work; cost scales     #
+    # with result size, not graph size.                                   #
+    # ------------------------------------------------------------------ #
+
+    async def trace(self, req: TraceRequest) -> TraceResult:
+        # Use the RESOLVED ontology (carries entity_type_definitions with
+        # hierarchy.level) — get_ontology_metadata() returns the flat
+        # OntologyMetadata projection which only has entity_type_hierarchy
+        # (canContain/canBeContainedBy) and no level info, so _resolve_level
+        # would silently fall back to 0 with that.
+        resolved = await self._resolve_ontology()
+        level = await self._resolve_level(req.level, req.urn, resolved)
+        edge_types = req.lineage_edge_types or list(resolved.lineage_edge_types or [])
+        containment_types = list(resolved.containment_edge_types or [])
+
+        async with self._trace_semaphore():
+            return await self.provider.trace_at_level(
+                urn=req.urn,
+                level=level,
+                upstream_depth=req.upstream_depth if req.direction in ("upstream", "both") else 0,
+                downstream_depth=req.downstream_depth if req.direction in ("downstream", "both") else 0,
+                lineage_edge_types=edge_types,
+                containment_edge_types=containment_types,
+                max_nodes=ContextEngine.TRACE_MAX_NODES,
+                timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
+                include_containment_edges=req.include_containment_edges,
+                include_inherited_lineage=req.include_inherited_lineage,
+            )
+
+    async def expand_aggregated_edge(self, req: ExpandRequest) -> TraceResult:
+        resolved = await self._resolve_ontology()
+        # next_level can be int or entity-type-id; resolve to int
+        level = await self._resolve_level(req.next_level, req.source_urn, resolved)
+        edge_types = req.lineage_edge_types or list(resolved.lineage_edge_types or [])
+        containment_types = list(resolved.containment_edge_types or [])
+
+        # Use raw edges when next_level is the finest level in the ontology
+        # — at that level AGGREGATED is 1:1 with raw lineage anyway, but
+        # raw is safer (no dependency on materialization having run).
+        finest_level = self._finest_level(resolved)
+        use_raw = (finest_level is not None and level >= finest_level)
+
+        async with self._trace_semaphore():
+            return await self.provider.expand_aggregated(
+                source_urn=req.source_urn,
+                target_urn=req.target_urn,
+                next_level=level,
+                lineage_edge_types=edge_types,
+                containment_edge_types=containment_types,
+                max_nodes=ContextEngine.TRACE_MAX_NODES,
+                timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
+                use_raw_edges=use_raw,
+                include_containment_edges=req.include_containment_edges,
+            )
+
+    async def _resolve_level(self, level_input: Any, source_urn: str, ontology: Any) -> int:
+        """Resolve a level specifier (``"auto" | int | entity-type-id``) to an int.
+
+        ``"auto"`` resolves to the source node's own ``hierarchy.level`` —
+        peer rollup. An integer is returned unchanged. A string entity-type-id
+        is looked up in the resolved ontology.
+        """
+        if isinstance(level_input, int):
+            return level_input
+        if isinstance(level_input, str) and level_input != "auto":
+            level = self._level_from_entity_type(level_input, ontology)
+            if level is not None:
+                return level
+            logger.warning("Unknown entity-type-id for level: %s — falling back to 'auto'", level_input)
+
+        # "auto" — peer rollup at source's own level
+        node = await self.provider.get_node(source_urn)
+        if node:
+            level = self._level_from_entity_type(str(node.entity_type), ontology)
+            if level is not None:
+                return level
+        return 0  # safe default: top-level
+
+    def _level_from_entity_type(self, entity_type_id: str, ontology: Any) -> Optional[int]:
+        defs = getattr(ontology, "entity_type_definitions", None) or {}
+        et_def = defs.get(entity_type_id)
+        if et_def is None:
+            return None
+        hierarchy = getattr(et_def, "hierarchy", None)
+        if hierarchy is None:
+            return None
+        level = getattr(hierarchy, "level", None)
+        return level if isinstance(level, int) else None
+
+    def _finest_level(self, ontology: Any) -> Optional[int]:
+        """Return the largest hierarchy.level in the ontology (= finest grain)."""
+        defs = getattr(ontology, "entity_type_definitions", None) or {}
+        levels: List[int] = []
+        for et_def in defs.values():
+            hierarchy = getattr(et_def, "hierarchy", None)
+            if hierarchy is not None:
+                lvl = getattr(hierarchy, "level", None)
+                if isinstance(lvl, int):
+                    levels.append(lvl)
+        return max(levels) if levels else None
+
+    # Per-instance semaphore — cap concurrent trace queries per engine
+    # (i.e. per workspace, since for_workspace returns a per-workspace engine).
+    # Lazily initialised on first call. Override limit via TRACE_CONCURRENCY.
+    def _trace_semaphore(self) -> asyncio.Semaphore:
+        sem = getattr(self, "_trace_sem", None)
+        if sem is None:
+            import os
+            limit = int(os.getenv("TRACE_CONCURRENCY", "4"))
+            sem = asyncio.Semaphore(limit)
+            self._trace_sem = sem
+        return sem
+
+    # Hard caps for trace v2. Override via env vars; not per-request.
+    import os as _os
+    TRACE_MAX_NODES: int = int(_os.getenv("TRACE_MAX_NODES", "2000"))
+    TRACE_TIMEOUT_MS: int = int(_os.getenv("TRACE_TIMEOUT_MS", "8000"))
+    del _os
 
     async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         return await self.provider.get_ancestors(urn, limit=limit, offset=offset)

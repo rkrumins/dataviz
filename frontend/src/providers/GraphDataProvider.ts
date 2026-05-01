@@ -405,6 +405,55 @@ export interface LineageResult {
     inheritedFrom?: string
 }
 
+// ============================================
+// Trace v2 — Cypher-native, ontology-aware lineage
+// ============================================
+
+export interface TraceV2Focus {
+    urn: URN
+    level: number
+    entityType: string
+}
+
+export interface TraceV2Request {
+    urn: URN
+    direction?: 'upstream' | 'downstream' | 'both'
+    upstreamDepth?: number
+    downstreamDepth?: number
+    /** "auto" = peer rollup at source's own level | int | entity-type-id */
+    level?: 'auto' | number | string
+    /** null = use all ontology lineage types */
+    lineageEdgeTypes?: string[] | null
+    includeContainmentEdges?: boolean
+    includeInheritedLineage?: boolean
+}
+
+export interface ExpandAggregatedRequest {
+    sourceUrn: URN
+    targetUrn: URN
+    nextLevel: number | string
+    lineageEdgeTypes?: string[] | null
+    includeContainmentEdges?: boolean
+}
+
+export interface TraceV2Result {
+    nodes: GraphNode[]
+    edges: GraphEdge[]
+    /** Containment edges between returned nodes (populated only when requested) */
+    containmentEdges: GraphEdge[]
+    upstreamUrns: Set<URN>
+    downstreamUrns: Set<URN>
+    focus: TraceV2Focus
+    /** The integer hierarchy level the trace ran at (server-resolved) */
+    effectiveLevel: number
+    /** True if the trace anchored at an ancestor because the focus had no direct lineage */
+    isInherited: boolean
+    inheritedFromUrn?: string | null
+    truncated: boolean
+    /** "max_nodes" | "timeout" | null */
+    truncationReason?: string | null
+}
+
 /**
  * Options for trace/lineage operations
  */
@@ -653,6 +702,23 @@ export interface GraphDataProvider {
         downstreamDepth: number,
         options?: TraceOptions
     ): Promise<LineageResult>
+
+    /**
+     * Trace v2 — Cypher-native, ontology-aware. Returns nodes already at
+     * the requested hierarchy level (peer rollup) plus AGGREGATED edges.
+     * Tracing from a Domain doesn't explode to Columns.
+     *
+     * Default `level: "auto"` resolves server-side to the source node's
+     * own `hierarchy.level`. Hard caps (max_nodes, timeout_ms) are server
+     * config — when tripped, response carries `truncated: true`.
+     */
+    traceAtLevel?(request: TraceV2Request): Promise<TraceV2Result>
+
+    /**
+     * Drill into an AGGREGATED edge: return finer-level nodes + edges
+     * within (source-subtree × target-subtree) at `nextLevel`.
+     */
+    expandAggregated?(request: ExpandAggregatedRequest): Promise<TraceV2Result>
 
     // ==========================================
     // Layer/Classification Queries
