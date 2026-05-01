@@ -1266,11 +1266,26 @@ class Neo4jProvider(GraphDataProvider):
             if not up_frontier and not down_frontier:
                 break
 
+        # Always hydrate the containment chain (ancestor nodes + parent-child
+        # edges) so the canvas can position trace nodes in the layered
+        # hierarchy. Hierarchy context is non-optional for trace responses;
+        # the `include_containment_edges` flag is intentionally ignored. See
+        # the FalkorDB implementation for the rationale.
         containment_edges_list: List[GraphEdge] = []
-        if include_containment_edges and len(nodes_by_urn) > 1 and ctypes:
-            containment_edges_list = await self._fetch_containment_edges(
+        if ctypes and nodes_by_urn:
+            ancestor_urns = await self._collect_ancestor_urns(
                 list(nodes_by_urn.keys()), ctypes,
             )
+            new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+            if new_ancestors:
+                ancestor_nodes = await self.get_nodes_batch(new_ancestors)
+                for n in ancestor_nodes:
+                    if n:
+                        nodes_by_urn[n.urn] = n
+            if len(nodes_by_urn) > 1:
+                containment_edges_list = await self._fetch_containment_edges(
+                    list(nodes_by_urn.keys()), ctypes,
+                )
 
         return TraceResult(
             nodes=list(nodes_by_urn.values()),
@@ -1334,11 +1349,23 @@ class Neo4jProvider(GraphDataProvider):
         nodes = await self.get_nodes_batch(list(all_urns)) if all_urns else []
         nodes_by_urn = {n.urn: n for n in nodes if n}
 
+        # Always hydrate ancestors + containment edges so drilled-into nodes
+        # have hierarchy context in the canvas. See trace_at_level rationale.
         containment_edges_list: List[GraphEdge] = []
-        if include_containment_edges and len(nodes_by_urn) > 1 and ctypes:
-            containment_edges_list = await self._fetch_containment_edges(
+        if ctypes and nodes_by_urn:
+            ancestor_urns = await self._collect_ancestor_urns(
                 list(nodes_by_urn.keys()), ctypes,
             )
+            new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+            if new_ancestors:
+                ancestor_nodes = await self.get_nodes_batch(new_ancestors)
+                for n in ancestor_nodes:
+                    if n:
+                        nodes_by_urn[n.urn] = n
+            if len(nodes_by_urn) > 1:
+                containment_edges_list = await self._fetch_containment_edges(
+                    list(nodes_by_urn.keys()), ctypes,
+                )
 
         anchor_node = nodes_by_urn.get(source_urn) or await self.get_node(source_urn)
         focus_level_actual = (
@@ -1519,6 +1546,39 @@ class Neo4jProvider(GraphDataProvider):
             except Exception:
                 continue
         return out
+
+    async def _collect_ancestor_urns(
+        self, urns: List[str], ctypes: List[str],
+    ) -> List[str]:
+        """Collect ALL containment ancestors of the given URNs in one query.
+
+        Foundational for trace responses: a trace returns lineage URNs at the
+        requested level (often columns), but the canvas needs the full
+        ancestor chain (Dataset → Container → Domain) to position those URNs
+        in the layered hierarchy. Without this, trace nodes become orphans
+        and never reach the rendered tree.
+        """
+        if not urns or not ctypes:
+            return []
+        ip = self._id_prop()
+        cypher = (
+            f"UNWIND $urns AS u "
+            f"MATCH (n {{{ip}: u}})<-[c*1..10]-(ancestor) "
+            f"WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
+            f"RETURN DISTINCT ancestor.{ip} AS ancestorUrn"
+        )
+        try:
+            rows = await self._run_read(cypher, {"urns": urns, "ctypes": ctypes})
+            out: List[str] = []
+            for row in rows:
+                if isinstance(row, dict):
+                    val = row.get("ancestorUrn")
+                    if val:
+                        out.append(val)
+            return out
+        except Exception as exc:
+            logger.warning("trace_at_level: ancestor collection failed for %d urns: %s", len(urns), exc)
+            return []
 
     async def _collect_descendants_at_level(
         self, anchor_urn: str, target_level: int, ctypes: List[str], limit: int,

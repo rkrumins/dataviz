@@ -2677,12 +2677,32 @@ class FalkorDBProvider(GraphDataProvider):
             if not up_frontier and not down_frontier:
                 break
 
-        # 5. Optionally fetch containment edges between returned nodes
+        # 5. ALWAYS hydrate the containment chain. A trace returns lineage URNs
+        # at whatever level was requested (peer-level by default, finer levels
+        # via expand). For the canvas to position those URNs in the layered
+        # hierarchy it needs every containment ancestor (Dataset → Container →
+        # Domain) AND the parent-child edges linking them. Without this the
+        # frontend treats trace nodes as orphans, layer assignment can't place
+        # them, and the user sees nothing — which is exactly the schemaField
+        # trace bug. The `include_containment_edges` flag is intentionally
+        # ignored here: hierarchy context is non-optional for trace responses.
         containment_edges_list: List[GraphEdge] = []
-        if include_containment_edges and len(nodes_by_urn) > 1 and ctypes:
-            containment_edges_list = await self._fetch_containment_edges(
+        if ctypes and nodes_by_urn:
+            ancestor_urns = await self._collect_ancestor_urns(
                 list(nodes_by_urn.keys()), ctypes,
             )
+            new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+            if new_ancestors:
+                ancestor_nodes = await self.get_nodes_batch(new_ancestors)
+                for n in ancestor_nodes:
+                    if n:
+                        nodes_by_urn[n.urn] = n
+            # Containment edges between every returned node — both lineage
+            # participants and their hydrated ancestors.
+            if len(nodes_by_urn) > 1:
+                containment_edges_list = await self._fetch_containment_edges(
+                    list(nodes_by_urn.keys()), ctypes,
+                )
 
         return TraceResult(
             nodes=list(nodes_by_urn.values()),
@@ -2751,11 +2771,25 @@ class FalkorDBProvider(GraphDataProvider):
         nodes = await self.get_nodes_batch(list(all_urns)) if all_urns else []
         nodes_by_urn = {n.urn: n for n in nodes if n}
 
+        # Always hydrate containment ancestors + edges so the drilled-into
+        # nodes can be positioned in the canvas hierarchy. See trace_at_level
+        # for the rationale — the `include_containment_edges` flag is
+        # intentionally ignored because hierarchy context is non-optional.
         containment_edges_list: List[GraphEdge] = []
-        if include_containment_edges and len(nodes_by_urn) > 1 and ctypes:
-            containment_edges_list = await self._fetch_containment_edges(
+        if ctypes and nodes_by_urn:
+            ancestor_urns = await self._collect_ancestor_urns(
                 list(nodes_by_urn.keys()), ctypes,
             )
+            new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+            if new_ancestors:
+                ancestor_nodes = await self.get_nodes_batch(new_ancestors)
+                for n in ancestor_nodes:
+                    if n:
+                        nodes_by_urn[n.urn] = n
+            if len(nodes_by_urn) > 1:
+                containment_edges_list = await self._fetch_containment_edges(
+                    list(nodes_by_urn.keys()), ctypes,
+                )
 
         # Focus node for response — use the source anchor of the drill
         anchor_node = nodes_by_urn.get(source_urn)
@@ -2950,6 +2984,40 @@ class FalkorDBProvider(GraphDataProvider):
             except Exception:
                 continue
         return out
+
+    async def _collect_ancestor_urns(
+        self, urns: List[str], ctypes: List[str],
+    ) -> List[str]:
+        """Collect ALL containment ancestors of the given URNs in one query.
+
+        Foundational for trace responses: a trace returns lineage URNs at
+        whatever level the user picked (e.g. column-level schemaFields), but
+        the canvas needs the full ancestor chain (Dataset → Container →
+        Domain) to position those URNs in the layered hierarchy. Without
+        this, the trace nodes render as orphans or get filtered out by layer
+        assignment.
+
+        Set-based, deduped, capped at depth 10. Returns URNs only; caller
+        fetches the node payloads via ``get_nodes_batch``.
+        """
+        if not urns or not ctypes:
+            return []
+        cypher = (
+            "UNWIND $urns AS u "
+            "MATCH (n {urn: u})<-[c*1..10]-(ancestor) "
+            "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
+            "RETURN DISTINCT ancestor.urn AS ancestorUrn"
+        )
+        try:
+            result = await self._ro_query(cypher, params={"urns": urns, "ctypes": ctypes})
+            out: List[str] = []
+            for row in (result.result_set or []):
+                if row and row[0]:
+                    out.append(row[0])
+            return out
+        except Exception as exc:
+            logger.warning("trace_at_level: ancestor collection failed for %d urns: %s", len(urns), exc)
+            return []
 
     async def _collect_descendants_at_level(
         self, anchor_urn: str, target_level: int, ctypes: List[str], limit: int,

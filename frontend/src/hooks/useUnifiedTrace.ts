@@ -16,7 +16,7 @@
 import { create } from 'zustand'
 import { useCallback, useMemo, useEffect, useRef } from 'react'
 import type {
-    GraphDataProvider, LineageResult, TraceOptions,
+    GraphDataProvider, GraphEdge, LineageResult, TraceOptions,
     TraceV2Result, TraceV2Request,
 } from '@/providers/GraphDataProvider'
 import { useCanvasStore } from '@/store/canvas'
@@ -84,6 +84,21 @@ export interface TraceResult {
     truncated?: boolean
     /** "max_nodes" | "timeout" | undefined */
     truncationReason?: string | null
+    /**
+     * Containment edges (parent → child) returned by the backend. Always
+     * populated by /trace/v2 — needed so the canvas can position trace
+     * nodes (especially deep ones like columns) in the layered hierarchy.
+     * Without these, deep trace nodes render as orphans.
+     */
+    containmentEdges?: GraphEdge[]
+    /**
+     * Ancestor nodes (Domain → Container → Dataset …) that the backend
+     * hydrated alongside the lineage participants. They're already in
+     * `lineageResult.nodes` for back-compat; this set lets consumers tell
+     * "lineage participant" from "ancestor for hierarchy context" when it
+     * matters (e.g. for a "Show only direct lineage" toggle).
+     */
+    ancestorUrns?: Set<string>
 }
 
 /** Drill-down state — keyed by `${sourceUrn}->${targetUrn}@${atLevel}`. */
@@ -142,7 +157,12 @@ const DEFAULT_CONFIG: TraceConfig = {
     autoSyncToStore: true,
     lineageEdgeTypes: [],  // Empty = use all ontology-classified lineage types
     level: 'auto',         // v2: peer rollup at source's own hierarchy.level
-    includeContainmentEdges: false,
+    // ContextView positions every node by walking containment from a layer
+    // root to its descendants. /trace/v2 returning lineage participants but
+    // NOT their containment chains makes deep participants (e.g. schemaField
+    // upstream of focus) orphans — invisible in the canvas. Default to true
+    // so trace results are always positionable in the hierarchy.
+    includeContainmentEdges: true,
     granularity: 'column', // legacy /trace path only — superseded by `level` for v2
 }
 
@@ -312,6 +332,19 @@ function traceResultFromV2(focusId: string, focusUrn: string, v2: TraceV2Result)
     v2.downstreamUrns.forEach(u => traceNodes.add(u))
     v2.edges.forEach(e => traceEdges.add(e.id))
 
+    // Identify ancestor-only nodes: those returned by the backend purely for
+    // hierarchy positioning (Domain/Container/Dataset chains around deep
+    // lineage participants). They aren't lineage members themselves, so we
+    // exclude them from upstream/downstream sets but keep them in the
+    // canvas merge so the layered hierarchy can host the trace nodes.
+    const lineageMembers = new Set<string>([focusUrn])
+    v2.upstreamUrns.forEach(u => lineageMembers.add(u))
+    v2.downstreamUrns.forEach(u => lineageMembers.add(u))
+    const ancestorUrns = new Set<string>()
+    v2.nodes.forEach(n => {
+        if (!lineageMembers.has(n.urn)) ancestorUrns.add(n.urn)
+    })
+
     // Synthesize a legacy-shape LineageResult so existing consumers
     // (ContextViewCanvas merge, EdgeLegend, etc.) keep working unchanged.
     const lineageResult: LineageResult = {
@@ -336,6 +369,8 @@ function traceResultFromV2(focusId: string, focusUrn: string, v2: TraceV2Result)
         inheritedFromUrn: v2.inheritedFromUrn ?? undefined,
         truncated: v2.truncated,
         truncationReason: v2.truncationReason ?? undefined,
+        containmentEdges: v2.containmentEdges,
+        ancestorUrns,
     }
 }
 
