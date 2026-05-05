@@ -70,6 +70,8 @@ import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay } from './LineageFlowOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { useLoadingToast } from '@/components/ui/toast'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { StagedChangesPanel } from './StagedChangesPanel'
 
 // Re-export for backward compatibility
 export { defaultReferenceModelLayers } from './constants'
@@ -94,7 +96,6 @@ export function ContextViewCanvas({
   const selectedNodeId = selectedNodeIds[0] ?? null
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
-  const updateView = useSchemaStore((s) => s.updateView)
   const provider = useGraphProvider()
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
   const lineageEdgeTypes = useViewLineageEdgeTypes()
@@ -203,9 +204,16 @@ export function ContextViewCanvas({
     }
   })
 
+  // Forward-declared ref to the smart-level trace handler — defined further
+  // down where granularityOptions is in scope. Used by hooks that fire
+  // before that declaration (useCanvasInteractions options) so the
+  // closure dereferences lazily.
+  const startTraceRef = useRef<(nodeId: string) => void>(() => {})
+  const toggleTraceRef = useRef<(nodeId: string) => void>(() => {})
+
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
   const interactions = useCanvasInteractions({
-    onTraceNode: (nodeId) => trace.startTrace(nodeId),
+    onTraceNode: (nodeId) => startTraceRef.current(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
     layers: layers,
     onMoveToLayer: (_nodeId, _layerId) => {
@@ -216,6 +224,7 @@ export function ContextViewCanvas({
       return false
     },
     onCloseEntityDrawer: () => {
+      if (isStagedPanelOpen) { closeStagedChangesPanel(); return true }
       if (selectedNodeId) { clearSelection(); return true }
       return false
     },
@@ -316,14 +325,45 @@ export function ContextViewCanvas({
   const assignmentWarningTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleAssignToLayer = useCallback((entityId: string, layerId: string) => {
+    // Capture the previous layer for diff display before mutation.
+    const prevAssignment = useReferenceModelStore.getState().effectiveAssignments.get(entityId)
+    const prevLayerId = prevAssignment?.layerId
+    const prevLayer = storeLayers.find(l => l.id === prevLayerId)
+    const targetLayer = storeLayers.find(l => l.id === layerId)
+    const entity = nodes.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
+    const entityName = (entity?.data?.label as string) ?? entityId
+
     const result = assignEntityToLayer(entityId, layerId)
     if (!result.success && result.conflict?.type === 'containment_locked') {
       setAssignmentWarning(result.conflict.message)
       // Auto-dismiss after 5 seconds
       if (assignmentWarningTimer.current) clearTimeout(assignmentWarningTimer.current)
       assignmentWarningTimer.current = setTimeout(() => setAssignmentWarning(null), 5000)
+      return
     }
-  }, [assignEntityToLayer])
+
+    // Surface the assignment in the staged-changes review panel.
+    // Apply is a no-op because saveToBackend (referenceModelStore) is what
+    // actually flushes layer assignments — calling it here would double-write.
+    const stagedChanges = useStagedChangesStore.getState()
+    stagedChanges.stageOrReplace(
+      (c) => c.type === 'assign_layer' && c.targetId === entityId,
+      {
+        type: 'assign_layer',
+        targetId: entityId,
+        before: { layerId: prevLayerId, layerName: prevLayer?.name },
+        after: { layerId, layerName: targetLayer?.name },
+        summary: `Move '${entityName}' → ${targetLayer?.name ?? 'layer'}`,
+        discard: () => {
+          if (prevLayerId) {
+            useReferenceModelStore.getState().assignEntityToLayer(entityId, prevLayerId)
+          } else {
+            useReferenceModelStore.getState().removeEntityAssignment(entityId)
+          }
+        },
+      },
+    )
+  }, [assignEntityToLayer, storeLayers, nodes])
 
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
@@ -368,6 +408,16 @@ export function ContextViewCanvas({
       .map(et => ({ id: et.id, name: et.name, level: et.hierarchy.level })),
     [schemaEntityTypes]
   )
+
+  // Auto-select the coarsest (lowest-level) granularity once options are
+  // available. The toolbar no longer exposes a "no aggregation" option, so
+  // null is not a valid resting state.
+  useEffect(() => {
+    if (lineageGranularity == null && granularityOptions.length > 0) {
+      const coarsest = [...granularityOptions].sort((a, b) => a.level - b.level)[0]
+      setLineageGranularity(coarsest.id)
+    }
+  }, [lineageGranularity, granularityOptions, setLineageGranularity])
 
   // Handle save graph
   const handleSave = useCallback(async () => {
@@ -446,13 +496,100 @@ export function ContextViewCanvas({
       }
     }
 
-    // TRACE MODE: Toggle trace using unified trace hook
-    trace.toggleTrace(nodeId)
-  }, [trace.toggleTrace, nodes, interactions])
+    // TRACE MODE: Toggle trace using unified trace hook + smart level
+    toggleTraceRef.current(nodeId)
+  }, [nodes, interactions])
 
 
   // Lineage flow toggle
   const [showLineageFlow, setShowLineageFlow] = useState(initialShowLineageFlow)
+
+  // Edge direction toggle — controls arrowheads + animated mid-edge chevron
+  const [showEdgeDirection, setShowEdgeDirection] = useState(true)
+
+  // Sync ontology-derived lineage edge types into trace config so the trace
+  // backend traverses TRANSFORMS, AGGREGATED, and any other ontology-classified
+  // lineage edges — not just AGGREGATED. (Issue #3)
+  useEffect(() => {
+    if (lineageEdgeTypes.length > 0) {
+      trace.setConfig({ lineageEdgeTypes })
+    }
+  }, [lineageEdgeTypes, trace.setConfig])
+
+  // Trace ALWAYS runs at the focus node's own level — `level: 'auto'` resolves
+  // server-side to the focus's hierarchy.level, so a column-level focus traces
+  // column-level lineage (TRANSFORMS, AGGREGATED, or any other ontology-
+  // classified lineage edge type). The previous "auto-coarsen" hack broke
+  // fine-grained TRANSFORMS lineage; removed.
+  const startTraceWithSmartLevel = useCallback((nodeId: string) => {
+    trace.setConfig({ level: 'auto', lineageEdgeTypes })
+    return trace.startTrace(nodeId)
+  }, [trace, lineageEdgeTypes])
+
+  const toggleTraceWithSmartLevel = useCallback((nodeId: string) => {
+    trace.setConfig({ level: 'auto', lineageEdgeTypes })
+    return trace.toggleTrace(nodeId)
+  }, [trace, lineageEdgeTypes])
+
+  const traceUpstreamWithSmartLevel = useCallback((nodeId: string) => {
+    trace.setConfig({ level: 'auto', lineageEdgeTypes })
+    return trace.traceUpstream(nodeId)
+  }, [trace, lineageEdgeTypes])
+
+  const traceDownstreamWithSmartLevel = useCallback((nodeId: string) => {
+    trace.setConfig({ level: 'auto', lineageEdgeTypes })
+    return trace.traceDownstream(nodeId)
+  }, [trace, lineageEdgeTypes])
+
+  const traceFullLineageWithSmartLevel = useCallback((nodeId: string) => {
+    trace.setConfig({ level: 'auto', lineageEdgeTypes })
+    return trace.traceFullLineage(nodeId)
+  }, [trace, lineageEdgeTypes])
+
+  // Wire up the forward-declared refs (used by hooks that fire earlier in
+  // render order, before granularityOptions is in scope).
+  startTraceRef.current = startTraceWithSmartLevel
+  toggleTraceRef.current = toggleTraceWithSmartLevel
+
+  // Staged changes — review-before-save layer for all canvas edits
+  const stagedChangeList = useStagedChangesStore(s => s.changes)
+  const stagedRedoStack = useStagedChangesStore(s => s.redoStack)
+  const isStagedPanelOpen = useStagedChangesStore(s => s.isReviewPanelOpen)
+  const openStagedChangesPanel = useStagedChangesStore(s => s.openReviewPanel)
+  const closeStagedChangesPanel = useStagedChangesStore(s => s.closeReviewPanel)
+  const applyStagedChanges = useStagedChangesStore(s => s.applyAll)
+  const undoStagedChange = useStagedChangesStore(s => s.undo)
+  const redoStagedChange = useStagedChangesStore(s => s.redo)
+
+  // Keyboard shortcuts for Undo/Redo — works anywhere on the canvas.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Ignore when the user is typing in an input/textarea
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      const isMod = e.metaKey || e.ctrlKey
+      if (!isMod) return
+      const key = e.key.toLowerCase()
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        undoStagedChange()
+      } else if ((key === 'z' && e.shiftKey) || key === 'y') {
+        e.preventDefault()
+        redoStagedChange()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [undoStagedChange, redoStagedChange])
+
+  // Save Blueprint button now OPENS the review modal first — the user
+  // confirms inside the modal which then performs the actual apply + save.
+  // This makes the save flow self-documenting: every save shows what's about
+  // to happen, and the modal doubles as a "view pending changes" panel.
+  const handleSaveAll = useCallback(() => {
+    if (!activeWorkspaceId) return
+    openStagedChangesPanel()
+  }, [activeWorkspaceId, openStagedChangesPanel])
 
   // Ref to trigger edge redraw from child components
   const triggerEdgeRedrawRef = useRef<(() => void) | null>(null)
@@ -621,22 +758,22 @@ export function ContextViewCanvas({
   }, [searchQuery, displayFlat])
 
   // Action: Move entity to layer (updated for unified context menu)
+  // Stages a `move_to_layer` change instead of immediately persisting via
+  // updateView — the actual schema mutation happens during applyAll.
   const moveToLayer = useCallback((nodeId: string, layerId: string) => {
     if (!activeView || !activeView.id) return
 
     const entity = displayMap.get(nodeId)
     if (!entity) return
 
-    // If moving a logical node, we might need different logic (e.g. reparenting)
-    // For now, we assume we are moving a PHYSICAL entity into a layer/group
     if (entity.isLogical) {
       console.warn("Moving logical nodes not yet supported via context menu")
       return
     }
 
     const layers = activeView.layout.referenceLayout?.layers || defaultReferenceModelLayers
+    const targetLayer = layers.find(l => l.id === layerId)
 
-    // Helper to recursively add rule to the correct logical node
     const addRuleToNode = (nodes: LogicalNodeConfig[], targetId: string): LogicalNodeConfig[] => {
       return nodes.map(node => {
         if (node.id === targetId) {
@@ -644,66 +781,64 @@ export function ContextViewCanvas({
             ...node,
             rules: [
               ...(node.rules || []),
-              {
-                id: `rule-${Date.now()}`,
-                priority: 100,
-                urnPattern: entity.urn
-              }
+              { id: `rule-${Date.now()}`, priority: 100, urnPattern: entity.urn }
             ]
           }
         }
         if (node.children) {
-          return {
-            ...node,
-            children: addRuleToNode(node.children, targetId)
-          }
+          return { ...node, children: addRuleToNode(node.children, targetId) }
         }
         return node
       })
     }
 
-    // Clone layers to update
-    const updatedLayers = layers.map(l => {
-      // Check if target is the layer itself
+    const buildUpdatedLayers = () => layers.map(l => {
       if (l.id === layerId) {
         return {
           ...l,
           rules: [
             ...(l.rules || []),
-            {
-              id: `rule-${Date.now()}`,
-              priority: 100, // High priority for manual moves
-              urnPattern: entity.urn // Strict instance match
-            }
+            { id: `rule-${Date.now()}`, priority: 100, urnPattern: entity.urn }
           ]
         }
       }
-
-      // Check if target is a logical node within this layer
       if (l.logicalNodes) {
         const updatedLogicalNodes = addRuleToNode(l.logicalNodes, layerId)
         if (updatedLogicalNodes !== l.logicalNodes) {
           return { ...l, logicalNodes: updatedLogicalNodes }
         }
       }
-
       return l
     })
 
-    // Update View
-    updateView(activeView.id, {
-      layout: {
-        ...activeView.layout,
-        referenceLayout: {
-          ...activeView.layout.referenceLayout,
-          layers: updatedLayers
-        }
-      }
+    const previousLayout = activeView.layout
+
+    useStagedChangesStore.getState().stage({
+      type: 'move_to_layer',
+      targetId: nodeId,
+      targetUrn: entity.urn,
+      before: { layout: previousLayout },
+      after: { layerId, layerName: targetLayer?.name },
+      summary: `Move-to-layer rule: '${entity.name}' → ${targetLayer?.name ?? layerId}`,
+      apply: async () => {
+        const updatedLayers = buildUpdatedLayers()
+        useSchemaStore.getState().updateView(activeView.id, {
+          layout: {
+            ...activeView.layout,
+            referenceLayout: {
+              ...activeView.layout.referenceLayout,
+              layers: updatedLayers
+            }
+          }
+        })
+      },
+      discard: () => {
+        // No mutation occurred yet — discard is a no-op.
+      },
     })
 
-    // Close context menu
     interactions.closeContextMenu()
-  }, [activeView, displayMap, updateView, interactions])
+  }, [activeView, displayMap, interactions])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
@@ -884,15 +1019,6 @@ export function ContextViewCanvas({
     }
   }, [displayMap, loadChildren, trace.isTracing, autoDrillOnExpand])
 
-  // Expand all / collapse all
-  const expandAll = useCallback(() => {
-    const allIds = displayFlat.map((n) => n.id)
-    setExpandedNodes(new Set(allIds))
-  }, [displayFlat])
-
-  const collapseAll = useCallback(() => {
-    setExpandedNodes(new Set())
-  }, [])
 
 
 
@@ -999,13 +1125,19 @@ export function ContextViewCanvas({
         lineageGranularity={lineageGranularity}
         onGranularityChange={setLineageGranularity}
         granularityOptions={granularityOptions}
-        onExpandAll={expandAll}
-        onCollapseAll={collapseAll}
+        showEdgeDirection={showEdgeDirection}
+        onToggleEdgeDirection={() => setShowEdgeDirection(v => !v)}
         onAddEntity={() => { setIsCreatingEntity(true); setCreationParentId(null); setCreationLayerId(null) }}
         activeWorkspaceId={activeWorkspaceId}
         activeContextModelName={activeContextModelName}
         syncStatus={syncStatus}
-        onSave={() => activeWorkspaceId && saveToBackend(activeWorkspaceId)}
+        onSave={handleSaveAll}
+        pendingChangeCount={stagedChangeList.length}
+        onOpenStagedChanges={openStagedChangesPanel}
+        canUndo={stagedChangeList.length > 0}
+        canRedo={stagedRedoStack.length > 0}
+        onUndo={undoStagedChange}
+        onRedo={redoStagedChange}
         trace={trace}
         focusNodeName={displayMap.get(trace.focusId || '')?.name || trace.focusId || 'Unknown Node'}
         lineageEdgeTypes={lineageEdgeTypes}
@@ -1082,9 +1214,9 @@ export function ContextViewCanvas({
 
           {/* Entity Drawer - Unified view & edit */}
           <EntityDrawer
-            onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
-            onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
-            onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
+            onTraceUp={(nodeId) => traceUpstreamWithSmartLevel(nodeId)}
+            onTraceDown={(nodeId) => traceDownstreamWithSmartLevel(nodeId)}
+            onFullTrace={(nodeId) => traceFullLineageWithSmartLevel(nodeId)}
           />
 
           {/* Entity Creation Panel */}
@@ -1106,6 +1238,20 @@ export function ContextViewCanvas({
           />
         </AnimatePresence>
 
+        {/* Save Confirmation Modal — opens when the user clicks Save Blueprint
+             or the pending-changes badge. Single source of truth for reviewing
+             and confirming a batch of staged edits before they hit the backend. */}
+        <StagedChangesPanel onConfirm={async () => {
+          if (!activeWorkspaceId) return
+          const result = stagedChangeList.length > 0
+            ? await applyStagedChanges(provider, activeWorkspaceId)
+            : { ok: 0, failed: 0 }
+          if (result.failed === 0) {
+            await saveToBackend(activeWorkspaceId)
+            closeStagedChangesPanel()
+          }
+        }} />
+
         {/* Edge Legend — shifts left when EntityDrawer is open to avoid overlap (3.3)
              receives only the projected visible edges, not all canvas edges (3.2) */}
         <div className={cn(
@@ -1116,7 +1262,13 @@ export function ContextViewCanvas({
         </div>
 
         {/* Layer Columns */}
-        <div className="flex-1 overflow-auto relative scroll-smooth" onClick={handleBackgroundClick}>
+        <div
+          className={cn(
+            "flex-1 overflow-auto relative scroll-smooth transition-[padding] duration-300 ease-out",
+            selectedNodeId ? "pr-[420px]" : ""
+          )}
+          onClick={handleBackgroundClick}
+        >
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them (z-index managed in component to 0, cols should be higher) */}
           {(showLineageFlow || trace.isTracing) && (
             <LineageFlowOverlay
@@ -1133,6 +1285,7 @@ export function ContextViewCanvas({
               isHighlightActive={isHighlightActive}
               resolveEdgeColor={resolveEdgeColor}
               onEdgeDoubleClick={handleEdgeDoubleClick}
+              showDirection={showEdgeDirection}
             />
           )}
 
@@ -1190,7 +1343,7 @@ export function ContextViewCanvas({
         onDuplicateNode={interactions.duplicateNode}
         onDeleteNode={interactions.deleteNode}
         onCreateChild={interactions.createChild}
-        onTraceNode={(id) => trace.startTrace(id)}
+        onTraceNode={(id) => startTraceWithSmartLevel(id)}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={interactions.deleteEdge}

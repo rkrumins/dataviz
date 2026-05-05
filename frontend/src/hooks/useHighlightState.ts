@@ -146,15 +146,19 @@ export interface UseHoverHighlightResult {
 export function useHoverHighlight({
   hoveredNodeId,
   visibleLineageEdges,
-  isTracing,
+  isTracing: _isTracing,
   displayMap,
   childMap,
   isClickHighlightActive,
 }: UseHoverHighlightOptions): UseHoverHighlightResult {
+  // Hover highlight runs in BOTH trace and non-trace mode. In trace mode,
+  // `visibleLineageEdges` is already trace-filtered, so highlighting the
+  // hovered node's incident edges naturally surfaces its immediate
+  // upstream/downstream neighbors *within* the trace context.
   const hoverHighlight = useMemo(() => {
-    if (isTracing || isClickHighlightActive || !hoveredNodeId) return EMPTY
+    if (isClickHighlightActive || !hoveredNodeId) return EMPTY
     return computeConnected(hoveredNodeId, visibleLineageEdges, displayMap, childMap)
-  }, [hoveredNodeId, visibleLineageEdges, isTracing, isClickHighlightActive, displayMap, childMap])
+  }, [hoveredNodeId, visibleLineageEdges, isClickHighlightActive, displayMap, childMap])
 
   const isHoverActive = hoverHighlight.edges.size > 0
 

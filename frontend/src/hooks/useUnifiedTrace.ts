@@ -147,8 +147,12 @@ export interface TraceState {
 // ============================================
 
 const DEFAULT_CONFIG: TraceConfig = {
-    upstreamDepth: 5,
-    downstreamDepth: 5,
+    // Default hop depth — set high enough that a typical end-to-end pipeline
+    // (raw → staging → refined → consumption → reporting) plus a couple of
+    // intermediate transforms doesn't get truncated. Backend caps further
+    // if needed.
+    upstreamDepth: 25,
+    downstreamDepth: 25,
     includeColumnLineage: true,
     excludeContainmentEdges: true,
     includeInheritedLineage: true,
@@ -547,25 +551,28 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         await startTrace(focusId)
     }, [focusId, provider, startTrace])
 
-    // Preset: Trace upstream only (root cause analysis)
+    // Preset: Trace upstream only (root cause analysis) — deep walk so
+    // multi-hop pipelines reach origin systems without truncation.
     const traceUpstream = useCallback(async (nodeId: string) => {
-        setConfig({ upstreamDepth: 10, downstreamDepth: 0 })
+        setConfig({ upstreamDepth: 50, downstreamDepth: 0 })
         setShowUpstream(true)
         setShowDownstream(false)
         await startTrace(nodeId)
     }, [setConfig, setShowUpstream, setShowDownstream, startTrace])
 
-    // Preset: Trace downstream only (impact analysis)
+    // Preset: Trace downstream only (impact analysis) — same deep-walk depth.
     const traceDownstream = useCallback(async (nodeId: string) => {
-        setConfig({ upstreamDepth: 0, downstreamDepth: 10 })
+        setConfig({ upstreamDepth: 0, downstreamDepth: 50 })
         setShowUpstream(false)
         setShowDownstream(true)
         await startTrace(nodeId)
     }, [setConfig, setShowUpstream, setShowDownstream, startTrace])
 
-    // Preset: Full trace (both directions)
+    // Preset: Full trace (both directions). 25+25 covers typical end-to-end
+    // lineage chains (source → staging → refined → mart → reporting +
+    // intermediate transforms) without explosively expanding the graph.
     const traceFullLineage = useCallback(async (nodeId: string) => {
-        setConfig({ upstreamDepth: 5, downstreamDepth: 5 })
+        setConfig({ upstreamDepth: 25, downstreamDepth: 25 })
         setShowUpstream(true)
         setShowDownstream(true)
         await startTrace(nodeId)

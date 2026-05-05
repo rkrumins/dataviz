@@ -1,5 +1,7 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import type { ComputedEdge, OverflowBadge, OverflowEdge } from './types'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
 
 // Global visibility tracker — which layer-node-* elements are currently in the viewport
 const globalVisibleNodes = new Set<string>()
@@ -18,6 +20,7 @@ export function LineageFlowOverlay({
   isHighlightActive = false,
   resolveEdgeColor,
   onEdgeDoubleClick,
+  showDirection = true,
 }: {
   nodes: any[],
   edges: any[],
@@ -33,6 +36,8 @@ export function LineageFlowOverlay({
   resolveEdgeColor?: (edgeType: string) => string,
   /** Double-click handler — used for AGGREGATED-edge drill-down. */
   onEdgeDoubleClick?: (edgeId: string) => void,
+  /** When true, render arrowheads + animated mid-edge chevron flow. */
+  showDirection?: boolean,
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
@@ -48,6 +53,9 @@ export function LineageFlowOverlay({
   const updateFlowRef = useRef<(() => void) | null>(null)
   const rafIdRef = useRef<number | null>(null)
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null)
+  // Mouse position in viewport coordinates — used to position the hover panel
+  // via React Portal at document body, escaping the canvas's stacking context.
+  const [hoverMousePos, setHoverMousePos] = useState<{ x: number; y: number } | null>(null)
   // Persistent element cache — survives across updateFlow calls, cleared on node changes
   const elementCacheRef = useRef(new Map<string, HTMLElement>())
 
@@ -55,6 +63,19 @@ export function LineageFlowOverlay({
   // Size alone is sufficient because React will re-render when the Set reference changes,
   // and we only need this for effect dependency tracking (not equality).
   const expandedNodesFingerprint = expandedNodes.size
+
+  // Staged-change lookup map — keyed by edge ID. Recomputed when the staging
+  // store's changes array changes; reads inside the edge .map() are O(1).
+  const stagedEdgeChanges = useStagedChangesStore(s => s.changes)
+  const stagedEdgeColorByEdgeId = useMemo(() => {
+    const m = new Map<string, string>()
+    stagedEdgeChanges.forEach(c => {
+      if (c.type === 'create_edge') m.set(c.targetId, '#4ade80')
+      else if (c.type === 'delete_edge') m.set(c.targetId, '#f87171')
+      else if (c.type === 'edit_edge' || c.type === 'reverse_edge') m.set(c.targetId, '#fbbf24')
+    })
+    return m
+  }, [stagedEdgeChanges])
 
   // Debounced update function using requestAnimationFrame
   const scheduleUpdate = useCallback(() => {
@@ -536,7 +557,11 @@ export function LineageFlowOverlay({
   // Avoids creating 500+ <marker> and 200+ <linearGradient> elements per render.
   const sharedDefs = useMemo(() => {
     const markerColors = new Set<string>()
-    visibleEdges.forEach(e => { if (!e.isGhost) markerColors.add(e.color) })
+    // Include ALL visible edges (ghost or not) — ghost edges represent finer-
+    // level lineage delegated up to a visible ancestor (e.g. column→column
+    // TRANSFORMS bubbled to the parent Dataset). They are still directional
+    // and the user must see where the data flows.
+    visibleEdges.forEach(e => markerColors.add(e.color))
 
     const gradientKeys = new Set<string>()
     overflowEdges.forEach(e => gradientKeys.add(`${e.color}|${e.direction}`))
@@ -562,6 +587,17 @@ export function LineageFlowOverlay({
               .flow-particles-ghost {
                 animation: dashFlow 40s linear infinite;
               }
+              @keyframes edgeFlow {
+                to { stroke-dashoffset: -28; }
+              }
+              .edge-direction-flow {
+                animation: edgeFlow 1.4s linear infinite;
+              }
+              @media (prefers-reduced-motion: reduce) {
+                .flow-particles, .flow-particles-ghost, .edge-direction-flow {
+                  animation: none;
+                }
+              }
             `}
           </style>
           <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
@@ -569,12 +605,23 @@ export function LineageFlowOverlay({
             <feComposite in="SourceGraphic" in2="blur" operator="over" />
           </filter>
 
-          {/* Shared arrowhead markers — one per unique color */}
+          {/* Shared arrowhead markers — one per unique color.
+              Sized for clarity: 14×12 with a sharp filled triangle and full
+              opacity so direction is unambiguous at any zoom. */}
           {sharedDefs.markerColors.map(c => {
             const safeId = c.replace(/[^a-zA-Z0-9]/g, '')
             return (
-              <marker key={safeId} id={`arrow-${safeId}`} markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-                <polygon points="0 0.5, 7 3, 0 5.5" fill={c} opacity="0.8" />
+              <marker
+                key={safeId}
+                id={`arrow-${safeId}`}
+                markerWidth="14"
+                markerHeight="12"
+                refX="13"
+                refY="6"
+                orient="auto"
+                markerUnits="userSpaceOnUse"
+              >
+                <polygon points="0 0, 14 6, 0 12, 3 6" fill={c} stroke={c} strokeWidth="0.5" />
               </marker>
             )
           })}
@@ -601,6 +648,8 @@ export function LineageFlowOverlay({
           // Highlight on hover OR when connected to the selected node
           const isHighlighted = isHovered || isSourceHovered || isTargetHovered || (isHighlightActive && highlightedEdges?.has(edge.id))
           const { pathD, color, dynamicStrokeWidth, edgeOpacity, isGhost, isBundled, sx, sy, tx, ty } = edge
+          // Staged-change marker — colored halo around the edge if there's a pending change.
+          const stagedEdgeColor: string | undefined = stagedEdgeColorByEdgeId.get(edge.id)
 
           // When a node is selected, dim edges not connected to it to ~8%.
           // Connected edges stay full-strength with a brightness boost.
@@ -634,6 +683,22 @@ export function LineageFlowOverlay({
                 />
               )}
 
+              {/* STAGED-CHANGE HALO — visible whenever this edge has a pending change */}
+              {stagedEdgeColor && (
+                <path
+                  d={pathD}
+                  style={{
+                    stroke: stagedEdgeColor,
+                    strokeWidth: dynamicStrokeWidth + 4,
+                    fill: 'none',
+                    strokeOpacity: 0.55,
+                    strokeLinecap: 'round',
+                    strokeDasharray: '4 3',
+                  }}
+                  className="pointer-events-none"
+                />
+              )}
+
               {/* CORE LINE */}
               <path
                 d={pathD}
@@ -646,9 +711,46 @@ export function LineageFlowOverlay({
                   strokeLinecap: 'round',
                   transition: 'all 0.3s ease',
                 }}
-                markerEnd={!isGhost ? `url(#arrow-${color.replace(/[^a-zA-Z0-9]/g, '')})` : undefined}
+                markerEnd={showDirection ? `url(#arrow-${color.replace(/[^a-zA-Z0-9]/g, '')})` : undefined}
                 className="pointer-events-none"
               />
+
+              {/* DIRECTION FLOW — animated chevron flowing source → target.
+                  Renders for ALL edges (including ghost edges that represent
+                  fine-grained lineage delegated up to a visible ancestor —
+                  TRANSFORMS at column level rolled up to Dataset, etc.) so
+                  flow direction is unmistakable regardless of edge type. */}
+              {showDirection && (
+                <>
+                  {/* White underlay — gives the colored dashes contrast against any background */}
+                  <path
+                    d={pathD}
+                    style={{
+                      stroke: 'white',
+                      strokeWidth: Math.max(2.5, dynamicStrokeWidth * 1.2),
+                      fill: 'none',
+                      strokeOpacity: isGhost ? 0.10 : 0.18,
+                      strokeLinecap: 'round',
+                      strokeDasharray: '10 18',
+                      strokeDashoffset: 4,
+                    }}
+                    className="pointer-events-none edge-direction-flow"
+                  />
+                  {/* Foreground colored chevron — bright, opaque, marches forward */}
+                  <path
+                    d={pathD}
+                    style={{
+                      stroke: color,
+                      strokeWidth: Math.max(2, dynamicStrokeWidth * 1.05),
+                      fill: 'none',
+                      strokeOpacity: isGhost ? 0.7 : 0.95,
+                      strokeLinecap: 'round',
+                      strokeDasharray: '10 18',
+                    }}
+                    className="pointer-events-none edge-direction-flow"
+                  />
+                </>
+              )}
 
               {/* ANIMATED PARTICLES — only on hover/highlight, minimal */}
               {!isGhost && isHighlighted && (
@@ -768,69 +870,97 @@ export function LineageFlowOverlay({
         )
       })}
 
-      {/* ── 4.4 Edge Tooltip ───────────────────────────────────────────────────── */}
-      {(() => {
-        if (!hoveredEdgeId) return null
-        const edge = computedEdges.find(e => e.id === hoveredEdgeId)
-        if (!edge) return null
-        const midX = (edge.sx + edge.tx) / 2
-        const midY = (edge.sy + edge.ty) / 2
-        const typeLabel = edge.types.length > 0 ? edge.types.join(' · ') : 'RELATIONSHIP'
-        const confPct = edge.confidence > 0 ? Math.round(edge.confidence * 100) : null
-
-        // Flip tooltip left if too close to right edge
-        const tooltipX = midX + 14
-        const tooltipY = midY - 44
-
-        return (
-          <div
-            className="absolute pointer-events-none"
-            style={{ left: tooltipX, top: tooltipY, zIndex: 100 }}
-          >
-            <div
-              className="rounded-xl border border-white/[0.12] shadow-2xl shadow-black/60 px-3 py-2.5 min-w-[140px] max-w-[220px]"
-              style={{
-                background: 'rgba(15, 17, 23, 0.92)',
-                backdropFilter: 'blur(12px)',
-              }}
-            >
-              {/* type chip */}
-              <div className="flex items-center gap-2 mb-1.5">
-                <div className="w-3 h-0.5 rounded-full flex-shrink-0" style={{ backgroundColor: edge.color }} />
-                <span className="text-[11px] font-semibold tracking-wide" style={{ color: edge.color }}>
-                  {typeLabel}
-                </span>
-              </div>
-
-              {/* bundle count */}
-              {edge.edgeCount > 1 && (
-                <p className="text-[10px] text-white/60 leading-snug">
-                  {edge.edgeCount.toLocaleString()} relationships bundled
-                </p>
-              )}
-
-              {/* confidence */}
-              {confPct !== null && (
-                <div className="flex items-center gap-1.5 mt-1">
-                  <div className="flex-1 h-0.5 rounded-full bg-white/10 overflow-hidden">
-                    <div
-                      className="h-full rounded-full"
-                      style={{ width: `${confPct}%`, backgroundColor: edge.color, opacity: 0.7 }}
-                    />
-                  </div>
-                  <span className="text-[10px] text-white/50 tabular-nums flex-shrink-0">{confPct}%</span>
-                </div>
-              )}
-
-              {/* hint */}
-              <p className="text-[9px] text-white/30 mt-1.5 pt-1.5 border-t border-white/[0.06]">
-                Click to inspect
-              </p>
-            </div>
-          </div>
-        )
-      })()}
+      {/* Edge hover panel rendered via Portal — escapes the canvas's z-[5]
+          stacking context so it always sits above the column content (z-10)
+          and the EntityDrawer (z-50). See issue #2 fix. */}
     </div>
+    {hoveredEdgeId && hoverMousePos && (() => {
+      const edge = computedEdges.find(e => e.id === hoveredEdgeId)
+      if (!edge) return null
+      // Resolve source/target node display names via DOM — the elementCache
+      // already has the rendered node refs.
+      const sourceEl = document.getElementById(`layer-node-${edge.source}`)
+      const targetEl = document.getElementById(`layer-node-${edge.target}`)
+      const sourceName = sourceEl?.querySelector('.line-clamp-2')?.textContent?.trim() || edge.source
+      const targetName = targetEl?.querySelector('.line-clamp-2')?.textContent?.trim() || edge.target
+      const typeLabel = edge.types.length > 0 ? edge.types.join(' · ') : 'RELATIONSHIP'
+      const confPct = edge.confidence > 0 ? Math.round(edge.confidence * 100) : null
+
+      // Position above-right of the cursor; flip below if near top, left if near right edge.
+      const margin = 18
+      const panelW = 280
+      const panelH = 140
+      let left = hoverMousePos.x + margin
+      let top = hoverMousePos.y - panelH - margin
+      if (left + panelW > window.innerWidth - 8) left = hoverMousePos.x - panelW - margin
+      if (top < 8) top = hoverMousePos.y + margin
+
+      return createPortal(
+        <div
+          className="fixed pointer-events-none"
+          style={{ left, top, zIndex: 9999, width: panelW }}
+          role="tooltip"
+        >
+          <div
+            className="rounded-xl border shadow-2xl px-3.5 py-3"
+            style={{
+              background: 'rgba(15, 17, 23, 0.96)',
+              backdropFilter: 'blur(14px)',
+              borderColor: `${edge.color}55`,
+              boxShadow: `0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px ${edge.color}33`,
+            }}
+          >
+            {/* Type chip header */}
+            <div className="flex items-center gap-2 mb-2 pb-2 border-b border-white/[0.06]">
+              <span
+                className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase"
+                style={{ background: `${edge.color}22`, color: edge.color, border: `1px solid ${edge.color}44` }}
+              >
+                {typeLabel}
+              </span>
+              {edge.edgeCount > 1 && (
+                <span className="text-[10px] text-white/50 tabular-nums">
+                  ×{edge.edgeCount.toLocaleString()} bundled
+                </span>
+              )}
+            </div>
+
+            {/* Source → Target with arrow */}
+            <div className="flex items-center gap-2 text-[12px] leading-tight">
+              <div className="flex-1 min-w-0">
+                <p className="text-[9px] font-semibold uppercase tracking-wider text-white/40 mb-0.5">From</p>
+                <p className="text-white/90 truncate font-medium" title={sourceName}>{sourceName}</p>
+              </div>
+              <svg width="22" height="14" viewBox="0 0 22 14" className="flex-shrink-0">
+                <defs>
+                  <marker id="hover-arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+                    <polygon points="0 0, 5 3, 0 6" fill={edge.color} />
+                  </marker>
+                </defs>
+                <line x1="2" y1="7" x2="16" y2="7" stroke={edge.color} strokeWidth="1.5" markerEnd="url(#hover-arrow)" />
+              </svg>
+              <div className="flex-1 min-w-0">
+                <p className="text-[9px] font-semibold uppercase tracking-wider text-white/40 mb-0.5">To</p>
+                <p className="text-white/90 truncate font-medium" title={targetName}>{targetName}</p>
+              </div>
+            </div>
+
+            {confPct !== null && (
+              <div className="flex items-center gap-1.5 mt-2.5 pt-2 border-t border-white/[0.06]">
+                <span className="text-[9px] uppercase tracking-wider text-white/40">Confidence</span>
+                <div className="flex-1 h-1 rounded-full bg-white/10 overflow-hidden">
+                  <div className="h-full rounded-full" style={{ width: `${confPct}%`, backgroundColor: edge.color }} />
+                </div>
+                <span className="text-[10px] text-white/70 tabular-nums font-semibold">{confPct}%</span>
+              </div>
+            )}
+
+            <p className="text-[9px] text-white/30 mt-2 italic">Click to open details · Double-click to drill in</p>
+          </div>
+        </div>,
+        document.body,
+      )
+    })()}
 
     {/* ── HIT LAYER ─── z-20: above columns, transparent, only click/hover paths ── *
      *  Positioned identically to the visual layer but invisible. Sits above the    *
@@ -848,8 +978,17 @@ export function LineageFlowOverlay({
               strokeWidth={14}
               className="pointer-events-auto cursor-pointer"
               data-canvas-interactive
-              onMouseEnter={() => setHoveredEdgeId(edge.id)}
-              onMouseLeave={() => setHoveredEdgeId(null)}
+              onMouseEnter={(e) => {
+                setHoveredEdgeId(edge.id)
+                setHoverMousePos({ x: e.clientX, y: e.clientY })
+              }}
+              onMouseMove={(e) => {
+                setHoverMousePos({ x: e.clientX, y: e.clientY })
+              }}
+              onMouseLeave={() => {
+                setHoveredEdgeId(null)
+                setHoverMousePos(null)
+              }}
               onClick={(e) => {
                 e.stopPropagation()
                 selectEdge(edge.id)

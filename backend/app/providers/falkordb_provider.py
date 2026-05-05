@@ -2593,8 +2593,8 @@ class FalkorDBProvider(GraphDataProvider):
         # 2. Inherited-lineage fallback
         is_inherited = False
         inherited_from = None
-        if include_inherited_lineage and not await self._has_aggregated_at_level(anchor_urn, level):
-            parent = await self._find_ancestor_with_lineage(anchor_urn, level, ctypes)
+        if include_inherited_lineage and not await self._has_aggregated_at_level(anchor_urn, level, ltypes):
+            parent = await self._find_ancestor_with_lineage(anchor_urn, level, ctypes, ltypes)
             if parent and parent != anchor_urn:
                 inherited_from = anchor_urn
                 anchor_urn = parent
@@ -2649,13 +2649,18 @@ class FalkorDBProvider(GraphDataProvider):
                 for rec in recs:
                     edge_id = rec["edgeId"]
                     if edge_id not in edges_by_id:
+                        # Use the actual relationship type — AGGREGATED for
+                        # rolled-up lineage, or the raw lineage type
+                        # (TRANSFORMS, FLOWS_TO, …) when tracing at fine-
+                        # grained levels where lineage is not pre-aggregated.
+                        actual_type = rec.get("edgeType") or "AGGREGATED"
                         edges_by_id[edge_id] = GraphEdge(
                             id=edge_id,
                             sourceUrn=rec["sourceUrn"],
                             targetUrn=rec["targetUrn"],
-                            edgeType="AGGREGATED",
+                            edgeType=actual_type,
                             properties={
-                                "sourceEdgeTypes": rec.get("edgeTypes") or [],
+                                "sourceEdgeTypes": rec.get("edgeTypes") or [actual_type],
                                 "weight": rec.get("weight") or 1,
                             },
                         )
@@ -2857,29 +2862,50 @@ class FalkorDBProvider(GraphDataProvider):
             logger.warning("trace_at_level: anchor resolution failed for %s: %s", urn, exc)
         return urn
 
-    async def _has_aggregated_at_level(self, anchor_urn: str, level: int) -> bool:
+    async def _has_aggregated_at_level(
+        self, anchor_urn: str, level: int, ltypes: Optional[List[str]] = None,
+    ) -> bool:
+        """True iff the anchor has AT LEAST ONE lineage edge to a peer at
+        the given level. Counts both AGGREGATED rollups AND raw lineage edges
+        of any type listed in ``ltypes`` — without this, fine-grained focuses
+        whose lineage is expressed as TRANSFORMS / FLOWS_TO / etc. would be
+        misclassified as "no lineage", triggering the inherited-lineage
+        fallback to climb to a coarser ancestor.
+        """
         types = self._types_at_level(level)
         if not types:
             # If we can't tell which entity types belong to this level, assume
             # the focus has direct lineage so the inherited-lineage fallback
             # doesn't fire — that fallback only makes sense with type info.
             return True
+
+        # Build the relationship-type filter: AGGREGATED OR any raw lineage
+        # type the caller declared. We match any relationship and filter via
+        # type(r) so the same query covers both.
+        if ltypes:
+            ltype_clause = "AND (type(r) = 'AGGREGATED' OR type(r) IN $ltypes) "
+        else:
+            ltype_clause = "AND type(r) = 'AGGREGATED' "
+
         cypher = (
-            "MATCH (a {urn: $anchor})-[r:AGGREGATED]-(peer) "
+            "MATCH (a {urn: $anchor})-[r]-(peer) "
             "WHERE labels(peer)[0] IN $types "
-            "RETURN 1 LIMIT 1"
+            + ltype_clause
+            + "RETURN 1 LIMIT 1"
         )
+        params: Dict[str, Any] = {"anchor": anchor_urn, "types": types}
+        if ltypes:
+            params["ltypes"] = ltypes
         try:
-            result = await self._proj_ro_query(
-                cypher, params={"anchor": anchor_urn, "types": types},
-            )
+            result = await self._proj_ro_query(cypher, params=params)
             return bool(result.result_set)
         except Exception as exc:
-            logger.warning("trace_at_level: has-aggregated check failed for %s: %s", anchor_urn, exc)
+            logger.warning("trace_at_level: has-lineage check failed for %s: %s", anchor_urn, exc)
             return True  # fail-open: skip the inherited-lineage fallback
 
     async def _find_ancestor_with_lineage(
         self, anchor_urn: str, level: int, ctypes: List[str],
+        ltypes: Optional[List[str]] = None,
     ) -> Optional[str]:
         if not ctypes:
             return None
@@ -2899,7 +2925,7 @@ class FalkorDBProvider(GraphDataProvider):
             )
             for row in (result.result_set or []):
                 candidate = row[0]
-                if candidate and await self._has_aggregated_at_level(candidate, level):
+                if candidate and await self._has_aggregated_at_level(candidate, level, ltypes):
                     return candidate
         except Exception as exc:
             logger.warning("trace_at_level: find-ancestor-with-lineage failed for %s: %s", anchor_urn, exc)
@@ -2911,14 +2937,23 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> List[Dict[str, Any]]:
         """Per-hop expansion. Direction: 'incoming' (BFS upstream) or 'outgoing'
         (BFS downstream). Returns a list of dicts shaped for the BFS loop:
-        {sourceUrn, targetUrn, edgeId, edgeTypes, weight, node}.
+        {sourceUrn, targetUrn, edgeId, edgeType, edgeTypes, weight, node}.
+
+        Walks ANY lineage edge type listed in ``ltypes`` — not just the
+        materialized AGGREGATED rollup. Critical for fine-grained levels
+        (column / schemaField) where lineage is expressed as raw TRANSFORMS,
+        FLOWS_TO, or other ontology-classified edges that are never aggregated.
+
+        For AGGREGATED relationships we keep the original ``r.sourceEdgeTypes``
+        intersection check (so the user's edge-type filter still narrows the
+        rollup). For raw lineage relationships we just check ``type(r)`` is in
+        ``ltypes`` — the relationship type itself IS the edge classification.
 
         Filters by ``labels(other)[0] IN $types`` rather than ``other.level``
         so the trace works on every existing graph (labels are written at every
         upsert; ``n.level`` only after backfill_node_levels.py runs). When the
         ontology has no entity types at the requested level, the level filter
-        is dropped entirely and we follow all AGGREGATED edges from the frontier
-        — degrades to legacy behavior rather than returning empty.
+        is dropped entirely.
         """
         if not frontier or limit <= 0:
             return []
@@ -2929,31 +2964,50 @@ class FalkorDBProvider(GraphDataProvider):
         if types:
             other = "s" if direction == "incoming" else "t"
             type_filter = f"AND labels({other})[0] IN $types "
-        ltype_filter = "AND any(et IN r.sourceEdgeTypes WHERE et IN $ltypes) " if ltypes else ""
+
+        # Edge-type filter:
+        # - If ltypes provided, walk relationships whose type matches AGGREGATED
+        #   (with the sub-type intersection on r.sourceEdgeTypes) OR whose type
+        #   is one of the raw lineage types in ltypes.
+        # - If ltypes is empty, walk only AGGREGATED (legacy behavior).
+        if ltypes:
+            ltype_filter = (
+                "AND ("
+                "  (type(r) = 'AGGREGATED' AND r.sourceEdgeTypes IS NOT NULL "
+                "     AND any(et IN r.sourceEdgeTypes WHERE et IN $ltypes)) "
+                "  OR (type(r) IN $ltypes) "
+                ") "
+            )
+            rel_pattern = ""  # match any relationship type
+        else:
+            ltype_filter = ""
+            rel_pattern = ":AGGREGATED"  # legacy fallback
 
         if direction == "incoming":
             # Find sources flowing INTO frontier targets
             cypher = (
                 "UNWIND $frontier AS srcUrn "
-                "MATCH (s)-[r:AGGREGATED]->(t) "
+                f"MATCH (s)-[r{rel_pattern}]->(t) "
                 "WHERE t.urn = srcUrn "
                 + type_filter
                 + ltype_filter
                 + "RETURN s.urn AS sourceUrn, t.urn AS targetUrn, "
-                "id(r) AS edgeId, r.sourceEdgeTypes AS edgeTypes, "
-                "r.weight AS weight, s AS otherNode "
+                "id(r) AS edgeId, type(r) AS edgeType, "
+                "COALESCE(r.sourceEdgeTypes, [type(r)]) AS edgeTypes, "
+                "COALESCE(r.weight, 1) AS weight, s AS otherNode "
                 "LIMIT $limit"
             )
         else:
             cypher = (
                 "UNWIND $frontier AS srcUrn "
-                "MATCH (s)-[r:AGGREGATED]->(t) "
+                f"MATCH (s)-[r{rel_pattern}]->(t) "
                 "WHERE s.urn = srcUrn "
                 + type_filter
                 + ltype_filter
                 + "RETURN s.urn AS sourceUrn, t.urn AS targetUrn, "
-                "id(r) AS edgeId, r.sourceEdgeTypes AS edgeTypes, "
-                "r.weight AS weight, t AS otherNode "
+                "id(r) AS edgeId, type(r) AS edgeType, "
+                "COALESCE(r.sourceEdgeTypes, [type(r)]) AS edgeTypes, "
+                "COALESCE(r.weight, 1) AS weight, t AS otherNode "
                 "LIMIT $limit"
             )
 
@@ -2972,13 +3026,15 @@ class FalkorDBProvider(GraphDataProvider):
         out: List[Dict[str, Any]] = []
         for row in (result.result_set or []):
             try:
+                edge_type = str(row[3]) if row[3] is not None else "AGGREGATED"
                 rec = {
                     "sourceUrn": row[0],
                     "targetUrn": row[1],
-                    "edgeId": str(row[2]) if row[2] is not None else f"agg-{row[0]}-{row[1]}",
-                    "edgeTypes": row[3] if isinstance(row[3], list) else ([row[3]] if row[3] else []),
-                    "weight": int(row[4]) if row[4] is not None else 1,
-                    "node": self._extract_node_from_result([row[5]]) if row[5] is not None else None,
+                    "edgeId": str(row[2]) if row[2] is not None else f"{edge_type.lower()}-{row[0]}-{row[1]}",
+                    "edgeType": edge_type,
+                    "edgeTypes": row[4] if isinstance(row[4], list) else ([row[4]] if row[4] else [edge_type]),
+                    "weight": int(row[5]) if row[5] is not None else 1,
+                    "node": self._extract_node_from_result([row[6]]) if row[6] is not None else None,
                 }
                 out.append(rec)
             except Exception:
