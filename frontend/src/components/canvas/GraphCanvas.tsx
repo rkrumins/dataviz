@@ -686,9 +686,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         isTraced: trace.isInTrace(node.id),
         isDimmed:
           (trace.isTracing && !traceContextSet.has(node.id)) ||
-          (isHighlightActive &&
-            !mergedHighlightNodes.has(node.id) &&
-            !traceContextSet.has(node.id)),
+          (isHighlightActive && !mergedHighlightNodes.has(node.id)),
         isUpstream: trace.isUpstream(node.id),
         isDownstream: trace.isDownstream(node.id),
         isFocus: trace.isFocus(node.id),
