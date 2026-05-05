@@ -36,9 +36,9 @@ export interface ContextViewHeaderProps {
   /** Entity types from the active ontology, used to populate the granularity picker. */
   granularityOptions: GranularityOption[]
 
-  // Expand/collapse
-  onExpandAll: () => void
-  onCollapseAll: () => void
+  // Edge direction toggle
+  showEdgeDirection: boolean
+  onToggleEdgeDirection: () => void
 
   // Add entity
   onAddEntity: () => void
@@ -48,6 +48,16 @@ export interface ContextViewHeaderProps {
   activeContextModelName: string | null
   syncStatus: 'idle' | 'dirty' | 'saving' | 'synced' | 'error'
   onSave: () => void
+  /** Number of staged changes pending review/save — drives the badge + label. */
+  pendingChangeCount?: number
+  /** Optional click handler for the staged-changes badge (opens review panel). */
+  onOpenStagedChanges?: () => void
+
+  // Undo / Redo
+  canUndo?: boolean
+  canRedo?: boolean
+  onUndo?: () => void
+  onRedo?: () => void
 
   // Trace toolbar
   trace: UseUnifiedTraceResult
@@ -66,13 +76,19 @@ export function ContextViewHeader({
   lineageGranularity,
   onGranularityChange,
   granularityOptions,
-  onExpandAll,
-  onCollapseAll,
+  showEdgeDirection,
+  onToggleEdgeDirection,
   onAddEntity,
   activeWorkspaceId,
   activeContextModelName,
   syncStatus,
   onSave,
+  pendingChangeCount = 0,
+  onOpenStagedChanges,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
   trace,
   focusNodeName,
   lineageEdgeTypes,
@@ -163,7 +179,6 @@ export function ContextViewHeader({
                 className="px-3 py-2 rounded-xl text-xs font-medium bg-white/[0.04] border border-white/[0.08] text-ink cursor-pointer hover:bg-white/[0.08] focus:outline-none focus:border-accent-lineage/40 transition-all appearance-none pr-8 bg-no-repeat bg-right"
                 style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%239ca3af'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E")`, backgroundSize: '16px', backgroundPosition: 'right 8px center' }}
               >
-                <option value="">All levels (no aggregation)</option>
                 {[...granularityOptions]
                   .sort((a, b) => a.level - b.level)
                   .map(opt => (
@@ -175,6 +190,21 @@ export function ContextViewHeader({
           )}
         </AnimatePresence>
 
+        {/* Show Direction toggle — controls arrowheads + animated mid-edge chevron */}
+        <button
+          onClick={onToggleEdgeDirection}
+          title={showEdgeDirection ? 'Hide edge direction' : 'Show edge direction'}
+          className={cn(
+            "flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium transition-all duration-300",
+            showEdgeDirection
+              ? "bg-gradient-to-r from-cyan-500/20 to-cyan-500/10 text-cyan-300 border border-cyan-400/30 shadow-lg shadow-cyan-400/10"
+              : "bg-white/[0.04] border border-white/[0.08] text-ink-muted hover:bg-white/[0.08] hover:text-ink"
+          )}
+        >
+          <LucideIcons.MoveRight className="w-3.5 h-3.5" />
+          <span>{showEdgeDirection ? 'Direction On' : 'Direction Off'}</span>
+        </button>
+
         <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
 
         {/* Add Entity */}
@@ -185,25 +215,6 @@ export function ContextViewHeader({
           <LucideIcons.Plus className="w-4 h-4" />
           <span>Add Entity</span>
         </button>
-
-        {/* Expand / Collapse All */}
-        <div className="flex items-center gap-1 p-1 rounded-xl bg-white/[0.03] border border-white/[0.06]">
-          <button
-            onClick={onExpandAll}
-            className="p-1.5 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all"
-            title="Expand All"
-          >
-            <LucideIcons.ChevronsDownUp className="w-4 h-4 rotate-180" />
-          </button>
-          <div className="w-px h-4 bg-white/[0.08]" />
-          <button
-            onClick={onCollapseAll}
-            className="p-1.5 rounded-lg hover:bg-white/[0.08] text-ink-muted hover:text-ink transition-all"
-            title="Collapse All"
-          >
-            <LucideIcons.ChevronsDownUp className="w-4 h-4" />
-          </button>
-        </div>
 
         <div className="w-px h-6 bg-gradient-to-b from-transparent via-white/10 to-transparent" />
 
@@ -217,12 +228,67 @@ export function ContextViewHeader({
               </span>
             </div>
           )}
+          {/* Premium Undo / Redo cluster — segmented control, surfaces only when there's history. */}
+          {(canUndo || canRedo) && (
+            <div className="flex items-stretch rounded-xl overflow-hidden bg-gradient-to-b from-white/[0.06] to-white/[0.02] border border-white/[0.08] shadow-sm shadow-black/20">
+              <button
+                onClick={onUndo}
+                disabled={!canUndo}
+                title="Undo last change (⌘Z)"
+                aria-label="Undo"
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold tracking-tight transition-all",
+                  canUndo
+                    ? "text-ink/85 hover:bg-white/[0.06] hover:text-ink active:bg-white/[0.10]"
+                    : "text-ink-muted/25 cursor-not-allowed"
+                )}
+              >
+                <LucideIcons.Undo2 className="w-3.5 h-3.5" strokeWidth={2.4} />
+                <span>Undo</span>
+              </button>
+              <div className="w-px bg-white/[0.08]" />
+              <button
+                onClick={onRedo}
+                disabled={!canRedo}
+                title="Redo (⌘⇧Z)"
+                aria-label="Redo"
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold tracking-tight transition-all",
+                  canRedo
+                    ? "text-ink/85 hover:bg-white/[0.06] hover:text-ink active:bg-white/[0.10]"
+                    : "text-ink-muted/25 cursor-not-allowed"
+                )}
+              >
+                <span>Redo</span>
+                <LucideIcons.Redo2 className="w-3.5 h-3.5" strokeWidth={2.4} />
+              </button>
+            </div>
+          )}
+
+          {/* Pending-changes badge — premium pill that opens the review modal. */}
+          {pendingChangeCount > 0 && onOpenStagedChanges && (
+            <button
+              onClick={onOpenStagedChanges}
+              title="Review pending changes"
+              className="relative flex items-center gap-2 pl-2.5 pr-3 py-2 rounded-xl bg-gradient-to-br from-amber-300/25 via-amber-400/20 to-orange-500/15 border border-amber-300/50 text-amber-100 hover:from-amber-300/35 hover:to-orange-500/25 hover:border-amber-200/70 transition-all shadow-md shadow-amber-500/15 hover:shadow-lg hover:shadow-amber-500/25 hover:scale-[1.02] active:scale-[0.98]"
+            >
+              <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-300 opacity-75" />
+                <span className="relative inline-flex h-3 w-3 rounded-full bg-amber-300 ring-2 ring-canvas-elevated" />
+              </span>
+              <span className="flex items-center justify-center w-6 h-6 rounded-lg bg-amber-300/25 border border-amber-200/40">
+                <LucideIcons.ListChecks className="w-3.5 h-3.5 text-amber-100" strokeWidth={2.4} />
+              </span>
+              <span className="text-[12px] font-bold tabular-nums leading-none">{pendingChangeCount}</span>
+              <span className="text-[10.5px] uppercase tracking-[0.08em] font-bold leading-none">Pending</span>
+            </button>
+          )}
           <button
             onClick={onSave}
-            disabled={(syncStatus !== 'dirty' && syncStatus !== 'error') || !activeWorkspaceId}
+            disabled={(syncStatus !== 'dirty' && syncStatus !== 'error' && pendingChangeCount === 0) || !activeWorkspaceId}
             className={cn(
               "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
-              syncStatus === 'dirty'
+              (syncStatus === 'dirty' || pendingChangeCount > 0)
                 ? "bg-gradient-to-r from-blue-500/20 to-cyan-500/10 text-blue-400 border border-blue-500/30 hover:from-blue-500/30 hover:to-cyan-500/20 hover:shadow-lg hover:shadow-blue-500/20 hover:scale-[1.02] active:scale-[0.98]"
                 : syncStatus === 'error'
                   ? "bg-gradient-to-r from-red-500/20 to-red-500/10 text-red-400 border border-red-500/30"
@@ -230,6 +296,7 @@ export function ContextViewHeader({
             )}
             title={
               !activeWorkspaceId ? 'No workspace selected'
+                : pendingChangeCount > 0 ? `Apply ${pendingChangeCount} pending change${pendingChangeCount === 1 ? '' : 's'} and save`
                 : syncStatus === 'dirty' ? 'Save changes to backend'
                   : syncStatus === 'error' ? 'Save failed — click to retry'
                     : 'All changes saved'
@@ -239,17 +306,18 @@ export function ContextViewHeader({
               ? <LucideIcons.Loader2 className="w-4 h-4 animate-spin" />
               : syncStatus === 'error'
                 ? <LucideIcons.AlertCircle className="w-4 h-4" />
-                : syncStatus === 'synced'
+                : syncStatus === 'synced' && pendingChangeCount === 0
                   ? <LucideIcons.CheckCircle className="w-4 h-4" />
                   : <LucideIcons.Save className="w-4 h-4" />
             }
             <span>
               {syncStatus === 'saving' ? 'Saving...'
                 : syncStatus === 'error' ? 'Retry Save'
+                  : pendingChangeCount > 0 ? `Save ${pendingChangeCount} change${pendingChangeCount === 1 ? '' : 's'}`
                   : syncStatus === 'synced' ? 'Saved'
                     : 'Save Blueprint'}
             </span>
-            {syncStatus === 'dirty' && (
+            {(syncStatus === 'dirty' || pendingChangeCount > 0) && (
               <div className="w-2 h-2 rounded-full bg-blue-400 shadow-lg shadow-blue-400/50" />
             )}
           </button>

@@ -7,6 +7,7 @@ import type { HierarchyNode } from './types'
 import type { ViewLayerConfig } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
 import { generateIconFallback } from '@/lib/type-visuals'
+import { useStagedChangesStore, stagedChangeColor } from '@/store/stagedChangesStore'
 
 interface FlatTreeItemProps {
   node: HierarchyNode
@@ -64,6 +65,51 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const itemRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
   const isLogical = node.isLogical === true
+
+  // Staged-change indicator: a *direct* match wins, but if any descendant is
+  // staged the row also tints (lighter) so the user can spot pending work
+  // anywhere in the tree without expanding every container.
+  const directChange = useStagedChangesStore(s => {
+    const matches = s.changes.filter(c => c.targetId === node.id || c.targetUrn === node.urn)
+    return matches.length > 0 ? matches[matches.length - 1] : undefined
+  })
+  // Cascade detection — check if any descendant URN is staged.
+  const hasDescendantChange = useStagedChangesStore(s => {
+    if (directChange) return false
+    if (!node.children || node.children.length === 0) return false
+    const descendantIds = new Set<string>()
+    const collect = (n: HierarchyNode) => {
+      descendantIds.add(n.id)
+      if (n.urn) descendantIds.add(n.urn)
+      n.children?.forEach(collect)
+    }
+    node.children.forEach(collect)
+    return s.changes.some(c => descendantIds.has(c.targetId) || (c.targetUrn ? descendantIds.has(c.targetUrn) : false))
+  })
+
+  const stagedColor = directChange ? stagedChangeColor(directChange.type) : (hasDescendantChange ? 'cascade' : null)
+  const stagedSummary = directChange?.summary
+    ?? (hasDescendantChange ? 'Contains staged changes' : undefined)
+
+  // Strong, full-width background tint — the user wanted the ENTIRE row to
+  // glow in the change color so the canvas reads as a heatmap of pending edits.
+  // Direct changes get saturated tints; cascade indicates child changes with a
+  // muted left-bar treatment so it's spottable but not overpowering.
+  const stagedRowClass = (() => {
+    switch (stagedColor) {
+      case 'green':
+        return 'bg-gradient-to-r from-green-500/25 via-green-500/15 to-green-500/5 ring-2 ring-green-400/70 shadow-lg shadow-green-500/20'
+      case 'red':
+        return 'bg-gradient-to-r from-rose-500/30 via-rose-500/20 to-rose-500/8 ring-2 ring-rose-400/80 shadow-lg shadow-rose-500/25 opacity-90'
+      case 'amber':
+        return 'bg-gradient-to-r from-orange-500/25 via-orange-500/15 to-orange-500/5 ring-2 ring-orange-400/70 shadow-lg shadow-orange-500/20'
+      case 'cascade':
+        // Indicate that a descendant has a staged change with a soft amber edge stripe.
+        return 'border-l-[3px] border-l-amber-400/50'
+      default:
+        return ''
+    }
+  })()
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
   const nodeColor = visual?.color ?? layer.color
@@ -155,6 +201,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         isHoverHighlighted && !isSelected && !isClickHighlighted && "bg-gradient-to-r from-blue-500/[0.05] to-transparent ring-1 ring-blue-400/15 dark:from-blue-400/[0.06] dark:ring-blue-400/12",
         // Keyboard focus ring (4.5)
         isFocused && !isSelected && "ring-2 ring-accent-lineage/40 bg-gradient-to-r from-accent-lineage/[0.06] to-transparent",
+        // Staged-change row treatment — full-row color tint per change type
+        stagedRowClass,
         // Dimmed when not in trace path or not connected to highlighted node
         isDimmed && "opacity-40"
       )}
@@ -269,7 +317,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       {/* Entity Icon - Glass morphism container */}
       <div
         className={cn(
-          "rounded-xl flex items-center justify-center flex-shrink-0 transition-all duration-200 shadow-sm",
+          "rounded-xl flex items-center justify-center flex-shrink-0 transition-all duration-200 shadow-sm relative",
           iconContainerSize,
           isSelected && "scale-110 shadow-md",
           isHovered && "scale-105"
@@ -288,12 +336,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       </div>
 
       {/* Name - IMPROVED: Better visibility with tooltip */}
-      <div className="flex-1 min-w-0 flex flex-col justify-center" title={node.name}>
+      <div className="flex-1 min-w-0 flex flex-col justify-center" title={stagedSummary ?? node.name}>
         <span className={cn(
           "font-medium tracking-tight transition-colors duration-200",
           textClass,
           isHighlighted ? "text-accent-lineage" : isSelected ? "text-ink" : "text-ink/90",
           isHovered && !isSelected && "text-ink",
+          // Strikethrough for pending-delete makes the destruction intent unmissable
+          stagedColor === 'red' && "line-through decoration-rose-300/80 decoration-2",
           // Allow text to wrap to 2 lines for better readability
           "line-clamp-2"
         )}>

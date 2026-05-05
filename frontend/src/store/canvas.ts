@@ -19,6 +19,8 @@ export interface LineageNode extends Node {
     // Roll-up data
     _collapsedChildCount?: number
     _rollupData?: Record<string, unknown>
+    /** Pending change marker — drives the visual badge on the canvas. */
+    isPending?: 'create' | 'delete' | 'modify'
   }
 }
 

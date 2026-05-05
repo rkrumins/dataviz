@@ -20,6 +20,8 @@ import {
 } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { generateId } from '@/lib/utils'
 import type { EntityTypeSchema } from '@/types/schema'
 
 // Dynamic icon component
@@ -62,10 +64,13 @@ export function EntityCreationPanel({
     const nodes = useCanvasStore((s) => s.nodes)
     const addNodes = useCanvasStore((s) => s.addNodes)
     const addEdges = useCanvasStore((s) => s.addEdges)
+    const removeNode = useCanvasStore((s) => s.removeNode)
+    const removeEdge = useCanvasStore((s) => s.removeEdge)
     const provider = useGraphProvider()
     const containmentEdgeTypes = useContainmentEdgeTypes()
     const rootEntityTypes = useRootEntityTypes()
     const entityTypeHierarchy = useEntityTypeHierarchyMap()
+    const stageChange = useStagedChangesStore((s) => s.stage)
 
     // Form state
     const [formData, setFormData] = useState<FormData>({
@@ -203,24 +208,71 @@ export function EntityCreationPanel({
                 description: formData.description,
             }
 
-            // Call provider to create node
-            if (provider) {
-                const result = await provider.createNode({
-                    entityType: formData.entityType as any,
-                    displayName: formData.displayName,
-                    parentUrn: formData.parentUrn || undefined,
-                    properties,
-                    tags,
-                })
+            // STAGE the creation. The entity is added to the canvas immediately
+            // with isPending='create' so the user sees it; the actual backend
+            // call happens when they click Save.
+            const tempUrn = `urn:staged:${formData.entityType}:${generateId('new')}`
+            const containmentEdgeId = formData.parentUrn
+                ? `contains-${formData.parentUrn}-${tempUrn}`
+                : null
+            const containmentEdgeType = containmentEdgeTypes[0] ?? 'CONTAINS'
 
-                if (!result.success) {
-                    setError(result.error || 'Failed to create entity')
-                    return
-                }
+            addNodes([{
+                id: tempUrn,
+                type: 'generic',
+                position: { x: 0, y: 0 },
+                data: {
+                    label: formData.displayName,
+                    type: formData.entityType,
+                    urn: tempUrn,
+                    classifications: tags,
+                    isPending: 'create',
+                    metadata: properties,
+                },
+            }])
 
-                // Add to canvas store
-                if (result.node) {
-                    addNodes([{
+            if (containmentEdgeId && formData.parentUrn) {
+                addEdges([{
+                    id: containmentEdgeId,
+                    source: formData.parentUrn,
+                    target: tempUrn,
+                    type: 'containment',
+                    data: {
+                        edgeType: containmentEdgeType,
+                        relationship: containmentEdgeType.toLowerCase(),
+                    },
+                }])
+            }
+
+            const snapshot = { ...formData, tags, properties }
+
+            stageChange({
+                type: 'create_entity',
+                targetId: tempUrn,
+                targetUrn: tempUrn,
+                after: snapshot,
+                summary: `Create ${formData.entityType}: '${formData.displayName}'`,
+                apply: async ({ provider: p, registerTempIdResolution }) => {
+                    if (!p) {
+                        // No provider — accept the local-only creation by clearing the pending flag.
+                        useCanvasStore.getState().updateNode(tempUrn, { isPending: undefined })
+                        return
+                    }
+                    const result = await p.createNode({
+                        entityType: snapshot.entityType as any,
+                        displayName: snapshot.displayName,
+                        parentUrn: snapshot.parentUrn || undefined,
+                        properties: snapshot.properties,
+                        tags: snapshot.tags,
+                    })
+                    if (!result.success || !result.node) {
+                        throw new Error(result.error || 'Failed to create entity')
+                    }
+                    registerTempIdResolution(tempUrn, result.node.urn)
+                    // Replace temp node with backend-issued one (URN may differ).
+                    useCanvasStore.getState().removeNode(tempUrn)
+                    if (containmentEdgeId) useCanvasStore.getState().removeEdge(containmentEdgeId)
+                    useCanvasStore.getState().addNodes([{
                         id: result.node.urn,
                         type: 'generic',
                         position: { x: 0, y: 0 },
@@ -228,15 +280,12 @@ export function EntityCreationPanel({
                             label: result.node.displayName,
                             type: result.node.entityType,
                             urn: result.node.urn,
-                            description: result.node.description,
                             classifications: result.node.tags,
-                            ...result.node.properties,
+                            metadata: result.node.properties,
                         },
                     }])
-
-                    // Add containment edge if created
                     if (result.containmentEdge) {
-                        addEdges([{
+                        useCanvasStore.getState().addEdges([{
                             id: result.containmentEdge.id,
                             source: result.containmentEdge.sourceUrn,
                             target: result.containmentEdge.targetUrn,
@@ -247,74 +296,32 @@ export function EntityCreationPanel({
                             },
                         }])
                     }
+                },
+                discard: () => {
+                    if (containmentEdgeId) removeEdge(containmentEdgeId)
+                    removeNode(tempUrn)
+                },
+            })
 
-                    setSuccessMessage(`Created "${result.node.displayName}" successfully!`)
-                    onEntityCreated?.(result.node.urn, formData.parentUrn || undefined)
+            setSuccessMessage(`Staged: '${formData.displayName}' — click Save to commit`)
+            onEntityCreated?.(tempUrn, formData.parentUrn || undefined)
 
-                    // Reset for another creation
-                    setTimeout(() => {
-                        setFormData(prev => ({
-                            ...prev,
-                            displayName: '',
-                            description: '',
-                            tags: '',
-                            properties: {},
-                        }))
-                        setSuccessMessage(null)
-                    }, 1500)
-                }
-            } else {
-                // Fallback: Create locally without backend
-                const fakeUrn = `urn:local:${formData.entityType}:${Date.now()}`
-
-                addNodes([{
-                    id: fakeUrn,
-                    type: 'generic',
-                    position: { x: 0, y: 0 },
-                    data: {
-                        label: formData.displayName,
-                        type: formData.entityType,
-                        urn: fakeUrn,
-                        description: formData.description,
-                        classifications: tags,
-                        ...properties,
-                    },
-                }])
-
-                // Add containment edge if parent selected
-                if (formData.parentUrn) {
-                    addEdges([{
-                        id: `contains-${formData.parentUrn}-${fakeUrn}`,
-                        source: formData.parentUrn,
-                        target: fakeUrn,
-                        type: 'containment',
-                        data: {
-                            edgeType: containmentEdgeTypes[0] ?? 'edge',
-                            relationship: (containmentEdgeTypes[0] ?? 'edge').toLowerCase(),
-                        },
-                    }])
-                }
-
-                setSuccessMessage(`Created "${formData.displayName}" locally!`)
-                onEntityCreated?.(fakeUrn, formData.parentUrn || undefined)
-
-                setTimeout(() => {
-                    setFormData(prev => ({
-                        ...prev,
-                        displayName: '',
-                        description: '',
-                        tags: '',
-                        properties: {},
-                    }))
-                    setSuccessMessage(null)
-                }, 1500)
-            }
+            setTimeout(() => {
+                setFormData(prev => ({
+                    ...prev,
+                    displayName: '',
+                    description: '',
+                    tags: '',
+                    properties: {},
+                }))
+                setSuccessMessage(null)
+            }, 1500)
         } catch (err) {
             setError(err instanceof Error ? err.message : 'An error occurred')
         } finally {
             setIsSubmitting(false)
         }
-    }, [formData, provider, addNodes, addEdges, onEntityCreated])
+    }, [formData, provider, addNodes, addEdges, removeNode, removeEdge, containmentEdgeTypes, stageChange, onEntityCreated])
 
     if (!isOpen) return null
 

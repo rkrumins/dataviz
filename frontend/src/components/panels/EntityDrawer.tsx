@@ -16,6 +16,7 @@ import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { cn } from '@/lib/utils'
 
 // ============================================
@@ -120,16 +121,46 @@ export function EntityDrawer({
     }
   }, [])
 
-  // Save changes
+  // Save changes — staged, not committed to backend until user clicks Save Blueprint.
+  // Drawer edits primarily change the entity label, so we record a `rename_entity`
+  // staged change. Other field changes still update the canvas immediately for
+  // visual feedback, and the staging entry captures the full before/after diff
+  // so the review panel makes the change visible.
   const handleSave = useCallback(() => {
     if (!selectedNode) return
     if (jsonError) return
+
+    const previousData = { ...(selectedNode.data as Record<string, any>) }
+    const previousLabel = (previousData.label as string) ?? ''
+    const newLabel = (formData.label as string) ?? previousLabel
 
     updateNode(selectedNode.id, formData)
     setHasChanges(false)
     setShowSaved(true)
     setTimeout(() => setShowSaved(false), 2000)
     setRawJson(JSON.stringify(formData, null, 2))
+
+    // Stage the change so it becomes visible in the review panel + count badge.
+    // stageOrReplace coalesces consecutive edits to the same entity into one entry.
+    const isLabelChange = previousLabel !== newLabel
+    const stagedChanges = useStagedChangesStore.getState()
+    const summary = isLabelChange
+      ? `Edit '${previousLabel}' → '${newLabel}'`
+      : `Edit fields on '${previousLabel || selectedNode.id}'`
+    stagedChanges.stageOrReplace(
+      (c) => c.type === 'rename_entity' && c.targetId === selectedNode.id,
+      {
+        type: 'rename_entity',
+        targetId: selectedNode.id,
+        targetUrn: previousData.urn,
+        before: previousData,
+        after: { ...formData },
+        summary,
+        discard: () => {
+          useCanvasStore.getState().updateNode(selectedNode.id, previousData)
+        },
+      },
+    )
   }, [selectedNode, formData, jsonError, updateNode])
 
   // Cancel changes

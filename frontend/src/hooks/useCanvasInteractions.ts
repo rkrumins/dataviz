@@ -8,6 +8,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import type { ContextMenuTarget } from '@/components/canvas/CanvasContextMenu'
 
 // ============================================
@@ -144,16 +145,12 @@ export function useCanvasInteractions(
     const provider = useGraphProvider()
     const {
         nodes,
-        edges,
         selectedNodeIds,
         selectedEdgeIds,
         selectNode,
         clearSelection,
         addNodes,
-        addEdges,
         updateNode,
-        removeNode,
-        removeEdge,
     } = useCanvasStore()
     
     // State
@@ -213,9 +210,33 @@ export function useCanvasInteractions(
     }, [])
     
     const saveInlineEdit = useCallback((nodeId: string, newValue: string) => {
+        const node = useCanvasStore.getState().nodes.find(n => n.id === nodeId)
+        const previousLabel = (node?.data?.label as string) ?? ''
+        if (previousLabel === newValue) {
+            setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 } })
+            return
+        }
         updateNode(nodeId, { label: newValue })
         onInlineEditSave?.(nodeId, newValue)
         setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 } })
+
+        const stagedChanges = useStagedChangesStore.getState()
+        // Replace any existing rename for this node so the user's net rename
+        // shows up as a single entry, but preserve the original `before` value.
+        stagedChanges.stageOrReplace(
+            (c) => c.type === 'rename_entity' && c.targetId === nodeId,
+            {
+                type: 'rename_entity',
+                targetId: nodeId,
+                targetUrn: (node?.data?.urn as string) ?? nodeId,
+                before: { label: previousLabel },
+                after: { label: newValue },
+                summary: `Rename '${previousLabel}' → '${newValue}'`,
+                discard: () => {
+                    useCanvasStore.getState().updateNode(nodeId, { label: previousLabel })
+                },
+            },
+        )
     }, [updateNode, onInlineEditSave])
     
     const cancelInlineEdit = useCallback(() => {
@@ -284,9 +305,41 @@ export function useCanvasInteractions(
     }, [nodes, addNodes, selectNode, onNodeDuplicated])
     
     const deleteNode = useCallback((nodeId: string) => {
-        removeNode(nodeId)
+        const node = useCanvasStore.getState().nodes.find(n => n.id === nodeId)
+        if (!node) return
+
+        // If the node was itself staged-as-create, deleting it just discards the
+        // creation rather than staging a separate delete (otherwise apply tries
+        // to delete a never-created entity).
+        const stagedChanges = useStagedChangesStore.getState()
+        const createChange = stagedChanges.changes.find(
+            c => c.type === 'create_entity' && c.targetId === nodeId,
+        )
+        if (createChange) {
+            stagedChanges.discard(createChange.id)
+            onNodeDeleted?.(nodeId)
+            return
+        }
+
+        // Mark visually as pending-delete; actual removal happens on Save.
+        useCanvasStore.getState().updateNode(nodeId, { isPending: 'delete' })
+
+        stagedChanges.stage({
+            type: 'delete_entity',
+            targetId: nodeId,
+            targetUrn: (node.data?.urn as string) ?? nodeId,
+            before: { node: { ...node } },
+            after: null,
+            summary: `Delete '${node.data?.label ?? nodeId}'`,
+            apply: async () => {
+                useCanvasStore.getState().removeNode(nodeId)
+            },
+            discard: () => {
+                useCanvasStore.getState().updateNode(nodeId, { isPending: undefined })
+            },
+        })
         onNodeDeleted?.(nodeId)
-    }, [removeNode, onNodeDeleted])
+    }, [onNodeDeleted])
     
     const createChild = useCallback((parentId: string) => {
         const parentNode = nodes.find(n => n.id === parentId)
@@ -317,23 +370,62 @@ export function useCanvasInteractions(
     }, [])
     
     const deleteEdge = useCallback((edgeId: string) => {
-        removeEdge(edgeId)
-        onEdgeDeleted?.(edgeId)
-    }, [removeEdge, onEdgeDeleted])
-    
-    const reverseEdge = useCallback((edgeId: string) => {
-        const edge = edges.find(e => e.id === edgeId)
+        const edge = useCanvasStore.getState().edges.find(e => e.id === edgeId)
         if (!edge) return
-        
-        // Remove old edge and add reversed one
-        removeEdge(edgeId)
-        addEdges([{
+
+        const stagedChanges = useStagedChangesStore.getState()
+        // If the edge was staged-as-create, deleting just discards the create.
+        const createChange = stagedChanges.changes.find(
+            c => c.type === 'create_edge' && c.targetId === edgeId,
+        )
+        if (createChange) {
+            stagedChanges.discard(createChange.id)
+            onEdgeDeleted?.(edgeId)
+            return
+        }
+
+        const snapshot = { ...edge }
+        useCanvasStore.getState().removeEdge(edgeId)
+
+        stagedChanges.stage({
+            type: 'delete_edge',
+            targetId: edgeId,
+            before: { edge: snapshot },
+            after: null,
+            summary: `Delete edge ${edge.source} → ${edge.target}`,
+            discard: () => {
+                useCanvasStore.getState().addEdges([snapshot])
+            },
+        })
+        onEdgeDeleted?.(edgeId)
+    }, [onEdgeDeleted])
+
+    const reverseEdge = useCallback((edgeId: string) => {
+        const edge = useCanvasStore.getState().edges.find(e => e.id === edgeId)
+        if (!edge) return
+
+        const reversedId = `${edgeId}-reversed`
+        const reversed = {
             ...edge,
-            id: `${edgeId}-reversed`,
+            id: reversedId,
             source: edge.target,
             target: edge.source,
-        }])
-    }, [edges, removeEdge, addEdges])
+        }
+        useCanvasStore.getState().removeEdge(edgeId)
+        useCanvasStore.getState().addEdges([reversed])
+
+        useStagedChangesStore.getState().stage({
+            type: 'reverse_edge',
+            targetId: reversedId,
+            before: { edge: { ...edge } },
+            after: { edge: reversed },
+            summary: `Reverse edge ${edge.source} → ${edge.target}`,
+            discard: () => {
+                useCanvasStore.getState().removeEdge(reversedId)
+                useCanvasStore.getState().addEdges([{ ...edge }])
+            },
+        })
+    }, [])
     
     // ===================
     // Canvas Actions
@@ -344,16 +436,12 @@ export function useCanvasInteractions(
     }, [nodes, selectNode])
     
     const deleteSelected = useCallback(() => {
-        selectedNodeIds.forEach(id => {
-            removeNode(id)
-            onNodeDeleted?.(id)
-        })
-        selectedEdgeIds.forEach(id => {
-            removeEdge(id)
-            onEdgeDeleted?.(id)
-        })
+        // Route through the staged-delete helpers so keyboard Delete shows up
+        // in the staged-changes panel just like context-menu Delete does.
+        selectedNodeIds.forEach(id => deleteNode(id))
+        selectedEdgeIds.forEach(id => deleteEdge(id))
         clearSelection()
-    }, [selectedNodeIds, selectedEdgeIds, removeNode, removeEdge, clearSelection, onNodeDeleted, onEdgeDeleted])
+    }, [selectedNodeIds, selectedEdgeIds, deleteNode, deleteEdge, clearSelection])
     
     const duplicateSelected = useCallback(() => {
         selectedNodeIds.forEach(id => duplicateNode(id))
