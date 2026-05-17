@@ -1354,6 +1354,19 @@ class FalkorDBProvider(GraphDataProvider):
         q = NodeQuery(search_query=query, limit=limit, offset=offset)
         return await self.get_nodes(q)
 
+    async def deep_search(self, query, *, deadline_ms=None):
+        """Advanced server-side search. See ``backend/common/models/search.py``.
+
+        Implementation lives in ``falkordb_deep_search.execute_deep_search``
+        to keep this provider module focused. Imported lazily to avoid a
+        circular dependency at module load (the deep-search module
+        imports from this one's read-path helpers indirectly via
+        ``_extract_node_from_result`` and friends).
+        """
+        from .falkordb_deep_search import execute_deep_search
+        await self._ensure_connected()
+        return await execute_deep_search(self, query, deadline_ms=deadline_ms)
+
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
         await self._ensure_connected()
 

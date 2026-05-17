@@ -11,6 +11,7 @@ from ..models.graph import (
     ChildrenWithEdgesResult, TopLevelNodesResult,
     TraceResult,
 )
+from ..models.search import SearchQuery, SearchResultPage
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -80,6 +81,42 @@ class GraphDataProvider(ABC):
     @abstractmethod
     async def search_nodes(self, query: str, limit: int = 10) -> List[GraphNode]:
         pass
+
+    async def deep_search(
+        self,
+        query: SearchQuery,
+        *,
+        deadline_ms: Optional[int] = None,
+    ) -> SearchResultPage:
+        """Advanced server-side search with predicate-tree + aggregations.
+
+        Replaces the flat ``search_nodes`` for the new search experience.
+        Implementations push the predicate down as Cypher (or its analogue
+        for non-graph providers), respect the scope clamp, and roll matches
+        up to ancestors when ``query.options.aggregations`` is set. See
+        ``backend/common/models/search.py`` for the request/response shape
+        and the rationale for aggregation-first defaults.
+
+        Not yet abstract: providers ship native implementations one at a
+        time. Until a provider overrides this, callers get a clear
+        ``NotImplementedError`` instead of silent fallback to the legacy
+        ``search_nodes``. The service layer translates this to HTTP 501.
+
+        Parameters
+        ----------
+        query : SearchQuery
+            Validated, scope-intersected request.
+        deadline_ms : int, optional
+            Per-operation soft deadline. If the provider exceeds it,
+            return whatever partial rows it has with ``deadline_exceeded=
+            True`` and ``truncated=True``; do not raise. The service
+            layer relies on this to keep the UI responsive — exceptions
+            here become opaque 500s for the user.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no deep_search implementation. "
+            "Override this method or use the legacy search_nodes path."
+        )
 
     # ==========================================
     # Edge Operations

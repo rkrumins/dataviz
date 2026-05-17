@@ -22,6 +22,7 @@ from backend.app.models.graph import (
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
+from backend.common.models.search import SearchQuery
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.fair_share import get_fair_share
 from backend.app.services.graph_cache import (
@@ -520,6 +521,45 @@ async def search_nodes(
     engine: ContextEngine = Depends(get_context_engine),
 ):
     return await engine.search_nodes(query, limit=limit, offset=offset)
+
+
+@router.post(
+    "/search/advanced",
+    response_model_by_alias=True,
+)
+async def search_advanced(
+    query: SearchQuery,
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Advanced server-side search.
+
+    Replaces the legacy ``POST /search`` with a structured predicate-tree
+    request. Default response shape is per-ancestor *aggregates* (the
+    'orient before drill' UX) — set ``options.results`` to ``'hits'`` or
+    ``'both'`` for the flat list.
+
+    See ``backend/common/models/search.py`` for the full contract and
+    ``docs/api/advanced-search.md`` (to be written) for the AI-agent
+    iterative-drill pattern.
+    """
+    # Lazy imports keep this route free of overhead when feature isn't used.
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    svc = AdvancedSearchService(engine)
+    try:
+        return await svc.search(query)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                f"deep_search not implemented on the active provider "
+                f"({type(engine.provider).__name__}). Only FalkorDB is "
+                f"supported in this workstream."
+            ),
+        ) from exc
 
 
 @router.get("/edges", response_model=List[GraphEdge], response_model_by_alias=True,
