@@ -41,11 +41,125 @@ def _sanitize_label(s: str) -> str:
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
 
 
+# Reserved node-key set — fields the provider writes directly onto a FalkorDB
+# node. User-supplied `properties` keys that collide with these names are
+# dropped at write time so provider state stays authoritative. Used by both
+# the write-side split helper and the read-side reconstruction of the user
+# `properties` dict (everything NOT in this set is a user property).
+#
+# `properties` is included because nodes upserted before the native-property
+# refactor still carry the legacy JSON blob; the read path parses it as a
+# transitional fallback, and the write path strips it on next write.
+# `propertiesRaw` is the post-refactor escape hatch — a JSON-stringified
+# dict of values that couldn't be written natively (nested objects, lists
+# of dicts, etc.).
+_RESERVED_NODE_KEYS: frozenset = frozenset({
+    "urn", "entityType", "displayName", "qualifiedName", "description",
+    "tags", "layerAssignment", "childCount", "sourceSystem", "lastSyncedAt",
+    "level", "levelDigest",
+    "properties",      # legacy blob — read transitionally, never written
+    "propertiesRaw",   # native escape hatch for non-scalar property values
+})
+
+
+def _split_user_properties(
+    props: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], str]:
+    """Split a user-supplied `properties` dict into (native_scalar, residual_json).
+
+    Returns
+    -------
+    native_scalar : dict
+        Keys whose values are FalkorDB-native (scalars or flat lists of
+        scalars). Suitable for `SET n += $native_scalar` — each key becomes
+        a real node property and is therefore indexable and Cypher-queryable.
+    residual_json : str
+        JSON-stringified dict of values that couldn't be written natively
+        (nested dicts, lists of dicts, anything heterogenous). Always a
+        string — empty dict serialises to "{}" so the SET clause always
+        has a value and we don't need a separate REMOVE round-trip when
+        the residual becomes empty on an upsert.
+
+    Keys that collide with `_RESERVED_NODE_KEYS` are dropped with a warning
+    so user data can't shadow provider-owned fields like `urn` or `level`.
+    `None` values are skipped (writing null would shadow an existing value).
+    """
+    native: Dict[str, Any] = {}
+    residual: Dict[str, Any] = {}
+    collided: List[str] = []
+    for k, v in (props or {}).items():
+        if v is None:
+            continue
+        if k in _RESERVED_NODE_KEYS:
+            collided.append(k)
+            continue
+        if isinstance(v, bool) or isinstance(v, (str, int, float)):
+            native[k] = v
+        elif isinstance(v, list) and all(
+            isinstance(x, (str, int, float, bool)) for x in v
+        ):
+            native[k] = v
+        else:
+            residual[k] = v
+    if collided:
+        logger.warning(
+            "user-property keys collided with reserved node keys, dropping: %s",
+            collided,
+        )
+    return native, json.dumps(residual)
+
+
 def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = None) -> Optional[GraphNode]:
-    """Build GraphNode from FalkorDB node properties."""
+    """Build GraphNode from FalkorDB node properties.
+
+    Reconstructs the user `properties` dict from three layers, in increasing
+    priority (later wins):
+
+      1. Legacy JSON blob in `props['properties']` — pre-refactor nodes.
+         Parsed and merged first; stripped on next write.
+      2. Non-reserved native keys on the node — written by the post-refactor
+         ingest path. These are the source of truth for any node that has
+         been touched since the refactor.
+      3. JSON-stringified residual in `props['propertiesRaw']` — non-scalar
+         values that couldn't be written natively. Layered on top of native
+         because residual keys are disjoint from native keys by construction
+         (the write-side split assigns each user key to exactly one bucket).
+
+    Nodes mid-migration (legacy blob present AND some native writes since)
+    end up with native winning over blob, which is correct because native
+    was written more recently.
+    """
     if not props or "urn" not in props:
         return None
     entity_type = entity_type_str or props.get("entityType", "unknown")
+
+    user_props: Dict[str, Any] = {}
+
+    legacy_blob = props.get("properties")
+    if isinstance(legacy_blob, str) and legacy_blob:
+        try:
+            blob_dict = json.loads(legacy_blob)
+            if isinstance(blob_dict, dict):
+                user_props.update(blob_dict)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    elif isinstance(legacy_blob, dict):
+        user_props.update(legacy_blob)
+
+    for k, v in props.items():
+        if k in _RESERVED_NODE_KEYS:
+            continue
+        user_props[k] = v
+
+    residual_blob = props.get("propertiesRaw")
+    if isinstance(residual_blob, str) and residual_blob:
+        try:
+            residual_dict = json.loads(residual_blob)
+            if isinstance(residual_dict, dict):
+                user_props.update(residual_dict)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     try:
         return GraphNode(
             urn=props["urn"],
@@ -53,7 +167,7 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
             displayName=props.get("displayName", ""),
             qualifiedName=props.get("qualifiedName"),
             description=props.get("description"),
-            properties=json.loads(props["properties"]) if isinstance(props.get("properties"), str) else (props.get("properties") or {}),
+            properties=user_props,
             tags=json.loads(props["tags"]) if isinstance(props.get("tags"), str) else (props.get("tags") or []),
             layerAssignment=props.get("layerAssignment"),
             childCount=props.get("childCount"),
@@ -6133,12 +6247,14 @@ class FalkorDBProvider(GraphDataProvider):
         nodes_by_label: Dict[str, list] = defaultdict(list)
         for node in nodes:
             label = _sanitize_label(str(node.entity_type))
+            native_props, residual_blob = _split_user_properties(node.properties)
             nodes_by_label[label].append({
                 "urn": node.urn,
                 "displayName": node.display_name or "",
                 "qualifiedName": node.qualified_name or "",
                 "description": node.description or "",
-                "properties": json.dumps(node.properties),
+                "nativeProps": native_props,
+                "propertiesRaw": residual_blob,
                 "tags": json.dumps(node.tags or []),
                 "layerAssignment": node.layer_assignment or "",
                 "childCount": node.child_count or 0,
@@ -6155,23 +6271,37 @@ class FalkorDBProvider(GraphDataProvider):
             for i in range(0, len(items), batch_size):
                 batch = items[i : i + batch_size]
                 try:
-                    # Note: SET n.level is conditional via COALESCE — if the engine
-                    # hasn't injected the entity-type→level map (e.g. seed-from-file
-                    # before ontology resolution), level is null and we leave the
-                    # existing value untouched. Backfill script handles those nodes.
+                    # Notes on the SET / REMOVE shape:
+                    # - `n += item.nativeProps` merges user-supplied scalar
+                    #   properties as real node fields. Merge semantics —
+                    #   keys that disappear across upserts are NOT removed
+                    #   (delete via an explicit op if needed). This matches
+                    #   how every other reserved field is upserted here.
+                    # - `n.propertiesRaw` always written (always a string,
+                    #   "{}" when empty) so we don't need a separate REMOVE
+                    #   round-trip when the residual goes empty.
+                    # - `REMOVE n.properties` strips the legacy blob on
+                    #   every write so the read-path transitional code
+                    #   becomes dead weight as soon as a node is touched.
+                    # - `n.level = coalesce(item.level, n.level)` keeps the
+                    #   pre-refactor semantics: if the engine hasn't
+                    #   injected the entity-type→level map yet (seed-from-
+                    #   file before ontology resolution), level stays as-is.
                     await self._query(
                         f"UNWIND $batch AS item "
                         f"MERGE (n:{label} {{urn: item.urn}}) "
                         f"SET n.displayName = item.displayName, "
                         f"n.qualifiedName = item.qualifiedName, "
                         f"n.description = item.description, "
-                        f"n.properties = item.properties, "
                         f"n.tags = item.tags, "
                         f"n.layerAssignment = item.layerAssignment, "
                         f"n.childCount = item.childCount, "
                         f"n.sourceSystem = item.sourceSystem, "
                         f"n.lastSyncedAt = item.lastSyncedAt, "
-                        f"n.level = coalesce(item.level, n.level)",
+                        f"n.propertiesRaw = item.propertiesRaw, "
+                        f"n.level = coalesce(item.level, n.level), "
+                        f"n += item.nativeProps "
+                        f"REMOVE n.properties",
                         params={"batch": batch},
                     )
                 except Exception as e:
@@ -6212,26 +6342,35 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         try:
             label = _sanitize_label(str(node.entity_type))
-            params = {
-                "urn": node.urn,
+            native_props, residual_blob = _split_user_properties(node.properties)
+            # Reserved fields go into the merge map alongside native user
+            # props — `SET n += $p` writes them all in one pass. The native
+            # user props sit at the top level of the map (they ARE the new
+            # node fields); the legacy blob is stripped via REMOVE.
+            params: Dict[str, Any] = {
                 "displayName": node.display_name or "",
                 "qualifiedName": node.qualified_name or "",
                 "description": node.description or "",
-                "properties": json.dumps(node.properties),
+                "propertiesRaw": residual_blob,
                 "tags": json.dumps(node.tags or []),
                 "layerAssignment": node.layer_assignment or "",
-                "childCount": node.child_count,
                 "sourceSystem": node.source_system or "",
                 "lastSyncedAt": node.last_synced_at or "",
             }
+            if node.child_count is not None:
+                params["childCount"] = node.child_count
             # Only include level when the engine has injected the mapping;
             # otherwise omit the key so SET n += $p doesn't overwrite an
             # existing level with null.
             level = self._get_node_level(node.entity_type)
             if level is not None:
                 params["level"] = level
+            # Merge native user props on top — they become real node
+            # fields. Reserved-key collisions were already dropped by
+            # _split_user_properties so this is safe.
+            params.update(native_props)
             await self._query(
-                f"MERGE (n:{label} {{urn: $urn}}) SET n += $p",
+                f"MERGE (n:{label} {{urn: $urn}}) SET n += $p REMOVE n.properties",
                 params={"urn": node.urn, "p": params},
             )
             await self._cache_urn_label(node.urn, label)
