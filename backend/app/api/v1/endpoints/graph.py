@@ -562,6 +562,64 @@ async def search_advanced(
         ) from exc
 
 
+@router.post("/search/explain")
+async def search_explain(
+    query: SearchQuery,
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Compile a SearchQuery without executing it.
+
+    Returns the generated Cypher + bound parameters that
+    ``search_advanced`` would run against the active provider, plus
+    diagnostic notes (e.g. "scope intersection is empty",
+    "containment edge types not configured"). Powers the dev panel's
+    "Show Cypher" button and is the first stop for diagnosing
+    queries that silently return 0 results.
+
+    Side-effect-free; safe to call repeatedly without rate-limit
+    concerns.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    svc = AdvancedSearchService(engine)
+    try:
+        return svc.explain(query)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/search/discover")
+async def search_discover(
+    samplePerLabel: int = Query(
+        200, ge=1, le=2000,
+        description="How many nodes to sample per label before "
+                    "collecting their distinct native property keys.",
+    ),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Discover what native node properties exist in the active graph.
+
+    Samples nodes per entity-type label and returns the set of native
+    property keys present on them — the diagnostic counterpart to
+    ``search_advanced``'s predicate compiler. Answers "what can I
+    actually query?", which is the most common cause of property
+    predicates returning 0 results (the user picks a key that doesn't
+    exist on natively-stored nodes).
+
+    A label with sampled > 0 nodes but zero user-keys appears in
+    ``blobOnlyLabels`` — strong signal that those nodes are still on
+    pre-W1 blob storage and need the migration script
+    (``python -m backend.scripts.migrate_native_properties``) to be
+    queryable by property.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    svc = AdvancedSearchService(engine)
+    return await svc.discover(sample_per_label=samplePerLabel)
+
+
 @router.get("/edges", response_model=List[GraphEdge], response_model_by_alias=True,
              deprecated=True)
 async def get_edges(

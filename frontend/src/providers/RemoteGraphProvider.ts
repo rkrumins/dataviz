@@ -31,7 +31,12 @@ import type {
     TopLevelNodesResult,
 } from './GraphDataProvider'
 import type { TraceMeta } from '@/services/traceApi'
-import type { SearchQuery, SearchResultPage } from '@/types/search'
+import type {
+    SearchQuery,
+    SearchResultPage,
+    SearchExplainResult,
+    SearchDiscoverResult,
+} from '@/types/search'
 
 // Wire shape from POST /trace/v2 — `upstreamUrns`/`downstreamUrns` arrive as
 // JSON arrays (Pydantic serializes Set as list); we re-hydrate to Set on read.
@@ -292,6 +297,39 @@ export class RemoteGraphProvider implements GraphDataProvider {
             method: 'POST',
             body: JSON.stringify(query),
         })
+    }
+
+    /**
+     * Compile a SearchQuery without executing it.
+     *
+     * Returns the Cypher + params that `searchAdvanced` would run,
+     * plus diagnostic notes. Powers the dev panel's "Show Cypher"
+     * button and is the first stop when a query silently returns 0
+     * results.
+     */
+    async searchExplain(query: SearchQuery): Promise<SearchExplainResult> {
+        return await this.fetch<SearchExplainResult>('/search/explain', {
+            method: 'POST',
+            body: JSON.stringify(query),
+        })
+    }
+
+    /**
+     * Discover what native node properties exist in the active graph.
+     *
+     * Per-label sample (cap = sample_per_label) of distinct native
+     * property keys, plus a `blobOnlyLabels` list flagging labels
+     * whose nodes are still on pre-W1 blob storage. Answers "what
+     * can I actually query?" — the most common cause of property
+     * predicates returning 0 results.
+     */
+    async discoverSearchableProperties(
+        samplePerLabel = 200,
+    ): Promise<SearchDiscoverResult> {
+        return await this.fetch<SearchDiscoverResult>(
+            '/search/discover',
+            { extraParams: { samplePerLabel: String(samplePerLabel) } },
+        )
     }
 
     // ==========================================

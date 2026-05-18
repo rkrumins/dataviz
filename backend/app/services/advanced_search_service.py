@@ -121,3 +121,33 @@ class AdvancedSearchService:
             # Ontology hasn't been configured for this workspace. The
             # existing graph endpoints translate this to 400.
             raise ValidationError(str(exc)) from exc
+
+    def explain(self, query: SearchQuery):
+        """Compile-only path. Returns the generated Cypher + bound params
+        without executing — powers the dev panel's "Show Cypher" button
+        and the `/search/explain` endpoint.
+
+        Same validation as `search` (so the FE sees identical errors for
+        identical inputs), but never hits the provider's query channel.
+        """
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        _count_and_validate(query)
+        try:
+            return explain_deep_search(self._engine.provider, query)
+        except CompileError as exc:
+            raise ValidationError(str(exc)) from exc
+
+    async def discover(self, *, sample_per_label: int = 200):
+        """Returns the distinct native property keys present on the
+        graph, per entity-type label. Diagnostic counterpart to the
+        predicate compiler — answers "what can I actually query?".
+        """
+        from backend.app.providers.falkordb_deep_search import (
+            discover_native_property_keys,
+        )
+        return await discover_native_property_keys(
+            self._engine.provider,
+            sample_per_label=sample_per_label,
+        )

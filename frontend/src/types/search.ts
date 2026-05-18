@@ -228,3 +228,47 @@ export interface SearchResultPage {
     cacheHit: boolean
     queryExplain?: QueryExplain | null
 }
+
+// ---------------------------------------------------------------------------
+// Explain / Discover — diagnostic surfaces
+// ---------------------------------------------------------------------------
+
+/** Response from POST /search/explain — compile-only diagnostic. */
+export interface SearchExplainResult {
+    /** Candidate-selection Cypher (ends with `WITH n`). */
+    cypher: string
+    /** Same as `cypher` plus `RETURN n` — what a hits query actually runs. */
+    hits_cypher: string
+    /** Bound parameters that would be sent. */
+    params: Record<string, unknown>
+    /** Hard cap on the candidate set the provider walks. */
+    candidate_cap: number
+    /** URN sets hoisted out of top-level DescendantOf predicates. */
+    hoisted_root_urns: string[][]
+    /** Final root URNs after intersecting scope + hoisted (null = no scope). */
+    effective_root_urns: string[] | null
+    /** Human-readable diagnostic hints (e.g. "scope dropped — no containment configured"). */
+    notes: string[]
+}
+
+/** One entry in SearchDiscoverResult.labels. */
+export interface SearchDiscoverLabel {
+    /** Distinct native property keys present on sampled nodes of this label. */
+    keys: string[]
+    /** How many nodes were sampled for this label. */
+    sampled: number
+}
+
+/** Response from GET /search/discover — what's actually queryable in the graph. */
+export interface SearchDiscoverResult {
+    labels: Record<string, SearchDiscoverLabel>
+    /**
+     * Labels where the sampler found nodes but zero user-property keys.
+     * Strong signal those nodes are still pre-W1 blob-storage and need
+     * `python -m backend.scripts.migrate_native_properties`.
+     */
+    blobOnlyLabels: string[]
+    /** Provider has no containment edge types configured. */
+    missingContainment: boolean
+    elapsedMs: number
+}

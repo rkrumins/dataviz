@@ -21,7 +21,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
-import type { SearchQuery, SearchResultPage } from '@/types/search'
+import type {
+    SearchQuery,
+    SearchResultPage,
+    SearchExplainResult,
+    SearchDiscoverResult,
+} from '@/types/search'
 
 /**
  * Pre-canned query shapes — clickable from the panel's preset dropdown.
@@ -130,9 +135,11 @@ function isDevSearchEnabled(): boolean {
 
 type RunState =
     | { status: 'idle' }
-    | { status: 'running'; startedAt: number }
+    | { status: 'running'; startedAt: number; action: 'run' | 'explain' | 'discover' }
     | { status: 'ok'; result: SearchResultPage; elapsedMs: number }
-    | { status: 'error'; message: string; elapsedMs: number }
+    | { status: 'explainOk'; result: SearchExplainResult; elapsedMs: number }
+    | { status: 'discoverOk'; result: SearchDiscoverResult; elapsedMs: number }
+    | { status: 'error'; message: string; elapsedMs: number; action: 'run' | 'explain' | 'discover' }
 
 export function AdvancedSearchDevPanel() {
     // Re-evaluate on mount + on popstate (back/forward); browsers don't
@@ -168,56 +175,123 @@ function DevPanelInner() {
         [provider],
     )
 
-    const run = useCallback(async () => {
-        // Validate JSON synchronously so the user sees a parse error
-        // before we burn a round-trip.
-        let parsed: SearchQuery
+    /** Parse the textarea as a SearchQuery; centralises the error
+     * shape so the three action buttons (run / explain) share it. */
+    const parseBody = useCallback((): SearchQuery | { error: string } => {
         try {
-            parsed = JSON.parse(bodyText) as SearchQuery
+            return JSON.parse(bodyText) as SearchQuery
         } catch (e) {
+            return { error: `JSON parse error: ${(e as Error).message}` }
+        }
+    }, [bodyText])
+
+    const beginAction = useCallback(
+        (action: 'run' | 'explain' | 'discover'): AbortController | null => {
+            if (!canRunHere) {
+                setRunState({
+                    status: 'error',
+                    action,
+                    message:
+                        'Active provider is not RemoteGraphProvider; the dev ' +
+                        'panel only works against the live backend.',
+                    elapsedMs: 0,
+                })
+                return null
+            }
+            abortRef.current?.abort()
+            const controller = new AbortController()
+            abortRef.current = controller
+            setRunState({ status: 'running', startedAt: performance.now(), action })
+            return controller
+        },
+        [canRunHere],
+    )
+
+    const run = useCallback(async () => {
+        const parsed = parseBody()
+        if ('error' in parsed) {
             setRunState({
-                status: 'error',
-                message: `JSON parse error: ${(e as Error).message}`,
-                elapsedMs: 0,
+                status: 'error', action: 'run',
+                message: parsed.error, elapsedMs: 0,
             })
             return
         }
-        if (!canRunHere) {
-            setRunState({
-                status: 'error',
-                message:
-                    'Active provider is not RemoteGraphProvider; the dev ' +
-                    'panel only works against the live backend.',
-                elapsedMs: 0,
-            })
-            return
-        }
-
-        // Cancel any in-flight prior request.
-        abortRef.current?.abort()
-        const controller = new AbortController()
-        abortRef.current = controller
-
+        const controller = beginAction('run')
+        if (!controller) return
         const startedAt = performance.now()
-        setRunState({ status: 'running', startedAt })
-
         try {
             const result = await (provider as RemoteGraphProvider).searchAdvanced(parsed)
             if (controller.signal.aborted) return
             setRunState({
-                status: 'ok',
-                result,
+                status: 'ok', result,
                 elapsedMs: Math.round(performance.now() - startedAt),
             })
         } catch (e) {
             if (controller.signal.aborted) return
             setRunState({
-                status: 'error',
+                status: 'error', action: 'run',
                 message: (e as Error).message,
                 elapsedMs: Math.round(performance.now() - startedAt),
             })
         }
-    }, [bodyText, provider, canRunHere])
+    }, [parseBody, beginAction, provider])
+
+    /** Calls /search/explain — compile-only, no FalkorDB round-trip.
+     * Surfaces the generated Cypher so the user can see exactly what's
+     * being asked. First stop for diagnosing 0-result queries. */
+    const explain = useCallback(async () => {
+        const parsed = parseBody()
+        if ('error' in parsed) {
+            setRunState({
+                status: 'error', action: 'explain',
+                message: parsed.error, elapsedMs: 0,
+            })
+            return
+        }
+        const controller = beginAction('explain')
+        if (!controller) return
+        const startedAt = performance.now()
+        try {
+            const result = await (provider as RemoteGraphProvider).searchExplain(parsed)
+            if (controller.signal.aborted) return
+            setRunState({
+                status: 'explainOk', result,
+                elapsedMs: Math.round(performance.now() - startedAt),
+            })
+        } catch (e) {
+            if (controller.signal.aborted) return
+            setRunState({
+                status: 'error', action: 'explain',
+                message: (e as Error).message,
+                elapsedMs: Math.round(performance.now() - startedAt),
+            })
+        }
+    }, [parseBody, beginAction, provider])
+
+    /** Calls /search/discover — samples each entity-type label and
+     * reports which native property keys are present. Answers
+     * "what can I actually query?". */
+    const discover = useCallback(async () => {
+        const controller = beginAction('discover')
+        if (!controller) return
+        const startedAt = performance.now()
+        try {
+            const result = await (provider as RemoteGraphProvider)
+                .discoverSearchableProperties(200)
+            if (controller.signal.aborted) return
+            setRunState({
+                status: 'discoverOk', result,
+                elapsedMs: Math.round(performance.now() - startedAt),
+            })
+        } catch (e) {
+            if (controller.signal.aborted) return
+            setRunState({
+                status: 'error', action: 'discover',
+                message: (e as Error).message,
+                elapsedMs: Math.round(performance.now() - startedAt),
+            })
+        }
+    }, [beginAction, provider])
 
     // Stop the inflight request if the panel unmounts.
     useEffect(() => () => abortRef.current?.abort(), [])
@@ -323,7 +397,54 @@ function DevPanelInner() {
                                     fontFamily: 'inherit',
                                 }}
                             >
-                                {runState.status === 'running' ? 'Running…' : 'Run (⌘↵)'}
+                                {runState.status === 'running' &&
+                                runState.action === 'run'
+                                    ? 'Running…'
+                                    : 'Run (⌘↵)'}
+                            </button>
+                            <button
+                                onClick={() => void explain()}
+                                disabled={runState.status === 'running'}
+                                title="Compile this SearchQuery to Cypher without running it (POST /search/explain)"
+                                style={{
+                                    background: 'transparent',
+                                    color: '#9bd',
+                                    border: '1px solid #3a3f4a',
+                                    padding: '4px 10px',
+                                    borderRadius: 4,
+                                    cursor:
+                                        runState.status === 'running'
+                                            ? 'not-allowed'
+                                            : 'pointer',
+                                    fontFamily: 'inherit',
+                                }}
+                            >
+                                {runState.status === 'running' &&
+                                runState.action === 'explain'
+                                    ? 'Explaining…'
+                                    : 'Show Cypher'}
+                            </button>
+                            <button
+                                onClick={() => void discover()}
+                                disabled={runState.status === 'running'}
+                                title="Sample the graph and report what native properties exist per entity-type label (GET /search/discover)"
+                                style={{
+                                    background: 'transparent',
+                                    color: '#9bd',
+                                    border: '1px solid #3a3f4a',
+                                    padding: '4px 10px',
+                                    borderRadius: 4,
+                                    cursor:
+                                        runState.status === 'running'
+                                            ? 'not-allowed'
+                                            : 'pointer',
+                                    fontFamily: 'inherit',
+                                }}
+                            >
+                                {runState.status === 'running' &&
+                                runState.action === 'discover'
+                                    ? 'Discovering…'
+                                    : 'Discover properties'}
                             </button>
                             <select
                                 onChange={(e) => {
@@ -372,7 +493,9 @@ function DevPanelInner() {
                             minHeight: 120,
                         }}
                     >
-                        <div style={{ marginBottom: 4, opacity: 0.7 }}>Response:</div>
+                        <div style={{ marginBottom: 4, opacity: 0.7 }}>
+                            {renderResponseLabel(runState)}
+                        </div>
                         <pre
                             style={{
                                 margin: 0,
@@ -387,6 +510,7 @@ function DevPanelInner() {
                         >
                             {renderResponseBody(runState)}
                         </pre>
+                        {renderEmptyStateHint(runState)}
                     </div>
                 </>
             )}
@@ -398,7 +522,7 @@ function renderStatus(state: RunState): string {
     if (state.status === 'idle') return 'idle'
     if (state.status === 'running') {
         const elapsed = Math.round(performance.now() - state.startedAt)
-        return `running… ${elapsed}ms`
+        return `${state.action}… ${elapsed}ms`
     }
     if (state.status === 'ok') {
         const r = state.result
@@ -416,12 +540,159 @@ function renderStatus(state: RunState): string {
             .filter(Boolean)
             .join(' · ')
     }
+    if (state.status === 'explainOk') {
+        const paramCount = Object.keys(state.result.params).length
+        const noteCount = state.result.notes.length
+        return [
+            `explain · ${state.elapsedMs}ms`,
+            `params=${paramCount}`,
+            noteCount > 0 ? `notes=${noteCount}` : '',
+        ]
+            .filter(Boolean)
+            .join(' · ')
+    }
+    if (state.status === 'discoverOk') {
+        const labelCount = Object.keys(state.result.labels).length
+        const totalKeys = Object.values(state.result.labels).reduce(
+            (n, l) => n + l.keys.length, 0,
+        )
+        const blobOnly = state.result.blobOnlyLabels.length
+        return [
+            `discover · ${state.elapsedMs}ms`,
+            `labels=${labelCount}`,
+            `totalKeys=${totalKeys}`,
+            blobOnly > 0 ? `blobOnlyLabels=${blobOnly}` : '',
+        ]
+            .filter(Boolean)
+            .join(' · ')
+    }
     return `error · ${state.elapsedMs}ms`
+}
+
+function renderResponseLabel(state: RunState): string {
+    if (state.status === 'explainOk') return 'Compiled Cypher (compile-only, not executed):'
+    if (state.status === 'discoverOk') return 'Discovered native properties per label:'
+    if (state.status === 'error') return `Error from /search/${state.action}:`
+    return 'Response:'
 }
 
 function renderResponseBody(state: RunState): string {
     if (state.status === 'idle') return '(run the query to see the response)'
     if (state.status === 'running') return '…'
     if (state.status === 'error') return state.message
+    if (state.status === 'explainOk') return renderExplainBody(state.result)
+    if (state.status === 'discoverOk') return renderDiscoverBody(state.result)
     return JSON.stringify(state.result, null, 2)
+}
+
+function renderExplainBody(r: SearchExplainResult): string {
+    // Foreground the Cypher; full JSON underneath for completeness.
+    const lines: string[] = []
+    lines.push('# Hits cypher (what `Run` would execute)')
+    lines.push(r.hits_cypher)
+    lines.push('')
+    lines.push('# Bound params')
+    lines.push(JSON.stringify(r.params, null, 2))
+    if (r.notes.length > 0) {
+        lines.push('')
+        lines.push('# Diagnostic notes')
+        for (const n of r.notes) lines.push(`  - ${n}`)
+    }
+    lines.push('')
+    lines.push('# Full explain payload')
+    lines.push(JSON.stringify(r, null, 2))
+    return lines.join('\n')
+}
+
+function renderDiscoverBody(r: SearchDiscoverResult): string {
+    const lines: string[] = []
+    if (r.missingContainment) {
+        lines.push(
+            '!! No containment edge types configured on this provider — ',
+        )
+        lines.push(
+            '   scope.root_urns will be silently ignored. Aggregations by ',
+        )
+        lines.push('   ancestorType will return empty buckets.')
+        lines.push('')
+    }
+    if (r.blobOnlyLabels.length > 0) {
+        lines.push('!! Labels with nodes but no native properties — ')
+        lines.push('   these are likely pre-W1 blob-stored. Run:')
+        lines.push('     python -m backend.scripts.migrate_native_properties')
+        lines.push('   to make property predicates work against them.')
+        for (const l of r.blobOnlyLabels) lines.push(`     - ${l}`)
+        lines.push('')
+    }
+    lines.push('# Native property keys per label')
+    for (const [label, info] of Object.entries(r.labels)) {
+        if (info.keys.length === 0) {
+            lines.push(
+                `  ${label}  (sampled ${info.sampled}, 0 native keys — blob-only?)`,
+            )
+        } else {
+            lines.push(`  ${label}  (sampled ${info.sampled}):`)
+            for (const k of info.keys) lines.push(`    • ${k}`)
+        }
+    }
+    return lines.join('\n')
+}
+
+/** Renders a diagnostic hint card below the response when a search
+ * returned 0 results. Tells the user the most-likely causes and
+ * points them at the explain / discover buttons. */
+function renderEmptyStateHint(state: RunState) {
+    if (state.status !== 'ok') return null
+    const r = state.result
+    const aggCount = (r.aggregates ?? []).reduce((sum, b) => sum + b.length, 0)
+    const hitCount = r.hits?.length ?? 0
+    const isEmpty = r.candidateCount === 0 && aggCount === 0 && hitCount === 0
+    if (!isEmpty) return null
+    return (
+        <div
+            style={{
+                marginTop: 10,
+                padding: 8,
+                background: 'rgba(250, 204, 21, 0.08)',
+                border: '1px solid rgba(250, 204, 21, 0.4)',
+                borderRadius: 4,
+                color: '#fde68a',
+                fontSize: 11.5,
+                lineHeight: 1.5,
+            }}
+            data-testid="advanced-search-empty-hint"
+        >
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                0 candidates matched — common causes:
+            </div>
+            <ol style={{ margin: 0, paddingLeft: 18 }}>
+                <li>
+                    <b>Pre-W1 blob storage</b>: property predicates only work
+                    against natively-stored properties. Click{' '}
+                    <i>Discover properties</i> — if your labels show up in{' '}
+                    <code>blobOnlyLabels</code>, run{' '}
+                    <code>python -m backend.scripts.migrate_native_properties</code>
+                    {' '}or re-seed from the worktree.
+                </li>
+                <li>
+                    <b>Value type mismatch</b>: you sent <code>"1000"</code>{' '}
+                    but the stored value is the integer <code>1000</code>. Use
+                    a numeric literal (no quotes) in the JSON for numeric
+                    properties.
+                </li>
+                <li>
+                    <b>Property name typo / case sensitivity</b> (
+                    <code>n.Schema</code> ≠ <code>n.schema</code>). Click{' '}
+                    <i>Show Cypher</i> to see the exact field being queried,
+                    then <i>Discover properties</i> to see what's actually
+                    present.
+                </li>
+                <li>
+                    <b>No node has this value</b>. Try{' '}
+                    <i>Discover properties</i> to see which property values
+                    exist in your data.
+                </li>
+            </ol>
+        </div>
+    )
 }

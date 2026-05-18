@@ -442,6 +442,203 @@ def decode_cursor(s: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Explain — compile-only path. Returns the exact Cypher + params that
+# `execute_deep_search` would run, without touching FalkorDB. Powers the
+# `/search/explain` endpoint and the dev panel's "Show Cypher" button.
+# ---------------------------------------------------------------------------
+
+def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
+    """Return the compiled Cypher + bound parameters without executing.
+
+    Mirrors `execute_deep_search`'s pipeline up to the point of
+    sending the candidate query to FalkorDB. Returns:
+
+        {
+          "cypher": str,        # full candidate cypher (ends WITH n)
+          "hits_cypher": str,   # candidate cypher + " RETURN n"
+          "params": dict,       # bound parameters that would be sent
+          "candidate_cap": int, # the hard cap on candidate rows
+          "hoisted_root_urns": list[list[str]],  # scope hoisted from
+                                                 # top-level DescendantOf
+          "effective_root_urns": list[str] | None,
+          "notes": list[str],   # human-readable diagnostic hints
+        }
+
+    Aggregation queries get the same prefix; their per-spec
+    continuation isn't materialised here (would be ~one extra line
+    per AggregationSpec — left to caller's understanding).
+    """
+    notes: List[str] = []
+    compiler = _Compiler()
+    where_fragment = compiler.compile(query.predicate)
+    base_params: Dict[str, Any] = dict(compiler.params)
+
+    eff_root_urns = _effective_root_urns(compiler, query.scope.root_urns)
+    if eff_root_urns is not None and not eff_root_urns:
+        notes.append(
+            "scope.root_urns intersected with hoisted DescendantOf "
+            "predicates produced an empty set — no rows can match."
+        )
+
+    scope_continuation = ""
+    if eff_root_urns:
+        scope_continuation, scope_params = _build_scope_continuation(
+            provider, eff_root_urns, query.scope.max_depth or 12,
+        )
+        base_params.update(scope_params)
+        if not scope_continuation:
+            notes.append(
+                "scope.root_urns supplied but the provider has no "
+                "containment edge types configured — the scope check "
+                "was dropped. All matching predicates pass without "
+                "ancestry verification."
+            )
+
+    use_entity_types = bool(query.scope.entity_types)
+    if use_entity_types:
+        base_params["_scopeEntityTypes"] = list(query.scope.entity_types)
+
+    cand_cypher = _build_candidate_cypher(
+        where_fragment=where_fragment,
+        entity_types_param=use_entity_types,
+        scope_continuation=scope_continuation,
+        candidate_cap=CANDIDATE_CAP,
+    )
+
+    if query.options.results == "aggregates" and not query.options.aggregations:
+        notes.append(
+            "results='aggregates' but no aggregations supplied — the "
+            "response will be empty buckets. Add at least one "
+            "AggregationSpec to options.aggregations."
+        )
+
+    return {
+        "cypher": cand_cypher,
+        "hits_cypher": cand_cypher + " RETURN n",
+        "params": base_params,
+        "candidate_cap": CANDIDATE_CAP,
+        "hoisted_root_urns": [list(s) for s in compiler.hoisted_root_urns],
+        "effective_root_urns": eff_root_urns,
+        "notes": notes,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Discover — sample native property keys per entity-type label. Powers the
+# `/search/discover` endpoint and the dev panel's "Discover properties"
+# button. Answers the question "what can I actually query?" — the most
+# common cause of property predicates returning 0 results is the user
+# guessing a property name that doesn't exist on natively-stored nodes
+# (or doesn't exist at all in the data).
+# ---------------------------------------------------------------------------
+
+# Reserved keys are the provider-owned top-level fields. The discover
+# scan strips them from the per-label key list so the response only
+# contains user-supplied property names. Kept in sync with
+# `falkordb_provider._RESERVED_NODE_KEYS`.
+_DISCOVER_RESERVED_KEYS = frozenset({
+    "urn", "entityType", "displayName", "qualifiedName", "description",
+    "tags", "layerAssignment", "childCount", "sourceSystem", "lastSyncedAt",
+    "level", "levelDigest",
+    "properties",      # legacy blob
+    "propertiesRaw",   # native escape hatch
+})
+
+
+async def discover_native_property_keys(
+    provider,
+    *,
+    sample_per_label: int = 200,
+    max_labels: int = 100,
+    timeout_s: float = 5.0,
+) -> Dict[str, Any]:
+    """Sample nodes per label, collect their native property keys.
+
+    Returns:
+
+        {
+          "labels": {
+            "dataset":   {"keys": ["logicalType","rowCount",...], "sampled": 200},
+            "container": {"keys": ["layer","schema",...],          "sampled": 47},
+            ...
+          },
+          "blobOnlyLabels": ["domain", ...],   # labels where 0 native
+                                                # keys found — strong
+                                                # signal that those
+                                                # nodes are still
+                                                # blob-stored.
+          "missingContainment": bool,           # provider has no
+                                                # containment edge
+                                                # types configured.
+          "elapsedMs": int,
+        }
+
+    This is the diagnostic counterpart to the predicate compiler: it
+    tells the user what property names the compiler would actually find
+    on their data.
+    """
+    t0 = time.monotonic()
+    out_labels: Dict[str, Dict[str, Any]] = {}
+    blob_only: List[str] = []
+
+    # Step 1: list labels (FalkorDB supports CALL db.labels())
+    try:
+        lbl_result = await provider._ro_query(
+            "CALL db.labels() YIELD label RETURN label",
+            params={}, timeout=timeout_s,
+        )
+        labels = [row[0] for row in (lbl_result.result_set or [])
+                  if row and row[0]]
+    except Exception as exc:
+        logger.warning("discover: CALL db.labels() failed: %s", exc)
+        labels = []
+    labels = labels[:max_labels]
+
+    # Step 2: per label, sample nodes + extract native keys
+    for label in labels:
+        safe = _sanitize_label(label)
+        try:
+            res = await provider._ro_query(
+                f"MATCH (n:`{safe}`) WITH n LIMIT $lim "
+                f"UNWIND keys(n) AS k WITH DISTINCT k "
+                f"RETURN collect(k) AS allKeys, count(*) AS sampled",
+                params={"lim": int(sample_per_label)},
+                timeout=timeout_s,
+            )
+            rs = res.result_set or []
+            all_keys = list(rs[0][0]) if rs and rs[0] else []
+            sampled_count = int(rs[0][1]) if rs and rs[0] else 0
+        except Exception as exc:
+            logger.warning(
+                "discover: label=%s sample failed: %s", label, exc,
+            )
+            continue
+        user_keys = sorted(k for k in all_keys
+                           if k not in _DISCOVER_RESERVED_KEYS)
+        out_labels[label] = {
+            "keys": user_keys,
+            "sampled": sampled_count,
+        }
+        # A label with sampled > 0 nodes but zero user-keys is a strong
+        # tell that those nodes are still pre-W1 blob storage.
+        if sampled_count > 0 and not user_keys:
+            blob_only.append(label)
+
+    missing_containment = False
+    try:
+        provider._get_containment_edge_types()
+    except Exception:
+        missing_containment = True
+
+    return {
+        "labels": out_labels,
+        "blobOnlyLabels": sorted(blob_only),
+        "missingContainment": missing_containment,
+        "elapsedMs": int((time.monotonic() - t0) * 1000),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main entry — wires everything together
 # ---------------------------------------------------------------------------
 
