@@ -70,6 +70,7 @@ import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay } from './LineageFlowOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
+import { AdvancedSearchDevPanel } from '../search/AdvancedSearchDevPanel'
 import { useLoadingToast } from '@/components/ui/toast'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
@@ -1467,6 +1468,12 @@ export function ContextViewCanvas({
           />
         )}
       </AnimatePresence>
+
+      {/* Advanced Search dev panel — fixed-position overlay, opt-in via
+          `?devSearch=1` URL param. Smoke harness for the new
+          POST /search/advanced endpoint while the production search UX
+          (QuickSearchBar / SearchMapPanel / SearchResultsDock) is built. */}
+      <AdvancedSearchDevPanel />
 
       {/* Row layout: canvas column + right-rail panels.
           When a panel opens it joins the row as a flex sibling so the entire

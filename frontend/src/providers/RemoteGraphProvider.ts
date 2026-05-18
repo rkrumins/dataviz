@@ -31,6 +31,7 @@ import type {
     TopLevelNodesResult,
 } from './GraphDataProvider'
 import type { TraceMeta } from '@/services/traceApi'
+import type { SearchQuery, SearchResultPage } from '@/types/search'
 
 // Wire shape from POST /trace/v2 — `upstreamUrns`/`downstreamUrns` arrive as
 // JSON arrays (Pydantic serializes Set as list); we re-hydrate to Set on read.
@@ -271,6 +272,25 @@ export class RemoteGraphProvider implements GraphDataProvider {
         return await this.fetch<GraphNode[]>('/search', {
             method: 'POST',
             body: JSON.stringify({ query, limit }),
+        })
+    }
+
+    /**
+     * Advanced server-side search (POST /search/advanced).
+     *
+     * Sends a structured `SearchQuery` predicate tree and receives an
+     * aggregate-and/or-hit `SearchResultPage`. See `frontend/src/types/search.ts`
+     * for the full contract and `backend/common/models/search.py` for the
+     * authoritative shape.
+     *
+     * No client-side caching: search results depend on the full predicate
+     * body which the GET-cache layer can't key on, and the backend will
+     * grow its own Redis cache in workstream 3.
+     */
+    async searchAdvanced(query: SearchQuery): Promise<SearchResultPage> {
+        return await this.fetch<SearchResultPage>('/search/advanced', {
+            method: 'POST',
+            body: JSON.stringify(query),
         })
     }
 
