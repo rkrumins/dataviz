@@ -618,9 +618,14 @@ async def _run_aggregation(
             provider, cand_cypher, cand_params, spec,
             timeout_s=timeout_s,
         )
+    if spec.by == "property":
+        return await _run_aggregation_property(
+            provider, cand_cypher, cand_params, spec,
+            timeout_s=timeout_s,
+        )
     raise CompileError(
         f"aggregation by={spec.by!r} is not yet supported in v1. "
-        "Use 'ancestorType' or 'entityType'."
+        "Use 'ancestorType', 'entityType', or 'property'."
     )
 
 
@@ -681,6 +686,41 @@ async def _run_aggregation_entity_type(
     return _rows_to_buckets(provider, result.result_set or [])
 
 
+async def _run_aggregation_property(
+    provider, cand_cypher, cand_params, spec, *, timeout_s,
+):
+    """Group the candidate set by the value of a single native property.
+
+    Powers questions like "show me the distribution of `n.layer` values"
+    or "count nodes by `n.dataType`" — turns any indexed property into
+    a histogram with one Cypher round-trip. Nodes that don't have the
+    property at all are filtered out before the GROUP BY (otherwise
+    they'd collapse into a single "null" bucket that's rarely useful;
+    callers who want that case can combine with a `hasProperty:negate`
+    predicate).
+    """
+    if not spec.property_key:
+        raise CompileError(
+            "aggregation by='property' requires propertyKey"
+        )
+    key = _safe_property_name(spec.property_key)
+    k = max(0, int(spec.sample_hits_per_bucket))
+    agg_cypher = (
+        cand_cypher + " "
+        f"WHERE EXISTS(n.{key}) "
+        f"WITH n.{key} AS pkey, n "
+        f"WITH pkey, count(DISTINCT n) AS mc, "
+        f"collect(DISTINCT n)[..{k}] AS samples "
+        f"RETURN '' AS urn, toString(pkey) AS name, "
+        f"'{key}' AS etype, mc, samples "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+    )
+    result = await provider._ro_query(
+        agg_cypher, params=cand_params, timeout=timeout_s,
+    )
+    return _rows_to_buckets(provider, result.result_set or [])
+
+
 def _rows_to_buckets(provider, rows) -> List[SearchAggregateBucket]:
     buckets: List[SearchAggregateBucket] = []
     for row in rows:
@@ -709,6 +749,14 @@ def _build_hits_from_rows(provider, rows, query: SearchQuery) -> List[SearchHit]
     The candidate Cypher deliberately doesn't ORDER BY — sorting in
     Cypher forces a materialisation barrier that thwarts the candidate
     cap. We sort the already-bounded result here.
+
+    Sort precedence:
+      1. `options.sort_property` (an arbitrary native node property
+         like 'rowCount' or 'createdAt') wins if set — powers
+         "biggest first" / "newest first" UX.
+      2. `options.sort` ('displayName' / 'qualifiedName' / 'relevance'
+         falls back to displayName until fulltext lands).
+      'depth' is deferred — currently silently coerces to displayName.
     """
     hits: List[SearchHit] = []
     for row in rows:
@@ -716,21 +764,36 @@ def _build_hits_from_rows(provider, rows, query: SearchQuery) -> List[SearchHit]
         if node:
             hits.append(SearchHit(node=node))
 
-    sort_field = query.options.sort
     sort_dir = query.options.sort_dir
-    if sort_field in ("displayName", "qualifiedName"):
-        def key(h: SearchHit):
-            v = (getattr(h.node, "display_name" if sort_field == "displayName"
-                         else "qualified_name") or "")
-            return v.lower()
-        hits.sort(key=key, reverse=(sort_dir == "desc"))
-    # 'relevance' and 'depth' deferred; default to displayName ordering.
-    elif sort_field == "relevance":
-        # No relevance signal in v1 (no fulltext). Fall back to displayName.
-        hits.sort(
-            key=lambda h: (h.node.display_name or "").lower(),
-            reverse=(sort_dir == "desc"),
-        )
+    reverse = (sort_dir == "desc")
+
+    if query.options.sort_property:
+        # Reach into node.properties; missing → sort as if value were ""
+        # so absent rows clump consistently at one end.
+        prop = query.options.sort_property
+
+        def prop_key(h: SearchHit):
+            v = (h.node.properties or {}).get(prop)
+            # Sort numerics naturally; coerce everything else through str
+            if isinstance(v, (int, float, bool)):
+                return (0, v)
+            return (1, str(v).lower() if v is not None else "")
+
+        hits.sort(key=prop_key, reverse=reverse)
+    else:
+        sort_field = query.options.sort
+        if sort_field in ("displayName", "qualifiedName"):
+            def key(h: SearchHit):
+                v = (getattr(h.node, "display_name" if sort_field == "displayName"
+                             else "qualified_name") or "")
+                return v.lower()
+            hits.sort(key=key, reverse=reverse)
+        elif sort_field == "relevance":
+            # No relevance signal in v1 (no fulltext). Fall back to displayName.
+            hits.sort(
+                key=lambda h: (h.node.display_name or "").lower(),
+                reverse=reverse,
+            )
 
     return hits[:query.options.page_size]
 

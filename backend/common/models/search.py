@@ -228,6 +228,7 @@ AggregationKind = Literal[
     "parent",         # group by direct parent (containment edge)
     "tag",            # group by tag value
     "entityType",     # group by the hit's own entity type
+    "property",       # group by the value of a single arbitrary node property
 ]
 
 
@@ -248,6 +249,12 @@ class AggregationSpec(_Base):
     ancestor_level: Optional[int] = Field(
         None, alias="ancestorLevel", ge=0, le=20,
         description="Required when by='ancestorLevel'.",
+    )
+    property_key: Optional[str] = Field(
+        None, alias="propertyKey", min_length=1, max_length=128,
+        description="Required when by='property'. The native node "
+                    "property whose values become the bucket keys "
+                    "(e.g. 'layer' → one bucket per layer value).",
     )
     max_buckets: int = Field(50, alias="maxBuckets", ge=1, le=500)
     sample_hits_per_bucket: int = Field(
@@ -316,6 +323,12 @@ class SearchOptions(_Base):
     page_size: int = Field(50, alias="pageSize", ge=1, le=200)
     cursor: Optional[str] = None
     sort: SortKey = "relevance"
+    sort_property: Optional[str] = Field(
+        None, alias="sortProperty", min_length=1, max_length=128,
+        description="When set, hits are ordered by this native node "
+                    "property (e.g. 'rowCount') instead of by `sort`. "
+                    "Useful for 'biggest first' / 'newest first' UX.",
+    )
     sort_dir: Literal["asc", "desc"] = Field("desc", alias="sortDir")
     include_ancestor_path: bool = Field(False, alias="includeAncestorPath")
     highlights: bool = True

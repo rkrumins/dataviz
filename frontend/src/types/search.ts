@@ -119,6 +119,7 @@ export type AggregationKind =
     | 'parent'
     | 'tag'
     | 'entityType'
+    | 'property'
 
 export interface AggregationSpec {
     by?: AggregationKind                 // default 'ancestorType'
@@ -126,6 +127,8 @@ export interface AggregationSpec {
     ancestorEntityTypes?: string[]
     /** Required when by='ancestorLevel'. */
     ancestorLevel?: number
+    /** Required when by='property' — the native node property to group by. */
+    propertyKey?: string
     maxBuckets?: number                  // default 50
     sampleHitsPerBucket?: number         // default 3
     /** One-level nested drill. */
@@ -158,6 +161,8 @@ export interface SearchOptions {
     pageSize?: number                    // default 50
     cursor?: string
     sort?: SortKey                       // default 'relevance'
+    /** When set, hits ordered by this native node property (e.g. 'rowCount'); overrides `sort`. */
+    sortProperty?: string
     sortDir?: 'asc' | 'desc'             // default 'desc'
     includeAncestorPath?: boolean        // default false
     highlights?: boolean                 // default true

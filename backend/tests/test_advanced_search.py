@@ -444,3 +444,200 @@ class TestCursor:
         q1 = SearchQuery(predicate=TagPredicate(values=["PII"]))
         q2 = SearchQuery(predicate=TagPredicate(values=["GDPR"]))
         assert query_hash(q1) != query_hash(q2)
+
+
+# ---------------------------------------------------------------------------
+# Aggregation by arbitrary property + sort by arbitrary property
+# (the "show me layout by layer" + "biggest first" gap closure)
+# ---------------------------------------------------------------------------
+
+class TestAggregationByProperty:
+    def test_spec_accepts_property_kind(self):
+        spec = AggregationSpec(by="property", propertyKey="layer")
+        assert spec.by == "property"
+        assert spec.property_key == "layer"
+
+    def test_round_trip_through_query(self):
+        q = SearchQuery(
+            predicate=TagPredicate(values=["PII"]),
+            options={  # type: ignore[arg-type]
+                "aggregations": [
+                    {"by": "property", "propertyKey": "layer", "maxBuckets": 10},
+                ],
+            },
+        )
+        j = q.model_dump_json(by_alias=True)
+        round_tripped = SearchQuery.model_validate_json(j)
+        assert round_tripped.options.aggregations[0].by == "property"
+        assert round_tripped.options.aggregations[0].property_key == "layer"
+
+    @pytest.mark.asyncio
+    async def test_emits_property_pivot_cypher(self):
+        # Stub provider that records the Cypher it would run instead of
+        # talking to FalkorDB. Lets us verify the visitor output without
+        # a live graph.
+        import asyncio
+
+        class _CapturingProvider:
+            def __init__(self):
+                self.calls = []
+
+            async def _ro_query(self, cypher, *, params=None, timeout=None):
+                self.calls.append((cypher, params, timeout))
+                class R:
+                    result_set = []
+                return R()
+
+            def _get_containment_edge_types(self):
+                return ["CONTAINS"]
+
+            def _extract_node_from_result(self, _row):
+                return None
+
+        prov = _CapturingProvider()
+        from backend.app.providers.falkordb_deep_search import (
+            _run_aggregation_property,
+        )
+        spec = AggregationSpec(
+            by="property", propertyKey="layer",
+            maxBuckets=20, sampleHitsPerBucket=3,
+        )
+        cand_cypher = "MATCH (n) WHERE n.tags CONTAINS $p0 WITH n LIMIT 5000"
+        await _run_aggregation_property(
+            prov, cand_cypher, {"p0": '"PII"'}, spec, timeout_s=3.0,
+        )
+        assert len(prov.calls) == 1
+        cypher = prov.calls[0][0]
+        # Critical assertions: pivots on n.layer, filters out nulls, uses GROUP BY
+        assert "WHERE EXISTS(n.layer)" in cypher
+        assert "WITH n.layer AS pkey, n" in cypher
+        assert "count(DISTINCT n) AS mc" in cypher
+        assert "ORDER BY mc DESC LIMIT 20" in cypher
+        assert "collect(DISTINCT n)[..3]" in cypher
+
+    @pytest.mark.asyncio
+    async def test_missing_property_key_raises(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _run_aggregation_property,
+        )
+        with pytest.raises(CompileError, match="propertyKey"):
+            await _run_aggregation_property(
+                None, "x", {},
+                AggregationSpec(by="property"),  # no propertyKey
+                timeout_s=3.0,
+            )
+
+    def test_property_name_injection_blocked(self):
+        # The property name is interpolated into the Cypher (it can't
+        # be parameterised), so the same alnum+_ guard from the predicate
+        # compiler must apply here too.
+        import asyncio
+        from backend.app.providers.falkordb_deep_search import (
+            _run_aggregation_property,
+        )
+
+        async def go():
+            await _run_aggregation_property(
+                None, "x", {},
+                AggregationSpec(by="property", propertyKey="x); DROP"),
+                timeout_s=3.0,
+            )
+        with pytest.raises(CompileError, match="disallowed chars"):
+            asyncio.run(go())
+
+
+class TestSortByProperty:
+    def test_options_accept_sort_property(self):
+        from backend.common.models.search import SearchOptions
+        opts = SearchOptions(sortProperty="rowCount", sortDir="desc")
+        assert opts.sort_property == "rowCount"
+        assert opts.sort_dir == "desc"
+
+    def test_hits_sorted_by_native_property_descending(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        from backend.common.models.graph import GraphNode
+
+        class _MockProv:
+            def _extract_node_from_result(self, n):
+                return n  # rows ARE GraphNodes for the test
+
+        rows = [
+            GraphNode(urn="urn:a", entityType="dataset", displayName="a",
+                      properties={"rowCount": 100}),
+            GraphNode(urn="urn:b", entityType="dataset", displayName="b",
+                      properties={"rowCount": 9000}),
+            GraphNode(urn="urn:c", entityType="dataset", displayName="c",
+                      properties={"rowCount": 500}),
+        ]
+        q = SearchQuery(
+            predicate=TagPredicate(values=["x"]),
+            options={  # type: ignore[arg-type]
+                "sortProperty": "rowCount", "sortDir": "desc",
+                "pageSize": 10,
+            },
+        )
+        hits = _build_hits_from_rows(_MockProv(), rows, q)
+        assert [h.node.urn for h in hits] == ["urn:b", "urn:c", "urn:a"]
+
+    def test_hits_sorted_by_native_property_ascending(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        from backend.common.models.graph import GraphNode
+
+        class _MockProv:
+            def _extract_node_from_result(self, n):
+                return n
+
+        rows = [
+            GraphNode(urn="urn:a", entityType="dataset", displayName="a",
+                      properties={"rowCount": 100}),
+            GraphNode(urn="urn:b", entityType="dataset", displayName="b",
+                      properties={"rowCount": 9000}),
+            GraphNode(urn="urn:c", entityType="dataset", displayName="c",
+                      properties={"rowCount": 500}),
+        ]
+        q = SearchQuery(
+            predicate=TagPredicate(values=["x"]),
+            options={  # type: ignore[arg-type]
+                "sortProperty": "rowCount", "sortDir": "asc",
+                "pageSize": 10,
+            },
+        )
+        hits = _build_hits_from_rows(_MockProv(), rows, q)
+        assert [h.node.urn for h in hits] == ["urn:a", "urn:c", "urn:b"]
+
+    def test_missing_property_clumps_consistently(self):
+        # Nodes without the sort property end up grouped at one end —
+        # neither randomly interleaved nor dropped from the result.
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        from backend.common.models.graph import GraphNode
+
+        class _MockProv:
+            def _extract_node_from_result(self, n):
+                return n
+
+        rows = [
+            GraphNode(urn="urn:a", entityType="dataset", displayName="a",
+                      properties={"rowCount": 100}),
+            GraphNode(urn="urn:b", entityType="dataset", displayName="b",
+                      properties={}),  # no rowCount
+            GraphNode(urn="urn:c", entityType="dataset", displayName="c",
+                      properties={"rowCount": 500}),
+        ]
+        q = SearchQuery(
+            predicate=TagPredicate(values=["x"]),
+            options={  # type: ignore[arg-type]
+                "sortProperty": "rowCount", "sortDir": "desc",
+                "pageSize": 10,
+            },
+        )
+        hits = _build_hits_from_rows(_MockProv(), rows, q)
+        # All three returned; missing-rowCount node grouped consistently
+        assert len(hits) == 3
+        urns_with_value = [h.node.urn for h in hits if h.node.properties.get("rowCount") is not None]
+        assert urns_with_value == ["urn:c", "urn:a"]  # 500, 100 desc
