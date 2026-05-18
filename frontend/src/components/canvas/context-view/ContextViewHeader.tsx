@@ -41,6 +41,10 @@ export interface ContextViewHeaderProps {
   // Add entity
   onAddEntity: () => void
 
+  // Advanced search panel (G2 production UX surface)
+  onOpenAdvancedSearch?: () => void
+  advancedSearchOpen?: boolean
+
   // Title — actual view name + entity-type count, shown in the header.
   // Replaces the previous hardcoded "Context View / Data Flow Blueprint".
   viewName?: string
@@ -77,6 +81,8 @@ export function ContextViewHeader({
   onStartTrace,
   onExitTrace,
   onAddEntity,
+  onOpenAdvancedSearch,
+  advancedSearchOpen = false,
   viewName,
   entityTypeCount,
   activeWorkspaceId,
@@ -179,6 +185,25 @@ export function ContextViewHeader({
             <LucideIcons.MoveRight className="w-3.5 h-3.5" />
             <span>{showEdgeDirection ? 'Direction On' : 'Direction Off'}</span>
           </button>
+
+          <div className="w-px h-6 bg-gradient-to-b from-transparent via-black/15 dark:via-white/10 to-transparent" />
+
+          {/* Advanced Search — opens SearchMapPanel for template-driven exploration */}
+          {onOpenAdvancedSearch && (
+            <button
+              onClick={onOpenAdvancedSearch}
+              title="Open advanced search · question templates, aggregates, drill-down"
+              className={cn(
+                "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
+                advancedSearchOpen
+                  ? "bg-gradient-to-r from-accent-lineage/25 to-accent-lineage/10 text-accent-lineage border border-accent-lineage/50 shadow-sm shadow-accent-lineage/10 dark:shadow-lg dark:shadow-accent-lineage/20"
+                  : "bg-black/[0.04] border border-black/[0.10] text-ink hover:bg-black/[0.08] hover:border-accent-lineage/30 dark:bg-white/[0.04] dark:border-white/[0.08] dark:hover:bg-white/[0.08]"
+              )}
+            >
+              <LucideIcons.Sparkles className="w-4 h-4" strokeWidth={2.2} />
+              <span>Advanced Search</span>
+            </button>
+          )}
 
           <div className="w-px h-6 bg-gradient-to-b from-transparent via-black/15 dark:via-white/10 to-transparent" />
 

@@ -71,6 +71,7 @@ import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay } from './LineageFlowOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { AdvancedSearchDevPanel } from '../search/AdvancedSearchDevPanel'
+import { SearchMapPanel } from '../search/SearchMapPanel'
 import { useLoadingToast } from '@/components/ui/toast'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
@@ -469,6 +470,10 @@ export function ContextViewCanvas({
   const [isPaletteOpen, setPaletteOpen] = useState(false)
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   const relationshipTypes = useViewRelationshipTypes()
+
+  // Advanced Search (G2) — production panel for template-driven exploration.
+  // Separate from the dev-only JSON panel gated by `?devSearch=1`.
+  const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
 
   // Granularity options for the lineage aggregation selector — driven by the
   // active ontology's entity types, sorted coarsest-first (lowest level first).
@@ -1475,6 +1480,25 @@ export function ContextViewCanvas({
           (QuickSearchBar / SearchMapPanel / SearchResultsDock) is built. */}
       <AdvancedSearchDevPanel />
 
+      {/* Advanced Search (G2) — production-grade template-driven panel.
+          Right-side glass drawer with the orient-before-drill UX:
+          question templates, aggregate bucket cards, hit rows with
+          breadcrumbs. Toggled from the header's Advanced Search button. */}
+      <SearchMapPanel
+        open={advancedSearchOpen}
+        onClose={() => setAdvancedSearchOpen(false)}
+        onRevealNode={(urn) => {
+          // Same affordance as the legacy inline result click:
+          // select + expand. Once a proper reveal-and-pulse helper
+          // exists (G3), swap to that.
+          const node = nodes.find(n => (n.data?.urn as string) === urn)
+          if (node) {
+            selectNode(node.id)
+            setExpandedNodes((prev) => new Set([...prev, node.id]))
+          }
+        }}
+      />
+
       {/* Row layout: canvas column + right-rail panels.
           When a panel opens it joins the row as a flex sibling so the entire
           canvas (header + body) shrinks horizontally rather than being
@@ -1509,6 +1533,8 @@ export function ContextViewCanvas({
         onStartTrace={() => { if (selectedNodeIds[0]) startTraceWithSmartLevel(selectedNodeIds[0]) }}
         onExitTrace={exitTrace}
         onAddEntity={() => { setIsCreatingEntity(true); setCreationParentId(null); setCreationLayerId(null) }}
+        onOpenAdvancedSearch={() => setAdvancedSearchOpen((v) => !v)}
+        advancedSearchOpen={advancedSearchOpen}
         viewName={activeView?.name}
         entityTypeCount={activeView?.content.visibleEntityTypes.length}
         activeWorkspaceId={activeWorkspaceId}
