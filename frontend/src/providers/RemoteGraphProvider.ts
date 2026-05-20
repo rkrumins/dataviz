@@ -82,10 +82,21 @@ export class RemoteGraphProvider implements GraphDataProvider {
     /** In-flight request deduplication: identical concurrent requests share one Promise */
     private _inflight = new Map<string, Promise<unknown>>()
 
-    /** Short-lived response cache for GET requests (prevents rapid re-fetches during re-renders) */
-    private _responseCache = new Map<string, { data: unknown; ts: number; ttl: number }>()
+    /** Short-lived response cache for GET requests (prevents rapid re-fetches during re-renders).
+     *  ``gen`` is the value of the ``X-Graph-Generation`` response header
+     *  observed when the entry was written. ``-1`` means "not advertised"
+     *  (legacy endpoint or unwrapped server response). */
+    private _responseCache = new Map<string, { data: unknown; ts: number; ttl: number; gen: number }>()
+    /** Highest server-advertised generation we've seen for this provider's
+     *  (workspace, data_source) scope. Updated on EVERY response that carries
+     *  ``X-Graph-Generation`` — including cache-bypass POSTs — so the next
+     *  cache lookup can detect that another user/ingestion bumped past us
+     *  and discard the local entry. -1 = no header ever observed. */
+    private _latestGen = -1
     /** Fallback TTL for endpoints not matched in {@link responseCacheTtlMs}. */
     private static DEFAULT_RESPONSE_CACHE_TTL_MS = 2000
+
+    private static readonly GEN_HEADER = 'X-Graph-Generation'
 
     constructor(options?: RemoteGraphProviderOptions) {
         this.workspaceId = options?.workspaceId
@@ -164,11 +175,20 @@ export class RemoteGraphProvider implements GraphDataProvider {
         const url = this.buildUrl(path, extraParams, apiVersion)
         const cacheKey = `${method}:${url}:${fetchOptions.body ?? ''}`
 
-        // Check short-lived response cache for GET requests
+        // Check short-lived response cache for GET requests. An entry is
+        // valid only while within its TTL AND tagged with a generation
+        // ≥ the highest we've seen for this scope. A newer ``X-Graph-Generation``
+        // observed on any subsequent response (including a sibling endpoint)
+        // tells us the (workspace, data_source) was mutated server-side —
+        // we drop the entry and refetch instead of serving local stale data.
         if (method === 'GET') {
             const cached = this._responseCache.get(cacheKey)
             if (cached && Date.now() - cached.ts < cached.ttl) {
-                return cached.data as T
+                const stale = this._latestGen >= 0 && cached.gen >= 0 && cached.gen < this._latestGen
+                if (!stale) {
+                    return cached.data as T
+                }
+                this._responseCache.delete(cacheKey)
             }
         }
 
@@ -221,12 +241,28 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
             const data = await response.json() as T
 
+            // Track the server-advertised generation BEFORE writing the
+            // cache entry, so the entry is tagged with the freshest gen
+            // we've observed for this scope. We update on every response
+            // (GET or POST) that carries the header — POSTs like
+            // /edges/aggregated aren't cached client-side but their gen
+            // header still tells us whether sibling GET entries are stale.
+            const genHeader = response.headers.get(RemoteGraphProvider.GEN_HEADER)
+            if (genHeader !== null) {
+                const parsed = parseInt(genHeader, 10)
+                if (!isNaN(parsed) && parsed > this._latestGen) {
+                    this._latestGen = parsed
+                }
+            }
+
             // Cache GET responses; TTL is per-endpoint (hot read paths 30s,
             // metadata 60s, default 2s) so a "expand all" doesn't re-fire
-            // the same children query on every render.
+            // the same children query on every render. Entry is tagged with
+            // the current ``_latestGen`` (or -1 if the server never advertised)
+            // so the next read can detect a cross-user/ingestion bump.
             if (method === 'GET') {
                 const ttl = RemoteGraphProvider.responseCacheTtlMs(url)
-                this._responseCache.set(cacheKey, { data, ts: Date.now(), ttl })
+                this._responseCache.set(cacheKey, { data, ts: Date.now(), ttl, gen: this._latestGen })
             }
 
             this.circuitBreaker.recordSuccess()

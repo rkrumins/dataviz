@@ -260,6 +260,27 @@ class AggregationWorker:
                     graph_fingerprint=job.graph_fingerprint_after,
                 )
 
+                # Materialization wrote AGGREGATED edges directly into the
+                # graph, bypassing the API layer's own _invalidate_cache hook.
+                # Bump the (workspace, data_source) generation so cached
+                # /edges/aggregated and /children-with-edges reads flip to
+                # fresh on the next request. Best-effort: a failure here
+                # only widens the staleness window to the cache TTL, which
+                # the cache's own logging covers.
+                # Lazy import — graph_cache lives outside this package; a
+                # top-level import would cycle through aggregation/__init__.py.
+                try:
+                    from backend.app.services.graph_cache import bump_generation_for
+                    await bump_generation_for(
+                        workspace_id=job.workspace_id or "",
+                        data_source_id=job.data_source_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 - never fail a completed job on cache-bump
+                    logger.warning(
+                        "Aggregation job %s: graph_cache gen bump failed (%s)",
+                        job_id, exc,
+                    )
+
                 # Audit-log row written in this same transaction so the
                 # durable status flip + the audit trail land or roll
                 # back together. Sequence is the next one the emitter

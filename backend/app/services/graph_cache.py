@@ -58,22 +58,27 @@ _GEN_PREFIX = "graphcache:gen"
 # write rates or dial down if we see staleness complaints.
 _DEFAULT_CHILDREN_TTL = int(os.getenv("GRAPH_CACHE_CHILDREN_TTL_S", "30"))
 _DEFAULT_AGGREGATED_TTL = int(os.getenv("GRAPH_CACHE_AGGREGATED_TTL_S", "60"))
+_DEFAULT_TOP_LEVEL_TTL = int(os.getenv("GRAPH_CACHE_TOP_LEVEL_TTL_S", "30"))
 # Short TTL for empty/404 results — absorbs herds asking for the same
 # missing URN without committing to caching nonsense for long.
 _NEGATIVE_TTL = int(os.getenv("GRAPH_CACHE_NEGATIVE_TTL_S", "5"))
 
-# Per-endpoint kill switches. Default OFF so the cache rolls out behind a
-# feature flag. Operations turns them on per-endpoint after instrumenting.
+# Per-endpoint kill switches. Default ON for the wired endpoints — the
+# scope-keyed gen-counter invalidation gives correctness, and these
+# endpoints carry the bulk of read load. Env var still allows a per-env
+# kill switch (`GRAPH_CACHE_ENABLED_*=0`).
 def _flag(name: str, default: bool = False) -> bool:
     raw = os.getenv(name, "1" if default else "0").strip().lower()
     return raw in ("1", "true", "yes", "on")
 
 ENDPOINT_CHILDREN = "children-with-edges"
 ENDPOINT_AGGREGATED = "aggregated"
+ENDPOINT_TOP_LEVEL = "top-level"
 
 _ENABLED_ENDPOINTS = {
-    ENDPOINT_CHILDREN: _flag("GRAPH_CACHE_ENABLED_CHILDREN", default=False),
-    ENDPOINT_AGGREGATED: _flag("GRAPH_CACHE_ENABLED_AGGREGATED", default=False),
+    ENDPOINT_CHILDREN: _flag("GRAPH_CACHE_ENABLED_CHILDREN", default=True),
+    ENDPOINT_AGGREGATED: _flag("GRAPH_CACHE_ENABLED_AGGREGATED", default=True),
+    ENDPOINT_TOP_LEVEL: _flag("GRAPH_CACHE_ENABLED_TOP_LEVEL", default=True),
 }
 
 
@@ -195,6 +200,17 @@ class GraphCache:
                 scope, exc,
             )
 
+    async def current_generation(self, scope: CacheScope) -> int:
+        """Read the current generation counter for `scope`. Returns 0 on
+        miss/error. Public surface for handlers that need to stamp the
+        served generation onto a response (``X-Graph-Generation``) so the
+        client can tell when its locally cached entry has become stale."""
+        try:
+            return await self._get_generation(scope)
+        except RedisError as exc:
+            logger.warning("graph_cache: current_generation read failed (%s)", exc)
+            return 0
+
     # ─── Internals ────────────────────────────────────────────────────
 
     async def _get_generation(self, scope: CacheScope) -> int:
@@ -253,22 +269,59 @@ def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:
         return _DEFAULT_CHILDREN_TTL
     if endpoint == ENDPOINT_AGGREGATED:
         return _DEFAULT_AGGREGATED_TTL
+    if endpoint == ENDPOINT_TOP_LEVEL:
+        return _DEFAULT_TOP_LEVEL_TTL
     return _DEFAULT_CHILDREN_TTL
 
 
 def _is_empty_result(result: BaseModel) -> bool:
-    """Detect "empty" responses worth caching only briefly. Currently:
-    a ChildrenWithEdgesResult with no children, or an AggregatedEdgeResult
-    with no aggregated edges. Returning True shortens the TTL to the
-    negative-cache window so a transient miss doesn't pin the empty
-    answer for 30-60s."""
+    """Detect "empty" responses worth caching only briefly. Covers:
+    ChildrenWithEdgesResult (children=[]), AggregatedEdgeResult
+    (aggregated_edges=[]), and TopLevelNodesResult (nodes=[]). Returning
+    True shortens the TTL to the negative-cache window so a transient
+    miss doesn't pin the empty answer for 30-60s."""
     children = getattr(result, "children", None)
     if isinstance(children, list) and len(children) == 0:
         return True
     aggregated = getattr(result, "aggregated_edges", None)
     if isinstance(aggregated, list) and len(aggregated) == 0:
         return True
+    nodes = getattr(result, "nodes", None)
+    if isinstance(nodes, list) and len(nodes) == 0:
+        return True
     return False
+
+
+# ─── Cache-Redis client factory ────────────────────────────────────────
+#
+# The graph cache and the aggregation broker (Redis Streams + dedup keys)
+# historically shared one Redis instance. That instance runs with
+# ``maxmemory-policy noeviction`` to prevent silent stream-message loss
+# — but ``noeviction`` is the wrong policy for a *pure* response cache,
+# which orphans old-generation keys on every write until they TTL-expire.
+# Under churn the shared instance can hit ``maxmemory`` and start failing
+# SETs, silently degrading the cache for everyone.
+#
+# Resolution: a dedicated cache Redis pointed at by ``GRAPH_CACHE_REDIS_URL``
+# (e.g. the ``redis-cache`` compose service running ``allkeys-lru``). If
+# the env var is unset we transparently fall back to the broker Redis
+# via the existing ``get_redis()`` factory — back-compat for envs that
+# haven't been migrated yet. Losing a ``graphcache:gen:*`` counter
+# under LRU eviction is safe: ``_get_generation`` returns 0 and the
+# subsequent read computes and caches under gen 0 — never stale, just
+# a cache miss.
+
+
+def _get_cache_redis() -> aioredis.Redis:
+    """Return the Redis client backing the graph cache.
+
+    Uses ``GRAPH_CACHE_REDIS_URL`` when set, otherwise falls back to the
+    shared aggregation broker via ``get_redis()`` for back-compat.
+    """
+    url = os.getenv("GRAPH_CACHE_REDIS_URL", "").strip()
+    if not url:
+        return get_redis()
+    return aioredis.from_url(url, decode_responses=True)
 
 
 # ─── Singleton accessor ────────────────────────────────────────────────
@@ -278,10 +331,10 @@ _cache: Optional[GraphCache] = None
 
 def get_graph_cache() -> GraphCache:
     """Return the process-wide GraphCache. Lazy-initialised on first use
-    so test code can patch `get_redis()` before this fires."""
+    so test code can patch the redis factory before this fires."""
     global _cache
     if _cache is None:
-        _cache = GraphCache(get_redis())
+        _cache = GraphCache(_get_cache_redis())
     return _cache
 
 
@@ -289,3 +342,20 @@ def reset_graph_cache_for_tests() -> None:
     """Drop the singleton so a fresh fixture can install its own."""
     global _cache
     _cache = None
+
+
+# ─── Worker-friendly invalidation helper ───────────────────────────────
+
+async def bump_generation_for(workspace_id: str, data_source_id: str) -> None:
+    """Module-level convenience for callers that don't carry a ``CacheScope``
+    object (e.g. the aggregation worker, which has raw ws/ds strings on
+    the job envelope). Equivalent to ``get_graph_cache().bump_generation(
+    CacheScope(workspace_id, data_source_id))``.
+    """
+    if not workspace_id:
+        # Without a workspace we can't build the key; skip silently —
+        # caller is responsible for resolving it before invoking us.
+        return
+    await get_graph_cache().bump_generation(
+        CacheScope(workspace_id=workspace_id, data_source_id=data_source_id or "")
+    )

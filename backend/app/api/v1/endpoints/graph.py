@@ -28,8 +28,33 @@ from backend.app.services.graph_cache import (
     CacheScope,
     ENDPOINT_AGGREGATED,
     ENDPOINT_CHILDREN,
+    ENDPOINT_TOP_LEVEL,
     get_graph_cache,
 )
+
+# Response header advertising the (workspace, data_source) generation
+# the response was served under. Clients tag their local cache with this
+# and refetch when they next observe a newer value — the cheapest cross-
+# user/ingestion staleness check we can ship (no polling, no websocket).
+_GEN_HEADER = "X-Graph-Generation"
+
+
+async def _stamp_generation(response: Response, scope: Optional[CacheScope]) -> None:
+    """Set the X-Graph-Generation response header for cached graph endpoints.
+
+    Reads the current generation for the scope and stamps it on the
+    response. If a write races us between cache lookup and this stamp,
+    the header advertises gen N+1 while the body was served under gen N
+    — the client will then see a newer gen on its *next* request and
+    refetch, which is the conservative direction.
+    """
+    if scope is None:
+        return
+    try:
+        gen = await get_graph_cache().current_generation(scope)
+    except Exception:  # noqa: BLE001 - never let header stamping fail a response
+        return
+    response.headers[_GEN_HEADER] = str(gen)
 from backend.app.services.stats_cache import (
     CacheMiss, SYNTHETIC_SCHEMA_MISSING_FIELDS,
     build_computing_envelope, build_envelope, build_error_envelope, build_meta,
@@ -367,6 +392,7 @@ async def trace_expand_batch(
     response_model_by_alias=True,
 )
 async def get_top_level_nodes(
+    response: Response,
     entityTypes: Optional[List[str]] = Query(
         None,
         description="Restrict to these entity type IDs. None = all types.",
@@ -406,7 +432,7 @@ async def get_top_level_nodes(
     order, and the generic ``{urn}`` path would otherwise swallow
     ``/nodes/top-level`` and return 404 for a non-existent URN.
     """
-    try:
+    async def compute() -> TopLevelNodesResult:
         return await engine.get_top_level_or_orphan_nodes(
             entity_types=entityTypes,
             search_query=searchQuery,
@@ -414,6 +440,29 @@ async def get_top_level_nodes(
             cursor=cursor,
             include_child_count=includeChildCount,
         )
+
+    scope = _cache_scope(engine)
+    try:
+        if scope is None:
+            return await compute()
+
+        result = await get_graph_cache().get_or_compute(
+            scope=scope,
+            endpoint=ENDPOINT_TOP_LEVEL,
+            # Sort entityTypes so callers passing the same set in different
+            # order share a cache key — same convention as /edges/aggregated.
+            params={
+                "entityTypes": sorted(entityTypes) if entityTypes else None,
+                "searchQuery": searchQuery,
+                "limit": limit,
+                "cursor": cursor,
+                "includeChildCount": includeChildCount,
+            },
+            compute=compute,
+            model_cls=TopLevelNodesResult,
+        )
+        await _stamp_generation(response, scope)
+        return result
     except ProviderConfigurationError as exc:
         raise HTTPException(
             status_code=400,
@@ -467,6 +516,7 @@ async def get_node_children(
 
 @router.get("/nodes/{urn}/children-with-edges", response_model=ChildrenWithEdgesResult, response_model_by_alias=True)
 async def get_children_with_edges(
+    response: Response,
     urn: str,
     edge_types: Optional[List[str]] = Query(None, alias="edgeTypes"),
     lineage_edge_types: Optional[List[str]] = Query(None, alias="lineageEdgeTypes"),
@@ -493,7 +543,7 @@ async def get_children_with_edges(
     if scope is None:
         return await compute()
 
-    return await get_graph_cache().get_or_compute(
+    result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_CHILDREN,
         params={
@@ -510,6 +560,8 @@ async def get_children_with_edges(
         compute=compute,
         model_cls=ChildrenWithEdgesResult,
     )
+    await _stamp_generation(response, scope)
+    return result
 
 
 @router.post("/search", response_model=List[GraphNode], response_model_by_alias=True)
@@ -1079,6 +1131,7 @@ async def get_refresh_status(
 
 @router.post("/edges/aggregated", response_model=AggregatedEdgeResult, response_model_by_alias=True)
 async def get_aggregated_edges(
+    response: Response,
     request: AggregatedEdgeRequest = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
 ):
@@ -1099,7 +1152,7 @@ async def get_aggregated_edges(
     # Sort URN lists so two semantically identical requests with differing
     # input order map to the same cache key — the frontend's chunked
     # fan-out frequently produces equivalent batches in different orders.
-    return await get_graph_cache().get_or_compute(
+    result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_AGGREGATED,
         params={
@@ -1113,6 +1166,8 @@ async def get_aggregated_edges(
         compute=compute,
         model_cls=AggregatedEdgeResult,
     )
+    await _stamp_generation(response, scope)
+    return result
 
 
 @router.post("/edges/aggregated/materialize")
@@ -1136,6 +1191,10 @@ async def materialize_aggregated_edges(
         )
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
+    # Materialization writes AGGREGATED edges to the graph — invalidate
+    # cached reads under this (workspace, data_source) so the next
+    # /edges/aggregated call recomputes against the fresh edges.
+    await _invalidate_cache(engine)
     return JSONResponse(content=stats)
 
 
@@ -1310,6 +1369,12 @@ async def batch_commands(
                     error="Skipped: batch aborted due to earlier failure (fail_fast=true)",
                 ))
             break
+
+    # Any successful mutation in the batch invalidates cached reads for
+    # the engine's (workspace, data_source) scope. Skipped when every
+    # command failed — no graph change, no cache to bump.
+    if succeeded > 0:
+        await _invalidate_cache(engine)
 
     return BatchResponse(
         results=results,

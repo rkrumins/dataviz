@@ -19,8 +19,10 @@ from backend.app.services.graph_cache import (
     CacheScope,
     ENDPOINT_AGGREGATED,
     ENDPOINT_CHILDREN,
+    ENDPOINT_TOP_LEVEL,
     GraphCache,
     _build_key,
+    bump_generation_for,
 )
 
 
@@ -28,6 +30,12 @@ class _Result(BaseModel):
     """Minimal Pydantic model standing in for ChildrenWithEdgesResult."""
     value: int
     children: list = []
+
+
+class _NodesResult(BaseModel):
+    """Stand-in for TopLevelNodesResult / any ``nodes``-shaped response."""
+    value: int = 0
+    nodes: list = []
 
 
 def _make_redis() -> AsyncMock:
@@ -41,12 +49,15 @@ def _make_redis() -> AsyncMock:
 
 @pytest.fixture(autouse=True)
 def _enable_children_endpoint(monkeypatch):
-    """Force the children-with-edges flag on for tests that exercise it."""
+    """Force the cached-endpoint flags on for tests that exercise them."""
     monkeypatch.setitem(
         graph_cache._ENABLED_ENDPOINTS, ENDPOINT_CHILDREN, True,
     )
     monkeypatch.setitem(
         graph_cache._ENABLED_ENDPOINTS, ENDPOINT_AGGREGATED, True,
+    )
+    monkeypatch.setitem(
+        graph_cache._ENABLED_ENDPOINTS, ENDPOINT_TOP_LEVEL, True,
     )
 
 
@@ -254,3 +265,114 @@ def test_different_scopes_yield_different_keys() -> None:
     k2 = _build_key(CacheScope("ws2", "ds1"), 0, ENDPOINT_CHILDREN, {})
     k3 = _build_key(CacheScope("ws1", "ds2"), 0, ENDPOINT_CHILDREN, {})
     assert len({k1, k2, k3}) == 3
+
+
+# ─── Phase 1: top-level endpoint wiring ─────────────────────────────────
+
+def test_top_level_default_enabled() -> None:
+    """The top-level endpoint flag must default ON so the cache rolls out
+    with the rest of Phase 1 rather than being silently bypassed."""
+    assert graph_cache._ENABLED_ENDPOINTS[ENDPOINT_TOP_LEVEL] is True
+    assert graph_cache._ENABLED_ENDPOINTS[ENDPOINT_CHILDREN] is True
+    assert graph_cache._ENABLED_ENDPOINTS[ENDPOINT_AGGREGATED] is True
+
+
+def test_top_level_uses_dedicated_ttl() -> None:
+    ttl = graph_cache._resolve_ttl(None, ENDPOINT_TOP_LEVEL)
+    assert ttl == graph_cache._DEFAULT_TOP_LEVEL_TTL
+
+
+@pytest.mark.asyncio
+async def test_top_level_caches_via_get_or_compute() -> None:
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_NodesResult(value=1, nodes=[{"urn": "u1"}]))
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_TOP_LEVEL,
+        params={"entityTypes": ["Domain"], "limit": 100},
+        compute=compute,
+        model_cls=_NodesResult,
+    )
+
+    compute.assert_awaited_once()
+    redis.set.assert_awaited_once()
+    # The key contains the new endpoint marker.
+    key = redis.set.call_args.args[0]
+    assert f":{ENDPOINT_TOP_LEVEL}:" in key
+
+
+@pytest.mark.asyncio
+async def test_empty_nodes_list_uses_negative_ttl() -> None:
+    """Top-level / future NodesListResult responses with an empty ``nodes``
+    list must be cached for the short negative-TTL window, not the full
+    30s — otherwise a transient miss would pin "no data" on the UI."""
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_NodesResult(value=0, nodes=[]))
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_TOP_LEVEL,
+        params={},
+        compute=compute,
+        model_cls=_NodesResult,
+    )
+
+    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
+
+
+# ─── generation-header support for client revalidation ─────────────────
+
+@pytest.mark.asyncio
+async def test_current_generation_reads_redis() -> None:
+    redis = _make_redis()
+    redis.get = AsyncMock(return_value="7")
+    cache = GraphCache(redis)
+    assert await cache.current_generation(CacheScope("ws1", "ds1")) == 7
+
+
+@pytest.mark.asyncio
+async def test_current_generation_returns_zero_on_miss() -> None:
+    redis = _make_redis()  # default get returns None
+    cache = GraphCache(redis)
+    assert await cache.current_generation(CacheScope("ws1", "ds1")) == 0
+
+
+@pytest.mark.asyncio
+async def test_current_generation_swallows_redis_error() -> None:
+    redis = _make_redis()
+    redis.get = AsyncMock(side_effect=RedisError("down"))
+    cache = GraphCache(redis)
+    assert await cache.current_generation(CacheScope("ws1", "ds1")) == 0
+
+
+# ─── worker-friendly invalidation helper (ingestion path) ──────────────
+
+@pytest.mark.asyncio
+async def test_bump_generation_for_invokes_bump(monkeypatch) -> None:
+    """The aggregation worker calls this with raw ws/ds strings on job
+    completion — it must drive an INCR on the same gen key the API uses."""
+    redis = _make_redis()
+    graph_cache._cache = GraphCache(redis)
+    try:
+        await bump_generation_for(workspace_id="ws1", data_source_id="ds1")
+        redis.incr.assert_awaited_once()
+        key = redis.incr.call_args.args[0]
+        assert "ws1" in key and "ds1" in key
+    finally:
+        graph_cache.reset_graph_cache_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_bump_generation_for_skips_without_workspace() -> None:
+    """No workspace = no scope = no key — bumping a malformed scope would
+    create unreachable garbage in Redis, so we short-circuit instead."""
+    redis = _make_redis()
+    graph_cache._cache = GraphCache(redis)
+    try:
+        await bump_generation_for(workspace_id="", data_source_id="ds1")
+        redis.incr.assert_not_called()
+    finally:
+        graph_cache.reset_graph_cache_for_tests()

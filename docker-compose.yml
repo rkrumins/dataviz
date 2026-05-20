@@ -78,6 +78,29 @@ services:
       timeout: 3s
       retries: 10
 
+  # ── Redis (Graph Cache) ────────────────────────────────────────────
+  # Dedicated Redis 7 for the graph response cache (graph_cache.py).
+  # Kept SEPARATE from the broker above because the cache uses
+  # generation-counter invalidation, which orphans old-generation keys
+  # until they TTL-expire — under churn that needs LRU eviction, which
+  # would break the broker's at-most-once-loss guarantee. No AOF: the
+  # cache is reconstructable from the graph provider on miss.
+  redis-cache:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "${REDIS_CACHE_PORT:-6381}:6379"
+    command: >
+      redis-server
+      --maxmemory ${GRAPH_CACHE_MAXMEMORY:-512mb}
+      --maxmemory-policy allkeys-lru
+      --save ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # ── PostgreSQL (Management Database) ──────────────────────────────
   postgres:
     image: postgres:16.4-alpine
@@ -177,6 +200,11 @@ services:
       # Redis (for aggregation event listener — syncs status from CP)
       REDIS_URL: redis://redis:6379/0
 
+      # Dedicated cache Redis for graph_cache.py. Falls back to REDIS_URL
+      # above if unset. Pointed at the LRU-evicting redis-cache instance
+      # so orphaned old-generation entries don't pin memory.
+      GRAPH_CACHE_REDIS_URL: redis://redis-cache:6379/0
+
       # Aggregation proxy: all 13 aggregation endpoints are forwarded
       # to the Control Plane.  The viz-service does NOT run any
       # aggregation logic locally — no dispatcher, no scheduler, no
@@ -193,6 +221,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      redis-cache:
         condition: service_healthy
       # Wait for Control Plane to be healthy so the aggregation schema
       # exists and proxy requests don't fail on first boot.
@@ -220,6 +250,12 @@ services:
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
 
+      # Graph cache Redis — the worker bumps the (workspace, data_source)
+      # generation here on materialization completion so viz-service's
+      # cached /edges/aggregated and /children-with-edges reads flip to
+      # fresh on the next request. Same instance as viz-service points at.
+      GRAPH_CACHE_REDIS_URL: redis://redis-cache:6379/0
+
       # FalkorDB — worker-specific tuning: longer timeouts for heavy
       # MERGE ops, pool sizes auto-scaled from WORKER_CONCURRENCY.
       FALKORDB_HOST: falkordb
@@ -243,6 +279,8 @@ services:
       falkordb:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      redis-cache:
         condition: service_healthy
       postgres:
         condition: service_healthy
