@@ -192,31 +192,10 @@ class TestCompilerLeaves:
             c.compile(TextPredicate(value="x", target="name", match="fulltext"))
 
     def test_property_eq(self):
-        # eq predicates carry a blob fallback so pre-W-1 nodes (where
-        # the value is trapped in n.properties JSON) still match. The
-        # native branch is the fast/precise path; the blob branch is
-        # the slow/permissive backup.
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="logicalType", op="eq", value="STRING"))
-        assert where == (
-            "(n.logicalType = $p0 OR "
-            "(n.properties IS NOT NULL AND "
-            "(n.properties CONTAINS '\"logicalType\":\"STRING\"' OR "
-            "n.properties CONTAINS '\"logicalType\": \"STRING\"')))"
-        )
+        assert where == "n.logicalType = $p0"
         assert c.params == {"p0": "STRING"}
-
-    def test_property_eq_numeric_has_blob_fallback(self):
-        c = _Compiler()
-        where = c.compile(PropertyPredicate(key="rowCount", op="eq", value=1000))
-        # Numeric values match without quotes in the blob
-        assert "n.properties CONTAINS '\"rowCount\":1000'" in where
-        assert "n.properties CONTAINS '\"rowCount\": 1000'" in where
-
-    def test_property_eq_bool_has_blob_fallback(self):
-        c = _Compiler()
-        where = c.compile(PropertyPredicate(key="nullable", op="eq", value=True))
-        assert "n.properties CONTAINS '\"nullable\":true'" in where
 
     def test_property_between(self):
         c = _Compiler()
@@ -276,16 +255,14 @@ class TestCompilerLeaves:
         assert where == "NOT (n.tags CONTAINS $p0)"
 
     def test_has_property(self):
-        # hasProperty has a blob fallback so pre-W-1 nodes still match.
         c = _Compiler()
         where = c.compile(HasPropertyPredicate(key="pii_class"))
-        assert where.startswith("(EXISTS(n.pii_class) OR ")
-        assert "n.properties CONTAINS '\"pii_class\":'" in where
+        assert where == "EXISTS(n.pii_class)"
 
     def test_has_property_negate(self):
         c = _Compiler()
         where = c.compile(HasPropertyPredicate(key="pii_class", negate=True))
-        assert where.startswith("NOT ((EXISTS(n.pii_class) OR ")
+        assert where == "NOT (EXISTS(n.pii_class))"
 
     def test_entity_type_in(self):
         c = _Compiler()
@@ -311,15 +288,14 @@ class TestCompilerLeaves:
 
 class TestCompilerGroups:
     def test_and(self):
-        # AND group: tag CONTAINS plus property eq (with blob fallback)
         c = _Compiler()
         where = c.compile(GroupPredicate(op="and", children=[
             TagPredicate(values=["PII"]),
             PropertyPredicate(key="logicalType", op="eq", value="STRING"),
         ]))
-        assert where.startswith("((n.tags CONTAINS $p0) AND ")
-        assert "n.logicalType = $p1" in where  # native branch
-        assert "n.properties CONTAINS '\"logicalType\":\"STRING\"'" in where
+        assert where == (
+            "((n.tags CONTAINS $p0) AND n.logicalType = $p1)"
+        )
         assert c.params == {"p0": '"PII"', "p1": "STRING"}
 
     def test_or(self):
@@ -328,9 +304,9 @@ class TestCompilerGroups:
             TextPredicate(value="x", target="name", match="exact"),
             HasPropertyPredicate(key="foo"),
         ]))
-        assert where.startswith("(toLower(toString(n.displayName)) = $p0 OR ")
-        assert "EXISTS(n.foo)" in where  # native branch
-        assert "n.properties CONTAINS '\"foo\":'" in where  # blob branch
+        assert where == (
+            "(toLower(toString(n.displayName)) = $p0 OR EXISTS(n.foo))"
+        )
 
     def test_not(self):
         c = _Compiler()
@@ -342,15 +318,12 @@ class TestCompilerGroups:
     def test_descendant_of_top_level_hoisted(self):
         # DescendantOf at the top-level AND compiles to TRUE; the URNs
         # are stashed on the compiler for the caller to merge into scope.
-        # The property eq predicate now carries a blob fallback (see
-        # test_property_eq above), so the AND fragment includes both
-        # the native branch and the OR-blob branch.
         c = _Compiler()
         where = c.compile(GroupPredicate(op="and", children=[
             DescendantOfPredicate(urns=["urn:domain:A", "urn:domain:B"]),
             PropertyPredicate(key="logicalType", op="eq", value="STRING"),
         ]))
-        assert where.startswith("(true AND (n.logicalType = $p0 OR ")
+        assert where == "(true AND n.logicalType = $p0)"
         assert c.hoisted_root_urns == [["urn:domain:A", "urn:domain:B"]]
 
     def test_descendant_of_inside_or_rejected(self):

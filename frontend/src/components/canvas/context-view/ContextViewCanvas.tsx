@@ -1480,6 +1480,83 @@ export function ContextViewCanvas({
           (QuickSearchBar / SearchMapPanel / SearchResultsDock) is built. */}
       <AdvancedSearchDevPanel />
 
+      {/* Advanced Search (G2) — production-grade template-driven panel.
+          Right-side glass drawer with the orient-before-drill UX:
+          question templates, aggregate bucket cards, hit rows with
+          breadcrumbs. Toggled from the header's Advanced Search button. */}
+      <SearchMapPanel
+        open={advancedSearchOpen}
+        onClose={() => setAdvancedSearchOpen(false)}
+        onRevealNode={async (urn, ancestorPath) => {
+          // Spine walk: expand each ancestor in turn so the deep hit
+          // becomes reachable. Each loadChildren is awaited so the
+          // canvas store has settled before the next ancestor lookup.
+          // Re-reads `nodes` via getState() between steps because the
+          // captured `nodes` closure here is stale relative to in-flight
+          // hydration.
+          for (const ancestor of ancestorPath) {
+            const currentNodes = useCanvasStore.getState().nodes
+            const ancNode = currentNodes.find(
+              (n) => (n.data?.urn as string) === ancestor.urn ||
+                     n.id === ancestor.urn,
+            )
+            if (!ancNode) {
+              // Ancestor isn't in the canvas yet — the previous
+              // loadChildren may not have produced it. Stop walking;
+              // we'll select the deepest reachable node below.
+              break
+            }
+            setExpandedNodes((prev) => {
+              const next = new Set(prev)
+              next.add(ancNode.id)
+              return next
+            })
+            try {
+              await loadChildren(ancNode.id)
+            } catch (e) {
+              console.warn('[reveal] loadChildren failed for', ancestor.urn, e)
+              // Keep walking — partial reveal beats no reveal.
+            }
+          }
+
+          // After the walk, look for the hit itself. Settle one tick
+          // first because state updates are batched.
+          await new Promise((resolve) => setTimeout(resolve, 80))
+          const allNodes = useCanvasStore.getState().nodes
+          const hitNode = allNodes.find(
+            (n) => (n.data?.urn as string) === urn || n.id === urn,
+          )
+          if (hitNode) {
+            selectNode(hitNode.id)
+            // Also expand the hit's immediate parent so the hit row
+            // itself renders (containers don't render their children
+            // until expanded).
+            const parent = ancestorPath[ancestorPath.length - 1]
+            if (parent) {
+              const parentNode = allNodes.find(
+                (n) => (n.data?.urn as string) === parent.urn,
+              )
+              if (parentNode) {
+                setExpandedNodes((prev) => new Set([...prev, parentNode.id]))
+              }
+            }
+          } else {
+            // Hit isn't loaded (deep leaf, or load failed). Fall back
+            // to selecting the deepest reachable ancestor so the user
+            // gets visual confirmation that we landed near the target.
+            for (let i = ancestorPath.length - 1; i >= 0; i--) {
+              const ancNode = allNodes.find(
+                (n) => (n.data?.urn as string) === ancestorPath[i].urn,
+              )
+              if (ancNode) {
+                selectNode(ancNode.id)
+                break
+              }
+            }
+          }
+        }}
+      />
+
       {/* Row layout: canvas column + right-rail panels.
           When a panel opens it joins the row as a flex sibling so the entire
           canvas (header + body) shrinks horizontally rather than being
@@ -1698,71 +1775,6 @@ export function ContextViewCanvas({
 
         </div>
       </div>
-
-      {/* Advanced Search (G2) — production-grade template-driven panel.
-          Mounted INSIDE the canvas column so its absolute positioning is
-          relative to the canvas area (not the outer layout including the
-          toolbar). Slides in from the right; toggled from the header. */}
-      <SearchMapPanel
-        open={advancedSearchOpen}
-        onClose={() => setAdvancedSearchOpen(false)}
-        onRevealNode={async (urn, ancestorPath) => {
-          // Spine walk: expand each ancestor in turn so the deep hit
-          // becomes reachable. Each loadChildren is awaited so the
-          // canvas store has settled before the next ancestor lookup.
-          // Re-reads `nodes` via getState() between steps because the
-          // captured `nodes` closure here is stale relative to in-flight
-          // hydration.
-          for (const ancestor of ancestorPath) {
-            const currentNodes = useCanvasStore.getState().nodes
-            const ancNode = currentNodes.find(
-              (n) => (n.data?.urn as string) === ancestor.urn ||
-                     n.id === ancestor.urn,
-            )
-            if (!ancNode) {
-              break
-            }
-            setExpandedNodes((prev) => {
-              const next = new Set(prev)
-              next.add(ancNode.id)
-              return next
-            })
-            try {
-              await loadChildren(ancNode.id)
-            } catch (e) {
-              console.warn('[reveal] loadChildren failed for', ancestor.urn, e)
-            }
-          }
-
-          await new Promise((resolve) => setTimeout(resolve, 80))
-          const allNodes = useCanvasStore.getState().nodes
-          const hitNode = allNodes.find(
-            (n) => (n.data?.urn as string) === urn || n.id === urn,
-          )
-          if (hitNode) {
-            selectNode(hitNode.id)
-            const parent = ancestorPath[ancestorPath.length - 1]
-            if (parent) {
-              const parentNode = allNodes.find(
-                (n) => (n.data?.urn as string) === parent.urn,
-              )
-              if (parentNode) {
-                setExpandedNodes((prev) => new Set([...prev, parentNode.id]))
-              }
-            }
-          } else {
-            for (let i = ancestorPath.length - 1; i >= 0; i--) {
-              const ancNode = allNodes.find(
-                (n) => (n.data?.urn as string) === ancestorPath[i].urn,
-              )
-              if (ancNode) {
-                selectNode(ancNode.id)
-                break
-              }
-            }
-          }
-        }}
-      />
       </div>{/* end canvas column */}
 
       {/* Right-rail panels — flex siblings of the canvas column.

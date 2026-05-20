@@ -149,12 +149,11 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
 
     return (
         <motion.div
-            initial={{ opacity: 0, y: 4 }}
+            initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{
-                duration: 0.14,
-                // Tight stagger cap: a 50-hit list settles in <100ms total.
-                delay: Math.min(index * 0.008, 0.08),
+                duration: 0.22,
+                delay: Math.min(index * 0.025, 0.4),
                 ease: [0.22, 1, 0.36, 1],
             }}
             className={cn(

@@ -121,85 +121,6 @@ def _sanitize_label(s: str) -> str:
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
 
 
-# ---------------------------------------------------------------------------
-# Legacy-blob fallback helpers
-#
-# Nodes ingested before the W-1 native-property refactor still store user
-# properties as a single `n.properties = json.dumps({...})` JSON string
-# (see falkordb_provider.py:6141). The post-W-1 read path transparently
-# merges native + blob into the API response (so the JSON output looks
-# identical), but Cypher predicates against `n.<key>` only match the
-# native side — pre-W-1 nodes return 0 even when the value exists.
-#
-# These helpers add an OR-clause that ALSO probes the blob using
-# CONTAINS on the JSON text. It's not as precise as native (substring
-# match against the serialized blob) but it's correct for `eq` and
-# `hasProperty` against scalar values, which is the common case. The
-# operator should still run `migrate_native_properties.py` eventually —
-# the blob branch is the slow path.
-#
-# Python's `json.dumps` with default separators writes ': ' (with space)
-# after keys, but operators using `separators=(',', ':')` write no space.
-# We try both spacings to be defensive.
-# ---------------------------------------------------------------------------
-
-def _json_str_literal(s: str) -> str:
-    """JSON-escape a string for direct embedding in a Cypher string
-    literal. We use single quotes around the Cypher literal and escape
-    any single quotes / backslashes in the value. Doesn't aim for full
-    JSON correctness — just enough to dodge the common cases that would
-    break Cypher parsing.
-    """
-    return s.replace("\\", "\\\\").replace("'", "\\'")
-
-
-def _blob_eq_fallback(key: str, value) -> str:
-    """Return a Cypher fragment that matches the legacy blob form of
-    a property equality predicate. Empty string when the value isn't
-    blob-fallback-friendly (lists, dicts).
-
-    For string values, matches `"key":"value"` (both spacing variants).
-    For numeric / boolean values, matches `"key":value` (no quotes).
-    """
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        # bools must come before int (Python: True isinstance int)
-        v_json = "true" if value else "false"
-        pat_a = f'"{key}":{v_json}'
-        pat_b = f'"{key}": {v_json}'
-    elif isinstance(value, (int, float)):
-        v_json = str(value)
-        pat_a = f'"{key}":{v_json}'
-        pat_b = f'"{key}": {v_json}'
-    elif isinstance(value, str):
-        v_json = _json_str_literal(value)
-        pat_a = f'"{key}":"{v_json}"'
-        pat_b = f'"{key}": "{v_json}"'
-    else:
-        # lists / dicts can't be matched via a stable substring
-        return ""
-    return (
-        f"(n.properties IS NOT NULL AND "
-        f"(n.properties CONTAINS '{pat_a}' OR n.properties CONTAINS '{pat_b}'))"
-    )
-
-
-def _blob_has_property_fallback(key: str) -> str:
-    """Return a Cypher fragment that matches the legacy blob form of
-    a property-presence check. Matches `"key":` (both spacings)."""
-    # Both spacings: `"key":` (no space) and `"key" :` should never
-    # occur with Python's json, but `"key":<value>` is what we have.
-    # A trailing colon is the discriminator that catches the start of
-    # the value without false-matching on a value that contains
-    # the literal key name.
-    return (
-        f"(n.properties IS NOT NULL AND "
-        f"(n.properties CONTAINS '\"{key}\":' "
-        f"OR n.properties CONTAINS '\"{key}\": '))"
-    )
-
-
 class _Compiler:
     """Walks the predicate tree, emitting a Cypher WHERE fragment.
 
@@ -328,36 +249,13 @@ class _Compiler:
         return f"{col_expr} CONTAINS ${pn}"  # substring
 
     def _visit_property(self, p) -> str:
-        safe_key = _safe_property_name(p.key)
-        col = f"n.{safe_key}"
+        col = f"n.{_safe_property_name(p.key)}"
         op = p.op
-        if op == "eq":
-            # Equality predicates get the blob fallback so legacy
-            # (pre-W-1) data still matches without forcing a
-            # migration. See `_blob_eq_fallback` for the pattern.
-            pn = self._next()
-            self.params[pn] = p.value
-            native = f"{col} = ${pn}"
-            fallback = _blob_eq_fallback(safe_key, p.value)
-            if fallback:
-                # NOTE: the OR prevents the planner from using the
-                # property index on the native branch, so eq queries
-                # are slightly slower than they could be. The trade
-                # is "works against legacy data" beats "fast against
-                # only native data" — and once operators run the
-                # migration the blob disappears, leaving the native
-                # branch as the only matchable side.
-                return f"({native} OR {fallback})"
-            return native
-        if op in ("neq", "gt", "gte", "lt", "lte"):
-            symbol = {"neq": "<>", "gt": ">",
+        if op in ("eq", "neq", "gt", "gte", "lt", "lte"):
+            symbol = {"eq": "=", "neq": "<>", "gt": ">",
                       "gte": ">=", "lt": "<", "lte": "<="}[op]
             pn = self._next()
             self.params[pn] = p.value
-            # No blob fallback for inequality/ordering ops: they
-            # can't be expressed as a CONTAINS pattern against the
-            # JSON blob (would need APOC, not available in FalkorDB).
-            # These ops only work against natively-stored data.
             return f"{col} {symbol} ${pn}"
         if op in ("contains", "startsWith", "endsWith"):
             pn = self._next()
@@ -410,10 +308,7 @@ class _Compiler:
         raise CompileError(f"unknown tag op: {t.op!r}")
 
     def _visit_has_property(self, h) -> str:
-        safe_key = _safe_property_name(h.key)
-        native = f"EXISTS(n.{safe_key})"
-        fallback = _blob_has_property_fallback(safe_key)
-        expr = f"({native} OR {fallback})"
+        expr = f"EXISTS(n.{_safe_property_name(h.key)})"
         return f"NOT ({expr})" if h.negate else expr
 
     def _visit_entity_type(self, e) -> str:
