@@ -11,6 +11,7 @@
  *   VITE_TIMEOUT_TRACE_MS
  *   VITE_TIMEOUT_GET_CHILDREN_MS
  *   VITE_TIMEOUT_AGGREGATED_EDGES_MS
+ *   VITE_TIMEOUT_ADMIN_LIST_MS
  *
  * Companion backend constants live in
  * backend/app/config/resilience.py.
@@ -29,4 +30,8 @@ export const TIMEOUTS = {
   AGGREGATED_EDGES_MS: readMs('VITE_TIMEOUT_AGGREGATED_EDGES_MS', 45_000),
   EDGES_BETWEEN_MS:    readMs('VITE_TIMEOUT_EDGES_BETWEEN_MS',    45_000),
   PROVIDER_HEALTH_MS:  readMs('VITE_TIMEOUT_PROVIDER_HEALTH_MS',  30_000),
+  // Per-call deadline for admin/dashboard list fan-outs wrapped in
+  // Promise.allSettled. Generous enough for a healthy backend, tight
+  // enough that one slow provider does not pin the page on a spinner.
+  ADMIN_LIST_MS:       readMs('VITE_TIMEOUT_ADMIN_LIST_MS',       8_000),
 } as const

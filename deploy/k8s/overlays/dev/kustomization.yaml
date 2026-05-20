@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+patches:
+  - path: patches/replicas.yaml
+  - path: patches/resource-limits.yaml
+  - path: patches/ingress-patch.yaml
+  # Override LOG_LEVEL to DEBUG
+  - target:
+      kind: ConfigMap
+      name: common-config
+    patch: |-
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "DEBUG"
+
+images:
+  - name: REGISTRY/synodic-viz
+    newName: gcr.io/PROJECT_ID/synodic-viz
+    newTag: dev-latest
+  - name: REGISTRY/synodic-controlplane
+    newName: gcr.io/PROJECT_ID/synodic-controlplane
+    newTag: dev-latest
+  - name: REGISTRY/synodic-worker
+    newName: gcr.io/PROJECT_ID/synodic-worker
+    newTag: dev-latest
+  - name: REGISTRY/synodic-graph
+    newName: gcr.io/PROJECT_ID/synodic-graph
+    newTag: dev-latest
+  - name: REGISTRY/synodic-frontend
+    newName: gcr.io/PROJECT_ID/synodic-frontend
+    newTag: dev-latest
+  - name: REGISTRY/synodic-falkordb
+    newName: gcr.io/PROJECT_ID/synodic-falkordb
+    newTag: dev-latest
+  - name: REGISTRY/synodic-seed
+    newName: gcr.io/PROJECT_ID/synodic-seed
+    newTag: dev-latest

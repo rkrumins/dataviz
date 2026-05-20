@@ -28,6 +28,8 @@ from backend.app.services.graph_cache import (
     CacheScope,
     ENDPOINT_AGGREGATED,
     ENDPOINT_CHILDREN,
+    ENDPOINT_TRACE,
+    ENDPOINT_TRACE_EXPAND,
     get_graph_cache,
 )
 from backend.app.services.stats_cache import (
@@ -100,6 +102,23 @@ def _cache_scope(engine: ContextEngine) -> Optional[CacheScope]:
         return None
     ds = getattr(engine, "_data_source_id", None) or ""
     return CacheScope(workspace_id=ws, data_source_id=ds)
+
+
+def _provider_health_header(engine: ContextEngine) -> str:
+    """Map the engine's CircuitBreakerProxy state to the same string set
+    used by the stats_cache envelope's ``provider_health`` field.
+
+    Values mirror stats_cache: ``healthy`` | ``unreachable`` | ``unknown``.
+    Half-open is reported as ``healthy`` because the breaker is actively
+    probing — surfacing the transient state would flap the UI banner.
+    """
+    proxy = getattr(engine, "provider", None)
+    state = getattr(proxy, "breaker_state", None)
+    if state is None:
+        return "unknown"
+    if state == "open":
+        return "unreachable"
+    return "healthy"
 
 
 async def _invalidate_cache(engine: ContextEngine) -> None:
@@ -215,6 +234,7 @@ async def get_lineage_trace_deprecated(request: Request):
 
 @router.post("/trace/v2", response_model=TraceResult, response_model_by_alias=True)
 async def trace_v2(
+    response: Response,
     request: TraceRequest = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
 ) -> TraceResult:
@@ -230,11 +250,31 @@ async def trace_v2(
     returns ``truncated: true`` with ``truncationReason``. Always HTTP
     200 unless input is malformed.
     """
-    return await engine.trace(request)
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
+
+    async def compute() -> TraceResult:
+        return await engine.trace(request)
+
+    scope = _cache_scope(engine)
+    if scope is None:
+        return await compute()
+
+    return await get_graph_cache().get_or_compute(
+        scope=scope,
+        endpoint=ENDPOINT_TRACE,
+        # ``model_dump`` produces a deterministic dict keyed by field
+        # name; the cache layer hashes it with ``sort_keys=True`` so
+        # alias order / dict ordering can't shift the key.
+        params=request.model_dump(mode="json", by_alias=True, exclude_none=True),
+        compute=compute,
+        model_cls=TraceResult,
+        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+    )
 
 
 @router.post("/trace/expand", response_model=TraceResult, response_model_by_alias=True)
 async def trace_expand(
+    response: Response,
     request: ExpandRequest = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
 ) -> TraceResult:
@@ -245,7 +285,23 @@ async def trace_expand(
     the ontology, the engine bypasses AGGREGATED and reads raw lineage
     edges directly.
     """
-    return await engine.expand_aggregated_edge(request)
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
+
+    async def compute() -> TraceResult:
+        return await engine.expand_aggregated_edge(request)
+
+    scope = _cache_scope(engine)
+    if scope is None:
+        return await compute()
+
+    return await get_graph_cache().get_or_compute(
+        scope=scope,
+        endpoint=ENDPOINT_TRACE_EXPAND,
+        params=request.model_dump(mode="json", by_alias=True, exclude_none=True),
+        compute=compute,
+        model_cls=TraceResult,
+        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+    )
 
 
 class _TraceExpandPair(BaseModel):
@@ -468,6 +524,7 @@ async def get_node_children(
 @router.get("/nodes/{urn}/children-with-edges", response_model=ChildrenWithEdgesResult, response_model_by_alias=True)
 async def get_children_with_edges(
     urn: str,
+    response: Response,
     edge_types: Optional[List[str]] = Query(None, alias="edgeTypes"),
     lineage_edge_types: Optional[List[str]] = Query(None, alias="lineageEdgeTypes"),
     search_query: Optional[str] = Query(None, alias="searchQuery"),
@@ -480,6 +537,7 @@ async def get_children_with_edges(
 ):
     """Get children with containment and lineage edges in a single round-trip."""
     await _enforce_fair_share(engine, ENDPOINT_CHILDREN)
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
 
     async def compute() -> ChildrenWithEdgesResult:
         return await engine.get_children_with_edges(
@@ -509,6 +567,7 @@ async def get_children_with_edges(
         },
         compute=compute,
         model_cls=ChildrenWithEdgesResult,
+        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
 
 
@@ -1079,6 +1138,7 @@ async def get_refresh_status(
 
 @router.post("/edges/aggregated", response_model=AggregatedEdgeResult, response_model_by_alias=True)
 async def get_aggregated_edges(
+    response: Response,
     request: AggregatedEdgeRequest = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
 ):
@@ -1088,6 +1148,7 @@ async def get_aggregated_edges(
     at a higher granularity level (e.g., between datasets instead of columns).
     """
     await _enforce_fair_share(engine, ENDPOINT_AGGREGATED)
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
 
     async def compute() -> AggregatedEdgeResult:
         return await engine.get_aggregated_edges(request)
@@ -1112,6 +1173,7 @@ async def get_aggregated_edges(
         },
         compute=compute,
         model_cls=AggregatedEdgeResult,
+        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
 
 

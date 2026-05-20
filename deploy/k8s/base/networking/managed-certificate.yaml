@@ -1,0 +1,8 @@
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: synodic-certificate
+  namespace: synodic
+spec:
+  domains:
+    - synodic.example.com

@@ -1,0 +1,57 @@
+{{- /*
+synodic-upgrade Job — runs Alembic upgrades/downgrades as a Helm
+pre-install/pre-upgrade hook.
+
+Ordering (hook weights):
+  -10  →  dataviz-db-init-secret      (Secret w/ DB_INIT_DSN, if needed)
+   -5  →  dataviz-db-init-sql         (ConfigMap w/ role+schema SQL)
+    0  →  dataviz-db-init             (psql: CREATE ROLE/DATABASE/SCHEMA)
+    5  →  dataviz-upgrade  ← THIS     (alembic upgrade head)
+
+After hooks complete, normal Deployments roll, each gated by the
+wait-for-schema initContainer (see _helpers.tpl).
+*/}}
+{{- if .Values.upgrade.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dataviz-upgrade
+  labels:
+    {{- include "dataviz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: upgrade
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.upgrade.backoffLimit | default 3 }}
+  ttlSecondsAfterFinished: {{ .Values.upgrade.ttlSecondsAfterFinished | default 600 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dataviz.labels" . | nindent 8 }}
+        app.kubernetes.io/component: upgrade
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: upgrade
+          image: {{ include "dataviz.image" (dict "ctx" $ "name" "synodic-upgrade") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - {{ .Values.upgrade.command | default "upgrade" | quote }}
+            {{- if .Values.upgrade.targetRevision }}
+            - "--revision"
+            - {{ .Values.upgrade.targetRevision | quote }}
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: dataviz-config
+            - secretRef:
+                name: {{ include "dataviz.secretName" . }}
+          resources:
+            {{- toYaml .Values.upgrade.resources | nindent 12 }}
+{{- end }}

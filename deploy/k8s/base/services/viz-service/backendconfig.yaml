@@ -1,0 +1,17 @@
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: viz-service-backendconfig
+  namespace: synodic
+spec:
+  healthCheck:
+    checkIntervalSec: 15
+    timeoutSec: 5
+    healthyThreshold: 1
+    unhealthyThreshold: 3
+    type: HTTP
+    requestPath: /api/v1/health/ready
+    port: 8000
+  timeoutSec: 120
+  connectionDraining:
+    drainingTimeoutSec: 30

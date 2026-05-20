@@ -8,6 +8,33 @@
  */
 
 /**
+ * Race a promise against a timeout. Rejects with a TimeoutError if the
+ * promise does not settle within `ms`. The underlying promise is not
+ * cancelled — wrap a fetch in AbortController separately if cancellation
+ * matters. Used to keep `Promise.allSettled` fan-outs from being held
+ * open by a single slow backend (e.g. an unhealthy provider listing).
+ */
+export class TimeoutError extends Error {
+  constructor(message = 'timeout') {
+    super(message)
+    this.name = 'TimeoutError'
+  }
+}
+
+export function withTimeout<T>(promise: Promise<T>, ms: number, label?: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new TimeoutError(label ? `${label}: timeout after ${ms}ms` : `timeout after ${ms}ms`)),
+      ms,
+    )
+  })
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer)
+  })
+}
+
+/**
  * Run `fn` over `items` with at most `limit` concurrent invocations.
  *
  * Returns results in input order. Failures propagate per-item via

@@ -41,6 +41,26 @@ def _sanitize_label(s: str) -> str:
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
 
 
+def _redact_redis_url(url: str) -> str:
+    """Strip embedded credentials from a Redis URL for safe logging.
+
+    ``redis://:password@host:6379/1`` → ``redis://***@host:6379/1``.
+    Best-effort: unparseable input returns the literal ``redis://***``
+    so a malformed URL never leaks raw chars into the log.
+    """
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(url)
+        if parsed.password is None and parsed.username is None:
+            return url
+        netloc = parsed.hostname or ""
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunparse(parsed._replace(netloc=f"***@{netloc}"))
+    except Exception:
+        return "redis://***"
+
+
 def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = None) -> Optional[GraphNode]:
     """Build GraphNode from FalkorDB node properties."""
     if not props or "urn" not in props:
@@ -349,6 +369,11 @@ class FalkorDBProvider(GraphDataProvider):
                     # redis://:password@host:port/0) so we don't pass our
                     # FalkorDB password here — the cache Redis is a separate
                     # instance that may have separate credentials.
+                    logger.info(
+                        "FalkorDB provider using dedicated cache Redis %s "
+                        "(decoupled from graph host %s:%s).",
+                        _redact_redis_url(cache_redis_url), self._host, self._port,
+                    )
                     _raw_redis = Redis.from_url(
                         cache_redis_url,
                         max_connections=redis_pool_size,
@@ -359,7 +384,17 @@ class FalkorDBProvider(GraphDataProvider):
                     self._redis_pool = None  # managed by from_url
                 else:
                     # Cache Redis falls back to the FalkorDB instance — same
-                    # host, same auth (P1.6).
+                    # host, same auth (P1.6). This is dev-compat only: in
+                    # production CACHE_REDIS_URL MUST be set to a separate
+                    # Redis so a FalkorDB outage doesn't take caching with
+                    # it. Warn loudly so ops can spot the misconfiguration.
+                    logger.warning(
+                        "CACHE_REDIS_URL is not set; FalkorDB provider's "
+                        "ancestor/URN caches will share the FalkorDB instance "
+                        "(host=%s:%s). A FalkorDB outage will also disable "
+                        "caching. Set CACHE_REDIS_URL to a dedicated Redis "
+                        "in production.", self._host, self._port,
+                    )
                     _redis_pool_kwargs: dict = {
                         "host": self._host,
                         "port": self._port,
