@@ -61,27 +61,25 @@ export const SearchMapPanel: FC<SearchMapPanelProps> = ({
     <AnimatePresence>
         {open && (
             <>
-                {/* Backdrop — subtle dim so the canvas reads as
-                    secondary while the search is the focused mode.
-                    Click to dismiss. */}
+                {/* Backdrop — solid dim, no backdrop-filter blur (the
+                    blur was the single most expensive thing in the
+                    drawer because it composites the entire canvas
+                    behind it on every frame). Click to dismiss. */}
                 <motion.div
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
-                    transition={{ duration: 0.18 }}
+                    transition={{ duration: 0.12 }}
                     onClick={onClose}
-                    className={cn(
-                        "absolute inset-0 z-40",
-                        "bg-black/15 dark:bg-black/30 backdrop-blur-[2px]",
-                    )}
+                    className="absolute inset-0 z-40 bg-black/15 dark:bg-black/35"
                 />
 
                 {/* Drawer */}
                 <motion.div
-                    initial={{ opacity: 0, x: 32 }}
+                    initial={{ opacity: 0, x: 24 }}
                     animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 32 }}
-                    transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+                    exit={{ opacity: 0, x: 24 }}
+                    transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
                     className={cn(
                         // z-50 sits above the editor toolbar (z-30), the
                         // node palette (z-20), and our backdrop (z-40).
@@ -89,9 +87,13 @@ export const SearchMapPanel: FC<SearchMapPanelProps> = ({
                         "absolute top-3 right-3 bottom-3 z-50",
                         "w-[34rem] max-w-[calc(100vw-1.5rem)]",
                         "flex flex-col overflow-hidden",
-                        "rounded-2xl border border-glass-border",
-                        "bg-gradient-to-br from-canvas-elevated/95 via-canvas-elevated/92 to-canvas-elevated/95",
-                        "backdrop-blur-2xl shadow-2xl",
+                        "rounded-2xl",
+                        // glass-panel utility = adaptive light/dark glass
+                        // with backdrop-blur + border + shadow. Matches
+                        // NodePalette / TraceBottomDock so the panel
+                        // reads as part of the canvas chrome instead of
+                        // a sheet of paper pasted over it.
+                        "glass-panel shadow-2xl",
                     )}
                     data-testid="search-map-panel"
                 >

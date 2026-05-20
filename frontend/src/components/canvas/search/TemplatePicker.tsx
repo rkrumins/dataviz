@@ -102,8 +102,8 @@ export const TemplatePicker: FC<TemplatePickerProps> = ({ onPick }) => {
                 <h2 className="text-lg font-display font-semibold text-ink tracking-tight">
                     What do you want to find?
                 </h2>
-                <p className="mt-1 text-xs text-ink-muted leading-relaxed max-w-[28rem]">
-                    Pick a question to start. The panel rolls up matches by
+                <p className="mt-1.5 text-xs text-ink-secondary leading-relaxed max-w-[28rem]">
+                    Pick a question to start. The panel rolls matches up by
                     ancestor first, so you can orient before drilling into
                     specific results.
                 </p>
@@ -118,20 +118,20 @@ export const TemplatePicker: FC<TemplatePickerProps> = ({ onPick }) => {
                 return (
                     <motion.div
                         key={section.id}
-                        initial={{ opacity: 0, y: 8 }}
+                        initial={{ opacity: 0, y: 4 }}
                         animate={{ opacity: 1, y: 0 }}
                         transition={{
-                            duration: 0.22,
-                            delay: sIdx * 0.04,
+                            duration: 0.14,
+                            delay: sIdx * 0.015,
                             ease: [0.22, 1, 0.36, 1],
                         }}
                         className="flex flex-col gap-2.5"
                     >
                         <div className="px-1">
-                            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">
+                            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-secondary">
                                 {section.title}
                             </div>
-                            <div className="text-[11px] text-ink-muted/70 mt-0.5">
+                            <div className="text-[11px] text-ink-muted mt-0.5">
                                 {section.description}
                             </div>
                         </div>
@@ -142,23 +142,26 @@ export const TemplatePicker: FC<TemplatePickerProps> = ({ onPick }) => {
                             return (
                                 <motion.button
                                     key={t.id}
-                                    initial={{ opacity: 0, y: 4 }}
+                                    initial={{ opacity: 0, y: 2 }}
                                     animate={{ opacity: 1, y: 0 }}
                                     transition={{
-                                        duration: 0.18,
-                                        delay: sIdx * 0.04 + tIdx * 0.02,
+                                        duration: 0.12,
+                                        delay: sIdx * 0.015 + tIdx * 0.008,
                                         ease: [0.22, 1, 0.36, 1],
                                     }}
                                     whileHover={{ y: -1 }}
                                     onClick={() => onPick(t)}
                                     className={cn(
                                         "group relative w-full text-left",
-                                        "rounded-2xl border border-glass-border",
-                                        "bg-gradient-to-br from-canvas-elevated/90 via-canvas-elevated/70 to-canvas-elevated/90",
-                                        "backdrop-blur-md",
+                                        "rounded-2xl",
+                                        // Solid card surface that sits ABOVE the
+                                        // panel's glass — not another transparent
+                                        // gradient that disappears into it.
+                                        "border border-black/[0.08] dark:border-white/[0.08]",
+                                        "bg-canvas-elevated dark:bg-canvas-elevated/95",
                                         "p-4",
                                         "shadow-sm transition-all duration-200",
-                                        "hover:shadow-lg dark:hover:shadow-xl",
+                                        "hover:shadow-md dark:hover:shadow-xl",
                                         accent.shadow,
                                         accent.border,
                                         "focus:outline-none focus:ring-2 focus:ring-accent-lineage/40",
@@ -179,7 +182,7 @@ export const TemplatePicker: FC<TemplatePickerProps> = ({ onPick }) => {
                                             <div className="text-sm font-display font-semibold text-ink leading-tight">
                                                 {t.label}
                                             </div>
-                                            <div className="mt-1 text-xs text-ink-muted leading-snug">
+                                            <div className="mt-1 text-xs text-ink-secondary leading-snug">
                                                 {t.description}
                                             </div>
                                         </div>

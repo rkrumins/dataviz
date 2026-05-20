@@ -762,9 +762,42 @@ class FalkorDBProvider(GraphDataProvider):
         # if the index already exists.
         properties = ["urn", "displayName", "qualifiedName", "level"]
 
+        # Advanced-search property indices — common catalog metadata keys
+        # that appear as native node properties after the W-1 storage
+        # refactor. Without these, `WHERE n.logicalType = 'STRING'` is a
+        # full label scan; with them, it's an index seek (sub-ms).
+        #
+        # Best-effort: CREATE INDEX is idempotent in FalkorDB, and a
+        # failure on a single (label, prop) pair (e.g. property doesn't
+        # exist on that label, planner doesn't support the syntax) is
+        # logged and skipped — search still works, just slower for that
+        # specific predicate.
+        #
+        # The list is hard-coded rather than discovered because per-graph
+        # property discovery would add a startup-time scan. Operators
+        # with bespoke property names can hit `/search/discover` to see
+        # what their graph has and add to this list.
+        advanced_search_properties = [
+            "logicalType", "dataType", "owner", "piiClass", "nullable",
+            "layer", "schema", "dataPath", "sensitivity", "classification",
+            "rowCount", "sizeBytes",
+        ]
+
         _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
         for label in labels:
             for prop in properties:
+                try:
+                    await asyncio.wait_for(
+                        self._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})"),
+                        timeout=_init_timeout,
+                    )
+                except Exception:
+                    pass
+            # Advanced-search property indices, per label. Same
+            # idempotent best-effort pattern. Failure here doesn't
+            # block ensure_indices — the rest of the trace stack
+            # works without them.
+            for prop in advanced_search_properties:
                 try:
                     await asyncio.wait_for(
                         self._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})"),

@@ -161,41 +161,36 @@ export const AggregateBucketCard: FC<AggregateBucketCardProps> = ({
         : 0
     const sharePct = Math.round(share * 1000) / 10  // one decimal
     const sampleNames = bucket.sampleHits.slice(0, 4).map((h) => h.node.displayName)
-    const staggerDelay = Math.min(index * 0.04, 0.4)
+    // Tight stagger cap so a 50-bucket response settles in ~150ms total,
+    // not 2 seconds. The choreography should feel responsive, not slow.
+    const staggerDelay = Math.min(index * 0.012, 0.15)
 
     return (
         <motion.div
-            initial={{ opacity: 0, y: 12, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
             transition={{
-                duration: 0.32,
+                duration: 0.18,
                 delay: staggerDelay,
                 ease: [0.22, 1, 0.36, 1],
             }}
             whileHover={{ y: -2 }}
             className={cn(
                 "group relative overflow-hidden",
-                "rounded-2xl border border-glass-border",
-                "bg-gradient-to-br from-canvas-elevated/95 via-canvas-elevated/80 to-canvas-elevated/95",
-                "backdrop-blur-md",
+                "rounded-2xl",
+                // Solid card surface that sits cleanly on the glass-panel
+                // backdrop — both light and dark mode.
+                "border border-black/[0.08] dark:border-white/[0.08]",
+                "bg-canvas-elevated dark:bg-canvas-elevated/95",
                 "p-5",
-                "shadow-node transition-shadow duration-200",
-                "hover:shadow-node-hover hover:border-accent-lineage/30",
+                "shadow-sm transition-all duration-200",
+                "hover:shadow-md dark:hover:shadow-xl",
+                "hover:border-accent-lineage/30",
                 style.shadowColor && `hover:${style.shadowColor}`,
                 onDrill && "cursor-pointer",
             )}
             onClick={onDrill}
         >
-            {/* Subtle decorative gradient overlay — dark-mode only */}
-            <div className={cn(
-                "absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-300",
-                "hidden dark:block pointer-events-none",
-                "bg-gradient-to-br via-transparent",
-                bucket.ancestorEntityType in ENTITY_STYLES
-                    ? `from-${bucket.ancestorEntityType}-500/[0.03]`
-                    : 'from-accent-lineage/[0.03]',
-            )} />
-
             {/* Row 1: icon + label + drill arrow */}
             <div className="relative flex items-start gap-3">
                 <div className={cn(
@@ -236,7 +231,7 @@ export const AggregateBucketCard: FC<AggregateBucketCardProps> = ({
                 <div className="flex items-baseline gap-3">
                     <AnimatedCount
                         value={bucket.matchCount}
-                        delay={staggerDelay + 0.05}
+                        delay={staggerDelay + 0.02}
                         className={cn(
                             "font-display font-semibold tabular-nums",
                             "text-[40px] leading-none text-ink tracking-tight",
@@ -254,51 +249,29 @@ export const AggregateBucketCard: FC<AggregateBucketCardProps> = ({
                 </div>
             </div>
 
-            {/* Row 3: share bar */}
+            {/* Row 3: share bar — single layer, tight transition, CSS only.
+                Was two stacked motion.divs (~280ms total) — collapsed to one
+                CSS transition that fires on mount, no framer-motion overhead. */}
             <div className="relative mt-4 h-2 rounded-full bg-glass/30 overflow-hidden">
-                <motion.div
-                    initial={{ width: 0 }}
-                    animate={{ width: `${Math.max(2, share * 100)}%` }}
-                    transition={{
-                        duration: 0.7,
-                        delay: staggerDelay + 0.15,
-                        ease: [0.22, 1, 0.36, 1],
-                    }}
+                <div
                     className={cn(
                         "absolute inset-y-0 left-0 rounded-full",
                         "bg-gradient-to-r",
                         style.barGradient,
                         "shadow-sm",
+                        "transition-[width] duration-300 ease-out",
                     )}
-                />
-                {/* Subtle inner highlight on the bar */}
-                <motion.div
-                    initial={{ width: 0, opacity: 0 }}
-                    animate={{ width: `${Math.max(2, share * 100)}%`, opacity: 0.4 }}
-                    transition={{
-                        duration: 0.7,
-                        delay: staggerDelay + 0.15,
-                        ease: [0.22, 1, 0.36, 1],
+                    style={{
+                        width: `${Math.max(2, share * 100)}%`,
+                        transitionDelay: `${staggerDelay * 1000 + 60}ms`,
                     }}
-                    className={cn(
-                        "absolute inset-y-0 left-0 rounded-full",
-                        "bg-gradient-to-b from-white/30 via-transparent to-transparent",
-                        "pointer-events-none",
-                    )}
                 />
             </div>
 
-            {/* Row 4: sample-hit chips (fade in after bar settles) */}
+            {/* Row 4: sample-hit chips — no entry delay; the parent card
+                fade handles it. */}
             {sampleNames.length > 0 && (
-                <motion.div
-                    initial={{ opacity: 0, y: 4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{
-                        delay: staggerDelay + 0.5,
-                        duration: 0.3,
-                    }}
-                    className="relative mt-4 flex flex-wrap gap-1.5"
-                >
+                <div className="relative mt-4 flex flex-wrap gap-1.5">
                     {sampleNames.map((name) => (
                         <span
                             key={name}
@@ -319,7 +292,7 @@ export const AggregateBucketCard: FC<AggregateBucketCardProps> = ({
                             +{formatCount(bucket.matchCount - sampleNames.length)} more
                         </span>
                     )}
-                </motion.div>
+                </div>
             )}
         </motion.div>
     )
@@ -330,20 +303,27 @@ export const AggregateBucketCard: FC<AggregateBucketCardProps> = ({
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Tween from 0 → `value` over ~0.9s on first render and on value change.
- * Gives the headline count a deliberate, calibrated reveal — turns the
- * card into a mini KPI tile rather than a static row. */
+/** Tween from 0 → `value` over ~0.3s (was 0.9s). Short enough that the
+ * count never feels like it's lagging the response, long enough to read
+ * as deliberate calibration rather than a hard switch. For values below
+ * 100 we skip the animation entirely — the difference is imperceptible
+ * and it saves a frame per render.
+ */
 function AnimatedCount({
     value, delay = 0, className,
 }: { value: number; delay?: number; className?: string }) {
-    const motionValue = useMotionValue(0)
+    const motionValue = useMotionValue(value < 100 ? value : 0)
     const display = useTransform(motionValue, (latest) =>
         formatCount(Math.round(latest)),
     )
 
     useEffect(() => {
+        if (value < 100) {
+            motionValue.set(value)
+            return
+        }
         const controls = animate(motionValue, value, {
-            duration: 0.9,
+            duration: 0.3,
             delay,
             ease: [0.22, 1, 0.36, 1],
         })
