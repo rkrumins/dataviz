@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker-config
+  namespace: synodic
+data:
+  SYNODIC_ROLE: "worker"
+  FALKORDB_SOCKET_TIMEOUT: "60"
+  WORKER_CONCURRENCY: "4"
+  MAX_CONCURRENT_PER_GRAPH: "2"
+  AGGREGATION_JOB_TIMEOUT_SECS: "7200"

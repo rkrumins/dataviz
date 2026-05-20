@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: viz-config
+  namespace: synodic
+data:
+  SYNODIC_ROLE: "web"
+  AGGREGATION_PROXY_ENABLED: "true"
+  AGGREGATION_SERVICE_URL: "http://aggregation-controlplane:8091"
+  AUTH_COOKIE_SECURE: "true"
+  AUTH_COOKIE_SAMESITE: "lax"
+  FALKORDB_SOCKET_TIMEOUT: "10"

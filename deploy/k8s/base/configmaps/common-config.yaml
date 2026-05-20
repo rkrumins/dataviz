@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: common-config
+  namespace: synodic
+data:
+  GRAPH_PROVIDER: "falkordb"
+  FALKORDB_HOST: "falkordb"
+  FALKORDB_PORT: "6379"
+  FALKORDB_GRAPH_NAME: "nexus_lineage"
+  REDIS_URL: "redis://redis:6379/0"
+  # Dedicated cache Redis for the FalkorDB provider's ancestor chain
+  # and URN-label caches. Must point at a Redis instance that is NOT
+  # the FalkorDB server itself, so a graph outage does not also wipe
+  # caching/state. DB index 1 segregates this traffic from REDIS_URL
+  # (DB 0) on the same dedicated Redis service.
+  CACHE_REDIS_URL: "redis://redis:6379/1"
+  LOG_LEVEL: "INFO"
+  DB_POOL_TIMEOUT_SECS: "10"
+  DB_POOL_RECYCLE_SECS: "1800"
+  DB_POOL_PRE_PING: "true"
+  DB_CONNECT_TIMEOUT_SECS: "5"
+  DB_STARTUP_RETRY_TIMEOUT_SECS: "60"
+  JWT_ALGORITHM: "HS256"
+  JWT_EXPIRY_MINUTES: "15"

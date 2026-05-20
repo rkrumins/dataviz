@@ -8,6 +8,8 @@ import { providerService, type ProviderResponse } from '@/services/providerServi
 import { listViews, type View } from '@/services/viewApiService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import { deriveWorkspaceHealth } from './WorkspaceHealthBadge'
+import { withTimeout } from '@/lib/concurrency'
+import { TIMEOUTS } from '@/config/timeouts'
 
 /** Resolved provider info for a data source (derived from catalogItem → provider). */
 export interface DataSourceProviderInfo {
@@ -60,14 +62,27 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
     setIsRefreshing(true)
     setError(null)
     try {
-      // Phase 1 — parallel initial fetch
-      const [ws, catalogList, ontologyList, providerList] = await Promise.all([
-        workspaceService.get(wsId),
-        catalogService.list(),
-        ontologyDefinitionService.list().catch(() => [] as OntologyDefinitionResponse[]),
-        providerService.list().catch(() => [] as ProviderResponse[]),
+      // Phase 1 — parallel initial fetch. Each call gets a hard timeout
+      // so a single slow backend (e.g. provider listing held up by an
+      // unhealthy provider) doesn't pin the whole page on a spinner.
+      // Workspace itself is the only mandatory result; the rest fall
+      // back to empty lists and the page renders in a degraded state.
+      const settled = await Promise.allSettled([
+        withTimeout(workspaceService.get(wsId), TIMEOUTS.ADMIN_LIST_MS, 'workspace.get'),
+        withTimeout(catalogService.list(), TIMEOUTS.ADMIN_LIST_MS, 'catalog.list'),
+        withTimeout(ontologyDefinitionService.list(), TIMEOUTS.ADMIN_LIST_MS, 'ontology.list'),
+        withTimeout(providerService.list(), TIMEOUTS.ADMIN_LIST_MS, 'providers.list'),
       ])
       if (signal?.cancelled) return
+
+      const wsRes = settled[0]
+      if (wsRes.status !== 'fulfilled') {
+        throw wsRes.reason instanceof Error ? wsRes.reason : new Error(String(wsRes.reason))
+      }
+      const ws = wsRes.value
+      const catalogList = settled[1].status === 'fulfilled' ? settled[1].value : ([] as CatalogItemResponse[])
+      const ontologyList = settled[2].status === 'fulfilled' ? settled[2].value : ([] as OntologyDefinitionResponse[])
+      const providerList = settled[3].status === 'fulfilled' ? settled[3].value : ([] as ProviderResponse[])
 
       setWorkspace(ws)
       setCatalogItems(catalogList)

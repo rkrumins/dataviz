@@ -6,8 +6,11 @@ depend on Alembic — creates the ``aggregation`` schema and its tables
 directly via SQLAlchemy ``create_all``.
 
 This is the correct entry point for microservice processes.  The
-viz-service uses ``init_db()`` (which runs Alembic), but the Control
-Plane and Worker only need their own tables to exist.
+Schema migrations are owned by the synodic-upgrade service
+(``backend/scripts/upgrade.py``) — this function only ensures the
+aggregation schema + tables exist for Control Plane / Worker processes
+booting before the upgrade Job has applied Alembic changes. With the
+``wait-for-schema`` initContainer in place this is mostly safety net.
 
 Idempotent — safe to call on every startup from any process.
 """
