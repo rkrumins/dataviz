@@ -490,7 +490,32 @@ async def lifespan(_app: FastAPI):
     async def _kill_user_sessions(user_id: str) -> None:
         await get_revocation_service().revoke_all_user_sessions(user_id)
 
-    from backend.app.db.repositories import user_identity_repo as _user_identity_repo
+    # Phase 4: inject the platform SSO posture provider. The
+    # ``auth_service`` stays free of ``backend.app.*`` imports —
+    # the loader closure does the DB hit; the service only sees a
+    # cached snapshot.
+    from backend.app.db.repositories import (
+        app_auth_config_repo as _app_auth_config_repo,
+        user_identity_repo as _user_identity_repo,
+    )
+    from backend.auth_service.app_auth_config import (
+        AuthConfigSnapshot,
+        CachedAuthConfigProvider,
+    )
+
+    async def _load_auth_config() -> AuthConfigSnapshot:
+        async with get_async_session() as session:
+            snap = await _app_auth_config_repo.get_snapshot(session)
+        return AuthConfigSnapshot(
+            sso_enabled=snap.sso_enabled,
+            allow_local_login=snap.allow_local_login,
+            allow_jit_provisioning=snap.allow_jit_provisioning,
+            version=snap.version,
+            updated_at=snap.updated_at,
+        )
+
+    _auth_config_provider = CachedAuthConfigProvider(_load_auth_config)
+
     _app.state.identity_service = LocalIdentityService(
         session_factory=get_async_session,
         user_repo=user_repo,
@@ -500,6 +525,7 @@ async def lifespan(_app: FastAPI):
         claims_resolver=_resolve_claims,
         sso_role_reconciler=_reconcile_sso_targets,
         session_killer=_kill_user_sessions,
+        auth_config_provider=_auth_config_provider,
     )
     logger.info("Auth service initialised (provider=local, rbac_claims=on)")
 

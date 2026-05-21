@@ -77,6 +77,67 @@ export interface IdpGroupMapping {
     createdBy?: string | null
 }
 
+
+// ── Phase 4: platform SSO posture (master toggle + local-login + JIT) ─
+
+
+export interface AuthConfig {
+    ssoEnabled: boolean
+    allowLocalLogin: boolean
+    allowJitProvisioning: boolean
+    version: number
+    updatedAt: string
+}
+
+export interface AuthConfigPatch {
+    ssoEnabled?: boolean
+    allowLocalLogin?: boolean
+    allowJitProvisioning?: boolean
+    expectedVersion?: number
+}
+
+
+// ── Phase 4: user lookup + search response shapes ───────────────────
+
+
+export interface ProviderRef {
+    id: string
+    slug: string
+    displayName: string
+    kind: string
+}
+
+export interface UserIdentityRef {
+    id: string
+    provider: ProviderRef
+    externalId: string
+    emailAtLink?: string | null
+    createdAt: string
+    lastLoginAt?: string | null
+}
+
+export interface UserAttributeRef {
+    key: string
+    value: string
+    sourceProvider?: ProviderRef | null
+    setAt: string
+}
+
+export interface UserSummary {
+    id: string
+    email: string
+    firstName: string
+    lastName: string
+    status: string
+    signupSource: string                      // 'local_signup' | 'sso_jit' | ...
+    signupProvider?: ProviderRef | null
+    signupAt: string
+    passwordSet: boolean
+    identities: UserIdentityRef[]
+    attributes: UserAttributeRef[]
+    matchedOn?: string[] | null
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
@@ -190,5 +251,47 @@ export const ssoAdminService = {
             `${ADMIN}/idp-group-mappings/${encodeURIComponent(id)}`,
             { method: 'DELETE' },
         )
+    },
+
+    // ── Phase 4: app auth config ──────────────────────────────────────
+
+    getAuthConfig(): Promise<AuthConfig> {
+        return request<AuthConfig>(`${ADMIN}/sso/config`)
+    },
+
+    updateAuthConfig(patch: AuthConfigPatch): Promise<AuthConfig> {
+        return request<AuthConfig>(`${ADMIN}/sso/config`, {
+            method: 'PATCH', body: JSON.stringify(patch),
+        })
+    },
+
+    // ── Phase 4: user lookup + search ────────────────────────────────
+
+    lookupUserByEmail(email: string): Promise<UserSummary> {
+        const qs = new URLSearchParams({ mode: 'email', value: email })
+        return request<UserSummary>(`${ADMIN}/users/lookup?${qs.toString()}`)
+    },
+
+    lookupUserByIdentity(
+        providerSlug: string, externalId: string,
+    ): Promise<UserSummary> {
+        const qs = new URLSearchParams({
+            mode: 'identity', providerSlug, externalId,
+        })
+        return request<UserSummary>(`${ADMIN}/users/lookup?${qs.toString()}`)
+    },
+
+    lookupUserByAttribute(
+        attributeKey: string, attributeValue: string,
+    ): Promise<UserSummary> {
+        const qs = new URLSearchParams({
+            mode: 'attribute', attributeKey, attributeValue,
+        })
+        return request<UserSummary>(`${ADMIN}/users/lookup?${qs.toString()}`)
+    },
+
+    searchUsers(q: string, limit = 20): Promise<UserSummary[]> {
+        const qs = new URLSearchParams({ q, limit: String(limit) })
+        return request<UserSummary[]>(`${ADMIN}/users/search?${qs.toString()}`)
     },
 }

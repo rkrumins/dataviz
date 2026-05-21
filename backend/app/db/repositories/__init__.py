@@ -16,6 +16,8 @@ from . import (
     idp_group_mapping_repo,
     idp_provider_repo,
     user_identity_repo,
+    user_attribute_repo,
+    app_auth_config_repo,
 )
 
 __all__ = [
@@ -36,4 +38,6 @@ __all__ = [
     "idp_group_mapping_repo",
     "idp_provider_repo",
     "user_identity_repo",
+    "user_attribute_repo",
+    "app_auth_config_repo",
 ]

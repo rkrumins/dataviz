@@ -35,13 +35,20 @@ async def create_user(
     first_name: str,
     last_name: str,
     status: str = "pending",
+    signup_source: str = "local_signup",
+    signup_provider_id: Optional[str] = None,
 ) -> UserORM:
+    """Local-password (or invite/admin) signup. Phase 4 carries
+    ``signup_source`` (default ``'local_signup'``); the invite + admin
+    flows pass ``'invite'`` / ``'admin_created'``."""
     user = UserORM(
         email=email.strip().lower(),
         password_hash=password_hash,
         first_name=first_name.strip(),
         last_name=last_name.strip(),
         status=status,
+        signup_source=signup_source,
+        signup_provider_id=signup_provider_id,
     )
     session.add(user)
     await session.flush()
@@ -78,6 +85,8 @@ async def create_sso_user(
     first_name: str,
     last_name: str,
     password_hash: str,
+    signup_source: str = "sso_jit",
+    signup_provider_id: Optional[str] = None,
 ) -> UserORM:
     """JIT-provision an IdP-owned account. Active immediately (the IdP
     authenticated the subject); no role bindings — permissions stay
@@ -88,6 +97,11 @@ async def create_sso_user(
     local password path can never authenticate this account. The
     actual SSO subject lives in ``user_identities`` — call
     ``user_identity_repo.create_identity()`` in the same transaction.
+
+    Phase 4: ``signup_source`` defaults to ``'sso_jit'`` and
+    ``signup_provider_id`` records the IdP that provisioned the
+    account, so the admin lookup surface can answer "how did this
+    user sign up?" without replaying the audit log.
     """
     user = UserORM(
         email=email.strip().lower(),
@@ -95,6 +109,8 @@ async def create_sso_user(
         first_name=first_name.strip(),
         last_name=last_name.strip(),
         status="active",
+        signup_source=signup_source,
+        signup_provider_id=signup_provider_id,
     )
     session.add(user)
     await session.flush()
@@ -123,6 +139,7 @@ async def set_user_idp_metadata(
     idp_groups: list[str],
     raw_claims: Optional[dict] = None,
     attributes: Optional[dict] = None,
+    source_provider_id: Optional[str] = None,
 ) -> Optional[UserORM]:
     """Persist the latest IdP-asserted groups, raw claims, and
     operator-mapped extra attributes (department, employee_id, …)
@@ -132,6 +149,10 @@ async def set_user_idp_metadata(
 
     The metadata column is a free-form JSON document; we merge rather
     than overwrite — other top-level keys (UI prefs, etc.) survive.
+
+    Phase 4: ``attributes`` are ALSO projected into
+    ``user_external_attributes`` so the admin lookup surface can
+    resolve a user by ``staff_id=12345`` via an indexed query.
     """
     user = await get_user_by_id(session, user_id)
     if user is None:
@@ -155,7 +176,58 @@ async def set_user_idp_metadata(
     user.metadata_ = json.dumps(meta, default=str)
     user.updated_at = _now()
     await session.flush()
+
+    # Indexed projection so the admin lookup endpoint can resolve
+    # users by attribute value. Best-effort: a write error here MUST
+    # NOT roll back the login (the JSON snapshot is the source of
+    # truth; the index is for query convenience).
+    if attributes:
+        try:
+            from backend.app.db.repositories import user_attribute_repo
+            await user_attribute_repo.upsert_for_user(
+                session,
+                user_id=user_id,
+                attributes=attributes,
+                source_provider_id=source_provider_id,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            pass
+
     return user
+
+
+# ── Admin search / fan-out lookup (Phase 4) ────────────────────────────
+
+
+async def search_users(
+    session: AsyncSession,
+    *,
+    q: str,
+    limit: int = 20,
+) -> list[UserORM]:
+    """Free-text fan-out across email + first/last name. Used by the
+    admin ``/admin/users/search`` endpoint. The identities / external-
+    attribute scans live in their own repos; the endpoint joins
+    results."""
+    q = (q or "").strip()
+    if not q:
+        return []
+    needle = f"%{q}%"
+    result = await session.execute(
+        select(UserORM)
+        .where(
+            UserORM.deleted_at.is_(None),
+        )
+        .where(
+            (UserORM.email.ilike(needle))
+            | (UserORM.first_name.ilike(needle))
+            | (UserORM.last_name.ilike(needle))
+            | (UserORM.id == q)
+        )
+        .order_by(UserORM.email.asc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
 
 
 async def list_users(

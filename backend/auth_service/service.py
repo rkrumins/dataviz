@@ -34,10 +34,16 @@ from .core.tokens import (
     decode_token,
     decode_refresh_token,
 )
+from .app_auth_config import (
+    AuthConfigProvider,
+    AuthConfigSnapshot,
+    StaticAuthConfigProvider,
+)
 from .csrf import mint_csrf_token
 from .interface import (
     InvalidCredentials,
     InvalidRefreshToken,
+    LocalLoginDisabled,
     SessionTokens,
     SSOAuthError,
     SsoReauthRequired,
@@ -112,6 +118,7 @@ class LocalIdentityService:
         claims_resolver: Optional[Callable[..., Awaitable[dict]]] = None,
         sso_role_reconciler: Optional[Callable[..., Awaitable[dict]]] = None,
         session_killer: Optional[Callable[..., Awaitable[None]]] = None,
+        auth_config_provider: Optional[AuthConfigProvider] = None,
     ):
         self._session_factory = session_factory
         self._user_repo = user_repo
@@ -121,6 +128,15 @@ class LocalIdentityService:
         self._claims_resolver = claims_resolver
         self._sso_role_reconciler = sso_role_reconciler
         self._session_killer = session_killer
+        # ``auth_config_provider`` (Phase 4) gates login + JIT + SSO
+        # discovery on the platform posture stored in
+        # ``app_auth_config``. When ``None`` (legacy test wiring), the
+        # service falls back to the all-true defaults via
+        # ``StaticAuthConfigProvider`` so existing tests keep
+        # working unchanged.
+        self._auth_config_provider: AuthConfigProvider = (
+            auth_config_provider or StaticAuthConfigProvider()
+        )
 
     # ── Service protocol ──────────────────────────────────────────────
 
@@ -143,7 +159,29 @@ class LocalIdentityService:
             roles = await self._user_repo.get_user_roles(session, orm.id)
         return _orm_to_user(orm, role=_primary_role(roles))
 
+    async def auth_config(self) -> AuthConfigSnapshot:
+        """Expose the current platform posture to the routing layer.
+
+        Returns the cached snapshot from the injected provider. The
+        ``/auth/providers`` route + ``/auth/{slug}/*`` slug routes
+        consult this to short-circuit the master kill-switch."""
+        return await self._auth_config_provider.get()
+
+    async def invalidate_auth_config_cache(self) -> None:
+        """Called by the admin ``PATCH /admin/sso/config`` endpoint
+        after a successful change so the next request sees the new
+        posture without waiting out the TTL."""
+        await self._auth_config_provider.invalidate()
+
     async def login(self, email: str, password: str) -> tuple[User, SessionTokens]:
+        # Phase 4: respect the platform kill-switch BEFORE invoking
+        # the local provider — refuse the request explicitly so the
+        # FE can redirect to the dynamic providers list instead of
+        # showing a generic "wrong password".
+        cfg = await self._auth_config_provider.get()
+        if not cfg.allow_local_login:
+            raise LocalLoginDisabled()
+
         provider = get_provider("local")
 
         claims_extra: dict = {}
@@ -379,6 +417,14 @@ class LocalIdentityService:
         if self._user_identity_repo is None:
             raise SSOAuthError("identity_repo_unavailable")
 
+        # Phase 4: respect the platform posture switches BEFORE
+        # touching any data. ``sso_enabled=false`` short-circuits the
+        # whole flow (the slug route 404s in the same condition; this
+        # is the belt-and-suspenders for direct service calls).
+        cfg = await self._auth_config_provider.get()
+        if not cfg.sso_enabled:
+            raise SSOAuthError("sso_disabled")
+
         external_id = identity.external_id
         email = identity.email
         email_verified = _claims_email_verified(identity.raw_claims)
@@ -436,6 +482,19 @@ class LocalIdentityService:
                 #    existing account?
                 by_email = await self._user_repo.get_user_by_email(session, email)
                 if by_email is None:
+                    # Phase 4: JIT provisioning is gated on the
+                    # platform posture. When ``allow_jit_provisioning``
+                    # is false, brand-new IdP subjects with no matching
+                    # local user get rejected here. Audit the deny so
+                    # operators can spot misconfigured users / IdPs.
+                    if not cfg.allow_jit_provisioning:
+                        await self._emit_audit(
+                            "user.sso_jit_blocked",
+                            {"email": email, "provider_id": provider_id,
+                             "external_id": external_id,
+                             "reason": "jit_provisioning_disabled"},
+                        )
+                        raise SSOAuthError("jit_disabled")
                     if linking_policy == "disabled":
                         # Policy explicitly says "no linking" — but the
                         # email is free, so JIT-provision a fresh user.
@@ -449,6 +508,8 @@ class LocalIdentityService:
                         first_name=identity.first_name,
                         last_name=identity.last_name,
                         password_hash=disabled_password_hash(),
+                        signup_source="sso_jit",
+                        signup_provider_id=provider_id,
                     )
                     await self._user_identity_repo.create_identity(
                         session,
@@ -462,7 +523,8 @@ class LocalIdentityService:
                             {"user_id": orm.id, "email": orm.email,
                              "provider_id": provider_id,
                              "external_id": external_id,
-                             "linking_policy": linking_policy},
+                             "linking_policy": linking_policy,
+                             "signup_source": "sso_jit"},
                         )
                 else:
                     # Collision branch — apply the linking policy.
@@ -533,6 +595,7 @@ class LocalIdentityService:
                         idp_groups=idp_groups,
                         raw_claims=identity.raw_claims,
                         attributes=attributes,
+                        source_provider_id=provider_id,
                     )
             except TypeError:
                 # Pre-Phase-3 signature (no ``attributes`` kwarg).

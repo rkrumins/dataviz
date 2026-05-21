@@ -72,6 +72,7 @@ from ..interface import (
     IdentityService,
     InvalidCredentials,
     InvalidRefreshToken,
+    LocalLoginDisabled,
     SSOAuthError,
     SsoReauthRequired,
     User,
@@ -179,8 +180,24 @@ def _read_link_intent(request: Request, *, provider_id: str) -> Optional[str]:
     return user_id if isinstance(user_id, str) and user_id else None
 
 
-async def _resolve_provider(slug: str):
-    """Slug -> provider instance; raises 404 on unknown / disabled."""
+async def _require_sso_enabled(request: Request) -> None:
+    """Raise 404 when the platform master kill-switch is off. We use
+    404 (not 503) so an attacker can't probe the toggle's state."""
+    svc = _identity_service(request)
+    try:
+        cfg = await svc.auth_config()
+    except AttributeError:
+        # Legacy service wiring without auth_config() — treat as
+        # "enabled" so existing tests pass unchanged.
+        return
+    if not cfg.sso_enabled:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "SSO is not configured")
+
+
+async def _resolve_provider(slug: str, *, request: Request):
+    """Slug -> provider instance; raises 404 on unknown / disabled OR
+    when the platform master kill-switch is off."""
+    await _require_sso_enabled(request)
     try:
         registry = get_registry()
         provider_id = await registry.resolve_slug(slug)
@@ -224,6 +241,14 @@ async def login(
     svc = _identity_service(request)
     try:
         user, tokens = await svc.login(body.email, body.password)
+    except LocalLoginDisabled:
+        # Phase 4: SSO-only mode. Don't leak the existence of any
+        # account; respond with a structured 403 so the FE can
+        # redirect to the providers picker.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "local_login_disabled"},
+        )
     except InvalidCredentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -313,12 +338,24 @@ async def me(request: Request):
 
 
 @router.get("/providers", response_model=list[ProviderSummary])
-async def list_providers():
+async def list_providers(request: Request):
     """Return the public catalog of enabled IdPs.
 
     Used by the login page to render one button per provider. No
     secrets, no settings — only the bits the user-facing UI needs.
+
+    Phase 4: when the platform master kill-switch
+    (``app_auth_config.sso_enabled``) is off, returns ``[]`` — the
+    user-facing login page treats this as "SSO is unavailable" and
+    falls back to the password form.
     """
+    svc = _identity_service(request)
+    try:
+        cfg = await svc.auth_config()
+    except AttributeError:
+        cfg = None
+    if cfg is not None and not cfg.sso_enabled:
+        return []
     try:
         registry = get_registry()
     except RuntimeError:
@@ -367,7 +404,7 @@ async def sso_login(
     pass it through to the provider so OIDC adds ``prompt=login`` and
     SAML sets ``ForceAuthn=true``.
     """
-    provider = await _resolve_provider(slug)
+    provider = await _resolve_provider(slug, request=request)
     next_path = _safe_next(next)
     force_flag = (force or "").strip() in {"1", "true", "yes"}
 
@@ -430,7 +467,7 @@ async def oidc_callback(
     state: str | None = None,
     error: str | None = None,
 ):
-    provider = await _resolve_provider(slug)
+    provider = await _resolve_provider(slug, request=request)
     if not isinstance(provider, OidcProvider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not an OIDC provider")
     svc = _identity_service(request)
@@ -505,7 +542,7 @@ async def oidc_callback(
 
 @router.get("/{slug}/metadata")
 async def saml_metadata(slug: str):
-    provider = await _resolve_provider(slug)
+    provider = await _resolve_provider(slug, request=request)
     if SamlProvider is None or not isinstance(provider, SamlProvider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not a SAML provider")
     try:
@@ -520,7 +557,7 @@ async def saml_metadata(slug: str):
 
 @router.post("/{slug}/acs")
 async def saml_acs(slug: str, request: Request):
-    provider = await _resolve_provider(slug)
+    provider = await _resolve_provider(slug, request=request)
     if SamlProvider is None or not isinstance(provider, SamlProvider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not a SAML provider")
     svc = _identity_service(request)
@@ -594,7 +631,7 @@ async def saml_acs(slug: str, request: Request):
 
 @router.api_route("/{slug}/sls", methods=["GET", "POST"])
 async def saml_sls(slug: str, request: Request):
-    provider = await _resolve_provider(slug)
+    provider = await _resolve_provider(slug, request=request)
     if SamlProvider is None or not isinstance(provider, SamlProvider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not a SAML provider")
     host, https, path = _request_https_host(request)
@@ -655,7 +692,7 @@ async def custom_mock(
     ``nx_mock_identity`` cookie. Resolves the provider via slug to
     ensure the cookie is only set for an actual ``custom`` row in the
     registry."""
-    provider = await _resolve_provider(slug)
+    provider = await _resolve_provider(slug, request=request)
     if not isinstance(provider, CustomIdentityProvider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not a Custom provider")
     if not AUTH_CUSTOM_PROVIDER_ENABLED:

@@ -11,6 +11,8 @@ from .endpoints import (
     admin_idp_groups,
     admin_idp_providers,
     admin_user_identities,
+    admin_users_lookup,
+    admin_sso_config,
     me_identities,
 )
 from backend.auth_service.api.router import router as auth_session_router
@@ -161,6 +163,23 @@ api_router.include_router(
     me_identities.router,
     prefix="/me/identities",
     tags=["me:identities"],
+)
+
+# SSO Phase 4 — admin user lookup + free-text fan-out search.
+# Mounted under /admin/users so it sits next to the existing
+# admin user-management endpoints.
+api_router.include_router(
+    admin_users_lookup.router,
+    prefix="/admin/users",
+    tags=["admin:users:lookup"],
+)
+
+# SSO Phase 4 — platform SSO posture (master kill-switch + local-login
+# + JIT-provisioning toggles). Singleton row in app_auth_config.
+api_router.include_router(
+    admin_sso_config.router,
+    prefix="/admin/sso/config",
+    tags=["admin:sso:config"],
 )
 
 # ── Public announcements (no auth — all users see banners) ────────────

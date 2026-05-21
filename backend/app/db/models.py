@@ -871,6 +871,19 @@ class UserORM(Base):
     # SSO?" query ``user_identities`` by ``user_id``; to check "does
     # this user have a password?" compare ``password_hash`` against
     # the disabled-sentinel constant in ``auth_service.core.password``.
+    #
+    # Phase 4 adds signup provenance: how the account first came into
+    # existence ('local_signup' / 'sso_jit' / 'invite' /
+    # 'admin_created' / 'admin_linked') and — for SSO origins —
+    # which provider provisioned it. Used by the admin user-lookup
+    # surface; the auth_audit_log carries the time-series detail.
+    signup_source = Column(
+        Text, nullable=False, default="local_signup",
+    )
+    signup_provider_id = Column(
+        Text, ForeignKey("idp_providers.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     metadata_ = Column("metadata", Text, nullable=True, default="{}")  # JSON: idp_groups snapshot, attributes, prefs
     reset_token_hash = Column(Text, nullable=True)
     reset_token_expires_at = Column(Text, nullable=True)
@@ -883,13 +896,23 @@ class UserORM(Base):
     identities = relationship(
         "UserIdentityORM", back_populates="user", cascade="all, delete-orphan",
     )
+    external_attributes = relationship(
+        "UserExternalAttributeORM", back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         UniqueConstraint("email", name="uq_users_email"),
         Index("idx_users_status_created", "status", "created_at"),
+        Index("idx_users_signup_source", "signup_source"),
         CheckConstraint(
             "status IN ('pending', 'active', 'suspended')",
             name="ck_users_status",
+        ),
+        CheckConstraint(
+            "signup_source IN ('local_signup', 'sso_jit', 'invite', "
+            "                  'admin_created', 'admin_linked')",
+            name="ck_users_signup_source",
         ),
     )
 
@@ -1017,6 +1040,107 @@ class UserIdentityORM(Base):
         return (
             f"<UserIdentity id={self.id!r} user={self.user_id!r} "
             f"provider={self.provider_id!r}>"
+        )
+
+
+# ------------------------------------------------------------------ #
+# user_external_attributes  (indexed projection of IdP claim extras)   #
+# ------------------------------------------------------------------ #
+
+
+class UserExternalAttributeORM(Base):
+    """One row per (user, attribute key). The ``value`` column is the
+    indexed projection of the operator-declared ``claim_mapping.extras``
+    bucket — multi-valued claims are flattened to a CSV so a single
+    string can serve both single-value (staff_id=12345) and contains-
+    style searches.
+
+    Phase 4: the raw JSON (multi-typed) snapshot still lives at
+    ``users.metadata_.attributes``; this table is the queryable
+    view. ``set_at`` + ``source_provider_id`` are kept for audit so
+    the help-desk can answer "which IdP last set this user's
+    employee_id?".
+
+    UNIQUE(user_id, key) keeps the upsert path race-safe across
+    pods. INDEX(key, value) covers the
+    "find user by ``staff_id=12345``" lookup.
+    """
+    __tablename__ = "user_external_attributes"
+
+    id = Column(Text, primary_key=True, default=lambda: f"uea_{uuid.uuid4().hex[:12]}")
+    user_id = Column(
+        Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+    )
+    key = Column(Text, nullable=False)
+    value = Column(Text, nullable=False)
+    source_provider_id = Column(
+        Text, ForeignKey("idp_providers.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    set_at = Column(Text, nullable=False, default=_now)
+
+    user = relationship("UserORM", back_populates="external_attributes")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "key",
+            name="uq_user_external_attributes_user_key",
+        ),
+        Index(
+            "idx_user_external_attributes_key_value",
+            "key", "value",
+        ),
+        Index("idx_user_external_attributes_user", "user_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<UserExternalAttribute user={self.user_id!r} "
+            f"key={self.key!r}>"
+        )
+
+
+# ------------------------------------------------------------------ #
+# app_auth_config  (singleton: platform-wide SSO posture switches)     #
+# ------------------------------------------------------------------ #
+
+
+class AppAuthConfigORM(Base):
+    """Singleton row carrying the platform-wide SSO posture.
+
+    Only one row ever exists (PK pinned to ``'singleton'`` by CHECK).
+    The repo upserts with an optimistic ``version`` bump mirroring
+    ``feature_flags_repo``'s pattern. The migration seeds the row
+    with defaults (all true) so the auth flow never sees a NULL
+    config.
+
+    Phase 4 ships three posture switches:
+
+      * ``sso_enabled`` — master kill-switch.
+      * ``allow_local_login`` — when false, password login is
+        refused (SSO-only mode).
+      * ``allow_jit_provisioning`` — when false, SSO logins for
+        unknown subjects with no matching email are rejected with
+        ``jit_disabled`` instead of provisioning.
+    """
+    __tablename__ = "app_auth_config"
+
+    id = Column(Text, primary_key=True, default="singleton")
+    sso_enabled = Column(Boolean, nullable=False, default=True)
+    allow_local_login = Column(Boolean, nullable=False, default=True)
+    allow_jit_provisioning = Column(Boolean, nullable=False, default=True)
+    version = Column(Integer, nullable=False, default=1)
+    updated_at = Column(Text, nullable=False, default=_now)
+    updated_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("id = 'singleton'", name="ck_app_auth_config_singleton"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AppAuthConfig sso={self.sso_enabled} "
+            f"local={self.allow_local_login} jit={self.allow_jit_provisioning}>"
         )
 
 

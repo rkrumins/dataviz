@@ -156,6 +156,17 @@ class SsoReauthRequired(AuthError):
         self.provider = provider
 
 
+class LocalLoginDisabled(AuthError):
+    """Phase 4: the platform is in SSO-only mode
+    (``app_auth_config.allow_local_login = false``). The router
+    surfaces this as a 403 with a structured body so the FE can
+    redirect to the dynamic providers picker instead of showing the
+    generic "invalid credentials" message."""
+
+    def __init__(self) -> None:
+        super().__init__("local_login_disabled")
+
+
 __all__ = [
     "User",
     "SessionTokens",
@@ -165,4 +176,5 @@ __all__ = [
     "InvalidRefreshToken",
     "SSOAuthError",
     "SsoReauthRequired",
+    "LocalLoginDisabled",
 ]
