@@ -37,6 +37,9 @@ spec:
         app.kubernetes.io/name: falkordb
         app.kubernetes.io/part-of: dataviz
     spec:
+      # FalkorDB is on the hot path for every aggregation job; pre-empting
+      # it leaves the worker fleet idle.
+      priorityClassName: system-cluster-critical
       containers:
         - name: falkordb
           image: {{ .Values.stores.falkordb.image | quote }}

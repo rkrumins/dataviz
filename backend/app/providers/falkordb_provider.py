@@ -36,9 +36,163 @@ class AggregationBatchAbort(Exception):
     """
 
 
+class JobScratch:
+    """Per-job in-process caches that live only for one materialize call.
+
+    Change 6 — memoization scaffolding. Today the provider re-resolves
+    URN→label and URN→ancestors per outer-batch and rebuilds the same
+    Cypher template strings per sub-batch. Root container URNs appear
+    in tens of thousands of leaf edges across a single job; re-paying
+    Redis RTT + Cypher build cost per appearance is pure waste.
+
+    Lifecycle: created in ``provider.begin_job()``, dropped in
+    ``provider.end_job()``. Worker calls both around its
+    ``materialize_aggregated_edges_batch`` call. If a job crashes
+    without calling ``end_job`` the scratch leaks once; the next
+    ``begin_job`` replaces it. The scratch is intentionally NOT
+    persisted across jobs because containment edges (and therefore
+    ancestor chains and node labels) can be mutated between jobs and
+    a stale cache would silently corrupt output.
+
+    All members default to safe empty values so callers can read
+    without None-checking when the provider has no active job (the
+    L2 Redis cache + provider-instance caches still cover correctness).
+    """
+
+    __slots__ = (
+        "urn_label",
+        "urn_ancestors",
+        "missing_urns",
+        "cypher_templates",
+        "agg_member_bloom",
+        "stats",
+    )
+
+    def __init__(self) -> None:
+        # L1: URN → sanitized label. L2 (Redis HGET) still consulted on miss.
+        self.urn_label: Dict[str, Optional[str]] = {}
+        # L1: URN → ancestor chain. L2 (Redis HGET) still consulted on miss.
+        self.urn_ancestors: Dict[str, List[str]] = {}
+        # Negative cache: URNs we know don't exist in the graph this job.
+        # Stays valid for job duration only.
+        self.missing_urns: Set[str] = set()
+        # Built Cypher strings keyed by (sl_label, tl_label) for the
+        # bulk-CREATE / SET paths. Rebuilding the same f-string per
+        # 10k-item chunk is measurable on large rebuilds.
+        self.cypher_templates: Dict[Tuple[str, str], str] = {}
+        # Per-job bloom filter for AGGREGATED-pair existence. Used to
+        # skip Redis SISMEMBER on pairs known-not-present. False
+        # positives are safe (fall through to MATCH+SET); negatives
+        # are guaranteed correct (CREATE without Redis check).
+        self.agg_member_bloom: Optional["_PairBloom"] = None
+        # Lightweight counters surfaced by ``end_job`` at INFO so
+        # operators can see cache effectiveness without a separate
+        # metrics surface.
+        self.stats: Dict[str, int] = {
+            "urn_label_hits": 0,
+            "urn_label_misses": 0,
+            "urn_ancestor_hits": 0,
+            "urn_ancestor_misses": 0,
+            "bloom_negatives": 0,
+            "bloom_positives": 0,
+        }
+
+
+class _PairBloom:
+    """Bit-array bloom filter for ``(s_urn, t_urn)`` pair existence.
+
+    Used by the incremental aggregation path to skip Redis SISMEMBER
+    round-trips for the common "this pair has never been aggregated
+    before" case. Sized for ~1% false-positive rate at the configured
+    capacity; oversized buckets get false-positive rates that climb
+    asymptotically toward 1 but never produce false negatives, so the
+    correctness contract (CREATE-on-negative is always safe) holds
+    regardless of fill.
+
+    Self-contained — no external library — to avoid adding a runtime
+    dependency for a single use site.
+    """
+
+    __slots__ = ("_bits", "_size", "_k", "_count")
+
+    def __init__(self, capacity: int = 1_000_000, fp_rate: float = 0.01) -> None:
+        import math
+        # Optimal m = -n ln(p) / (ln 2)^2; k = (m/n) ln 2
+        m = max(1024, int(-capacity * math.log(fp_rate) / (math.log(2) ** 2)))
+        # Round up to a multiple of 64 so the bytearray is word-aligned.
+        m = (m + 63) & ~63
+        self._size = m
+        self._k = max(1, int((m / capacity) * math.log(2))) if capacity else 1
+        self._bits = bytearray(m // 8)
+        self._count = 0
+
+    def _hashes(self, key: str):
+        # Double-hashing scheme: combine two cheap hashes into k
+        # positions. Sufficient for filter purposes; no crypto needed.
+        h1 = hash(key) & 0xFFFFFFFFFFFFFFFF
+        h2 = hash("salt:" + key) & 0xFFFFFFFFFFFFFFFF
+        for i in range(self._k):
+            yield (h1 + i * h2) % self._size
+
+    def add(self, s_urn: str, t_urn: str) -> None:
+        key = f"{s_urn}\x00{t_urn}"
+        for pos in self._hashes(key):
+            self._bits[pos >> 3] |= 1 << (pos & 7)
+        self._count += 1
+
+    def might_contain(self, s_urn: str, t_urn: str) -> bool:
+        key = f"{s_urn}\x00{t_urn}"
+        for pos in self._hashes(key):
+            if not (self._bits[pos >> 3] & (1 << (pos & 7))):
+                return False
+        return True
+
+
 def _sanitize_label(s: str) -> str:
     """Sanitize string for use as FalkorDB label/relationship type (alphanumeric + underscore)."""
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
+
+
+def _parse_cursor(cursor: Optional[str]) -> Optional[Tuple[str, str]]:
+    """Parse an aggregation cursor stored in ``aggregation_jobs.last_cursor``.
+
+    Change 3 — the historical format was ``"{s_urn}|{t_urn}"`` and the
+    Cypher cursor predicate was ``(s.urn + '|' + t.urn) > $cursor``,
+    which is not index-backed and forces a full-edge scan + in-memory
+    sort per batch. The new format is a 2-element JSON list
+    ``[s_urn, t_urn]`` matched by ``(s.urn > $cs OR (s.urn = $cs AND
+    t.urn > $ct))`` — an index seek on ``s.urn`` plus a 1-hop
+    tiebreak.
+
+    Accepts both formats so in-flight jobs at deploy time don't
+    break. Returns None for an empty / unparseable cursor (caller
+    falls back to the unbounded first-batch query).
+    """
+    if not cursor:
+        return None
+    # New JSON tuple form first.
+    try:
+        parsed = json.loads(cursor)
+        if (
+            isinstance(parsed, list)
+            and len(parsed) == 2
+            and all(isinstance(x, str) for x in parsed)
+        ):
+            return parsed[0], parsed[1]
+    except (ValueError, TypeError):
+        pass
+    # Legacy "{s_urn}|{t_urn}" — rsplit so URNs containing '|' don't
+    # accidentally re-split. Both sides will round-trip correctly so
+    # long as t_urn does not itself contain '|' (the legacy assumption).
+    if "|" in cursor:
+        s, _, t = cursor.partition("|")
+        return s, t
+    return None
+
+
+def _encode_cursor(s_urn: str, t_urn: str) -> str:
+    """Serialise a cursor in the new JSON tuple format. Change 3."""
+    return json.dumps([s_urn, t_urn])
 
 
 def _redact_redis_url(url: str) -> str:
@@ -259,6 +413,129 @@ class FalkorDBProvider(GraphDataProvider):
             self._quiesce_cooldown_s: float = max(1.0, min(600.0, float(_cooldown_raw)))
         except ValueError:
             self._quiesce_cooldown_s = 30.0
+
+        # Change 6 — per-job scratch cache slot. Created by begin_job(),
+        # cleared by end_job(). None when no job is active; provider
+        # methods read it defensively so the no-active-job state still
+        # works correctly (falls back to L2 Redis cache).
+        self._job_scratch: Optional[JobScratch] = None
+
+        # Change 5 — startup index-probe cache. Set to True once the
+        # probe has run once successfully (or once we've decided to
+        # give up); prevents re-probing on every ensure_projections.
+        self._index_probe_done: bool = False
+
+    def begin_job(self, *, expected_pair_capacity: int = 1_000_000) -> JobScratch:
+        """Open a per-job scratch cache. Change 6.
+
+        Worker calls this immediately before
+        ``materialize_aggregated_edges_batch``. The returned scratch is
+        also stored on the provider as ``self._job_scratch`` so internal
+        helpers can read it without threading the parameter through
+        every call signature.
+
+        ``expected_pair_capacity`` sizes the bloom filter; oversize is
+        cheap (false-positive rate climbs but correctness is preserved)
+        so an over-estimate is the safe default.
+
+        Change 8 — also seeds the AIMD sub-batch size based on the
+        provider's recent write-latency p95. If FalkorDB was already
+        slow when the previous job ran (or when another job is sharing
+        the same provider instance), we start at the AIMD floor
+        instead of paying one oversized first sub-batch before the
+        reactive shrinker fires. Pure in-process telemetry — no
+        external dependency.
+        """
+        scratch = JobScratch()
+        scratch.agg_member_bloom = _PairBloom(
+            capacity=max(1024, int(expected_pair_capacity)),
+        )
+        self._job_scratch = scratch
+
+        # Change 8 — predictive AIMD seed. Reads the existing rolling
+        # window maintained by ``_record_write_latency`` (see
+        # ``_quiesce_p95``) and chooses a starting sub-batch size based
+        # on observed slowness, rather than always starting at the
+        # ceiling and reacting after damage is done.
+        try:
+            recent_p95 = self._quiesce_p95()
+            high = self._MERGE_SUB_BATCH_TARGET_HIGH_S
+            low = self._MERGE_SUB_BATCH_TARGET_LOW_S
+            ceil = self._MERGE_SUB_BATCH_SIZE
+            floor = self._MERGE_SUB_BATCH_MIN
+            if recent_p95 <= 0.0:
+                # No samples yet — keep the existing starting size.
+                pass
+            elif recent_p95 >= high:
+                # Provider is already hot — start at the floor.
+                seeded = floor
+                if seeded != self._aggregation_sub_batch_size:
+                    logger.info(
+                        "begin_job on %s: AIMD seed=%d (floor) — write "
+                        "p95=%.2fs >= target high %.1fs",
+                        self._graph_name, seeded, recent_p95, high,
+                    )
+                    self._aggregation_sub_batch_size = seeded
+            elif recent_p95 <= low:
+                # Provider is healthy — start at the ceiling.
+                if self._aggregation_sub_batch_size != ceil:
+                    logger.info(
+                        "begin_job on %s: AIMD seed=%d (ceiling) — write "
+                        "p95=%.2fs <= target low %.1fs",
+                        self._graph_name, ceil, recent_p95, low,
+                    )
+                    self._aggregation_sub_batch_size = ceil
+            else:
+                # Linear interpolation between floor and ceiling.
+                frac = (high - recent_p95) / max(high - low, 1e-6)
+                seeded = max(floor, min(ceil, floor + int((ceil - floor) * frac)))
+                if seeded != self._aggregation_sub_batch_size:
+                    logger.info(
+                        "begin_job on %s: AIMD seed=%d (interpolated) — "
+                        "write p95=%.2fs in target band [%.1f, %.1f]",
+                        self._graph_name, seeded, recent_p95, low, high,
+                    )
+                    self._aggregation_sub_batch_size = seeded
+            # Reset the growth-streak counter regardless: the AIMD
+            # grow path requires N consecutive healthy sub-batches,
+            # and the previous job's counter doesn't apply here.
+            self._aggregation_sub_batch_under_target_run = 0
+        except Exception as exc:
+            logger.debug(
+                "begin_job on %s: predictive AIMD seed skipped (%s)",
+                self._graph_name, exc,
+            )
+
+        return scratch
+
+    def end_job(self) -> None:
+        """Close the per-job scratch cache. Change 6.
+
+        Idempotent — calling twice (or once without a matching begin)
+        is a no-op. Emits one INFO line with cache hit-rate counters
+        so operators can see whether the memoization layer is paying
+        off without a separate metrics surface.
+        """
+        scratch = self._job_scratch
+        if scratch is None:
+            return
+        s = scratch.stats
+        total_label = s["urn_label_hits"] + s["urn_label_misses"]
+        total_anc = s["urn_ancestor_hits"] + s["urn_ancestor_misses"]
+        label_hr = (s["urn_label_hits"] / total_label * 100) if total_label else 0.0
+        anc_hr = (s["urn_ancestor_hits"] / total_anc * 100) if total_anc else 0.0
+        bloom_total = s["bloom_negatives"] + s["bloom_positives"]
+        bloom_skip = (s["bloom_negatives"] / bloom_total * 100) if bloom_total else 0.0
+        logger.info(
+            "Job scratch on %s: label cache %d/%d hit (%.1f%%), "
+            "ancestor cache %d/%d hit (%.1f%%), "
+            "bloom skipped %d/%d SISMEMBER (%.1f%%)",
+            self._graph_name,
+            s["urn_label_hits"], total_label, label_hr,
+            s["urn_ancestor_hits"], total_anc, anc_hr,
+            s["bloom_negatives"], bloom_total, bloom_skip,
+        )
+        self._job_scratch = None
 
     @property
     def _proj(self):
@@ -801,6 +1078,17 @@ class FalkorDBProvider(GraphDataProvider):
                 # No running loop (rare — usually only in synchronous
                 # test paths). The probe will run on first trace.
                 pass
+            # Change 1 — invalidate the ancestor-path precompute digest
+            # so the next aggregation job re-stamps ``n.ancestorPath``
+            # before reading it. We deliberately do NOT kick off the
+            # refresh in the background here: it can take several
+            # minutes on large graphs and would race with whatever
+            # caller triggered the level change (typically the API
+            # request handler that wrote the ontology). The
+            # aggregation orchestrator runs the refresh under the
+            # job's own lifecycle where progress is visible to the
+            # operator.
+            self._ancestor_paths_digest = None
 
     def _get_node_level(self, entity_type: Any) -> Optional[int]:
         """Resolve a node's hierarchy level from the cached mapping. Returns
@@ -1913,9 +2201,19 @@ class FalkorDBProvider(GraphDataProvider):
         - **AGGREGATED edge indexes**: ``()-[r:AGGREGATED]-() ON
           (r.sourceLevel ...)`` — drives the trace fast path.
 
-        Never raises; never blocks startup. A missing index is reported
-        at WARNING level so it surfaces in operator alerts.
+        Change 5: also compares against ``db.labels()`` and emits one
+        WARNING per label that exists in the graph but lacks a URN
+        index — that label's pairs cannot use index seeks and will
+        scan on every aggregation MERGE/CREATE. Caches the result on
+        the provider instance so this only runs once per process
+        lifetime regardless of how many ``ensure_projections`` calls
+        happen.
         """
+        # Cache: once we've probed successfully, don't re-probe.
+        # Index state is essentially fixed for a graph lifetime;
+        # re-probing per call just adds RTT.
+        if getattr(self, "_index_probe_done", False):
+            return
         try:
             res = await asyncio.wait_for(
                 self._proj.ro_query("CALL db.indexes()", {}),
@@ -1928,6 +2226,7 @@ class FalkorDBProvider(GraphDataProvider):
                 "indexes manually if aggregation perf is poor.",
                 self._graph_name, exc,
             )
+            self._index_probe_done = True
             return
 
         rows = res.result_set or []
@@ -2007,6 +2306,45 @@ class FalkorDBProvider(GraphDataProvider):
                 "investigate why CREATE INDEX FOR (n) ON (n.urn) was rejected.",
                 self._graph_name,
             )
+
+        # Change 5: per-label gap report. Compare the labels FalkorDB
+        # knows about against the labels that have a URN index — any
+        # label in the graph without one will scan on every MERGE /
+        # MATCH that touches it. Best-effort; never raises.
+        try:
+            lr = await asyncio.wait_for(
+                self._proj.ro_query(
+                    "CALL db.labels() YIELD label RETURN label", {},
+                ),
+                timeout=2.0,
+            )
+            graph_labels: List[str] = []
+            for row in (lr.result_set or []):
+                if row and row[0]:
+                    raw = row[0]
+                    if isinstance(raw, (bytes, bytearray)):
+                        raw = raw.decode("utf-8")
+                    graph_labels.append(str(raw))
+            indexed = set(labeled_urn)
+            missing = sorted(set(graph_labels) - indexed)
+            # _Projection is an internal scaffolding label; not a
+            # write target for aggregation, so skip it.
+            missing = [l for l in missing if l != "_Projection"]
+            if missing:
+                logger.warning(
+                    "Index health on %s: %d labels lack a URN index — "
+                    "every MATCH/MERGE on these labels will full-scan. "
+                    "Missing: %s",
+                    self._graph_name, len(missing),
+                    ", ".join(missing[:20]) + ("..." if len(missing) > 20 else ""),
+                )
+        except Exception as exc:
+            logger.debug(
+                "Index health on %s: per-label gap probe failed "
+                "(continuing): %s", self._graph_name, exc,
+            )
+
+        self._index_probe_done = True
 
     def _ancestors_cache_key(self) -> str:
         """Return the Redis Hash key for ancestor chains in this graph,
@@ -2115,24 +2453,46 @@ class FalkorDBProvider(GraphDataProvider):
         if not urns:
             return result
 
+        # Change 6 — L1 in-process check first. Root containers appear
+        # in every leaf edge under them; this collapses tens of
+        # thousands of identical Redis HGETs into one per job per URN.
+        scratch = self._job_scratch
+        l1 = scratch.urn_ancestors if scratch is not None else None
+        if l1 is not None:
+            urns_for_l2: List[str] = []
+            for u in urns:
+                if u in l1:
+                    result[u] = l1[u]
+                    scratch.stats["urn_ancestor_hits"] += 1
+                else:
+                    urns_for_l2.append(u)
+        else:
+            urns_for_l2 = list(urns)
+
+        if not urns_for_l2:
+            return result
+
         # First, try to fetch all from cache in one pipeline
         try:
             pipe = self._redis.pipeline(transaction=False)
-            for u in urns:
+            for u in urns_for_l2:
                 pipe.execute_command("HGET", cache_key, u)
             cached = await pipe.execute()
 
             missing_urns = []
-            for i, u in enumerate(urns):
+            for i, u in enumerate(urns_for_l2):
                 if cached[i]:
                     try:
-                        result[u] = json.loads(cached[i])
+                        chain = json.loads(cached[i])
+                        result[u] = chain
+                        if l1 is not None:
+                            l1[u] = chain
                     except Exception:
                         missing_urns.append(u)
                 else:
                     missing_urns.append(u)
         except Exception:
-            missing_urns = list(urns)
+            missing_urns = list(urns_for_l2)
 
         if missing_urns:
             try:
@@ -2162,7 +2522,16 @@ class FalkorDBProvider(GraphDataProvider):
                 computed = {u: chain for u, chain in pairs}
 
             for u in missing_urns:
-                result[u] = computed.get(u, [])
+                chain = computed.get(u, [])
+                result[u] = chain
+                # Change 6 — populate L1 so subsequent batches in this
+                # job hit in-process and skip the Redis HGET.
+                if l1 is not None:
+                    l1[u] = chain
+
+            # Change 6 — count cold-path resolutions for the hit-rate log.
+            if scratch is not None:
+                scratch.stats["urn_ancestor_misses"] += len(missing_urns)
 
             # Batch-store all computed chains in one pipeline
             store_pipe = self._redis.pipeline(transaction=False)
@@ -2181,19 +2550,33 @@ class FalkorDBProvider(GraphDataProvider):
         self,
         urns: List[str],
     ) -> Dict[str, List[str]]:
-        """Compute ancestor chains for many URNs in a single Cypher.
+        """Compute ancestor chains for many URNs.
 
-        Preserves the longest-path semantics of
-        ``_compute_ancestor_chain``: each URN's chain is the ordered
-        ``[parent, grandparent, ...]`` along the longest containment
-        path, matching what callers that depend on parent-before-
-        grandparent ordering already expect.
+        Change 1 — rewritten. The previous implementation issued a
+        single Cypher per chunk using ``OPTIONAL MATCH path =
+        (child)<-[:CONTAINS|...*1..max_depth]-(a) ... ORDER BY plen
+        DESC`` — a variable-length pattern that materialised every
+        upward path before picking the longest. On multi-parent
+        hierarchies (depth 10) the planner evaluated up to 10^depth
+        paths per child × 500 children per chunk, which is the
+        dominant cause of FalkorDB pegging at 200% CPU.
 
-        Internally chunked to bound the per-query parameter size; the
-        planner sees one set of bound variables per chunk and only one
-        round-trip is paid per chunk regardless of how many URNs miss
-        the cache. This is the fix for the per-URN scan amplification
-        documented in the aggregation hardening plan.
+        New strategy, tried in order:
+
+        1. **Precomputed property read** — ``MATCH (n) WHERE n.urn IN
+           $urns RETURN n.urn, n.ancestorPath``. ``ancestorPath`` is
+           denormalised onto each node by ``refresh_ancestor_paths()``
+           on ontology change; the read is an index seek per URN plus
+           a property fetch.
+        2. **Iterative BFS-from-leaves** for any URN the precompute
+           hasn't covered yet (new node, legacy node, etc.). Walks one
+           level at a time using the existing per-label URN indexes,
+           accumulating chain in Python. ``max_depth`` rounds × O(1)
+           per URN is bounded; no path explosion.
+
+        The longest-path semantics of the legacy implementation are
+        preserved by BFS: each iteration picks the longest extension
+        seen so far.
         """
         out: Dict[str, List[str]] = {u: [] for u in urns}
         if not urns:
@@ -2206,20 +2589,382 @@ class FalkorDBProvider(GraphDataProvider):
 
         containment_cypher = "|".join(_sanitize_label(t) for t in containment)
         max_depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
-
-        # Keep parameter lists bounded so a single misconfigured outer
-        # batch (e.g. 10k URNs) doesn't generate a single oversized
-        # query plan that itself spikes provider CPU.
         chunk_size = 500
 
-        # ``MATCH (child) WHERE child.urn IN $urns`` is one node-scan for
-        # the whole chunk; ``UNWIND $urns AS u MATCH (child {urn:u})``
-        # was N scans (one per URN), which on a multi-million-node graph
-        # without an unlabeled URN index busts the 5s read timeout and
-        # triggers the worker retry loop. Same pathology as the original
-        # MERGE-on-relationship problem, just hiding in the ancestor
-        # lookup. URNs that don't exist in the graph simply produce no
-        # row; the caller's pre-initialization to ``[]`` handles them.
+        # ──────────────────────────────────────────────────────────────
+        # Stage 1: precomputed property read.
+        # Each node carries ``n.ancestorPath`` stamped by
+        # ``refresh_ancestor_paths()``. When present, the read is
+        # purely an index seek + scalar fetch — no path planning, no
+        # variable-length traversal, no Cartesian risk.
+        # ──────────────────────────────────────────────────────────────
+        precompute_misses: List[str] = []
+        for i in range(0, len(urns), chunk_size):
+            chunk = urns[i : i + chunk_size]
+            try:
+                res = await self._ro_query(
+                    "MATCH (n) WHERE n.urn IN $urns "
+                    "RETURN n.urn AS u, n.ancestorPath AS chain",
+                    params={"urns": chunk},
+                )
+            except Exception as exc:
+                # Precompute read failed (transient) — treat the whole
+                # chunk as miss and let BFS handle it.
+                logger.warning(
+                    "Ancestor precompute read failed for chunk of %d "
+                    "URNs (%s); falling back to BFS for this chunk.",
+                    len(chunk), exc,
+                )
+                precompute_misses.extend(chunk)
+                continue
+
+            returned: Set[str] = set()
+            for row in res.result_set or []:
+                urn = row[0]
+                if not urn:
+                    continue
+                returned.add(urn)
+                chain = row[1]
+                if chain is None:
+                    # Node exists but ancestorPath hasn't been stamped
+                    # yet (legacy node, or refresh_ancestor_paths
+                    # hasn't run for this label) — BFS will compute it.
+                    precompute_misses.append(urn)
+                    continue
+                # FalkorDB returns lists as plain Python lists.
+                if isinstance(chain, (list, tuple)):
+                    out[urn] = [c for c in chain if c]
+                else:
+                    # Unexpected shape — treat as miss rather than risk
+                    # silently corrupting output.
+                    precompute_misses.append(urn)
+
+            # Any URN in the chunk that didn't come back at all is
+            # missing from the graph — leave its entry as [] (set at
+            # the top), and add to the negative cache so subsequent
+            # batches in this job don't re-issue lookups for it.
+            scratch = self._job_scratch
+            for u in chunk:
+                if u not in returned:
+                    if scratch is not None:
+                        scratch.missing_urns.add(u)
+
+        if not precompute_misses:
+            return out
+
+        # ──────────────────────────────────────────────────────────────
+        # Stage 2: iterative BFS-from-leaves for cold URNs.
+        # One round-trip per depth level, regardless of fan-out per
+        # node. Bounded concurrency keeps the per-cold-URN query rate
+        # from overwhelming the single-thread Cypher planner.
+        # ──────────────────────────────────────────────────────────────
+        bfs_misses = [u for u in precompute_misses if u not in out or not out[u]]
+        if not bfs_misses:
+            return out
+
+        bfs_chains = await self._bfs_ancestor_chains(
+            bfs_misses, containment_cypher, max_depth,
+        )
+        for urn, chain in bfs_chains.items():
+            out[urn] = chain
+
+        return out
+
+    async def _bfs_ancestor_chains(
+        self,
+        urns: List[str],
+        containment_cypher: str,
+        max_depth: int,
+    ) -> Dict[str, List[str]]:
+        """Iterative BFS-from-leaves ancestor walker. Change 1 fallback.
+
+        Walks containment edges upward one level at a time using bulk
+        Cypher per level. Each level adds at most one ancestor per
+        URN; we stop early when a level returns no new ancestors or
+        when ``max_depth`` is hit.
+
+        Per-level Cypher: ``UNWIND $urns AS u MATCH (c {urn:u})
+        <-[:CONTAINS|...]-(p) RETURN u, p.urn LIMIT 1`` — index seek
+        on `c.urn`, single 1-hop edge expansion, single ancestor per
+        URN by `LIMIT 1` (matches the longest-path-first-parent
+        semantics of the legacy variable-length path when the graph
+        is a tree).
+
+        Returns a dict keyed by every input URN; empty chain for URNs
+        with no parents.
+        """
+        out: Dict[str, List[str]] = {u: [] for u in urns}
+        if not urns or not containment_cypher:
+            return out
+
+        # Frontier: URNs we still need to advance one level. Maps
+        # original URN → current "tip" URN whose parent we'll look up
+        # next. When tip has no parent, the original URN's chain is
+        # final and it drops out of the frontier.
+        frontier: Dict[str, str] = {u: u for u in urns}
+
+        for depth in range(max_depth):
+            if not frontier:
+                break
+
+            # Issue one bulk Cypher per level — index seek per tip,
+            # bounded by the size of the frontier (≤ len(urns)).
+            tips = list(frontier.values())
+            try:
+                res = await self._ro_query(
+                    "UNWIND $tips AS tip "
+                    "MATCH (c {urn: tip}) "
+                    f"OPTIONAL MATCH (c)<-[:{containment_cypher}]-(p) "
+                    "WITH tip, p.urn AS parent "
+                    "RETURN tip, parent LIMIT $lim",
+                    params={"tips": tips, "lim": len(tips) * 4},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "BFS ancestor depth %d failed for %d frontier URNs "
+                    "(%s); returning chains computed so far.",
+                    depth, len(frontier), exc,
+                )
+                return out
+
+            # Pick the first parent seen per tip; preserves the
+            # longest-path-first-parent behaviour for tree-shaped
+            # hierarchies. For DAGs with multiple parents the legacy
+            # implementation also picked arbitrarily by sort order,
+            # so this is not a behaviour change.
+            tip_to_parent: Dict[str, Optional[str]] = {}
+            for row in res.result_set or []:
+                if not row:
+                    continue
+                tip = row[0]
+                parent = row[1] if len(row) > 1 else None
+                if tip and tip not in tip_to_parent:
+                    tip_to_parent[tip] = parent
+
+            new_frontier: Dict[str, str] = {}
+            for original_urn, tip in frontier.items():
+                parent = tip_to_parent.get(tip)
+                if not parent:
+                    continue  # chain complete for this URN
+                # Cycle guard: a malformed graph could loop forever.
+                # Skip if we'd revisit a URN already in this chain.
+                if parent in out[original_urn] or parent == original_urn:
+                    continue
+                out[original_urn].append(parent)
+                new_frontier[original_urn] = parent
+            frontier = new_frontier
+
+        return out
+
+    # ------------------------------------------------------------------ #
+    # Ancestor-path precompute (Change 1)
+    # ------------------------------------------------------------------ #
+
+    _ANCESTOR_REFRESH_BATCH = 1000
+
+    async def refresh_ancestor_paths(
+        self,
+        *,
+        only_if_digest_changed: bool = True,
+    ) -> Dict[str, int]:
+        """Denormalise ancestor chains onto every node as ``n.ancestorPath``.
+
+        Change 1. Runs the BFS-from-leaves walker bottom-up across the
+        graph (label by label), then writes the computed chain back
+        as a list property. Subsequent aggregation jobs read
+        ``n.ancestorPath`` directly via index seek instead of running
+        the variable-length path Cypher whose CPU cost scales as
+        ``O(branch^depth × N_urns)``.
+
+        The refresh is keyed by ``_level_digest`` — if the digest
+        hasn't changed and ``only_if_digest_changed`` is True, the
+        call is a no-op. The digest changes whenever the entity-type
+        → level mapping changes (i.e. ontology containment was
+        edited), which is exactly when stamped chains can become
+        stale.
+
+        Returns a dict ``{label: nodes_stamped}`` for operator
+        observability. Best-effort: never raises; logs per-label
+        failures and continues. The aggregation path remains correct
+        without precompute (BFS fallback handles every URN that
+        lacks a stamped chain).
+        """
+        digest = getattr(self, "_level_digest", None)
+        last = getattr(self, "_ancestor_paths_digest", None)
+        if only_if_digest_changed and digest is not None and digest == last:
+            return {}
+
+        await self._ensure_connected()
+
+        try:
+            containment = list(self._get_containment_edge_types())
+        except Exception:
+            containment = []
+        if not containment:
+            logger.info(
+                "refresh_ancestor_paths on %s: no containment types "
+                "configured; skipping.", self._graph_name,
+            )
+            self._ancestor_paths_digest = digest
+            return {}
+
+        containment_cypher = "|".join(_sanitize_label(t) for t in containment)
+        max_depth = max(
+            len(getattr(self, "_entity_type_levels", {}) or {}), 10,
+        )
+
+        # Enumerate labels — one BFS pass per label keeps each query
+        # under the index seek and lets us skip labels with no nodes.
+        try:
+            lr = await asyncio.wait_for(
+                self._proj.ro_query(
+                    "CALL db.labels() YIELD label RETURN label", {},
+                ),
+                timeout=5.0,
+            )
+        except Exception as exc:
+            logger.warning(
+                "refresh_ancestor_paths on %s: CALL db.labels() failed "
+                "(%s); aborting precompute. BFS fallback will run "
+                "per-job.", self._graph_name, exc,
+            )
+            return {}
+
+        labels: List[str] = []
+        for row in (lr.result_set or []):
+            if row and row[0]:
+                raw = row[0]
+                if isinstance(raw, (bytes, bytearray)):
+                    raw = raw.decode("utf-8")
+                lbl = str(raw)
+                if lbl and lbl != "_Projection":
+                    labels.append(lbl)
+
+        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
+        stamped: Dict[str, int] = {}
+
+        for label in labels:
+            safe = _sanitize_label(label)
+            level = entity_levels.get(label)
+            try:
+                # Scan all URNs for this label; per-label URN index
+                # makes this a fast index range read. Soft cap so a
+                # pathologically large label can't monopolise the
+                # refresh; remaining URNs still work via BFS fallback.
+                ur = await asyncio.wait_for(
+                    self._proj.ro_query(
+                        f"MATCH (n:{safe}) RETURN n.urn LIMIT 500000",
+                        {},
+                    ),
+                    timeout=30.0,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "refresh_ancestor_paths on %s: scan for label %r "
+                    "failed (%s); skipping label.",
+                    self._graph_name, label, exc,
+                )
+                continue
+
+            urns_for_label: List[str] = []
+            for row in (ur.result_set or []):
+                if row and row[0]:
+                    u = row[0]
+                    if isinstance(u, (bytes, bytearray)):
+                        u = u.decode("utf-8")
+                    urns_for_label.append(str(u))
+            if not urns_for_label:
+                continue
+
+            # Compute chains via BFS — bounded concurrency over the
+            # whole label at once would issue too many parallel
+            # queries; chunk into refresh batches.
+            chains: Dict[str, List[str]] = {}
+            for i in range(0, len(urns_for_label), self._ANCESTOR_REFRESH_BATCH):
+                chunk = urns_for_label[i : i + self._ANCESTOR_REFRESH_BATCH]
+                chunk_chains = await self._bfs_ancestor_chains(
+                    chunk, containment_cypher, max_depth,
+                )
+                chains.update(chunk_chains)
+
+            # Stamp the chains back as ``n.ancestorPath`` and
+            # ``n.level`` in batches. Index seek per URN, scalar SET.
+            stamp_count = 0
+            for i in range(0, len(urns_for_label), self._ANCESTOR_REFRESH_BATCH):
+                chunk_urns = urns_for_label[i : i + self._ANCESTOR_REFRESH_BATCH]
+                batch_items = [
+                    {"u": u, "p": chains.get(u, [])}
+                    for u in chunk_urns
+                ]
+                if level is not None:
+                    set_clause = (
+                        "SET n.ancestorPath = item.p, n.level = $level"
+                    )
+                    params = {"batch": batch_items, "level": int(level)}
+                else:
+                    set_clause = "SET n.ancestorPath = item.p"
+                    params = {"batch": batch_items}
+                try:
+                    await self._proj_query(
+                        "UNWIND $batch AS item "
+                        f"MATCH (n:{safe} {{urn: item.u}}) "
+                        f"{set_clause}",
+                        params=params,
+                        timeout=self._bulk_create_timeout_s,
+                    )
+                    stamp_count += len(chunk_urns)
+                except Exception as exc:
+                    logger.warning(
+                        "refresh_ancestor_paths on %s: stamp batch for "
+                        "label %r failed (%s); chains computed but "
+                        "not persisted for this batch.",
+                        self._graph_name, label, exc,
+                    )
+
+            stamped[label] = stamp_count
+            logger.info(
+                "refresh_ancestor_paths on %s: label %r stamped "
+                "%d/%d nodes (level=%s)",
+                self._graph_name, label, stamp_count,
+                len(urns_for_label), level,
+            )
+
+        self._ancestor_paths_digest = digest
+        total = sum(stamped.values())
+        logger.info(
+            "refresh_ancestor_paths on %s complete: %d nodes stamped "
+            "across %d labels (digest=%s)",
+            self._graph_name, total, len(stamped),
+            (digest or "")[:16],
+        )
+        return stamped
+
+    # ------------------------------------------------------------------ #
+    # End of Change 1 ancestor-precompute block
+    # ------------------------------------------------------------------ #
+
+    async def _legacy_compute_ancestor_chains_bulk_cypher(
+        self,
+        urns: List[str],
+    ) -> Dict[str, List[str]]:
+        """Legacy variable-length-path Cypher.
+
+        Retained only as a documented reference for what was replaced
+        by Change 1. NOT called by the active code path; kept private
+        so a future investigator can compare behaviours without
+        digging through git history.
+        """
+        out: Dict[str, List[str]] = {u: [] for u in urns}
+        if not urns:
+            return out
+
+        containment = list(self._get_containment_edge_types())
+        if not containment:
+            return out
+
+        containment_cypher = "|".join(_sanitize_label(t) for t in containment)
+        max_depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
+        chunk_size = 500
         cypher = (
             "MATCH (child) WHERE child.urn IN $urns "
             f"OPTIONAL MATCH path = (child)<-[:{containment_cypher}*1..{max_depth}]-(a) "
@@ -2264,6 +3009,127 @@ class FalkorDBProvider(GraphDataProvider):
     _MERGE_SUB_BATCH_TARGET_LOW_S = 0.8
     _MERGE_SUB_BATCH_GROW_AFTER = 5
     _MERGE_SUB_BATCH_GROW_STEP = 100
+
+    async def _write_aggregated_chunk_split(
+        self,
+        chunk: List[Dict[str, Any]],
+        pair_label_map: Dict[str, Optional[str]],
+    ) -> None:
+        """Write one AIMD sub-batch via label-scoped CREATE/MATCH+SET.
+
+        Change 2 helper. Splits items four ways:
+
+        - **labeled create** (scard==1, both labels resolved): one
+          ``UNWIND $batch AS item MATCH (a:LabelA {urn:item.s})
+          MATCH (b:LabelB {urn:item.t}) CREATE (a)-[r:AGGREGATED ...
+          ]->(b)`` per ``(LabelA, LabelB)`` group. Cypher template
+          cached on ``self._job_scratch.cypher_templates`` so a
+          long-running job pays the f-string build cost once per
+          label pair.
+        - **labeled update** (scard>1, both labels resolved): one
+          ``UNWIND $batch AS item MATCH (a:LabelA {urn:item.s})
+          -[r:AGGREGATED]->(b:LabelB {urn:item.t}) SET r.weight = ...``
+          per label group. Index seek on both endpoints + 1-hop check
+          (no full out-edge scan).
+        - **unlabeled fallback** (either label is None): legacy
+          ``MERGE (s {urn:item.s}) ... MERGE (s)-[r:AGGREGATED]->(t)
+          SET ...`` for that item only. Slow but rare; the
+          aggregation hot path on root containers always has
+          resolved labels via the warmup.
+        """
+        if not chunk:
+            return
+
+        from collections import defaultdict
+        scratch = self._job_scratch
+        templates = scratch.cypher_templates if scratch is not None else {}
+
+        # Bucketize. (sl_label, tl_label, kind) where kind ∈ {"create",
+        # "update"}. Items with either label None go to "fallback".
+        buckets: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+        fallback: List[Dict[str, Any]] = []
+        for item in chunk:
+            sl_label = pair_label_map.get(item["s"])
+            tl_label = pair_label_map.get(item["t"])
+            if not (sl_label and tl_label):
+                fallback.append(item)
+                continue
+            kind = "create" if int(item.get("w", 1)) == 1 else "update"
+            buckets[(sl_label, tl_label, kind)].append(item)
+
+        # Execute each labeled bucket with a cached Cypher template.
+        for (sl_label, tl_label, kind), items in buckets.items():
+            cache_key = (f"{kind}:{sl_label}", tl_label)
+            cypher = templates.get(cache_key)
+            if cypher is None:
+                if kind == "create":
+                    cypher = (
+                        f"UNWIND $batch AS item "
+                        f"MATCH (a:{sl_label} {{urn: item.s}}) "
+                        f"MATCH (b:{tl_label} {{urn: item.t}}) "
+                        f"CREATE (a)-[r:AGGREGATED {{"
+                        f"weight: item.w, "
+                        f"sourceLevel: item.sl, "
+                        f"targetLevel: item.tl, "
+                        f"sourceEdgeTypes: item.et, "
+                        f"latestUpdate: timestamp()"
+                        f"}}]->(b)"
+                    )
+                else:
+                    cypher = (
+                        f"UNWIND $batch AS item "
+                        f"MATCH (a:{sl_label} {{urn: item.s}})"
+                        f"-[r:AGGREGATED]->"
+                        f"(b:{tl_label} {{urn: item.t}}) "
+                        f"SET r.weight = item.w, "
+                        f"    r.latestUpdate = timestamp(), "
+                        f"    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
+                        f"    r.targetLevel = coalesce(item.tl, r.targetLevel), "
+                        f"    r.sourceEdgeTypes = REDUCE(acc = "
+                        f"      CASE WHEN r.sourceEdgeTypes IS NULL THEN [] "
+                        f"           ELSE r.sourceEdgeTypes END, "
+                        f"      et IN item.et | "
+                        f"      CASE WHEN et IN acc THEN acc "
+                        f"           ELSE acc + et END)"
+                    )
+                if scratch is not None:
+                    templates[cache_key] = cypher
+
+            try:
+                await self._proj_query(cypher, params={"batch": items})
+            except Exception as exc:
+                # Fall back to the legacy unlabeled MERGE for this
+                # group so a single label-scoped failure (e.g. label
+                # was dropped between resolve and write) doesn't lose
+                # the whole sub-batch. The legacy path is correct but
+                # slow; loud-log so the operator notices.
+                logger.warning(
+                    "Aggregation %s on %s for label pair (%s, %s) "
+                    "failed (%s); falling back to unlabeled MERGE "
+                    "for this group of %d items.",
+                    kind, self._graph_name, sl_label, tl_label, exc,
+                    len(items),
+                )
+                fallback.extend(items)
+
+        if fallback:
+            await self._proj_query(
+                "UNWIND $batch AS item "
+                "MERGE (s {urn: item.s}) "
+                "MERGE (t {urn: item.t}) "
+                "MERGE (s)-[r:AGGREGATED]->(t) "
+                "SET r.weight = item.w, "
+                "    r.latestUpdate = timestamp(), "
+                "    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
+                "    r.targetLevel = coalesce(item.tl, r.targetLevel), "
+                "    r.sourceEdgeTypes = REDUCE(acc = "
+                "      CASE WHEN r.sourceEdgeTypes IS NULL THEN [] "
+                "           ELSE r.sourceEdgeTypes END, "
+                "      et IN item.et | "
+                "      CASE WHEN et IN acc THEN acc "
+                "           ELSE acc + et END)",
+                params={"batch": fallback},
+            )
 
     async def _materialize_edges_batched(
         self,
@@ -2383,6 +3249,20 @@ class FalkorDBProvider(GraphDataProvider):
                         len(all_urns), exc,
                     )
 
+        # Change 2 — resolve endpoint labels once for the whole sub-batch.
+        # We need them to route to label-scoped Cypher (the O(1)-per-row
+        # CREATE / MATCH+SET path) instead of the unlabeled
+        # MERGE-on-relationship path that scans the source node's
+        # AGGREGATED out-edges (O(out_degree)). The L1 scratch cache
+        # absorbs URNs that appear in multiple sub-batches across the
+        # same job, so repeated root-container URNs cost zero Redis
+        # round-trips after their first resolution.
+        all_pair_urns: List[str] = sorted({s for (s, _), _ in ordered_pairs}
+                                          | {t for (_, t), _ in ordered_pairs})
+        pair_label_map: Dict[str, Optional[str]] = await self._resolve_urn_labels_bulk(
+            all_pair_urns,
+        )
+
         merge_batch: list[dict[str, Any]] = []
         for i, ((s, t), _) in enumerate(ordered_pairs):
             weight = scard_results[i] if scard_results[i] else 1
@@ -2393,20 +3273,21 @@ class FalkorDBProvider(GraphDataProvider):
                 "tl": url_levels.get(t),
             })
 
-        # Execute ONE Cypher UNWIND+MERGE per sub-batch.  The Cypher
-        # REDUCE accumulates all edge types into sourceEdgeTypes in a
-        # single pass — no per-edge-type iteration needed.
+        # Change 2 — execute per-sub-batch via label-scoped CREATE for
+        # genuinely new AGGREGATED edges (scard==1: first contributor
+        # → no edge yet) and label-scoped MATCH+SET for existing
+        # edges (scard>1: edge exists, this contributor bumps its
+        # weight). Both paths use index seeks on both endpoint URNs;
+        # neither pays O(out_degree). When either endpoint's label
+        # could not be resolved we fall back to the legacy unlabeled
+        # MERGE path for that single chunk only (rare; never hits a
+        # high-degree root node because root nodes always have a
+        # resolvable label after warmup). The AIMD sub-batcher and
+        # intra-batch heartbeat are preserved unchanged.
 
         created = 0
         chunk_start = 0
         while chunk_start < len(merge_batch):
-            # Cooperative cancel between MERGE sub-batches. The previous
-            # sub-batch's MERGE has fully landed in FalkorDB before we
-            # reach this check, so raising here cannot orphan a Cypher
-            # transaction. Without this hook, a single outer batch
-            # (~100+ sub-batches over several minutes) cannot be
-            # cancelled without ``task.cancel()`` interrupting a
-            # mid-flight MERGE.
             if should_cancel is not None and should_cancel():
                 from backend.app.services.aggregation.cancel import JobCancelled
                 from datetime import datetime, timezone
@@ -2415,37 +3296,13 @@ class FalkorDBProvider(GraphDataProvider):
                     observed_at=datetime.now(timezone.utc).isoformat(),
                 )
 
-            # Adaptive sub-batch size: starts at the ceiling and shrinks
-            # toward _MERGE_SUB_BATCH_MIN when MERGE latency creeps past
-            # _MERGE_SUB_BATCH_TARGET_HIGH_S. This is the WS1.4 backpressure
-            # mechanism — when FalkorDB CPU spikes, sub-batches slow down,
-            # and shrinking the size both reduces per-call MERGE work and
-            # makes the cooperative-cancel check fire more often.
             sub_batch_size = self._aggregation_sub_batch_size
             chunk = merge_batch[chunk_start:chunk_start + sub_batch_size]
             chunk_start += len(chunk)
 
             t_merge_start = time.monotonic()
-            await self._proj_query(
-                "UNWIND $batch AS item "
-                "MERGE (s {urn: item.s}) "
-                "MERGE (t {urn: item.t}) "
-                "MERGE (s)-[r:AGGREGATED]->(t) "
-                "SET r.weight = item.w, "
-                "    r.latestUpdate = timestamp(), "
-                # Level-pair fast-path props. ``coalesce`` keeps a previously
-                # backfilled value when the new resolution couldn't find a
-                # label (cold cache / unknown entity type) — never regresses
-                # known level metadata to NULL.
-                "    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
-                "    r.targetLevel = coalesce(item.tl, r.targetLevel), "
-                "    r.sourceEdgeTypes = REDUCE(acc = "
-                "      CASE WHEN r.sourceEdgeTypes IS NULL THEN [] "
-                "           ELSE r.sourceEdgeTypes END, "
-                "      et IN item.et | "
-                "      CASE WHEN et IN acc THEN acc "
-                "           ELSE acc + et END)",
-                params={"batch": chunk},
+            await self._write_aggregated_chunk_split(
+                chunk, pair_label_map,
             )
             t_merge_elapsed = time.monotonic() - t_merge_start
             created += len(chunk)
@@ -2653,18 +3510,43 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> Dict[str, Optional[str]]:
         """Resolve URN → sanitized-label for many URNs at once.
 
-        First consults the Redis URN→label cache populated as a side
-        effect of node upserts / get_node calls. For misses, falls back
-        to a single bulk Cypher querying labels for the missing URNs
-        (one round-trip regardless of miss count). Caches results back
-        to Redis for subsequent calls.
+        Three-tier lookup:
 
-        Returns dict with every input URN as a key; the value is
-        ``None`` when the URN's label could not be resolved (caller
-        routes through the unlabeled fallback CREATE path for these).
+        1. L1 (in-process, per-job): ``self._job_scratch.urn_label`` —
+           survives across outer batches within one job. Eliminates
+           Redis RTT for root container URNs that appear in tens of
+           thousands of leaf edges. Change 6.
+        2. L2 (Redis hash): ``self._urn_label_key()`` — survives across
+           jobs. Populated lazily on miss and by ``_warmup_urn_label_
+           cache_for_aggregation`` at job start.
+        3. Cold path: bulk Cypher with ``WHERE n.urn IN $urns``.
+
+        Returns dict with every input URN as a key; value is ``None``
+        when the URN's label could not be resolved (caller routes
+        through the unlabeled fallback CREATE path for these).
         """
         out: Dict[str, Optional[str]] = {}
         if not urns:
+            return out
+
+        # Change 6 — L1 in-process lookup. Pulls labels that any prior
+        # batch in this same job already resolved. Counter feeds the
+        # end-of-job hit-rate log.
+        scratch = self._job_scratch
+        l1 = scratch.urn_label if scratch is not None else None
+        stage1_remaining: List[str] = []
+        if l1 is not None:
+            for u in urns:
+                if u in l1:
+                    out[u] = l1[u]
+                    scratch.stats["urn_label_hits"] += 1
+                else:
+                    stage1_remaining.append(u)
+            urns_for_l2 = stage1_remaining
+        else:
+            urns_for_l2 = list(urns)
+
+        if not urns_for_l2:
             return out
 
         label_key = self._urn_label_key()
@@ -2672,17 +3554,20 @@ class FalkorDBProvider(GraphDataProvider):
 
         try:
             pipe = self._redis.pipeline(transaction=False)
-            for u in urns:
+            for u in urns_for_l2:
                 pipe.hget(label_key, u)
             raws = await pipe.execute()
-            for u, raw in zip(urns, raws):
+            for u, raw in zip(urns_for_l2, raws):
                 if raw is None:
                     missing.append(u)
                 else:
                     lbl = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-                    out[u] = _sanitize_label(lbl)
+                    sanitized = _sanitize_label(lbl)
+                    out[u] = sanitized
+                    if l1 is not None:
+                        l1[u] = sanitized
         except Exception:
-            missing = list(urns)
+            missing = list(urns_for_l2)
 
         if missing:
             try:
@@ -2707,15 +3592,30 @@ class FalkorDBProvider(GraphDataProvider):
                 )
                 store_pipe = self._redis.pipeline(transaction=False)
                 store_count = 0
+                resolved_urns: Set[str] = set()
                 for row in res.result_set or []:
                     urn, label = row[0], row[1]
+                    resolved_urns.add(urn)
                     if label:
                         safe = _sanitize_label(label)
                         out[urn] = safe
+                        if l1 is not None:
+                            l1[urn] = safe
                         store_pipe.hset(label_key, urn, safe)
                         store_count += 1
                     else:
                         out[urn] = None
+                        if l1 is not None:
+                            l1[urn] = None
+                # Change 6 — negative cache: URNs that the bulk Cypher
+                # didn't return at all are missing from the graph.
+                # Remember them on the scratch so subsequent batches
+                # in this same job don't re-issue lookups for them.
+                if scratch is not None:
+                    for u in missing:
+                        if u not in resolved_urns:
+                            scratch.missing_urns.add(u)
+                            scratch.urn_label[u] = None
                 if store_count > 0:
                     try:
                         await store_pipe.execute()
@@ -2727,6 +3627,10 @@ class FalkorDBProvider(GraphDataProvider):
                     "back to unlabeled MATCH for these): %s",
                     len(missing), exc,
                 )
+
+        # Change 6 — count L2 → cold-path misses for the hit-rate log.
+        if scratch is not None:
+            scratch.stats["urn_label_misses"] += len(urns_for_l2)
 
         for u in urns:
             out.setdefault(u, None)
@@ -3081,6 +3985,7 @@ class FalkorDBProvider(GraphDataProvider):
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]],
         should_cancel: Optional[Callable[[], bool]],
         last_cursor: Optional[str],
+        total_edges_hint: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Bulk-rebuild orchestrator — Phase 1 of aggregation hardening.
 
@@ -3135,14 +4040,28 @@ class FalkorDBProvider(GraphDataProvider):
                 self._graph_name, last_cursor,
             )
 
-        # Total count — informational, used by progress callback.
-        count_cypher = f"MATCH ()-[r]->() {type_filter} RETURN count(r)"
-        count_res = await self._ro_query(count_cypher, params=type_params)
-        total = count_res.result_set[0][0] if count_res.result_set else 0
-        logger.info(
-            "bulk_rebuild on %s starting: %d lineage edges to scan.",
-            self._graph_name, total,
-        )
+        # Total count — informational, used by progress callback. When
+        # the caller passes a hint from the prior successful run we
+        # skip the full-edge count(r) scan entirely; the next run will
+        # overwrite the cached value with the actual processed count
+        # from stats["total_edges"]. Saves a 30s+ pre-flight on
+        # multi-million-edge graphs and lets the first checkpoint fire
+        # immediately.
+        if total_edges_hint and total_edges_hint > 0:
+            total = int(total_edges_hint)
+            logger.info(
+                "bulk_rebuild on %s starting: skipping count(r) scan, "
+                "using cached total=%d from prior run.",
+                self._graph_name, total,
+            )
+        else:
+            count_cypher = f"MATCH ()-[r]->() {type_filter} RETURN count(r)"
+            count_res = await self._ro_query(count_cypher, params=type_params)
+            total = count_res.result_set[0][0] if count_res.result_set else 0
+            logger.info(
+                "bulk_rebuild on %s starting: %d lineage edges to scan.",
+                self._graph_name, total,
+            )
 
         # Initialize scan-position state up front so the phase-emit
         # helper (defined below) sees consistent values from its first
@@ -3178,6 +4097,35 @@ class FalkorDBProvider(GraphDataProvider):
                     phase_id, self._graph_name, cb_exc,
                 )
 
+        # ===== PHASE A0: Ancestor-path precompute (Change 1) =====
+        # Stamp ``n.ancestorPath`` on every node so Phase B's per-batch
+        # ancestor lookups become index seeks instead of variable-length
+        # path Cypher. Runs once per ontology-digest change; subsequent
+        # jobs with the same digest no-op out of the precompute and
+        # read the stamped property directly. Best-effort — failure
+        # falls through to the BFS-from-leaves fallback per URN, so
+        # job correctness is unaffected.
+        try:
+            await _emit_phase("precomputing_ancestors")
+            t_phase_a0_start = time.monotonic()
+            stamped = await self.refresh_ancestor_paths(
+                only_if_digest_changed=True,
+            )
+            t_phase_a0 = (time.monotonic() - t_phase_a0_start) * 1000
+            if stamped:
+                logger.info(
+                    "bulk_rebuild phase A0 (ancestor precompute): "
+                    "%d labels stamped in %.1fms",
+                    len(stamped), t_phase_a0,
+                )
+        except Exception as exc:
+            logger.warning(
+                "bulk_rebuild phase A0 (ancestor precompute) on %s "
+                "failed (%s); falling back to BFS-per-URN inside "
+                "Phase B. Job will still succeed.",
+                self._graph_name, exc,
+            )
+
         # ===== PHASE A: Wipe + purge idempotency =====
         await _emit_phase("wiping")
         t_phase_a_start = time.monotonic()
@@ -3196,19 +4144,27 @@ class FalkorDBProvider(GraphDataProvider):
 
         while True:
             batch_num += 1
-            if current_cursor:
+            # Change 3 — index-backed cursor on (s.urn, t.urn) instead
+            # of the legacy ``(s.urn + '|' + t.urn) > $cursor`` predicate.
+            # The new predicate matches the existing URN index on s,
+            # then 1-hop tiebreaks on t.urn inside one source's
+            # out-edge group. Previous form forced a full edge scan +
+            # in-memory sort per batch on multi-million-edge graphs.
+            cursor_pair = _parse_cursor(current_cursor)
+            if cursor_pair is not None:
+                cs, ct = cursor_pair
                 batch_cypher = (
                     f"MATCH (s)-[r]->(t) {type_filter} "
-                    f"AND (s.urn + '|' + t.urn) > $cursor "
+                    f"AND (s.urn > $cs OR (s.urn = $cs AND t.urn > $ct)) "
                     f"RETURN s.urn, t.urn, type(r), r.id "
-                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
+                    f"ORDER BY s.urn, t.urn LIMIT $limit"
                 )
-                batch_params = {**type_params, "cursor": current_cursor, "limit": batch_size}
+                batch_params = {**type_params, "cs": cs, "ct": ct, "limit": batch_size}
             else:
                 batch_cypher = (
                     f"MATCH (s)-[r]->(t) {type_filter} "
                     f"RETURN s.urn, t.urn, type(r), r.id "
-                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
+                    f"ORDER BY s.urn, t.urn LIMIT $limit"
                 )
                 batch_params = {**type_params, "limit": batch_size}
 
@@ -3270,7 +4226,8 @@ class FalkorDBProvider(GraphDataProvider):
 
             processed += len(rows)
             last_row = rows[-1]
-            current_cursor = f"{last_row[0]}|{last_row[1]}"
+            # Change 3 — JSON tuple cursor (parsed back by _parse_cursor).
+            current_cursor = _encode_cursor(last_row[0], last_row[1])
 
             logger.info(
                 "bulk_rebuild scan batch %d: %d/%d edges | fetch=%.1fms "
@@ -3455,6 +4412,9 @@ class FalkorDBProvider(GraphDataProvider):
             "processed": processed,
             "aggregated_edges_affected": created,
             "input_edges_processed": processed,
+            # Caller persists this back as the cached denominator for
+            # the next job's pre-flight skip (Change 4).
+            "total_edges": processed,
             "errors": 0,
         }
 
@@ -3889,6 +4849,7 @@ class FalkorDBProvider(GraphDataProvider):
         progress_callback: Optional[Any] = None,
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
+        total_edges_hint: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Batch materialization using ancestor-chain approach with cursor-based pagination.
 
@@ -3932,6 +4893,7 @@ class FalkorDBProvider(GraphDataProvider):
                 intra_batch_callback=intra_batch_callback,
                 should_cancel=should_cancel,
                 last_cursor=last_cursor,
+                total_edges_hint=total_edges_hint,
             )
 
         containment = containment_edge_types or list(self._get_containment_edge_types())
@@ -3962,12 +4924,25 @@ class FalkorDBProvider(GraphDataProvider):
             type_filter = "WHERE NOT type(r) IN $excludeTypes"
             type_params = {"excludeTypes": exclude_types}
 
-        # Count total lineage edges
-        count_cypher = f"MATCH ()-[r]->() {type_filter} RETURN count(r)"
-        count_res = await self._ro_query(count_cypher, params=type_params)
-        total = count_res.result_set[0][0] if count_res.result_set else 0
-
-        logger.info(f"Batch materialization: {total} lineage edges to process (cursor: {last_cursor or 'start'})")
+        # Count total lineage edges. When the caller passes a hint from
+        # the previous successful run, skip the full-edge count(r) scan
+        # entirely — on multi-million-edge graphs this is the 30s+
+        # pre-flight that delayed the first checkpoint and starved the
+        # UI. Hint is advisory (the next run will overwrite with the
+        # exact total via stats["total_edges"]), so a small drift since
+        # the prior run is acceptable.
+        if total_edges_hint and total_edges_hint > 0:
+            total = int(total_edges_hint)
+            logger.info(
+                "Batch materialization: skipping count(r) scan, using "
+                "cached total=%d from prior run (cursor: %s)",
+                total, last_cursor or 'start',
+            )
+        else:
+            count_cypher = f"MATCH ()-[r]->() {type_filter} RETURN count(r)"
+            count_res = await self._ro_query(count_cypher, params=type_params)
+            total = count_res.result_set[0][0] if count_res.result_set else 0
+            logger.info(f"Batch materialization: {total} lineage edges to process (cursor: {last_cursor or 'start'})")
 
         processed = 0
         errors = 0
@@ -3977,20 +4952,22 @@ class FalkorDBProvider(GraphDataProvider):
 
         while True:
             batch_num += 1
-            # Cursor-based batch fetch — sorted composite key for stable ordering
-            if current_cursor:
+            # Change 3 — index-backed cursor on (s.urn, t.urn).
+            cursor_pair = _parse_cursor(current_cursor)
+            if cursor_pair is not None:
+                cs, ct = cursor_pair
                 batch_cypher = (
                     f"MATCH (s)-[r]->(t) {type_filter} "
-                    f"AND (s.urn + '|' + t.urn) > $cursor "
+                    f"AND (s.urn > $cs OR (s.urn = $cs AND t.urn > $ct)) "
                     f"RETURN s.urn, t.urn, type(r), r.id "
-                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
+                    f"ORDER BY s.urn, t.urn LIMIT $limit"
                 )
-                batch_params = {**type_params, "cursor": current_cursor, "limit": batch_size}
+                batch_params = {**type_params, "cs": cs, "ct": ct, "limit": batch_size}
             else:
                 batch_cypher = (
                     f"MATCH (s)-[r]->(t) {type_filter} "
                     f"RETURN s.urn, t.urn, type(r), r.id "
-                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
+                    f"ORDER BY s.urn, t.urn LIMIT $limit"
                 )
                 batch_params = {**type_params, "limit": batch_size}
 
@@ -4062,9 +5039,10 @@ class FalkorDBProvider(GraphDataProvider):
             t_materialize = (time.monotonic() - t0) * 1000
 
             processed += len(rows)
-            # Update cursor to last row's composite key
+            # Change 3 — JSON tuple cursor matching the index-backed
+            # WHERE/ORDER BY pair above.
             last_row = rows[-1]
-            current_cursor = f"{last_row[0]}|{last_row[1]}"
+            current_cursor = _encode_cursor(last_row[0], last_row[1])
 
             logger.info(
                 "Batch %d: %d/%d edges | fetch=%.1fms ancestors=%.1fms "
@@ -4110,6 +5088,9 @@ class FalkorDBProvider(GraphDataProvider):
             # they diverge the operator has a clear signal that the
             # Redis idempotency sets are in a surprising state.
             "input_edges_processed": processed,
+            # Caller persists this back as the cached denominator for
+            # the next job's pre-flight skip (Change 4).
+            "total_edges": processed,
             "errors": errors,
         }
         try:

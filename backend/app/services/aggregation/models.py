@@ -75,6 +75,14 @@ class AggregationJobORM(Base):
     # phase signals — frontend falls back to a generic label.
     current_phase = Column(Text, nullable=True)
 
+    # Last-known lineage edge count for this data source, written at
+    # successful job completion. The next job uses it as its progress
+    # denominator so the opening ``count(r)`` full-edge scan can be
+    # skipped (or run in the background). NULL on first-ever run, on
+    # legacy rows, and on jobs that ended in failure with no cached
+    # value to overwrite.
+    lineage_edge_count = Column(Integer, nullable=True)
+
     # ── Dynamic timeout (estimated from graph size at trigger time) ──
     timeout_secs = Column(Integer, nullable=True)  # None = use global default
 

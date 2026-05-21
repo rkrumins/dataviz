@@ -80,9 +80,11 @@ stores:
     enabled: false
     image: falkordb/falkordb:v4.16.0
     storage: 10Gi
+    # FALKORDB_ARGS pins THREAD_COUNT=4 in the template; the limit must be
+    # >= 4 cores or the kernel CFS throttles the pod under aggregation load.
     resources:
-      requests: { cpu: 250m, memory: 512Mi }
-      limits: { cpu: "1", memory: 2Gi }
+      requests: { cpu: "2", memory: 4Gi }
+      limits: { cpu: "4", memory: 8Gi }
   redis:
     enabled: false
     image: redis:7-alpine

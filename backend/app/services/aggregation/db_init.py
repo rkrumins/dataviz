@@ -89,6 +89,12 @@ async def init_aggregation_db() -> None:
                 # Phase 1.7 (2026-05-12) — phase visibility for UI
                 f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
                 "ADD COLUMN IF NOT EXISTS current_phase TEXT NULL",
+                # 2026-05-21 — cache last successful lineage edge count so
+                # the next job can skip the full-edge count(r) scan that
+                # added 30s+ of pre-flight overhead per job start on
+                # multi-million-edge graphs.
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS lineage_edge_count BIGINT NULL",
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:

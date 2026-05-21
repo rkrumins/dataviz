@@ -220,6 +220,30 @@ class AggregationWorker:
 
                 # Compute fingerprint before aggregation
                 job.graph_fingerprint_before = await compute_graph_fingerprint(provider)
+
+                # Change 4: hydrate the cached edge-count hint from the
+                # most recent successful job on the same data source. A
+                # brand-new pending row has ``lineage_edge_count=NULL``;
+                # carrying the hint forward lets the provider skip the
+                # opening count(r) scan on every run after the first.
+                # Resumed jobs (status was 'running' or 'failed') keep
+                # whatever hint was already on the row.
+                if job.lineage_edge_count is None:
+                    prior = await session.execute(
+                        select(AggregationJobORM.lineage_edge_count)
+                        .where(
+                            AggregationJobORM.data_source_id == job.data_source_id,
+                            AggregationJobORM.status == "completed",
+                            AggregationJobORM.lineage_edge_count.isnot(None),
+                            AggregationJobORM.id != job.id,
+                        )
+                        .order_by(AggregationJobORM.completed_at.desc())
+                        .limit(1)
+                    )
+                    prior_count = prior.scalar_one_or_none()
+                    if prior_count is not None and prior_count > 0:
+                        job.lineage_edge_count = prior_count
+
                 await session.commit()
 
                 # Run cursor-based batch materialization with retry + timeout.
@@ -248,6 +272,14 @@ class AggregationWorker:
                 job.progress = 100
                 job.completed_at = _now()
                 job.created_edges = result.get("aggregated_edges_affected", 0)
+                # Change 4: cache the actual edge count for the next job's
+                # pre-flight skip. ``total_edges`` is the provider's true
+                # scan count; we deliberately overwrite the prior hint
+                # (graphs grow/shrink between runs) and only persist on
+                # SUCCESS so a failed run can't poison the cache.
+                _total = result.get("total_edges")
+                if isinstance(_total, int) and _total >= 0:
+                    job.lineage_edge_count = _total
                 job.graph_fingerprint_after = await compute_graph_fingerprint(provider)
 
                 # Update aggregation-owned data source state
@@ -862,14 +894,53 @@ class AggregationWorker:
         def should_cancel() -> bool:
             return cancel_event.is_set()
 
-        result = await provider.materialize_aggregated_edges_batch(
-            containment_edge_types=containment_types,
-            lineage_edge_types=lineage_types,
-            batch_size=job.batch_size,
-            last_cursor=job.last_cursor,
-            progress_callback=checkpoint,
-            intra_batch_callback=intra_batch_heartbeat,
-            should_cancel=should_cancel,
-        )
+        # Change 6: open the provider's per-job scratch cache for the
+        # duration of this materialize call. Closes via the finally
+        # so an exception out of the provider doesn't leak the cache
+        # into the next job (which could carry stale label / ancestor
+        # entries if containment edges were edited in between).
+        # ``begin_job`` is best-effort — older providers without the
+        # method continue to work via the L2 Redis cache alone.
+        scratch_opened = False
+        if hasattr(provider, "begin_job"):
+            try:
+                provider.begin_job(
+                    expected_pair_capacity=max(
+                        100_000, (job.lineage_edge_count or 0) * 4,
+                    ),
+                )
+                scratch_opened = True
+            except Exception as exc:
+                logger.warning(
+                    "Aggregation job %s: provider.begin_job failed "
+                    "(continuing without per-job scratch): %s",
+                    job.id, exc,
+                )
+
+        try:
+            result = await provider.materialize_aggregated_edges_batch(
+                containment_edge_types=containment_types,
+                lineage_edge_types=lineage_types,
+                batch_size=job.batch_size,
+                last_cursor=job.last_cursor,
+                progress_callback=checkpoint,
+                intra_batch_callback=intra_batch_heartbeat,
+                should_cancel=should_cancel,
+                # Change 4: pass the previous run's edge count so the
+                # provider can skip the count(r) full-edge pre-flight scan.
+                # First-ever job has lineage_edge_count=NULL → provider
+                # falls back to a real count.
+                total_edges_hint=job.lineage_edge_count,
+            )
+        finally:
+            if scratch_opened:
+                try:
+                    provider.end_job()
+                except Exception as exc:
+                    logger.warning(
+                        "Aggregation job %s: provider.end_job failed "
+                        "(scratch may leak until next begin_job): %s",
+                        job.id, exc,
+                    )
 
         return result

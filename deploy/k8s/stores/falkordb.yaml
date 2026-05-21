@@ -45,6 +45,10 @@ spec:
         app.kubernetes.io/name: falkordb
         app.kubernetes.io/part-of: dataviz
     spec:
+      # FalkorDB is on the hot path for every aggregation job; pre-empting
+      # it leaves the worker fleet idle. system-cluster-critical keeps it
+      # alive under cluster pressure.
+      priorityClassName: system-cluster-critical
       containers:
         - name: falkordb
           image: falkordb/falkordb:v4.16.0
@@ -70,12 +74,15 @@ spec:
             - name: data
               mountPath: /var/lib/falkordb/data
           resources:
+            # THREAD_COUNT=4 cannot use 4 cores when the CPU limit is 1;
+            # the kernel CFS throttles the pod and FalkorDB appears stuck
+            # under aggregation load. Match the limit to THREAD_COUNT.
             requests:
-              cpu: 250m
-              memory: 512Mi
+              cpu: "2"
+              memory: 4Gi
             limits:
-              cpu: "1"
-              memory: 2Gi
+              cpu: "4"
+              memory: 8Gi
   volumeClaimTemplates:
     - metadata:
         name: data
