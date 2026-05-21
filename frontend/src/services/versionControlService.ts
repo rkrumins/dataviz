@@ -89,6 +89,36 @@ export class StaleEntityError extends Error {
   }
 }
 
+/** Strict graph references an ontology that does not exist (or is
+ *  soft-deleted) in the management DB. */
+export class OntologyMissingError extends Error {
+  ontologyId: string | null
+  constructor(ontologyId: string | null) {
+    super('Bound ontology is missing or deleted.')
+    this.name = 'OntologyMissingError'
+    this.ontologyId = ontologyId
+  }
+}
+
+/** Strict graph references an unpublished ontology — drafts cannot
+ *  back authored graphs. */
+export class OntologyNotPublishedError extends Error {
+  ontologyId: string | null
+  constructor(ontologyId: string | null) {
+    super('Bound ontology is not published.')
+    this.name = 'OntologyNotPublishedError'
+    this.ontologyId = ontologyId
+  }
+}
+
+/** Strict graph create attempted without an ontology_id. */
+export class OntologyRequiredError extends Error {
+  constructor() {
+    super('Strict schema mode requires an ontology.')
+    this.name = 'OntologyRequiredError'
+  }
+}
+
 /** Best-effort parse of a structured detail out of an Error thrown by
  * authFetch (it may be a JSON string of the detail object, the
  * `.message` of a structured detail, or a plain string). */
@@ -114,21 +144,47 @@ function rethrowTyped(err: unknown): never {
     if (d.code === 'validation' && Array.isArray(d.violations)) {
       throw new GraphValidationError(d.violations as Violation[])
     }
+    if (d.code === 'ontology_required') throw new OntologyRequiredError()
+    if (d.code === 'ontology_missing') {
+      throw new OntologyMissingError(d.ontology_id ?? null)
+    }
+    if (d.code === 'ontology_not_published') {
+      throw new OntologyNotPublishedError(d.ontology_id ?? null)
+    }
   }
   throw err instanceof Error ? err : new Error(String(err))
 }
 
 const base = (ws: string) => `/api/v1/${encodeURIComponent(ws)}/graphs`
 
+/** Stable id of the seeded "Basic Lineage" system ontology — the
+ *  Simple Lineage on-ramp picks this without showing a picker. Kept
+ *  in lock-step with `seeded_ontologies.BASIC_LINEAGE_ONTOLOGY_ID`
+ *  on the backend. */
+export const BASIC_LINEAGE_ONTOLOGY_ID = 'bp_basic_lineage'
+
+export interface CreateGraphRequest {
+  name: string
+  description?: string
+  schema_mode?: 'schemaless' | 'strict'
+  ontology_id?: string | null
+  origin?: 'authored' | 'connected'
+  source_data_source_id?: string | null
+}
+
 export async function createGraph(
   wsId: string,
-  body: { name: string; description?: string; schema_mode?: string },
+  body: CreateGraphRequest,
 ): Promise<GraphSummary> {
-  return authFetch<GraphSummary>(`${base(wsId)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
+  try {
+    return await authFetch<GraphSummary>(`${base(wsId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch (err) {
+    rethrowTyped(err)
+  }
 }
 
 export async function listGraphs(wsId: string): Promise<GraphSummary[]> {

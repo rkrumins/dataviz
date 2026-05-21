@@ -22,7 +22,7 @@ fully unit-testable.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Iterable, Iterator
 
 
 @dataclass(frozen=True)
@@ -43,10 +43,20 @@ class EdgeSpec:
 class OntologySpec:
     """Thin projection of a resolved ontology — just the membership
     sets the validator needs. The engine builds this from the existing
-    ontology service so strict-mode rules stay single-sourced."""
+    ontology service so strict-mode rules stay single-sourced.
+
+    ``containment_edge_types`` and ``lineage_edge_types`` classify the
+    relationship types so the validator can enforce containment-DAG
+    (no cycles among containment edges) while leaving lineage cycles
+    permitted (real data flows can loop back). They default empty for
+    back-compat with strict graphs whose ontology pre-dated the
+    classification — in that case no DAG check runs and lineage is
+    treated as undifferentiated."""
 
     entity_types: frozenset[str]
     relationship_types: frozenset[str]
+    containment_edge_types: frozenset[str] = field(default_factory=frozenset)
+    lineage_edge_types: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -168,8 +178,86 @@ def validate_graph_state(
                     e.key,
                 )
 
+    # ── containment DAG enforcement ─────────────────────────────────
+    # Strict-mode only and only when the ontology classifies any edge
+    # as containment. Pure-structural cycle detection over the
+    # containment-edge subgraph; lineage edges are not checked here
+    # (real data flows can legitimately loop back to upstream).
+    if (
+        schema_mode == "strict"
+        and ontology is not None
+        and ontology.containment_edge_types
+    ):
+        _check_containment_dag(
+            edges=edges, containment_types=ontology.containment_edge_types, acc=acc,
+        )
+
     if acc.violations:
         raise GraphValidationError(acc.violations)
+
+
+def _check_containment_dag(
+    *,
+    edges: Iterable[EdgeSpec],
+    containment_types: frozenset[str],
+    acc: "_Acc",
+) -> None:
+    """Append a ``containment_cycle`` violation per cycle found in the
+    containment-edge subgraph. Uses iterative 3-color DFS (white →
+    gray → black) so deep hierarchies don't blow the recursion limit.
+    A single violation per discovered cycle (named by the node where
+    the back-edge closes) is enough for the UI to surface a clear
+    fix — listing every edge on every cycle would drown the user.
+    """
+    adjacency: dict[str, list[str]] = {}
+    for e in edges:
+        if e.edge_type and e.edge_type in containment_types:
+            adjacency.setdefault(e.source_key, []).append(e.target_key)
+            adjacency.setdefault(e.target_key, [])  # ensure sink keys are visited
+
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: dict[str, int] = {k: WHITE for k in adjacency}
+    parent: dict[str, str | None] = {k: None for k in adjacency}
+    reported: set[str] = set()
+
+    for root in list(adjacency.keys()):
+        if color[root] != WHITE:
+            continue
+        # Iterative DFS with an explicit stack of (node, neighbor-iter).
+        stack: list[tuple[str, "Iterator[str]"]] = [(root, iter(adjacency[root]))]
+        color[root] = GRAY
+        while stack:
+            node, neighbors = stack[-1]
+            nxt = next(neighbors, None)
+            if nxt is None:
+                color[node] = BLACK
+                stack.pop()
+                continue
+            c = color.get(nxt, WHITE)
+            if c == WHITE:
+                color[nxt] = GRAY
+                parent[nxt] = node
+                stack.append((nxt, iter(adjacency.get(nxt, []))))
+            elif c == GRAY:
+                # Back-edge: cycle closes at `nxt`. Walk the parent
+                # chain from `node` back to `nxt` to render the path
+                # in the violation message.
+                if nxt in reported:
+                    continue
+                reported.add(nxt)
+                path = [node]
+                cur = parent.get(node)
+                while cur is not None and cur != nxt:
+                    path.append(cur)
+                    cur = parent.get(cur)
+                path.append(nxt)
+                path.reverse()
+                acc.add(
+                    "containment_cycle",
+                    f"containment cycle: {' -> '.join(path)} -> {nxt}",
+                    "node",
+                    nxt,
+                )
 
 
 __all__ = [

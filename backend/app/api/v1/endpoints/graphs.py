@@ -19,12 +19,14 @@ Error contract (matches the frontend rebase/validation UX):
      observed_content_hash}, ...]}}``
 * validation   -> 422 ``{detail:{code:"validation", violations:[...]}}``
 * working set  -> 422 ``{detail:{code:"working_set_invalid", message}}``
+* ontology     -> 422 ``{detail:{code:"ontology_missing"|"ontology_not_published",
+                                 ontology_id}}``
 * not found    -> 404
 
-Strict-mode ontology enforcement is Phase-1-deferred at the *endpoint*
-(the engine/validator fully support it): a strict graph commit returns
-501 until the management ontology resolution is wired. Schemaless
-(the product default) is fully functional.
+Strict-mode commits resolve the bound ontology from the management DB
+(``OntologyORM``) into an :class:`OntologySpec` via
+:func:`ontology_resolver.to_spec`. Schemaless graphs ignore the
+management DB entirely (the path is opt-in per graph).
 """
 from __future__ import annotations
 
@@ -35,8 +37,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
+
 from backend.app.auth.dependencies import get_optional_user, requires
+from backend.app.db.engine import get_db_session
 from backend.app.db.graph_store_engine import get_graph_store_db_session
+from backend.app.db.models import OntologyORM
 from backend.app.db.repositories import graph_repo, graph_working_set_repo as ws_repo
 from backend.app.db.repositories.graph_commit_repo import HeadMovedError
 from backend.app.services.graph_authoring_engine import GraphAuthoringEngine
@@ -44,6 +50,12 @@ from backend.app.services.graph_outbox_relay import sse_subscribe
 from backend.app.services.graph_versioning import (
     EmptyCommitError,
     GraphValidationError,
+    OntologySpec,
+)
+from backend.app.services.graph_versioning.ontology_resolver import (
+    OntologyNotFoundError,
+    OntologyNotPublishedError,
+    to_spec,
 )
 from backend.app.services.graph_versioning.snapshot_reader import (
     StaleBaseError,
@@ -111,18 +123,24 @@ async def create_graph(
     ws_id: str = Path(...),
     body: CreateGraphRequest = Body(...),
     session: AsyncSession = Depends(get_graph_store_db_session),
+    mgmt_session: AsyncSession = Depends(get_db_session),
     user=Depends(get_optional_user),
     _=Depends(requires("workspace:graph:create", workspace="ws_id")),
 ):
+    # Strict mode requires an ontology that is (a) loadable from the
+    # management DB and (b) published. The engine also enforces (a),
+    # but checking at create time gives the user an immediate, precise
+    # error instead of a 422 on first commit.
     if body.schema_mode == "strict":
-        raise HTTPException(
-            status_code=501,
-            detail={
-                "code": "strict_not_wired",
-                "message": "strict ontology enforcement is a Phase-1 "
-                "follow-up; create the graph as schemaless for now",
-            },
-        )
+        if not body.ontology_id:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "ontology_required",
+                    "message": "strict schema_mode requires an ontology_id",
+                },
+            )
+        await _load_ontology_spec(mgmt_session, body.ontology_id)
     g = await GraphAuthoringEngine.create_graph(
         session,
         workspace_id=ws_id,
@@ -135,6 +153,32 @@ async def create_graph(
         created_by=_uid(user),
     )
     return _graph_response(g, head=None)
+
+
+async def _load_ontology_spec(
+    mgmt_session: AsyncSession, ontology_id: str
+) -> OntologySpec:
+    """Cross-DB lookup + projection. Raises HTTPException 422 with a
+    structured detail so the frontend can branch on the code."""
+    row = (
+        await mgmt_session.execute(
+            select(OntologyORM).where(OntologyORM.id == ontology_id)
+        )
+    ).scalar_one_or_none()
+    if row is None or row.deleted_at:
+        raise HTTPException(
+            422,
+            detail={"code": "ontology_missing", "ontology_id": ontology_id},
+        )
+    if not row.is_published:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "ontology_not_published",
+                "ontology_id": ontology_id,
+            },
+        )
+    return to_spec(row)
 
 
 @router.get("/{ws_id}/graphs", response_model=list[GraphResponse])
@@ -282,9 +326,29 @@ async def commit(
     branch: str = Path(...),
     body: CommitRequest = Body(...),
     session: AsyncSession = Depends(get_graph_store_db_session),
+    mgmt_session: AsyncSession = Depends(get_db_session),
     user=Depends(get_optional_user),
     _=Depends(requires("workspace:graph:commit", workspace="ws_id")),
 ):
+    # Resolve the bound ontology for strict graphs before entering the
+    # engine — the engine requires the spec to be passed in (it has no
+    # management-DB session and stays cross-DB-decoupled).
+    try:
+        graph = await graph_repo.get_graph(session, graph_id)
+    except graph_repo.GraphNotFoundError:
+        raise HTTPException(404, detail={"code": "not_found"})
+    ontology_spec: OntologySpec | None = None
+    if graph.schema_mode == "strict":
+        if not graph.ontology_id:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "ontology_required",
+                    "message": "strict graph has no ontology_id bound",
+                },
+            )
+        ontology_spec = await _load_ontology_spec(mgmt_session, graph.ontology_id)
+
     try:
         outcome = await GraphAuthoringEngine.commit(
             session,
@@ -294,7 +358,7 @@ async def commit(
             message=body.message,
             author=_uid(user),
             expected_head_commit_id=body.expected_head_commit_id,
-            ontology=None,
+            ontology=ontology_spec,
             actor=_uid(user),
         )
     except graph_repo.GraphNotFoundError:

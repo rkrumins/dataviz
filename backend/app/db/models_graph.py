@@ -299,6 +299,10 @@ class GraphChangeEventORM(GraphStoreBase):
     prev_content_hash = Column(Text, nullable=True)
     new_content_hash = Column(Text, nullable=True)
     actor = Column(Text, nullable=True)
+    # Stamped on rows produced by a PR merge commit so blame can render
+    # "merged via PR #N" instead of attributing each changed object
+    # directly to the merging actor. Null for ordinary commits.
+    pr_id = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
 
     __table_args__ = (
@@ -306,6 +310,7 @@ class GraphChangeEventORM(GraphStoreBase):
         Index("idx_gce_commit", "graph_id", "commit_id"),
         Index("idx_gce_branch", "graph_id", "branch", "created_at"),
         Index("idx_gce_actor", "actor", "action", "created_at"),
+        Index("idx_gce_pr", "pr_id", "created_at"),
         CheckConstraint(
             "object_kind IN ('node', 'edge', 'graph', 'branch')",
             name="ck_gce_object_kind",

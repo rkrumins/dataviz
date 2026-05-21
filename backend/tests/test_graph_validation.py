@@ -110,3 +110,111 @@ def test_duplicate_edge_key_rejected():
             ],
         )
     assert any(v.code == "edge_key_duplicate" for v in ei.value.violations)
+
+
+# ── containment DAG enforcement ────────────────────────────────────
+
+def _lineage_onto() -> OntologySpec:
+    """Mirrors the Basic Lineage seed: CONTAINS is the only containment
+    edge, lineage edges may cycle."""
+    return OntologySpec(
+        entity_types=frozenset({"Dataset", "Pipeline"}),
+        relationship_types=frozenset({"CONTAINS", "FLOWS_TO"}),
+        containment_edge_types=frozenset({"CONTAINS"}),
+        lineage_edge_types=frozenset({"FLOWS_TO"}),
+    )
+
+
+def test_containment_tree_passes():
+    onto = _lineage_onto()
+    validate_graph_state(
+        schema_mode="strict",
+        ontology=onto,
+        nodes=[NodeSpec(k, "Dataset") for k in ("root", "a", "b", "c")],
+        edges=[
+            EdgeSpec("e1", "root", "a", "CONTAINS"),
+            EdgeSpec("e2", "root", "b", "CONTAINS"),
+            EdgeSpec("e3", "a", "c", "CONTAINS"),
+        ],
+    )
+
+
+def test_containment_cycle_rejected():
+    onto = _lineage_onto()
+    with pytest.raises(GraphValidationError) as ei:
+        validate_graph_state(
+            schema_mode="strict",
+            ontology=onto,
+            nodes=[NodeSpec(k, "Dataset") for k in ("a", "b", "c")],
+            edges=[
+                EdgeSpec("e1", "a", "b", "CONTAINS"),
+                EdgeSpec("e2", "b", "c", "CONTAINS"),
+                EdgeSpec("e3", "c", "a", "CONTAINS"),  # closes the cycle
+            ],
+        )
+    cycles = [v for v in ei.value.violations if v.code == "containment_cycle"]
+    assert len(cycles) == 1
+    assert "->" in cycles[0].message
+
+
+def test_lineage_cycles_permitted():
+    # Data flowing back to an upstream system is legal — only containment
+    # is acyclic.
+    onto = _lineage_onto()
+    validate_graph_state(
+        schema_mode="strict",
+        ontology=onto,
+        nodes=[NodeSpec(k, "Dataset") for k in ("a", "b", "c")],
+        edges=[
+            EdgeSpec("e1", "a", "b", "FLOWS_TO"),
+            EdgeSpec("e2", "b", "c", "FLOWS_TO"),
+            EdgeSpec("e3", "c", "a", "FLOWS_TO"),
+        ],
+    )
+
+
+def test_self_loop_containment_rejected():
+    onto = _lineage_onto()
+    with pytest.raises(GraphValidationError) as ei:
+        validate_graph_state(
+            schema_mode="strict",
+            ontology=onto,
+            nodes=[NodeSpec("a", "Dataset")],
+            edges=[EdgeSpec("e1", "a", "a", "CONTAINS")],
+        )
+    assert any(v.code == "containment_cycle" for v in ei.value.violations)
+
+
+def test_no_dag_check_when_classification_empty():
+    # An ontology that pre-dates the containment_edge_types extension
+    # falls back to membership-only — no cycle enforcement.
+    onto = OntologySpec(
+        entity_types=frozenset({"T"}),
+        relationship_types=frozenset({"r"}),
+    )
+    validate_graph_state(
+        schema_mode="strict",
+        ontology=onto,
+        nodes=[NodeSpec(k, "T") for k in ("a", "b")],
+        edges=[
+            EdgeSpec("e1", "a", "b", "r"),
+            EdgeSpec("e2", "b", "a", "r"),
+        ],
+    )
+
+
+def test_containment_cycle_in_deep_chain_detected():
+    onto = _lineage_onto()
+    # Deep linear containment chain that loops back at the end.
+    chain = [f"n{i}" for i in range(50)]
+    nodes = [NodeSpec(k, "Dataset") for k in chain]
+    edges = [
+        EdgeSpec(f"e{i}", chain[i], chain[i + 1], "CONTAINS")
+        for i in range(len(chain) - 1)
+    ]
+    edges.append(EdgeSpec("e_loop", chain[-1], chain[0], "CONTAINS"))
+    with pytest.raises(GraphValidationError) as ei:
+        validate_graph_state(
+            schema_mode="strict", ontology=onto, nodes=nodes, edges=edges,
+        )
+    assert any(v.code == "containment_cycle" for v in ei.value.violations)
