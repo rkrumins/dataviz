@@ -81,6 +81,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.proxy.postgres.enabled }}
+      initContainers:
+        {{- include "dataviz.dbProxySidecar" . | nindent 8 }}
+      {{- end }}
       containers:
         - name: db-init
           image: {{ .Values.dbInit.image | quote }}

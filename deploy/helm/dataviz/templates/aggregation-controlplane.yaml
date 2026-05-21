@@ -23,9 +23,17 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if not .Values.services.controlplane.skipSchemaCheck }}
+      {{- if or (not .Values.services.controlplane.skipSchemaCheck) .Values.proxy.postgres.enabled .Values.proxy.redis.enabled }}
       initContainers:
+        {{- if .Values.proxy.postgres.enabled }}
+        {{- include "dataviz.dbProxySidecar" . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.proxy.redis.enabled }}
+        {{- include "dataviz.redisProxySidecar" . | nindent 8 }}
+        {{- end }}
+        {{- if not .Values.services.controlplane.skipSchemaCheck }}
         {{- include "dataviz.schemaCheckInitContainer" (dict "ctx" $) | nindent 8 }}
+        {{- end }}
       {{- end }}
       containers:
         - name: aggregation-controlplane

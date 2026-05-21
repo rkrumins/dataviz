@@ -21,8 +21,14 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or .Values.ordering.enabled (not .Values.services.stats.skipSchemaCheck) }}
+      {{- if or .Values.ordering.enabled (not .Values.services.stats.skipSchemaCheck) .Values.proxy.postgres.enabled .Values.proxy.redis.enabled }}
       initContainers:
+        {{- if .Values.proxy.postgres.enabled }}
+        {{- include "dataviz.dbProxySidecar" . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.proxy.redis.enabled }}
+        {{- include "dataviz.redisProxySidecar" . | nindent 8 }}
+        {{- end }}
         {{- if .Values.ordering.enabled }}
         {{- include "dataviz.waitForControlplane" . | nindent 8 }}
         {{- end }}

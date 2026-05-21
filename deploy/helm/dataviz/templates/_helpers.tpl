@@ -49,3 +49,35 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 dataviz-secrets
 {{- end -}}
 {{- end -}}
+
+{{/* TCP forwarder sidecars for managed Postgres / Redis via a proxy VM.
+
+     Rendered as Kubernetes native sidecars (initContainer with
+     restartPolicy: Always — GA in 1.29) so socat is Ready before any
+     subsequent initContainer (wait-for-schema, wait-for-controlplane)
+     or the app container attempts to connect to 127.0.0.1.
+
+     `upstream` is the proxy VM's NIC0 address in host:port form. */}}
+{{- define "dataviz.dbProxySidecar" -}}
+- name: db-proxy
+  image: {{ .Values.proxy.postgres.image | quote }}
+  imagePullPolicy: IfNotPresent
+  restartPolicy: Always
+  args:
+    - "TCP-LISTEN:5432,fork,reuseaddr,bind=127.0.0.1"
+    - "TCP:{{ required "proxy.postgres.upstream must be set (e.g. \"10.0.0.5:5432\") when proxy.postgres.enabled" .Values.proxy.postgres.upstream }}"
+  resources:
+    {{- toYaml .Values.proxy.postgres.resources | nindent 4 }}
+{{- end -}}
+
+{{- define "dataviz.redisProxySidecar" -}}
+- name: redis-proxy
+  image: {{ .Values.proxy.redis.image | quote }}
+  imagePullPolicy: IfNotPresent
+  restartPolicy: Always
+  args:
+    - "TCP-LISTEN:6379,fork,reuseaddr,bind=127.0.0.1"
+    - "TCP:{{ required "proxy.redis.upstream must be set (e.g. \"10.0.0.5:6379\") when proxy.redis.enabled" .Values.proxy.redis.upstream }}"
+  resources:
+    {{- toYaml .Values.proxy.redis.resources | nindent 4 }}
+{{- end -}}
