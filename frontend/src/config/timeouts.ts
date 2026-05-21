@@ -12,6 +12,7 @@
  *   VITE_TIMEOUT_GET_CHILDREN_MS
  *   VITE_TIMEOUT_AGGREGATED_EDGES_MS
  *   VITE_TIMEOUT_ADMIN_LIST_MS
+ *   VITE_TIMEOUT_LINEAGE_FOCUS_MS
  *
  * Companion backend constants live in
  * backend/app/config/resilience.py.
@@ -34,4 +35,8 @@ export const TIMEOUTS = {
   // Promise.allSettled. Generous enough for a healthy backend, tight
   // enough that one slow provider does not pin the page on a spinner.
   ADMIN_LIST_MS:       readMs('VITE_TIMEOUT_ADMIN_LIST_MS',       8_000),
+  // Lineage drawer canvas reveal (onFocusNode). The drawer should never
+  // hang for more than a few seconds waiting for the canvas to pan to
+  // a node — if it does, drop the wait and let the user keep working.
+  LINEAGE_FOCUS_MS:    readMs('VITE_TIMEOUT_LINEAGE_FOCUS_MS',    5_000),
 } as const

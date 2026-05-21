@@ -19,6 +19,8 @@ from backend.app.services.graph_cache import (
     CacheScope,
     ENDPOINT_AGGREGATED,
     ENDPOINT_CHILDREN,
+    ENDPOINT_LAYER_ASSIGNMENT,
+    ENDPOINT_TOP_LEVEL,
     ENDPOINT_TRACE,
     ENDPOINT_TRACE_EXPAND,
     GraphCache,
@@ -264,6 +266,40 @@ def test_params_order_does_not_affect_key() -> None:
     assert k1 == k2
 
 
+# ─── memory safety (P1.5) ──────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_oversized_payload_is_not_cached(monkeypatch, caplog) -> None:
+    """A response larger than ``_MAX_PAYLOAD_BYTES`` must skip the cache
+    write — both primary and LKG — and log a WARNING. The compute already
+    succeeded, so the caller still gets the answer; we just decline to
+    cache it so it can't crowd out hundreds of normal entries."""
+    import logging
+    monkeypatch.setattr(graph_cache, "_MAX_PAYLOAD_BYTES", 50)
+
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    # A non-empty payload whose JSON serialization exceeds 50 bytes.
+    large = _Result(value=1, children=list(range(100)))
+    compute = AsyncMock(return_value=large)
+
+    caplog.set_level(logging.WARNING, logger="backend.app.services.graph_cache")
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "a"},
+        compute=compute,
+        model_cls=_Result,
+    )
+
+    # Caller still gets the answer.
+    assert result.value == 1
+    # No SET fired — neither primary nor LKG.
+    assert redis.set.await_count == 0
+    # WARNING line was emitted with the diagnostic shape.
+    assert any("payload_too_large" in rec.message for rec in caplog.records)
+
+
 # ─── stale-on-error fallback (P1.1) ────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -336,6 +372,67 @@ async def test_stale_fallback_propagates_when_no_lkg_available() -> None:
             compute=compute,
             model_cls=_Result,
         )
+
+
+@pytest.mark.asyncio
+async def test_stale_fallback_singleflight_followers_also_invoke_on_stale() -> None:
+    """Regression for P2.1.1: a leader hitting the stale-LKG path must
+    propagate the ``served_stale`` flag to followers awaiting on the
+    singleflight Future, so each follower can invoke its own ``on_stale``
+    callback (which sets the per-request ``X-Cache-Status: stale-fallback``
+    header). Without this, only one of N concurrent responses carries the
+    stale header and the frontend banner misfires for the rest."""
+    from backend.common.adapters import ProviderUnavailable
+
+    redis = _make_redis()
+    # First GET = generation; second GET = primary miss; third GET = LKG hit.
+    redis.get = AsyncMock(side_effect=[
+        "0",
+        None,
+        _Result(value=555).model_dump_json(by_alias=True),
+    ])
+    cache = GraphCache(redis)
+    leader_callbacks: list[bool] = []
+    follower_callbacks: list[bool] = []
+
+    gate = asyncio.Event()
+
+    async def slow_compute() -> _Result:
+        await gate.wait()
+        raise ProviderUnavailable("falkordb", "breaker open")
+
+    async def leader_call() -> _Result:
+        return await cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"),
+            endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "shared"},
+            compute=slow_compute,
+            model_cls=_Result,
+            on_stale=lambda: leader_callbacks.append(True),
+        )
+
+    async def follower_call() -> _Result:
+        return await cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"),
+            endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "shared"},
+            # Reads are idempotent — second caller hits singleflight.
+            compute=AsyncMock(side_effect=AssertionError("follower compute must not run")),
+            model_cls=_Result,
+            on_stale=lambda: follower_callbacks.append(True),
+        )
+
+    task_a = asyncio.create_task(leader_call())
+    # Give the leader time to register on _inflight before the follower joins.
+    await asyncio.sleep(0.01)
+    task_b = asyncio.create_task(follower_call())
+    await asyncio.sleep(0.01)
+    gate.set()
+    res_a, res_b = await asyncio.gather(task_a, task_b)
+
+    assert res_a.value == 555 and res_b.value == 555
+    assert leader_callbacks == [True], "leader missed its own on_stale"
+    assert follower_callbacks == [True], "follower missed on_stale via singleflight"
 
 
 @pytest.mark.asyncio
@@ -419,6 +516,29 @@ async def test_trace_endpoint_cache_miss_then_hit() -> None:
     assert a.label == "ok" and b.label == "ok"
     # compute should have run exactly once across both calls
     assert compute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_top_level_and_layer_assignment_keys_isolated_from_other_endpoints() -> None:
+    """Each endpoint must map to a unique cache key prefix so a /top-level
+    response can never be returned as a /children-with-edges hit (and so on)."""
+    scope = CacheScope("ws1", "ds1")
+    params = {"limit": 100}
+    keys = {
+        ep: _build_key(scope, 0, ep, params)
+        for ep in (
+            ENDPOINT_CHILDREN,
+            ENDPOINT_AGGREGATED,
+            ENDPOINT_TRACE,
+            ENDPOINT_TRACE_EXPAND,
+            ENDPOINT_TOP_LEVEL,
+            ENDPOINT_LAYER_ASSIGNMENT,
+        )
+    }
+    # All six keys are pairwise distinct.
+    assert len(set(keys.values())) == len(keys)
+    assert "top-level" in keys[ENDPOINT_TOP_LEVEL]
+    assert "layer-assignment" in keys[ENDPOINT_LAYER_ASSIGNMENT]
 
 
 @pytest.mark.asyncio

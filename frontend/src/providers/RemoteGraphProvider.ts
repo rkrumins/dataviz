@@ -2,6 +2,8 @@ import { unwrapEnvelope } from '@/services/cacheEnvelope'
 import { getCircuitBreaker, type CircuitBreaker } from '@/services/circuitBreaker'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { TIMEOUTS } from '@/config/timeouts'
+import { useProviderHealthStore } from '@/store/providerHealth'
+import { useCacheStalenessStore } from '@/store/cacheStaleness'
 
 import type {
     GraphDataProvider,
@@ -217,6 +219,33 @@ export class RemoteGraphProvider implements GraphDataProvider {
                     )
                 }
                 throw error
+            }
+
+            // Header-borne resilience signals from the backend GraphCache.
+            // - ``X-Provider-Health``: 'healthy' | 'unreachable' — pushed
+            //   into providerHealth store so the UI banner reacts faster
+            //   than the 30s /health/providers poll cycle.
+            // - ``X-Cache-Status: stale-fallback`` — backend served from
+            //   the last-known-good snapshot; signal so the user sees a
+            //   "data may be stale" hint near affected widgets.
+            const providerHealth = response.headers.get('X-Provider-Health')
+            if (providerHealth) {
+                useProviderHealthStore.getState().markFromHeader(
+                    this.workspaceId, this.dataSourceId, providerHealth,
+                )
+            }
+            const cacheStatus = response.headers.get('X-Cache-Status')
+            if (cacheStatus === 'stale-fallback') {
+                useCacheStalenessStore.getState().markStale(
+                    this.workspaceId, this.dataSourceId, url,
+                )
+            } else if (providerHealth === 'healthy') {
+                // Fresh response from a healthy provider — clear any
+                // stale flag for this scope so the banner disappears on
+                // recovery without waiting for the TTL.
+                useCacheStalenessStore.getState().clear(
+                    this.workspaceId, this.dataSourceId,
+                )
             }
 
             const data = await response.json() as T

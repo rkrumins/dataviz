@@ -31,6 +31,8 @@
  */
 import { getCircuitBreaker } from './circuitBreaker'
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { useProviderHealthStore } from '@/store/providerHealth'
+import { useCacheStalenessStore } from '@/store/cacheStaleness'
 
 export type CacheStatus = 'fresh' | 'stale' | 'computing' | 'partial' | 'error'
 export type CacheSource = 'postgres' | 'ontology' | 'none' | 'error'
@@ -213,6 +215,22 @@ async function _runEnvelopeFetch(
         // — don't penalize the breaker for those. The handler returns null
         // and the caller's `?? 0` fallback engages.
         return null
+    }
+
+    // Header-borne resilience signals from the backend GraphCache —
+    // mirrors the same logic in RemoteGraphProvider._doFetch so both
+    // request paths feed the same stores.
+    const wsId = options?.circuitScope?.workspaceId
+    const dsId = options?.circuitScope?.dataSourceId
+    const providerHealth = res.headers.get('X-Provider-Health')
+    if (providerHealth) {
+        useProviderHealthStore.getState().markFromHeader(wsId, dsId, providerHealth)
+    }
+    const cacheStatus = res.headers.get('X-Cache-Status')
+    if (cacheStatus === 'stale-fallback') {
+        useCacheStalenessStore.getState().markStale(wsId, dsId, url)
+    } else if (providerHealth === 'healthy') {
+        useCacheStalenessStore.getState().clear(wsId, dsId)
     }
 
     let json: unknown

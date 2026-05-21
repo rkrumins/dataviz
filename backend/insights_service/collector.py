@@ -87,6 +87,17 @@ async def collect(session: AsyncSession, envelope: StatsJobEnvelope) -> None:
         config.last_status = "success"
         config.last_error = None
 
+    # Fire-and-forget cache pre-warm. Uses its own readonly session so it
+    # can run independently of this job's commit. No-op when the feature
+    # flag is off, when this DS is over ``CACHE_PREWARM_MAX_NODE_COUNT``,
+    # or when another replica holds the per-(ws, ds) lock.
+    from . import cache_warmer
+    cache_warmer.schedule_warm(
+        ws_id=envelope.workspace_id,
+        ds_id=envelope.data_source_id,
+        node_count=stats.get("nodeCount", 0),
+    )
+
 
 async def record_failure(
     session: AsyncSession,
