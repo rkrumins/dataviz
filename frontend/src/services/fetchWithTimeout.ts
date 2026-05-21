@@ -114,6 +114,17 @@ async function tryRefresh(): Promise<boolean> {
             && typeof detail.login_url === 'string'
             && detail.login_url.startsWith('/')
           ) {
+            // Wipe the cached user DTO before the bounce. The IdP
+            // re-auth may resolve to a different account, and we
+            // don't want a stale cache seeding the next /auth/me.
+            // Dynamic import avoids a top-level circular dep through
+            // the auth store.
+            try {
+              const mod = await import('@/store/userCache')
+              mod.clearUserCache()
+            } catch {
+              // ignore — bounce still happens
+            }
             if (typeof window !== 'undefined') {
               window.location.href = detail.login_url
             }

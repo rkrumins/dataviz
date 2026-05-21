@@ -21,6 +21,11 @@ import {
     type PermissionClaims,
     type SignUpRequest,
 } from '@/services/authService'
+import {
+    clearUserCache,
+    readUserCache,
+    writeUserCache,
+} from '@/store/userCache'
 
 export type { PermissionClaims }
 
@@ -123,17 +128,38 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         // Idempotent: skip if already resolved or in flight.
         const current = get().status
         if (current === 'loading' || current === 'authenticated') return
-        set({ status: 'loading' })
+
+        // Optimistic seed from the sessionStorage cache so the shell
+        // can render synchronously on reload. The cookie is still the
+        // source of truth — the /auth/me call below confirms or
+        // wipes this seed. Permissions are deliberately NOT seeded:
+        // a role demotion between sessions must never surface admin
+        // UI to a now-non-admin user.
+        const cached = readUserCache()
+        if (cached !== null) {
+            set({ ..._authenticated(cached), error: null })
+        } else {
+            set({ status: 'loading' })
+        }
+
         try {
             const { user } = await authService.me()
+            // Re-apply with the server's freshly-returned DTO so
+            // role/status updates from the backend overwrite the
+            // optimistic copy.
             set({ ..._authenticated(user), error: null })
+            writeUserCache(user)
             // Hydrate permissions in the background — failure here
             // doesn't unauthenticate the user, it just means the FE
             // gates fall closed until next refresh.
             await hydratePermissions(set)
         } catch {
-            // Any failure (no cookie, expired, server down) → unauthenticated.
-            // The user lands on /login; route guards do the rest.
+            // Any failure (no cookie, expired, server down) →
+            // unauthenticated. Wipe the cache so the next boot in
+            // this tab doesn't repeat the optimistic-then-reject
+            // flicker. The user lands on /login; route guards do the
+            // rest.
+            clearUserCache()
             set({ ..._unauthenticated, error: null })
         }
     },
@@ -143,10 +169,12 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         try {
             const { user } = await authService.login({ email, password })
             set({ ..._authenticated(user), error: null, isLoading: false })
+            writeUserCache(user)
             await hydratePermissions(set)
             return true
         } catch (err: unknown) {
             const message = err instanceof Error ? err.message : 'Login failed'
+            clearUserCache()
             set({ ..._unauthenticated, error: message, isLoading: false })
             return false
         }
@@ -174,10 +202,12 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         } catch {
             // ignore
         }
+        clearUserCache()
         set({ ..._unauthenticated, error: null, isLoading: false })
     },
 
     handleSessionLost: () => {
+        clearUserCache()
         set({ ..._unauthenticated, error: null })
     },
 
