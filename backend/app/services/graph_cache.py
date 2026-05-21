@@ -68,17 +68,29 @@ _DEFAULT_AGGREGATED_TTL = int(os.getenv("GRAPH_CACHE_AGGREGATED_TTL_S", "60"))
 # The same gen counter (bumped on writes) invalidates trace entries.
 _DEFAULT_TRACE_TTL = int(os.getenv("GRAPH_CACHE_TRACE_TTL_S", "60"))
 _DEFAULT_TRACE_EXPAND_TTL = int(os.getenv("GRAPH_CACHE_TRACE_EXPAND_TTL_S", "60"))
+# Top-level nodes change only when a write inside the workspace shuffles
+# containment — gen counter bumps invalidate. Small payloads, hot path.
+_DEFAULT_TOP_LEVEL_TTL = int(os.getenv("GRAPH_CACHE_TOP_LEVEL_TTL_S", "60"))
+# Layer assignment is deterministic for a given (ws, ds, request body)
+# and touches the same node/edge set as a trace. 60s matches /trace.
+_DEFAULT_LAYER_ASSIGNMENT_TTL = int(os.getenv("GRAPH_CACHE_LAYER_ASSIGNMENT_TTL_S", "60"))
 # Short TTL for empty/404 results — absorbs herds asking for the same
 # missing URN without committing to caching nonsense for long.
 _NEGATIVE_TTL = int(os.getenv("GRAPH_CACHE_NEGATIVE_TTL_S", "5"))
 
 # Last-known-good snapshot TTL. The LKG snapshot is the gen-less mirror
 # of every successful compute, used as the stale-fallback source when
-# the provider is unavailable or times out. A long TTL means a multi-day
-# provider outage still leaves the UI responsive; the matching default
-# is ``STATS_CACHE_ABSOLUTE_EXPIRY_SECS`` (7 days). Set to 0 to disable
-# the LKG mirror entirely (compute failures will then propagate).
-_LKG_TTL = int(os.getenv("GRAPH_CACHE_LKG_TTL_S", "604800"))
+# the provider is unavailable or times out. 1 day is enough to keep the
+# UI responsive across a same-day outage without pinning Redis memory
+# for outliers; longer outages are operational problems. Set to 0 to
+# disable the LKG mirror entirely (compute failures will then propagate).
+_LKG_TTL = int(os.getenv("GRAPH_CACHE_LKG_TTL_S", "86400"))
+
+# Per-payload size cap. A single response larger than this is logged
+# and dropped rather than cached — a 5 MB aggregated-edge dump shouldn't
+# crowd out a thousand normal 5 KB entries. Applies to both primary and
+# LKG writes. Set to 0 to disable the cap (do not recommend in prod).
+_MAX_PAYLOAD_BYTES = int(os.getenv("GRAPH_CACHE_MAX_PAYLOAD_BYTES", "1048576"))
 
 # Per-endpoint kill switches. Default ON: these two endpoints carry the
 # bulk of FalkorDB Cypher-thread contention; with the cache off every
@@ -92,13 +104,33 @@ ENDPOINT_CHILDREN = "children-with-edges"
 ENDPOINT_AGGREGATED = "aggregated"
 ENDPOINT_TRACE = "trace"
 ENDPOINT_TRACE_EXPAND = "trace-expand"
+ENDPOINT_TOP_LEVEL = "top-level"
+ENDPOINT_LAYER_ASSIGNMENT = "layer-assignment"
 
 _ENABLED_ENDPOINTS = {
     ENDPOINT_CHILDREN: _flag("GRAPH_CACHE_ENABLED_CHILDREN", default=True),
     ENDPOINT_AGGREGATED: _flag("GRAPH_CACHE_ENABLED_AGGREGATED", default=True),
     ENDPOINT_TRACE: _flag("GRAPH_CACHE_ENABLED_TRACE", default=True),
     ENDPOINT_TRACE_EXPAND: _flag("GRAPH_CACHE_ENABLED_TRACE_EXPAND", default=True),
+    ENDPOINT_TOP_LEVEL: _flag("GRAPH_CACHE_ENABLED_TOP_LEVEL", default=True),
+    ENDPOINT_LAYER_ASSIGNMENT: _flag("GRAPH_CACHE_ENABLED_LAYER_ASSIGNMENT", default=True),
 }
+
+
+@dataclass(frozen=True)
+class _SingleflightOutcome:
+    """Internal sentinel passed through the in-process singleflight Future.
+
+    Wraps the computed value alongside a ``served_stale`` flag so
+    *followers* awaiting on ``asyncio.shield(existing)`` learn the
+    leader took the stale-fallback path and can invoke their OWN
+    ``on_stale`` callback. Without this wrapper only the leader's HTTP
+    response carries ``X-Cache-Status: stale-fallback``; followers would
+    silently return stale data and the frontend banner would misfire
+    on every concurrent request after the first.
+    """
+    value: Any
+    served_stale: bool
 
 
 @dataclass(frozen=True)
@@ -188,24 +220,32 @@ class GraphCache:
         # ── 2. In-process singleflight ────────────────────────────────
         # Coalesce concurrent callers in this pod. Outside-pod fan-out is
         # bounded by the provider semaphore, so this is sufficient at our
-        # current scale.
+        # current scale. The future carries a ``_SingleflightOutcome`` so
+        # followers learn whether the leader served the stale-fallback
+        # path and can fire their own ``on_stale`` callback.
         existing = self._inflight.get(cache_key)
         if existing is not None:
             try:
-                return await asyncio.shield(existing)
+                outcome: _SingleflightOutcome = await asyncio.shield(existing)
+                if outcome.served_stale and on_stale is not None:
+                    try:
+                        on_stale()
+                    except Exception as cb_exc:  # pragma: no cover
+                        logger.warning("graph_cache: on_stale callback raised: %s", cb_exc)
+                return outcome.value
             except Exception:
                 # Leader failed — fall through to recompute below.
                 pass
 
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future[T] = loop.create_future()
+        fut: asyncio.Future[_SingleflightOutcome] = loop.create_future()
         self._inflight[cache_key] = fut
         try:
             result = await compute()
             await self._set(cache_key, result, ttl_seconds, endpoint)
             await self._set_lkg(scope, endpoint, params, result)
             if not fut.done():
-                fut.set_result(result)
+                fut.set_result(_SingleflightOutcome(value=result, served_stale=False))
             return result
         except (ProviderUnavailable, asyncio.TimeoutError) as exc:
             # Provider can't answer right now. Fall through to the
@@ -223,7 +263,9 @@ class GraphCache:
                     except Exception as cb_exc:  # pragma: no cover
                         logger.warning("graph_cache: on_stale callback raised: %s", cb_exc)
                 if not fut.done():
-                    fut.set_result(stale)
+                    # served_stale=True so followers awaiting via
+                    # ``shield(existing)`` invoke their own on_stale.
+                    fut.set_result(_SingleflightOutcome(value=stale, served_stale=True))
                 return stale
             # No fallback available — propagate.
             if not fut.done():
@@ -283,6 +325,12 @@ class GraphCache:
             ttl = _NEGATIVE_TTL
         try:
             payload = result.model_dump_json(by_alias=True)
+            if _MAX_PAYLOAD_BYTES > 0 and len(payload) > _MAX_PAYLOAD_BYTES:
+                logger.warning(
+                    "graph_cache: payload_too_large endpoint=%s key=%s size=%d cap=%d (skipping cache write)",
+                    endpoint, cache_key, len(payload), _MAX_PAYLOAD_BYTES,
+                )
+                return
             await self._redis.set(cache_key, payload, ex=ttl)
         except (RedisError, Exception) as exc:
             logger.warning("graph_cache: SET failed (%s)", exc)
@@ -307,6 +355,10 @@ class GraphCache:
             return
         try:
             payload = result.model_dump_json(by_alias=True)
+            if _MAX_PAYLOAD_BYTES > 0 and len(payload) > _MAX_PAYLOAD_BYTES:
+                # Already logged at WARNING in _set for the primary key;
+                # the LKG mirror is dropped silently to avoid double-noise.
+                return
             await self._redis.set(_build_lkg_key(scope, endpoint, params), payload, ex=_LKG_TTL)
         except (RedisError, Exception) as exc:
             logger.warning("graph_cache: LKG SET failed (%s)", exc)
@@ -376,6 +428,10 @@ def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:
         return _DEFAULT_TRACE_TTL
     if endpoint == ENDPOINT_TRACE_EXPAND:
         return _DEFAULT_TRACE_EXPAND_TTL
+    if endpoint == ENDPOINT_TOP_LEVEL:
+        return _DEFAULT_TOP_LEVEL_TTL
+    if endpoint == ENDPOINT_LAYER_ASSIGNMENT:
+        return _DEFAULT_LAYER_ASSIGNMENT_TTL
     return _DEFAULT_CHILDREN_TTL
 
 

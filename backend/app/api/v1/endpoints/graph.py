@@ -28,6 +28,7 @@ from backend.app.services.graph_cache import (
     CacheScope,
     ENDPOINT_AGGREGATED,
     ENDPOINT_CHILDREN,
+    ENDPOINT_TOP_LEVEL,
     ENDPOINT_TRACE,
     ENDPOINT_TRACE_EXPAND,
     get_graph_cache,
@@ -423,6 +424,7 @@ async def trace_expand_batch(
     response_model_by_alias=True,
 )
 async def get_top_level_nodes(
+    response: Response,
     entityTypes: Optional[List[str]] = Query(
         None,
         description="Restrict to these entity type IDs. None = all types.",
@@ -462,7 +464,9 @@ async def get_top_level_nodes(
     order, and the generic ``{urn}`` path would otherwise swallow
     ``/nodes/top-level`` and return 404 for a non-existent URN.
     """
-    try:
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
+
+    async def compute() -> TopLevelNodesResult:
         return await engine.get_top_level_or_orphan_nodes(
             entity_types=entityTypes,
             search_query=searchQuery,
@@ -470,7 +474,38 @@ async def get_top_level_nodes(
             cursor=cursor,
             include_child_count=includeChildCount,
         )
+
+    scope = _cache_scope(engine)
+    if scope is None:
+        try:
+            return await compute()
+        except ProviderConfigurationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Ontology configuration error: {exc}. Configure containment "
+                    "edge types on the active ontology (or set CONTAINMENT_EDGE_TYPES "
+                    "as a deployment-level override)."
+                ),
+            )
+
+    try:
+        return await get_graph_cache().get_or_compute(
+            scope=scope,
+            endpoint=ENDPOINT_TOP_LEVEL,
+            params={
+                "entityTypes": sorted(entityTypes) if entityTypes else None,
+                "searchQuery": searchQuery,
+                "limit": limit,
+                "cursor": cursor,
+                "includeChildCount": includeChildCount,
+            },
+            compute=compute,
+            model_cls=TopLevelNodesResult,
+            on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        )
     except ProviderConfigurationError as exc:
+        # Logical error — not a cache-fallback case; surface as 400.
         raise HTTPException(
             status_code=400,
             detail=(
