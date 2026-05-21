@@ -1,10 +1,11 @@
 {
-  "permissions": {
-    "allow": [
-      "Bash(ls:*)"
-    ]
-  },
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(mkdir -p /root/.claude/plans)"
+    ]
   }
 }
