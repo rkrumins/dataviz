@@ -425,6 +425,29 @@ class FalkorDBProvider(GraphDataProvider):
         # give up); prevents re-probing on every ensure_projections.
         self._index_probe_done: bool = False
 
+        # Gap B (validation follow-up) — pair_data memory ceiling.
+        # Soft cap: log one WARN per job when crossed. Hard cap:
+        # abort the run cleanly via ``AggregationBatchAbort`` so the
+        # worker pod surfaces a job-failed signal instead of being
+        # OOMKilled by the kernel. Defaults sized for the post-Gap-B
+        # ~150-byte-per-pair regime against a 2Gi worker pod: 5M soft
+        # ≈ 750 MB, 20M hard ≈ 3 GB (with overhead, hits the limit).
+        try:
+            self._pair_data_warn_at: int = max(
+                10_000,
+                int(os.getenv("AGGREGATION_PAIR_DATA_WARN_AT", "5000000")),
+            )
+        except ValueError:
+            self._pair_data_warn_at = 5_000_000
+        try:
+            self._pair_data_abort_at: int = max(
+                self._pair_data_warn_at,
+                int(os.getenv("AGGREGATION_PAIR_DATA_ABORT_AT", "20000000")),
+            )
+        except ValueError:
+            self._pair_data_abort_at = 20_000_000
+        self._pair_data_warned_this_job: bool = False
+
     def begin_job(self, *, expected_pair_capacity: int = 1_000_000) -> JobScratch:
         """Open a per-job scratch cache. Change 6.
 
@@ -3919,61 +3942,17 @@ class FalkorDBProvider(GraphDataProvider):
         *,
         should_cancel: Optional[Callable[[], bool]] = None,
     ) -> None:
-        """Repopulate the Redis SADD-based contributor tracking from the
-        in-memory pair set. Required so subsequent incremental writes
-        (``on_lineage_edge_written``) see correct existing-pair state and
-        don't double-count freshly-rebuilt edges.
+        """Phase E — no-op.
 
-        Issued in batched pipelines (500 keys per pipeline) so a single
-        round-trip never carries an oversized payload on million-pair
-        rebuilds.
+        Idempotency SADDs are pipelined inline during Phase B scan
+        accumulation (see the loop around the cross-product expansion
+        in ``_materialize_aggregated_edges_bulk_rebuild``). This used to
+        be a second full pass over ``pair_data`` to do the SADDs; the
+        list of contributors that drove it was the dominant per-pair
+        memory consumer. Kept as a stub so callers don't need to know
+        about the move.
         """
-        members_key_prefix = f"{self._graph_name}:agg_members"
-        pipe_size = 500
-        sent = 0
-
-        pipe = self._redis.pipeline(transaction=False)
-        pipe_count = 0
-        for (s, t), meta in pair_data.items():
-            if pipe_count == 0 and should_cancel is not None and should_cancel():
-                from backend.app.services.aggregation.cancel import JobCancelled
-                from datetime import datetime, timezone
-                raise JobCancelled(
-                    job_id="<bulk-idem-cancel>",
-                    observed_at=datetime.now(timezone.utc).isoformat(),
-                )
-            contributors = meta.get("contributors") or []
-            if not contributors:
-                continue
-            member_key = f"{members_key_prefix}:{s}:{t}"
-            pipe.execute_command("SADD", member_key, *contributors)
-            pipe_count += 1
-            if pipe_count >= pipe_size:
-                try:
-                    await pipe.execute()
-                    sent += pipe_count
-                except Exception as exc:
-                    logger.warning(
-                        "Idempotency rebuild pipeline failed (continuing — "
-                        "incremental writes for these pairs will be treated "
-                        "as net-new): %s", exc,
-                    )
-                pipe = self._redis.pipeline(transaction=False)
-                pipe_count = 0
-        if pipe_count > 0:
-            try:
-                await pipe.execute()
-                sent += pipe_count
-            except Exception as exc:
-                logger.warning(
-                    "Idempotency rebuild pipeline (tail) failed: %s", exc,
-                )
-
-        logger.info(
-            "Idempotency rebuild on %s complete: %d pair member sets "
-            "written to Redis.",
-            self._graph_name, sent,
-        )
+        return
 
     async def _materialize_aggregated_edges_bulk_rebuild(
         self,
@@ -4010,6 +3989,9 @@ class FalkorDBProvider(GraphDataProvider):
         """
         containment = containment_edge_types or list(self._get_containment_edge_types())
         exclude_types = list(containment) + ["AGGREGATED"]
+        # Gap B (validation follow-up): per-job warning-flag reset so
+        # the soft-cap WARN fires at most once per job.
+        self._pair_data_warned_this_job = False
 
         # Filter AGGREGATED out of any explicit lineage whitelist —
         # feeding existing AGGREGATED edges back through aggregation
@@ -4200,6 +4182,23 @@ class FalkorDBProvider(GraphDataProvider):
             # (src_anc, tgt_anc) gives free deduplication across leaf
             # edges that share the same ancestor pair — the bulk-CREATE
             # phase then has a guaranteed-unique input.
+            #
+            # Gap B (validation follow-up): contributors are pushed to
+            # Redis SADD inline rather than accumulated in a Python list
+            # per pair. The previous design held a ``contributors: list``
+            # of edge_ids in each meta dict; on graphs with 7-level deep
+            # hierarchies the cross-product produces ~49 pairs per leaf
+            # edge with avg 5 contributors per pair, which made
+            # ``contributors`` the dominant memory consumer (~300 bytes
+            # per pair). Pushing inline means Phase E (idempotency
+            # rebuild) becomes a no-op and per-pair memory drops ~3×,
+            # raising the safe leaf-edge-count ceiling roughly that much
+            # before the worker pod's 2Gi limit comes into play. Phase A
+            # already wipes the SADD namespace before Phase B starts, so
+            # partial state from a crashed prior run is cleaned up.
+            members_key_prefix = f"{self._graph_name}:agg_members"
+            sadd_pipe = self._redis.pipeline(transaction=False)
+            sadd_count = 0
             for s_urn, t_urn, edge_type, edge_id in rows:
                 if not edge_id:
                     edge_id = f"{s_urn}|{edge_type}|{t_urn}"
@@ -4215,14 +4214,60 @@ class FalkorDBProvider(GraphDataProvider):
                             meta = {
                                 "weight": 0,
                                 "edge_types": set(),
-                                "contributors": [],
                                 "source_level": None,
                                 "target_level": None,
                             }
                             pair_data[pair] = meta
                         meta["weight"] += 1
                         meta["edge_types"].add(edge_type)
-                        meta["contributors"].append(edge_id)
+                        sadd_pipe.execute_command(
+                            "SADD",
+                            f"{members_key_prefix}:{sa}:{ta}",
+                            edge_id,
+                        )
+                        sadd_count += 1
+            if sadd_count > 0:
+                try:
+                    await sadd_pipe.execute()
+                except Exception as exc:
+                    # Idempotency state is best-effort during bulk
+                    # rebuild — Phase A already wiped it and the next
+                    # bulk rebuild will wipe again. Log and continue.
+                    logger.warning(
+                        "bulk_rebuild: inline SADD pipeline (%d ops) "
+                        "failed (%s); future incremental writes for "
+                        "these pairs may be treated as net-new.",
+                        sadd_count, exc,
+                    )
+
+            # Gap B safety net: if pair_data is climbing past the soft
+            # cap, log loudly so the operator can size up the worker
+            # pod before the next run. Hard-fail above the absolute cap
+            # so we surface a clean job-failed signal instead of an
+            # OOMKilled pod. Both thresholds are env-tunable.
+            soft_cap = self._pair_data_warn_at
+            hard_cap = self._pair_data_abort_at
+            if hard_cap and len(pair_data) > hard_cap:
+                raise AggregationBatchAbort(
+                    f"bulk_rebuild on {self._graph_name}: pair_data "
+                    f"exceeded hard cap ({len(pair_data)} > {hard_cap}); "
+                    "bump worker pod memory or shrink the graph "
+                    "(see AGGREGATION_PAIR_DATA_ABORT_AT)."
+                )
+            if (
+                soft_cap
+                and len(pair_data) > soft_cap
+                and not self._pair_data_warned_this_job
+            ):
+                logger.warning(
+                    "bulk_rebuild on %s: pair_data at %d pairs (soft "
+                    "cap %d) — approaching worker memory ceiling. "
+                    "Consider bumping AGGREGATION_PAIR_DATA_ABORT_AT or "
+                    "the worker pod memory limit if rebuild continues "
+                    "to grow.",
+                    self._graph_name, len(pair_data), soft_cap,
+                )
+                self._pair_data_warned_this_job = True
 
             processed += len(rows)
             last_row = rows[-1]

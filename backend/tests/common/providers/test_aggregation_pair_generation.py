@@ -205,3 +205,79 @@ async def test_purge_all_drops_idempotency_after_graph_purge():
     await m.purge_all()
 
     assert not any(idem.members.values()), "idempotency state must be cleared post-purge"
+
+
+# ---------------------------------------------------------------------------
+# Deep cross-domain coverage (7-level hierarchy)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_seven_level_cross_domain_full_cross_product():
+    """A schemaField 7 levels deep in domainA with a lineage edge to a
+    schemaField 7 levels deep in domainB must produce the full 7 x 7
+    ancestor cross-product as AGGREGATED edges (no self-loops because
+    URNs differ across domains)."""
+    chain_a = [
+        "fieldA", "datasetA", "schemaA", "subContainerA",
+        "containerA", "platformA", "domainA",
+    ]
+    chain_b = [
+        "fieldB", "datasetB", "schemaB", "subContainerB",
+        "containerB", "platformB", "domainB",
+    ]
+    m, _idem, mat = _materializer({"fieldA": chain_a, "fieldB": chain_b})
+    await m.materialize_lineage_edge("fieldA", "fieldB", "edge_xd", "DERIVES_FROM")
+
+    pairs = {p for p, _, _ in mat.upserts}
+    # 7 x 7 = 49, no shared URNs so zero self-loops are filtered.
+    assert len(pairs) == 49, f"expected 49 cross-domain pairs, got {len(pairs)}"
+    # Corner pairs — leaf x leaf, leaf x root, root x leaf, root x root.
+    assert ("fieldA", "fieldB") in pairs
+    assert ("fieldA", "domainB") in pairs
+    assert ("domainA", "fieldB") in pairs
+    assert ("domainA", "domainB") in pairs
+    # A mid-level cross — datasetA must connect to every level on the B side.
+    for tgt in chain_b:
+        assert ("datasetA", tgt) in pairs
+
+
+@pytest.mark.asyncio
+async def test_descendants_are_not_materialized():
+    """Sibling descendants of the source's ancestors must not appear as
+    endpoints in any AGGREGATED edge. Only the source's own ancestor
+    chain participates in the cross-product."""
+    # fieldA1 has an ancestor chain up to datasetA → domainA.
+    # fieldA2 is a SIBLING of fieldA1 inside datasetA. fieldA2 has no
+    # lineage of its own; the AncestorResolver only sees fieldA1 because
+    # it is the only endpoint of the lineage edge we materialize.
+    chain_a1 = ["fieldA1", "datasetA", "domainA"]
+    chain_b1 = ["fieldB1", "datasetB", "domainB"]
+    m, _idem, mat = _materializer({
+        "fieldA1": chain_a1,
+        "fieldB1": chain_b1,
+        # fieldA2 / fieldB2 are siblings — present in the ontology but
+        # NEVER passed to materialize_lineage_edge. If the materializer
+        # ever expanded to descendants we'd see them in mat.upserts.
+        "fieldA2": ["fieldA2", "datasetA", "domainA"],
+        "fieldB2": ["fieldB2", "datasetB", "domainB"],
+    })
+    await m.materialize_lineage_edge("fieldA1", "fieldB1", "edge_only", "T")
+
+    pairs = {p for p, _, _ in mat.upserts}
+    # Sibling descendants must not appear as either endpoint of any
+    # produced pair — that would be a fabricated lineage claim.
+    sibling_urns = {"fieldA2", "fieldB2"}
+    offending = [
+        p for p in pairs
+        if p[0] in sibling_urns or p[1] in sibling_urns
+    ]
+    assert not offending, (
+        "AGGREGATED edges referenced a sibling descendant — "
+        f"descendants must not be materialized. Offending pairs: {offending}"
+    )
+    # Sanity-check: the legitimate ancestor cross-product still landed
+    # (3 x 3 - 1 self-loop on shared domain absence = 9 pairs since
+    # domains differ in this fixture).
+    assert ("fieldA1", "fieldB1") in pairs
+    assert ("datasetA", "datasetB") in pairs
+    assert ("domainA", "domainB") in pairs
