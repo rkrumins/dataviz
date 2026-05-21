@@ -46,6 +46,13 @@ MOCK_IDENTITY_COOKIE_NAME = "nx_mock_identity"
 MOCK_IDENTITY_COOKIE_PATH = "/api/v1/auth/"
 _MOCK_IDENTITY_COOKIE_MAX_AGE = 600
 
+# Self-service link cookie. Set by ``POST /me/identities/link/{slug}/start``,
+# read by the SSO callback to bind the verified identity to the
+# already-authenticated user instead of provisioning a new account.
+LINK_INTENT_COOKIE_NAME = "nx_link_intent"
+LINK_INTENT_COOKIE_PATH = "/api/v1/auth/"
+_LINK_INTENT_COOKIE_MAX_AGE = 600
+
 # Refresh cookie is scoped to the /auth subtree so it's sent to /refresh
 # AND /logout (logout needs to read it to revoke the rotation family)
 # but is excluded from every data endpoint where it's never useful.
@@ -187,3 +194,29 @@ def clear_mock_identity_cookie(response: Response) -> None:
 
 def read_mock_identity_cookie(request: Request) -> str | None:
     return request.cookies.get(MOCK_IDENTITY_COOKIE_NAME)
+
+
+# ── Link intent cookie ──────────────────────────────────────────────
+
+
+def set_link_intent_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=LINK_INTENT_COOKIE_NAME,
+        value=token,
+        max_age=_LINK_INTENT_COOKIE_MAX_AGE,
+        httponly=True,
+        path=LINK_INTENT_COOKIE_PATH,
+        **_common_kwargs(),
+    )
+
+
+def clear_link_intent_cookie(response: Response) -> None:
+    response.delete_cookie(
+        LINK_INTENT_COOKIE_NAME,
+        path=LINK_INTENT_COOKIE_PATH,
+        **_common_kwargs(),
+    )
+
+
+def read_link_intent_cookie(request: Request) -> str | None:
+    return request.cookies.get(LINK_INTENT_COOKIE_NAME)

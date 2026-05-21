@@ -24,6 +24,13 @@ class User(BaseModel):
 
     This is the cross-service contract: when auth becomes its own
     microservice, this is what /auth/me returns over HTTP.
+
+    Phase 3 adds ``attributes``: the operator-mapped IdP extras
+    (department, employee_id, manager, cost_center, …) persisted on
+    the user row by ``set_user_idp_metadata``. The full list of
+    linked SSO identities lives on a separate ``/me/identities``
+    endpoint, not on this DTO, so the wire shape of /me / /login /
+    /refresh stays tight.
     """
     model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
@@ -36,6 +43,8 @@ class User(BaseModel):
     auth_provider: str = Field("local", alias="authProvider")
     created_at: str = Field("", alias="createdAt")
     updated_at: str = Field("", alias="updatedAt")
+    # IdP-mapped attributes. Empty dict for local-only users.
+    attributes: dict = Field(default_factory=dict)
 
     @property
     def display_name(self) -> str:

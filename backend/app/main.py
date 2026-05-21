@@ -287,62 +287,166 @@ async def lifespan(_app: FastAPI):
     #    client implementing the same protocol.
     register_provider("local", LocalIdentityProvider())
 
-    # Phase 1: OIDC (Authorization Code + PKCE). Always registered so
-    # the /auth/oidc/* routes can answer 404 when unconfigured; the
-    # provider self-reports ``enabled`` from env (OIDC_ENABLED + creds).
-    from backend.auth_service.providers import OidcProvider, load_oidc_settings
-    _oidc_settings = load_oidc_settings()
-    register_provider("oidc", OidcProvider(_oidc_settings))
-    logger.info(
-        "OIDC provider registered (enabled=%s, issuer=%s)",
-        _oidc_settings.enabled,
-        _oidc_settings.issuer or "<unset>",
-    )
-
-    # Phase 2.A: SAML 2.0. Same pattern — always register so the
-    # /auth/saml/* routes can 404 cleanly when unconfigured. The
-    # provider self-reports ``enabled`` from env. ``SAML_AVAILABLE``
-    # gates the registration: non-viz Dockerfiles may not have the
-    # python3-saml / libxmlsec1 system deps, in which case the import
-    # failed and the import side returned ``None``s instead.
+    # Phase 3: DB-backed provider registry. The auth service no longer
+    # holds singleton OIDC/SAML/Custom instances — it materialises one
+    # per ``idp_providers`` row on demand. Env-only Phase 2 deployments
+    # get a "default-{kind}" row seeded automatically on first boot so
+    # the old config keeps working until the operator edits it via the
+    # admin UI.
     from backend.auth_service.providers import (
+        PROVIDER_BUILDERS,
+        ProviderConfigSnapshot,
+        ProviderRegistry,
+        configure_registry,
         SAML_AVAILABLE,
-        SamlProvider,
-        load_saml_settings,
     )
-    if SAML_AVAILABLE and SamlProvider is not None and load_saml_settings is not None:
-        _saml_settings = load_saml_settings()
-        register_provider("saml2", SamlProvider(_saml_settings))
-        logger.info(
-            "SAML provider registered (enabled=%s, idp_entity_id=%s)",
-            _saml_settings.enabled,
-            _saml_settings.idp_entity_id or "<unset>",
-        )
-    else:
-        logger.info(
-            "SAML provider NOT registered (python3-saml unavailable; "
-            "the /auth/saml/* routes will 404).",
+    from backend.app.db.repositories import idp_provider_repo
+
+    class _DbProviderConfigLoader:
+        """Implements ``ProviderConfigLoader`` against the DB.
+
+        Lives here in main.py so the auth_service stays free of
+        ``backend.app.*`` imports (enforced by the isolation test).
+        """
+
+        async def get_by_id(self, provider_id: str):
+            async with get_async_session() as session:
+                row = await idp_provider_repo.get_provider(session, provider_id)
+                return self._to_snapshot(row) if row is not None else None
+
+        async def get_by_slug(self, slug: str):
+            async with get_async_session() as session:
+                row = await idp_provider_repo.get_provider_by_slug(session, slug)
+                return self._to_snapshot(row) if row is not None else None
+
+        async def list_enabled(self):
+            async with get_async_session() as session:
+                rows = await idp_provider_repo.list_providers(
+                    session, only_enabled=True,
+                )
+                return [self._to_snapshot(r) for r in rows]
+
+        @staticmethod
+        def _to_snapshot(row) -> ProviderConfigSnapshot:
+            return ProviderConfigSnapshot(
+                id=row.id,
+                slug=row.slug,
+                display_name=row.display_name,
+                kind=row.kind,
+                enabled=bool(row.enabled),
+                priority=int(row.priority or 100),
+                settings=idp_provider_repo.decrypt_settings(row.settings),
+                claim_mapping=idp_provider_repo.parse_claim_mapping(row),
+                linking_policy=row.linking_policy,
+                button_label=row.button_label,
+                button_icon=row.button_icon,
+            )
+
+    _registry = ProviderRegistry(
+        loader=_DbProviderConfigLoader(),
+        builders=PROVIDER_BUILDERS,
+    )
+    configure_registry(_registry)
+    logger.info(
+        "Provider registry configured (builders=%s)",
+        sorted(PROVIDER_BUILDERS.keys()),
+    )
+
+    # Boot-seed: write a default OIDC / SAML / custom row from env
+    # vars (if set) so existing deployments keep working without an
+    # admin action on first start. Idempotent — re-runs detect the
+    # existing row and skip.
+    async def _seed_provider_from_env() -> None:
+        from backend.auth_service.providers import (
+            load_env_oidc_settings,
+            load_env_saml_settings,
         )
 
-    # Phase 2.B: Custom IdP (dev/demo mock). Registered ONLY when the
-    # feature flag is on AND env is non-prod. The startup guard in
-    # core/config.py refuses to start if the flag is true in prod.
-    from backend.auth_service.core.config import (
-        AUTH_CUSTOM_PROVIDER_ENABLED, ENV,
-    )
-    if AUTH_CUSTOM_PROVIDER_ENABLED:
-        from backend.auth_service.providers import CustomIdentityProvider
-        register_provider("custom", CustomIdentityProvider())
-        logger.warning(
-            "Custom IdP REGISTERED (ENV=%s). The /auth/custom/* routes "
-            "trust a self-signed identity cookie — never enable this in "
-            "production.",
-            ENV,
-        )
-    else:
-        logger.info(
-            "Custom IdP NOT registered (AUTH_CUSTOM_PROVIDER_ENABLED=false).",
-        )
+        async with get_async_session() as session:
+            # OIDC
+            env_oidc = load_env_oidc_settings()
+            if env_oidc is not None:
+                existing = await idp_provider_repo.get_provider_by_slug(
+                    session, "default-oidc",
+                )
+                if existing is None:
+                    await idp_provider_repo.create_provider(
+                        session,
+                        slug="default-oidc",
+                        display_name="Default OIDC (from env)",
+                        kind="oidc",
+                        settings={
+                            "issuer": env_oidc.issuer,
+                            "client_id": env_oidc.client_id,
+                            "client_secret": env_oidc.client_secret,
+                            "redirect_uri": env_oidc.redirect_uri,
+                            "scopes": env_oidc.scopes,
+                            "default_next": env_oidc.default_next,
+                        },
+                        claim_mapping={},
+                        linking_policy="strict",
+                        button_label="Sign in with OIDC",
+                    )
+                    await session.commit()
+                    logger.info("Seeded default-oidc provider from env.")
+            # SAML
+            if SAML_AVAILABLE and load_env_saml_settings is not None:
+                env_saml = load_env_saml_settings()
+                if env_saml is not None:
+                    existing = await idp_provider_repo.get_provider_by_slug(
+                        session, "default-saml2",
+                    )
+                    if existing is None:
+                        await idp_provider_repo.create_provider(
+                            session,
+                            slug="default-saml2",
+                            display_name="Default SAML (from env)",
+                            kind="saml2",
+                            settings={
+                                "sp_entity_id": env_saml.sp_entity_id,
+                                "sp_acs_url": env_saml.sp_acs_url,
+                                "sp_slo_url": env_saml.sp_slo_url,
+                                "idp_entity_id": env_saml.idp_entity_id,
+                                "idp_sso_url": env_saml.idp_sso_url,
+                                "idp_slo_url": env_saml.idp_slo_url,
+                                "idp_x509_cert": env_saml.idp_x509_cert,
+                                "sp_x509_cert": env_saml.sp_x509_cert,
+                                "sp_private_key": env_saml.sp_private_key,
+                                "name_id_format": env_saml.name_id_format,
+                                "default_next": env_saml.default_next,
+                            },
+                            claim_mapping={},
+                            linking_policy="strict",
+                            button_label="Sign in with SAML",
+                        )
+                        await session.commit()
+                        logger.info("Seeded default-saml2 provider from env.")
+            # Custom (dev only)
+            from backend.auth_service.core.config import (
+                AUTH_CUSTOM_PROVIDER_ENABLED, ENV,
+            )
+            if AUTH_CUSTOM_PROVIDER_ENABLED:
+                existing = await idp_provider_repo.get_provider_by_slug(
+                    session, "default-custom",
+                )
+                if existing is None:
+                    await idp_provider_repo.create_provider(
+                        session,
+                        slug="default-custom",
+                        display_name=f"Dev Login (mock) [{ENV}]",
+                        kind="custom",
+                        settings={},
+                        claim_mapping={},
+                        linking_policy="strict",
+                        button_label="Dev Login",
+                    )
+                    await session.commit()
+                    logger.info("Seeded default-custom provider (dev).")
+
+    try:
+        await _seed_provider_from_env()
+    except Exception as exc:  # noqa: BLE001 — seeding must not block boot
+        logger.warning("Provider seeding failed (continuing): %s", exc)
 
     async def _emit_user_event(session, event_type: str, payload: dict) -> None:
         await user_repo.create_outbox_event(session, event_type=event_type, payload=payload)
@@ -368,12 +472,16 @@ async def lifespan(_app: FastAPI):
             )
         return claims.to_jwt_dict()
 
-    # Phase 2.D: inject the SSO group->role reconciler. The auth
-    # service must NOT import backend.app directly (isolation test
-    # enforces this) — we pass it as a callable here.
-    async def _reconcile_sso_bindings(session, *, user_id: str, idp_groups: list[str]) -> dict:
-        return await permission_service.reconcile_sso_role_bindings(
+    # Phase 3: inject the group->target reconciler (now handles both
+    # role_binding and group_membership target types). New signature
+    # accepts provider_id so per-IdP mapping scoping works.
+    async def _reconcile_sso_targets(
+        session, *, user_id: str, idp_groups: list[str],
+        provider_id=None,
+    ) -> dict:
+        return await permission_service.reconcile_sso_targets(
             session, user_id=user_id, idp_groups=idp_groups,
+            provider_id=provider_id,
         )
 
     # Phase 2.E: inject the session-killer (RevocationService). Called
@@ -382,13 +490,15 @@ async def lifespan(_app: FastAPI):
     async def _kill_user_sessions(user_id: str) -> None:
         await get_revocation_service().revoke_all_user_sessions(user_id)
 
+    from backend.app.db.repositories import user_identity_repo as _user_identity_repo
     _app.state.identity_service = LocalIdentityService(
         session_factory=get_async_session,
         user_repo=user_repo,
+        user_identity_repo=_user_identity_repo,
         refresh_store_factory=make_refresh_store,
         outbox_emit=_emit_user_event,
         claims_resolver=_resolve_claims,
-        sso_role_reconciler=_reconcile_sso_bindings,
+        sso_role_reconciler=_reconcile_sso_targets,
         session_killer=_kill_user_sessions,
     )
     logger.info("Auth service initialised (provider=local, rbac_claims=on)")

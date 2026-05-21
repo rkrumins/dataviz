@@ -34,7 +34,6 @@ async def _seed_user(session, *, user_id="usr_bob", email="bob@example.com"):
         first_name="Bob",
         last_name="Bobson",
         status="active",
-        auth_provider="local",
     ))
     await session.commit()
     return user_id

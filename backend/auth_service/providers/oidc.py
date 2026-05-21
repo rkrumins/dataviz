@@ -1,11 +1,11 @@
 """
 OIDC identity provider — Authorization Code flow + PKCE.
 
-Implements the ``IdentityProvider`` seam for any spec-compliant OpenID
-Connect IdP (Entra ID / Auth0 / Ping / Keycloak …). The provider owns
-the *protocol*; the routes in ``api/router.py`` own the browser
-redirects and cookie handling, and ``service.py`` owns find-or-provision
-+ linking. That split keeps the existing login/refresh flow untouched.
+Phase 3: every instance is per-provider-row (multi-IdP). The
+``OidcProvider`` constructor accepts a registry snapshot rather than
+env-loaded settings, and ``fetch_identity()`` delegates all claim
+extraction to :mod:`claim_mapper` so operators can plumb non-standard
+IdP claim layouts without code changes.
 
 Security properties enforced here:
 
@@ -30,7 +30,7 @@ import logging
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -49,51 +49,11 @@ except ImportError:  # pragma: no cover - joserfc ships with Authlib 1.7+
 # which the retry loop resolves by force-refetching the key set.
 _VERIFY_ERRORS = (_AuthlibJoseError, _JoseRfcError, ValueError, KeyError)
 
-from ..core.config import OIDC_GROUPS_CLAIM
 from .base import ProviderCredentials, ProviderIdentity
+from .claim_mapper import apply_claim_mapping, ClaimMappingError
+from .registry import ProviderConfigSnapshot
 
 logger = logging.getLogger(__name__)
-
-
-def _extract_groups(claims: dict) -> tuple[str, ...]:
-    """Read ``OIDC_GROUPS_CLAIM`` (default ``groups``) out of the claims.
-
-    IdPs serialise group lists in a handful of shapes; we tolerate the
-    common ones rather than locking in one and surprising operators:
-
-      * JSON array of strings  -> used as-is
-      * single string          -> wrapped in a 1-tuple
-      * comma-separated string -> split (Entra emits this in some token
-        configurations; Keycloak also does in a single-string mode)
-      * missing / null         -> empty
-    """
-    raw = claims.get(OIDC_GROUPS_CLAIM)
-    if raw is None:
-        return ()
-    if isinstance(raw, str):
-        if "," in raw:
-            return tuple(g.strip() for g in raw.split(",") if g.strip())
-        return (raw.strip(),) if raw.strip() else ()
-    if isinstance(raw, (list, tuple)):
-        out: list[str] = []
-        for g in raw:
-            if isinstance(g, str) and g.strip():
-                out.append(g.strip())
-        return tuple(out)
-    return ()
-
-
-def _extract_auth_time(claims: dict) -> int | None:
-    """OIDC ``auth_time`` claim (epoch seconds). Many IdPs include it
-    only when ``max_age`` is requested or when the response_type
-    requires it; absence is tolerated."""
-    raw = claims.get("auth_time")
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
 
 # Bounded clock skew for ID-token exp/iat/nbf validation (seconds).
 _CLOCK_SKEW_LEEWAY = 60
@@ -110,30 +70,90 @@ class OidcError(Exception):
 
 @dataclass(frozen=True)
 class OidcSettings:
-    enabled: bool
-    issuer: str
-    client_id: str
-    client_secret: str
-    redirect_uri: str
-    scopes: str
+    """Per-provider OIDC config.
+
+    Built once per ``idp_providers`` row by the registry builder. The
+    fields mirror the previous env-only struct so the verified-token
+    code path is unchanged; ``provider_id``, ``provider_slug``,
+    ``claim_mapping_override`` and ``linking_policy`` are new in
+    Phase 3 and carry the registry context.
+
+    The new fields have defaults so the unit tests in
+    ``test_oidc_provider.py`` (which only exercise the
+    code-exchange + verification path) can keep instantiating
+    settings with positional kwargs.
+    """
+    issuer: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    redirect_uri: str = ""
+    scopes: str = "openid email profile"
+    provider_id: str = "test-oidc"
+    provider_slug: str = "test-oidc"
+    claim_mapping_override: dict = field(default_factory=dict)
+    linking_policy: str = "strict"
     # Post-login redirect targets are restricted to relative paths only
     # (see _safe_next) so the callback can't be turned into an open
     # redirect.
     default_next: str = "/"
+    # Phase 2 carried this flag as ``enabled``; Phase 3 derives it
+    # from "settings are minimally populated". Accept the kwarg in
+    # __init__ for backwards-compatibility but treat it as informational.
+    _legacy_enabled: bool = True
+
+    @property
+    def enabled(self) -> bool:
+        """Minimum-viable check: a provider row with empty settings
+        passes admin validation but can't actually run a flow.
+        """
+        return bool(
+            self._legacy_enabled
+            and self.issuer and self.client_id and self.client_secret
+            and self.redirect_uri
+        )
 
 
-def load_oidc_settings() -> OidcSettings:
-    """Read OIDC config from the environment. Never raises — when
-    disabled or unconfigured the provider simply reports not-enabled."""
-    enabled = os.getenv("OIDC_ENABLED", "false").lower() == "true"
+def load_env_oidc_settings() -> OidcSettings | None:
+    """Read the legacy ``OIDC_*`` env vars into a synthetic snapshot
+    for the boot-time seeding hook in ``app/main.py``. Returns
+    ``None`` when nothing is configured (so the seeder skips). Once
+    the operator edits the seeded row in the admin UI this function
+    is no longer the source of truth."""
+    if os.getenv("OIDC_ENABLED", "false").lower() != "true":
+        return None
     return OidcSettings(
-        enabled=enabled,
+        provider_id="env-bootstrap",
+        provider_slug="default-oidc",
         issuer=os.getenv("OIDC_ISSUER", "").rstrip("/"),
         client_id=os.getenv("OIDC_CLIENT_ID", ""),
         client_secret=os.getenv("OIDC_CLIENT_SECRET", ""),
         redirect_uri=os.getenv("OIDC_REDIRECT_URI", ""),
         scopes=os.getenv("OIDC_SCOPES", "openid email profile"),
         default_next=os.getenv("OIDC_DEFAULT_NEXT", "/"),
+    )
+
+
+# Phase 2 compatibility shim: kept so a legacy import path doesn't
+# crash on package upgrade. Deprecated — use ``load_env_oidc_settings``.
+load_oidc_settings = load_env_oidc_settings
+
+
+def settings_from_snapshot(snap: ProviderConfigSnapshot) -> OidcSettings:
+    """Build :class:`OidcSettings` from a registry snapshot. Missing
+    settings fields fall back to empty strings; ``enabled`` returns
+    False until the operator finishes configuration."""
+    s = snap.settings or {}
+    return OidcSettings(
+        provider_id=snap.id,
+        provider_slug=snap.slug,
+        issuer=str(s.get("issuer", "")).rstrip("/"),
+        client_id=str(s.get("client_id", "")),
+        client_secret=str(s.get("client_secret", "")),
+        redirect_uri=str(s.get("redirect_uri", "")),
+        scopes=str(s.get("scopes", "openid email profile")),
+        claim_mapping_override=snap.claim_mapping or {},
+        linking_policy=snap.linking_policy,
+        default_next=str(s.get("default_next", "/")),
     )
 
 
@@ -146,7 +166,12 @@ def _pkce_pair() -> tuple[str, str]:
 
 
 class OidcProvider:
-    """OIDC provider. One instance per process, registered as ``oidc``."""
+    """OIDC provider instance. One per ``idp_providers`` row.
+
+    The class-level ``name = 'oidc'`` is the *kind*; the per-instance
+    ``slug`` is the user-facing handle (e.g. ``entra-staff``) used in
+    URLs and audit logs.
+    """
 
     name = "oidc"
 
@@ -158,12 +183,20 @@ class OidcProvider:
         self._jwks_at: float = 0.0
 
     @property
+    def settings(self) -> OidcSettings:
+        return self._s
+
+    @property
+    def slug(self) -> str:
+        return self._s.provider_slug
+
+    @property
+    def provider_id(self) -> str:
+        return self._s.provider_id
+
+    @property
     def enabled(self) -> bool:
-        s = self._s
-        return bool(
-            s.enabled and s.issuer and s.client_id
-            and s.client_secret and s.redirect_uri
-        )
+        return self._s.enabled
 
     # ── IdentityProvider protocol ────────────────────────────────────
     #
@@ -223,17 +256,15 @@ class OidcProvider:
         """Return (authorization_url, flow_state).
 
         ``flow_state`` carries the values the callback must verify
-        (state, nonce, PKCE verifier, post-login next) — the route
-        signs it into the ``nx_oidc`` cookie via ``core.tokens``.
+        (state, nonce, PKCE verifier, post-login next, provider_id) —
+        the route signs it into the ``nx_oidc`` cookie via
+        :mod:`core.tokens`.
 
-        ``force_reauth`` is set by the daily re-auth path (the
-        ``SsoReauthRequired`` 401 → /login?force=1 redirect) and:
-
-          * pins ``max_age=SSO_SESSION_MAX_AGE_SECONDS`` so the IdP
-            itself refuses to short-circuit when its own session is
-            older than our ceiling, and
-          * asks ``prompt=login`` so the IdP shows the login form even
-            when the IdP session is still warm.
+        ``force_reauth`` is set by the daily-SSO-re-auth path: it
+        pins ``max_age=SSO_SESSION_MAX_AGE_SECONDS`` so the IdP itself
+        refuses to short-circuit when its own session is older than
+        our ceiling, and requests ``prompt=login`` so the IdP shows
+        the login form even when its session is still warm.
         """
         if not self.enabled:
             raise OidcError("OIDC is not enabled/configured")
@@ -241,8 +272,6 @@ class OidcProvider:
         state = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(32)
         verifier, challenge = _pkce_pair()
-        # max_age is always sent so the IdP gates re-auth in step with us
-        # (the daily ceiling matches `SSO_SESSION_MAX_AGE_SECONDS`).
         from ..core.config import SSO_SESSION_MAX_AGE_SECONDS  # local import: avoid cycle
         params = {
             "response_type": "code",
@@ -263,6 +292,8 @@ class OidcProvider:
             "nonce": nonce,
             "code_verifier": verifier,
             "next": next_path,
+            "provider_id": self._s.provider_id,
+            "provider_slug": self._s.provider_slug,
         }
         return auth_url, flow_state
 
@@ -276,8 +307,9 @@ class OidcProvider:
         nonce: str,
     ) -> ProviderIdentity:
         """Exchange the auth code (with the PKCE verifier) and return a
-        fully-verified ``ProviderIdentity``. Raises ``OidcError`` on any
-        failure — the caller must not provision on a partial result."""
+        fully-verified :class:`ProviderIdentity`. Raises
+        :class:`OidcError` on any failure — the caller must not
+        provision on a partial result."""
         if not self.enabled:
             raise OidcError("OIDC is not enabled/configured")
         meta = await self._discovery()
@@ -304,22 +336,18 @@ class OidcProvider:
 
         claims = await self._verify_id_token(id_token, nonce, access_token)
 
-        sub = claims.get("sub")
-        email = claims.get("email")
-        if not sub or not email:
-            raise OidcError("id_token missing sub/email")
-        return ProviderIdentity(
-            provider="oidc",
-            external_id=str(sub),
-            email=str(email).strip().lower(),
-            first_name=str(claims.get("given_name", "") or ""),
-            last_name=str(claims.get("family_name", "") or ""),
-            # raw_claims feeds the linking policy (email_verified) and is
-            # stored on the user row for audit.
-            raw_claims=dict(claims),
-            groups=_extract_groups(dict(claims)),
-            auth_time=_extract_auth_time(dict(claims)),
-        )
+        # Delegate all field extraction to the configurable mapper.
+        # Operators control which claim maps to which internal field
+        # via the per-provider ``claim_mapping`` JSON.
+        try:
+            return apply_claim_mapping(
+                dict(claims),
+                kind="oidc",
+                provider_slug=self._s.provider_slug,
+                override=self._s.claim_mapping_override,
+            )
+        except ClaimMappingError as exc:
+            raise OidcError(str(exc)) from exc
 
     async def _verify_id_token(
         self, id_token: str, nonce: str, access_token: Optional[str],
@@ -353,3 +381,9 @@ class OidcProvider:
                     continue
                 raise OidcError(f"id_token verification failed: {exc}") from exc
         raise OidcError("id_token verification failed")
+
+
+def build_oidc_provider(snap: ProviderConfigSnapshot) -> OidcProvider:
+    """Factory for the registry. Materialises a working
+    :class:`OidcProvider` from a snapshot."""
+    return OidcProvider(settings_from_snapshot(snap))

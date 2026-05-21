@@ -34,8 +34,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from dataclasses import field
+
 from .base import ProviderCredentials, ProviderIdentity
-from ..core.config import SAML_GROUPS_ATTRIBUTE
+from .claim_mapper import apply_claim_mapping, ClaimMappingError
+from .registry import ProviderConfigSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -50,22 +53,37 @@ class SamlError(Exception):
 class SamlSettings:
     """Static configuration for the SAML SP.
 
-    Loaded from environment via :func:`load_saml_settings`. The provider
-    self-reports ``enabled`` only when the minimum fields are populated;
-    a partial config is treated as disabled so routes can 404.
+    Phase 3: built per ``idp_providers`` row by
+    :func:`build_saml_provider`. Operators stash the same fields in
+    the provider's encrypted ``settings`` JSON via the admin UI; the
+    env-only loader stays as a one-shot seeder for legacy deployments.
+
+    ``enabled`` is derived from "settings are minimally populated"
+    rather than a manual flag, matching the OIDC settings shape.
     """
-    enabled: bool
-    sp_entity_id: str
-    sp_acs_url: str
-    sp_slo_url: str
-    idp_entity_id: str
-    idp_sso_url: str
-    idp_slo_url: str
-    idp_x509_cert: str         # PEM body without headers, or full PEM
-    sp_x509_cert: str          # required for signing/encryption (optional)
-    sp_private_key: str
-    name_id_format: str
+    sp_entity_id: str = ""
+    sp_acs_url: str = ""
+    sp_slo_url: str = ""
+    idp_entity_id: str = ""
+    idp_sso_url: str = ""
+    idp_slo_url: str = ""
+    idp_x509_cert: str = ""    # PEM body without headers, or full PEM
+    sp_x509_cert: str = ""     # required for signing/encryption (optional)
+    sp_private_key: str = ""
+    name_id_format: str = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"
     default_next: str = "/"
+    provider_id: str = "test-saml"
+    provider_slug: str = "test-saml"
+    claim_mapping_override: dict = field(default_factory=dict)
+    linking_policy: str = "strict"
+
+    @property
+    def enabled(self) -> bool:
+        return bool(
+            self.sp_entity_id and self.sp_acs_url
+            and self.idp_entity_id and self.idp_sso_url
+            and self.idp_x509_cert
+        )
 
 
 def _env_or_file(key: str) -> str:
@@ -89,16 +107,13 @@ def _env_or_file(key: str) -> str:
     return ""
 
 
-def load_saml_settings() -> SamlSettings:
-    """Read SAML SP + IdP config from the environment.
-
-    All fields are tolerant of empty values — the provider self-reports
-    ``enabled=False`` whenever the minimum set is missing, so routes
-    can 404 instead of 500 on a partial config.
-    """
-    enabled = os.getenv("SAML_ENABLED", "false").lower() == "true"
+def load_env_saml_settings() -> SamlSettings | None:
+    """Read the legacy ``SAML_*`` env vars into a synthetic settings
+    object for the boot-time seeder in ``app/main.py``. Returns
+    ``None`` when nothing is configured."""
+    if os.getenv("SAML_ENABLED", "false").lower() != "true":
+        return None
     return SamlSettings(
-        enabled=enabled,
         sp_entity_id=os.getenv("SAML_SP_ENTITY_ID", ""),
         sp_acs_url=os.getenv("SAML_SP_ACS_URL", ""),
         sp_slo_url=os.getenv("SAML_SP_SLO_URL", ""),
@@ -113,6 +128,36 @@ def load_saml_settings() -> SamlSettings:
             "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
         ),
         default_next=os.getenv("SAML_DEFAULT_NEXT", "/"),
+        provider_id="env-bootstrap",
+        provider_slug="default-saml2",
+    )
+
+
+load_saml_settings = load_env_saml_settings  # Phase 2 compat alias
+
+
+def settings_from_snapshot(snap: ProviderConfigSnapshot) -> SamlSettings:
+    """Build :class:`SamlSettings` from a registry snapshot."""
+    s = snap.settings or {}
+    return SamlSettings(
+        sp_entity_id=str(s.get("sp_entity_id", "")),
+        sp_acs_url=str(s.get("sp_acs_url", "")),
+        sp_slo_url=str(s.get("sp_slo_url", "")),
+        idp_entity_id=str(s.get("idp_entity_id", "")),
+        idp_sso_url=str(s.get("idp_sso_url", "")),
+        idp_slo_url=str(s.get("idp_slo_url", "")),
+        idp_x509_cert=str(s.get("idp_x509_cert", "")),
+        sp_x509_cert=str(s.get("sp_x509_cert", "")),
+        sp_private_key=str(s.get("sp_private_key", "")),
+        name_id_format=str(
+            s.get("name_id_format",
+                  "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress")
+        ),
+        default_next=str(s.get("default_next", "/")),
+        provider_id=snap.id,
+        provider_slug=snap.slug,
+        claim_mapping_override=snap.claim_mapping or {},
+        linking_policy=snap.linking_policy,
     )
 
 
@@ -156,14 +201,20 @@ class SamlProvider:
         self._replay_cache = replay_cache or _MemoryReplayCache()
 
     @property
+    def settings(self) -> SamlSettings:
+        return self._s
+
+    @property
+    def slug(self) -> str:
+        return self._s.provider_slug
+
+    @property
+    def provider_id(self) -> str:
+        return self._s.provider_id
+
+    @property
     def enabled(self) -> bool:
-        s = self._s
-        return bool(
-            s.enabled
-            and s.sp_entity_id and s.sp_acs_url
-            and s.idp_entity_id and s.idp_sso_url
-            and s.idp_x509_cert
-        )
+        return self._s.enabled
 
     # ── IdentityProvider protocol ────────────────────────────────────
     #
@@ -332,34 +383,41 @@ class SamlProvider:
             if not is_new:
                 raise SamlError("SAML assertion replay rejected")
 
-        email = _attr_first(attrs, ("email", "mail",
-                                    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"))
-        if not email:
-            # NameID is often the email address — fall back to it.
-            email = name_id
-        email = (email or "").strip().lower()
-        if not email:
-            raise SamlError("SAML response missing email")
+        # Build the synthetic claims dict the configurable mapper
+        # consumes. ``__name_id__`` and ``__authn_instant__`` are
+        # special-cased so the mapper can reference them via the
+        # uniform path syntax (same shape as OIDC's id_token).
+        claims: dict = {**attrs}
+        claims["__name_id__"] = name_id
+        authn_instant = _extract_authn_instant(auth)
+        if authn_instant is not None:
+            claims["__authn_instant__"] = authn_instant
+        # Fallback: when no explicit email attribute is configured the
+        # default mapping falls through and the NameID itself (often an
+        # email-format identifier) becomes the email value via the
+        # mapper's resolution order. Operators can override via the
+        # claim_mapping spec.
+        if "email" not in claims and "@" in str(name_id):
+            claims["email"] = name_id
 
-        first_name = _attr_first(attrs, ("given_name", "givenName", "firstName",
-                                         "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname"))
-        last_name = _attr_first(attrs, ("family_name", "surname", "lastName", "sn",
-                                        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname"))
+        try:
+            identity = apply_claim_mapping(
+                claims,
+                kind="saml2",
+                provider_slug=self._s.provider_slug,
+                override=self._s.claim_mapping_override,
+            )
+        except ClaimMappingError as exc:
+            raise SamlError(str(exc)) from exc
 
-        groups = _extract_groups(attrs)
-        auth_time = _extract_authn_instant(auth)
-
-        return ProviderIdentity(
-            provider="saml2",
-            external_id=str(name_id),
-            email=email,
-            first_name=str(first_name or ""),
-            last_name=str(last_name or ""),
-            raw_claims={"attributes": attrs, "name_id": name_id,
-                        "session_index": auth.get_session_index() or ""},
-            groups=groups,
-            auth_time=auth_time,
-        )
+        # Stash the SAML-specific session_index in raw_claims for audit.
+        # ProviderIdentity is frozen, so build a fresh instance with
+        # the augmented raw_claims rather than mutating.
+        from dataclasses import replace
+        raw_claims = dict(identity.raw_claims)
+        raw_claims["session_index"] = auth.get_session_index() or ""
+        raw_claims["name_id"] = name_id
+        return replace(identity, raw_claims=raw_claims)
 
     # ── SLO ──────────────────────────────────────────────────────────
 
@@ -527,3 +585,9 @@ class _MemoryReplayCache:
             return False
         self._seen[assertion_id] = expires_at_epoch
         return True
+
+
+def build_saml_provider(snap: ProviderConfigSnapshot) -> SamlProvider:
+    """Factory for the registry. Materialises a working
+    :class:`SamlProvider` from a snapshot."""
+    return SamlProvider(settings_from_snapshot(snap))

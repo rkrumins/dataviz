@@ -32,7 +32,6 @@ async def _seed_user(db_session, *, user_id="usr_alice", email="alice@example.co
         first_name="Alice",
         last_name="Anderson",
         status="active",
-        auth_provider="local",
     ))
     await db_session.flush()
     return user_id

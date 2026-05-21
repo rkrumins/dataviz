@@ -218,7 +218,8 @@ async def test_client(
         first_name=_FAKE_USER.first_name,
         last_name=_FAKE_USER.last_name,
         status=_FAKE_USER.status,
-        auth_provider=_FAKE_USER.auth_provider,
+        # Phase 3: auth_provider lives on user_identities now. The fake
+        # user is local-only so no identity row is needed.
         created_at="2024-01-01T00:00:00Z",
         updated_at="2024-01-01T00:00:00Z",
     ))

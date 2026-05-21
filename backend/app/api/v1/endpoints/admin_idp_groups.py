@@ -1,15 +1,17 @@
-"""Admin CRUD: idp_group_role_mappings.
+"""Admin CRUD: ``idp_group_role_mappings`` (Phase 3 — both target types).
 
-Mounted at ``/api/v1/admin/idp-group-mappings``. Every endpoint requires
-``system:admin``. The mappings drive the SSO group->role reconciler
-(``permission_service.reconcile_sso_role_bindings``): on every SSO
-login the reconciler reads every mapping whose ``idp_group`` is in the
-user's IdP-asserted group set and ensures matching ``source='sso'``
-RoleBindings exist; bindings whose source group is no longer asserted
-are soft-revoked.
+Mounted at ``/api/v1/admin/idp-group-mappings``. Every endpoint
+requires ``system:admin``. Two creation flows reflect the two target
+types:
 
-``system:admin`` is explicitly forbidden as an auto-mappable role —
-admin grants must remain a deliberate human action with an audit trail.
+  * ``POST /role-binding`` — IdP group -> RoleBinding (Phase 2 shape).
+  * ``POST /group-membership`` — IdP group -> internal Group membership.
+
+Listing returns rows of either shape; the ``target_type`` field tells
+consumers which path to render. Validation lives in the repo: role
+existence + workspace-scope bindability for role_binding targets,
+group existence + ``is_protected`` check for group_membership targets,
+and the universal ``system:admin`` refusal.
 """
 from __future__ import annotations
 
@@ -22,9 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import idp_group_mapping_repo
+from backend.app.db.repositories import idp_group_mapping_repo, user_repo
 from backend.app.db.repositories.idp_group_mapping_repo import (
     ForbiddenSsoRoleError,
+    MappingValidationError,
 )
 from backend.auth_service.interface import User
 
@@ -37,109 +40,154 @@ router = APIRouter()
 
 
 class IdpGroupRoleMappingDTO(BaseModel):
-    """Response shape — JSON-camelCase via the alias, snake_case in
-    Python following the project convention."""
+    """Single mapping row — supports both target shapes."""
     model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
     id: str
+    provider_id: Optional[str] = Field(default=None, alias="providerId")
     idp_group: str = Field(alias="idpGroup")
-    scope_type: str = Field(alias="scopeType")
+    target_type: str = Field(alias="targetType")
+    # role_binding fields (NULL for group_membership)
+    scope_type: Optional[str] = Field(default=None, alias="scopeType")
     scope_id: Optional[str] = Field(default=None, alias="scopeId")
-    role_name: str = Field(alias="roleName")
+    role_name: Optional[str] = Field(default=None, alias="roleName")
+    # group_membership field (NULL for role_binding)
+    target_group_id: Optional[str] = Field(default=None, alias="targetGroupId")
     created_at: str = Field(alias="createdAt")
     created_by: Optional[str] = Field(default=None, alias="createdBy")
-
-
-class CreateMappingRequest(BaseModel):
-    """Body for ``POST /admin/idp-group-mappings``."""
-    model_config = ConfigDict(populate_by_name=True)
-
-    idp_group: str = Field(alias="idpGroup", min_length=1, max_length=256)
-    scope_type: str = Field(alias="scopeType")
-    scope_id: Optional[str] = Field(default=None, alias="scopeId")
-    role_name: str = Field(alias="roleName", min_length=1, max_length=128)
 
 
 def _to_dto(row) -> IdpGroupRoleMappingDTO:
     return IdpGroupRoleMappingDTO(
         id=row.id,
+        provider_id=row.provider_id,
         idp_group=row.idp_group,
+        target_type=row.target_type,
         scope_type=row.scope_type,
         scope_id=row.scope_id,
         role_name=row.role_name,
+        target_group_id=row.target_group_id,
         created_at=row.created_at,
         created_by=row.created_by,
     )
 
 
+class CreateRoleBindingMappingRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    idp_group: str = Field(alias="idpGroup", min_length=1, max_length=256)
+    role_name: str = Field(alias="roleName", min_length=1, max_length=128)
+    scope_type: str = Field(alias="scopeType")
+    scope_id: Optional[str] = Field(default=None, alias="scopeId")
+    provider_id: Optional[str] = Field(default=None, alias="providerId")
+
+
+class CreateGroupMembershipMappingRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    idp_group: str = Field(alias="idpGroup", min_length=1, max_length=256)
+    target_group_id: str = Field(alias="targetGroupId", min_length=1)
+    provider_id: Optional[str] = Field(default=None, alias="providerId")
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────
 
 
-@router.get(
-    "",
-    response_model=list[IdpGroupRoleMappingDTO],
-    response_model_by_alias=True,
-)
+@router.get("", response_model=list[IdpGroupRoleMappingDTO],
+            response_model_by_alias=True)
 async def list_mappings(
     _admin: User = Depends(requires("system:admin")),
     idp_group: Optional[str] = Query(default=None, alias="idpGroup"),
+    provider_id: Optional[str] = Query(default=None, alias="providerId"),
+    target_type: Optional[str] = Query(default=None, alias="targetType"),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Return every mapping (optionally filtered by group name).
-
-    No pagination yet — mapping counts are expected to remain small
-    (one row per IdP group × role pair). Add cursor pagination when
-    the admin UI surfaces an "all mappings" view at scale.
-    """
     rows = await idp_group_mapping_repo.list_mappings(
-        session, idp_group=idp_group,
+        session, provider_id=provider_id, idp_group=idp_group,
+        target_type=target_type,
     )
     return [_to_dto(r) for r in rows]
 
 
 @router.post(
-    "",
+    "/role-binding",
     response_model=IdpGroupRoleMappingDTO,
     response_model_by_alias=True,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_mapping(
-    body: CreateMappingRequest,
+async def create_role_binding_mapping(
+    body: CreateRoleBindingMappingRequest,
     admin: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Create a new mapping. Returns 400 for invalid scope/role inputs
-    or when the mapping targets the forbidden auto-role
-    (``system:admin``)."""
     try:
-        row = await idp_group_mapping_repo.create_mapping(
+        row = await idp_group_mapping_repo.create_role_binding_mapping(
             session,
             idp_group=body.idp_group,
+            role_name=body.role_name,
             scope_type=body.scope_type,
             scope_id=body.scope_id,
-            role_name=body.role_name,
+            provider_id=body.provider_id,
             created_by=admin.id,
         )
     except ForbiddenSsoRoleError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
-    except ValueError as exc:
+    except (MappingValidationError, ValueError) as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    await user_repo.create_outbox_event(
+        session, event_type="rbac.sso_mapping.created",
+        payload={"mapping_id": row.id, "target_type": "role_binding",
+                 "idp_group": row.idp_group, "role_name": row.role_name,
+                 "scope_type": row.scope_type, "scope_id": row.scope_id,
+                 "provider_id": row.provider_id, "actor": admin.id},
+    )
+    return _to_dto(row)
+
+
+@router.post(
+    "/group-membership",
+    response_model=IdpGroupRoleMappingDTO,
+    response_model_by_alias=True,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_group_membership_mapping(
+    body: CreateGroupMembershipMappingRequest,
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    try:
+        row = await idp_group_mapping_repo.create_group_membership_mapping(
+            session,
+            idp_group=body.idp_group,
+            target_group_id=body.target_group_id,
+            provider_id=body.provider_id,
+            created_by=admin.id,
+        )
+    except (MappingValidationError, ValueError) as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    await user_repo.create_outbox_event(
+        session, event_type="rbac.sso_mapping.created",
+        payload={"mapping_id": row.id, "target_type": "group_membership",
+                 "idp_group": row.idp_group,
+                 "target_group_id": row.target_group_id,
+                 "provider_id": row.provider_id, "actor": admin.id},
+    )
     return _to_dto(row)
 
 
 @router.delete("/{mapping_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_mapping(
     mapping_id: str,
-    _admin: User = Depends(requires("system:admin")),
+    admin: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Remove a mapping. Existing RoleBindings derived from it remain
-    until the affected users next SSO-login (the reconciler will then
-    soft-revoke them because the mapping's target tuple is no longer in
-    the target set). Operators wanting immediate revocation should call
-    ``revoke_all_user_sessions`` for the affected users from the
-    admin-users surface — out of scope for this endpoint."""
+    row = await idp_group_mapping_repo.get_mapping(session, mapping_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mapping not found")
     ok = await idp_group_mapping_repo.delete_mapping(session, mapping_id)
     if not ok:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mapping not found")
+    await user_repo.create_outbox_event(
+        session, event_type="rbac.sso_mapping.deleted",
+        payload={"mapping_id": mapping_id, "target_type": row.target_type,
+                 "idp_group": row.idp_group, "actor": admin.id},
+    )
     return None

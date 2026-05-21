@@ -27,8 +27,10 @@ _CLIENT_ID = "client-123"
 
 
 def _settings() -> OidcSettings:
+    # Phase 3: ``enabled`` is derived from settings completeness;
+    # supplying issuer + client_id + secret + redirect_uri here is
+    # enough to make ``provider.enabled`` return True.
     return OidcSettings(
-        enabled=True,
         issuer=_ISSUER,
         client_id=_CLIENT_ID,
         client_secret="secret",

@@ -68,21 +68,7 @@ async def get_user_by_id(session: AsyncSession, user_id: str) -> Optional[UserOR
     return result.scalar_one_or_none()
 
 
-# ── SSO identity (provider + external subject) ─────────────────────────
-
-async def get_user_by_external_identity(
-    session: AsyncSession, auth_provider: str, external_id: str,
-) -> Optional[UserORM]:
-    """Look up by the SSO join key. This — never email — is the durable
-    identity key for provisioned/linked SSO accounts."""
-    result = await session.execute(
-        select(UserORM).where(
-            UserORM.auth_provider == auth_provider,
-            UserORM.external_id == external_id,
-            UserORM.deleted_at.is_(None),
-        )
-    )
-    return result.scalar_one_or_none()
+# ── SSO provisioning (identity rows live in user_identity_repo) ────────
 
 
 async def create_sso_user(
@@ -91,47 +77,40 @@ async def create_sso_user(
     email: str,
     first_name: str,
     last_name: str,
-    auth_provider: str,
-    external_id: str,
     password_hash: str,
 ) -> UserORM:
     """JIT-provision an IdP-owned account. Active immediately (the IdP
     authenticated the subject); no role bindings — permissions stay
     default-deny until a group/role mapping or admin grant lands.
 
-    ``password_hash`` is a discardable random Argon2id hash so the local
-    password path can never authenticate this account."""
+    ``password_hash`` is the disabled-sentinel from
+    ``auth_service.core.password.disabled_password_hash()`` so the
+    local password path can never authenticate this account. The
+    actual SSO subject lives in ``user_identities`` — call
+    ``user_identity_repo.create_identity()`` in the same transaction.
+    """
     user = UserORM(
         email=email.strip().lower(),
         password_hash=password_hash,
         first_name=first_name.strip(),
         last_name=last_name.strip(),
         status="active",
-        auth_provider=auth_provider,
-        external_id=external_id,
     )
     session.add(user)
     await session.flush()
     return user
 
 
-async def link_user_to_provider(
-    session: AsyncSession,
-    *,
-    user_id: str,
-    auth_provider: str,
-    external_id: str,
-    disabled_password_hash: str,
+async def disable_password(
+    session: AsyncSession, user_id: str, disabled_hash: str,
 ) -> Optional[UserORM]:
-    """Bind an existing local account to an SSO subject and disable its
-    password login (the hash is replaced with a discardable random
-    one). Caller must have already enforced the linking guardrails."""
+    """Replace a user's password hash with the disabled sentinel.
+    Used when an admin force-migrates a local account to SSO-only
+    so the password path can never authenticate them again."""
     user = await get_user_by_id(session, user_id)
     if user is None:
         return None
-    user.auth_provider = auth_provider
-    user.external_id = external_id
-    user.password_hash = disabled_password_hash
+    user.password_hash = disabled_hash
     user.updated_at = _now()
     await session.flush()
     return user
@@ -143,14 +122,17 @@ async def set_user_idp_metadata(
     user_id: str,
     idp_groups: list[str],
     raw_claims: Optional[dict] = None,
+    attributes: Optional[dict] = None,
 ) -> Optional[UserORM]:
-    """Persist the latest IdP-asserted groups (and optionally the raw
-    claims) into ``users.metadata_``. Called from ``complete_sso_login``
-    on every SSO login so the admin UI / ``/me`` can surface the most
-    recent group set.
+    """Persist the latest IdP-asserted groups, raw claims, and
+    operator-mapped extra attributes (department, employee_id, …)
+    into ``users.metadata_``. Called from ``complete_sso_login`` on
+    every SSO login so the admin UI / ``/me`` can surface the most
+    recent snapshot.
 
-    The metadata column is a free-form JSON document so we merge rather
-    than overwrite — other keys (prefs, etc.) survive."""
+    The metadata column is a free-form JSON document; we merge rather
+    than overwrite — other top-level keys (UI prefs, etc.) survive.
+    """
     user = await get_user_by_id(session, user_id)
     if user is None:
         return None
@@ -163,6 +145,12 @@ async def set_user_idp_metadata(
     meta["idp_groups"] = list(idp_groups)
     if raw_claims is not None:
         meta["idp_last_claims"] = raw_claims
+    if attributes is not None:
+        # Merge attribute keys so subsequent IdPs add to (not replace)
+        # the picture. Last-writer wins per key.
+        merged_attrs = dict(meta.get("attributes", {}))
+        merged_attrs.update(attributes)
+        meta["attributes"] = merged_attrs
     meta["idp_last_login_at"] = _now()
     user.metadata_ = json.dumps(meta, default=str)
     user.updated_at = _now()

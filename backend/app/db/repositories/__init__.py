@@ -14,6 +14,8 @@ from . import (
     role_repo,
     access_request_repo,
     idp_group_mapping_repo,
+    idp_provider_repo,
+    user_identity_repo,
 )
 
 __all__ = [
@@ -32,4 +34,6 @@ __all__ = [
     "role_repo",
     "access_request_repo",
     "idp_group_mapping_repo",
+    "idp_provider_repo",
+    "user_identity_repo",
 ]

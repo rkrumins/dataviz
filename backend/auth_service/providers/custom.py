@@ -30,12 +30,15 @@ The HTTP routes live in ``api/router.py`` under
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Optional
 
 import jwt as pyjwt
 
 from ..core.tokens import decode_mock_identity_token
 from .base import ProviderCredentials, ProviderIdentity
+from .claim_mapper import apply_claim_mapping, ClaimMappingError
+from .registry import ProviderConfigSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,27 @@ logger = logging.getLogger(__name__)
 class CustomIdentityError(Exception):
     """Any failure in the custom-IdP envelope (missing/bad signature,
     expired, malformed payload). Mapped to a generic 401 by the route."""
+
+
+@dataclass(frozen=True)
+class CustomSettings:
+    """Per-provider settings for the dev/demo Custom IdP. The claim
+    mapping override carries through to ``apply_claim_mapping`` like
+    the other kinds. No actual secrets — the envelope signature uses
+    the platform ``JWT_SECRET_KEY``."""
+    provider_id: str = "test-custom"
+    provider_slug: str = "default-custom"
+    claim_mapping_override: dict = field(default_factory=dict)
+    linking_policy: str = "strict"
+
+
+def settings_from_snapshot(snap: ProviderConfigSnapshot) -> CustomSettings:
+    return CustomSettings(
+        provider_id=snap.id,
+        provider_slug=snap.slug,
+        claim_mapping_override=snap.claim_mapping or {},
+        linking_policy=snap.linking_policy,
+    )
 
 
 class CustomIdentityProvider:
@@ -55,16 +79,23 @@ class CustomIdentityProvider:
 
     name = "custom"
 
-    def __init__(self) -> None:
-        # No settings — everything is sourced from the cookie payload.
-        pass
+    def __init__(self, settings: CustomSettings | None = None) -> None:
+        self._s = settings or CustomSettings()
+
+    @property
+    def settings(self) -> CustomSettings:
+        return self._s
+
+    @property
+    def slug(self) -> str:
+        return self._s.provider_slug
+
+    @property
+    def provider_id(self) -> str:
+        return self._s.provider_id
 
     @property
     def enabled(self) -> bool:
-        # The provider is registered only when enabled, so this is True
-        # whenever an instance exists. Kept on the surface for parity
-        # with the OIDC / SAML providers (whose registration is
-        # unconditional).
         return True
 
     # ── IdentityProvider protocol ────────────────────────────────────
@@ -87,60 +118,30 @@ class CustomIdentityProvider:
         except pyjwt.InvalidTokenError as exc:
             raise CustomIdentityError(f"envelope_invalid:{exc}") from exc
 
-        external_id = _required_str(payload, "external_id")
-        email = _required_str(payload, "email").lower()
-        first_name = _optional_str(payload, "first_name")
-        last_name = _optional_str(payload, "last_name")
+        if not isinstance(payload, dict):
+            raise CustomIdentityError("envelope_malformed")
 
-        groups_raw = payload.get("groups") or []
-        if not isinstance(groups_raw, (list, tuple)):
-            raise CustomIdentityError("groups_must_be_list")
-        groups = tuple(
-            g.strip() for g in groups_raw
-            if isinstance(g, str) and g.strip()
-        )
+        # Hoist the operator's "claims" dict into the top-level claims
+        # namespace so the configurable mapper can reach it via the
+        # same path syntax as OIDC. Then delegate every field
+        # extraction to apply_claim_mapping.
+        claims = {**payload}
+        nested = payload.get("claims")
+        if isinstance(nested, dict):
+            for k, v in nested.items():
+                claims.setdefault(k, v)
 
-        claims = payload.get("claims")
-        if claims is not None and not isinstance(claims, dict):
-            raise CustomIdentityError("claims_must_be_object")
-
-        auth_time = payload.get("auth_time")
-        auth_time_int: Optional[int]
-        if auth_time is None:
-            auth_time_int = None
-        else:
-            try:
-                auth_time_int = int(auth_time)
-            except (TypeError, ValueError):
-                raise CustomIdentityError("auth_time_must_be_int")
-
-        return ProviderIdentity(
-            provider="custom",
-            external_id=external_id,
-            email=email,
-            first_name=first_name,
-            last_name=last_name,
-            raw_claims={
-                "claims": claims or {},
-                "groups": list(groups),
-                "source": "custom_mock",
-            },
-            groups=groups,
-            auth_time=auth_time_int,
-        )
+        try:
+            return apply_claim_mapping(
+                claims,
+                kind="custom",
+                provider_slug=self._s.provider_slug,
+                override=self._s.claim_mapping_override,
+            )
+        except ClaimMappingError as exc:
+            raise CustomIdentityError(str(exc)) from exc
 
 
-def _required_str(payload: dict, key: str) -> str:
-    v = payload.get(key)
-    if not isinstance(v, str) or not v.strip():
-        raise CustomIdentityError(f"missing_{key}")
-    return v.strip()
-
-
-def _optional_str(payload: dict, key: str) -> str:
-    v = payload.get(key)
-    if v is None:
-        return ""
-    if not isinstance(v, str):
-        raise CustomIdentityError(f"{key}_must_be_string")
-    return v.strip()
+def build_custom_provider(snap: ProviderConfigSnapshot) -> CustomIdentityProvider:
+    """Factory for the registry."""
+    return CustomIdentityProvider(settings_from_snapshot(snap))

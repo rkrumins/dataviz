@@ -34,11 +34,16 @@ import logging
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import RoleBindingORM
+from backend.app.db.models import (
+    GroupMemberORM,
+    GroupORM,
+    RoleBindingORM,
+)
 from backend.app.db.repositories import (
     binding_repo,
     idp_group_mapping_repo,
@@ -298,48 +303,89 @@ async def simulate_for_user(
     return global_set, ws_sets
 
 
-# ── SSO group -> role binding reconciliation ─────────────────────────
+# ── SSO group -> target reconciliation (Phase 3 — both targets) ──────
 
 
-async def reconcile_sso_role_bindings(
+async def reconcile_sso_targets(
     session: AsyncSession,
     *,
     user_id: str,
     idp_groups: list[str],
+    provider_id: Optional[str] = None,
 ) -> dict:
-    """Reconcile the user's ``source='sso'`` RoleBindings to match what
-    the IdP currently asserts.
+    """Reconcile the user's ``source='sso'`` RoleBindings AND Group
+    memberships to match what the IdP currently asserts.
 
-    Algorithm (idempotent; called on every SSO login):
+    Each mapping row's ``target_type`` determines the branch:
 
-      1. Look up every ``idp_group_role_mappings`` row whose
-         ``idp_group`` is in ``idp_groups``. Skip any mapping that
-         points to the forbidden auto-role (``system:admin``) — a
-         loud warning is logged so the operator knows the row is
-         inert.
-      2. Compute the target set of ``(scope_type, scope_id, role_name)``
-         tuples.
-      3. For existing direct ``source='sso'`` bindings on this user:
-           * present in target -> reactivate (clear ``expires_at``).
-           * absent  in target -> soft-revoke (``expires_at=now()``).
-      4. For target tuples without an existing binding -> insert with
-         ``source='sso'``.
+      * ``role_binding`` (Phase-2 default): a ``RoleBindingORM`` row
+        with ``source='sso'`` in the configured ``(scope_type,
+        scope_id, role_name)``.
+      * ``group_membership`` (Phase 3 new): a ``GroupMemberORM`` row
+        with ``source='sso'`` in the configured internal Group.
 
-    Returns a small dict of counts for observability /audit.
+    Algorithm (idempotent; called on every SSO login AND on every
+    /refresh):
+
+      1. Pull mappings whose ``idp_group`` is in ``idp_groups`` AND
+         whose ``provider_id`` matches the user's logging-in IdP OR
+         is NULL (the Phase 2 wildcard semantics).
+      2. Bucket the target set into two key spaces:
+            - role_keys: ``(scope_type, scope_id, role_name)``
+            - group_ids: ``{group_id, …}``
+      3. For each branch:
+            - missing in target -> soft-revoke (``expires_at=now()``
+              for bindings; delete row for memberships).
+            - present in target -> reactivate (clear ``expires_at``;
+              no-op for memberships).
+            - target without an existing row -> insert.
+
+    Hard guardrails (mirroring the write-time validation):
+      * Mappings pointing at ``system:admin`` are skipped + warned.
+      * Mappings whose target_group is ``is_protected=true`` are
+        skipped + warned. (Operator can't normally create these; the
+        check defends against out-of-band inserts.)
+
+    Returns a small dict of counts for observability / audit.
     """
+    from sqlalchemy import update, delete as sa_delete, select as sa_select
+
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    mappings = await idp_group_mapping_repo.list_by_groups(session, idp_groups)
-    target_keys: set[tuple[str, str | None, str]] = set()
-    for m in mappings:
-        if m.role_name == FORBIDDEN_AUTO_ROLE:
-            logger.warning(
-                "Refusing to auto-grant %s from IdP group %s (mapping id=%s)",
-                FORBIDDEN_AUTO_ROLE, m.idp_group, m.id,
-            )
-            continue
-        target_keys.add((m.scope_type, m.scope_id, m.role_name))
+    mappings = await idp_group_mapping_repo.list_active_for_groups(
+        session, provider_id=provider_id, idp_groups=idp_groups,
+    )
 
+    role_target_keys: set[tuple[str, str | None, str]] = set()
+    group_target_ids: set[str] = set()
+    for m in mappings:
+        if m.target_type == "group_membership":
+            if not m.target_group_id:
+                continue
+            target_group = (await session.execute(
+                sa_select(GroupORM).where(GroupORM.id == m.target_group_id)
+            )).scalar_one_or_none()
+            if target_group is None or target_group.deleted_at is not None:
+                continue
+            if getattr(target_group, "is_protected", False):
+                logger.warning(
+                    "Refusing to auto-add %s to protected group %s (mapping=%s)",
+                    user_id, m.target_group_id, m.id,
+                )
+                continue
+            group_target_ids.add(m.target_group_id)
+        else:
+            if m.role_name == FORBIDDEN_AUTO_ROLE:
+                logger.warning(
+                    "Refusing to auto-grant %s from IdP group %s (mapping id=%s)",
+                    FORBIDDEN_AUTO_ROLE, m.idp_group, m.id,
+                )
+                continue
+            if not m.role_name or not m.scope_type:
+                continue
+            role_target_keys.add((m.scope_type, m.scope_id, m.role_name))
+
+    # ── role_binding branch ───────────────────────────────────────────
     existing = await binding_repo.list_for_subject(
         session, subject_type="user", subject_id=user_id,
     )
@@ -354,7 +400,10 @@ async def reconcile_sso_role_bindings(
     created = 0
 
     # 3a. Soft-revoke bindings the IdP no longer asserts.
-    to_expire = [b for k, b in existing_sso.items() if k not in target_keys and b.expires_at is None]
+    to_expire = [
+        b for k, b in existing_sso.items()
+        if k not in role_target_keys and b.expires_at is None
+    ]
     if to_expire:
         ids = [b.id for b in to_expire]
         await session.execute(
@@ -367,7 +416,7 @@ async def reconcile_sso_role_bindings(
     # 3b. Reactivate bindings the IdP asserts again.
     to_reactivate = [
         b for k, b in existing_sso.items()
-        if k in target_keys and b.expires_at is not None
+        if k in role_target_keys and b.expires_at is not None
     ]
     if to_reactivate:
         ids = [b.id for b in to_reactivate]
@@ -379,12 +428,12 @@ async def reconcile_sso_role_bindings(
         reactivated = len(to_reactivate)
 
     # 4. Create missing target bindings.
-    for scope_type, scope_id, role_name in target_keys:
+    for scope_type, scope_id, role_name in role_target_keys:
         if (scope_type, scope_id, role_name) in existing_sso:
             continue
         # Skip when an admin-granted (source='local') binding already
-        # exists for the same (scope, role) — we don't need a duplicate
-        # row, and the unique constraint would reject it anyway.
+        # exists for the same (scope, role) — no need for a duplicate,
+        # and the unique constraint would reject it anyway.
         already = any(
             b.scope_type == scope_type
             and b.scope_id == scope_id
@@ -405,7 +454,49 @@ async def reconcile_sso_role_bindings(
         session.add(new_binding)
         created += 1
 
-    if created or revoked or reactivated:
+    # ── group_membership branch ───────────────────────────────────────
+    # Query the user's existing sso-sourced memberships once. The repo
+    # would do this for us but we read it directly here to keep this
+    # service self-contained (Phase 2 pattern).
+    members_q = await session.execute(
+        sa_select(GroupMemberORM).where(GroupMemberORM.user_id == user_id)
+    )
+    members = list(members_q.scalars().all())
+    existing_sso_groups = {
+        m.group_id for m in members
+        if getattr(m, "source", "local") == "sso"
+    }
+    existing_any_groups = {m.group_id for m in members}
+
+    memberships_removed = 0
+    memberships_added = 0
+
+    # 5a. Remove sso memberships that are no longer asserted.
+    to_remove = existing_sso_groups - group_target_ids
+    if to_remove:
+        await session.execute(
+            sa_delete(GroupMemberORM).where(
+                GroupMemberORM.user_id == user_id,
+                GroupMemberORM.group_id.in_(list(to_remove)),
+                GroupMemberORM.source == "sso",
+            )
+        )
+        memberships_removed = len(to_remove)
+
+    # 5b. Add memberships the IdP asserts. Skip groups the user is
+    # already a member of via a local route (we never overwrite admin-
+    # set memberships).
+    to_add = group_target_ids - existing_any_groups
+    for group_id in to_add:
+        session.add(GroupMemberORM(
+            group_id=group_id,
+            user_id=user_id,
+            added_by=None,
+            source="sso",
+        ))
+        memberships_added += 1
+
+    if created or revoked or reactivated or memberships_added or memberships_removed:
         await session.flush()
 
     return {
@@ -415,7 +506,24 @@ async def reconcile_sso_role_bindings(
         "created": created,
         "revoked": revoked,
         "reactivated": reactivated,
+        "memberships_added": memberships_added,
+        "memberships_removed": memberships_removed,
     }
+
+
+# Backwards-compatible alias for Phase 2 callers that still import the
+# old name. Routes the call to the Phase 3 reconciler with the new
+# kwargs. New code should import ``reconcile_sso_targets``.
+async def reconcile_sso_role_bindings(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    idp_groups: list[str],
+    provider_id: Optional[str] = None,
+) -> dict:
+    return await reconcile_sso_targets(
+        session, user_id=user_id, idp_groups=idp_groups, provider_id=provider_id,
+    )
 
 
 __all__ = [
@@ -425,4 +533,5 @@ __all__ = [
     "has_permission",
     "simulate_for_user",
     "reconcile_sso_role_bindings",
+    "reconcile_sso_targets",
 ]

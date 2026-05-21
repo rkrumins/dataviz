@@ -864,9 +864,14 @@ class UserORM(Base):
     first_name = Column(Text, nullable=False)
     last_name = Column(Text, nullable=False)
     status = Column(Text, nullable=False, default="pending")       # pending | active | suspended
-    auth_provider = Column(Text, nullable=False, default="local")  # local | oidc | saml2 | custom
-    external_id = Column(Text, nullable=True)                      # SSO subject
-    metadata_ = Column("metadata", Text, nullable=True, default="{}")  # JSON: SSO claims, prefs, idp_groups
+    # NB: ``auth_provider`` / ``external_id`` lived here in Phase 2.
+    # Phase 3 normalised SSO identity into the ``user_identities``
+    # table so one user can stack multiple providers (local password
+    # + Entra OIDC + Okta SAML, etc.). To check "does this user have
+    # SSO?" query ``user_identities`` by ``user_id``; to check "does
+    # this user have a password?" compare ``password_hash`` against
+    # the disabled-sentinel constant in ``auth_service.core.password``.
+    metadata_ = Column("metadata", Text, nullable=True, default="{}")  # JSON: idp_groups snapshot, attributes, prefs
     reset_token_hash = Column(Text, nullable=True)
     reset_token_expires_at = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
@@ -875,30 +880,144 @@ class UserORM(Base):
 
     # Relationships
     roles = relationship("UserRoleORM", back_populates="user", cascade="all, delete-orphan")
+    identities = relationship(
+        "UserIdentityORM", back_populates="user", cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         UniqueConstraint("email", name="uq_users_email"),
-        # SSO identity join key. Local rows leave external_id NULL and
-        # NULLs are distinct under a UNIQUE constraint, so this only
-        # constrains provisioned SSO subjects (one row per
-        # provider+subject) without affecting local accounts.
-        UniqueConstraint(
-            "auth_provider", "external_id",
-            name="uq_users_provider_external_id",
-        ),
         Index("idx_users_status_created", "status", "created_at"),
         CheckConstraint(
             "status IN ('pending', 'active', 'suspended')",
             name="ck_users_status",
         ),
-        CheckConstraint(
-            "auth_provider IN ('local', 'oidc', 'saml2', 'custom')",
-            name="ck_users_auth_provider",
-        ),
     )
 
     def __repr__(self) -> str:
         return f"<User id={self.id!r} email={self.email!r} status={self.status!r}>"
+
+
+# ------------------------------------------------------------------ #
+# idp_providers  (DB-stored SSO IdP configuration; Phase 3)            #
+# ------------------------------------------------------------------ #
+
+
+class IdpProviderORM(Base):
+    """One row per configured SSO Identity Provider.
+
+    Multiple rows of the same ``kind`` are allowed — e.g. ``oidc/entra``
+    + ``oidc/auth0-contractors`` is a legitimate setup. The runtime
+    factory in ``auth_service.providers.registry`` instantiates a
+    provider object per row, caching by ``id``.
+
+    ``settings`` is a Fernet-encrypted JSON blob (the same envelope used
+    by ``connection_repo._get_fernet``) carrying every kind-specific
+    detail including secrets. ``claim_mapping`` is plaintext JSON — it
+    contains no secrets and is read by the SSO admin UI for editing.
+    """
+    __tablename__ = "idp_providers"
+
+    id = Column(Text, primary_key=True, default=lambda: f"idp_{uuid.uuid4().hex[:12]}")
+    slug = Column(Text, nullable=False)                     # URL-safe id used in /auth/{slug}/login
+    display_name = Column(Text, nullable=False)             # 'Corporate Entra ID'
+    kind = Column(Text, nullable=False)                     # oidc | saml2 | custom
+    enabled = Column(Boolean, nullable=False, default=True)
+    priority = Column(Integer, nullable=False, default=100)
+    # Fernet-encrypted JSON of kind-specific settings. The repo wraps
+    # the bytes; never read this column directly outside the repo.
+    settings = Column(Text, nullable=False, default="{}")
+    # Plaintext JSON: which IdP claim populates which internal field.
+    # Empty dict means "use the kind's defaults" (see claim_mapper).
+    claim_mapping = Column(Text, nullable=False, default="{}")
+    linking_policy = Column(Text, nullable=False, default="strict")
+    button_label = Column(Text, nullable=True)
+    button_icon = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    created_by = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    updated_by = Column(Text, nullable=True)
+
+    identities = relationship("UserIdentityORM", back_populates="provider")
+
+    __table_args__ = (
+        UniqueConstraint("slug", name="uq_idp_providers_slug"),
+        Index("idx_idp_providers_kind_enabled", "kind", "enabled"),
+        CheckConstraint(
+            "kind IN ('oidc', 'saml2', 'custom')",
+            name="ck_idp_providers_kind",
+        ),
+        CheckConstraint(
+            "linking_policy IN ('strict', 'allow_verified', 'manual_only', 'disabled')",
+            name="ck_idp_providers_linking_policy",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<IdpProvider id={self.id!r} slug={self.slug!r} kind={self.kind!r}>"
+
+
+# ------------------------------------------------------------------ #
+# user_identities  (multi-identity per user; Phase 3)                  #
+# ------------------------------------------------------------------ #
+
+
+class UserIdentityORM(Base):
+    """SSO subject linked to a user. Replaces the Phase-2
+    ``(users.auth_provider, users.external_id)`` columns with a real
+    1:N relationship so one user can have local + Entra + Auth0 at
+    the same time.
+
+    The (provider_id, external_id) pair is the durable identity key —
+    e.g. for OIDC this is ``(provider, sub)``. UNIQUE keeps the JIT
+    find-or-provision flow race-safe even across pods.
+
+    ``UNIQUE(user_id, provider_id)`` prevents a single user from being
+    linked twice to the same IdP (which would be ambiguous on
+    refresh).
+    """
+    __tablename__ = "user_identities"
+
+    id = Column(Text, primary_key=True, default=lambda: f"uid_{uuid.uuid4().hex[:12]}")
+    user_id = Column(
+        Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+    )
+    provider_id = Column(
+        Text, ForeignKey("idp_providers.id", ondelete="RESTRICT"), nullable=False,
+    )
+    external_id = Column(Text, nullable=False)
+    # Snapshot of the email the IdP asserted at link time. Useful for
+    # audit ("this identity was linked under alice@example.com even
+    # though the IdP now says alice@corp.example") and for the admin
+    # identities tab.
+    email_at_link = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    last_login_at = Column(Text, nullable=True)
+    # Most recent raw_claims / groups for THIS identity. Phase 2
+    # snapshot logic (``set_user_idp_metadata``) still writes
+    # ``users.metadata_.idp_groups`` for the latest-login provider so
+    # the existing reconciler path keeps working unchanged.
+    metadata_ = Column("metadata", Text, nullable=True, default="{}")
+
+    user = relationship("UserORM", back_populates="identities")
+    provider = relationship("IdpProviderORM", back_populates="identities")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_id", "external_id",
+            name="uq_user_identities_provider_subject",
+        ),
+        UniqueConstraint(
+            "user_id", "provider_id",
+            name="uq_user_identities_user_provider",
+        ),
+        Index("idx_user_identities_user", "user_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<UserIdentity id={self.id!r} user={self.user_id!r} "
+            f"provider={self.provider_id!r}>"
+        )
 
 
 # ------------------------------------------------------------------ #
@@ -1111,6 +1230,10 @@ class GroupORM(Base):
     # These two columns are placeholders for Phase 2 SSO sync.
     source = Column(Text, nullable=False, default="local")
     external_id = Column(Text, nullable=True)
+    # Phase 3: groups flagged ``is_protected`` cannot be the target of
+    # an IdP group->group mapping. Set on groups that confer elevated
+    # access so admin-only flows remain the only way to add members.
+    is_protected = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)
@@ -1153,6 +1276,11 @@ class GroupMemberORM(Base):
     )
     added_at = Column(Text, nullable=False, default=_now)
     added_by = Column(Text, nullable=True)
+    # Phase 3: provenance, mirroring ``role_bindings.source``. The
+    # SSO group-mapping reconciler only ever adds/removes rows where
+    # source='sso'; manually-added members stay untouched even when
+    # the IdP later stops asserting the group.
+    source = Column(Text, nullable=False, default="local")
 
     group = relationship("GroupORM", back_populates="members")
 
@@ -1160,6 +1288,10 @@ class GroupMemberORM(Base):
         # Hot path: "what groups is this user in?" — used by the
         # PermissionResolver on every login.
         Index("idx_group_members_user", "user_id"),
+        CheckConstraint(
+            "source IN ('local', 'sso')",
+            name="ck_group_members_source",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -1172,47 +1304,95 @@ class GroupMemberORM(Base):
 
 
 class IdpGroupRoleMappingORM(Base):
-    """Maps an IdP group name to an automatic RoleBinding.
+    """Maps an IdP group name to either an automatic RoleBinding or
+    membership in an internal Group.
 
-    Populated by an admin (``POST /admin/idp-group-mappings``) and read
-    on every SSO login by the reconciler in
-    ``permission_service.reconcile_sso_role_bindings``. For each mapping
-    whose ``idp_group`` is in the IdP-asserted group list, a
-    ``RoleBindingORM`` row (``source='sso'``) is ensured; for
-    ``source='sso'`` bindings whose mapped group is *not* in the
-    current group set, the binding is soft-revoked (``expires_at=now``).
+    Phase 2 supported only RoleBinding targets. Phase 3 adds:
+      * ``target_type``: ``'role_binding'`` (default; Phase 2 behaviour)
+        OR ``'group_membership'``: maps IdP group X -> membership in
+        internal Group Y so internal admins manage group composition
+        once and permission inheritance flows through.
+      * ``provider_id``: scope the mapping to one IdP. NULL means
+        "matches groups from any IdP" (Phase 2 semantics). Most
+        enterprise setups want the explicit per-IdP form so a SAML
+        IdP's ``engineering`` and an OIDC IdP's ``engineering`` don't
+        collide.
 
-    Hard guardrail: ``role_name='system:admin'`` is refused at write
-    time AND skipped at apply time. Admin grants stay manual.
+    Validation happens in the repo (``role_repo.role_is_bindable_in_scope``
+    + group existence checks) — DB CHECK only enforces shape.
+
+    Hard guardrails (enforced in the repo):
+      * ``role_name='system:admin'`` is forever refused — admin grants
+        stay manual.
+      * ``target_type='group_membership'`` cannot target a Group with
+        ``is_protected=true``.
     """
     __tablename__ = "idp_group_role_mappings"
 
     id = Column(Text, primary_key=True, default=lambda: f"igrm_{uuid.uuid4().hex[:12]}")
+    # Optional scoping to a specific IdP. NULL = applies to any IdP's
+    # group set (Phase 2 fallback). ON DELETE CASCADE so removing an
+    # IdP automatically cleans up the mappings that referenced it.
+    provider_id = Column(
+        Text, ForeignKey("idp_providers.id", ondelete="CASCADE"), nullable=True,
+    )
     idp_group = Column(Text, nullable=False)
-    scope_type = Column(Text, nullable=False)   # global | workspace
-    scope_id = Column(Text, nullable=True)      # NULL for global
-    role_name = Column(Text, nullable=False)
+    target_type = Column(Text, nullable=False, default="role_binding")
+    # role_binding target columns (NULL for group_membership):
+    scope_type = Column(Text, nullable=True)            # global | workspace
+    scope_id = Column(Text, nullable=True)              # NULL for global
+    role_name = Column(Text, nullable=True)
+    # group_membership target columns (NULL for role_binding):
+    target_group_id = Column(
+        Text, ForeignKey("groups.id", ondelete="CASCADE"), nullable=True,
+    )
     created_at = Column(Text, nullable=False, default=_now)
     created_by = Column(Text, nullable=True)    # user_id who created the mapping
 
     __table_args__ = (
+        # The role_binding target uniqueness key, with provider_id as the
+        # outermost scope. Two providers can independently map their
+        # respective ``engineering`` groups to the same role+scope
+        # without colliding.
         UniqueConstraint(
-            "idp_group", "scope_type", "scope_id", "role_name",
-            name="uq_idp_group_role_mapping",
+            "provider_id", "idp_group", "scope_type", "scope_id", "role_name",
+            name="uq_idp_group_role_mapping_role",
+        ),
+        # The group_membership target uniqueness key.
+        UniqueConstraint(
+            "provider_id", "idp_group", "target_group_id",
+            name="uq_idp_group_role_mapping_group_membership",
         ),
         Index("idx_idp_group_role_mapping_group", "idp_group"),
+        Index("idx_idp_group_role_mapping_provider_group", "provider_id", "idp_group"),
         CheckConstraint(
-            "scope_type IN ('global', 'workspace')",
-            name="ck_idp_group_role_mappings_scope_type",
+            "target_type IN ('role_binding', 'group_membership')",
+            name="ck_idp_group_role_mappings_target_type",
         ),
         CheckConstraint(
-            "(scope_type = 'global' AND scope_id IS NULL) "
-            "OR (scope_type = 'workspace' AND scope_id IS NOT NULL)",
-            name="ck_idp_group_role_mappings_scope_consistency",
+            # role_binding target requires scope + role; group_membership
+            # target requires target_group_id and forbids role columns.
+            "(target_type = 'role_binding' "
+            " AND role_name IS NOT NULL "
+            " AND scope_type IN ('global', 'workspace') "
+            " AND ((scope_type = 'global' AND scope_id IS NULL) "
+            "      OR (scope_type = 'workspace' AND scope_id IS NOT NULL)) "
+            " AND target_group_id IS NULL) "
+            "OR (target_type = 'group_membership' "
+            "    AND target_group_id IS NOT NULL "
+            "    AND role_name IS NULL "
+            "    AND scope_type IS NULL "
+            "    AND scope_id IS NULL)",
+            name="ck_idp_group_role_mappings_target_shape",
         ),
     )
 
     def __repr__(self) -> str:
+        if self.target_type == "group_membership":
+            return (
+                f"<IdpGroupRoleMapping id={self.id!r} "
+                f"group={self.idp_group!r} -> group={self.target_group_id!r}>"
+            )
         return (
             f"<IdpGroupRoleMapping id={self.id!r} "
             f"group={self.idp_group!r} role={self.role_name!r} "

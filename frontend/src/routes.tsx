@@ -19,11 +19,13 @@ const AdminUsers = lazy(() => import('@/components/admin/AdminUsers').then(m => 
 const AdminGroups = lazy(() => import('@/components/admin/AdminGroups').then(m => ({ default: m.AdminGroups })))
 const AdminPermissions = lazy(() => import('@/components/admin/AdminPermissions').then(m => ({ default: m.AdminPermissions })))
 const AdminAnnouncements = lazy(() => import('@/components/admin/AdminAnnouncements/index').then(m => ({ default: m.AdminAnnouncements })))
+const AdminSso = lazy(() => import('@/components/admin/AdminSso').then(m => ({ default: m.AdminSso })))
 const IngestionPage = lazy(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
 const WorkspaceDetailPage = lazy(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
 const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 const MyAccessPage = lazy(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
+const MyIdentitiesPage = lazy(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
 
 // Auth pages (unauthenticated)
 const LoginPage = lazy(() => import('@/components/auth/LoginPage').then(m => ({ default: m.LoginPage })))
@@ -89,6 +91,8 @@ export const router = createBrowserRouter([
 
       // Self-service "what can I do?" page — every authenticated user.
       { path: 'my/access', element: <Lazy><MyAccessPage /></Lazy> },
+      // SSO identity management — link/unlink IdP connections.
+      { path: 'me/identities', element: <Lazy><MyIdentitiesPage /></Lazy> },
 
       // Schema/Semantic Layer pages — independent of workspace context.
       // They manage global ontology resources and read data source context
@@ -121,6 +125,7 @@ export const router = createBrowserRouter([
           { path: 'groups', element: <Lazy><AdminGroups /></Lazy> },
           { path: 'permissions', element: <Lazy><AdminPermissions /></Lazy> },
           { path: 'announcements', element: <Lazy><AdminAnnouncements /></Lazy> },
+          { path: 'sso', element: <Lazy><AdminSso /></Lazy> },
         ],
       },
       { path: '*', element: <NotFoundPage /> },

@@ -43,6 +43,40 @@ export interface AuthUser {
     authProvider: string
     createdAt: string
     updatedAt: string
+    /** IdP-mapped extras (department, employee_id, …). Phase 3. */
+    attributes?: Record<string, unknown>
+}
+
+/** Public summary of one configured SSO provider — returned by
+ *  ``GET /auth/providers``. No secrets. */
+export interface SsoProviderSummary {
+    id: string
+    slug: string
+    displayName: string
+    kind: string                 // 'oidc' | 'saml2' | 'custom'
+    priority: number
+    buttonLabel?: string | null
+    buttonIcon?: string | null
+}
+
+/** One linked identity on the current user. */
+export interface UserIdentity {
+    id: string
+    provider: {
+        id: string
+        slug: string
+        displayName: string
+        kind: string
+    }
+    externalId: string
+    emailAtLink?: string | null
+    createdAt: string
+    lastLoginAt?: string | null
+}
+
+export interface IdentitiesResponse {
+    passwordSet: boolean
+    identities: UserIdentity[]
 }
 
 /** Backwards-compat alias for components that still import this name. */
@@ -149,6 +183,48 @@ export const authService = {
     verifyInvite(token: string): Promise<{ valid: boolean; role: string | null }> {
         return request<{ valid: boolean; role: string | null }>(
             `${AUTH_API}/verify-invite?token=${encodeURIComponent(token)}`,
+        )
+    },
+
+    // ── SSO discovery + self-service identities (Phase 3) ───────────
+
+    /** Public catalog of enabled SSO providers. Drives the login page
+     *  buttons. Returns ``[]`` when the registry is unconfigured. */
+    listProviders(): Promise<SsoProviderSummary[]> {
+        return request<SsoProviderSummary[]>(`${AUTH_API}/providers`)
+    },
+
+    /** Logged-in user's linked SSO identities + whether they have a
+     *  password set. Drives ``/me/identities`` page. */
+    listMyIdentities(): Promise<IdentitiesResponse> {
+        return request<IdentitiesResponse>('/api/v1/me/identities')
+    },
+
+    /** Self-service unlink. Server returns 409 when this would leave
+     *  the user without any authenticator. */
+    unlinkMyIdentity(identityId: string): Promise<void> {
+        return request<void>(
+            `/api/v1/me/identities/${encodeURIComponent(identityId)}`,
+            { method: 'DELETE' },
+        )
+    },
+
+    /** Begin a self-service link flow. Returns the IdP login URL to
+     *  navigate to; the cookie set on this call carries the link-
+     *  intent so the SSO callback binds the new identity to the
+     *  current user instead of provisioning a fresh one. */
+    startIdentityLink(providerSlug: string): Promise<{
+        loginUrl: string
+        providerSlug: string
+        providerKind: string
+    }> {
+        return request<{
+            loginUrl: string
+            providerSlug: string
+            providerKind: string
+        }>(
+            `/api/v1/me/identities/link/${encodeURIComponent(providerSlug)}/start`,
+            { method: 'POST' },
         )
     },
 }

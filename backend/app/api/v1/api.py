@@ -9,6 +9,9 @@ from .endpoints import (
     groups, workspace_members, view_grants, role_bindings,
     permissions_admin, access_requests, rbac_search,
     admin_idp_groups,
+    admin_idp_providers,
+    admin_user_identities,
+    me_identities,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -130,13 +133,34 @@ api_router.include_router(
     tags=["admin:rbac:search"],
 )
 
-# RBAC Phase 5 — IdP group -> RoleBinding mapping. Admin manages the
-# mapping table; the SSO login path applies it via the reconciler in
-# permission_service.reconcile_sso_role_bindings.
+# RBAC Phase 5 — IdP group -> RoleBinding / Group membership mapping.
+# Admin manages the mapping table; the SSO login + refresh paths
+# apply it via permission_service.reconcile_sso_targets.
 api_router.include_router(
     admin_idp_groups.router,
     prefix="/admin/idp-group-mappings",
     tags=["admin:rbac:idp-groups"],
+)
+
+# SSO Phase 3 — IdP provider CRUD (multi-IdP DB-stored config).
+api_router.include_router(
+    admin_idp_providers.router,
+    prefix="/admin/idp-providers",
+    tags=["admin:sso:providers"],
+)
+
+# SSO Phase 3 — admin user-identity link/unlink.
+api_router.include_router(
+    admin_user_identities.router,
+    prefix="/admin/users/{user_id}/identities",
+    tags=["admin:sso:identities"],
+)
+
+# SSO Phase 3 — self-service identity management.
+api_router.include_router(
+    me_identities.router,
+    prefix="/me/identities",
+    tags=["me:identities"],
 )
 
 # ── Public announcements (no auth — all users see banners) ────────────

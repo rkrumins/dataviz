@@ -49,7 +49,6 @@ _NON_ADMIN = User(
     last_name="Admin",
     role="user",
     status="active",
-    auth_provider="local",
     created_at="2024-01-01T00:00:00Z",
     updated_at="2024-01-01T00:00:00Z",
 )

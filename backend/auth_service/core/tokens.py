@@ -30,6 +30,7 @@ _INVITE_AUDIENCE = f"{JWT_AUDIENCE}:invite"
 _OIDC_STATE_AUDIENCE = f"{JWT_AUDIENCE}:oidc_state"
 _SAML_STATE_AUDIENCE = f"{JWT_AUDIENCE}:saml_state"
 _MOCK_IDENTITY_AUDIENCE = f"{JWT_AUDIENCE}:mock_identity"
+_LINK_INTENT_AUDIENCE = f"{JWT_AUDIENCE}:link_intent"
 
 
 # ── Access tokens ────────────────────────────────────────────────────
@@ -331,4 +332,43 @@ def decode_mock_identity_token(token: str) -> dict:
     payload = envelope.get("payload")
     if not isinstance(payload, dict):
         raise jwt.InvalidTokenError("Mock identity payload missing")
+    return payload
+
+
+# ── Link-intent tokens (self-service "link this IdP to me") ──────────
+#
+# A logged-in user can ask to attach a new SSO identity to their
+# current account. We need to remember "who initiated this flow" and
+# "which provider they're linking to" across the IdP round-trip. The
+# signed cookie ``nx_link_intent`` carries those two ids; the SSO
+# callback checks it before deciding whether to provision a new user
+# or attach the verified identity to ``user_id``.
+
+
+def create_link_intent_token(
+    *, user_id: str, provider_id: str, expires_in_minutes: int = 10,
+) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "purpose": "link_intent",
+        "user_id": user_id,
+        "provider_id": provider_id,
+        "iss": JWT_ISSUER,
+        "aud": _LINK_INTENT_AUDIENCE,
+        "iat": now,
+        "exp": now + timedelta(minutes=expires_in_minutes),
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def decode_link_intent_token(token: str) -> dict:
+    payload = jwt.decode(
+        token,
+        JWT_SECRET_KEY,
+        algorithms=[JWT_ALGORITHM],
+        issuer=JWT_ISSUER,
+        audience=_LINK_INTENT_AUDIENCE,
+    )
+    if payload.get("purpose") != "link_intent":
+        raise jwt.InvalidTokenError("Not a link-intent token")
     return payload
