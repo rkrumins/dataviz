@@ -137,6 +137,39 @@ async def link_user_to_provider(
     return user
 
 
+async def set_user_idp_metadata(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    idp_groups: list[str],
+    raw_claims: Optional[dict] = None,
+) -> Optional[UserORM]:
+    """Persist the latest IdP-asserted groups (and optionally the raw
+    claims) into ``users.metadata_``. Called from ``complete_sso_login``
+    on every SSO login so the admin UI / ``/me`` can surface the most
+    recent group set.
+
+    The metadata column is a free-form JSON document so we merge rather
+    than overwrite — other keys (prefs, etc.) survive."""
+    user = await get_user_by_id(session, user_id)
+    if user is None:
+        return None
+    try:
+        meta = json.loads(user.metadata_ or "{}")
+        if not isinstance(meta, dict):
+            meta = {}
+    except (ValueError, TypeError):
+        meta = {}
+    meta["idp_groups"] = list(idp_groups)
+    if raw_claims is not None:
+        meta["idp_last_claims"] = raw_claims
+    meta["idp_last_login_at"] = _now()
+    user.metadata_ = json.dumps(meta, default=str)
+    user.updated_at = _now()
+    await session.flush()
+    return user
+
+
 async def list_users(
     session: AsyncSession,
     status: Optional[str] = None,

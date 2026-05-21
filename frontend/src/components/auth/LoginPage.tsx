@@ -5,6 +5,48 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { cn } from '@/lib/utils'
 
+
+// SSO is initiated by a top-level GET so the IdP redirect flow works
+// (a fetch would lose the cookie + redirect chain). The frontend has no
+// reliable way to know which providers are configured without an extra
+// /auth/providers endpoint, so we render all three buttons; the
+// backend returns 404 for any that isn't enabled, which surfaces here
+// as a redirect to /login?sso_error=1 on the way back.
+function SsoButtons() {
+    const customEnabled =
+        (import.meta.env.VITE_AUTH_CUSTOM_PROVIDER_ENABLED ?? '')
+            .toString()
+            .toLowerCase() === 'true'
+    const next = encodeURIComponent('/dashboard')
+    return (
+        <div className="mt-6 pt-6 border-t border-white/10 space-y-3">
+            <p className="text-[11px] text-center uppercase tracking-widest text-ink-muted">
+                Or sign in with
+            </p>
+            <a
+                href={`/api/v1/auth/oidc/login?next=${next}`}
+                className="block w-full text-center py-2.5 rounded-xl border border-white/20 text-sm font-medium text-ink hover:bg-white/5 transition-colors"
+            >
+                OpenID Connect (Entra ID / Auth0 / Ping)
+            </a>
+            <a
+                href={`/api/v1/auth/saml/login?next=${next}`}
+                className="block w-full text-center py-2.5 rounded-xl border border-white/20 text-sm font-medium text-ink hover:bg-white/5 transition-colors"
+            >
+                SAML 2.0 (ADFS / Okta / OneLogin)
+            </a>
+            {customEnabled && (
+                <a
+                    href={`/dev-login?next=${next}`}
+                    className="block w-full text-center py-2.5 rounded-xl border border-yellow-500/40 text-sm font-medium text-yellow-300 hover:bg-yellow-500/5 transition-colors"
+                >
+                    Dev Login (mock IdP) — non-production
+                </a>
+            )}
+        </div>
+    )
+}
+
 export function LoginPage() {
     const [email, setEmail] = useState('')
     const [password, setPassword] = useState('')
@@ -167,6 +209,14 @@ export function LoginPage() {
                             )}
                         </button>
                     </form>
+
+                    {/* ── SSO ──────────────────────────────────────────── */}
+                    {/* Each link is a top-level GET so the IdP redirect
+                        flow works. The backend returns 404 for any
+                        provider that isn't configured, and we render
+                        the buttons unconditionally because the user has
+                        the most context about which their org uses. */}
+                    <SsoButtons />
 
                     {/* Footer Info */}
                     <div className="mt-8 text-center space-y-3">

@@ -299,6 +299,51 @@ async def lifespan(_app: FastAPI):
         _oidc_settings.issuer or "<unset>",
     )
 
+    # Phase 2.A: SAML 2.0. Same pattern — always register so the
+    # /auth/saml/* routes can 404 cleanly when unconfigured. The
+    # provider self-reports ``enabled`` from env. ``SAML_AVAILABLE``
+    # gates the registration: non-viz Dockerfiles may not have the
+    # python3-saml / libxmlsec1 system deps, in which case the import
+    # failed and the import side returned ``None``s instead.
+    from backend.auth_service.providers import (
+        SAML_AVAILABLE,
+        SamlProvider,
+        load_saml_settings,
+    )
+    if SAML_AVAILABLE and SamlProvider is not None and load_saml_settings is not None:
+        _saml_settings = load_saml_settings()
+        register_provider("saml2", SamlProvider(_saml_settings))
+        logger.info(
+            "SAML provider registered (enabled=%s, idp_entity_id=%s)",
+            _saml_settings.enabled,
+            _saml_settings.idp_entity_id or "<unset>",
+        )
+    else:
+        logger.info(
+            "SAML provider NOT registered (python3-saml unavailable; "
+            "the /auth/saml/* routes will 404).",
+        )
+
+    # Phase 2.B: Custom IdP (dev/demo mock). Registered ONLY when the
+    # feature flag is on AND env is non-prod. The startup guard in
+    # core/config.py refuses to start if the flag is true in prod.
+    from backend.auth_service.core.config import (
+        AUTH_CUSTOM_PROVIDER_ENABLED, ENV,
+    )
+    if AUTH_CUSTOM_PROVIDER_ENABLED:
+        from backend.auth_service.providers import CustomIdentityProvider
+        register_provider("custom", CustomIdentityProvider())
+        logger.warning(
+            "Custom IdP REGISTERED (ENV=%s). The /auth/custom/* routes "
+            "trust a self-signed identity cookie — never enable this in "
+            "production.",
+            ENV,
+        )
+    else:
+        logger.info(
+            "Custom IdP NOT registered (AUTH_CUSTOM_PROVIDER_ENABLED=false).",
+        )
+
     async def _emit_user_event(session, event_type: str, payload: dict) -> None:
         await user_repo.create_outbox_event(session, event_type=event_type, payload=payload)
 
@@ -323,12 +368,28 @@ async def lifespan(_app: FastAPI):
             )
         return claims.to_jwt_dict()
 
+    # Phase 2.D: inject the SSO group->role reconciler. The auth
+    # service must NOT import backend.app directly (isolation test
+    # enforces this) — we pass it as a callable here.
+    async def _reconcile_sso_bindings(session, *, user_id: str, idp_groups: list[str]) -> dict:
+        return await permission_service.reconcile_sso_role_bindings(
+            session, user_id=user_id, idp_groups=idp_groups,
+        )
+
+    # Phase 2.E: inject the session-killer (RevocationService). Called
+    # by the auth service when the SSO daily ceiling forces re-auth so
+    # every live access token across all tabs bounces to the IdP.
+    async def _kill_user_sessions(user_id: str) -> None:
+        await get_revocation_service().revoke_all_user_sessions(user_id)
+
     _app.state.identity_service = LocalIdentityService(
         session_factory=get_async_session,
         user_repo=user_repo,
         refresh_store_factory=make_refresh_store,
         outbox_emit=_emit_user_event,
         claims_resolver=_resolve_claims,
+        sso_role_reconciler=_reconcile_sso_bindings,
+        session_killer=_kill_user_sessions,
     )
     logger.info("Auth service initialised (provider=local, rbac_claims=on)")
 

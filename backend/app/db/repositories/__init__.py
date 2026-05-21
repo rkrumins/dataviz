@@ -13,6 +13,7 @@ from . import (
     grant_repo,
     role_repo,
     access_request_repo,
+    idp_group_mapping_repo,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "grant_repo",
     "role_repo",
     "access_request_repo",
+    "idp_group_mapping_repo",
 ]

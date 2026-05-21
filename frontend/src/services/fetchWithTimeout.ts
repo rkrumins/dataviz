@@ -96,7 +96,37 @@ async function tryRefresh(): Promise<boolean> {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
       })
-      return res.ok
+      if (res.ok) return true
+
+      // SSO daily ceiling: the backend signals "session expired at the
+      // IdP, follow login_url to re-authenticate" via a structured 401
+      // body. Navigate transparently — the user shouldn't have to click
+      // anything; they just see one extra IdP redirect that completes
+      // automatically when the IdP session is still warm.
+      if (res.status === 401) {
+        try {
+          const body = (await res.clone().json()) as {
+            detail?: { error?: string; login_url?: string }
+          }
+          const detail = body?.detail
+          if (
+            detail?.error === 'sso_reauth_required'
+            && typeof detail.login_url === 'string'
+            && detail.login_url.startsWith('/')
+          ) {
+            if (typeof window !== 'undefined') {
+              window.location.href = detail.login_url
+            }
+            // Tell callers refresh "succeeded" in the sense that we're
+            // about to navigate; suppresses the session-lost event so
+            // we don't flash the /login screen during the bounce.
+            return true
+          }
+        } catch {
+          // Body wasn't the structured envelope; fall through to false.
+        }
+      }
+      return false
     } catch {
       return false
     } finally {

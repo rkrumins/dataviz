@@ -30,16 +30,26 @@ actual three-layer view evaluator lives in
 """
 from __future__ import annotations
 
+import logging
 import secrets
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.models import RoleBindingORM
 from backend.app.db.repositories import (
     binding_repo,
+    idp_group_mapping_repo,
     permission_repo,
     user_repo,
 )
+from backend.app.db.repositories.idp_group_mapping_repo import (
+    FORBIDDEN_AUTO_ROLE,
+)
+
+logger = logging.getLogger(__name__)
 
 
 # Permission ids that the wildcard collapser knows about. Any permission
@@ -288,10 +298,131 @@ async def simulate_for_user(
     return global_set, ws_sets
 
 
+# ── SSO group -> role binding reconciliation ─────────────────────────
+
+
+async def reconcile_sso_role_bindings(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    idp_groups: list[str],
+) -> dict:
+    """Reconcile the user's ``source='sso'`` RoleBindings to match what
+    the IdP currently asserts.
+
+    Algorithm (idempotent; called on every SSO login):
+
+      1. Look up every ``idp_group_role_mappings`` row whose
+         ``idp_group`` is in ``idp_groups``. Skip any mapping that
+         points to the forbidden auto-role (``system:admin``) — a
+         loud warning is logged so the operator knows the row is
+         inert.
+      2. Compute the target set of ``(scope_type, scope_id, role_name)``
+         tuples.
+      3. For existing direct ``source='sso'`` bindings on this user:
+           * present in target -> reactivate (clear ``expires_at``).
+           * absent  in target -> soft-revoke (``expires_at=now()``).
+      4. For target tuples without an existing binding -> insert with
+         ``source='sso'``.
+
+    Returns a small dict of counts for observability /audit.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    mappings = await idp_group_mapping_repo.list_by_groups(session, idp_groups)
+    target_keys: set[tuple[str, str | None, str]] = set()
+    for m in mappings:
+        if m.role_name == FORBIDDEN_AUTO_ROLE:
+            logger.warning(
+                "Refusing to auto-grant %s from IdP group %s (mapping id=%s)",
+                FORBIDDEN_AUTO_ROLE, m.idp_group, m.id,
+            )
+            continue
+        target_keys.add((m.scope_type, m.scope_id, m.role_name))
+
+    existing = await binding_repo.list_for_subject(
+        session, subject_type="user", subject_id=user_id,
+    )
+    # Snapshot keys of existing sso-sourced bindings.
+    existing_sso = {
+        (b.scope_type, b.scope_id, b.role_name): b
+        for b in existing if getattr(b, "source", "local") == "sso"
+    }
+
+    revoked = 0
+    reactivated = 0
+    created = 0
+
+    # 3a. Soft-revoke bindings the IdP no longer asserts.
+    to_expire = [b for k, b in existing_sso.items() if k not in target_keys and b.expires_at is None]
+    if to_expire:
+        ids = [b.id for b in to_expire]
+        await session.execute(
+            update(RoleBindingORM)
+            .where(RoleBindingORM.id.in_(ids))
+            .values(expires_at=now_iso)
+        )
+        revoked = len(to_expire)
+
+    # 3b. Reactivate bindings the IdP asserts again.
+    to_reactivate = [
+        b for k, b in existing_sso.items()
+        if k in target_keys and b.expires_at is not None
+    ]
+    if to_reactivate:
+        ids = [b.id for b in to_reactivate]
+        await session.execute(
+            update(RoleBindingORM)
+            .where(RoleBindingORM.id.in_(ids))
+            .values(expires_at=None)
+        )
+        reactivated = len(to_reactivate)
+
+    # 4. Create missing target bindings.
+    for scope_type, scope_id, role_name in target_keys:
+        if (scope_type, scope_id, role_name) in existing_sso:
+            continue
+        # Skip when an admin-granted (source='local') binding already
+        # exists for the same (scope, role) — we don't need a duplicate
+        # row, and the unique constraint would reject it anyway.
+        already = any(
+            b.scope_type == scope_type
+            and b.scope_id == scope_id
+            and b.role_name == role_name
+            for b in existing
+        )
+        if already:
+            continue
+        new_binding = RoleBindingORM(
+            subject_type="user",
+            subject_id=user_id,
+            role_name=role_name,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            granted_by=None,
+            source="sso",
+        )
+        session.add(new_binding)
+        created += 1
+
+    if created or revoked or reactivated:
+        await session.flush()
+
+    return {
+        "user_id": user_id,
+        "groups": list(idp_groups),
+        "mappings_matched": len(mappings),
+        "created": created,
+        "revoked": revoked,
+        "reactivated": reactivated,
+    }
+
+
 __all__ = [
     "PermissionClaims",
     "resolve",
     "new_session_id",
     "has_permission",
     "simulate_for_user",
+    "reconcile_sso_role_bindings",
 ]

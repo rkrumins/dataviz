@@ -24,6 +24,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libffi-dev libpq-dev curl \
+        libxml2-dev libxmlsec1-dev libxmlsec1-openssl xmlsec1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt /app/requirements.txt

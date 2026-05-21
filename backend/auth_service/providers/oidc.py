@@ -49,9 +49,51 @@ except ImportError:  # pragma: no cover - joserfc ships with Authlib 1.7+
 # which the retry loop resolves by force-refetching the key set.
 _VERIFY_ERRORS = (_AuthlibJoseError, _JoseRfcError, ValueError, KeyError)
 
+from ..core.config import OIDC_GROUPS_CLAIM
 from .base import ProviderCredentials, ProviderIdentity
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_groups(claims: dict) -> tuple[str, ...]:
+    """Read ``OIDC_GROUPS_CLAIM`` (default ``groups``) out of the claims.
+
+    IdPs serialise group lists in a handful of shapes; we tolerate the
+    common ones rather than locking in one and surprising operators:
+
+      * JSON array of strings  -> used as-is
+      * single string          -> wrapped in a 1-tuple
+      * comma-separated string -> split (Entra emits this in some token
+        configurations; Keycloak also does in a single-string mode)
+      * missing / null         -> empty
+    """
+    raw = claims.get(OIDC_GROUPS_CLAIM)
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        if "," in raw:
+            return tuple(g.strip() for g in raw.split(",") if g.strip())
+        return (raw.strip(),) if raw.strip() else ()
+    if isinstance(raw, (list, tuple)):
+        out: list[str] = []
+        for g in raw:
+            if isinstance(g, str) and g.strip():
+                out.append(g.strip())
+        return tuple(out)
+    return ()
+
+
+def _extract_auth_time(claims: dict) -> int | None:
+    """OIDC ``auth_time`` claim (epoch seconds). Many IdPs include it
+    only when ``max_age`` is requested or when the response_type
+    requires it; absence is tolerated."""
+    raw = claims.get("auth_time")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 # Bounded clock skew for ID-token exp/iat/nbf validation (seconds).
 _CLOCK_SKEW_LEEWAY = 60
@@ -175,12 +217,23 @@ class OidcProvider:
 
     # ── Leg 1: build the authorization redirect ──────────────────────
 
-    async def build_authorization(self, next_path: str) -> tuple[str, dict]:
+    async def build_authorization(
+        self, next_path: str, *, force_reauth: bool = False,
+    ) -> tuple[str, dict]:
         """Return (authorization_url, flow_state).
 
         ``flow_state`` carries the values the callback must verify
         (state, nonce, PKCE verifier, post-login next) — the route
         signs it into the ``nx_oidc`` cookie via ``core.tokens``.
+
+        ``force_reauth`` is set by the daily re-auth path (the
+        ``SsoReauthRequired`` 401 → /login?force=1 redirect) and:
+
+          * pins ``max_age=SSO_SESSION_MAX_AGE_SECONDS`` so the IdP
+            itself refuses to short-circuit when its own session is
+            older than our ceiling, and
+          * asks ``prompt=login`` so the IdP shows the login form even
+            when the IdP session is still warm.
         """
         if not self.enabled:
             raise OidcError("OIDC is not enabled/configured")
@@ -188,6 +241,9 @@ class OidcProvider:
         state = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(32)
         verifier, challenge = _pkce_pair()
+        # max_age is always sent so the IdP gates re-auth in step with us
+        # (the daily ceiling matches `SSO_SESSION_MAX_AGE_SECONDS`).
+        from ..core.config import SSO_SESSION_MAX_AGE_SECONDS  # local import: avoid cycle
         params = {
             "response_type": "code",
             "client_id": self._s.client_id,
@@ -197,7 +253,10 @@ class OidcProvider:
             "nonce": nonce,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
+            "max_age": str(SSO_SESSION_MAX_AGE_SECONDS),
         }
+        if force_reauth:
+            params["prompt"] = "login"
         auth_url = f"{meta['authorization_endpoint']}?{urlencode(params)}"
         flow_state = {
             "state": state,
@@ -258,6 +317,8 @@ class OidcProvider:
             # raw_claims feeds the linking policy (email_verified) and is
             # stored on the user row for audit.
             raw_claims=dict(claims),
+            groups=_extract_groups(dict(claims)),
+            auth_time=_extract_auth_time(dict(claims)),
         )
 
     async def _verify_id_token(

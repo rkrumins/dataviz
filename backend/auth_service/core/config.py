@@ -63,3 +63,41 @@ JWT_AUDIENCE: str = os.getenv("JWT_AUDIENCE", "nexus-lineage")
 COOKIE_SECURE: bool = os.getenv("AUTH_COOKIE_SECURE", "true").lower() != "false"
 COOKIE_DOMAIN: str | None = os.getenv("AUTH_COOKIE_DOMAIN") or None
 COOKIE_SAMESITE: str = os.getenv("AUTH_COOKIE_SAMESITE", "lax").lower()
+
+
+# ── SSO session lifetime (Phase 2.E) ─────────────────────────────────
+# Re-auth ceiling: SSO users must complete a fresh IdP authentication at
+# least once every ``SSO_SESSION_MAX_AGE_HOURS`` (default 24). Enforced
+# on every /refresh by comparing the provider-issued auth_time embedded
+# in the refresh JWT. Local password sessions are NOT subject to this
+# ceiling — their refresh cookie still lives ``JWT_REFRESH_EXPIRY_DAYS``.
+SSO_SESSION_MAX_AGE_HOURS: float = float(
+    os.getenv("SSO_SESSION_MAX_AGE_HOURS", "24")
+)
+SSO_SESSION_MAX_AGE_SECONDS: int = int(SSO_SESSION_MAX_AGE_HOURS * 3600)
+
+
+# ── Group claim extraction (Phase 2.C) ───────────────────────────────
+# Which OIDC claim / SAML attribute holds the user's group memberships.
+# Missing or empty -> empty list (no reconciliation happens).
+OIDC_GROUPS_CLAIM: str = os.getenv("OIDC_GROUPS_CLAIM", "groups")
+SAML_GROUPS_ATTRIBUTE: str = os.getenv("SAML_GROUPS_ATTRIBUTE", "groups")
+
+
+# ── Custom Identity Provider (Phase 2.B; dev/demo only) ──────────────
+# The Custom provider reads a JWT-signed cookie/header that simulates an
+# IdP returning AD-style attributes (first/last/email/external_id/claims/
+# groups). It is hard-gated by AUTH_CUSTOM_PROVIDER_ENABLED and is
+# refused at startup when ENV is a production-looking value.
+ENV: str = os.getenv("ENV", "dev").strip().lower()
+AUTH_CUSTOM_PROVIDER_ENABLED: bool = (
+    os.getenv("AUTH_CUSTOM_PROVIDER_ENABLED", "false").lower() == "true"
+)
+_PROD_ENV_VALUES = {"prod", "production"}
+if AUTH_CUSTOM_PROVIDER_ENABLED and ENV in _PROD_ENV_VALUES:
+    raise RuntimeError(
+        "AUTH_CUSTOM_PROVIDER_ENABLED=true is forbidden in production. "
+        "The Custom IdP is a dev/demo mock that trusts a self-signed "
+        "cookie payload; running it in prod would bypass real SSO. "
+        "Set AUTH_CUSTOM_PROVIDER_ENABLED=false or change ENV."
+    )

@@ -864,9 +864,9 @@ class UserORM(Base):
     first_name = Column(Text, nullable=False)
     last_name = Column(Text, nullable=False)
     status = Column(Text, nullable=False, default="pending")       # pending | active | suspended
-    auth_provider = Column(Text, nullable=False, default="local")  # local | saml2 | oidc
+    auth_provider = Column(Text, nullable=False, default="local")  # local | oidc | saml2 | custom
     external_id = Column(Text, nullable=True)                      # SSO subject
-    metadata_ = Column("metadata", Text, nullable=True, default="{}")  # JSON: SSO claims, prefs
+    metadata_ = Column("metadata", Text, nullable=True, default="{}")  # JSON: SSO claims, prefs, idp_groups
     reset_token_hash = Column(Text, nullable=True)
     reset_token_expires_at = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
@@ -892,7 +892,7 @@ class UserORM(Base):
             name="ck_users_status",
         ),
         CheckConstraint(
-            "auth_provider IN ('local', 'saml2', 'oidc')",
+            "auth_provider IN ('local', 'oidc', 'saml2', 'custom')",
             name="ck_users_auth_provider",
         ),
     )
@@ -1167,6 +1167,60 @@ class GroupMemberORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# idp_group_role_mappings  (IdP group -> RBAC role binding template)   #
+# ------------------------------------------------------------------ #
+
+
+class IdpGroupRoleMappingORM(Base):
+    """Maps an IdP group name to an automatic RoleBinding.
+
+    Populated by an admin (``POST /admin/idp-group-mappings``) and read
+    on every SSO login by the reconciler in
+    ``permission_service.reconcile_sso_role_bindings``. For each mapping
+    whose ``idp_group`` is in the IdP-asserted group list, a
+    ``RoleBindingORM`` row (``source='sso'``) is ensured; for
+    ``source='sso'`` bindings whose mapped group is *not* in the
+    current group set, the binding is soft-revoked (``expires_at=now``).
+
+    Hard guardrail: ``role_name='system:admin'`` is refused at write
+    time AND skipped at apply time. Admin grants stay manual.
+    """
+    __tablename__ = "idp_group_role_mappings"
+
+    id = Column(Text, primary_key=True, default=lambda: f"igrm_{uuid.uuid4().hex[:12]}")
+    idp_group = Column(Text, nullable=False)
+    scope_type = Column(Text, nullable=False)   # global | workspace
+    scope_id = Column(Text, nullable=True)      # NULL for global
+    role_name = Column(Text, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+    created_by = Column(Text, nullable=True)    # user_id who created the mapping
+
+    __table_args__ = (
+        UniqueConstraint(
+            "idp_group", "scope_type", "scope_id", "role_name",
+            name="uq_idp_group_role_mapping",
+        ),
+        Index("idx_idp_group_role_mapping_group", "idp_group"),
+        CheckConstraint(
+            "scope_type IN ('global', 'workspace')",
+            name="ck_idp_group_role_mappings_scope_type",
+        ),
+        CheckConstraint(
+            "(scope_type = 'global' AND scope_id IS NULL) "
+            "OR (scope_type = 'workspace' AND scope_id IS NOT NULL)",
+            name="ck_idp_group_role_mappings_scope_consistency",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<IdpGroupRoleMapping id={self.id!r} "
+            f"group={self.idp_group!r} role={self.role_name!r} "
+            f"{self.scope_type}={self.scope_id!r}>"
+        )
+
+
+# ------------------------------------------------------------------ #
 # role_bindings  (the central binding table)                           #
 # ------------------------------------------------------------------ #
 
@@ -1194,6 +1248,11 @@ class RoleBindingORM(Base):
     granted_by = Column(Text, nullable=True)      # user_id who created the binding
     # Time-bound bindings: schema-ready in Phase 1, not enforced until Phase 2.
     expires_at = Column(Text, nullable=True)
+    # Provenance: 'local' = admin-granted in-app; 'sso' = derived from
+    # an IdP group via ``idp_group_role_mappings`` at SSO login. The
+    # reconciler only ever touches ``source='sso'`` rows; admin-granted
+    # bindings remain authoritative and untouched.
+    source = Column(Text, nullable=False, default="local")
 
     __table_args__ = (
         UniqueConstraint(
@@ -1218,6 +1277,10 @@ class RoleBindingORM(Base):
             "(scope_type = 'global' AND scope_id IS NULL) "
             "OR (scope_type = 'workspace' AND scope_id IS NOT NULL)",
             name="ck_role_bindings_scope_consistency",
+        ),
+        CheckConstraint(
+            "source IN ('local', 'sso')",
+            name="ck_role_bindings_source",
         ),
         # Phase 3 dropped the role_name CHECK constraint — the canonical
         # ``roles`` table is now the source of truth and ``role_repo``

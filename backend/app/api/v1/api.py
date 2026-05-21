@@ -8,6 +8,7 @@ from .endpoints import (
     insights, me,
     groups, workspace_members, view_grants, role_bindings,
     permissions_admin, access_requests, rbac_search,
+    admin_idp_groups,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -127,6 +128,15 @@ api_router.include_router(
     rbac_search.router,
     prefix="/admin/rbac/search",
     tags=["admin:rbac:search"],
+)
+
+# RBAC Phase 5 — IdP group -> RoleBinding mapping. Admin manages the
+# mapping table; the SSO login path applies it via the reconciler in
+# permission_service.reconcile_sso_role_bindings.
+api_router.include_router(
+    admin_idp_groups.router,
+    prefix="/admin/idp-group-mappings",
+    tags=["admin:rbac:idp-groups"],
 )
 
 # ── Public announcements (no auth — all users see banners) ────────────

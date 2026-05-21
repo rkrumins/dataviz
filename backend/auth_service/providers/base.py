@@ -10,7 +10,7 @@ external IdP), confirm the identity and return enough information for the
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Protocol, runtime_checkable
 
 
@@ -19,8 +19,9 @@ class ProviderCredentials:
     """Credentials handed to a provider's ``authenticate`` call.
 
     For ``local``: email + password are populated.
-    For ``oidc`` / ``saml2``: ``external_token`` carries the ID token /
-    SAML response; ``email`` / ``password`` are unused.
+    For ``oidc`` / ``saml2`` / ``custom``: ``external_token`` carries
+    the ID token / SAML response / signed envelope; ``email`` /
+    ``password`` are unused.
     """
     email: Optional[str] = None
     password: Optional[str] = None
@@ -34,13 +35,26 @@ class ProviderIdentity:
     ``IdentityService`` uses this to find or provision the matching
     ``UserORM`` row (matched on ``provider`` + ``external_id`` for SSO,
     or on ``email`` for local).
+
+    ``groups`` is the list of IdP-asserted group memberships at this
+    login (OIDC ``groups`` claim, SAML group attribute, or custom
+    payload). The auth service persists it on the user row and feeds
+    it to the group->role reconciler so RoleBindings track what the
+    IdP currently says. Empty when the provider can't or won't supply
+    groups.
+
+    ``auth_time`` (epoch seconds) is the provider-attested moment the
+    user actually authenticated. Used to enforce the 24h SSO re-auth
+    ceiling on every /refresh. ``None`` for local password sessions.
     """
-    provider: str          # 'local' | 'oidc' | 'saml2' | ...
+    provider: str          # 'local' | 'oidc' | 'saml2' | 'custom' | ...
     external_id: str       # for SSO: the IdP-assigned subject; for local: the user_id
     email: str
     first_name: str
     last_name: str
     raw_claims: dict       # full IdP claims for audit / metadata storage
+    groups: tuple[str, ...] = field(default_factory=tuple)
+    auth_time: Optional[int] = None
 
 
 @runtime_checkable

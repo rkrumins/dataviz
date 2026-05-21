@@ -35,6 +35,9 @@ const DocsContent = lazy(() => import('@/components/docs/DocsContent').then(m =>
 const DocsFAQ = lazy(() => import('@/components/docs/DocsFAQ').then(m => ({ default: m.DocsFAQ })))
 const ForgotPasswordPage = lazy(() => import('@/components/auth/ForgotPasswordPage').then(m => ({ default: m.ForgotPasswordPage })))
 const ResetPasswordPage = lazy(() => import('@/components/auth/ResetPasswordPage').then(m => ({ default: m.ResetPasswordPage })))
+// Dev-only mock IdP login page. Gated by VITE_AUTH_CUSTOM_PROVIDER_ENABLED
+// inside the component (renders a "disabled" banner otherwise).
+const DevLogin = lazy(() => import('@/pages/DevLogin').then(m => ({ default: m.DevLogin })))
 
 // Thin suspense wrapper used for each lazy route — shows a centred spinner.
 function PageLoader() {
@@ -65,6 +68,8 @@ export const router = createBrowserRouter([
   },
   { path: '/forgot-password', element: <Lazy><ForgotPasswordPage /></Lazy> },
   { path: '/reset-password', element: <Lazy><ResetPasswordPage /></Lazy> },
+  // Dev/demo mock IdP — gated by VITE_AUTH_CUSTOM_PROVIDER_ENABLED.
+  { path: '/dev-login', element: <Lazy><DevLogin /></Lazy> },
 
   // Authenticated routes (guarded by AppLayout)
   {

@@ -32,6 +32,20 @@ OIDC_COOKIE_NAME = "nx_oidc"
 OIDC_COOKIE_PATH = "/api/v1/auth/"
 _OIDC_COOKIE_MAX_AGE = 600
 
+# Short-lived signed cookie holding the in-flight SAML handshake
+# (RelayState + next_path). Same scoping rationale as ``nx_oidc``.
+SAML_COOKIE_NAME = "nx_saml"
+SAML_COOKIE_PATH = "/api/v1/auth/"
+_SAML_COOKIE_MAX_AGE = 600
+
+# Dev/demo Custom-IdP signed identity envelope cookie. The browser
+# obtains it from /api/v1/auth/custom/mock (also dev-only); the
+# /custom/login route reads it to find-or-provision the user. Refused
+# in production via the AUTH_CUSTOM_PROVIDER_ENABLED env gate.
+MOCK_IDENTITY_COOKIE_NAME = "nx_mock_identity"
+MOCK_IDENTITY_COOKIE_PATH = "/api/v1/auth/"
+_MOCK_IDENTITY_COOKIE_MAX_AGE = 600
+
 # Refresh cookie is scoped to the /auth subtree so it's sent to /refresh
 # AND /logout (logout needs to read it to revoke the rotation family)
 # but is excluded from every data endpoint where it's never useful.
@@ -123,3 +137,53 @@ def clear_oidc_cookie(response: Response) -> None:
 
 def read_oidc_cookie(request: Request) -> str | None:
     return request.cookies.get(OIDC_COOKIE_NAME)
+
+
+# ── SAML state cookie ────────────────────────────────────────────────
+
+
+def set_saml_cookie(response: Response, state_token: str) -> None:
+    response.set_cookie(
+        key=SAML_COOKIE_NAME,
+        value=state_token,
+        max_age=_SAML_COOKIE_MAX_AGE,
+        httponly=True,
+        path=SAML_COOKIE_PATH,
+        **_common_kwargs(),
+    )
+
+
+def clear_saml_cookie(response: Response) -> None:
+    response.delete_cookie(
+        SAML_COOKIE_NAME, path=SAML_COOKIE_PATH, **_common_kwargs()
+    )
+
+
+def read_saml_cookie(request: Request) -> str | None:
+    return request.cookies.get(SAML_COOKIE_NAME)
+
+
+# ── Custom-IdP mock-identity cookie (dev/demo only) ──────────────────
+
+
+def set_mock_identity_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=MOCK_IDENTITY_COOKIE_NAME,
+        value=token,
+        max_age=_MOCK_IDENTITY_COOKIE_MAX_AGE,
+        httponly=True,
+        path=MOCK_IDENTITY_COOKIE_PATH,
+        **_common_kwargs(),
+    )
+
+
+def clear_mock_identity_cookie(response: Response) -> None:
+    response.delete_cookie(
+        MOCK_IDENTITY_COOKIE_NAME,
+        path=MOCK_IDENTITY_COOKIE_PATH,
+        **_common_kwargs(),
+    )
+
+
+def read_mock_identity_cookie(request: Request) -> str | None:
+    return request.cookies.get(MOCK_IDENTITY_COOKIE_NAME)

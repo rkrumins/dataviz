@@ -18,9 +18,13 @@ from typing import Awaitable, Callable, Optional
 
 import jwt as pyjwt
 
+import time
+from urllib.parse import quote
+
 from .core.config import (
     JWT_EXPIRY_MINUTES,
     JWT_REFRESH_EXPIRY_DAYS,
+    SSO_SESSION_MAX_AGE_SECONDS,
 )
 from .core.password import hash_password
 from .core.tokens import (
@@ -35,10 +39,35 @@ from .interface import (
     InvalidRefreshToken,
     SessionTokens,
     SSOAuthError,
+    SsoReauthRequired,
     User,
 )
 from .providers import ProviderCredentials, get_provider
 from .refresh import check_and_record_rotation
+
+
+# Provider names that participate in the SSO daily re-auth ceiling.
+# ``local`` is exempt — local password sessions keep the existing
+# 7-day refresh TTL. Update this when a new SSO provider lands.
+_SSO_PROVIDERS = frozenset({"oidc", "saml2", "custom"})
+
+# Where to send the user when their SSO session has expired. Each
+# provider has its own /login endpoint that re-runs the handshake; the
+# 401 body includes the URL so the frontend can navigate transparently.
+_SSO_LOGIN_PATHS = {
+    "oidc":   "/api/v1/auth/oidc/login",
+    "saml2":  "/api/v1/auth/saml/login",
+    "custom": "/api/v1/auth/custom/login",
+}
+
+
+def _build_reauth_url(provider: str, *, next_path: str) -> str:
+    """Compose the IdP /login URL for the SSO re-auth bounce. ``force=1``
+    is appended so the frontend's tryRefresh handler can request a fresh
+    IdP login (vs. silent rotation through the IdP session)."""
+    base = _SSO_LOGIN_PATHS.get(provider, "/api/v1/auth/oidc/login")
+    safe_next = next_path or "/"
+    return f"{base}?next={quote(safe_next, safe='/')}&force=1"
 
 logger = logging.getLogger(__name__)
 
@@ -66,12 +95,15 @@ class LocalIdentityService:
         refresh_store_factory,
         outbox_emit=None,
         claims_resolver: Optional[Callable[..., Awaitable[dict]]] = None,
+        sso_role_reconciler: Optional[Callable[..., Awaitable[dict]]] = None,
+        session_killer: Optional[Callable[..., Awaitable[None]]] = None,
     ):
         # ``user_repo`` is injected as a module so this class doesn't need
         # to import the concrete repository directly. The shape used:
         #   get_user_by_id(session, id) -> ORM | None
         #   get_user_by_email(session, email) -> ORM | None
         #   get_user_roles(session, id) -> list[str]
+        #   set_user_idp_metadata(session, *, user_id, idp_groups, raw_claims) (optional)
         #
         # ``claims_resolver`` (RBAC Phase 1) is an optional callable
         # ``(session, user_id, *, sid) -> dict`` that returns the
@@ -80,11 +112,27 @@ class LocalIdentityService:
         # forwards it to ``create_access_token(extra=...)``. When None,
         # tokens carry only identity (no permission claims), preserving
         # pre-Phase-1 behaviour.
+        #
+        # ``sso_role_reconciler`` (Phase 2.D) is an optional callable
+        # ``(session, *, user_id, idp_groups) -> dict`` that reconciles
+        # SSO RoleBindings against the IdP-asserted group list. The
+        # auth service treats the return value as opaque (audit metadata).
+        # Lives outside this module so the binding repo stays out of the
+        # extractable surface.
+        #
+        # ``session_killer`` (Phase 2.E) is an optional async callable
+        # ``(user_id) -> None`` invoked when the SSO daily ceiling
+        # forces re-auth — it kills every live access-token session for
+        # the user so the next request from any browser tab bounces to
+        # the IdP. Implemented by ``revocation_service.revoke_all_user_sessions``
+        # but injected to keep the boundary clean.
         self._session_factory = session_factory
         self._user_repo = user_repo
         self._refresh_store_factory = refresh_store_factory
         self._outbox_emit = outbox_emit
         self._claims_resolver = claims_resolver
+        self._sso_role_reconciler = sso_role_reconciler
+        self._session_killer = session_killer
 
     # ── Service protocol ──────────────────────────────────────────────
 
@@ -181,6 +229,53 @@ class LocalIdentityService:
                 # User no longer eligible — kill the family and bail.
                 await store.revoke_family(claims.family_id)
                 raise InvalidRefreshToken("user_inactive")
+
+            # ── SSO daily re-auth ceiling ────────────────────────────
+            # SSO sessions must re-authenticate at the IdP at least
+            # every ``SSO_SESSION_MAX_AGE_SECONDS``. We measure elapsed
+            # wall-clock time from the IdP-issued ``auth_time`` (which
+            # propagates unchanged through every rotation), not from
+            # the previous rotation. Local password sessions skip
+            # this check and keep the existing 7-day refresh TTL.
+            user_provider = getattr(orm, "auth_provider", "local") or "local"
+            if (
+                user_provider in _SSO_PROVIDERS
+                and claims.auth_time is not None
+                and (int(time.time()) - claims.auth_time) > SSO_SESSION_MAX_AGE_SECONDS
+            ):
+                # Kill the family + every live access token across all
+                # tabs so the next request from any browser surface
+                # bounces to the IdP. Best-effort outbox audit. The
+                # session-killer (revocation service) is injected so
+                # this module stays extractable.
+                await store.revoke_family(claims.family_id)
+                if self._session_killer is not None:
+                    try:
+                        await self._session_killer(orm.id)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "session_killer failed during SSO expiry "
+                            "(user=%s): %s", orm.id, exc,
+                        )
+                if self._outbox_emit is not None:
+                    await self._outbox_emit(
+                        session, "user.sso_session_expired",
+                        {
+                            "user_id": orm.id,
+                            "provider": user_provider,
+                            "auth_time": claims.auth_time,
+                            "elapsed_seconds": int(time.time()) - claims.auth_time,
+                        },
+                    )
+                logger.info(
+                    "SSO session expired (user=%s, provider=%s, age=%ds)",
+                    orm.id, user_provider, int(time.time()) - claims.auth_time,
+                )
+                raise SsoReauthRequired(
+                    _build_reauth_url(user_provider, next_path="/"),
+                    provider=user_provider,
+                )
+
             roles = await self._user_repo.get_user_roles(session, orm.id)
 
             if self._claims_resolver is not None:
@@ -190,7 +285,15 @@ class LocalIdentityService:
                 claims_extra = await self._claims_resolver(session, orm.id)
 
         user = _orm_to_user(orm, role=_primary_role(roles))
-        tokens = self._issue_tokens(user, family_id=claims.family_id, claims_extra=claims_extra)
+        # Propagate the original IdP auth_time unchanged through
+        # rotation so the next check still measures from the real
+        # authentication instant, not from this refresh.
+        tokens = self._issue_tokens(
+            user,
+            family_id=claims.family_id,
+            claims_extra=claims_extra,
+            auth_time=claims.auth_time,
+        )
         return user, tokens
 
     async def get_user(self, user_id: str) -> Optional[User]:
@@ -204,7 +307,7 @@ class LocalIdentityService:
     async def complete_sso_login(self, identity) -> tuple[User, SessionTokens]:
         """Find-or-provision from a verified SSO identity, then issue a
         session. ``identity`` is a ``ProviderIdentity`` (provider,
-        external_id, email, names, raw_claims).
+        external_id, email, names, raw_claims, groups, auth_time).
 
         Identity key is ``(auth_provider, external_id)`` — never email.
         Linking guardrails (account-takeover defence):
@@ -216,11 +319,23 @@ class LocalIdentityService:
             ``email_verified=true`` AND the existing account is a local,
             active account; on link, password login is disabled;
           * otherwise → **deny + audit** (no duplicate-email account).
+
+        Additionally — for every successful SSO login — the IdP groups
+        are persisted on the user row and the group->role reconciler
+        is invoked so RoleBindings track what the IdP currently
+        asserts.
         """
         provider = identity.provider
         external_id = identity.external_id
         email = identity.email
         email_verified = _claims_email_verified(identity.raw_claims)
+        idp_groups: list[str] = list(getattr(identity, "groups", ()) or ())
+        # auth_time anchors the 24h SSO re-auth ceiling. Fall back to
+        # "now" when the IdP didn't surface one (we have to start the
+        # clock somewhere; doing so is conservative).
+        auth_time = getattr(identity, "auth_time", None)
+        if not isinstance(auth_time, int) or auth_time <= 0:
+            auth_time = int(time.time())
 
         claims_extra: dict = {}
         async with self._session_factory() as session:
@@ -281,17 +396,68 @@ class LocalIdentityService:
                              "provider": provider, "external_id": external_id},
                         )
 
+            # Persist the IdP-asserted groups + raw_claims on the user
+            # row so the admin UI / /me can surface the latest snapshot.
+            # Best-effort: failures here MUST NOT block login (the
+            # reconciler below still runs and its result is the
+            # authoritative permission state).
+            try:
+                if hasattr(self._user_repo, "set_user_idp_metadata"):
+                    await self._user_repo.set_user_idp_metadata(
+                        session,
+                        user_id=orm.id,
+                        idp_groups=idp_groups,
+                        raw_claims=identity.raw_claims,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Persisting IdP metadata failed (user=%s, provider=%s): %s",
+                    orm.id, provider, exc,
+                )
+
+            # Reconcile group->role RoleBindings (source='sso') with
+            # what the IdP currently asserts. Additive for present
+            # groups; expires bindings whose source group is no longer
+            # asserted. Same transaction as the upsert above so a
+            # failure here rolls back the whole login. The reconciler
+            # itself lives outside this module (the auth service is
+            # extractable and must not import from backend.app); it
+            # is injected by the app at startup.
+            reconcile_result: dict | None = None
+            if self._sso_role_reconciler is not None:
+                try:
+                    reconcile_result = await self._sso_role_reconciler(
+                        session, user_id=orm.id, idp_groups=idp_groups,
+                    )
+                except Exception as exc:  # noqa: BLE001 — surface in audit
+                    logger.warning(
+                        "Group->role reconcile failed (user=%s, provider=%s): %s",
+                        orm.id, provider, exc,
+                    )
+
             roles = await self._user_repo.get_user_roles(session, orm.id)
             if self._claims_resolver is not None:
                 claims_extra = await self._claims_resolver(session, orm.id)
             if self._outbox_emit is not None:
-                await self._outbox_emit(
-                    session, "user.logged_in",
-                    {"user_id": orm.id, "email": orm.email, "provider": provider},
-                )
+                payload = {
+                    "user_id": orm.id,
+                    "email": orm.email,
+                    "provider": provider,
+                    "auth_time": auth_time,
+                    "groups": idp_groups,
+                }
+                if reconcile_result is not None:
+                    payload["reconcile"] = {
+                        k: reconcile_result[k] for k in
+                        ("mappings_matched", "created", "revoked", "reactivated")
+                        if k in reconcile_result
+                    }
+                await self._outbox_emit(session, "user.logged_in", payload)
 
         user = _orm_to_user(orm, role=_primary_role(roles))
-        tokens = self._issue_tokens(user, family_id=None, claims_extra=claims_extra)
+        tokens = self._issue_tokens(
+            user, family_id=None, claims_extra=claims_extra, auth_time=auth_time,
+        )
         return user, tokens
 
     async def _emit_audit(self, event_type: str, payload: dict) -> None:
@@ -314,14 +480,25 @@ class LocalIdentityService:
         *,
         family_id: Optional[str],
         claims_extra: Optional[dict] = None,
+        auth_time: Optional[int] = None,
     ) -> SessionTokens:
+        """Mint a fresh (access, refresh, csrf) triple.
+
+        ``auth_time`` (epoch seconds) is the IdP-issued authentication
+        instant for SSO sessions; it is embedded in the refresh JWT
+        and propagated through every rotation. The 24h SSO re-auth
+        check reads it on the next refresh. ``None`` for local
+        password sessions.
+        """
         access = create_access_token(
             user_id=user.id,
             email=user.email,
             role=user.role,
             extra=claims_extra or None,
         )
-        refresh, _ = create_refresh_token(user_id=user.id, family_id=family_id)
+        refresh, _ = create_refresh_token(
+            user_id=user.id, family_id=family_id, auth_time=auth_time,
+        )
         return SessionTokens(
             access_token=access,
             access_max_age_seconds=JWT_EXPIRY_MINUTES * 60,

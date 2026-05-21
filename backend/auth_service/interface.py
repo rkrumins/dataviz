@@ -131,6 +131,22 @@ class SSOAuthError(AuthError):
     shown to the browser."""
 
 
+class SsoReauthRequired(AuthError):
+    """The SSO session has exceeded ``SSO_SESSION_MAX_AGE_HOURS`` since
+    the user actually authenticated at the IdP. The refresh family is
+    revoked and the caller must redirect the user to ``login_url`` (an
+    IdP-bound /auth/{oidc,saml,custom}/login URL with ``force=1``) to
+    re-authenticate.
+
+    The router translates this into a 401 with a structured body so the
+    frontend can follow the redirect transparently."""
+
+    def __init__(self, login_url: str, *, provider: str):
+        super().__init__("sso_reauth_required")
+        self.login_url = login_url
+        self.provider = provider
+
+
 __all__ = [
     "User",
     "SessionTokens",
@@ -139,4 +155,5 @@ __all__ = [
     "InvalidCredentials",
     "InvalidRefreshToken",
     "SSOAuthError",
+    "SsoReauthRequired",
 ]

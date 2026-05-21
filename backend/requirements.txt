@@ -21,6 +21,12 @@ Authlib>=1.3.0           # OIDC ID-token verification (JWKS) + OAuth client
 zxcvbn-python>=4.4.24    # Server-side password strength validation
 slowapi>=0.1.9           # Rate limiting for auth endpoints
 
+# SAML 2.0 SP. Only the viz-service mounts the auth routes that need
+# it; other Dockerfiles skip this to avoid the libxmlsec1 system-dep
+# tax. The providers/__init__.py registers the SAML provider only when
+# this import succeeds, so a missing install is a silent no-op.
+python3-saml>=1.16.0
+
 # Graph adapter dependencies
 neo4j>=5.14.0            # Neo4j async driver (Phase 4)
 httpx>=0.26.0            # DataHub GraphQL HTTP client + async test client
