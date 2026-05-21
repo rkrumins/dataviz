@@ -9,6 +9,8 @@ import { authFetch } from './apiClient'
 import {
   EmptyCommitError,
   GraphValidationError,
+  StaleEntityError,
+  branchEventsUrl,
   commit,
   createGraph,
   history,
@@ -98,5 +100,37 @@ describe('versionControlService', () => {
     expect(parseDetail(new Error('plain text'))).toBeNull()
     expect(parseDetail(new Error('{"code":"x"}'))).toEqual({ code: 'x' })
     expect(parseDetail('not an error')).toBeNull()
+  })
+
+  it('maps a stale_entity 409 to StaleEntityError with per-object violations', async () => {
+    mockFetch.mockRejectedValueOnce(
+      new Error(
+        JSON.stringify({
+          code: 'stale_entity',
+          violations: [
+            {
+              object_kind: 'node', object_id: 'urn:a',
+              expected_base_content_hash: 'expected-x',
+              observed_content_hash: 'actual-y',
+            },
+          ],
+        }),
+      ),
+    )
+    try {
+      await commit('ws', 'g', 'main', 'm', 'gcmt_old')
+      throw new Error('should have thrown')
+    } catch (e) {
+      expect(e).toBeInstanceOf(StaleEntityError)
+      expect((e as StaleEntityError).violations[0].object_id).toBe('urn:a')
+      expect((e as StaleEntityError).violations[0].observed_content_hash)
+        .toBe('actual-y')
+    }
+  })
+
+  it('branchEventsUrl encodes workspace and branch path segments', () => {
+    expect(branchEventsUrl('ws 1', 'g_1', 'feature/x')).toBe(
+      '/api/v1/ws%201/graphs/g_1/branches/feature%2Fx/events',
+    )
   })
 })

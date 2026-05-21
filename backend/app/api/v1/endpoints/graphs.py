@@ -14,6 +14,9 @@ manifests, commit, audit, ref advance, outbox event).
 Error contract (matches the frontend rebase/validation UX):
 * head moved   -> 409 ``{detail:{code:"ref_moved", current_head}}``
 * empty commit -> 409 ``{detail:{code:"empty_commit"}}``
+* stale entity -> 409 ``{detail:{code:"stale_entity", violations:[
+    {object_kind, object_id, expected_base_content_hash,
+     observed_content_hash}, ...]}}``
 * validation   -> 422 ``{detail:{code:"validation", violations:[...]}}``
 * working set  -> 422 ``{detail:{code:"working_set_invalid", message}}``
 * not found    -> 404
@@ -27,7 +30,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,11 +40,15 @@ from backend.app.db.graph_store_engine import get_graph_store_db_session
 from backend.app.db.repositories import graph_repo, graph_working_set_repo as ws_repo
 from backend.app.db.repositories.graph_commit_repo import HeadMovedError
 from backend.app.services.graph_authoring_engine import GraphAuthoringEngine
+from backend.app.services.graph_outbox_relay import sse_subscribe
 from backend.app.services.graph_versioning import (
     EmptyCommitError,
     GraphValidationError,
 )
-from backend.app.services.graph_versioning.snapshot_reader import WorkingSetError
+from backend.app.services.graph_versioning.snapshot_reader import (
+    StaleBaseError,
+    WorkingSetError,
+)
 
 router = APIRouter()
 
@@ -298,6 +306,22 @@ async def commit(
         )
     except EmptyCommitError:
         raise HTTPException(409, detail={"code": "empty_commit"})
+    except StaleBaseError as exc:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "stale_entity",
+                "violations": [
+                    {
+                        "object_kind": v.object_kind,
+                        "object_id": v.object_id,
+                        "expected_base_content_hash": v.expected_base_content_hash,
+                        "observed_content_hash": v.observed_content_hash,
+                    }
+                    for v in exc.violations
+                ],
+            },
+        )
     except GraphValidationError as exc:
         raise HTTPException(
             422,
@@ -364,6 +388,46 @@ async def history(
 class CreateBranchRequest(BaseModel):
     name: str
     from_commit_id: Optional[str] = None
+
+
+@router.get("/{ws_id}/graphs/{graph_id}/branches/{branch}/events")
+async def stream_branch_events(
+    request: Request,
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    branch: str = Path(...),
+    user=Depends(get_optional_user),
+    _=Depends(requires("workspace:graph:read", workspace="ws_id")),
+):
+    """Server-Sent Events stream for `(graph_id, branch)`.
+
+    Emits `commit` events (and, when wired, `working_set_advanced`)
+    so other tabs / users learn about new commits without polling.
+    The relay already publishes the underlying events to Redis; this
+    handler is a thin per-subscriber `XREAD BLOCK` fan-out. Honors
+    the `Last-Event-ID` header for resume on reconnect.
+    """
+    last_event_id = request.headers.get("last-event-id")
+
+    async def stream():
+        async for frame in sse_subscribe(
+            graph_id=graph_id,
+            branch=branch,
+            user_id=_uid(user),
+            last_event_id=last_event_id,
+        ):
+            if await request.is_disconnected():
+                break
+            yield frame
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/{ws_id}/graphs/{graph_id}/branches", status_code=201)

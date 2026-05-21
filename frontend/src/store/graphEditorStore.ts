@@ -36,7 +36,12 @@ export interface EditorOp {
 }
 
 export type SyncState =
-  | 'clean' | 'dirty' | 'committing' | 'conflict' | 'error'
+  | 'clean'
+  | 'dirty'
+  | 'committing'
+  | 'remote_advanced'
+  | 'conflict'
+  | 'error'
 
 export interface GraphEditorState {
   graphId: string | null
@@ -50,6 +55,13 @@ export interface GraphEditorState {
   syncState: SyncState
   /** Set when the server reports the ref moved under us. */
   conflictHead: string | null
+  /** Most recent commit_id seen on the branch via SSE that we do NOT
+   * yet have as our base. Null once we refresh / pull onto it. */
+  remoteHead: string | null
+  /** Highest ws_change_version reported by the working_set_advanced
+   * SSE event from another tab of this user. Null if no such signal
+   * has been observed yet. */
+  remoteWsVersion: number | null
 
   init: (graphId: string, branch: string, baseCommitId: string | null) => void
   applyOp: (
@@ -61,6 +73,17 @@ export interface GraphEditorState {
    * draft save / commit. */
   reconcileTempIds: (mapping: Record<string, string>) => void
   onRefMoved: (currentHead: string | null) => void
+  /** Another tab / user committed on this branch. Idempotent: an echo
+   * of our own commit (commit_id === baseCommitId) is ignored. While
+   * dirty/committing/conflict the syncState is preserved (we just
+   * record `remoteHead` so the UI can show "N commits ahead"). */
+  onRemoteCommit: (commitId: string) => void
+  /** Another of this user's tabs staged on this branch. Same-user
+   * signal — the listener should refetch the working set. The store
+   * reaction is intentionally minimal (no automatic refetch here;
+   * that's the page layer's job). Tracks the latest version seen so
+   * a stale notification can be detected. */
+  onRemoteWorkingSetAdvanced: (wsChangeVersion: number) => void
   /** Commit succeeded: clear ops, advance base, back to clean. */
   clearAfterCommit: (newCommitId: string) => void
   setSyncState: (s: SyncState) => void
@@ -83,6 +106,8 @@ export const useGraphEditorStore = create<GraphEditorState>((set, get) => ({
   redoStack: [],
   syncState: 'clean',
   conflictHead: null,
+  remoteHead: null,
+  remoteWsVersion: null,
 
   init: (graphId, branch, baseCommitId) =>
     set({
@@ -94,6 +119,8 @@ export const useGraphEditorStore = create<GraphEditorState>((set, get) => ({
       redoStack: [],
       syncState: 'clean',
       conflictHead: null,
+      remoteHead: null,
+      remoteWsVersion: null,
     }),
 
   applyOp: (input) => {
@@ -182,7 +209,34 @@ export const useGraphEditorStore = create<GraphEditorState>((set, get) => ({
   },
 
   onRefMoved: (currentHead) =>
-    set({ syncState: 'conflict', conflictHead: currentHead }),
+    set({
+      syncState: 'conflict',
+      conflictHead: currentHead,
+      remoteHead: currentHead,
+    }),
+
+  onRemoteCommit: (commitId) => {
+    const s = get()
+    if (commitId === s.baseCommitId) return // echo of our own commit
+    if (commitId === s.remoteHead) return   // duplicate notification
+    // Always record the new remote head. Only downgrade `clean` →
+    // `remote_advanced`; preserve dirty/committing/conflict (the user
+    // already has work in progress; the UI uses `remoteHead` to gate
+    // the commit button in those states).
+    if (s.syncState === 'clean') {
+      set({ syncState: 'remote_advanced', remoteHead: commitId })
+    } else {
+      set({ remoteHead: commitId })
+    }
+  },
+
+  onRemoteWorkingSetAdvanced: (wsChangeVersion) => {
+    const cur = get().remoteWsVersion
+    // Ignore older / equal notifications (events may arrive out of
+    // order on reconnect).
+    if (cur !== null && wsChangeVersion <= cur) return
+    set({ remoteWsVersion: wsChangeVersion })
+  },
 
   clearAfterCommit: (newCommitId) =>
     set({
@@ -192,6 +246,8 @@ export const useGraphEditorStore = create<GraphEditorState>((set, get) => ({
       baseCommitId: newCommitId,
       syncState: 'clean',
       conflictHead: null,
+      remoteHead: null,
+      remoteWsVersion: null,
     }),
 
   setSyncState: (s) => set({ syncState: s }),
@@ -215,5 +271,7 @@ export const useGraphEditorStore = create<GraphEditorState>((set, get) => ({
       redoStack: [],
       syncState: 'clean',
       conflictHead: null,
+      remoteHead: null,
+      remoteWsVersion: null,
     }),
 }))

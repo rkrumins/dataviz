@@ -292,6 +292,8 @@ async def persist_commit(
             "branch": branch,
             "commit_id": commit_id,
             "commit_hash": commit_hash,
+            "root_hash": plan.root_hash,
+            "actor": actor,
             "delta_summary": dict(plan.delta_summary),
         },
     )

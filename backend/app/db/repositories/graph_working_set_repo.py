@@ -21,6 +21,7 @@ from backend.app.db.models_graph import (
     GraphWorkingChangeORM,
     GraphWorkingSetORM,
 )
+from backend.app.db.repositories import graph_store_outbox_repo
 
 _VALID_CHANGE_TYPES = {
     "add_node", "update_node", "delete_node",
@@ -139,6 +140,23 @@ async def stage_changes(
 
     working_set.ws_change_version += 1
     working_set.updated_at = _now()
+
+    # Per-user signal so the same user's other tabs learn the working
+    # set advanced. The SSE subscriber filters by payload.user_id so
+    # only the originating user's tabs react. aggregate_id = graph_id
+    # (cross-table convention); entity = working_set.
+    await graph_store_outbox_repo.emit(
+        session,
+        event_type="visualization.working_set.advanced",
+        aggregate_id=working_set.graph_id,
+        payload={
+            "graph_id": working_set.graph_id,
+            "branch": working_set.branch,
+            "user_id": working_set.user_id,
+            "ws_change_version": working_set.ws_change_version,
+        },
+    )
+
     return working_set.ws_change_version
 
 
@@ -185,6 +203,7 @@ async def to_ordered_ops(
             "object_kind": r.object_kind,
             "object_id": r.object_id,
             "payload": r.after_blob or {"key": r.object_id},
+            "base_content_hash": r.base_content_hash,
         }
         for r in rows
     ]

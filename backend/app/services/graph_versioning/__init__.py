@@ -44,6 +44,8 @@ from .snapshot_reader import (  # noqa: F401
     rebuild_snapshot,
     apply_changes,
     WorkingSetError,
+    StaleBaseError,
+    StaleEntityViolation,
 )
 from .merge import (  # noqa: F401
     MergeConflict,
@@ -89,6 +91,8 @@ __all__ = [
     "rebuild_snapshot",
     "apply_changes",
     "WorkingSetError",
+    "StaleBaseError",
+    "StaleEntityViolation",
     "MergeConflict",
     "MergeOutcome",
     "IntegrityViolation",

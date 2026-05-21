@@ -26,7 +26,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Awaitable, Callable, Optional
+import time
+from typing import AsyncIterator, Awaitable, Callable, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -156,9 +157,154 @@ async def run_graph_outbox_relay(
     logger.info("Graph outbox relay stopped")
 
 
+# ─── SSE fan-out subscriber ─────────────────────────────────────────
+#
+# Per-tab read-side of the outbox stream. Each subscriber maintains its
+# own cursor (no consumer group) — every UI tab must see every commit
+# on the branch it has open, not get a partitioned slice. The endpoint
+# wraps this generator in a FastAPI ``StreamingResponse``.
+
+
+def _sse_frame(stream_id: str, event_name: str, data: dict) -> str:
+    return (
+        f"id: {stream_id}\n"
+        f"event: {event_name}\n"
+        f"data: {json.dumps(data, separators=(',', ':'))}\n\n"
+    )
+
+
+def _format_event(
+    stream_id: str,
+    fields: dict,
+    *,
+    graph_id: str,
+    branch: str,
+    user_id: str | None,
+) -> str | None:
+    """Filter + shape one Redis stream entry into an SSE frame, or
+    ``None`` if this entry is not for this subscriber.
+
+    Supported event types:
+    - ``visualization.graph.committed`` → broadcast to every subscriber
+      on the matching ``(graph_id, branch)`` (the multi-user signal).
+    - ``visualization.working_set.advanced`` → forwarded only to the
+      originating user's own subscribers (the two-tab signal). Filter
+      requires ``user_id`` to be passed in.
+    """
+    event_type = fields.get("event_type", "")
+    if event_type not in (
+        "visualization.graph.committed",
+        "visualization.working_set.advanced",
+    ):
+        return None
+    try:
+        payload = json.loads(fields.get("payload") or "{}")
+    except json.JSONDecodeError:
+        logger.warning("SSE: malformed payload on stream id %s", stream_id)
+        return None
+    if payload.get("graph_id") != graph_id or payload.get("branch") != branch:
+        return None
+
+    if event_type == "visualization.graph.committed":
+        return _sse_frame(
+            stream_id,
+            "commit",
+            {
+                "commit_id": payload.get("commit_id"),
+                "commit_hash": payload.get("commit_hash"),
+                "root_hash": payload.get("root_hash"),
+                "actor": payload.get("actor"),
+                "delta_summary": payload.get("delta_summary") or {},
+            },
+        )
+
+    # working_set.advanced — same-user only.
+    if user_id is None or payload.get("user_id") != user_id:
+        return None
+    return _sse_frame(
+        stream_id,
+        "working_set_advanced",
+        {
+            "ws_change_version": payload.get("ws_change_version"),
+        },
+    )
+
+
+async def sse_subscribe(
+    *,
+    graph_id: str,
+    branch: str,
+    user_id: str | None = None,
+    last_event_id: str | None = None,
+    stop_event: Optional[asyncio.Event] = None,
+    block_ms: int = 5000,
+    heartbeat_secs: float = 15.0,
+    redis_client=None,
+) -> AsyncIterator[str]:
+    """Yield SSE-formatted frames for one subscriber on ``(graph_id, branch)``.
+
+    Reads :data:`GRAPH_OUTBOX_STREAM` via ``XREAD BLOCK`` (no consumer
+    group — fan-out). Honors a ``Last-Event-ID`` cursor for replay; if
+    absent, starts from ``$`` (only events after subscription).
+    Emits an SSE comment heartbeat after ``heartbeat_secs`` of silence
+    so intermediate proxies don't close the connection.
+
+    ``user_id`` is required for the per-user ``working_set_advanced``
+    fan-out; the multi-user ``commit`` fan-out works without it. Pass
+    the authenticated user id from the endpoint.
+
+    The generator exits when ``stop_event`` is set or the consumer
+    stops iterating (FastAPI handles client disconnect that way).
+    Transient Redis errors back off and retry; the loop is the
+    recovery unit.
+    """
+    redis = redis_client
+    if redis is None:
+        from backend.app.services.aggregation.redis_client import get_redis
+        redis = get_redis()
+
+    cursor = last_event_id or "$"
+    last_emit = time.monotonic()
+
+    # Initial heartbeat so the client knows the connection is live.
+    yield ": connected\n\n"
+
+    while stop_event is None or not stop_event.is_set():
+        try:
+            entries = await redis.xread(
+                {GRAPH_OUTBOX_STREAM: cursor}, block=block_ms
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — loop recovers
+            logger.warning("SSE XREAD failed (retrying): %s", exc)
+            await asyncio.sleep(1.0)
+            continue
+
+        if entries:
+            for _stream_name, msgs in entries:
+                for stream_id, fields in msgs:
+                    cursor = stream_id
+                    frame = _format_event(
+                        stream_id, fields,
+                        graph_id=graph_id, branch=branch,
+                        user_id=user_id,
+                    )
+                    if frame is not None:
+                        yield frame
+                        last_emit = time.monotonic()
+
+        # Heartbeat after extended silence (covers idle branches and
+        # the case where every event was filtered out).
+        if time.monotonic() - last_emit >= heartbeat_secs:
+            yield ": heartbeat\n\n"
+            last_emit = time.monotonic()
+
+
 __all__ = [
     "GRAPH_OUTBOX_STREAM",
     "drain_once",
     "run_graph_outbox_relay",
+    "sse_subscribe",
     "PublishFn",
 ]

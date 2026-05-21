@@ -14,9 +14,11 @@ base state + ordered ops -> resulting node/edge state.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
 from .commit import EdgeState, NodeState
+from .content_address import edge_content_hash, node_content_hash
 from .manifest import PartitionManifest, Snapshot, _partition_hash, _root_hash
 
 # fetch_root(root_hash)  -> list of (partition_index, partition_hash)
@@ -97,6 +99,28 @@ class WorkingSetError(ValueError):
     Surfaced before validation so the user gets a precise reason."""
 
 
+@dataclass(frozen=True)
+class StaleEntityViolation:
+    """One update/delete op whose ``base_content_hash`` no longer
+    matches the live snapshot. ``observed_content_hash`` is ``None`` if
+    the target object has disappeared from base entirely."""
+
+    object_kind: str            # 'node' | 'edge'
+    object_id: str
+    expected_base_content_hash: str
+    observed_content_hash: str | None
+
+
+class StaleBaseError(WorkingSetError):
+    """One or more staged ops were authored against a stale view of
+    the branch. The API maps this to 409 ``stale_entity`` with the
+    per-object diff so the client can rebase the affected ops."""
+
+    def __init__(self, violations: Sequence[StaleEntityViolation]):
+        self.violations = tuple(violations)
+        super().__init__(f"stale base ({len(self.violations)} object(s))")
+
+
 def _node_from_payload(p: Mapping) -> NodeState:
     return NodeState(
         key=p["key"],
@@ -119,6 +143,68 @@ def _edge_from_payload(p: Mapping) -> EdgeState:
     )
 
 
+def _current_node_content_hash(n: NodeState) -> str:
+    return node_content_hash(
+        entity_type=n.entity_type,
+        display_name=n.display_name,
+        position=n.position,
+        properties=n.properties,
+        tags=n.tags,
+    )
+
+
+def _current_edge_content_hash(e: EdgeState) -> str:
+    return edge_content_hash(
+        source_node_key=e.source_key,
+        target_node_key=e.target_key,
+        edge_type=e.edge_type,
+        confidence=e.confidence,
+        properties=e.properties,
+    )
+
+
+def _check_stale_base(
+    base_nodes: Mapping[str, NodeState],
+    base_edges: Mapping[str, EdgeState],
+    changes: Sequence[Mapping],
+) -> None:
+    # Lost-update guard. update_*/delete_* ops may carry a
+    # base_content_hash captured by the client when the edit was
+    # authored. If it disagrees with the current snapshot's content
+    # for that object, the edit was authored against a stale view and
+    # must be rebased — never silently overwrite. add_* ops are
+    # skipped (no base). Ops with no base_content_hash are skipped
+    # too (older clients; the ref CAS still protects them).
+    violations: list[StaleEntityViolation] = []
+    for ch in changes:
+        op = ch["change_type"]
+        if op not in ("update_node", "delete_node", "update_edge", "delete_edge"):
+            continue
+        expected = ch.get("base_content_hash")
+        if not expected:
+            continue
+        key = ch["payload"]["key"]
+        if op.endswith("_node"):
+            current = base_nodes.get(key)
+            observed = _current_node_content_hash(current) if current else None
+            kind = "node"
+        else:
+            current = base_edges.get(key)
+            observed = _current_edge_content_hash(current) if current else None
+            kind = "edge"
+        if observed != expected:
+            violations.append(
+                StaleEntityViolation(
+                    object_kind=kind,
+                    object_id=key,
+                    expected_base_content_hash=expected,
+                    observed_content_hash=observed,
+                )
+            )
+    if violations:
+        raise StaleBaseError(violations)
+
+
 def apply_changes(
     *,
     base_nodes: Mapping[str, NodeState],
@@ -127,8 +213,12 @@ def apply_changes(
 ) -> tuple[dict[str, NodeState], dict[str, EdgeState]]:
     """Apply ordered working-set ops onto the base state, returning the
     resulting node/edge maps the commit planner consumes. Raises
+    :class:`StaleBaseError` if any update/delete op's
+    ``base_content_hash`` no longer matches the live base, or
     :class:`WorkingSetError` on an internally impossible op (the API
-    turns this into a 4xx with the reason)."""
+    turns these into 409 / 422 respectively)."""
+    _check_stale_base(base_nodes, base_edges, changes)
+
     nodes: dict[str, NodeState] = dict(base_nodes)
     edges: dict[str, EdgeState] = dict(base_edges)
 
@@ -174,4 +264,6 @@ __all__ = [
     "rebuild_snapshot",
     "apply_changes",
     "WorkingSetError",
+    "StaleBaseError",
+    "StaleEntityViolation",
 ]

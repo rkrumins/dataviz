@@ -111,4 +111,93 @@ describe('graphEditorStore', () => {
     expect(sum.add_edge).toBe(1)
     expect(sum.delete_node).toBe(0)
   })
+
+  describe('onRemoteCommit (SSE-driven)', () => {
+    it('clean → remote_advanced and records remoteHead', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().onRemoteCommit('gcmt_new')
+      expect(S().syncState).toBe('remote_advanced')
+      expect(S().remoteHead).toBe('gcmt_new')
+    })
+
+    it('ignores an echo of our own latest commit', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().clearAfterCommit('gcmt_mine')
+      S().onRemoteCommit('gcmt_mine')
+      expect(S().syncState).toBe('clean')
+      expect(S().remoteHead).toBeNull()
+    })
+
+    it('ignores a duplicate notification for the same remoteHead', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().onRemoteCommit('gcmt_new')
+      // Calling again must not re-set or churn state.
+      S().onRemoteCommit('gcmt_new')
+      expect(S().syncState).toBe('remote_advanced')
+      expect(S().remoteHead).toBe('gcmt_new')
+    })
+
+    it('while dirty: preserves dirty state but records remoteHead', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().applyOp(addNode('urn:a'))
+      expect(S().syncState).toBe('dirty')
+      S().onRemoteCommit('gcmt_new')
+      expect(S().syncState).toBe('dirty')
+      expect(S().remoteHead).toBe('gcmt_new')
+    })
+
+    it('clearAfterCommit clears remoteHead', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().onRemoteCommit('gcmt_new')
+      S().applyOp(addNode('urn:a'))
+      S().clearAfterCommit('gcmt_latest')
+      expect(S().remoteHead).toBeNull()
+      expect(S().syncState).toBe('clean')
+    })
+
+    it('init resets remoteHead', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().onRemoteCommit('gcmt_new')
+      S().init('g1', 'main', 'gcmt_old')
+      expect(S().remoteHead).toBeNull()
+    })
+  })
+
+  describe('onRemoteWorkingSetAdvanced (same-user two-tab)', () => {
+    it('records the latest ws_change_version', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      expect(S().remoteWsVersion).toBeNull()
+      S().onRemoteWorkingSetAdvanced(3)
+      expect(S().remoteWsVersion).toBe(3)
+    })
+
+    it('ignores out-of-order or duplicate notifications', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().onRemoteWorkingSetAdvanced(5)
+      S().onRemoteWorkingSetAdvanced(3) // older — ignored
+      expect(S().remoteWsVersion).toBe(5)
+      S().onRemoteWorkingSetAdvanced(5) // duplicate — ignored
+      expect(S().remoteWsVersion).toBe(5)
+    })
+
+    it('does not affect syncState directly', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().applyOp(addNode('urn:a'))
+      expect(S().syncState).toBe('dirty')
+      S().onRemoteWorkingSetAdvanced(2)
+      // The store records the signal; reaction (refetch) is the page's
+      // responsibility. syncState is unchanged.
+      expect(S().syncState).toBe('dirty')
+    })
+
+    it('clearAfterCommit and init both reset remoteWsVersion', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().onRemoteWorkingSetAdvanced(2)
+      S().clearAfterCommit('gcmt_latest')
+      expect(S().remoteWsVersion).toBeNull()
+      S().onRemoteWorkingSetAdvanced(3)
+      S().init('g1', 'main', 'gcmt_old')
+      expect(S().remoteWsVersion).toBeNull()
+    })
+  })
 })

@@ -73,6 +73,22 @@ export class EmptyCommitError extends Error {
   }
 }
 
+export interface StaleEntityViolation {
+  object_kind: 'node' | 'edge'
+  object_id: string
+  expected_base_content_hash: string
+  observed_content_hash: string | null
+}
+
+export class StaleEntityError extends Error {
+  violations: StaleEntityViolation[]
+  constructor(violations: StaleEntityViolation[]) {
+    super(`${violations.length} stale entity edit(s) — rebase required`)
+    this.name = 'StaleEntityError'
+    this.violations = violations
+  }
+}
+
 /** Best-effort parse of a structured detail out of an Error thrown by
  * authFetch (it may be a JSON string of the detail object, the
  * `.message` of a structured detail, or a plain string). */
@@ -92,6 +108,9 @@ function rethrowTyped(err: unknown): never {
   if (d) {
     if (d.code === 'ref_moved') throw new RefMovedError(d.current_head ?? null)
     if (d.code === 'empty_commit') throw new EmptyCommitError()
+    if (d.code === 'stale_entity' && Array.isArray(d.violations)) {
+      throw new StaleEntityError(d.violations as StaleEntityViolation[])
+    }
     if (d.code === 'validation' && Array.isArray(d.violations)) {
       throw new GraphValidationError(d.violations as Violation[])
     }
@@ -204,4 +223,89 @@ export async function createBranch(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, from_commit_id: fromCommitId }),
   })
+}
+
+// ── SSE: live branch events ──────────────────────────────────────────
+
+export interface BranchCommitEvent {
+  commit_id: string
+  commit_hash: string
+  root_hash: string | null
+  actor: string | null
+  delta_summary: Record<string, number>
+}
+
+export interface WorkingSetAdvancedEvent {
+  ws_change_version: number
+}
+
+export interface BranchEventHandlers {
+  onCommit?: (e: BranchCommitEvent) => void
+  /** Same-user signal: another of this user's tabs staged on this
+   * branch. Filtered server-side by user_id. */
+  onWorkingSetAdvanced?: (e: WorkingSetAdvancedEvent) => void
+  onOpen?: () => void
+  onError?: (err: Event) => void
+}
+
+export interface SSESubscription {
+  /** Closes the underlying EventSource. Idempotent. */
+  close: () => void
+}
+
+export function branchEventsUrl(
+  wsId: string,
+  graphId: string,
+  branch: string,
+): string {
+  return `${base(wsId)}/${graphId}/branches/${encodeURIComponent(branch)}/events`
+}
+
+/** Subscribe to live SSE events for `(graph, branch)`.
+ *
+ * Returns an object with `.close()`; the browser's `EventSource` handles
+ * auto-reconnect with `Last-Event-ID` so the caller does not need to
+ * manage retries. `withCredentials: true` so the auth cookie travels.
+ *
+ * Phase 1 ships the `commit` event only; `working_set_advanced` arrives
+ * with the same shape when item 4 lands. */
+export function subscribeBranchEvents(
+  wsId: string,
+  graphId: string,
+  branch: string,
+  handlers: BranchEventHandlers,
+): SSESubscription {
+  const url = branchEventsUrl(wsId, graphId, branch)
+  const es = new EventSource(url, { withCredentials: true })
+
+  if (handlers.onOpen) {
+    es.addEventListener('open', () => handlers.onOpen!())
+  }
+  if (handlers.onError) {
+    es.addEventListener('error', (ev) => handlers.onError!(ev))
+  }
+  if (handlers.onCommit) {
+    es.addEventListener('commit', (ev) => {
+      const msg = ev as MessageEvent
+      try {
+        handlers.onCommit!(JSON.parse(msg.data) as BranchCommitEvent)
+      } catch {
+        // Malformed payload — drop; the server contract is JSON.
+      }
+    })
+  }
+  if (handlers.onWorkingSetAdvanced) {
+    es.addEventListener('working_set_advanced', (ev) => {
+      const msg = ev as MessageEvent
+      try {
+        handlers.onWorkingSetAdvanced!(
+          JSON.parse(msg.data) as WorkingSetAdvancedEvent,
+        )
+      } catch {
+        // Malformed payload — drop.
+      }
+    })
+  }
+
+  return { close: () => es.close() }
 }
