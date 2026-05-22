@@ -7,6 +7,7 @@ import type { HierarchyNode } from './types'
 import type { ViewLayerConfig } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
+import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore, stagedChangeColor } from '@/store/stagedChangesStore'
 
@@ -94,6 +95,15 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // multi-locate flows can pulse many nodes concurrently. Auto-clears
   // per-id via the store's setTimeout (~900ms).
   const isPulsing = useCanvasStore((s) => s.pulseNodeIds.has(node.id))
+
+  // Pin Lineage — surface the same togglePinTarget action already wired
+  // to the on-canvas node toolbar / context menu so users can pin from
+  // the tree too. Boolean selectors keep per-row subscriptions cheap.
+  const isTracingActive = useTraceStore((s) => s.focusId !== null)
+  const isPinned = useCanvasStore((s) =>
+    !!node.urn && s.pinnedTargetUrns.includes(node.urn)
+  )
+  const togglePinTarget = useCanvasStore((s) => s.togglePinTarget)
 
   const stagedColor = directChange ? stagedChangeColor(directChange.type) : (hasDescendantChange ? 'cascade' : null)
   const stagedSummary = directChange?.summary
@@ -383,6 +393,15 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             className="w-1.5 h-1.5 rounded-full flex-shrink-0"
             style={{ backgroundColor: nodeColor }}
           />
+          {/* Persistent pinned indicator — survives mouseout (the Pin
+              action button only shows on hover, so without this the row
+              would lose its pinned cue once the cursor leaves). */}
+          {isTracingActive && isPinned && (
+            <LucideIcons.Pin
+              className="w-3 h-3 text-amber-400 flex-shrink-0"
+              aria-label="Pinned to trace path"
+            />
+          )}
           {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
         </span>
       </div>
@@ -452,6 +471,27 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             title="Add child entity"
           >
             <LucideIcons.Plus className="w-3 h-3" />
+          </button>
+        )}
+
+        {/* Pin to Trace Path — only during an active trace. Uses the same
+            canvas-store action as the node toolbar and context menu, so
+            pinning from any surface produces the same isolated lineage. */}
+        {isTracingActive && node.urn && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              togglePinTarget(node.urn)
+            }}
+            className={cn(
+              "p-1.5 rounded-lg transition-all duration-200 hover:scale-110 active:scale-95",
+              isPinned
+                ? "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
+                : "bg-white/[0.06] hover:bg-white/[0.12] text-ink-muted/80 hover:text-ink-muted"
+            )}
+            title={isPinned ? "Unpin from trace path" : "Pin to trace path"}
+          >
+            <LucideIcons.Pin className="w-3 h-3" />
           </button>
         )}
       </motion.div>
