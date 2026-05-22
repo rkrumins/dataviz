@@ -6,6 +6,13 @@ export type ThemeMode = 'light' | 'dark' | 'system'
 /** Visual density of list/grid items in the Explorer page. */
 export type ExplorerDensity = 'compact' | 'comfortable' | 'spacious'
 
+/** Visual density of layer column tree items in the Context View canvas. */
+export type CanvasDensity = 'compact' | 'comfortable' | 'spacious'
+
+export const CANVAS_ZOOM_MIN = 0.75
+export const CANVAS_ZOOM_MAX = 1.5
+export const CANVAS_ZOOM_STEP = 0.05
+
 /**
  * How lineage edges render on the canvas.
  *  - 'stubs'  : every node with lineage shows a small stub; real edges materialize on hover/click.
@@ -105,6 +112,18 @@ interface PreferencesState {
   // Explorer density (affects grid gaps + list row padding)
   explorerDensity: ExplorerDensity
   setExplorerDensity: (density: ExplorerDensity) => void
+
+  // Context View display settings — control canvas-side rendering density,
+  // zoom, and visual chrome from the header's Display Settings popover.
+  canvasZoom: number
+  setCanvasZoom: (n: number) => void
+  canvasDensity: CanvasDensity
+  setCanvasDensity: (density: CanvasDensity) => void
+  showCanvasTypeBadge: boolean
+  toggleCanvasTypeBadge: () => void
+  subtleCanvasTreeLines: boolean
+  toggleSubtleCanvasTreeLines: () => void
+  resetCanvasDisplaySettings: () => void
 }
 
 const DEFAULT_SHORTCUTS: ShortcutConfig[] = [
@@ -203,6 +222,24 @@ export const usePreferencesStore = create<PreferencesState>()(
       // Explorer density
       explorerDensity: 'comfortable',
       setExplorerDensity: (explorerDensity) => set({ explorerDensity }),
+
+      // Context View display settings
+      canvasZoom: 1,
+      setCanvasZoom: (n) => set({
+        canvasZoom: Math.min(CANVAS_ZOOM_MAX, Math.max(CANVAS_ZOOM_MIN, Math.round(n / CANVAS_ZOOM_STEP) * CANVAS_ZOOM_STEP)),
+      }),
+      canvasDensity: 'comfortable',
+      setCanvasDensity: (canvasDensity) => set({ canvasDensity }),
+      showCanvasTypeBadge: true,
+      toggleCanvasTypeBadge: () => set((s) => ({ showCanvasTypeBadge: !s.showCanvasTypeBadge })),
+      subtleCanvasTreeLines: false,
+      toggleSubtleCanvasTreeLines: () => set((s) => ({ subtleCanvasTreeLines: !s.subtleCanvasTreeLines })),
+      resetCanvasDisplaySettings: () => set({
+        canvasZoom: 1,
+        canvasDensity: 'comfortable',
+        showCanvasTypeBadge: true,
+        subtleCanvasTreeLines: false,
+      }),
     }),
     {
       name: 'nexus-preferences',

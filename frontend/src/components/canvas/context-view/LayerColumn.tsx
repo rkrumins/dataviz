@@ -9,18 +9,21 @@
  * - Keyboard navigation (arrow keys, home/end, enter)
  */
 
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import React, { useState, useMemo, useCallback, useRef, useEffect, useLayoutEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useSchemaStore } from '@/store/schema'
+import { usePreferencesStore } from '@/store/preferences'
 import type { ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode } from './types'
 import { FlatTreeItem } from './FlatTreeItem'
 import { SearchBoxItem } from './SearchBoxItem'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
+import { densityRowHeights } from './density'
 
 interface LayerColumnProps {
   layer: ViewLayerConfig
@@ -364,20 +367,33 @@ export const LayerColumn = React.memo(function LayerColumn({
   }, [nodes, localFocusId])
 
   // ── Virtualizer ───────────────────────────────────────────────────────────
+  // Estimates must match the heights FlatTreeItem renders at the current
+  // canvas density — densityRowHeights() is the shared source of truth so
+  // scroll position stays stable across density changes. Default guards
+  // users whose persisted preferences predate this field.
+  const density = usePreferencesStore(s => s.canvasDensity) ?? 'comfortable'
+  const rowHeights = useMemo(() => densityRowHeights(density), [density])
   const virtualizer = useVirtualizer({
     count: flatTree.length,
     getScrollElement: () => scrollContainerRef.current,
     estimateSize: (index) => {
       const item = flatTree[index]
-      if (item.isSearchBox) return 40
-      if (item.isSkeleton) return 44
-      if (item.isFailed) return 40
-      if (item.isLoadMore) return 40
-      return item.depth === 0 ? 52 : 44
+      if (item.isSearchBox) return rowHeights.searchBox
+      if (item.isSkeleton) return rowHeights.skeleton
+      if (item.isFailed) return rowHeights.failed
+      if (item.isLoadMore) return rowHeights.loadMore
+      return item.depth === 0 ? rowHeights.root : rowHeights.child
     },
     overscan: 15,
     getItemKey: (index) => getItemKey(flatTree[index], index),
   })
+
+  // Re-measure all virtualized rows when density flips so the cached
+  // measurements from the previous density don't leave the row stack
+  // pinned to stale heights.
+  useEffect(() => {
+    virtualizer.measure()
+  }, [density, virtualizer])
 
   // Auto-scroll keyboard-focused row into view via virtualizer
   const focusedNodeId = navigableItems[focusIndex]?.node.id ?? null
@@ -529,11 +545,15 @@ export const LayerColumn = React.memo(function LayerColumn({
       {/* Subtle column separator line with gradient fade */}
       <div className="absolute right-0 top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-glass-border/50 to-transparent" />
 
-      {/* Layer Header - Glass morphism style + drag target (4.3) */}
+      {/* Layer Header - Glass morphism style + drag target (4.3).
+          When collapsed, the header is the only content in the column; it
+          stretches (`flex-1`) so every collapsed column shares the same
+          vertical extent as its expanded siblings regardless of count
+          digit count or icon size. */}
       <div
         className={cn(
-          "flex-shrink-0 sticky top-0 z-10 backdrop-blur-xl border-b cursor-pointer transition-all duration-200",
-          isCollapsed ? "px-2 py-4" : "px-4 py-3",
+          "sticky top-0 z-10 backdrop-blur-xl border-b cursor-pointer transition-all duration-200",
+          isCollapsed ? "flex-1 px-2 py-4" : "flex-shrink-0 px-4 py-3",
           isDragOver
             ? "border-white/30"
             : "border-white/[0.08] dark:border-white/[0.05]"
@@ -574,7 +594,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         )}
         <div className={cn(
           "flex items-center",
-          isCollapsed ? "flex-col gap-3" : "gap-3"
+          isCollapsed ? "flex-col gap-3 h-full" : "gap-3"
         )}>
           {/* Collapse/Expand Toggle + Icon Container */}
           <div className="flex items-center gap-2">
@@ -611,17 +631,23 @@ export const LayerColumn = React.memo(function LayerColumn({
             </div>
           </div>
 
-          {/* Collapsed state - vertical text */}
+          {/* Collapsed state - vertical text.
+              `h-full` on the inner stack + `mt-auto` on the expand button
+              anchors the expand affordance to the bottom of the column
+              while the name/count sit at the top. With multiple collapsed
+              columns side by side the spine alignment now matches even
+              when entity counts differ in width. */}
           {isCollapsed ? (
-            <div className="flex flex-col items-center gap-2">
+            <div className="flex flex-col items-center gap-2 h-full w-full">
               <span
                 className="text-xs font-semibold writing-mode-vertical transform rotate-180"
                 style={{ color: layer.color, writingMode: 'vertical-rl' }}
+                title={layer.name}
               >
                 {layer.name}
               </span>
               <div
-                className="px-1.5 py-1 rounded-full text-[10px] font-semibold"
+                className="px-1.5 py-1 rounded-full text-[10px] font-semibold tabular-nums"
                 style={{ backgroundColor: `${layer.color}20`, color: layer.color }}
               >
                 {totalCount}
@@ -631,7 +657,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   e.stopPropagation()
                   setIsCollapsed(false)
                 }}
-                className="p-1.5 rounded-lg hover:bg-white/[0.1] text-ink-muted hover:text-ink transition-all mt-2"
+                className="p-1.5 rounded-lg hover:bg-white/[0.1] text-ink-muted hover:text-ink transition-all mt-auto"
                 title="Expand layer"
               >
                 <LucideIcons.PanelLeftOpen className="w-4 h-4" />
@@ -639,17 +665,11 @@ export const LayerColumn = React.memo(function LayerColumn({
             </div>
           ) : (
             <>
-              <div className="flex-1 min-w-0">
-                <h3
-                  className="text-sm font-semibold truncate tracking-tight"
-                  style={{ color: layer.color }}
-                >
-                  {layer.name}
-                </h3>
-                {layer.description && (
-                  <p className="text-[10px] text-ink-muted/70 truncate mt-0.5">{layer.description}</p>
-                )}
-              </div>
+              <LayerHeaderTitle
+                name={layer.name}
+                description={layer.description}
+                color={layer.color}
+              />
               <div className="flex items-center gap-2">
                 {/* Loading pill — replaces the entity-count pill while this
                     layer is hydrating with no entities yet. Premium spinner +
@@ -1058,6 +1078,171 @@ export const LayerColumn = React.memo(function LayerColumn({
     </motion.div>
   )
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LayerHeaderTitle — name + description block for an expanded layer column.
+//
+// Wraps the title in a 2-line clamp so long names wrap legibly and a hover
+// popover that materialises ONLY when text is actually truncated. The
+// popover (createPortal + framer-motion) mirrors LineageDisplayPopover's
+// pattern so the two header surfaces feel like a matched set.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TITLE_HOVER_OPEN_DELAY_MS = 180
+const TITLE_HOVER_CLOSE_DELAY_MS = 80
+const TITLE_POPOVER_WIDTH = 320
+
+function LayerHeaderTitle({
+  name,
+  description,
+  color,
+}: {
+  name: string
+  description?: string
+  color?: string
+}) {
+  const resolvedColor = color ?? '#6b7280'
+  const containerRef = useRef<HTMLDivElement>(null)
+  const nameRef = useRef<HTMLHeadingElement>(null)
+  const descRef = useRef<HTMLParagraphElement>(null)
+  const [isTruncated, setIsTruncated] = useState(false)
+  const [open, setOpen] = useState(false)
+  const [anchor, setAnchor] = useState<{ top: number; left: number } | null>(null)
+  const openTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+
+  // Detect overflow after layout / on every name/description change. The
+  // popover only opens when there's actually more text to show.
+  useLayoutEffect(() => {
+    const nameOverflow = nameRef.current ? nameRef.current.scrollHeight > nameRef.current.clientHeight + 1 : false
+    const descOverflow = descRef.current ? descRef.current.scrollHeight > descRef.current.clientHeight + 1 : false
+    setIsTruncated(nameOverflow || descOverflow)
+  }, [name, description])
+
+  // Re-check on container resize (column width can change as users open
+  // the right-rail drawer or toggle adjacent layers).
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => {
+      const nameOverflow = nameRef.current ? nameRef.current.scrollHeight > nameRef.current.clientHeight + 1 : false
+      const descOverflow = descRef.current ? descRef.current.scrollHeight > descRef.current.clientHeight + 1 : false
+      setIsTruncated(nameOverflow || descOverflow)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const update = () => {
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (!rect) return
+      // Prefer left-aligned with the title; clamp to viewport so the popover
+      // never bleeds off-screen for the right-most column.
+      const left = Math.max(
+        8,
+        Math.min(rect.left, window.innerWidth - TITLE_POPOVER_WIDTH - 8),
+      )
+      setAnchor({ top: rect.bottom + 6, left })
+    }
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+    }
+  }, [open])
+
+  useEffect(() => () => {
+    clearTimeout(openTimerRef.current)
+    clearTimeout(closeTimerRef.current)
+  }, [])
+
+  const scheduleOpen = () => {
+    if (!isTruncated) return
+    clearTimeout(closeTimerRef.current)
+    clearTimeout(openTimerRef.current)
+    openTimerRef.current = setTimeout(() => setOpen(true), TITLE_HOVER_OPEN_DELAY_MS)
+  }
+  const scheduleClose = () => {
+    clearTimeout(openTimerRef.current)
+    clearTimeout(closeTimerRef.current)
+    closeTimerRef.current = setTimeout(() => setOpen(false), TITLE_HOVER_CLOSE_DELAY_MS)
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      className="flex-1 min-w-0"
+      onMouseEnter={scheduleOpen}
+      onMouseLeave={scheduleClose}
+      onFocus={scheduleOpen}
+      onBlur={scheduleClose}
+    >
+      <h3
+        ref={nameRef}
+        className="text-sm font-semibold tracking-tight line-clamp-2 leading-snug"
+        style={{ color: resolvedColor }}
+        title={isTruncated ? undefined : name}
+      >
+        {name}
+      </h3>
+      {description && (
+        <p
+          ref={descRef}
+          className="text-[10px] text-ink-muted/70 line-clamp-2 mt-0.5 leading-snug"
+        >
+          {description}
+        </p>
+      )}
+
+      {typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {open && anchor && (
+            <motion.div
+              initial={{ opacity: 0, y: -4, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -4, scale: 0.98 }}
+              transition={{ duration: 0.14, ease: 'easeOut' }}
+              role="tooltip"
+              onMouseEnter={() => {
+                clearTimeout(closeTimerRef.current)
+              }}
+              onMouseLeave={scheduleClose}
+              style={{
+                position: 'fixed',
+                top: anchor.top,
+                left: anchor.left,
+                width: TITLE_POPOVER_WIDTH,
+                zIndex: 1000,
+              }}
+              className="rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
+            >
+              <div
+                className="px-3 py-2 border-b border-black/[0.06] dark:border-white/[0.04]"
+                style={{
+                  background: `linear-gradient(135deg, ${resolvedColor}18 0%, ${resolvedColor}08 100%)`,
+                }}
+              >
+                <div className="text-[13px] font-semibold tracking-tight leading-snug" style={{ color: resolvedColor }}>
+                  {name}
+                </div>
+              </div>
+              {description && (
+                <div className="px-3 py-2.5 text-[12px] text-ink/85 leading-relaxed whitespace-pre-wrap">
+                  {description}
+                </div>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body,
+      )}
+    </div>
+  )
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AutoLoadSentinel — replaces the click-based LoadMoreItem (Phase 3.4)

@@ -4,22 +4,29 @@ Wires up three concurrent tasks:
     1. Scheduler  — every tick, enqueues due data sources to Redis.
     2. Worker     — XREADGROUP loop on three streams (stats / discovery /
        schema), routes via the dispatcher to the registered handler.
-    3. Health HTTP — minimal liveness probe on STATS_HEALTH_PORT.
+    3. Health HTTP — minimal liveness probe on the configured health port.
 
 Gracefully drains in-flight jobs on SIGTERM (up to
 ``STATS_DRAIN_TIMEOUT_SECS``) so container restarts do not leave
 partial upserts behind.
 
 Usage:
-    python -m backend.insights_service
+    python -m backend.insights_service [--health-port PORT]
+
+Health-port resolution order (highest precedence first):
+    1. --health-port CLI flag
+    2. STATS_HEALTH_PORT environment variable
+    3. Default 8092
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import os
 import signal
 import sys
+from dataclasses import replace
 
 from backend.app.common.health_server import run_health_server
 from backend.app.services.aggregation.redis_client import close_redis, get_redis
@@ -48,6 +55,32 @@ from . import dispatcher
 from .worker import StatsJobConsumer
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse CLI flags. Kept tiny on purpose — env vars remain the
+    primary configuration surface for the container deployment; CLI
+    flags exist so a developer running on the host can avoid port
+    conflicts with an in-Docker stats-service (or a stale orphan)
+    without editing ``.env.dev``.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m backend.insights_service",
+        description=(
+            "Synodic insights service — scheduler + worker + health endpoint."
+        ),
+    )
+    parser.add_argument(
+        "--health-port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help=(
+            "TCP port for the liveness health endpoint. "
+            "Overrides STATS_HEALTH_PORT. Default: 8092."
+        ),
+    )
+    return parser.parse_args(argv)
 
 
 _REQUIRED_TABLES = (
@@ -163,16 +196,23 @@ async def _preflight() -> None:
     logger.info("Preflight OK: asyncpg present, Postgres reachable, Redis reachable, schema present.")
 
 
-async def main() -> None:
+async def main(args: argparse.Namespace) -> None:
     logging.basicConfig(
         level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
     config = StatsServiceConfig.from_env()
+    health_port_source = "env"
+    if args.health_port is not None:
+        config = replace(config, health_port=args.health_port)
+        health_port_source = "cli"
+    elif "STATS_HEALTH_PORT" not in os.environ:
+        health_port_source = "default"
+
     logger.info(
         "=== Insights Service starting ===  kinds=%s concurrency=%d per_scope=%d "
-        "tick=%.0fs default_interval=%ds min_interval=%ds health_port=%d",
+        "tick=%.0fs default_interval=%ds min_interval=%ds health_port=%d (via %s)",
         dispatcher.registered_kinds(),
         config.worker_concurrency,
         config.max_per_graph,
@@ -180,6 +220,7 @@ async def main() -> None:
         config.default_interval_secs,
         config.min_interval_secs,
         config.health_port,
+        health_port_source,
     )
 
     # Sanity-check registration before opening Redis loops — if a
@@ -345,4 +386,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(_parse_args()))

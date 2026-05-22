@@ -120,6 +120,20 @@ export function ContextViewCanvas({
   const autoStubThreshold = usePreferencesStore((s) => s.autoStubThreshold)
   const lineageBundleFanIn = usePreferencesStore((s) => s.lineageBundleFanIn)
 
+  // Canvas display settings — driven by the header's DisplaySettingsPopover.
+  // `?? default` guards users whose persisted preferences predate these
+  // fields: zustand's shallow-merge hydration can surface them as
+  // undefined for that cohort until the next setter fires.
+  const canvasZoom = usePreferencesStore((s) => s.canvasZoom) ?? 1
+  const setCanvasZoom = usePreferencesStore((s) => s.setCanvasZoom)
+  const canvasDensity = usePreferencesStore((s) => s.canvasDensity) ?? 'comfortable'
+  const setCanvasDensity = usePreferencesStore((s) => s.setCanvasDensity)
+  const showCanvasTypeBadge = usePreferencesStore((s) => s.showCanvasTypeBadge) ?? true
+  const toggleCanvasTypeBadge = usePreferencesStore((s) => s.toggleCanvasTypeBadge)
+  const subtleCanvasTreeLines = usePreferencesStore((s) => s.subtleCanvasTreeLines) ?? false
+  const toggleSubtleCanvasTreeLines = usePreferencesStore((s) => s.toggleSubtleCanvasTreeLines)
+  const resetCanvasDisplaySettings = usePreferencesStore((s) => s.resetCanvasDisplaySettings)
+
   // URN resolver for trace
   const urnResolver = useCallback((nodeId: string) => {
     const node = nodes.find(n => n.id === nodeId)
@@ -1749,6 +1763,15 @@ export function ContextViewCanvas({
         canRedo={stagedRedoStack.length > 0}
         onUndo={undoStagedChange}
         onRedo={redoStagedChange}
+        canvasZoom={canvasZoom}
+        onSetCanvasZoom={setCanvasZoom}
+        canvasDensity={canvasDensity}
+        onSetCanvasDensity={setCanvasDensity}
+        showCanvasTypeBadge={showCanvasTypeBadge}
+        onToggleCanvasTypeBadge={toggleCanvasTypeBadge}
+        subtleCanvasTreeLines={subtleCanvasTreeLines}
+        onToggleSubtleCanvasTreeLines={toggleSubtleCanvasTreeLines}
+        onResetCanvasDisplaySettings={resetCanvasDisplaySettings}
       />
 
       <div data-canvas-body className="flex-1 w-full h-full relative overflow-hidden bg-canvas flex flex-col">
@@ -1913,7 +1936,17 @@ export function ContextViewCanvas({
               those curves within the visible box at the scroll extremes. */}
           <div
             className="flex h-full min-h-0 relative z-30 gap-12 pointer-events-none"
-            style={{ paddingLeft: EXTREMITY_EDGE_GUTTER_PX, paddingRight: EXTREMITY_EDGE_GUTTER_PX }}
+            style={{
+              paddingLeft: EXTREMITY_EDGE_GUTTER_PX,
+              paddingRight: EXTREMITY_EDGE_GUTTER_PX,
+              // Canvas zoom — CSS scale on the columns area. Width/height
+              // are pre-compensated so the inner flex layout stays truthful
+              // at non-100% zoom; the outer overflow-auto handles scrolling.
+              transform: canvasZoom !== 1 ? `scale(${canvasZoom})` : undefined,
+              transformOrigin: 'top left',
+              width: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
+              height: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
+            }}
           >
             {sortedLayers.map((layer) => (
               <LayerColumn

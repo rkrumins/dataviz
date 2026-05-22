@@ -9,6 +9,8 @@ import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore, stagedChangeColor } from '@/store/stagedChangesStore'
+import { usePreferencesStore } from '@/store/preferences'
+import { densityRowTokens } from './density'
 
 interface FlatTreeItemProps {
   node: HierarchyNode
@@ -136,14 +138,20 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     ? (isTracing ? node.children.length : (childCount || node.children.length))
     : 0
 
-  // IMPROVED SIZING - Keep items readable at ALL depths
-  // Root items are slightly larger, but children remain very readable
+  // Density-aware sizing — driven by usePreferencesStore.canvasDensity. The
+  // virtualizer in LayerColumn reads the same density via densityRowHeights()
+  // so its size estimates stay in lockstep with the rendered row heights.
+  // `?? default` covers users whose persisted state predates these fields.
+  const density = usePreferencesStore(s => s.canvasDensity) ?? 'comfortable'
+  const showTypeBadge = usePreferencesStore(s => s.showCanvasTypeBadge) ?? true
+  const subtleTreeLines = usePreferencesStore(s => s.subtleCanvasTreeLines) ?? false
   const isRoot = depth === 0
-  const heightClass = isRoot ? 'min-h-[52px]' : 'min-h-[44px]'
-  const paddingClass = isRoot ? 'py-3' : 'py-2.5'
-  const textClass = isRoot ? 'text-sm' : 'text-[13px]'
-  const iconSize = isRoot ? 'w-5 h-5' : 'w-4 h-4'
-  const iconContainerSize = isRoot ? 'w-9 h-9' : 'w-7 h-7'
+  const sizing = densityRowTokens(density, isRoot)
+  const minRowHeightPx = isRoot ? sizing.rootHeight : sizing.childHeight
+  const paddingClass = sizing.paddingClass
+  const textClass = sizing.textClass
+  const iconSize = sizing.iconSize
+  const iconContainerSize = sizing.iconContainerSize
 
   // Dimming applies only to the click-highlight feature now. Trace mode used
   // to dim non-traced nodes here, but ContextViewCanvas's
@@ -198,7 +206,6 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       data-trace-focus={isFocusNode ? 'true' : 'false'}
       className={cn(
         "flex items-center gap-2 mx-1 rounded-xl cursor-pointer transition-all duration-200 group/item relative z-[2]",
-        heightClass,
         paddingClass,
         // Subtle backdrop-blur on the card body — visually invisible
         // (matches the glassy translucent design) but blurs anything
@@ -233,6 +240,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       )}
       style={{
         paddingLeft: 12 + indentWidth,
+        minHeight: minRowHeightPx,
         // Subtle left border accent for root items
         ...(depth === 0 && {
           borderLeft: `3px solid ${nodeColor}40`,
@@ -256,17 +264,22 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         delete document.documentElement.dataset.hoveredNode
       }}
     >
-      {/* Modern Tree Lines with gradient effect */}
+      {/* Modern Tree Lines with gradient effect.
+          Subtle mode dims connectors + dot for a calmer look without
+          removing them — orientation cues survive at lower contrast. */}
       <div className="flex items-center absolute left-3" style={{ width: indentWidth }}>
         {parentIsLast.map((pIsLast, idx) => (
           <div key={idx} className="w-5 h-full flex justify-center">
             {!pIsLast && (
-              <div className="w-px h-full bg-gradient-to-b from-white/[0.08] via-white/[0.12] to-white/[0.08]" />
+              <div className={cn(
+                "w-px h-full bg-gradient-to-b from-white/[0.08] via-white/[0.12] to-white/[0.08]",
+                subtleTreeLines && "opacity-40"
+              )} />
             )}
           </div>
         ))}
         {depth > 0 && (
-          <div className="w-5 h-full relative">
+          <div className={cn("w-5 h-full relative", subtleTreeLines && "opacity-50")}>
             {/* Vertical line with gradient */}
             <div className={cn(
               "absolute left-1/2 -translate-x-1/2 w-px",
@@ -374,17 +387,20 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}>
           {node.name}
         </span>
-        {/* Type badge - show for all items to help identify entity types */}
-        <span className={cn(
-          "text-[10px] text-ink-muted/60 truncate mt-0.5 flex items-center gap-1",
-          isRoot && "text-[11px]"
-        )}>
-          <span
-            className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-            style={{ backgroundColor: nodeColor }}
-          />
-          {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
-        </span>
+        {/* Type badge — gated by usePreferencesStore.showCanvasTypeBadge so
+            users can reclaim vertical space in dense canvases. */}
+        {showTypeBadge && (
+          <span className={cn(
+            "text-[10px] text-ink-muted/60 truncate mt-0.5 flex items-center gap-1",
+            isRoot && "text-[11px]"
+          )}>
+            <span
+              className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+              style={{ backgroundColor: nodeColor }}
+            />
+            {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
+          </span>
+        )}
       </div>
 
       {/* Badges - Descendant count */}
@@ -401,12 +417,21 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}
       </AnimatePresence>
 
-      {/* Action buttons - Glass morphism style, appear on hover */}
+      {/* Action buttons — overlay (absolute) so they don't reserve width
+          when hidden. The name beside us gets the full row to itself; on
+          hover the buttons fade in over the right edge with a soft mask
+          that prevents the text underneath from reading awkwardly. */}
       <motion.div
         initial={false}
         animate={{ opacity: isHovered ? 1 : 0, x: isHovered ? 0 : 8 }}
         transition={{ duration: 0.15 }}
-        className="flex items-center gap-1 flex-shrink-0"
+        className={cn(
+          "absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 pl-6 pr-1 rounded-l-xl z-[3]",
+          // Subtle backdrop blur + soft mask so the row text behind the
+          // hovered actions remains legible without a hard color block.
+          isHovered && "backdrop-blur-sm bg-gradient-to-l from-canvas-elevated/95 via-canvas-elevated/80 to-transparent",
+          !isHovered && "pointer-events-none"
+        )}
       >
         {/* Focus/Drill button */}
         {hasChildren && (
