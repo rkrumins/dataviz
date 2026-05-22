@@ -6360,21 +6360,24 @@ class FalkorDBProvider(GraphDataProvider):
     # ------------------------------------------------------------------ #
 
     async def list_graphs(self) -> list:
-        """Return all graph keys on this FalkorDB instance via GRAPH.LIST."""
+        """Return all graph keys on this FalkorDB instance via GRAPH.LIST.
+
+        Raises on connection / auth / timeout failure so the discovery
+        worker can stamp ``last_error`` and the UI can surface a
+        reachable-failure reason (e.g. "tcp_refused: localhost:6379")
+        instead of an empty list that the user can't distinguish from
+        "no graphs exist". Only an empty result is normalised to ``[]``.
+        """
         await self._ensure_connected()
-        try:
-            # GRAPH.LIST is a one-off Redis-protocol command on the FalkorDB
-            # client (not Cypher, not the TimeoutRedis proxy) so it has no
-            # natural wrapper.  Bound it inline at the read-query timeout to
-            # honour the per-operation deadline contract.
-            result = await asyncio.wait_for(
-                self._db.execute_command("GRAPH.LIST"),
-                timeout=self._READ_TIMEOUT,
-            )
-            return list(result) if result else []
-        except Exception as exc:
-            logger.warning("GRAPH.LIST failed: %s", exc)
-            return []
+        # GRAPH.LIST is a one-off Redis-protocol command on the FalkorDB
+        # client (not Cypher, not the TimeoutRedis proxy) so it has no
+        # natural wrapper.  Bound it inline at the read-query timeout to
+        # honour the per-operation deadline contract.
+        result = await asyncio.wait_for(
+            self._db.execute_command("GRAPH.LIST"),
+            timeout=self._READ_TIMEOUT,
+        )
+        return list(result) if result else []
 
     async def close(self) -> None:
         """Release both connection pools held by this provider."""

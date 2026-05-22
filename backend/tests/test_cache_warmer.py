@@ -87,6 +87,8 @@ async def test_warm_happy_path_fills_all_three_endpoints(monkeypatch) -> None:
     monkeypatch.setattr(cache_warmer, "MAX_NODE_COUNT", 0)
     monkeypatch.setattr(cache_warmer, "CHILDREN_FANOUT", 5)
     monkeypatch.setattr(cache_warmer, "ONE_DOWN_FANOUT", 2)
+    # Step-4 is opt-in after P2.2.6; enable for this test which exercises it.
+    monkeypatch.setattr(cache_warmer, "ENABLE_ONE_DOWN", True)
 
     redis = _make_redis()
     monkeypatch.setattr(cache_warmer, "get_redis", lambda: redis)
@@ -110,6 +112,38 @@ async def test_warm_happy_path_fills_all_three_endpoints(monkeypatch) -> None:
     assert result.errors == []
     # Lock released
     redis.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_warm_skips_one_down_when_flag_is_off(monkeypatch) -> None:
+    """Regression for P2.2.6: step 4 must be opt-in. With the default
+    ENABLE_ONE_DOWN=False the warmer fills top-level + aggregated +
+    children but does NOT fan out one level further, regardless of
+    ONE_DOWN_FANOUT."""
+    monkeypatch.setattr(cache_warmer, "CACHE_PREWARM_ENABLED", True)
+    monkeypatch.setattr(cache_warmer, "MAX_NODE_COUNT", 0)
+    monkeypatch.setattr(cache_warmer, "CHILDREN_FANOUT", 5)
+    monkeypatch.setattr(cache_warmer, "ONE_DOWN_FANOUT", 2)
+    monkeypatch.setattr(cache_warmer, "ENABLE_ONE_DOWN", False)
+
+    redis = _make_redis()
+    monkeypatch.setattr(cache_warmer, "get_redis", lambda: redis)
+    cache = _make_cache_with_top_level(top_urns=["urn:a", "urn:b"], children_per=2)
+    monkeypatch.setattr(cache_warmer, "get_graph_cache", lambda: cache)
+    monkeypatch.setattr(
+        cache_warmer.ContextEngine, "for_workspace",
+        AsyncMock(return_value=MagicMock()),
+    )
+
+    result = await cache_warmer.warm_data_source(
+        ws_id="ws1", ds_id="ds1", session=MagicMock(),
+    )
+
+    assert result.top_level_filled is True
+    assert result.aggregated_filled is True
+    assert result.children_filled == 2
+    # Critical: zero one-down calls when the flag is off.
+    assert result.one_down_filled == 0
 
 
 @pytest.mark.asyncio

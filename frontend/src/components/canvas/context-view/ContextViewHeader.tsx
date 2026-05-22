@@ -16,8 +16,9 @@ import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
 import type { HierarchyNode } from './types'
-import type { LineageRenderMode } from '@/store/preferences'
+import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { LineageDisplayPopover } from './LineageDisplayPopover'
+import { DisplaySettingsPopover } from './DisplaySettingsPopover'
 import { TraceDepthControl } from './TraceDepthControl'
 
 export interface ContextViewHeaderProps {
@@ -85,6 +86,17 @@ export interface ContextViewHeaderProps {
   canRedo?: boolean
   onUndo?: () => void
   onRedo?: () => void
+
+  // Display settings — canvas zoom + density + chrome toggles
+  canvasZoom: number
+  onSetCanvasZoom: (n: number) => void
+  canvasDensity: CanvasDensity
+  onSetCanvasDensity: (density: CanvasDensity) => void
+  showCanvasTypeBadge: boolean
+  onToggleCanvasTypeBadge: () => void
+  subtleCanvasTreeLines: boolean
+  onToggleSubtleCanvasTreeLines: () => void
+  onResetCanvasDisplaySettings: () => void
 }
 
 export function ContextViewHeader({
@@ -119,6 +131,15 @@ export function ContextViewHeader({
   canRedo = false,
   onUndo,
   onRedo,
+  canvasZoom,
+  onSetCanvasZoom,
+  canvasDensity,
+  onSetCanvasDensity,
+  showCanvasTypeBadge,
+  onToggleCanvasTypeBadge,
+  subtleCanvasTreeLines,
+  onToggleSubtleCanvasTreeLines,
+  onResetCanvasDisplaySettings,
 }: ContextViewHeaderProps) {
   const searchInputRef = useRef<HTMLInputElement>(null)
   const { showToast } = useToast()
@@ -217,6 +238,21 @@ export function ContextViewHeader({
               onToggleEdgeDirection={onToggleEdgeDirection}
             />
           )}
+
+          {/* Canvas display settings — zoom, density, type-badge, subtle lines.
+              Always visible: these affect node rendering, not edges, so they
+              stay useful even when the lineage mesh is off. */}
+          <DisplaySettingsPopover
+            canvasZoom={canvasZoom}
+            onSetCanvasZoom={onSetCanvasZoom}
+            canvasDensity={canvasDensity}
+            onSetCanvasDensity={onSetCanvasDensity}
+            showTypeBadge={showCanvasTypeBadge}
+            onToggleTypeBadge={onToggleCanvasTypeBadge}
+            subtleTreeLines={subtleCanvasTreeLines}
+            onToggleSubtleTreeLines={onToggleSubtleCanvasTreeLines}
+            onReset={onResetCanvasDisplaySettings}
+          />
 
           <div className="w-px h-6 bg-gradient-to-b from-transparent via-black/15 dark:via-white/10 to-transparent" />
 

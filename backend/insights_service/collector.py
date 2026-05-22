@@ -87,12 +87,14 @@ async def collect(session: AsyncSession, envelope: StatsJobEnvelope) -> None:
         config.last_status = "success"
         config.last_error = None
 
-    # Fire-and-forget cache pre-warm. Uses its own readonly session so it
-    # can run independently of this job's commit. No-op when the feature
-    # flag is off, when this DS is over ``CACHE_PREWARM_MAX_NODE_COUNT``,
-    # or when another replica holds the per-(ws, ds) lock.
+    # Defer the cache pre-warm request to fire AFTER the worker commits
+    # this session. Firing it now would race the commit (and worse
+    # against a read replica). See ``cache_warmer.defer_warm`` /
+    # ``fire_deferred_warm``. The actual fire-and-forget scheduling
+    # still happens via ``schedule_warm`` after the worker invokes
+    # ``fire_deferred_warm`` post-commit.
     from . import cache_warmer
-    cache_warmer.schedule_warm(
+    cache_warmer.defer_warm(
         ws_id=envelope.workspace_id,
         ds_id=envelope.data_source_id,
         node_count=stats.get("nodeCount", 0),

@@ -1,5 +1,16 @@
 """Cache pre-warmer for top-level + 1-level-down navigation entry points.
 
+POST-COMMIT TRIGGER (P2.1.4):
+The collector and worker cooperate via the ``defer_warm`` / ``fire_deferred_warm``
+pair to avoid the race documented in the review: the collector cannot
+fire ``schedule_warm`` directly because the worker hasn't committed the
+DB session yet, and the warmer opens its own readonly session which
+would race the commit (worse against a read replica). Instead the
+collector calls ``defer_warm`` to stash the warm request on a
+``contextvars.ContextVar``, and the worker calls ``fire_deferred_warm``
+*after* ``session.commit()`` succeeds. The ContextVar makes this
+safe under asyncio task switching (per-task state, not module-global).
+
 Fired post-stats-poll for each data source. Fills the GraphCache for the
 three endpoints a user hits the moment they open a data source:
 
@@ -26,10 +37,11 @@ Bounds:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,36 +70,120 @@ def _flag(name: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _clamped_int(name: str, default: int, *, lo: int, hi: int) -> int:
+    """Read an int env var, fall back on bad input, clamp out-of-range
+    to ``[lo, hi]`` with a WARNING. Same shape as ``graph_cache._clamped_int_env``."""
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError:
+        logger.warning(
+            "cache_warmer: %s=%r is not an integer; falling back to default %d",
+            name, raw, default,
+        )
+        return default
+    if parsed < lo:
+        logger.warning("cache_warmer: %s=%d below safe min %d; clamping up", name, parsed, lo)
+        return lo
+    if parsed > hi:
+        logger.warning("cache_warmer: %s=%d above safe max %d; clamping down", name, parsed, hi)
+        return hi
+    return parsed
+
+
+def _clamped_float(name: str, default: float, *, lo: float, hi: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError:
+        logger.warning(
+            "cache_warmer: %s=%r is not a number; falling back to default %.1f",
+            name, raw, default,
+        )
+        return default
+    if parsed < lo:
+        logger.warning("cache_warmer: %s=%.2f below safe min %.2f; clamping up", name, parsed, lo)
+        return lo
+    if parsed > hi:
+        logger.warning("cache_warmer: %s=%.2f above safe max %.2f; clamping down", name, parsed, hi)
+        return hi
+    return parsed
+
+
 # Master switch. When OFF, ``warm_data_source`` is a no-op so the stats
 # worker's post-poll hook can stay wired unconditionally.
 CACHE_PREWARM_ENABLED: bool = _flag("CACHE_PREWARM_ENABLED", default=True)
 
-# Top-level page size requested during warm. Default 50 covers the common
-# "DS has < 50 top-level entities" case in one cache entry.
-TOP_LEVEL_LIMIT: int = int(os.getenv("CACHE_PREWARM_TOP_LEVEL_LIMIT", "50"))
+# Top-level page size requested during warm. Bounds: 1 (anything less
+# is useless) up to 500 (covers the largest realistic top-level set
+# without inviting unbounded fan-out).
+TOP_LEVEL_LIMIT: int = _clamped_int("CACHE_PREWARM_TOP_LEVEL_LIMIT", 50, lo=1, hi=500)
 
 # How many top-level URNs we expand into their direct children. Bounds
-# the worst-case provider load per warm cycle.
-CHILDREN_FANOUT: int = int(os.getenv("CACHE_PREWARM_CHILDREN_FANOUT", "20"))
+# the worst-case provider load per warm cycle. Max 200 caps the worst
+# case at ~200 children calls per DS per cycle.
+CHILDREN_FANOUT: int = _clamped_int("CACHE_PREWARM_CHILDREN_FANOUT", 20, lo=0, hi=200)
+
+# Whether to run step 4 (warm children of children, "one level down")
+# at all. Off by default after the review found this step to be the
+# dominant load cost with the lowest reactive-hit-rate payoff. Operators
+# can enable per-deployment once measured hit-rate data justifies the
+# extra fan-out.
+ENABLE_ONE_DOWN: bool = _flag("CACHE_PREWARM_ENABLE_ONE_DOWN", default=False)
 
 # For each warmed top-level URN, how many of its direct children we then
-# warm one level further. Total worst-case requests:
-# ``TOP_LEVEL_LIMIT(1) + CHILDREN_FANOUT(N) + ONE_DOWN_FANOUT*N``.
-ONE_DOWN_FANOUT: int = int(os.getenv("CACHE_PREWARM_ONE_DOWN_FANOUT", "10"))
+# warm one level further (when ``ENABLE_ONE_DOWN`` is on). 0 also
+# disables the pass even when the flag is on.
+ONE_DOWN_FANOUT: int = _clamped_int("CACHE_PREWARM_ONE_DOWN_FANOUT", 10, lo=0, hi=100)
 
-# Skip pre-warming for graphs above this node count. Pre-warming a
-# 10M-node graph would burn FalkorDB time for marginal hit-rate gain
-# (the user's navigation entry is unpredictable at that scale).
-MAX_NODE_COUNT: int = int(os.getenv("CACHE_PREWARM_MAX_NODE_COUNT", "500000"))
+# Skip pre-warming for graphs above this node count. Bounds: at least
+# 1k (smaller is meaningless), at most 100M (anything bigger is a
+# different system).
+MAX_NODE_COUNT: int = _clamped_int(
+    "CACHE_PREWARM_MAX_NODE_COUNT", 500_000, lo=1_000, hi=100_000_000,
+)
 
-# Outer wall-clock budget for one warm cycle. Inner per-op timeouts are
-# inherited from the engine/provider path.
-DS_TIMEOUT_SECS: float = float(os.getenv("CACHE_PREWARM_DS_TIMEOUT_SECS", "60"))
+# Outer wall-clock budget for one warm cycle. 5s floor so we never
+# punish a fast cycle with a sub-second deadline; 10min ceiling because
+# anything longer is doing different work.
+DS_TIMEOUT_SECS: float = _clamped_float(
+    "CACHE_PREWARM_DS_TIMEOUT_SECS", 60.0, lo=5.0, hi=600.0,
+)
 
-# Lock TTL: long enough that a slow warm doesn't release before it's
-# finished, short enough that a crashed warmer doesn't pin the lock.
-_LOCK_TTL_SECS: int = int(os.getenv("CACHE_PREWARM_LOCK_TTL_SECS", "300"))
+# Lock TTL must always exceed ``DS_TIMEOUT_SECS`` so an in-flight warm
+# doesn't have its lock expire under itself, and must be short enough
+# that a crashed pod doesn't pin the lock for too long. Floor enforces
+# the warm-fits-inside invariant.
+_LOCK_TTL_SECS: int = _clamped_int(
+    "CACHE_PREWARM_LOCK_TTL_SECS",
+    max(int(DS_TIMEOUT_SECS) + 30, 90),
+    lo=max(int(DS_TIMEOUT_SECS) + 5, 30),
+    hi=1800,
+)
 _LOCK_PREFIX = "cache_warm:lock"
+
+# Process-wide cap on concurrent warm cycles. Without this, 50 stats
+# polls completing in the same 30s window each spawn their own
+# ``schedule_warm`` task and FalkorDB's single-threaded Cypher path is
+# hit by hundreds of concurrent queries. The semaphore caps in-flight
+# warms across all data sources for one process; the per-DS Redis
+# SET-NX lock still deduplicates across replicas. Bounds: 1..32.
+GLOBAL_CONCURRENCY: int = _clamped_int(
+    "CACHE_PREWARM_GLOBAL_CONCURRENCY", 4, lo=1, hi=32,
+)
+_global_warm_semaphore: asyncio.Semaphore = asyncio.Semaphore(GLOBAL_CONCURRENCY)
+
+# Random jitter window applied when ``schedule_warm`` is called. Without
+# jitter, 50 stats polls completing in the same second all fire warm
+# immediately and saturate the semaphore. With ±N seconds of jitter the
+# warms spread evenly over the cycle. Bounds: 0..120s.
+JITTER_SECS: float = _clamped_float(
+    "CACHE_PREWARM_JITTER_SECS", 30.0, lo=0.0, hi=120.0,
+)
 
 
 @dataclass
@@ -128,6 +224,26 @@ async def warm_data_source(
         result.skipped_reason = f"node_count_{node_count}_over_cap_{MAX_NODE_COUNT}"
         return result
 
+    # Global concurrency cap — bounds total in-flight warms across all
+    # data sources for this process. Acquired BEFORE the Redis lock so
+    # we don't hold the lock while waiting for a semaphore slot.
+    async with _global_warm_semaphore:
+        return await _warm_data_source_locked(
+            ws_id=ws_id, ds_id=ds_id,
+            session=session, result=result,
+        )
+
+
+async def _warm_data_source_locked(
+    *,
+    ws_id: str,
+    ds_id: str,
+    session: Optional[AsyncSession],
+    result: WarmResult,
+) -> WarmResult:
+    """Inner body of ``warm_data_source`` — runs under the global
+    semaphore. Split out so the semaphore acquisition is the *only*
+    work that happens before the per-DS lock contention."""
     redis = get_redis()
     lock_key = f"{_LOCK_PREFIX}:{ws_id}:{ds_id}"
     # SET NX with TTL — atomic acquisition with auto-release on crash.
@@ -284,6 +400,11 @@ async def _warm_steps(
             result.errors.append(f"children:{urn}:{type(exc).__name__}:{exc}")
 
     # ── 4. children for 1-level-down URNs ─────────────────────────────
+    # Opt-in: this step is the dominant load cost in the warm cycle and
+    # the lowest reactive-hit-rate payoff. Off by default; enable via
+    # ``CACHE_PREWARM_ENABLE_ONE_DOWN=true`` once measured data justifies.
+    if not ENABLE_ONE_DOWN:
+        return
     for urn in one_down_urns[:CHILDREN_FANOUT * ONE_DOWN_FANOUT]:
         try:
             await cache.get_or_compute(
@@ -311,6 +432,42 @@ async def _warm_steps(
             result.errors.append(f"one_down:{urn}:{type(exc).__name__}:{exc}")
 
 
+# ── post-commit defer/fire pair (P2.1.4) ──────────────────────────────
+#
+# Collector handlers run inside the worker's session, BEFORE the worker
+# commits. The warmer needs to read post-commit state (and would
+# otherwise race the commit against a readonly replica). To bridge this
+# without changing the dispatcher signature, the collector calls
+# ``defer_warm(...)`` which stashes the request on a per-task
+# ``ContextVar``. After ``session.commit()`` succeeds, the worker calls
+# ``fire_deferred_warm()`` which reads-and-clears the ContextVar and
+# schedules the warm via the existing ``schedule_warm`` path.
+
+_deferred_warm: contextvars.ContextVar[Optional[Tuple[str, str, int]]] = (
+    contextvars.ContextVar("_deferred_warm", default=None)
+)
+
+
+def defer_warm(ws_id: str, ds_id: str, node_count: int = 0) -> None:
+    """Stash a warm request to be fired by ``fire_deferred_warm`` after
+    the enclosing DB session commits. Per-task via ContextVar so two
+    concurrent jobs cannot stomp each other's requests."""
+    _deferred_warm.set((ws_id, ds_id, node_count))
+
+
+def fire_deferred_warm() -> Optional[asyncio.Task]:
+    """Read-and-clear the deferred warm slot for this task and schedule
+    the warmer if one was set. Called from worker.py immediately AFTER
+    ``await session.commit()``. Returns the scheduled task (or None) for
+    test observability."""
+    pending = _deferred_warm.get()
+    if pending is None:
+        return None
+    _deferred_warm.set(None)
+    ws_id, ds_id, node_count = pending
+    return schedule_warm(ws_id=ws_id, ds_id=ds_id, node_count=node_count)
+
+
 # ── fire-and-forget scheduling ────────────────────────────────────────
 
 # Held strong references to in-flight warm tasks so the event loop's
@@ -327,6 +484,12 @@ def schedule_warm(ws_id: str, ds_id: str, node_count: int = 0) -> Optional[async
     returned task is tracked so it isn't GC'd mid-flight; callers don't
     need to hold the reference.
 
+    A uniform random jitter in ``[0, JITTER_SECS]`` is added before the
+    warm starts so 50 stats polls completing in the same second don't
+    all fire warms at once (the global concurrency semaphore caps
+    in-flight, but jitter spreads the arrival distribution so we
+    actually use the semaphore window instead of queueing instantly).
+
     Returns ``None`` when the feature flag is off — collector code can
     call this unconditionally without branching.
     """
@@ -337,8 +500,14 @@ def schedule_warm(ws_id: str, ds_id: str, node_count: int = 0) -> Optional[async
     except RuntimeError:  # pragma: no cover — only called from async ctx
         return None
 
+    async def _delayed_warm() -> WarmResult:
+        if JITTER_SECS > 0:
+            import random
+            await asyncio.sleep(random.uniform(0.0, JITTER_SECS))
+        return await warm_data_source(ws_id=ws_id, ds_id=ds_id, node_count=node_count)
+
     task = loop.create_task(
-        warm_data_source(ws_id=ws_id, ds_id=ds_id, node_count=node_count),
+        _delayed_warm(),
         name=f"cache-warm:{ws_id}:{ds_id}",
     )
     _active_warm_tasks.add(task)

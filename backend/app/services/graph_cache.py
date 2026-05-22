@@ -53,30 +53,84 @@ T = TypeVar("T", bound=BaseModel)
 
 _KEY_PREFIX = "graphcache:v1"
 _GEN_PREFIX = "graphcache:gen"
+
+
+# ─── env-safe parsing ──────────────────────────────────────────────────
+#
+# Every cache TTL + size knob below is operator-tunable, but a typo or
+# accidental zero/negative in production would either pin entries
+# forever (TTL=0 -> Redis SETEX with 0 is rejected; or in our case it
+# silently never expires under some interpreters) or instant-evict
+# everything. Both modes degrade the system. Routing every env read
+# through ``_clamped_int_env`` means an out-of-range override clamps
+# to a documented safe bound and logs a WARNING — the app keeps
+# running with a sane value instead of breaking on a deploy-time
+# config mistake.
+
+def _clamped_int_env(
+    name: str, default: int, *, lo: int, hi: int,
+) -> int:
+    """Parse ``os.getenv(name)`` as an int, falling back to ``default``
+    when missing / non-numeric, and clamping to ``[lo, hi]`` otherwise.
+    Out-of-range values log at WARNING — they're a deploy-time mistake
+    worth surfacing in startup logs."""
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError:
+        logger.warning(
+            "graph_cache: %s=%r is not an integer; falling back to default %d",
+            name, raw, default,
+        )
+        return default
+    if parsed < lo:
+        logger.warning(
+            "graph_cache: %s=%d is below safe minimum %d; clamping up",
+            name, parsed, lo,
+        )
+        return lo
+    if parsed > hi:
+        logger.warning(
+            "graph_cache: %s=%d is above safe maximum %d; clamping down",
+            name, parsed, hi,
+        )
+        return hi
+    return parsed
 # Last-known-good snapshot, gen-less so it survives ``bump_generation``.
 # Used only on the stale-fallback path when ``compute()`` raises a
 # transient provider error.
 _LKG_PREFIX = "graphcache:lkg:v1"
 
-# Per-endpoint TTLs (seconds). The plan calls for 30s on children and 60s
-# on aggregated — tunable via env so we can dial up under verified low
-# write rates or dial down if we see staleness complaints.
-_DEFAULT_CHILDREN_TTL = int(os.getenv("GRAPH_CACHE_CHILDREN_TTL_S", "30"))
-_DEFAULT_AGGREGATED_TTL = int(os.getenv("GRAPH_CACHE_AGGREGATED_TTL_S", "60"))
+# Per-endpoint TTLs (seconds). Each is operator-tunable inside a safe
+# range so a bad env value (typo, zero, huge) can't break the cache.
+# Bounds rationale:
+#   * lo = 1s — anything shorter is effectively no-cache and would
+#     trigger thundering-herd compute on every render.
+#   * hi = 1 hour — beyond this, ``bump_generation`` on writes is the
+#     only invalidation lever and operators would lose all ability to
+#     see fresh data without restarting.
+_TTL_LO, _TTL_HI = 1, 3600
+
+_DEFAULT_CHILDREN_TTL = _clamped_int_env("GRAPH_CACHE_CHILDREN_TTL_S", 30, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_AGGREGATED_TTL = _clamped_int_env("GRAPH_CACHE_AGGREGATED_TTL_S", 60, lo=_TTL_LO, hi=_TTL_HI)
 # Trace responses are large and expensive; 60s catches repeat navigation
 # inside the lineage preview drawer without serving stale data for long.
 # The same gen counter (bumped on writes) invalidates trace entries.
-_DEFAULT_TRACE_TTL = int(os.getenv("GRAPH_CACHE_TRACE_TTL_S", "60"))
-_DEFAULT_TRACE_EXPAND_TTL = int(os.getenv("GRAPH_CACHE_TRACE_EXPAND_TTL_S", "60"))
+_DEFAULT_TRACE_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_TTL_S", 60, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_TRACE_EXPAND_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_EXPAND_TTL_S", 60, lo=_TTL_LO, hi=_TTL_HI)
 # Top-level nodes change only when a write inside the workspace shuffles
 # containment — gen counter bumps invalidate. Small payloads, hot path.
-_DEFAULT_TOP_LEVEL_TTL = int(os.getenv("GRAPH_CACHE_TOP_LEVEL_TTL_S", "60"))
+_DEFAULT_TOP_LEVEL_TTL = _clamped_int_env("GRAPH_CACHE_TOP_LEVEL_TTL_S", 60, lo=_TTL_LO, hi=_TTL_HI)
 # Layer assignment is deterministic for a given (ws, ds, request body)
 # and touches the same node/edge set as a trace. 60s matches /trace.
-_DEFAULT_LAYER_ASSIGNMENT_TTL = int(os.getenv("GRAPH_CACHE_LAYER_ASSIGNMENT_TTL_S", "60"))
+_DEFAULT_LAYER_ASSIGNMENT_TTL = _clamped_int_env("GRAPH_CACHE_LAYER_ASSIGNMENT_TTL_S", 60, lo=_TTL_LO, hi=_TTL_HI)
 # Short TTL for empty/404 results — absorbs herds asking for the same
-# missing URN without committing to caching nonsense for long.
-_NEGATIVE_TTL = int(os.getenv("GRAPH_CACHE_NEGATIVE_TTL_S", "5"))
+# missing URN without committing to caching nonsense for long. Floor of
+# 5s keeps the herd-absorption property; ceiling of 5min limits damage
+# when a transient miss is overcached.
+_NEGATIVE_TTL = _clamped_int_env("GRAPH_CACHE_NEGATIVE_TTL_S", 5, lo=5, hi=300)
 
 # Last-known-good snapshot TTL. The LKG snapshot is the gen-less mirror
 # of every successful compute, used as the stale-fallback source when
@@ -84,13 +138,25 @@ _NEGATIVE_TTL = int(os.getenv("GRAPH_CACHE_NEGATIVE_TTL_S", "5"))
 # UI responsive across a same-day outage without pinning Redis memory
 # for outliers; longer outages are operational problems. Set to 0 to
 # disable the LKG mirror entirely (compute failures will then propagate).
-_LKG_TTL = int(os.getenv("GRAPH_CACHE_LKG_TTL_S", "86400"))
+# Bounds: 0 (disabled) or [60s, 30d].
+_LKG_TTL_RAW = _clamped_int_env("GRAPH_CACHE_LKG_TTL_S", 86400, lo=0, hi=2_592_000)
+# 0 means "disabled" — keep it as 0; otherwise clamp the lower bound up
+# so a tiny value doesn't make LKG functionally useless.
+_LKG_TTL = _LKG_TTL_RAW if _LKG_TTL_RAW == 0 else max(_LKG_TTL_RAW, 60)
 
 # Per-payload size cap. A single response larger than this is logged
 # and dropped rather than cached — a 5 MB aggregated-edge dump shouldn't
 # crowd out a thousand normal 5 KB entries. Applies to both primary and
 # LKG writes. Set to 0 to disable the cap (do not recommend in prod).
-_MAX_PAYLOAD_BYTES = int(os.getenv("GRAPH_CACHE_MAX_PAYLOAD_BYTES", "1048576"))
+# Bounds: 0 (disabled) or [4 KB, 64 MB]. The 64 MB ceiling matches
+# Redis's default string-value soft limit.
+_MAX_PAYLOAD_BYTES_RAW = _clamped_int_env(
+    "GRAPH_CACHE_MAX_PAYLOAD_BYTES", 1_048_576, lo=0, hi=67_108_864,
+)
+_MAX_PAYLOAD_BYTES = (
+    _MAX_PAYLOAD_BYTES_RAW if _MAX_PAYLOAD_BYTES_RAW == 0
+    else max(_MAX_PAYLOAD_BYTES_RAW, 4_096)
+)
 
 # Per-endpoint kill switches. Default ON: these two endpoints carry the
 # bulk of FalkorDB Cypher-thread contention; with the cache off every

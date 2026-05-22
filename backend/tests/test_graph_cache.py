@@ -385,12 +385,20 @@ async def test_stale_fallback_singleflight_followers_also_invoke_on_stale() -> N
     from backend.common.adapters import ProviderUnavailable
 
     redis = _make_redis()
-    # First GET = generation; second GET = primary miss; third GET = LKG hit.
-    redis.get = AsyncMock(side_effect=[
-        "0",
-        None,
-        _Result(value=555).model_dump_json(by_alias=True),
-    ])
+    # Key-based dispatch so we don't depend on the interleaving of
+    # leader/follower gen+primary GETs. Gen reads return "0", primary
+    # reads return None (miss → singleflight), LKG read returns a stale
+    # payload that the leader serves and the follower inherits.
+    lkg_payload = _Result(value=555).model_dump_json(by_alias=True)
+
+    async def fake_get(key: str):
+        if key.startswith(graph_cache._GEN_PREFIX):
+            return "0"
+        if key.startswith(graph_cache._LKG_PREFIX):
+            return lkg_payload
+        return None  # primary miss
+
+    redis.get = AsyncMock(side_effect=fake_get)
     cache = GraphCache(redis)
     leader_callbacks: list[bool] = []
     follower_callbacks: list[bool] = []

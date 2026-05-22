@@ -28,7 +28,7 @@ spec:
             - --appendonly
             - "yes"
             - --maxmemory
-            - 512mb
+            - 2gb
             # volatile-lru: only entries with a TTL are eligible for
             # eviction. Every GraphCache entry sets ``ex=...`` on write,
             # so cache entries get evicted under memory pressure first
@@ -38,13 +38,18 @@ spec:
           ports:
             - containerPort: 6379
               name: redis
+          # Resource asks must allow Redis to actually use the 2 GB
+          # maxmemory budget — Kubernetes OOMs the container if it grows
+          # past ``limits.memory`` regardless of Redis's own ceiling. The
+          # request matches the budget; the limit adds a slack window
+          # for transient overhead (fragmentation, replication buffers).
           resources:
             requests:
               cpu: 100m
-              memory: 512Mi
+              memory: 2Gi
             limits:
               cpu: 500m
-              memory: 768Mi
+              memory: 2560Mi
           readinessProbe:
             exec:
               command: ["redis-cli", "ping"]

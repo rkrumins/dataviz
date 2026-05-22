@@ -86,6 +86,36 @@ async def collect(session: AsyncSession, envelope: DiscoveryJobEnvelope) -> None
     start_ts = asyncio.get_event_loop().time()
     try:
         async with admission.gate(provider_id, op_kind="discovery"):
+            # Fast reachability probe (≤2s) before any expensive driver
+            # init. Without this, a provider whose stored host:port is
+            # unreachable from the worker's network context (e.g.
+            # ``localhost:6379`` left over from in-container setup, now
+            # being scanned by a host-run viz-service) would block
+            # ``_ensure_connected`` for 30+s and ultimately surface as a
+            # raw redis driver exception. Preflight gives us classified
+            # reason codes (``tcp_refused``, ``dns_unresolvable``,
+            # ``connect_timeout``, …) that the frontend's ``friendlyError``
+            # mapper translates into actionable messages.
+            pre = await instance.preflight(deadline_s=2.0)
+            if not pre.ok:
+                target = f"{prov_row.host}:{prov_row.port}"
+                error_msg = f"{pre.reason}: {target}"
+                duration = asyncio.get_event_loop().time() - start_ts
+                logger.warning(
+                    "discovery.preflight_failed provider=%s asset=%s "
+                    "target=%s reason=%s elapsed_ms=%d total_duration_secs=%.2f",
+                    provider_id, asset_name or "<list-all>",
+                    target, pre.reason, pre.elapsed_ms, duration,
+                )
+                # Stamp ``last_error`` on the cache row and return without
+                # raising. A misconfigured host won't recover from worker
+                # XAUTOCLAIM retries — the user has to fix the provider
+                # config. Returning normally lets the worker ACK so we
+                # don't waste 5 retries on a clearly-broken config; the
+                # UI surfaces ``last_error`` so the user knows what to fix.
+                await record_failure(session, provider_id, asset_name, error_msg)
+                return
+
             if is_list_all:
                 graphs = await asyncio.wait_for(
                     instance.list_graphs(), timeout=_DISCOVERY_LIVE_TIMEOUT_SECS
