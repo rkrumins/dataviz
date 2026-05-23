@@ -68,6 +68,7 @@ import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
 import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
+import { usePinnedLineagePath } from '@/hooks/usePinnedLineagePath'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
@@ -86,6 +87,13 @@ export interface ContextViewCanvasProps {
   layers?: ViewLayerConfig[]
   showLineageFlow?: boolean
 }
+
+// Stable empty constants for the Pin Lineage path through
+// useTraceFilteredHierarchy — keeps the memo's dep array stable when
+// substituting trace inputs in `hide` mode.
+const EMPTY_TRACE_NODES = new Set<string>()
+const EMPTY_DRILLDOWNS: Map<string, TraceV2Result> = new Map()
+
 
 export function ContextViewCanvas({
   className,
@@ -913,18 +921,58 @@ export function ContextViewCanvas({
     nodeMap, childMap, parentMap,
   })
 
+  // Pin Lineage — compute focus↔pin sub-lineage and clear pins on focus
+  // change. Mirrors the GraphCanvas wiring so all three canvases (graph
+  // and reference) react identically to pinned trace endpoints.
+  const pinnedTargetUrns = useCanvasStore((s) => s.pinnedTargetUrns)
+  const pinDisplayMode = useCanvasStore((s) => s.pinDisplayMode)
+  const clearPinTargets = useCanvasStore((s) => s.clearPinTargets)
+
+  const lastFocusRef = useRef<string | null>(trace.focusId)
+  useEffect(() => {
+    if (lastFocusRef.current !== trace.focusId) {
+      lastFocusRef.current = trace.focusId
+      clearPinTargets()
+    }
+  }, [trace.focusId, clearPinTargets])
+
+  const pinPath = usePinnedLineagePath({
+    edges,
+    isContainmentEdge,
+    focusUrn: trace.focusId,
+    pinnedUrns: pinnedTargetUrns,
+    containmentParent: parentMap,
+  })
+
+  const pinKeptUrns = useMemo(() => {
+    if (!pinPath.active) return null
+    const s = new Set(pinPath.pathNodeUrns)
+    pinPath.keepForLayoutUrns.forEach((u) => s.add(u))
+    return s
+  }, [pinPath])
+
   // Trace filter — when a trace is active, hides everything outside the trace
   // context (traced URNs + drilldown URNs + their containment ancestors).
   // When trace is off, returns the inputs unchanged with no allocation.
   // Used by LayerColumn / edge projection so expansion reveals only traced
   // descendants, recursively to any depth.
+  //
+  // Pin Lineage hooks in here: in `hide` mode we substitute the pinned
+  // focus↔pin sub-lineage for the broader trace context and drop the
+  // drilldown widening, so the existing recursive pruning narrows the
+  // hierarchy to exactly the path nodes (plus containment ancestors).
+  const pinIsolating = pinPath.active && pinDisplayMode === 'hide'
+  const effectiveTraceNodes = pinIsolating
+    ? (pinKeptUrns as Set<string>)
+    : (trace.result?.traceNodes ?? EMPTY_TRACE_NODES)
+  const effectiveDrilldowns = pinIsolating ? EMPTY_DRILLDOWNS : trace.drilldowns
   const {
     filteredByLayer, filteredFlat, filteredMap, contextSet: traceContextSet,
   } = useTraceFilteredHierarchy({
     nodesByLayer, displayFlat, displayMap,
-    isTracing: trace.isTracing,
-    traceNodes: trace.result?.traceNodes ?? new Set<string>(),
-    drilldowns: trace.drilldowns,
+    isTracing: trace.isTracing || pinIsolating,
+    traceNodes: effectiveTraceNodes,
+    drilldowns: effectiveDrilldowns,
     parentMap,
     childMap,
     expandedNodes,
@@ -1602,6 +1650,27 @@ export function ContextViewCanvas({
   const mergedHighlightNodes = isClickHighlightActive ? highlightState.nodes : hoverHighlight.nodes
   const mergedHighlightEdges = isClickHighlightActive ? highlightState.edges : hoverHighlight.edges
 
+  // Pin Lineage — in `dim` mode reuse the existing highlight-dim
+  // pipeline for both nodes (LayerColumn → FlatTreeItem
+  // isDimmedByHighlight) and edges (LineageFlowOverlay): union the
+  // pinned path into the highlight sets and force highlight-active. Off-
+  // path elements then render dimmed via the existing styling without
+  // touching downstream components.
+  const pinDimActive = pinPath.active && pinDisplayMode === 'dim'
+  const pinDimHighlightEdges = useMemo(() => {
+    if (!pinDimActive) return mergedHighlightEdges
+    const merged = new Set(mergedHighlightEdges ?? [])
+    pinPath.pathEdgeIds.forEach((id) => merged.add(id))
+    return merged
+  }, [pinDimActive, mergedHighlightEdges, pinPath])
+  const pinDimHighlightNodes = useMemo(() => {
+    if (!pinDimActive) return mergedHighlightNodes
+    const merged = new Set(mergedHighlightNodes ?? [])
+    pinPath.pathNodeUrns.forEach((u) => merged.add(u))
+    return merged
+  }, [pinDimActive, mergedHighlightNodes, pinPath])
+  const pinDimHighlightActive = pinDimActive || isHighlightActive
+
   const clearSelection = useCanvasStore((s) => s.clearSelection)
 
   // Drill-down: double-click an AGGREGATED edge to fetch finer-level lineage
@@ -1860,8 +1929,8 @@ export function ContextViewCanvas({
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={trace.isTracing}
               traceResult={trace.result}
-              highlightedEdges={mergedHighlightEdges}
-              isHighlightActive={isHighlightActive}
+              highlightedEdges={pinDimHighlightEdges}
+              isHighlightActive={pinDimHighlightActive}
               resolveEdgeColor={resolveEdgeColor}
               onEdgeDoubleClick={handleEdgeDoubleClick}
               showDirection={showEdgeDirection}
@@ -1938,8 +2007,8 @@ export function ContextViewCanvas({
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
                 isTracing={trace.isTracing}
-                highlightedNodes={mergedHighlightNodes}
-                isHighlightActive={isHighlightActive}
+                highlightedNodes={pinDimHighlightNodes}
+                isHighlightActive={pinDimHighlightActive}
                 isHoverHighlight={isHoverActive && !isClickHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
                 onLoadMore={loadChildren}
