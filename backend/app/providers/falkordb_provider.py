@@ -41,6 +41,32 @@ def _sanitize_label(s: str) -> str:
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
 
 
+def _compute_searchable_text(
+    display_name: Optional[str],
+    qualified_name: Optional[str],
+    description: Optional[str],
+    user_properties: Optional[Dict[str, Any]],
+) -> str:
+    """Build a lowercased, space-joined searchable string for n.searchableText.
+
+    Includes displayName, qualifiedName, description, and every string-valued
+    user property value. Capped at 4096 characters to bound storage.
+    """
+    parts: List[str] = []
+    if display_name:
+        parts.append(display_name)
+    if qualified_name:
+        parts.append(qualified_name)
+    if description:
+        parts.append(description)
+    if user_properties:
+        for value in user_properties.values():
+            if isinstance(value, str):
+                parts.append(value)
+    result = " ".join(parts).lower()
+    return result[:4096]
+
+
 # Reserved node-key set — fields the provider writes directly onto a FalkorDB
 # node. User-supplied `properties` keys that collide with these names are
 # dropped at write time so provider state stays authoritative. Used by both
@@ -1071,6 +1097,31 @@ class FalkorDBProvider(GraphDataProvider):
             "ContextEngine / aggregation must call set_containment_edge_types() "
             "with the resolved ontology before invoking provider methods that "
             "depend on containment classification."
+        )
+
+    def _get_lineage_edge_types(self) -> Set[str]:
+        """Return the authoritative lineage edge type set.
+
+        Mirrors ``_get_containment_edge_types``. The set is populated by
+        ``set_resolved_edge_metadata`` (called from
+        ``ContextEngine._resolve_ontology``) from the live ontology's
+        ``is_lineage`` flags. Empty is a valid resolved state (graph has
+        no lineage edges); a missing set raises ``ProviderConfigurationError``
+        so silent misconfiguration is impossible — search predicates that
+        depend on lineage (``isOrphan``, ``degree``, ``withinHops``) must
+        fail loudly if the ontology was never injected.
+
+        No hardcoded fallback: the whole point of the ontology resolution
+        gate is that lineage classification is per-data-source.
+        """
+        if getattr(self, "_resolved_edge_metadata_set", False):
+            return self._resolved_lineage_types
+        raise ProviderConfigurationError(
+            "Lineage edge types are not configured for this provider. "
+            "ContextEngine / aggregation must call set_resolved_edge_metadata() "
+            "with the resolved ontology before invoking provider methods that "
+            "depend on lineage classification (e.g. degree / isOrphan / "
+            "withinHops predicates)."
         )
 
     def _extract_node_from_result(self, row) -> Optional[GraphNode]:
@@ -6274,6 +6325,10 @@ class FalkorDBProvider(GraphDataProvider):
                 "sourceSystem": node.source_system or "",
                 "lastSyncedAt": node.last_synced_at or "",
                 "level": self._get_node_level(node.entity_type),
+                "searchableText": _compute_searchable_text(
+                    node.display_name, node.qualified_name,
+                    node.description, native_props,
+                ),
             })
 
         # Bulk-cache urn→label mappings
@@ -6313,6 +6368,7 @@ class FalkorDBProvider(GraphDataProvider):
                         f"n.lastSyncedAt = item.lastSyncedAt, "
                         f"n.propertiesRaw = item.propertiesRaw, "
                         f"n.level = coalesce(item.level, n.level), "
+                        f"n.searchableText = item.searchableText, "
                         f"n += item.nativeProps "
                         f"REMOVE n.properties",
                         params={"batch": batch},
@@ -6369,6 +6425,10 @@ class FalkorDBProvider(GraphDataProvider):
                 "layerAssignment": node.layer_assignment or "",
                 "sourceSystem": node.source_system or "",
                 "lastSyncedAt": node.last_synced_at or "",
+                "searchableText": _compute_searchable_text(
+                    node.display_name, node.qualified_name,
+                    node.description, native_props,
+                ),
             }
             if node.child_count is not None:
                 params["childCount"] = node.child_count

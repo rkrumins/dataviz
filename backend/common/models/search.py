@@ -31,7 +31,7 @@ Design notes
   model — the service produces meaningful path-into-tree error messages
   the model can't.
 """
-from typing import Annotated, Any, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -54,11 +54,12 @@ class _Base(BaseModel):
 # Leaf predicates
 # ---------------------------------------------------------------------------
 
-TextMatchMode = Literal["exact", "prefix", "substring", "fulltext", "regex"]
+TextMatchMode = Literal["exact", "prefix", "suffix", "substring", "fulltext", "regex"]
 """Match modes for text predicates.
 
 * ``exact``       — equality, case-insensitive by default
 * ``prefix``      — ``STARTS WITH``; can hit a B-tree index
+* ``suffix``      — ``ENDS WITH``; full scan, no index help
 * ``substring``   — ``CONTAINS``; falls back to label-scoped scan
 * ``fulltext``    — relevance-ranked, requires the per-label fulltext index
 * ``regex``       — opt-in; gated by ``ADVANCED_SEARCH_REGEX_ENABLED`` and
@@ -95,6 +96,11 @@ PropertyOp = Literal[
     "eq", "neq", "gt", "gte", "lt", "lte",
     "in", "notIn", "contains", "startsWith", "endsWith", "between",
 ]
+
+EdgeClass = Literal["lineage", "containment", "any"]
+"""Edge-class selector shared by DegreePredicate, WithinHopsPredicate,
+PathPredicate. Resolved to a concrete edge-type list at compile time
+via the active ontology — never hardcoded relationship names."""
 
 
 class PropertyPredicate(_Base):
@@ -149,6 +155,53 @@ class DescendantOfPredicate(_Base):
     max_depth: Optional[int] = Field(None, alias="maxDepth", ge=1, le=20)
 
 
+class EdgePropertyPredicate(_Base):
+    """Typed comparison against a single edge property.
+
+    Evaluated against each traversed relationship inside a
+    ``PathPredicate`` or ``WithinHopsPredicate``. Compiles to
+    ``rel.<key> <op> $val`` inside an ``ALL(rel IN relationships(p) …)``
+    block. ``between`` expects ``value`` to be a two-element list
+    ``[lo, hi]``.
+    """
+    kind: Literal["edgeProperty"] = "edgeProperty"
+    key: str = Field(min_length=1, max_length=128)
+    op: PropertyOp = "eq"
+    value: Any = None
+
+
+class EdgeHasPropertyPredicate(_Base):
+    """Key-presence predicate against an edge. Compiles to
+    ``EXISTS(rel.<key>)`` (or ``NOT EXISTS`` when ``negate``)."""
+    kind: Literal["edgeHasProperty"] = "edgeHasProperty"
+    key: str = Field(min_length=1, max_length=128)
+    negate: bool = False
+
+
+class EdgeGroupPredicate(_Base):
+    """Boolean composition of edge predicates.
+
+    Same shape as ``GroupPredicate`` but scoped to a traversed edge.
+    Service-layer validator enforces depth / leaf caps mirroring the
+    node-predicate tree.
+    """
+    kind: Literal["edgeGroup"] = "edgeGroup"
+    op: Literal["and", "or", "not"] = "and"
+    children: List["EdgePredicateType"] = Field(min_length=1, max_length=32)
+
+
+EdgePredicateType = Annotated[
+    Union[
+        EdgePropertyPredicate,
+        EdgeHasPropertyPredicate,
+        EdgeGroupPredicate,
+    ],
+    Field(discriminator="kind"),
+]
+
+EdgeGroupPredicate.model_rebuild()
+
+
 class WithinHopsPredicate(_Base):
     """Match nodes within N relationship hops of any anchor URN.
 
@@ -162,6 +215,17 @@ class WithinHopsPredicate(_Base):
     hops: int = Field(ge=1, le=10)
     edge_types: Optional[List[str]] = Field(None, alias="edgeTypes")
     direction: Literal["out", "in", "both"] = "both"
+    edge_class: EdgeClass = Field(
+        "lineage", alias="edgeClass",
+        description="Default edge-class when ``edge_types`` is omitted. "
+                    "Mirrors DegreePredicate / PathPredicate.",
+    )
+    edge_predicate: Optional[EdgePredicateType] = Field(
+        None, alias="edgePredicate",
+        description="Optional predicate evaluated against every traversed "
+                    "edge. ANDs with ``edge_types`` / ``edge_class``. "
+                    "Compiles to ``ALL(rel IN relationships(p) WHERE …)``.",
+    )
 
 
 class EntityTypePredicate(_Base):
@@ -179,6 +243,153 @@ class LayerPredicate(_Base):
     """Match the view's layer assignment (Source / Staging / Refinery / …)."""
     kind: Literal["layer"] = "layer"
     layer_assignment: str = Field(alias="layerAssignment", min_length=1)
+
+
+# ---------------------------------------------------------------------------
+# Graph-shape predicates (degree + sugar)
+# ---------------------------------------------------------------------------
+
+DegreeOp = Literal["eq", "neq", "gt", "gte", "lt", "lte"]
+DegreeDirection = Literal["in", "out", "both"]
+# EdgeClass declared at the top of the module so PropertyOp-adjacent
+# predicates (WithinHopsPredicate's edge_class field) can reference it.
+
+
+class DegreePredicate(_Base):
+    """Match nodes by their edge degree.
+
+    Powers structural questions like "find datasets with zero incoming
+    lineage edges" (UC-1 orphan finder), "find tables with > 5 children",
+    or "find views that produce >= 1 downstream artifact".
+
+    The edge type set is resolved from the live ontology at compile time
+    via the provider's ``_get_lineage_edge_types`` /
+    ``_get_containment_edge_types`` helpers, so no hardcoded names ever
+    leak into Cypher. ``edge_types`` lets a caller pin a specific subset
+    (e.g. ``['PRODUCES']`` only); when omitted, the ``edge_class`` chooses
+    the default set.
+    """
+    kind: Literal["degree"] = "degree"
+    direction: DegreeDirection = "both"
+    op: DegreeOp = "eq"
+    value: int = Field(ge=0, le=1_000_000)
+    edge_class: EdgeClass = Field("lineage", alias="edgeClass")
+    edge_types: Optional[List[str]] = Field(
+        None, alias="edgeTypes", min_length=1, max_length=32,
+        description=(
+            "Optional explicit edge-type list. When provided, overrides "
+            "the default set resolved from ``edge_class``."
+        ),
+    )
+
+
+class IsOrphanPredicate(_Base):
+    """Sugar: nodes with zero edges of the given class. Normalises to
+    ``DegreePredicate(direction='both', op='eq', value=0)``."""
+    kind: Literal["isOrphan"] = "isOrphan"
+    edge_class: EdgeClass = Field("lineage", alias="edgeClass")
+    edge_types: Optional[List[str]] = Field(
+        None, alias="edgeTypes", min_length=1, max_length=32,
+    )
+
+
+class IsLeafPredicate(_Base):
+    """Sugar: nodes with zero outgoing edges of the given class
+    ("dead ends"). Normalises to
+    ``DegreePredicate(direction='out', op='eq', value=0)``."""
+    kind: Literal["isLeaf"] = "isLeaf"
+    edge_class: EdgeClass = Field("lineage", alias="edgeClass")
+    edge_types: Optional[List[str]] = Field(
+        None, alias="edgeTypes", min_length=1, max_length=32,
+    )
+
+
+class IsRootPredicate(_Base):
+    """Sugar: nodes with zero incoming edges of the given class
+    ("nobody produces this"). Normalises to
+    ``DegreePredicate(direction='in', op='eq', value=0)``."""
+    kind: Literal["isRoot"] = "isRoot"
+    edge_class: EdgeClass = Field("lineage", alias="edgeClass")
+    edge_types: Optional[List[str]] = Field(
+        None, alias="edgeTypes", min_length=1, max_length=32,
+    )
+
+
+class HasIncomingPredicate(_Base):
+    """Sugar: nodes with at least one incoming edge of the given class.
+    Normalises to ``DegreePredicate(direction='in', op='gt', value=0)``."""
+    kind: Literal["hasIncoming"] = "hasIncoming"
+    edge_class: EdgeClass = Field("lineage", alias="edgeClass")
+    edge_types: Optional[List[str]] = Field(
+        None, alias="edgeTypes", min_length=1, max_length=32,
+    )
+
+
+class HasOutgoingPredicate(_Base):
+    """Sugar: nodes with at least one outgoing edge of the given class.
+    Normalises to ``DegreePredicate(direction='out', op='gt', value=0)``."""
+    kind: Literal["hasOutgoing"] = "hasOutgoing"
+    edge_class: EdgeClass = Field("lineage", alias="edgeClass")
+    edge_types: Optional[List[str]] = Field(
+        None, alias="edgeTypes", min_length=1, max_length=32,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Path predicate — UC3 (paths between specific nodes)
+# ---------------------------------------------------------------------------
+
+PathDirection = Literal["outgoing", "incoming", "any"]
+
+
+class PathPredicate(_Base):
+    """Find paths between source and target nodes.
+
+    Top-level AND only — the compiler raises CompileError if it
+    appears inside an OR or NOT group. When present, ``options.results``
+    must be ``'paths'``; the response carries ordered node→edge→node
+    sequences instead of (or in addition to) flat hits / aggregates.
+
+    Powers UC3: "find all paths from dataset:orders to dataset:reporting
+    going through ≤4 lineage hops".
+    """
+    kind: Literal["path"] = "path"
+    source_urns: List[str] = Field(
+        alias="sourceUrns", min_length=1, max_length=8,
+        description="Starting nodes. The provider runs a variable-length "
+                    "match outward (or inward) from each.",
+    )
+    target_urns: List[str] = Field(
+        alias="targetUrns", min_length=1, max_length=8,
+        description="Endpoint nodes. Paths terminate here.",
+    )
+    direction: PathDirection = Field(
+        "outgoing",
+        description="``outgoing`` walks source → target along edge "
+                    "direction; ``incoming`` walks against direction; "
+                    "``any`` is undirected.",
+    )
+    edge_class: EdgeClass = Field("lineage", alias="edgeClass")
+    edge_types: Optional[List[str]] = Field(
+        None, alias="edgeTypes", min_length=1, max_length=32,
+        description="Optional explicit edge-type list; overrides "
+                    "``edge_class``'s resolved set.",
+    )
+    max_hops: int = Field(
+        4, alias="maxHops", ge=1, le=6,
+        description="Maximum path length in edge hops.",
+    )
+    max_paths: int = Field(
+        32, alias="maxPaths", ge=1, le=128,
+        description="Hard cap on the number of paths returned.",
+    )
+    edge_predicate: Optional[EdgePredicateType] = Field(
+        None, alias="edgePredicate",
+        description="Optional predicate evaluated against every edge in the "
+                    "returned paths. ANDs with ``edge_types`` / "
+                    "``edge_class``. Compiles to "
+                    "``ALL(rel IN relationships(p) WHERE …)``.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +421,13 @@ Predicate = Annotated[
         WithinHopsPredicate,
         EntityTypePredicate,
         LayerPredicate,
+        DegreePredicate,
+        IsOrphanPredicate,
+        IsLeafPredicate,
+        IsRootPredicate,
+        HasIncomingPredicate,
+        HasOutgoingPredicate,
+        PathPredicate,
         GroupPredicate,
     ],
     Field(discriminator="kind"),
@@ -276,23 +494,47 @@ AggregationSpec.model_rebuild()
 # Scope + options + the full request
 # ---------------------------------------------------------------------------
 
-ResultShape = Literal["aggregates", "hits", "both"]
+ResultShape = Literal["aggregates", "hits", "both", "paths"]
 
 
 class SearchScope(_Base):
-    """Bounds the search to a subtree of the view.
+    """Bounds the search to a subtree of a specific *view*.
 
-    ``root_urns`` is typically the visible top-level nodes of the canvas
-    (when the FE issues the request). Empty means "search the whole
-    view" — the service will intersect against the view's configured
-    allowed-scope before passing through to the provider.
+    ``view_id`` is **required** — every search must be bound to a view.
+    The backend's ``ViewScopeResolver`` reads the view's config and
+    produces an ``EffectiveViewScope`` (root URNs + entity-type allow-list
+    + layer allow-list + max depth) that the compiler enforces.
+
+    ``root_urns`` / ``entity_types`` / ``layer_assignment`` / ``max_depth``
+    are **narrowing hints** from the client (e.g. a drill into one bucket
+    in the canvas). The resolver intersects them with the view's allowed
+    scope — never widens.
     """
+    view_id: str = Field(
+        alias="viewId", min_length=1,
+        description=(
+            "Required. The view this search is scoped to. Searches CANNOT "
+            "cross the view's boundary into the rest of the graph."
+        ),
+    )
     root_urns: Optional[List[str]] = Field(
         None, alias="rootUrns", max_length=64,
+        description=(
+            "Optional narrowing hint. Each URN must be a descendant of "
+            "(or equal to) one of the view's allowed roots; URNs that "
+            "fail validation are dropped server-side."
+        ),
     )
-    max_depth: Optional[int] = Field(12, alias="maxDepth", ge=1, le=20)
+    max_depth: Optional[int] = Field(
+        12, alias="maxDepth", ge=1, le=20,
+        description="Clamped to min(client, view.maxDepth) by the resolver.",
+    )
     entity_types: Optional[List[str]] = Field(
         None, alias="entityTypes", max_length=32,
+        description=(
+            "Optional. Must be ⊆ view's visibleEntityTypes; out-of-set "
+            "values cause the request to be rejected with 400."
+        ),
     )
     layer_assignment: Optional[str] = Field(None, alias="layerAssignment")
 
@@ -320,8 +562,27 @@ class SearchOptions(_Base):
         description="Parallel facets — each spec produces its own bucket "
                     "list in the response. Omit for hits-only requests.",
     )
-    page_size: int = Field(50, alias="pageSize", ge=1, le=200)
-    cursor: Optional[str] = None
+    page_size: int = Field(
+        50, alias="pageSize", ge=1, le=5000,
+        description=(
+            "Number of hits returned per page. Default 50 (sane for "
+            "browsing); the panel sets it to the candidate cap (5000) "
+            "when it wants the full match set in one round-trip so "
+            "canvas highlighting can cover every match without "
+            "paginating. Bounded at 5000 (matches CANDIDATE_CAP) — "
+            "larger pages require cursor pagination."
+        ),
+    )
+    cursor: Optional[str] = Field(
+        None,
+        description=(
+            "Opaque pagination cursor. When set, hits start from the "
+            "cursor's recorded offset within the candidate set. The "
+            "response echoes a new cursor when more rows are available "
+            "(``hits.length == pageSize`` AND the slice didn't exhaust "
+            "the candidate set)."
+        ),
+    )
     sort: SortKey = "relevance"
     sort_property: Optional[str] = Field(
         None, alias="sortProperty", min_length=1, max_length=128,
@@ -340,10 +601,31 @@ class SearchOptions(_Base):
     )
 
 
+SCHEMA_VERSION = "1"
+"""Current SearchQuery wire-format version.
+
+Bumped on breaking changes only. Server accepts the current version and
+(eventually) one previous; older requests are rejected with a clear
+error pointing at the migration notes. The npm-published
+``@synodic/search-schema`` package carries the same version string.
+"""
+
+
 class SearchQuery(_Base):
-    """The request body for POST /search/advanced."""
+    """The request body for POST /search/advanced.
+
+    ``scope`` is required — every search must be bound to a view via
+    ``scope.view_id``. There is no global / cross-view default.
+
+    ``schema_version`` carries the wire-format version. Clients omit it
+    on outgoing requests (the default fills it in); the server echoes it
+    on every response so clients can fail loud on a mismatch.
+    """
+    schema_version: Literal["1"] = Field(
+        default=SCHEMA_VERSION, alias="$schemaVersion",
+    )
     predicate: Predicate
-    scope: SearchScope = Field(default_factory=SearchScope)
+    scope: SearchScope
     options: SearchOptions = Field(default_factory=SearchOptions)
 
 
@@ -386,6 +668,34 @@ class SearchHit(_Base):
     )
 
 
+class EdgeRef(_Base):
+    """One edge in a returned path. Carries enough for the FE to render
+    a directed arrow between two nodes plus expose edge properties on
+    hover. We don't return a full GraphEdge to keep the path response
+    compact — the provider knows about the relationship type and
+    endpoints, which is what callers actually render."""
+    source_urn: str = Field(alias="sourceUrn")
+    target_urn: str = Field(alias="targetUrn")
+    edge_type: str = Field(alias="edgeType")
+    properties: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PathHit(_Base):
+    """One returned path: an ordered alternating sequence of nodes and
+    edges, with the hop count for sorting / display.
+
+    Constraint: ``len(nodes) == len(edges) + 1`` always. The first
+    node is one of the ``source_urns`` and the last is one of the
+    ``target_urns`` (after direction normalisation).
+    """
+    nodes: List[AncestorRef] = Field(
+        description="Ordered list — first is source endpoint, last is "
+                    "target endpoint.",
+    )
+    edges: List[EdgeRef]
+    hop_count: int = Field(alias="hopCount")
+
+
 class SearchAggregateBucket(_Base):
     """One ancestor (or facet) with N matches inside it."""
     ancestor_urn: str = Field(alias="ancestorUrn")
@@ -420,11 +730,71 @@ class QueryExplain(_Base):
     )
 
 
+class ScopeDiagnostics(_Base):
+    """Resolved-scope information returned on every search response.
+
+    Surfaces the values the server actually applied — both the
+    ``ViewScopeResolver``'s output and the ontology-resolved edge type
+    sets. Lets the FE explain zero-result responses ("your view scope
+    resolved to no roots", "your ontology has no lineage edges")
+    without the user having to read the compiled Cypher.
+
+    None of the fields here change query semantics; this is pure
+    instrumentation. The cost is one extra dict per response.
+    """
+    effective_root_urns: List[str] = Field(
+        default_factory=list, alias="effectiveRootUrns",
+        description="Root URNs the scope continuation actually anchored "
+                    "on. Empty list means no scope clamp was applied — "
+                    "search ran across the whole data source.",
+    )
+    effective_max_depth: int = Field(alias="effectiveMaxDepth")
+    effective_entity_types: Optional[List[str]] = Field(
+        None, alias="effectiveEntityTypes",
+        description="Entity-type allow-list applied by the view. None "
+                    "means no constraint from the view.",
+    )
+    dropped_root_urns: List[str] = Field(
+        default_factory=list, alias="droppedRootUrns",
+        description="Client-supplied URNs that were filtered out as "
+                    "out-of-view. Mirrors the X-Search-Dropped-URNs "
+                    "header for client convenience.",
+    )
+    lineage_edge_types: List[str] = Field(
+        default_factory=list, alias="lineageEdgeTypes",
+        description="Edge types the active ontology flags as is_lineage. "
+                    "Empty list means lineage-aware predicates "
+                    "(IsOrphan, HasIncoming, withinHops with edgeClass="
+                    "'lineage', etc.) will match zero nodes by design — "
+                    "configure at least one edge type as is_lineage in "
+                    "the data source's ontology.",
+    )
+    containment_edge_types: List[str] = Field(
+        default_factory=list, alias="containmentEdgeTypes",
+        description="Edge types the active ontology flags as containment. "
+                    "Empty list means the graph is flat (no hierarchy) "
+                    "and ancestor-aware features (aggregation by="
+                    "'ancestorType', DescendantOf scope hoisting) won't "
+                    "produce useful results.",
+    )
+    notes: List[str] = Field(
+        default_factory=list,
+        description="Human-readable diagnostic notes — e.g. 'view has "
+                    "no rootUrns configured; search ran unclamped'.",
+    )
+
+
 class SearchResultPage(_Base):
     """Provider + service response. One inner list in ``aggregates`` per
     requested AggregationSpec."""
     aggregates: Optional[List[List[SearchAggregateBucket]]] = None
     hits: Optional[List[SearchHit]] = None
+    paths: Optional[List[PathHit]] = Field(
+        None,
+        description="Populated when the request's predicate contains a "
+                    "PathPredicate and options.results='paths'. Ordered "
+                    "node→edge→node sequences from source to target.",
+    )
     cursor: Optional[str] = None
     truncated: bool = Field(
         False,
@@ -441,3 +811,122 @@ class SearchResultPage(_Base):
     elapsed_ms: int = Field(alias="elapsedMs")
     cache_hit: bool = Field(False, alias="cacheHit")
     query_explain: Optional[QueryExplain] = Field(None, alias="queryExplain")
+    scope_diagnostics: Optional[ScopeDiagnostics] = Field(
+        None, alias="scopeDiagnostics",
+        description="Resolved-scope + ontology diagnostics. Surfaced on "
+                    "every response so the FE can interpret 0-result "
+                    "cases without round-tripping to /search/explain.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# API contract bundle — single root for FE codegen
+# ---------------------------------------------------------------------------
+
+class SearchExplainResult(_Base):
+    """Response shape for ``POST /search/explain``.
+
+    Mirrors what ``backend.app.providers.falkordb_deep_search.explain_deep_search``
+    returns, plus the ``resolvedScope`` block added by the service layer.
+    Used by the FE's "Show Cypher" surface and by AI agents that want to
+    inspect what would run before committing.
+    """
+    cypher: str = Field(description="Full candidate Cypher (ends with `WITH n`).")
+    hits_cypher: str = Field(alias="hits_cypher", description="`cypher` plus `RETURN n` — what a hits query would actually run.")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Bound parameters, keyed by the parameter name used in ``cypher``.")
+    candidate_cap: int = Field(alias="candidate_cap", description="Hard cap on the candidate set the provider walks.")
+    hoisted_root_urns: List[List[str]] = Field(default_factory=list, alias="hoisted_root_urns", description="URN sets hoisted out of top-level DescendantOf predicates.")
+    effective_root_urns: Optional[List[str]] = Field(None, alias="effective_root_urns", description="Final root URNs after intersecting scope + hoisted (null = no scope).")
+    notes: List[str] = Field(default_factory=list, description="Human-readable diagnostics (e.g. 'predicate hoisted to candidate seed').")
+    resolved_scope: Optional[Dict[str, Any]] = Field(None, alias="resolvedScope", description="Effective scope after ViewScopeResolver: root URNs, max depth, entity-type allow-list, scope hash, dropped URNs.")
+
+
+class SearchDiscoverLabelInfo(_Base):
+    """Per-label discovery payload from ``GET /search/discover``."""
+    sampled: int = Field(description="How many nodes were sampled for this label.")
+    keys: List[str] = Field(default_factory=list, description="Native property keys found on at least one sampled node.")
+    value_samples_by_key: Optional[Dict[str, List[Any]]] = Field(
+        None,
+        alias="valueSamplesByKey",
+        description=(
+            "Distinct values seen for each property key in the sample "
+            "(capped at ~20 per key, ~64 keys per label). Powers the "
+            "FE's property-value picker so users can choose from known "
+            "values instead of typing blind. Absent when value-sample "
+            "collection is disabled via the request flag."
+        ),
+    )
+
+
+class SearchDiscoverEdgeInfo(_Base):
+    """Per-edge-type discovery payload from ``GET /search/discover``."""
+    sampled: int = Field(description="How many edges of this type were sampled.")
+    keys: List[str] = Field(default_factory=list, description="Property keys found on at least one sampled edge.")
+    value_samples_by_key: Optional[Dict[str, List[Any]]] = Field(
+        None,
+        alias="valueSamplesByKey",
+        description=(
+            "Distinct values per edge property key. Powers the edge-"
+            "predicate editor's value autocomplete in W2."
+        ),
+    )
+
+
+class SearchDiscoverResult(_Base):
+    """Response shape for ``GET /search/discover``.
+
+    Tells the FE/AI-agent what's actually queryable in the current view:
+    which entity-type labels exist, which native property keys + value
+    samples are present on them, what tag values exist across the
+    sample, and what edge types + properties traversal can filter on.
+    Used to populate every autocomplete picker in the visual builder.
+    """
+    labels: Dict[str, SearchDiscoverLabelInfo] = Field(default_factory=dict)
+    blob_only_labels: List[str] = Field(default_factory=list, alias="blobOnlyLabels", description="Labels whose sampled nodes have no native keys (still on pre-W1 blob storage; need migration).")
+    missing_containment: bool = Field(False, alias="missingContainment", description="True when the provider has no containment edge types configured — ancestor-based queries will return empty.")
+    tag_values: Dict[str, int] = Field(
+        default_factory=dict,
+        alias="tagValues",
+        description=(
+            "Map of tag name → occurrence count across the sample. "
+            "Tags live as JSON-stringified arrays on `n.tags` in v1 "
+            "(graph-relationship normalisation is deferred); the "
+            "discovery handler parses them in Python and aggregates "
+            "counts. Trimmed to the top N by count."
+        ),
+    )
+    edges: Dict[str, SearchDiscoverEdgeInfo] = Field(
+        default_factory=dict,
+        description=(
+            "Per-edge-type discovery payload. Mirrors `labels` but for "
+            "relationships — surfaces the edge types present in the "
+            "sample plus the property keys + value samples each one "
+            "carries. Powers the W2 edge-predicate editor and the "
+            "edge-aware path-query value pickers."
+        ),
+    )
+    elapsed_ms: int = Field(0, alias="elapsedMs", description="Discovery query duration in milliseconds.")
+
+
+class SearchApiContract(_Base):
+    """Bundle root that wraps every API-surface shape in one model.
+
+    Exists purely as a code-generation seed: ``model_json_schema()`` on
+    this class produces a single JSON Schema document whose ``$defs``
+    contain every type the FE / AI agents need. The frontend's
+    ``gen:search-schema`` script feeds this schema into
+    ``json-schema-to-typescript`` to produce the canonical TS types.
+
+    Not used at runtime — no endpoint sends or receives this shape.
+    Fields are kept ``Optional`` so a default constructor produces a
+    valid (empty) instance for tooling that needs one.
+    """
+    search_query: Optional[SearchQuery] = Field(None, alias="searchQuery")
+    search_result_page: Optional[SearchResultPage] = Field(None, alias="searchResultPage")
+    search_explain_result: Optional[SearchExplainResult] = Field(None, alias="searchExplainResult")
+    search_discover_result: Optional[SearchDiscoverResult] = Field(None, alias="searchDiscoverResult")
+    # ``ScopeDiagnostics`` is referenced from ``SearchResultPage`` and so
+    # already lives in the schema's $defs. Explicitly mentioning it here
+    # surfaces it as a top-level codegen target too, so the FE can
+    # import it directly without going through SearchResultPage.
+    scope_diagnostics: Optional[ScopeDiagnostics] = Field(None, alias="scopeDiagnostics")

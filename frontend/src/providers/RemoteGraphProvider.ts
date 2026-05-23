@@ -36,7 +36,9 @@ import type {
     SearchResultPage,
     SearchExplainResult,
     SearchDiscoverResult,
+    NLSearchResponse,
 } from '@/types/search'
+import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
 // Wire shape from POST /trace/v2 — `upstreamUrns`/`downstreamUrns` arrive as
 // JSON arrays (Pydantic serializes Set as list); we re-hydrate to Set on read.
@@ -300,6 +302,24 @@ export class RemoteGraphProvider implements GraphDataProvider {
     }
 
     /**
+     * Fetch the SearchQuery JSON Schema served by the backend.
+     *
+     * The body IS the canonical contract used by Ajv validation in the
+     * JSON editor and by the schema-version assertion in `useSearchSchema`.
+     * The schema's `properties.$schemaVersion` carries the wire-format
+     * version (`Literal["1"]` today). The FE asserts that against the
+     * version of `@synodic/search-schema` (or, in this worktree, the
+     * `SCHEMA_VERSION` constant in `frontend/src/types/searchSchemaVersion.ts`)
+     * to fail loud on protocol mismatches.
+     *
+     * Cached aggressively by the browser (Cache-Control: max-age=300 +
+     * ETag) and once per app boot in React Query.
+     */
+    async searchSchema(): Promise<JsonSchemaDocument> {
+        return await this.fetch<JsonSchemaDocument>('/search/schema')
+    }
+
+    /**
      * Compile a SearchQuery without executing it.
      *
      * Returns the Cypher + params that `searchAdvanced` would run,
@@ -330,6 +350,26 @@ export class RemoteGraphProvider implements GraphDataProvider {
             '/search/discover',
             { extraParams: { samplePerLabel: String(samplePerLabel) } },
         )
+    }
+
+    /**
+     * Natural-Language → SearchQuery. Backend translates the English
+     * question via Claude, validates the produced `SearchQuery`, runs
+     * it through the same pipeline as every structured search, and
+     * returns both the interpreted query (for the UI's "what I
+     * understood" affordance) and the results. The API key never
+     * touches the browser.
+     */
+    async searchNL(body: {
+        question: string
+        viewId: string
+        scopeHint?: 'view' | 'workspace'
+        conversationId?: string
+    }): Promise<NLSearchResponse> {
+        return await this.fetch<NLSearchResponse>('/search/nl', {
+            method: 'POST',
+            body: JSON.stringify(body),
+        })
     }
 
     // ==========================================

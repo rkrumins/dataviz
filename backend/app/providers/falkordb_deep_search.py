@@ -56,11 +56,14 @@ import hashlib
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from backend.common.models.search import (
     AggregationSpec,
     AncestorRef,
+    DegreePredicate,
+    EdgeRef,
+    PathHit,
     SearchAggregateBucket,
     SearchHit,
     SearchQuery,
@@ -128,16 +131,41 @@ class _Compiler:
       * ``params`` — generated parameter values (bound by Cypher ``$name``)
       * ``hoisted_root_urns`` — DescendantOf URN-sets pulled up to scope
       * ``hoisted_max_depths`` — DescendantOf per-predicate max_depths
+      * ``hoisted_within_hops`` — WithinHops continuations (compiled
+        post-candidate; one MATCH per occurrence)
 
     Reuse of the instance across multiple ``compile()`` calls is not
     supported — counters and hoisted state would leak between queries.
+
+    Ontology-resolved edge type sets are injected via the constructor so
+    the compiler never hardcodes lineage / containment edge names. The
+    executor passes the provider's resolved sets through to keep this
+    module dependency-free at module-load time.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        lineage_edge_types: Optional[Set[str]] = None,
+        containment_edge_types: Optional[Set[str]] = None,
+    ):
         self.params: Dict[str, Any] = {}
         self.hoisted_root_urns: List[List[str]] = []
         self.hoisted_max_depths: List[int] = []
+        # Each entry: ({"urns": [...], "hops": int, "direction": str,
+        #               "edgeTypes": [str] | None})
+        self.hoisted_within_hops: List[Dict[str, Any]] = []
+        # Hoisted path predicate (UC3). At most one per query — the
+        # service rejects multiple PathPredicates at validation time
+        # because the result shape couldn't merge two independent
+        # path queries cleanly.
+        self.hoisted_path: Optional[Dict[str, Any]] = None
         self._param_counter = 0
+        # Ontology-resolved edge type sets. ``None`` means the caller
+        # didn't inject them — predicates that depend on lineage /
+        # containment classification will raise CompileError on visit.
+        self._lineage_edge_types = lineage_edge_types
+        self._containment_edge_types = containment_edge_types
 
     def _next(self) -> str:
         n = self._param_counter
@@ -176,10 +204,31 @@ class _Compiler:
                 self.hoisted_max_depths.append(p.max_depth)
             return "true"  # scope check enforces the constraint
         if kind == "withinHops":
-            raise CompileError(
-                "WithinHops is not yet supported. Will be added in a "
-                "follow-up workstream."
-            )
+            if in_or or not at_top_and:
+                raise CompileError(
+                    "WithinHops is only allowed in the top-level AND group. "
+                    "Move it outside the OR / NOT group, or split the query."
+                )
+            return self._visit_within_hops(p)
+        if kind == "degree":
+            return self._visit_degree(p)
+        if kind in ("isOrphan", "isLeaf", "isRoot",
+                    "hasIncoming", "hasOutgoing"):
+            # Sugar — normalise to a DegreePredicate then visit.
+            return self._visit_degree(_normalize_sugar_to_degree(p))
+        if kind == "path":
+            if in_or or not at_top_and:
+                raise CompileError(
+                    "Path is only allowed in the top-level AND group. "
+                    "Path search returns a different result shape (ordered "
+                    "node→edge→node sequences) than predicate composition "
+                    "can express. Run path search separately."
+                )
+            if self.hoisted_path is not None:
+                raise CompileError(
+                    "Only one Path predicate is allowed per query."
+                )
+            return self._visit_path(p)
         raise CompileError(f"unknown predicate kind: {kind!r}")
 
     def _visit_group(self, g, *, in_or: bool, at_top_and: bool) -> str:
@@ -202,51 +251,83 @@ class _Compiler:
     def _visit_text(self, t) -> str:
         if t.match == "fulltext":
             raise CompileError(
-                "text match='fulltext' requires per-label fulltext indices "
-                "that haven't been created yet (deferred). Use 'substring' "
-                "or 'prefix'."
+                "fulltext search is not enabled in v1 — use "
+                "match='substring', 'prefix', or 'exact'"
             )
         if t.match == "regex":
             raise CompileError(
                 "text match='regex' is opt-in and not enabled in v1."
             )
         target = t.target
+
+        # ``target='name'`` and ``target='qualifiedName'`` widen to OR
+        # across the canonical name-like fields the storage layer
+        # commits to. Any single field can be null/empty on a given
+        # node (legacy sync, partial ingestion) without blackholing the
+        # search — the predicate matches if ANY of the listed columns
+        # contains the value. ``COALESCE(..., '')`` guards against
+        # MISSING/null reads so an absent field reads as a non-matching
+        # empty string rather than aborting the comparison.
+        #
+        # ``description`` / ``tags`` stay single-field — those are
+        # explicit user targets, not name aliases.
         if target == "name":
-            col = "n.displayName"
+            cols = ["n.displayName", "n.qualifiedName", "n.searchableText"]
         elif target == "qualifiedName":
-            col = "n.qualifiedName"
+            cols = ["n.qualifiedName", "n.searchableText"]
         elif target == "description":
-            col = "n.description"
+            cols = ["n.description"]
         elif target == "tags":
-            col = "n.tags"  # JSON-stringified array; CONTAINS is acceptable
+            # JSON-stringified array; CONTAINS is acceptable.
+            cols = ["n.tags"]
         elif target == "property":
             if not t.property_key:
                 raise CompileError(
                     "text target='property' requires propertyKey"
                 )
-            col = f"n.{_safe_property_name(t.property_key)}"
+            cols = [f"n.{_safe_property_name(t.property_key)}"]
         elif target == "any":
-            raise CompileError(
-                "text target='any' requires the n.searchableTextLower field "
-                "which is created by a follow-up workstream. Target a "
-                "specific field for v1 (name, qualifiedName, description, "
-                "property, tags)."
-            )
+            # n.searchableText is denormalised at write-time (already
+            # lowercased). The toLower on read is defensive in case a
+            # node was written by an older provider that didn't lowercase.
+            cols = ["n.searchableText"]
         else:
             raise CompileError(f"unknown text target: {target!r}")
 
         pn = self._next()
+        is_multi = len(cols) > 1
+
+        def wrap_col(c: str) -> str:
+            # Multi-field cases wrap in COALESCE(...) so a null property
+            # reads as an empty string, making the OR-disjunction
+            # explicit about null handling. Single-field cases keep the
+            # bare column expression for backwards compatibility — Cypher
+            # treats `null CONTAINS 'x'` as null (no match) which is
+            # already the correct behaviour for one column.
+            base = c if not is_multi else f"COALESCE({c}, '')"
+            if t.case_sensitive:
+                return base
+            return f"toLower(toString({base}))"
+
         if t.case_sensitive:
             self.params[pn] = t.value
-            col_expr = col
         else:
             self.params[pn] = t.value.lower()
-            col_expr = f"toLower(toString({col}))"
+
         if t.match == "exact":
-            return f"{col_expr} = ${pn}"
-        if t.match == "prefix":
-            return f"{col_expr} STARTS WITH ${pn}"
-        return f"{col_expr} CONTAINS ${pn}"  # substring
+            op = "="
+        elif t.match == "prefix":
+            op = "STARTS WITH"
+        elif t.match == "suffix":
+            op = "ENDS WITH"
+        else:
+            op = "CONTAINS"  # substring
+
+        if not is_multi:
+            return f"{wrap_col(cols[0])} {op} ${pn}"
+        # Multi-field OR — wrap in parens so it composes inside an AND.
+        clauses = [f"{wrap_col(c)} {op} ${pn}" for c in cols]
+        return "(" + " OR ".join(clauses) + ")"
 
     def _visit_property(self, p) -> str:
         col = f"n.{_safe_property_name(p.key)}"
@@ -322,6 +403,304 @@ class _Compiler:
         self.params[pn] = l.layer_assignment
         return f"n.layerAssignment = ${pn}"
 
+    def _resolve_degree_edge_types(self, predicate) -> List[str]:
+        """Resolve the edge-type list for a degree / withinHops predicate.
+
+        Precedence: explicit ``edge_types`` on the predicate wins; else
+        the constructor-injected lineage / containment set chosen by
+        ``edge_class``. Missing-injection is a compile-time error so we
+        never silently compile a degree check against zero edge types
+        (which would match every node and look like a planner bug).
+        """
+        if predicate.edge_types:
+            return list(predicate.edge_types)
+        edge_class = predicate.edge_class
+        if edge_class == "lineage":
+            if self._lineage_edge_types is None:
+                raise CompileError(
+                    "degree / withinHops with edgeClass='lineage' requires "
+                    "the provider's lineage edge types — ontology resolution "
+                    "must complete before search."
+                )
+            return sorted(self._lineage_edge_types)
+        if edge_class == "containment":
+            if self._containment_edge_types is None:
+                raise CompileError(
+                    "degree / withinHops with edgeClass='containment' "
+                    "requires the provider's containment edge types — "
+                    "ontology resolution must complete before search."
+                )
+            return sorted(self._containment_edge_types)
+        if edge_class == "any":
+            if (self._lineage_edge_types is None
+                    or self._containment_edge_types is None):
+                raise CompileError(
+                    "degree / withinHops with edgeClass='any' requires both "
+                    "lineage and containment edge types — ontology "
+                    "resolution must complete before search."
+                )
+            combined = set(self._lineage_edge_types) | set(
+                self._containment_edge_types
+            )
+            return sorted(combined)
+        raise CompileError(f"unknown edgeClass: {edge_class!r}")
+
+    def _visit_degree(self, d) -> str:
+        edge_types = self._resolve_degree_edge_types(d)
+        # An empty edge-type set with op=='eq' value=0 trivially matches
+        # every node (no edges of these types exist anywhere). Surface
+        # this as "true" rather than a degenerate Cypher fragment, so
+        # the caller can read the result honestly.
+        if not edge_types:
+            if d.op == "eq" and d.value == 0:
+                return "true"
+            if d.op in ("gt", "gte") and d.value >= 0:
+                # No such edges exist → degree is always 0
+                if d.op == "gte" and d.value == 0:
+                    return "true"
+                return "false"
+            if d.op in ("lt", "lte"):
+                return "true"
+            if d.op == "neq" and d.value != 0:
+                return "true"
+            if d.op == "eq":
+                return "false"
+            return "false"
+
+        rel = "|".join(_sanitize_label(t) for t in edge_types)
+        direction = d.direction
+        in_p = f"(n)<-[:{rel}]-()"
+        out_p = f"(n)-[:{rel}]->()"
+
+        if direction == "in":
+            pattern: Optional[str] = in_p
+        elif direction == "out":
+            pattern = out_p
+        elif direction == "both":
+            # Both directions handled per-op below — there's no single
+            # undirected pattern in FalkorDB that gives the union degree.
+            pattern = None
+        else:
+            raise CompileError(f"unknown degree direction: {direction!r}")
+
+        # ----- threshold-around-zero ops -----
+        # FalkorDB rejects `size((pattern))` over relationship-type
+        # alternation when the result is NOT-wrapped (its planner
+        # cannot resolve the "filtered alias"). For thresholds that
+        # are semantically "any vs. none", emit pattern-existence
+        # directly — the same idiom the orphan branch always used.
+        #
+        # The matrix below covers every (op, value) combo that
+        # collapses to existence / absence; only non-trivial counts
+        # (>1, =5, etc.) fall through to the `size()` branch.
+        threshold: Optional[str] = None   # 'existence' | 'absence' | None
+        if d.value == 0:
+            if d.op in ("eq", "lte"):
+                threshold = "absence"
+            elif d.op in ("neq", "gt"):
+                threshold = "existence"
+            elif d.op == "gte":
+                return "true"        # >= 0 always
+            elif d.op == "lt":
+                return "false"       # < 0 never
+        elif d.value == 1:
+            if d.op == "lt":
+                threshold = "absence"     # < 1 ⇔ == 0
+            elif d.op == "gte":
+                threshold = "existence"   # >= 1 ⇔ > 0
+
+        if threshold == "absence":
+            if direction == "both":
+                return f"(NOT {in_p} AND NOT {out_p})"
+            assert pattern is not None
+            return f"NOT {pattern}"
+        if threshold == "existence":
+            if direction == "both":
+                return f"({in_p} OR {out_p})"
+            assert pattern is not None
+            return pattern
+
+        # ----- non-trivial counts → size((pattern)) <op> $value -----
+        # NB: FalkorDB has been observed to reject size((pattern)) when
+        # the surrounding context wraps it in NOT and the relationship
+        # pattern uses alternation. The zero/one thresholds above cover
+        # the common cases (IsOrphan/IsLeaf/IsRoot/HasIncoming/
+        # HasOutgoing). Counts of >1 / =5 / etc. still emit size(); if
+        # FalkorDB also rejects those, the next step is to switch to a
+        # list-comprehension that filters on type(r) instead of using
+        # relationship-type alternation in the pattern itself.
+        symbol = {"eq": "=", "neq": "<>", "gt": ">",
+                  "gte": ">=", "lt": "<", "lte": "<="}[d.op]
+        pn = self._next()
+        self.params[pn] = int(d.value)
+        if direction == "both":
+            return f"(size({in_p}) + size({out_p})) {symbol} ${pn}"
+        assert pattern is not None
+        return f"size({pattern}) {symbol} ${pn}"
+
+    def _visit_path(self, p) -> str:
+        """Hoist a PathPredicate. Compiles to ``true`` in the WHERE
+        fragment (so the standard candidate scan effectively becomes
+        "any node") and stashes the path-query parameters so the
+        executor can emit a path MATCH instead of the usual
+        candidate cypher.
+
+        Resolving edge types here mirrors WithinHops — an empty
+        resolved set means "no edges of that class exist" and the
+        query trivially returns no paths.
+        """
+        # Use the same edge-type resolver. PathPredicate has
+        # ``edge_types`` (explicit override) and ``edge_class`` (default
+        # set selector), matching the DegreePredicate / WithinHops
+        # shape.
+        edge_types = self._resolve_degree_edge_types(p)
+        edge_where = self._emit_edge_predicate_fragment(
+            getattr(p, "edge_predicate", None)
+        )
+        self.hoisted_path = {
+            "source_urns": list(p.source_urns),
+            "target_urns": list(p.target_urns),
+            "direction": p.direction,
+            "edge_types": list(edge_types),
+            "max_hops": int(p.max_hops),
+            "max_paths": int(p.max_paths),
+            # Optional per-edge filter (e.g. ``rel.confidence > 0.9``).
+            # Empty string when no edge_predicate was supplied; injected
+            # into the ALL(rel IN relationships(p) WHERE …) block.
+            "edge_where": edge_where,
+        }
+        return "true"
+
+    def _visit_within_hops(self, w) -> str:
+        """Hoist a WithinHops predicate to a post-candidate MATCH.
+
+        Compiles to "true" in the WHERE fragment (so it composes with
+        AND'd siblings) and stashes its parameters for the executor to
+        emit a separate ``MATCH (anchor)-[:EDGES*1..hops]-(n)`` after
+        the candidate set is bound.
+        """
+        edge_types = self._resolve_degree_edge_types(w)
+        edge_where = self._emit_edge_predicate_fragment(
+            getattr(w, "edge_predicate", None)
+        )
+        if not edge_types:
+            # Empty edge-type set ⇒ no node can be within N hops of
+            # anything; short-circuit the whole query.
+            self.hoisted_within_hops.append({
+                "urns": list(w.urns),
+                "hops": int(w.hops),
+                "direction": w.direction,
+                "edge_types": [],
+                "edge_where": edge_where,
+            })
+            return "true"
+        self.hoisted_within_hops.append({
+            "urns": list(w.urns),
+            "hops": int(w.hops),
+            "direction": w.direction,
+            "edge_types": list(edge_types),
+            "edge_where": edge_where,
+        })
+        return "true"
+
+    # ---- Edge-predicate compilation (inside PathPredicate / WithinHops) ----
+
+    def _emit_edge_predicate_fragment(self, ep) -> str:
+        """Compile an EdgePredicate tree to a Cypher fragment that
+        evaluates against the bound variable ``rel``. Returns an empty
+        string when no predicate was supplied.
+
+        Used inside ``ALL(rel IN relationships(p) WHERE …)`` blocks of
+        path and variable-length-hop queries.
+        """
+        if ep is None:
+            return ""
+        return self._visit_edge(ep)
+
+    def _visit_edge(self, ep) -> str:
+        kind = ep.kind
+        if kind == "edgeProperty":
+            return self._visit_edge_property(ep)
+        if kind == "edgeHasProperty":
+            return self._visit_edge_has_property(ep)
+        if kind == "edgeGroup":
+            return self._visit_edge_group(ep)
+        raise CompileError(f"unknown edge predicate kind: {kind!r}")
+
+    def _visit_edge_property(self, ep) -> str:
+        col = f"rel.{_safe_property_name(ep.key)}"
+        op = ep.op
+        if op in ("eq", "neq", "gt", "gte", "lt", "lte"):
+            symbol = {"eq": "=", "neq": "<>", "gt": ">",
+                      "gte": ">=", "lt": "<", "lte": "<="}[op]
+            pn = self._next()
+            self.params[pn] = ep.value
+            return f"{col} {symbol} ${pn}"
+        if op in ("contains", "startsWith", "endsWith"):
+            pn = self._next()
+            v = "" if ep.value is None else str(ep.value)
+            self.params[pn] = v
+            keyword = {"contains": "CONTAINS",
+                       "startsWith": "STARTS WITH",
+                       "endsWith": "ENDS WITH"}[op]
+            return f"{col} {keyword} ${pn}"
+        if op in ("in", "notIn"):
+            pn = self._next()
+            self.params[pn] = list(ep.value or [])
+            return (f"NOT ({col} IN ${pn})" if op == "notIn"
+                    else f"{col} IN ${pn}")
+        if op == "between":
+            if not isinstance(ep.value, list) or len(ep.value) != 2:
+                raise CompileError(
+                    "edgeProperty op='between' requires value=[lo, hi]"
+                )
+            lo_p, hi_p = self._next(), self._next()
+            self.params[lo_p] = ep.value[0]
+            self.params[hi_p] = ep.value[1]
+            return f"({col} >= ${lo_p} AND {col} <= ${hi_p})"
+        raise CompileError(f"unknown edge property op: {op!r}")
+
+    def _visit_edge_has_property(self, ep) -> str:
+        expr = f"EXISTS(rel.{_safe_property_name(ep.key)})"
+        return f"NOT ({expr})" if ep.negate else expr
+
+    def _visit_edge_group(self, ep) -> str:
+        if ep.op == "not":
+            if len(ep.children) != 1:
+                raise CompileError(
+                    "EdgeGroup op='not' must have exactly one child"
+                )
+            return f"NOT ({self._visit_edge(ep.children[0])})"
+        if not ep.children:
+            return "true"
+        sep = " AND " if ep.op == "and" else " OR "
+        return "(" + sep.join(self._visit_edge(c) for c in ep.children) + ")"
+
+
+def _normalize_sugar_to_degree(p) -> DegreePredicate:
+    """Convert a sugar predicate (IsOrphan / IsLeaf / IsRoot /
+    HasIncoming / HasOutgoing) to the canonical ``DegreePredicate``.
+
+    Centralised so the compiler has a single visitor for graph-shape
+    queries; future emitters (path search, explain hints) reuse this.
+    """
+    kind = p.kind
+    common = {
+        "edge_class": p.edge_class,
+        "edge_types": list(p.edge_types) if p.edge_types else None,
+    }
+    if kind == "isOrphan":
+        return DegreePredicate(direction="both", op="eq", value=0, **common)
+    if kind == "isLeaf":
+        return DegreePredicate(direction="out", op="eq", value=0, **common)
+    if kind == "isRoot":
+        return DegreePredicate(direction="in", op="eq", value=0, **common)
+    if kind == "hasIncoming":
+        return DegreePredicate(direction="in", op="gt", value=0, **common)
+    if kind == "hasOutgoing":
+        return DegreePredicate(direction="out", op="gt", value=0, **common)
+    raise CompileError(f"unknown sugar predicate: {kind!r}")
+
 
 # ---------------------------------------------------------------------------
 # Candidate / scope / aggregation Cypher builders
@@ -358,6 +737,7 @@ def _build_candidate_cypher(
     entity_types_param: bool,
     scope_continuation: str,
     candidate_cap: int,
+    within_hops_continuation: str = "",
 ) -> str:
     """The candidate-selection prefix.
 
@@ -365,11 +745,25 @@ def _build_candidate_cypher(
       * ``RETURN n``                       (hits)
       * ``RETURN count(n) AS c``           (count-only)
       * ``MATCH (anc)-[...]->(n) ...``     (aggregation pivot)
+
+    ``within_hops_continuation`` is appended after the scope continuation
+    (so candidates are first scope-clamped, then narrowed to those
+    within N hops of the anchor URN-set). Both continuations end with
+    ``WITH DISTINCT n`` so multiple stack cleanly.
     """
     parts = ["MATCH (n)"]
     where_parts = []
     if entity_types_param:
-        where_parts.append("labels(n)[0] IN $_scopeEntityTypes")
+        # Multi-label safe: a node with labels ['Asset', 'object']
+        # would be dropped by ``labels(n)[0] IN $list`` if the planner
+        # surfaces 'Asset' first AND 'Asset' isn't in the list — even
+        # though 'object' IS in the list. ``ANY(... WHERE l IN ...)``
+        # checks every label and matches if any is in scope. Same cost
+        # for single-labeled nodes (the common case) and strictly more
+        # correct for multi-labeled nodes.
+        where_parts.append(
+            "ANY(l IN labels(n) WHERE l IN $_scopeEntityTypes)",
+        )
     if where_fragment and where_fragment != "true":
         where_parts.append(where_fragment)
     if where_parts:
@@ -377,7 +771,94 @@ def _build_candidate_cypher(
     parts.append(f"WITH n LIMIT {candidate_cap}")
     if scope_continuation:
         parts.append(scope_continuation)
+    if within_hops_continuation:
+        parts.append(within_hops_continuation)
     return " ".join(parts)
+
+
+def _resolve_entity_types_scope(
+    provider,
+    requested: Optional[List[str]],
+) -> Tuple[Optional[List[str]], Optional[str]]:
+    """Reconcile the view's ``scope.entity_types`` against the live data
+    source's resolved ontology — the data source is the authority on
+    what types actually exist; the view's stored list is a hint that
+    can drift (auto-created views inherit a default ontology snapshot
+    that may not match the bound data source).
+
+    The contract is: SILENTLY substitute the live ontology whenever
+    the view's requested list is disjoint from reality. The view's
+    *intent* ("apply a type filter") is honored; the *specific types*
+    are corrected to those that actually exist. No noisy diagnostic
+    for what is normal operation — users only see a note when they
+    explicitly picked a mix of valid + invalid types (likely a real
+    config error worth surfacing).
+
+    Returns ``(effective_types, note)`` where:
+      * ``effective_types`` — list bound to ``$_scopeEntityTypes`` (or
+        ``None`` to skip the filter entirely)
+      * ``note`` — diagnostic only when partial overlap suggests a
+        user-driven mistake; ``None`` for the silently-corrected
+        and clean-overlap cases.
+    """
+    requested_types = [t for t in (requested or []) if t]
+    if not requested_types:
+        return None, None
+
+    live_levels = getattr(provider, "_entity_type_levels", None) or {}
+    live_types = sorted(live_levels.keys())
+    if not live_types:
+        # Provider hasn't introspected its ontology yet. Trust the
+        # request as the only signal we have.
+        return list(requested_types), None
+
+    live_set = set(live_types)
+    requested_set = set(requested_types)
+    overlap = requested_set & live_set
+
+    if not overlap:
+        # Zero overlap → view config is a stale snapshot of a different
+        # (or default) ontology. Silently substitute the live ontology
+        # as the filter so the search remains type-scoped per the
+        # view's intent. No diagnostic — this is normal operation.
+        return live_types, None
+
+    if overlap == requested_set:
+        # Requested list is a clean subset of live — no override needed.
+        return sorted(requested_set), None
+
+    # Partial overlap — some valid, some stale. Narrow to the overlap
+    # but DO emit a quiet note because this could mean the user picked
+    # a type that genuinely no longer exists (worth telling them about).
+    dropped = sorted(requested_set - live_set)
+    note = (
+        f"{len(dropped)} requested type(s) "
+        f"({dropped[:6]}{'…' if len(dropped) > 6 else ''}) "
+        f"are not present in this data source's ontology and were "
+        f"omitted. Active filter: {sorted(overlap)}."
+    )
+    return sorted(overlap), note
+
+
+def _build_compiler_for_provider(provider) -> _Compiler:
+    """Construct a `_Compiler` with the provider's ontology-resolved
+    edge type sets. Missing-injection is tolerated (the compiler will
+    raise on visit only if a predicate actually depends on them).
+    """
+    lineage: Optional[Set[str]] = None
+    containment: Optional[Set[str]] = None
+    try:
+        lineage = set(provider._get_lineage_edge_types())
+    except Exception:
+        lineage = None
+    try:
+        containment = set(provider._get_containment_edge_types())
+    except Exception:
+        containment = None
+    return _Compiler(
+        lineage_edge_types=lineage,
+        containment_edge_types=containment,
+    )
 
 
 def _build_scope_continuation(
@@ -411,6 +892,71 @@ def _build_scope_continuation(
         f"WITH DISTINCT n"
     )
     return fragment, {"_rootUrns": list(effective_root_urns)}
+
+
+def _build_within_hops_continuation(
+    hoisted: List[Dict[str, Any]],
+    next_param_id: int,
+) -> Tuple[str, Dict[str, Any], int]:
+    """Compile each hoisted WithinHopsPredicate to a MATCH continuation.
+
+    Each WithinHops becomes one MATCH that anchors the variable-length
+    pattern at the predicate's URN set and binds back to ``n``. Multiple
+    occurrences AND together (each anchor must reach n within its hop
+    budget). An empty edge-type set short-circuits — no node can be
+    within N hops of anything, so the executor will surface zero rows.
+
+    Scope intersection is intentionally NOT enforced on anchors here:
+    anchors can legitimately sit outside the view's scope (an upstream
+    source three subtrees away), and the candidate ``n`` is already
+    scope-clamped by the existing ``_build_scope_continuation``.
+
+    Returns (cypher_fragment, params, next_param_id).
+    """
+    if not hoisted:
+        return "", {}, next_param_id
+
+    parts: List[str] = []
+    params: Dict[str, Any] = {}
+    pid = next_param_id
+
+    for idx, entry in enumerate(hoisted):
+        edge_types = entry["edge_types"]
+        if not edge_types:
+            # No edges of this class exist → no node reaches anything.
+            # Force a no-match by binding n to nothing.
+            return (
+                "WITH n WHERE false WITH n",
+                params, pid,
+            )
+        rel = "|".join(_sanitize_label(t) for t in edge_types)
+        hops = int(entry["hops"])
+        direction = entry["direction"]
+        urns_param = f"_whUrns{pid}"
+        pid += 1
+        params[urns_param] = list(entry["urns"])
+        edge_where = entry.get("edge_where") or ""
+        # Bind the variable-length path so we can apply per-edge filters.
+        # Each occurrence gets its own path alias to avoid clashes when
+        # multiple WithinHops predicates AND together.
+        path_alias = f"_whP{idx}"
+        if direction == "out":
+            arrow = f"-[:{rel}*1..{hops}]->"
+        elif direction == "in":
+            arrow = f"<-[:{rel}*1..{hops}]-"
+        else:  # both — undirected; planner walks either side
+            arrow = f"-[:{rel}*1..{hops}]-"
+        pat = f"MATCH {path_alias} = (anchor){arrow}(n)"
+        where_extra = (
+            f" AND ALL(rel IN relationships({path_alias}) WHERE {edge_where})"
+            if edge_where else ""
+        )
+        parts.append(
+            f"{pat} WHERE anchor.urn IN ${urns_param}{where_extra} "
+            "WITH DISTINCT n"
+        )
+
+    return " ".join(parts), params, pid
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +1015,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     per AggregationSpec — left to caller's understanding).
     """
     notes: List[str] = []
-    compiler = _Compiler()
+    compiler = _build_compiler_for_provider(provider)
     where_fragment = compiler.compile(query.predicate)
     base_params: Dict[str, Any] = dict(compiler.params)
 
@@ -494,15 +1040,31 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
                 "ancestry verification."
             )
 
-    use_entity_types = bool(query.scope.entity_types)
+    effective_types, et_note = _resolve_entity_types_scope(
+        provider, list(query.scope.entity_types or []),
+    )
+    use_entity_types = effective_types is not None
     if use_entity_types:
-        base_params["_scopeEntityTypes"] = list(query.scope.entity_types)
+        base_params["_scopeEntityTypes"] = effective_types
+    if et_note:
+        notes.append(et_note)
+
+    wh_continuation, wh_params, _ = _build_within_hops_continuation(
+        compiler.hoisted_within_hops, compiler._param_counter,
+    )
+    base_params.update(wh_params)
+    if compiler.hoisted_within_hops and not wh_continuation:
+        notes.append(
+            "withinHops predicates were hoisted but produced no Cypher — "
+            "check that edgeClass / edgeTypes resolve to a non-empty set."
+        )
 
     cand_cypher = _build_candidate_cypher(
         where_fragment=where_fragment,
         entity_types_param=use_entity_types,
         scope_continuation=scope_continuation,
         candidate_cap=CANDIDATE_CAP,
+        within_hops_continuation=wh_continuation,
     )
 
     if query.options.results == "aggregates" and not query.options.aggregations:
@@ -545,41 +1107,73 @@ _DISCOVER_RESERVED_KEYS = frozenset({
 })
 
 
+# Maximum distinct values surfaced per (label, property-key) sample.
+# Caps the response payload at a sane size while still being enough to
+# populate a dropdown of "common values" in the FE's property-value
+# picker. Higher than ~20 stops being useful for a UI hint.
+_DISCOVER_VALUE_SAMPLES_PER_KEY = 20
+# Maximum entries surfaced in the per-key value-sample dict (per label).
+# A label with hundreds of unique property keys would otherwise blow up
+# the response — most callers don't need values for every fringe key.
+_DISCOVER_VALUE_KEYS_PER_LABEL = 64
+# Maximum entries surfaced in the top-level tag-value list.
+_DISCOVER_TAG_VALUES_CAP = 200
+# Hard cap on edges sampled when collecting edge-type metadata. Edges
+# can vastly outnumber nodes; capping keeps the query bounded.
+_DISCOVER_EDGE_SAMPLE_CAP = 5000
+
+
 async def discover_native_property_keys(
     provider,
     *,
     sample_per_label: int = 200,
     max_labels: int = 100,
     timeout_s: float = 5.0,
+    include_value_samples: bool = True,
+    include_tag_values: bool = True,
+    include_edges: bool = True,
 ) -> Dict[str, Any]:
-    """Sample nodes per label, collect their native property keys.
+    """Sample nodes per label and surface what's actually queryable.
 
-    Returns:
+    Returns the schema-discovery payload that drives the FE's
+    property/value/tag/edge pickers:
 
         {
           "labels": {
-            "dataset":   {"keys": ["logicalType","rowCount",...], "sampled": 200},
-            "container": {"keys": ["layer","schema",...],          "sampled": 47},
+            "dataset": {
+              "keys": ["logicalType","rowCount",...],
+              "sampled": 200,
+              "valueSamplesByKey": {
+                "logicalType": ["STRING","BIGINT","DOUBLE"],
+                "layerAssignment": ["silver","gold"],
+                ...
+              }
+            },
             ...
           },
-          "blobOnlyLabels": ["domain", ...],   # labels where 0 native
-                                                # keys found — strong
-                                                # signal that those
-                                                # nodes are still
-                                                # blob-stored.
-          "missingContainment": bool,           # provider has no
-                                                # containment edge
-                                                # types configured.
+          "blobOnlyLabels": ["domain", ...],
+          "missingContainment": bool,
+          "tagValues": {"PII": 482, "GDPR": 39, "deprecated": 12, ...},
+          "edges": {
+            "TRANSFORMS":  {"keys": ["confidence","discoveredBy"], "sampled": 1240,
+                            "valueSamplesByKey": {"discoveredBy": ["manual","auto"]}},
+            ...
+          },
           "elapsedMs": int,
         }
 
-    This is the diagnostic counterpart to the predicate compiler: it
-    tells the user what property names the compiler would actually find
-    on their data.
+    ``valueSamplesByKey``, ``tagValues``, and ``edges`` are added for the
+    UI's autocomplete pickers. They can be skipped via the
+    ``include_*`` flags when only the legacy key list is needed.
     """
     t0 = time.monotonic()
     out_labels: Dict[str, Dict[str, Any]] = {}
     blob_only: List[str] = []
+    # Top-level tag-value accumulator across every label. Tags in v1
+    # remain JSON-stringified arrays on ``n.tags`` (see W1 deferral);
+    # we parse them in Python here rather than relying on FalkorDB's
+    # JSON-string handling at query time.
+    tag_value_counts: Dict[str, int] = {}
 
     # Step 1: list labels (FalkorDB supports CALL db.labels())
     try:
@@ -594,33 +1188,77 @@ async def discover_native_property_keys(
         labels = []
     labels = labels[:max_labels]
 
-    # Step 2: per label, sample nodes + extract native keys
+    # Step 2: per label, sample nodes + extract native keys + values
     for label in labels:
         safe = _sanitize_label(label)
         try:
+            # Fetch the sampled nodes themselves so we can mine both
+            # property keys AND distinct values per key in one pass.
+            # The extra payload is bounded by ``sample_per_label`` and
+            # FalkorDB streams it; for a 200-node sample with ~10
+            # properties each this is ~50 KB on the wire.
             res = await provider._ro_query(
-                f"MATCH (n:`{safe}`) WITH n LIMIT $lim "
-                f"UNWIND keys(n) AS k WITH DISTINCT k "
-                f"RETURN collect(k) AS allKeys, count(*) AS sampled",
+                f"MATCH (n:`{safe}`) WITH n LIMIT $lim RETURN n",
                 params={"lim": int(sample_per_label)},
                 timeout=timeout_s,
             )
-            rs = res.result_set or []
-            all_keys = list(rs[0][0]) if rs and rs[0] else []
-            sampled_count = int(rs[0][1]) if rs and rs[0] else 0
+            rows = res.result_set or []
+            sampled_count = len(rows)
         except Exception as exc:
             logger.warning(
                 "discover: label=%s sample failed: %s", label, exc,
             )
             continue
-        user_keys = sorted(k for k in all_keys
-                           if k not in _DISCOVER_RESERVED_KEYS)
+
+        user_keys_set: set = set()
+        value_samples: Dict[str, list] = {}
+        # Track seen values per key as a set when hashable; lists when
+        # not. We never let a per-key sample grow past the cap.
+        seen_values_per_key: Dict[str, set] = {}
+
+        for row in rows:
+            node = row[0] if row else None
+            props = getattr(node, "properties", None) or {}
+            for k, v in props.items():
+                if k in _DISCOVER_RESERVED_KEYS and k != "tags":
+                    # Reserved keys are stripped from the user-facing
+                    # key list — except ``tags`` which we still mine
+                    # for distinct values via the top-level tagValues
+                    # block.
+                    if k == "tags" and include_tag_values:
+                        _accumulate_tag_values(v, tag_value_counts)
+                    continue
+                user_keys_set.add(k)
+                if not include_value_samples:
+                    continue
+                if v is None:
+                    continue
+                if len(value_samples) >= _DISCOVER_VALUE_KEYS_PER_LABEL \
+                   and k not in value_samples:
+                    # Already at the per-label value-key cap.
+                    continue
+                try:
+                    sample = seen_values_per_key.setdefault(k, set())
+                    if len(sample) >= _DISCOVER_VALUE_SAMPLES_PER_KEY:
+                        continue
+                    sample.add(v)
+                    value_samples.setdefault(k, []).append(v)
+                except TypeError:
+                    # Non-hashable (list / dict) — skip rather than
+                    # silently de-duplicating wrongly.
+                    continue
+
+        user_keys = sorted(user_keys_set)
         out_labels[label] = {
             "keys": user_keys,
             "sampled": sampled_count,
         }
-        # A label with sampled > 0 nodes but zero user-keys is a strong
-        # tell that those nodes are still pre-W1 blob storage.
+        if include_value_samples and value_samples:
+            # Stable ordering for diff-friendly responses + UI render.
+            out_labels[label]["valueSamplesByKey"] = {
+                k: sorted(value_samples[k], key=lambda x: (str(type(x)), str(x)))
+                for k in sorted(value_samples.keys())
+            }
         if sampled_count > 0 and not user_keys:
             blob_only.append(label)
 
@@ -630,17 +1268,240 @@ async def discover_native_property_keys(
     except Exception:
         missing_containment = True
 
+    edges_payload: Dict[str, Dict[str, Any]] = {}
+    if include_edges:
+        edges_payload = await _discover_edge_metadata(provider, timeout_s=timeout_s)
+
+    tag_values_payload: Dict[str, int] = {}
+    if include_tag_values:
+        # Cap the surfaced list at the top N; trim by descending count
+        # so the UI shows the most-used tags first.
+        ordered = sorted(
+            tag_value_counts.items(), key=lambda kv: (-kv[1], kv[0]),
+        )[:_DISCOVER_TAG_VALUES_CAP]
+        tag_values_payload = dict(ordered)
+
     return {
         "labels": out_labels,
         "blobOnlyLabels": sorted(blob_only),
         "missingContainment": missing_containment,
+        "tagValues": tag_values_payload,
+        "edges": edges_payload,
         "elapsedMs": int((time.monotonic() - t0) * 1000),
     }
+
+
+def _accumulate_tag_values(raw: Any, into: Dict[str, int]) -> None:
+    """Parse a JSON-stringified ``n.tags`` field and accumulate counts.
+
+    Tolerates: a plain string (single tag), a JSON array of strings, or
+    an actual Python list (in case storage already normalised). Anything
+    else is silently skipped.
+    """
+    if raw is None:
+        return
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str) and item:
+                into[item] = into.get(item, 0) + 1
+        return
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return
+        if stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                return
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, str) and item:
+                        into[item] = into.get(item, 0) + 1
+            return
+        # Single tag stored as plain string.
+        into[stripped] = into.get(stripped, 0) + 1
+
+
+async def _discover_edge_metadata(
+    provider, *, timeout_s: float = 5.0,
+) -> Dict[str, Dict[str, Any]]:
+    """Sample edges, return per-edge-type property keys + value samples.
+
+    Returns ``{edgeType: {keys, sampled, valueSamplesByKey}}`` for every
+    edge type seen in the sample. Used by the FE's edge-predicate
+    editor (W2) and by the property-value picker when the user
+    composes a path query against a specific edge type.
+    """
+    try:
+        res = await provider._ro_query(
+            "MATCH ()-[r]->() WITH r LIMIT $lim RETURN type(r) AS edgeType, r",
+            params={"lim": _DISCOVER_EDGE_SAMPLE_CAP},
+            timeout=timeout_s,
+        )
+    except Exception as exc:
+        logger.warning("discover: edge sampling failed: %s", exc)
+        return {}
+
+    rows = res.result_set or []
+    per_type: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        if not row or len(row) < 2:
+            continue
+        edge_type = row[0]
+        rel = row[1]
+        if not edge_type:
+            continue
+        entry = per_type.setdefault(edge_type, {
+            "keys_set": set(),
+            "sampled": 0,
+            "value_samples": {},
+            "seen_per_key": {},
+        })
+        entry["sampled"] += 1
+        props = getattr(rel, "properties", None) or {}
+        for k, v in props.items():
+            entry["keys_set"].add(k)
+            if v is None:
+                continue
+            try:
+                seen = entry["seen_per_key"].setdefault(k, set())
+                if len(seen) >= _DISCOVER_VALUE_SAMPLES_PER_KEY:
+                    continue
+                seen.add(v)
+                entry["value_samples"].setdefault(k, []).append(v)
+            except TypeError:
+                continue
+
+    # Render to the public shape.
+    out: Dict[str, Dict[str, Any]] = {}
+    for edge_type, entry in per_type.items():
+        keys = sorted(entry["keys_set"])
+        out[edge_type] = {
+            "keys": keys,
+            "sampled": entry["sampled"],
+        }
+        if entry["value_samples"]:
+            out[edge_type]["valueSamplesByKey"] = {
+                k: sorted(entry["value_samples"][k], key=lambda x: (str(type(x)), str(x)))
+                for k in sorted(entry["value_samples"].keys())
+            }
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Main entry — wires everything together
 # ---------------------------------------------------------------------------
+
+def _build_path_cypher(
+    *,
+    direction: str,
+    max_hops: int,
+    edge_where: str = "",
+) -> str:
+    """Cypher for a PathPredicate query.
+
+    Direction-aware. Filters edge types via ``WHERE type(rel) IN $...``
+    rather than relationship-pattern alternation, so FalkorDB doesn't
+    hit the "Unable to resolve filtered alias" error.
+
+    When ``edge_where`` is non-empty, an additional per-edge predicate
+    (compiled from ``PathPredicate.edge_predicate``) is AND-joined into
+    the ``ALL(rel IN relationships(p) WHERE …)`` block so paths whose
+    edges fail the filter are excluded server-side.
+    """
+    if direction == "incoming":
+        pattern = f"(s)<-[*1..{max_hops}]-(t)"
+    elif direction == "any":
+        pattern = f"(s)-[*1..{max_hops}]-(t)"
+    else:
+        # default outgoing
+        pattern = f"(s)-[*1..{max_hops}]->(t)"
+
+    edge_filter = "type(rel) IN $_pathEdgeTypes"
+    if edge_where:
+        edge_filter = f"{edge_filter} AND ({edge_where})"
+
+    # Each path: list of {urn, displayName, entityType} for nodes;
+    # list of {sourceUrn, targetUrn, edgeType, properties} for edges.
+    return (
+        f"MATCH p = {pattern} "
+        "WHERE s.urn IN $_pathSrc AND t.urn IN $_pathTgt "
+        f"AND ALL(rel IN relationships(p) WHERE {edge_filter}) "
+        "WITH p, nodes(p) AS ns, relationships(p) AS rs "
+        "LIMIT $_pathMaxPaths "
+        "RETURN [n IN ns | { "
+        "  urn: n.urn, "
+        "  displayName: n.displayName, "
+        "  entityType: labels(n)[0] "
+        "}] AS nodes, "
+        "[rel IN rs | { "
+        "  sourceUrn: startNode(rel).urn, "
+        "  targetUrn: endNode(rel).urn, "
+        "  edgeType: type(rel), "
+        "  properties: properties(rel) "
+        "}] AS edges, "
+        "length(p) AS hopCount"
+    )
+
+
+async def _run_path_query(
+    provider, hoisted: Dict[str, Any], *, timeout_s: float,
+) -> Tuple[List[PathHit], bool]:
+    """Execute the hoisted PathPredicate. Returns (paths, truncated)."""
+    edge_types = hoisted.get("edge_types") or []
+    if not edge_types:
+        # No lineage / containment edge types resolved → no paths can
+        # match. Return empty cleanly rather than emit a Cypher with
+        # an empty IN clause.
+        return [], False
+
+    cypher = _build_path_cypher(
+        direction=hoisted["direction"],
+        max_hops=hoisted["max_hops"],
+        edge_where=hoisted.get("edge_where") or "",
+    )
+    params = {
+        "_pathSrc": hoisted["source_urns"],
+        "_pathTgt": hoisted["target_urns"],
+        "_pathEdgeTypes": edge_types,
+        "_pathMaxPaths": hoisted["max_paths"],
+    }
+    result = await provider._ro_query(cypher, params=params, timeout=timeout_s)
+    rows = result.result_set or []
+
+    paths: List[PathHit] = []
+    for row in rows:
+        # Row shape: [nodes_list, edges_list, hop_count]
+        node_dicts = row[0] or []
+        edge_dicts = row[1] or []
+        hop_count = int(row[2]) if row[2] is not None else 0
+        node_refs = [
+            AncestorRef(
+                urn=str(n.get("urn", "")),
+                display_name=str(n.get("displayName", "")),
+                entity_type=str(n.get("entityType", "")),
+            )
+            for n in node_dicts if isinstance(n, dict)
+        ]
+        edge_refs = [
+            EdgeRef(
+                source_urn=str(e.get("sourceUrn", "")),
+                target_urn=str(e.get("targetUrn", "")),
+                edge_type=str(e.get("edgeType", "")),
+                properties=e.get("properties") or {},
+            )
+            for e in edge_dicts if isinstance(e, dict)
+        ]
+        paths.append(PathHit(
+            nodes=node_refs,
+            edges=edge_refs,
+            hop_count=hop_count,
+        ))
+
+    truncated = len(paths) >= hoisted["max_paths"]
+    return paths, truncated
+
 
 async def execute_deep_search(
     provider,
@@ -658,10 +1519,38 @@ async def execute_deep_search(
     start = time.monotonic()
     timeout_s = (deadline_ms or query.options.soft_deadline_ms) / 1000.0
 
-    # 1. Compile predicate → Cypher WHERE fragment + scope hoisting
-    compiler = _Compiler()
+    # 1. Compile predicate → Cypher WHERE fragment + scope/withinHops hoisting
+    compiler = _build_compiler_for_provider(provider)
     where_fragment = compiler.compile(query.predicate)
     base_params: Dict[str, Any] = dict(compiler.params)
+
+    # 1a. Path-mode short-circuit. When a PathPredicate is present, the
+    # standard candidate scan is bypassed entirely — we run a single
+    # path-matching query and return the result as `paths`. Other
+    # predicates on the path-mode query are unsupported in v1
+    # (the path-predicate compiler raises CompileError if non-AND-top).
+    if compiler.hoisted_path is not None:
+        try:
+            paths, truncated = await _run_path_query(
+                provider, compiler.hoisted_path, timeout_s=timeout_s,
+            )
+            return SearchResultPage(
+                paths=paths,
+                truncated=truncated,
+                candidate_count=len(paths),
+                deadline_exceeded=False,
+                elapsed_ms=int((time.monotonic() - start) * 1000),
+                cache_hit=False,
+            )
+        except asyncio.TimeoutError:
+            return SearchResultPage(
+                paths=[],
+                truncated=True,
+                candidate_count=0,
+                deadline_exceeded=True,
+                elapsed_ms=int((time.monotonic() - start) * 1000),
+                cache_hit=False,
+            )
 
     # 2. Effective scope (scope.root_urns ∩ hoisted DescendantOf urns)
     eff_root_urns = _effective_root_urns(compiler, query.scope.root_urns)
@@ -677,15 +1566,32 @@ async def execute_deep_search(
         )
         base_params.update(scope_params)
 
-    # 4. Build the candidate prefix
-    use_entity_types = bool(query.scope.entity_types)
+    # 4. WithinHops continuation (each anchor → reachable-within-N-hops set)
+    wh_continuation, wh_params, _ = _build_within_hops_continuation(
+        compiler.hoisted_within_hops, compiler._param_counter,
+    )
+    base_params.update(wh_params)
+
+    # 5. Build the candidate prefix
+    effective_types, et_note = _resolve_entity_types_scope(
+        provider, list(query.scope.entity_types or []),
+    )
+    use_entity_types = effective_types is not None
     if use_entity_types:
-        base_params["_scopeEntityTypes"] = list(query.scope.entity_types)
+        base_params["_scopeEntityTypes"] = effective_types
+    if et_note:
+        # execute_deep_search has no diagnostic-notes channel
+        # (explain_deep_search does — see the parallel branch). Log at
+        # WARNING so operators can spot stale view-scope configs in
+        # production and so /search/explain can be re-issued to surface
+        # the same note to the UI.
+        logger.warning("deep_search: %s", et_note)
     cand_cypher = _build_candidate_cypher(
         where_fragment=where_fragment,
         entity_types_param=use_entity_types,
         scope_continuation=scope_continuation,
         candidate_cap=CANDIDATE_CAP,
+        within_hops_continuation=wh_continuation,
     )
 
     # 5. Execute according to requested result shape
@@ -694,6 +1600,11 @@ async def execute_deep_search(
     candidate_count = 0
     truncated = False
     deadline_exceeded = False
+    # Hits-pagination accounting — only populated by the hits branch
+    # below. Defaulted here so the SearchResultPage cursor expression
+    # stays safe on aggregates-only / timeout paths.
+    hits_offset_after = 0
+    hits_total_sorted = 0
 
     shape = query.options.results
     aggs = query.options.aggregations or []
@@ -724,7 +1635,9 @@ async def execute_deep_search(
             rows = result.result_set or []
             candidate_count = len(rows)
             truncated = candidate_count >= CANDIDATE_CAP
-            hits = _build_hits_from_rows(provider, rows, query)
+            hits, hits_offset_after, hits_total_sorted = _build_hits_from_rows(
+                provider, rows, query,
+            )
             if shape == "both" and aggs:
                 aggregates = []
                 for spec in aggs:
@@ -758,10 +1671,20 @@ async def execute_deep_search(
     if hits and query.options.include_ancestor_path:
         await _hydrate_ancestors(provider, hits)
 
+    # Emit a next-cursor whenever the page didn't exhaust the sorted
+    # candidate set. The cursor embeds ``query_hash(query)`` so a future
+    # iteration can reject cursors issued against a different query
+    # (not enforced this turn — codec carries the hash for the follow-up).
+    next_cursor: Optional[str] = None
+    if hits_offset_after < hits_total_sorted:
+        next_cursor = encode_cursor(
+            {"offset": hits_offset_after, "q": query_hash(query)}
+        )
+
     return SearchResultPage(
         aggregates=aggregates,
         hits=hits,
-        cursor=None,  # hits-pagination cursor wired up in a follow-up
+        cursor=next_cursor,
         truncated=truncated,
         candidate_count=candidate_count,
         deadline_exceeded=deadline_exceeded,
@@ -820,9 +1743,26 @@ async def _run_aggregation(
             provider, cand_cypher, cand_params, spec,
             timeout_s=timeout_s,
         )
+    if spec.by == "layer":
+        return await _run_aggregation_layer(
+            provider, cand_cypher, cand_params, spec,
+            timeout_s=timeout_s,
+        )
+    if spec.by == "parent":
+        return await _run_aggregation_parent(
+            provider, cand_cypher, cand_params, spec,
+            query=query, timeout_s=timeout_s,
+        )
+    if spec.by == "ancestorLevel":
+        return await _run_aggregation_ancestor_level(
+            provider, cand_cypher, cand_params, spec,
+            query=query, timeout_s=timeout_s,
+        )
     raise CompileError(
         f"aggregation by={spec.by!r} is not yet supported in v1. "
-        "Use 'ancestorType', 'entityType', or 'property'."
+        "Use 'ancestorType', 'entityType', 'property', 'layer', "
+        "'parent', or 'ancestorLevel'. ('tag' deferred until tags are a "
+        "native array field.)"
     )
 
 
@@ -918,6 +1858,135 @@ async def _run_aggregation_property(
     return _rows_to_buckets(provider, result.result_set or [])
 
 
+async def _run_aggregation_layer(
+    provider, cand_cypher, cand_params, spec, *, timeout_s,
+):
+    """Group the candidate set by ``n.layerAssignment``.
+
+    Reserved top-level field — never lived in the property blob — so
+    every node has it set (or null for unassigned). Nodes without an
+    assignment are excluded, mirroring the property-aggregation
+    behaviour. Powers the Map UX's "matches by layer" pivot.
+    """
+    k = max(0, int(spec.sample_hits_per_bucket))
+    agg_cypher = (
+        cand_cypher + " "
+        "WHERE n.layerAssignment IS NOT NULL "
+        "WITH n.layerAssignment AS layer, n "
+        "WITH layer, count(DISTINCT n) AS mc, "
+        f"collect(DISTINCT n)[..{k}] AS samples "
+        "RETURN '' AS urn, toString(layer) AS name, "
+        "'layer' AS etype, mc, samples "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+    )
+    result = await provider._ro_query(
+        agg_cypher, params=cand_params, timeout=timeout_s,
+    )
+    return _rows_to_buckets(provider, result.result_set or [])
+
+
+async def _run_aggregation_parent(
+    provider, cand_cypher, cand_params, spec, *, query, timeout_s,
+):
+    """Group the candidate set by direct containment parent (one hop).
+
+    Useful for the second drill in the Map UX ("inside this domain,
+    which containers hold the most matches?"). Empty containment-edge-
+    type set short-circuits to no buckets (consistent with
+    ancestorType).
+    """
+    try:
+        ctypes = list(provider._get_containment_edge_types())
+    except Exception:
+        ctypes = []
+    if not ctypes:
+        logger.warning(
+            "deep_search: parent aggregation requested but containment "
+            "edge types are not configured; returning empty buckets",
+        )
+        return []
+    rel = "|".join(_sanitize_label(t) for t in ctypes)
+    k = max(0, int(spec.sample_hits_per_bucket))
+
+    agg_cypher = (
+        cand_cypher + " "
+        f"MATCH (parent)-[:{rel}]->(n) "
+        "WITH parent, count(DISTINCT n) AS mc, "
+        f"collect(DISTINCT n)[..{k}] AS samples "
+        "RETURN parent.urn AS urn, parent.displayName AS name, "
+        "labels(parent)[0] AS etype, mc, samples "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+    )
+    result = await provider._ro_query(
+        agg_cypher, params=cand_params, timeout=timeout_s,
+    )
+    return _rows_to_buckets(provider, result.result_set or [])
+
+
+async def _run_aggregation_ancestor_level(
+    provider, cand_cypher, cand_params, spec, *, query, timeout_s,
+):
+    """Group by the ancestor at hierarchy depth ``ancestorLevel`` from
+    the candidate (0 = the candidate itself, 1 = direct parent, …).
+
+    Lets a caller ask "what does the level-2 ancestor of each match
+    look like?" without specifying ancestor entity types — useful when
+    the hierarchy is heterogeneous (e.g. one branch is
+    domain→container→table, another is platform→cluster→schema).
+
+    Empty containment-edge-type set short-circuits.
+    """
+    if spec.ancestor_level is None:
+        raise CompileError(
+            "aggregation by='ancestorLevel' requires ancestorLevel"
+        )
+    level = int(spec.ancestor_level)
+    if level < 0 or level > 20:
+        raise CompileError(
+            "aggregation by='ancestorLevel' requires 0 ≤ ancestorLevel ≤ 20"
+        )
+    try:
+        ctypes = list(provider._get_containment_edge_types())
+    except Exception:
+        ctypes = []
+    if not ctypes and level > 0:
+        logger.warning(
+            "deep_search: ancestorLevel aggregation requested but "
+            "containment edge types are not configured; returning empty",
+        )
+        return []
+    k = max(0, int(spec.sample_hits_per_bucket))
+
+    if level == 0:
+        # Trivial pivot: the candidate is its own "ancestor at level 0".
+        agg_cypher = (
+            cand_cypher + " "
+            "WITH n AS anc, n "
+            "WITH anc, count(DISTINCT n) AS mc, "
+            f"collect(DISTINCT n)[..{k}] AS samples "
+            "RETURN anc.urn AS urn, anc.displayName AS name, "
+            "labels(anc)[0] AS etype, mc, samples "
+            f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        )
+    else:
+        rel = "|".join(_sanitize_label(t) for t in ctypes)
+        # Fixed-length variable-length pattern pins the depth exactly.
+        # FalkorDB supports the syntax [:REL*N..N].
+        agg_cypher = (
+            cand_cypher + " "
+            f"MATCH (anc)-[:{rel}*{level}..{level}]->(n) "
+            "WITH anc, count(DISTINCT n) AS mc, "
+            f"collect(DISTINCT n)[..{k}] AS samples "
+            "RETURN anc.urn AS urn, anc.displayName AS name, "
+            "labels(anc)[0] AS etype, mc, samples "
+            f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        )
+    result = await provider._ro_query(
+        agg_cypher, params=cand_params, timeout=timeout_s,
+    )
+    return _rows_to_buckets(provider, result.result_set or [])
+
+
 def _rows_to_buckets(provider, rows) -> List[SearchAggregateBucket]:
     buckets: List[SearchAggregateBucket] = []
     for row in rows:
@@ -940,8 +2009,18 @@ def _rows_to_buckets(provider, rows) -> List[SearchAggregateBucket]:
     return buckets
 
 
-def _build_hits_from_rows(provider, rows, query: SearchQuery) -> List[SearchHit]:
-    """Convert candidate rows to SearchHits, applying sort + page_size in-memory.
+def _build_hits_from_rows(
+    provider, rows, query: SearchQuery,
+) -> Tuple[List[SearchHit], int, int]:
+    """Convert candidate rows to SearchHits, applying sort + cursor-paged
+    slicing in-memory.
+
+    Returns ``(hits, offset_after, total_sorted)`` where:
+      * ``hits`` — the page's SearchHits (sliced ``[offset : offset+page_size]``)
+      * ``offset_after`` — the next-cursor offset (offset + len(hits))
+      * ``total_sorted`` — the size of the full sorted candidate set,
+        so the caller can decide whether there are more pages to emit
+        a next-cursor.
 
     The candidate Cypher deliberately doesn't ORDER BY — sorting in
     Cypher forces a materialisation barrier that thwarts the candidate
@@ -992,7 +2071,13 @@ def _build_hits_from_rows(provider, rows, query: SearchQuery) -> List[SearchHit]
                 reverse=reverse,
             )
 
-    return hits[:query.options.page_size]
+    total_sorted = len(hits)
+    offset = 0
+    if query.options.cursor:
+        state = decode_cursor(query.options.cursor)
+        offset = max(0, int(state.get("offset", 0)))
+    page = hits[offset : offset + query.options.page_size]
+    return page, offset + len(page), total_sorted
 
 
 async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:

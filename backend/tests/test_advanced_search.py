@@ -19,6 +19,7 @@ from backend.app.providers.falkordb_deep_search import (
     _Compiler,
     _build_candidate_cypher,
     _effective_root_urns,
+    _resolve_entity_types_scope,
     decode_cursor,
     encode_cursor,
     query_hash,
@@ -32,11 +33,18 @@ from backend.app.services.advanced_search_service import (
 )
 from backend.common.models.search import (
     AggregationSpec,
+    DegreePredicate,
     DescendantOfPredicate,
     EntityTypePredicate,
     GroupPredicate,
+    HasIncomingPredicate,
+    HasOutgoingPredicate,
     HasPropertyPredicate,
+    IsLeafPredicate,
+    IsOrphanPredicate,
+    IsRootPredicate,
     LayerPredicate,
+    PathPredicate,
     PropertyPredicate,
     SearchOptions,
     SearchQuery,
@@ -47,13 +55,36 @@ from backend.common.models.search import (
 )
 
 
+# Compiler fixture for degree-family tests: inject a realistic lineage
+# edge-type set so _visit_degree has something to alternate over.
+_LINEAGE_EDGE_TYPES = {"LINEAGE", "PRODUCES", "CONSUMES"}
+_CONTAINMENT_EDGE_TYPES = {"CONTAINS"}
+
+
+def _degree_compiler() -> _Compiler:
+    return _Compiler(
+        lineage_edge_types=_LINEAGE_EDGE_TYPES,
+        containment_edge_types=_CONTAINMENT_EDGE_TYPES,
+    )
+
+
+# Every SearchQuery is bound to a view via scope.viewId — there is no
+# global/cross-view search. The unit tests don't need a real view; they
+# just need a syntactically valid scope so SearchQuery validation
+# accepts the constructor.
+_TEST_SCOPE = SearchScope(view_id="view_test")
+
+
 # ---------------------------------------------------------------------------
 # Models — construction + JSON round-trip
 # ---------------------------------------------------------------------------
 
 class TestModelConstruction:
     def test_minimal_text_query(self):
-        q = SearchQuery(predicate=TextPredicate(value="customer", target="name"))
+        q = SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=_TEST_SCOPE,
+        )
         assert q.predicate.kind == "text"
         assert q.options.results == "aggregates"  # default
 
@@ -67,6 +98,7 @@ class TestModelConstruction:
                     DescendantOfPredicate(urns=["urn:domain:Customers"]),
                 ]),
             ]),
+            scope=_TEST_SCOPE,
         )
         # discriminator should resolve every leaf
         assert q.predicate.children[0].kind == "tag"
@@ -79,7 +111,11 @@ class TestModelConstruction:
                 TagPredicate(values=["PII", "GDPR"], op="hasAll"),
                 HasPropertyPredicate(key="pii_class"),
             ]),
-            scope=SearchScope(root_urns=["urn:domain:X"], entity_types=["dataset"]),
+            scope=SearchScope(
+                view_id="view_test",
+                root_urns=["urn:domain:X"],
+                entity_types=["dataset"],
+            ),
             options=SearchOptions(
                 results="both",
                 aggregations=[AggregationSpec(
@@ -102,15 +138,21 @@ class TestModelConstruction:
 
 class TestServiceValidator:
     def test_leaf_only_passes(self):
-        q = SearchQuery(predicate=TextPredicate(value="x", target="name"))
+        q = SearchQuery(
+            predicate=TextPredicate(value="x", target="name"),
+            scope=_TEST_SCOPE,
+        )
         assert _count_and_validate(q) == 1
 
     def test_flat_and_passes(self):
-        q = SearchQuery(predicate=GroupPredicate(op="and", children=[
-            TagPredicate(values=["A"]),
-            TagPredicate(values=["B"]),
-            HasPropertyPredicate(key="k"),
-        ]))
+        q = SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                TagPredicate(values=["A"]),
+                TagPredicate(values=["B"]),
+                HasPropertyPredicate(key="k"),
+            ]),
+            scope=_TEST_SCOPE,
+        )
         assert _count_and_validate(q) == 3
 
     def test_depth_cap_enforced(self):
@@ -121,7 +163,7 @@ class TestServiceValidator:
         # is the number of wraps. We need depth > MAX_TREE_DEPTH at a leaf.
         for _ in range(MAX_TREE_DEPTH + 1):
             node = GroupPredicate(op="and", children=[node])
-        q = SearchQuery(predicate=node)
+        q = SearchQuery(predicate=node, scope=_TEST_SCOPE)
         with pytest.raises(ValidationError, match="max depth"):
             _count_and_validate(q)
 
@@ -130,25 +172,34 @@ class TestServiceValidator:
         # Split across two AND groups (each has 32 children); avoids the
         # OR-branch cap that would also fire.
         mid = MAX_LEAF_COUNT // 2 + 1
-        q = SearchQuery(predicate=GroupPredicate(op="and", children=[
-            GroupPredicate(op="and", children=leaves[:mid]),
-            GroupPredicate(op="and", children=leaves[mid:]),
-        ]))
+        q = SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                GroupPredicate(op="and", children=leaves[:mid]),
+                GroupPredicate(op="and", children=leaves[mid:]),
+            ]),
+            scope=_TEST_SCOPE,
+        )
         with pytest.raises(ValidationError, match="leaves"):
             _count_and_validate(q)
 
     def test_or_branch_cap_enforced(self):
-        q = SearchQuery(predicate=GroupPredicate(op="or", children=[
-            TagPredicate(values=[f"t{i}"]) for i in range(MAX_OR_BRANCH + 1)
-        ]))
+        q = SearchQuery(
+            predicate=GroupPredicate(op="or", children=[
+                TagPredicate(values=[f"t{i}"]) for i in range(MAX_OR_BRANCH + 1)
+            ]),
+            scope=_TEST_SCOPE,
+        )
         with pytest.raises(ValidationError, match="OR group"):
             _count_and_validate(q)
 
     def test_not_arity_enforced(self):
-        q = SearchQuery(predicate=GroupPredicate(op="not", children=[
-            TagPredicate(values=["a"]),
-            TagPredicate(values=["b"]),
-        ]))
+        q = SearchQuery(
+            predicate=GroupPredicate(op="not", children=[
+                TagPredicate(values=["a"]),
+                TagPredicate(values=["b"]),
+            ]),
+            scope=_TEST_SCOPE,
+        )
         with pytest.raises(ValidationError, match="NOT group"):
             _count_and_validate(q)
 
@@ -159,18 +210,95 @@ class TestServiceValidator:
 
 class TestCompilerLeaves:
     def test_text_substring_case_insensitive(self):
+        # ``target='name'`` widens to OR across the canonical name-like
+        # fields the storage layer commits to (displayName, qualifiedName,
+        # searchableText). A null field on a given node reads as an empty
+        # string via COALESCE so the predicate matches when ANY of the
+        # listed columns contains the value, instead of getting
+        # blackholed by one nullish field.
         c = _Compiler()
         where = c.compile(TextPredicate(value="Customer", target="name"))
-        assert where == "toLower(toString(n.displayName)) CONTAINS $p0"
+        assert where == (
+            "(toLower(toString(COALESCE(n.displayName, ''))) CONTAINS $p0"
+            " OR toLower(toString(COALESCE(n.qualifiedName, ''))) CONTAINS $p0"
+            " OR toLower(toString(COALESCE(n.searchableText, ''))) CONTAINS $p0)"
+        )
         assert c.params == {"p0": "customer"}
 
+    def test_text_name_prefix_ors_with_starts_with(self):
+        c = _Compiler()
+        where = c.compile(TextPredicate(
+            value="Cust", target="name", match="prefix",
+        ))
+        assert where == (
+            "(toLower(toString(COALESCE(n.displayName, ''))) STARTS WITH $p0"
+            " OR toLower(toString(COALESCE(n.qualifiedName, ''))) STARTS WITH $p0"
+            " OR toLower(toString(COALESCE(n.searchableText, ''))) STARTS WITH $p0)"
+        )
+        assert c.params == {"p0": "cust"}
+
+    def test_text_name_exact_ors_with_eq(self):
+        c = _Compiler()
+        where = c.compile(TextPredicate(
+            value="Customer", target="name", match="exact",
+        ))
+        assert where == (
+            "(toLower(toString(COALESCE(n.displayName, ''))) = $p0"
+            " OR toLower(toString(COALESCE(n.qualifiedName, ''))) = $p0"
+            " OR toLower(toString(COALESCE(n.searchableText, ''))) = $p0)"
+        )
+        assert c.params == {"p0": "customer"}
+
+    def test_text_name_suffix_ors_with_ends_with(self):
+        # ``match='suffix'`` is the symmetric of 'prefix' — compiles to
+        # Cypher ``ENDS WITH``, applies to the same multi-field OR over
+        # the canonical name-like columns.
+        c = _Compiler()
+        where = c.compile(TextPredicate(
+            value="_v2", target="name", match="suffix",
+        ))
+        assert where == (
+            "(toLower(toString(COALESCE(n.displayName, ''))) ENDS WITH $p0"
+            " OR toLower(toString(COALESCE(n.qualifiedName, ''))) ENDS WITH $p0"
+            " OR toLower(toString(COALESCE(n.searchableText, ''))) ENDS WITH $p0)"
+        )
+        assert c.params == {"p0": "_v2"}
+
+    def test_text_description_suffix(self):
+        # Suffix on a single-field target (description) — no OR wrap.
+        c = _Compiler()
+        where = c.compile(TextPredicate(
+            value=".", target="description", match="suffix",
+        ))
+        assert where == "toLower(toString(n.description)) ENDS WITH $p0"
+        assert c.params == {"p0": "."}
+
+    def test_text_qualifiedName_ors_with_searchableText(self):
+        # ``target='qualifiedName'`` widens to qualifiedName OR
+        # searchableText so a node whose qname is null but whose
+        # searchableText was denormalised still matches.
+        c = _Compiler()
+        where = c.compile(TextPredicate(
+            value="abc", target="qualifiedName",
+        ))
+        assert where == (
+            "(toLower(toString(COALESCE(n.qualifiedName, ''))) CONTAINS $p0"
+            " OR toLower(toString(COALESCE(n.searchableText, ''))) CONTAINS $p0)"
+        )
+        assert c.params == {"p0": "abc"}
+
     def test_text_exact_case_sensitive(self):
+        # Case-sensitive paths skip the toLower() wrap — the column read
+        # is raw — but still apply COALESCE for the multi-field expansion.
         c = _Compiler()
         where = c.compile(TextPredicate(
             value="X", target="qualifiedName",
             match="exact", case_sensitive=True,
         ))
-        assert where == "n.qualifiedName = $p0"
+        assert where == (
+            "(COALESCE(n.qualifiedName, '') = $p0"
+            " OR COALESCE(n.searchableText, '') = $p0)"
+        )
         assert c.params == {"p0": "X"}
 
     def test_text_property_target(self):
@@ -181,10 +309,49 @@ class TestCompilerLeaves:
         ))
         assert where == "toLower(toString(n.logicalType)) STARTS WITH $p0"
 
-    def test_text_any_raises_deferred(self):
+    def test_text_target_any_matches_display_name(self):
+        # A node with displayName='Orders Pipeline' has its lowercased
+        # displayName denormalised into n.searchableText at write time, so
+        # the compiled CONTAINS predicate against n.searchableText with
+        # parameter 'orders' matches it.
         c = _Compiler()
-        with pytest.raises(CompileError, match="target='any'"):
-            c.compile(TextPredicate(value="x", target="any"))
+        where = c.compile(TextPredicate(value="orders", target="any"))
+        assert where == "toLower(toString(n.searchableText)) CONTAINS $p0"
+        assert c.params == {"p0": "orders"}
+
+    def test_text_target_any_matches_property_value(self):
+        # A node with sourceSystem='snowflake' and no 'snowflake' in the
+        # displayName still matches because every string-valued user
+        # property is folded into n.searchableText at write time. The
+        # compiled fragment is the same — the matching happens in the
+        # graph against the denormalised field.
+        c = _Compiler()
+        where = c.compile(TextPredicate(value="Snowflake", target="any"))
+        assert where == "toLower(toString(n.searchableText)) CONTAINS $p0"
+        assert c.params == {"p0": "snowflake"}
+
+    def test_text_target_any_prefix(self):
+        c = _Compiler()
+        where = c.compile(TextPredicate(
+            value="orders", target="any", match="prefix",
+        ))
+        assert where == "toLower(toString(n.searchableText)) STARTS WITH $p0"
+        assert c.params == {"p0": "orders"}
+
+    def test_text_target_any_exact(self):
+        c = _Compiler()
+        where = c.compile(TextPredicate(
+            value="orders pipeline", target="any", match="exact",
+        ))
+        assert where == "toLower(toString(n.searchableText)) = $p0"
+        assert c.params == {"p0": "orders pipeline"}
+
+    def test_text_target_any_with_fulltext_match_raises(self):
+        c = _Compiler()
+        with pytest.raises(CompileError, match="fulltext"):
+            c.compile(TextPredicate(
+                value="x", target="any", match="fulltext",
+            ))
 
     def test_text_fulltext_raises_deferred(self):
         c = _Compiler()
@@ -280,10 +447,276 @@ class TestCompilerLeaves:
         assert where == "n.layerAssignment = $p0"
         assert c.params == {"p0": "Source"}
 
-    def test_within_hops_raises_deferred(self):
+    def test_within_hops_requires_ontology_injection(self):
+        # WithinHopsPredicate uses ``edge_class`` to resolve the
+        # traversed edge set; without the provider's ontology injection
+        # (the bare ``_Compiler()`` fixture) the compiler must reject
+        # the predicate rather than silently match against zero edges.
         c = _Compiler()
-        with pytest.raises(CompileError, match="WithinHops"):
+        with pytest.raises(CompileError, match="edgeClass='lineage'"):
             c.compile(WithinHopsPredicate(urns=["urn:x"], hops=2))
+
+    def test_within_hops_with_explicit_edge_types(self):
+        # Explicit ``edge_types`` bypasses ontology resolution, so the
+        # predicate compiles cleanly even without ontology injection.
+        c = _Compiler()
+        where = c.compile(WithinHopsPredicate(
+            urns=["urn:x"], hops=2, edge_types=["LINEAGE"],
+        ))
+        assert where == "true"  # hoisted to post-candidate MATCH
+        assert len(c.hoisted_within_hops) == 1
+        assert c.hoisted_within_hops[0]["edge_types"] == ["LINEAGE"]
+
+
+class TestCompilerDegree:
+    """Degree-family predicates must compile to FalkorDB-supported
+    fragments. Specifically, threshold-around-zero ops collapse to
+    pattern-existence (or NOT pattern-existence) — never to
+    `size((pattern)) <op> 0`, because FalkorDB rejects size() over a
+    relationship-type-alternation pattern when NOT-wrapped (the
+    "Unable to resolve filtered alias" error).
+    """
+
+    # -- absence ('NOT pattern' idiom) ---------------------------------
+
+    def test_orphan_lineage(self):
+        c = _degree_compiler()
+        where = c.compile(IsOrphanPredicate(edgeClass="lineage"))
+        # Both directions absent ⇒ (NOT in AND NOT out)
+        assert "NOT (n)<-[:" in where
+        assert "NOT (n)-[:" in where
+        assert "size(" not in where
+
+    def test_is_root_lineage_absence(self):
+        c = _degree_compiler()
+        where = c.compile(IsRootPredicate(edgeClass="lineage"))
+        assert where.startswith("NOT (n)<-[:")
+        assert "size(" not in where
+
+    def test_is_leaf_lineage_absence(self):
+        c = _degree_compiler()
+        where = c.compile(IsLeafPredicate(edgeClass="lineage"))
+        assert where.startswith("NOT (n)-[:")
+        assert "->()" in where
+        assert "size(" not in where
+
+    def test_degree_in_eq_zero(self):
+        c = _degree_compiler()
+        where = c.compile(DegreePredicate(direction="in", op="eq", value=0,
+                                          edgeClass="lineage"))
+        assert where.startswith("NOT (n)<-[:")
+        assert "size(" not in where
+
+    def test_degree_in_lte_zero_collapses_to_absence(self):
+        c = _degree_compiler()
+        where = c.compile(DegreePredicate(direction="in", op="lte", value=0,
+                                          edgeClass="lineage"))
+        assert where.startswith("NOT (n)<-[:")
+        assert "size(" not in where
+
+    def test_degree_in_lt_one_collapses_to_absence(self):
+        c = _degree_compiler()
+        where = c.compile(DegreePredicate(direction="in", op="lt", value=1,
+                                          edgeClass="lineage"))
+        assert where.startswith("NOT (n)<-[:")
+        assert "size(" not in where
+
+    # -- existence (bare pattern) --------------------------------------
+
+    def test_has_incoming_lineage_existence(self):
+        c = _degree_compiler()
+        where = c.compile(HasIncomingPredicate(edgeClass="lineage"))
+        # Bare pattern existence — no size(), no NOT.
+        assert where.startswith("(n)<-[:")
+        assert "size(" not in where
+        assert "NOT" not in where
+
+    def test_has_outgoing_lineage_existence(self):
+        c = _degree_compiler()
+        where = c.compile(HasOutgoingPredicate(edgeClass="lineage"))
+        assert where.startswith("(n)-[:")
+        assert "->()" in where
+        assert "size(" not in where
+        assert "NOT" not in where
+
+    def test_degree_in_gt_zero_collapses_to_existence(self):
+        c = _degree_compiler()
+        where = c.compile(DegreePredicate(direction="in", op="gt", value=0,
+                                          edgeClass="lineage"))
+        assert where.startswith("(n)<-[:")
+        assert "size(" not in where
+
+    def test_degree_in_gte_one_collapses_to_existence(self):
+        c = _degree_compiler()
+        where = c.compile(DegreePredicate(direction="in", op="gte", value=1,
+                                          edgeClass="lineage"))
+        assert where.startswith("(n)<-[:")
+        assert "size(" not in where
+
+    def test_degree_in_neq_zero_collapses_to_existence(self):
+        c = _degree_compiler()
+        where = c.compile(DegreePredicate(direction="in", op="neq", value=0,
+                                          edgeClass="lineage"))
+        assert where.startswith("(n)<-[:")
+        assert "size(" not in where
+
+    def test_degree_both_eq_zero(self):
+        c = _degree_compiler()
+        where = c.compile(DegreePredicate(direction="both", op="eq", value=0,
+                                          edgeClass="lineage"))
+        # Both absent ⇒ (NOT in AND NOT out)
+        assert "NOT (n)<-[:" in where
+        assert "NOT (n)-[:" in where
+        assert "size(" not in where
+
+    def test_degree_both_gt_zero_existence_either_side(self):
+        c = _degree_compiler()
+        where = c.compile(DegreePredicate(direction="both", op="gt", value=0,
+                                          edgeClass="lineage"))
+        # Either incoming OR outgoing edge exists ⇒ (in OR out)
+        assert "(n)<-[:" in where
+        assert "(n)-[:" in where
+        assert " OR " in where
+        assert "size(" not in where
+
+    # -- NOT-wrapped (the user's reported 503 case) --------------------
+
+    def test_not_has_incoming_compiles_without_size(self):
+        """The user's specific 503 case. Before the fix this emitted
+        `NOT (size((n)<-[:...]-()) > 0)`, which FalkorDB rejects with
+        'Unable to resolve filtered alias'."""
+        c = _degree_compiler()
+        where = c.compile(GroupPredicate(op="not", children=[
+            HasIncomingPredicate(edgeClass="lineage"),
+        ]))
+        assert "size(" not in where
+        # The NOT wraps a bare pattern, not a size() call.
+        assert "NOT" in where and "(n)<-[:" in where
+
+    def test_not_has_outgoing_compiles_without_size(self):
+        c = _degree_compiler()
+        where = c.compile(GroupPredicate(op="not", children=[
+            HasOutgoingPredicate(edgeClass="lineage"),
+        ]))
+        assert "size(" not in where
+        assert "NOT" in where and "(n)-[:" in where
+
+    # -- non-trivial counts (size() still used) ------------------------
+
+    def test_degree_in_gt_five_uses_size(self):
+        """Counts > 1 still go through size(). FalkorDB may reject this
+        if NOT-wrapped, but it's the only correct compilation for
+        non-threshold counts; users hitting this need a backend fix that
+        rewrites to a list-comprehension. Documented in the compiler."""
+        c = _degree_compiler()
+        where = c.compile(DegreePredicate(direction="in", op="gt", value=5,
+                                          edgeClass="lineage"))
+        assert "size(" in where
+        assert "> $p0" in where
+
+    def test_degree_in_eq_three_uses_size(self):
+        c = _degree_compiler()
+        where = c.compile(DegreePredicate(direction="in", op="eq", value=3,
+                                          edgeClass="lineage"))
+        assert "size(" in where
+        assert "= $p0" in where
+
+    # -- empty edge-type set short-circuits ----------------------------
+
+    def test_orphan_with_no_lineage_types_is_true(self):
+        c = _Compiler(lineage_edge_types=set(), containment_edge_types={"CONTAINS"})
+        where = c.compile(IsOrphanPredicate(edgeClass="lineage"))
+        assert where == "true"
+
+    def test_has_incoming_with_no_lineage_types_is_false(self):
+        c = _Compiler(lineage_edge_types=set(), containment_edge_types={"CONTAINS"})
+        where = c.compile(HasIncomingPredicate(edgeClass="lineage"))
+        assert where == "false"
+
+
+class TestCompilerPath:
+    """PathPredicate hoists out of the WHERE fragment and stashes its
+    parameters on the compiler — the executor then runs a separate
+    path-matching Cypher instead of the standard candidate scan.
+    """
+
+    def test_top_level_hoists_and_returns_true(self):
+        c = _degree_compiler()
+        where = c.compile(PathPredicate(
+            source_urns=["urn:a"],
+            target_urns=["urn:b"],
+            edgeClass="lineage",
+        ))
+        assert where == "true"
+        assert c.hoisted_path is not None
+        assert c.hoisted_path["source_urns"] == ["urn:a"]
+        assert c.hoisted_path["target_urns"] == ["urn:b"]
+        assert c.hoisted_path["direction"] == "outgoing"
+        assert set(c.hoisted_path["edge_types"]) == _LINEAGE_EDGE_TYPES
+        assert c.hoisted_path["max_hops"] == 4
+        assert c.hoisted_path["max_paths"] == 32
+
+    def test_inside_or_raises(self):
+        c = _degree_compiler()
+        with pytest.raises(CompileError, match="top-level AND"):
+            c.compile(GroupPredicate(op="or", children=[
+                PathPredicate(source_urns=["urn:a"], target_urns=["urn:b"]),
+                TagPredicate(values=["PII"]),
+            ]))
+
+    def test_inside_not_raises(self):
+        c = _degree_compiler()
+        with pytest.raises(CompileError, match="top-level AND"):
+            c.compile(GroupPredicate(op="not", children=[
+                PathPredicate(source_urns=["urn:a"], target_urns=["urn:b"]),
+            ]))
+
+    def test_multiple_paths_raise(self):
+        c = _degree_compiler()
+        with pytest.raises(CompileError, match="Only one Path"):
+            c.compile(GroupPredicate(op="and", children=[
+                PathPredicate(source_urns=["urn:a"], target_urns=["urn:b"]),
+                PathPredicate(source_urns=["urn:c"], target_urns=["urn:d"]),
+            ]))
+
+    def test_explicit_edge_types_override_class(self):
+        c = _degree_compiler()
+        c.compile(PathPredicate(
+            source_urns=["urn:a"],
+            target_urns=["urn:b"],
+            edgeClass="lineage",
+            edgeTypes=["TRANSFORMS"],
+        ))
+        # Explicit list wins over the resolved class set
+        assert c.hoisted_path["edge_types"] == ["TRANSFORMS"]
+
+    def test_incoming_direction_stored(self):
+        c = _degree_compiler()
+        c.compile(PathPredicate(
+            source_urns=["urn:a"],
+            target_urns=["urn:b"],
+            direction="incoming",
+        ))
+        assert c.hoisted_path["direction"] == "incoming"
+
+    def test_path_cypher_outgoing(self):
+        from backend.app.providers.falkordb_deep_search import _build_path_cypher
+        cy = _build_path_cypher(direction="outgoing", max_hops=4)
+        # Direction-aware pattern, edge filter is in WHERE not in the
+        # pattern (avoids the "filtered alias" FalkorDB issue).
+        assert "(s)-[*1..4]->(t)" in cy
+        assert "type(rel) IN $_pathEdgeTypes" in cy
+
+    def test_path_cypher_incoming(self):
+        from backend.app.providers.falkordb_deep_search import _build_path_cypher
+        cy = _build_path_cypher(direction="incoming", max_hops=3)
+        assert "(s)<-[*1..3]-(t)" in cy
+
+    def test_path_cypher_any(self):
+        from backend.app.providers.falkordb_deep_search import _build_path_cypher
+        cy = _build_path_cypher(direction="any", max_hops=2)
+        # Undirected variable-length pattern
+        assert "(s)-[*1..2]-(t)" in cy
 
 
 class TestCompilerGroups:
@@ -299,13 +732,20 @@ class TestCompilerGroups:
         assert c.params == {"p0": '"PII"', "p1": "STRING"}
 
     def test_or(self):
+        # ``target='name'`` now expands to a multi-field OR (see
+        # ``test_text_substring_case_insensitive``), so an OR group
+        # containing it has the expanded shape nested inside the
+        # outer OR.
         c = _Compiler()
         where = c.compile(GroupPredicate(op="or", children=[
             TextPredicate(value="x", target="name", match="exact"),
             HasPropertyPredicate(key="foo"),
         ]))
         assert where == (
-            "(toLower(toString(n.displayName)) = $p0 OR EXISTS(n.foo))"
+            "((toLower(toString(COALESCE(n.displayName, ''))) = $p0"
+            " OR toLower(toString(COALESCE(n.qualifiedName, ''))) = $p0"
+            " OR toLower(toString(COALESCE(n.searchableText, ''))) = $p0)"
+            " OR EXISTS(n.foo))"
         )
 
     def test_not(self):
@@ -399,7 +839,10 @@ class TestCandidateCypher:
             candidate_cap=CANDIDATE_CAP,
         )
         # When fragment is the trivial "true", drop it to avoid noise.
-        assert "WHERE labels(n)[0] IN $_scopeEntityTypes" in cypher
+        # Multi-label-safe shape: ``ANY(l IN labels(n) WHERE l IN ...)``
+        # catches every label, not just ``labels(n)[0]`` (which silently
+        # drops multi-labeled nodes whose first label isn't in scope).
+        assert "WHERE ANY(l IN labels(n) WHERE l IN $_scopeEntityTypes)" in cypher
         assert " AND true" not in cypher
 
     def test_with_scope_continuation(self):
@@ -420,6 +863,100 @@ class TestCandidateCypher:
 
 
 # ---------------------------------------------------------------------------
+# Entity-type scope resolution against live ontology
+# ---------------------------------------------------------------------------
+
+class _StubProvider:
+    """Minimal stand-in for the provider in ``_resolve_entity_types_scope``.
+    The function only reads ``_entity_type_levels`` so a duck-typed shim
+    is enough."""
+
+    def __init__(self, levels: dict):
+        self._entity_type_levels = levels
+
+
+class TestEntityTypesScopeResolution:
+    """``_resolve_entity_types_scope`` reconciles the view's stale
+    entity-type list against what the data source's resolved ontology
+    actually contains. This is the fix for the production bug where a
+    view was created against a default 17-type ontology snapshot but
+    the live data source only has e.g. ``object`` nodes — the original
+    code blackholed every search by AND-ing two disjoint label sets."""
+
+    def test_empty_request_skips_filter(self):
+        provider = _StubProvider({"dataset": 0, "schemaField": 1})
+        effective, note = _resolve_entity_types_scope(provider, [])
+        assert effective is None
+        assert note is None
+
+    def test_full_overlap_passes_through(self):
+        provider = _StubProvider({"dataset": 0, "schemaField": 1})
+        effective, note = _resolve_entity_types_scope(
+            provider, ["dataset", "schemaField"],
+        )
+        assert effective == ["dataset", "schemaField"]
+        assert note is None
+
+    def test_partial_overlap_narrows_and_notes(self):
+        # View asks for [dataset, schemaField, nonexistent]; data source
+        # only has [dataset, schemaField]. The filter narrows to the
+        # overlap and a diagnostic note flags the dropped type(s).
+        provider = _StubProvider({"dataset": 0, "schemaField": 1})
+        effective, note = _resolve_entity_types_scope(
+            provider, ["dataset", "schemaField", "nonexistent"],
+        )
+        assert effective == ["dataset", "schemaField"]
+        assert note is not None
+        assert "nonexistent" in note
+
+    def test_zero_overlap_silently_substitutes_live_ontology(self):
+        # The production bug: view scope says ["dataset", "schemaField",
+        # …17 defaults] but the actual data source has only ["object"].
+        # The intersection is empty. We SILENTLY substitute the live
+        # ontology (so the search stays type-scoped per the view's
+        # intent) and emit NO diagnostic — this is normal operation
+        # for views auto-created against a default ontology snapshot.
+        provider = _StubProvider({
+            "attribute": 0, "group": 1, "layer": 2, "object": 3,
+        })
+        effective, note = _resolve_entity_types_scope(
+            provider,
+            [
+                "app", "chart", "column", "container", "dashboard",
+                "dataFlow", "dataJob", "dataPlatform", "dataset",
+                "domain", "glossaryTerm", "pipeline", "report",
+                "schema", "schemaField", "system", "tag",
+            ],
+        )
+        # Substituted to the live ontology, sorted for determinism.
+        assert effective == ["attribute", "group", "layer", "object"]
+        # No diagnostic note — silent corrective behaviour.
+        assert note is None
+
+    def test_provider_without_resolved_ontology_trusts_request(self):
+        # Provider hasn't introspected yet (empty _entity_type_levels).
+        # Trust the request as the only signal we have.
+        provider = _StubProvider({})
+        effective, note = _resolve_entity_types_scope(
+            provider, ["dataset", "schemaField"],
+        )
+        assert effective == ["dataset", "schemaField"]
+        assert note is None
+
+    def test_provider_missing_attribute_trusts_request(self):
+        # Defensively handle providers that never set _entity_type_levels
+        # (older code paths / stub providers in tests).
+        class _NoAttrProvider:
+            pass
+
+        effective, note = _resolve_entity_types_scope(
+            _NoAttrProvider(), ["dataset"],
+        )
+        assert effective == ["dataset"]
+        assert note is None
+
+
+# ---------------------------------------------------------------------------
 # Cursor codec + query hash
 # ---------------------------------------------------------------------------
 
@@ -436,13 +973,13 @@ class TestCursor:
             decode_cursor("not-base64!!!")
 
     def test_query_hash_stable_across_runs(self):
-        q1 = SearchQuery(predicate=TagPredicate(values=["PII"]))
-        q2 = SearchQuery(predicate=TagPredicate(values=["PII"]))
+        q1 = SearchQuery(predicate=TagPredicate(values=["PII"]), scope=_TEST_SCOPE)
+        q2 = SearchQuery(predicate=TagPredicate(values=["PII"]), scope=_TEST_SCOPE)
         assert query_hash(q1) == query_hash(q2)
 
     def test_query_hash_changes_with_predicate(self):
-        q1 = SearchQuery(predicate=TagPredicate(values=["PII"]))
-        q2 = SearchQuery(predicate=TagPredicate(values=["GDPR"]))
+        q1 = SearchQuery(predicate=TagPredicate(values=["PII"]), scope=_TEST_SCOPE)
+        q2 = SearchQuery(predicate=TagPredicate(values=["GDPR"]), scope=_TEST_SCOPE)
         assert query_hash(q1) != query_hash(q2)
 
 
@@ -460,6 +997,7 @@ class TestAggregationByProperty:
     def test_round_trip_through_query(self):
         q = SearchQuery(
             predicate=TagPredicate(values=["PII"]),
+            scope=_TEST_SCOPE,
             options={  # type: ignore[arg-type]
                 "aggregations": [
                     {"by": "property", "propertyKey": "layer", "maxBuckets": 10},
@@ -573,12 +1111,13 @@ class TestSortByProperty:
         ]
         q = SearchQuery(
             predicate=TagPredicate(values=["x"]),
+            scope=_TEST_SCOPE,
             options={  # type: ignore[arg-type]
                 "sortProperty": "rowCount", "sortDir": "desc",
                 "pageSize": 10,
             },
         )
-        hits = _build_hits_from_rows(_MockProv(), rows, q)
+        hits, _, _ = _build_hits_from_rows(_MockProv(), rows, q)
         assert [h.node.urn for h in hits] == ["urn:b", "urn:c", "urn:a"]
 
     def test_hits_sorted_by_native_property_ascending(self):
@@ -601,12 +1140,13 @@ class TestSortByProperty:
         ]
         q = SearchQuery(
             predicate=TagPredicate(values=["x"]),
+            scope=_TEST_SCOPE,
             options={  # type: ignore[arg-type]
                 "sortProperty": "rowCount", "sortDir": "asc",
                 "pageSize": 10,
             },
         )
-        hits = _build_hits_from_rows(_MockProv(), rows, q)
+        hits, _, _ = _build_hits_from_rows(_MockProv(), rows, q)
         assert [h.node.urn for h in hits] == ["urn:a", "urn:c", "urn:b"]
 
     def test_missing_property_clumps_consistently(self):
@@ -631,13 +1171,375 @@ class TestSortByProperty:
         ]
         q = SearchQuery(
             predicate=TagPredicate(values=["x"]),
+            scope=_TEST_SCOPE,
             options={  # type: ignore[arg-type]
                 "sortProperty": "rowCount", "sortDir": "desc",
                 "pageSize": 10,
             },
         )
-        hits = _build_hits_from_rows(_MockProv(), rows, q)
+        hits, _, _ = _build_hits_from_rows(_MockProv(), rows, q)
         # All three returned; missing-rowCount node grouped consistently
         assert len(hits) == 3
         urns_with_value = [h.node.urn for h in hits if h.node.properties.get("rowCount") is not None]
         assert urns_with_value == ["urn:c", "urn:a"]  # 500, 100 desc
+
+
+# ---------------------------------------------------------------------------
+# Cursor pagination — backend-driven paging for the panel's single-shot
+# matchUrnSet round-trip + AI-agent iteration. The codec itself is
+# round-tripped in TestCursor above; these tests pin the slice/offset
+# semantics inside ``_build_hits_from_rows``.
+# ---------------------------------------------------------------------------
+
+class TestCursorPagination:
+    @staticmethod
+    def _mock_rows(n: int):
+        from backend.common.models.graph import GraphNode
+        return [
+            GraphNode(urn=f"urn:{i:03d}", entityType="dataset",
+                      displayName=f"node-{i:03d}")
+            for i in range(n)
+        ]
+
+    @staticmethod
+    def _mock_prov():
+        class _MockProv:
+            def _extract_node_from_result(self, n):
+                return n
+        return _MockProv()
+
+    @staticmethod
+    def _query(page_size: int, cursor=None):
+        opts = {"sort": "displayName", "sortDir": "asc",
+                "pageSize": page_size}
+        if cursor is not None:
+            opts["cursor"] = cursor
+        return SearchQuery(
+            predicate=TagPredicate(values=["x"]),
+            scope=_TEST_SCOPE,
+            options=opts,  # type: ignore[arg-type]
+        )
+
+    def test_first_page_no_cursor_starts_at_zero(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        rows = self._mock_rows(30)
+        hits, offset_after, total = _build_hits_from_rows(
+            self._mock_prov(), rows, self._query(page_size=10),
+        )
+        assert [h.node.urn for h in hits] == [f"urn:{i:03d}" for i in range(10)]
+        assert offset_after == 10
+        assert total == 30
+
+    def test_cursor_round_trip_advances_offset(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        rows = self._mock_rows(30)
+        # Page 1
+        page1, off1, _ = _build_hits_from_rows(
+            self._mock_prov(), rows, self._query(page_size=10),
+        )
+        # Encode the next-cursor the way execute_deep_search does
+        cursor = encode_cursor({"offset": off1, "q": "irrelevant"})
+        # Page 2
+        page2, off2, _ = _build_hits_from_rows(
+            self._mock_prov(), rows,
+            self._query(page_size=10, cursor=cursor),
+        )
+        assert [h.node.urn for h in page2] == [f"urn:{i:03d}" for i in range(10, 20)]
+        assert off2 == 20
+        # No overlap between page 1 and page 2 URNs
+        assert not (set(h.node.urn for h in page1)
+                    & set(h.node.urn for h in page2))
+
+    def test_final_page_exhausts_candidate_set(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        rows = self._mock_rows(30)
+        cursor = encode_cursor({"offset": 20})
+        page, off, total = _build_hits_from_rows(
+            self._mock_prov(), rows,
+            self._query(page_size=10, cursor=cursor),
+        )
+        # Last page is full but exhausts the set: caller will see
+        # offset_after == total_sorted and emit cursor=None.
+        assert len(page) == 10
+        assert off == 30
+        assert total == 30
+        assert off == total  # the caller's "stop" signal
+
+    def test_cursor_beyond_end_returns_empty_page(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        rows = self._mock_rows(30)
+        cursor = encode_cursor({"offset": 30})
+        page, off, total = _build_hits_from_rows(
+            self._mock_prov(), rows,
+            self._query(page_size=10, cursor=cursor),
+        )
+        assert page == []
+        assert off == 30
+        assert total == 30
+
+    def test_changed_pagesize_mid_iteration_uses_offset_only(self):
+        # The cursor stores ``offset`` only — page size is read from the
+        # current request, so a caller can re-tune mid-iteration without
+        # the cursor going stale.
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        rows = self._mock_rows(30)
+        # Page 1 with size 5
+        _, off1, _ = _build_hits_from_rows(
+            self._mock_prov(), rows, self._query(page_size=5),
+        )
+        assert off1 == 5
+        # Page 2 with bumped-up size 15 — should slice [5:20]
+        cursor = encode_cursor({"offset": off1})
+        page2, off2, _ = _build_hits_from_rows(
+            self._mock_prov(), rows,
+            self._query(page_size=15, cursor=cursor),
+        )
+        assert [h.node.urn for h in page2] == [f"urn:{i:03d}" for i in range(5, 20)]
+        assert off2 == 20
+
+    def test_negative_offset_clamped_to_zero(self):
+        # Defensive: a hand-crafted cursor with a negative offset
+        # shouldn't slice from the end of the list (Python's [-n:] would).
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        rows = self._mock_rows(10)
+        cursor = encode_cursor({"offset": -5})
+        page, off, total = _build_hits_from_rows(
+            self._mock_prov(), rows,
+            self._query(page_size=10, cursor=cursor),
+        )
+        assert [h.node.urn for h in page] == [f"urn:{i:03d}" for i in range(10)]
+        assert off == 10
+        assert total == 10
+
+    def test_pagesize_5000_accepted(self):
+        # The strategic-fix's central knob: callers can ask for the full
+        # candidate cap in one round-trip so canvas highlighting covers
+        # every match.
+        opts = SearchOptions(pageSize=5000)  # type: ignore[call-arg]
+        assert opts.page_size == 5000
+
+    def test_pagesize_above_ceiling_rejected(self):
+        from pydantic import ValidationError as PydValidationError
+        with pytest.raises(PydValidationError):
+            SearchOptions(pageSize=5001)  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# Edge predicates inside Path / WithinHops
+# ---------------------------------------------------------------------------
+
+class TestEdgePredicateModel:
+    """Model construction + JSON round-trip for the new edge-predicate
+    types and their hosting inside Path / WithinHops."""
+
+    def test_path_carries_edge_property(self):
+        from backend.common.models.search import EdgePropertyPredicate
+        pp = PathPredicate(
+            source_urns=["urn:a"], target_urns=["urn:b"],
+            edge_predicate=EdgePropertyPredicate(
+                key="confidence", op="gt", value=0.9,
+            ),
+        )
+        assert pp.edge_predicate.kind == "edgeProperty"
+        assert pp.edge_predicate.op == "gt"
+        # JSON round-trip preserves the subtree
+        rt = PathPredicate.model_validate_json(pp.model_dump_json(by_alias=True))
+        assert rt.edge_predicate.value == 0.9
+
+    def test_path_carries_nested_edge_group(self):
+        pp = PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {
+                "kind": "edgeGroup", "op": "and",
+                "children": [
+                    {"kind": "edgeProperty", "key": "weight",
+                     "op": "between", "value": [0.1, 0.9]},
+                    {"kind": "edgeHasProperty", "key": "verified"},
+                ],
+            },
+        })
+        assert pp.edge_predicate.kind == "edgeGroup"
+        assert len(pp.edge_predicate.children) == 2
+
+    def test_withinhops_default_edge_class_is_lineage(self):
+        wh = WithinHopsPredicate(urns=["urn:a"], hops=2)
+        # Newly added field — defaults to "lineage" to make `edge_types`
+        # optional in the same way DegreePredicate / PathPredicate do.
+        assert wh.edge_class == "lineage"
+
+    def test_withinhops_carries_edge_predicate(self):
+        wh = WithinHopsPredicate.model_validate({
+            "urns": ["urn:a"], "hops": 3,
+            "edgePredicate": {"kind": "edgeProperty",
+                              "key": "weight", "op": "gte", "value": 0.5},
+        })
+        assert wh.edge_predicate.key == "weight"
+
+
+class TestEdgePredicateCompile:
+    """The compiler emits Cypher fragments evaluated against ``rel`` for
+    each edge predicate kind, and the path / hops query builders inject
+    them into ALL(rel IN relationships(p) WHERE …) blocks."""
+
+    def test_edge_property_eq(self):
+        c = _degree_compiler()
+        # Compose via PathPredicate so the compiler is fully exercised.
+        c.compile(PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {"kind": "edgeProperty",
+                              "key": "confidence", "op": "eq", "value": 0.5},
+        }))
+        assert c.hoisted_path["edge_where"] == "rel.confidence = $p0"
+        assert c.params == {"p0": 0.5}
+
+    def test_edge_property_between(self):
+        c = _degree_compiler()
+        c.compile(PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {"kind": "edgeProperty",
+                              "key": "weight", "op": "between",
+                              "value": [0.1, 0.9]},
+        }))
+        assert c.hoisted_path["edge_where"] == \
+            "(rel.weight >= $p0 AND rel.weight <= $p1)"
+
+    def test_edge_property_between_invalid_raises(self):
+        from backend.common.models.search import EdgePropertyPredicate
+        c = _degree_compiler()
+        with pytest.raises(CompileError, match="value=\\[lo, hi\\]"):
+            c.compile(PathPredicate(
+                source_urns=["urn:a"], target_urns=["urn:b"],
+                edge_predicate=EdgePropertyPredicate(
+                    key="w", op="between", value=0.5,  # scalar, not list
+                ),
+            ))
+
+    def test_edge_has_property(self):
+        c = _degree_compiler()
+        c.compile(PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {"kind": "edgeHasProperty",
+                              "key": "verified"},
+        }))
+        assert c.hoisted_path["edge_where"] == "EXISTS(rel.verified)"
+
+    def test_edge_has_property_negate(self):
+        c = _degree_compiler()
+        c.compile(PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {"kind": "edgeHasProperty",
+                              "key": "verified", "negate": True},
+        }))
+        assert c.hoisted_path["edge_where"] == "NOT (EXISTS(rel.verified))"
+
+    def test_edge_group_and(self):
+        c = _degree_compiler()
+        c.compile(PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {
+                "kind": "edgeGroup", "op": "and",
+                "children": [
+                    {"kind": "edgeProperty", "key": "confidence",
+                     "op": "gt", "value": 0.9},
+                    {"kind": "edgeHasProperty", "key": "producedBy"},
+                ],
+            },
+        }))
+        assert c.hoisted_path["edge_where"] == \
+            "(rel.confidence > $p0 AND EXISTS(rel.producedBy))"
+
+    def test_edge_group_or(self):
+        c = _degree_compiler()
+        c.compile(PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {
+                "kind": "edgeGroup", "op": "or",
+                "children": [
+                    {"kind": "edgeProperty", "key": "k1", "op": "eq", "value": 1},
+                    {"kind": "edgeProperty", "key": "k2", "op": "eq", "value": 2},
+                ],
+            },
+        }))
+        assert "OR" in c.hoisted_path["edge_where"]
+
+    def test_edge_group_not(self):
+        c = _degree_compiler()
+        c.compile(PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {
+                "kind": "edgeGroup", "op": "not",
+                "children": [{"kind": "edgeHasProperty", "key": "stale"}],
+            },
+        }))
+        assert c.hoisted_path["edge_where"] == "NOT (EXISTS(rel.stale))"
+
+    def test_path_cypher_injects_edge_predicate(self):
+        from backend.app.providers.falkordb_deep_search import _build_path_cypher
+        cy = _build_path_cypher(
+            direction="outgoing", max_hops=3,
+            edge_where="rel.confidence > $p0",
+        )
+        # The edge predicate is AND-joined with the type filter inside
+        # the single ALL(rel IN relationships(p) WHERE …) clause — keeps
+        # us to one pass over the path's edges.
+        assert (
+            "ALL(rel IN relationships(p) WHERE type(rel) IN "
+            "$_pathEdgeTypes AND (rel.confidence > $p0))"
+        ) in cy
+
+    def test_path_cypher_without_edge_predicate(self):
+        # Regression: an empty edge_where leaves the existing Cypher
+        # unchanged so callers that don't pass it see no behaviour shift.
+        from backend.app.providers.falkordb_deep_search import _build_path_cypher
+        cy = _build_path_cypher(direction="outgoing", max_hops=3, edge_where="")
+        assert (
+            "ALL(rel IN relationships(p) WHERE type(rel) IN "
+            "$_pathEdgeTypes)"
+        ) in cy
+        assert " AND (" not in cy.split("ALL(rel IN")[1].split(")")[0]
+
+    def test_within_hops_continuation_named_path(self):
+        # When edge_predicate is present, the variable-length pattern
+        # gets a path alias so per-edge filters can be applied.
+        from backend.app.providers.falkordb_deep_search import (
+            _build_within_hops_continuation,
+        )
+        c = _degree_compiler()
+        c.compile(WithinHopsPredicate.model_validate({
+            "urns": ["urn:a"], "hops": 2, "direction": "out",
+            "edgePredicate": {"kind": "edgeProperty",
+                              "key": "weight", "op": "gte", "value": 0.5},
+        }))
+        cont, _, _ = _build_within_hops_continuation(
+            c.hoisted_within_hops, c._param_counter,
+        )
+        assert "_whP0 = (anchor)" in cont
+        assert "ALL(rel IN relationships(_whP0) WHERE rel.weight >= $p0)" in cont
+
+    def test_within_hops_continuation_no_edge_predicate(self):
+        # Regression: legacy shape still produces no per-edge filter
+        # block (the planner sees the same pattern as before).
+        from backend.app.providers.falkordb_deep_search import (
+            _build_within_hops_continuation,
+        )
+        c = _degree_compiler()
+        c.compile(WithinHopsPredicate.model_validate({
+            "urns": ["urn:a"], "hops": 2, "direction": "out",
+            "edgeTypes": ["LINEAGE"],
+        }))
+        cont, _, _ = _build_within_hops_continuation(
+            c.hoisted_within_hops, c._param_counter,
+        )
+        assert "ALL(rel IN" not in cont

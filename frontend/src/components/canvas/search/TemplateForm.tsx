@@ -12,6 +12,7 @@ import {
     ArrowLeft,
     Loader2,
     Play,
+    Wand2,
 } from 'lucide-react'
 import * as LucideIcons from 'lucide-react'
 import { type FC } from 'react'
@@ -41,11 +42,14 @@ export interface TemplateFormProps {
     onChange: (name: string, value: string | number) => void
     onRun: () => void
     onBack: () => void
+    /** Hand the current template's predicate to the visual builder so
+     *  the user can add/edit conditions before running. */
+    onCustomize?: () => void
 }
 
 export const TemplateForm: FC<TemplateFormProps> = ({
     template, inputs, knownEntityTypes, isRunning,
-    onChange, onRun, onBack,
+    onChange, onRun, onBack, onCustomize,
 }) => {
     const Icon = iconFor(template.icon)
 
@@ -118,35 +122,56 @@ export const TemplateForm: FC<TemplateFormProps> = ({
                 </div>
             )}
 
-            {/* Primary action */}
-            <button
-                onClick={onRun}
-                disabled={isRunning}
-                className={cn(
-                    "group inline-flex items-center justify-center gap-2",
-                    "px-5 py-3 rounded-xl",
-                    "bg-gradient-to-r from-accent-lineage to-cyan-500",
-                    "text-ink-inverse font-display font-semibold text-sm tracking-tight",
-                    "shadow-lg shadow-accent-lineage/25",
-                    "hover:shadow-xl hover:shadow-accent-lineage/40",
-                    "hover:brightness-110 active:brightness-95",
-                    "transition-all",
-                    "disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:brightness-100",
-                    "focus:outline-none focus:ring-2 focus:ring-accent-lineage/50 focus:ring-offset-2 focus:ring-offset-canvas-elevated",
+            {/* Actions: Run (primary) + Customize (secondary). */}
+            <div className="flex items-stretch gap-2">
+                <button
+                    onClick={onRun}
+                    disabled={isRunning}
+                    className={cn(
+                        "group flex-1 inline-flex items-center justify-center gap-2",
+                        "px-5 py-3 rounded-xl",
+                        "bg-gradient-to-r from-accent-lineage to-cyan-500",
+                        "text-ink-inverse font-display font-semibold text-sm tracking-tight",
+                        "shadow-lg shadow-accent-lineage/25",
+                        "hover:shadow-xl hover:shadow-accent-lineage/40",
+                        "hover:brightness-110 active:brightness-95",
+                        "transition-all",
+                        "disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:brightness-100",
+                        "focus:outline-none focus:ring-2 focus:ring-accent-lineage/50 focus:ring-offset-2 focus:ring-offset-canvas-elevated",
+                    )}
+                >
+                    {isRunning ? (
+                        <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Running…
+                        </>
+                    ) : (
+                        <>
+                            <Play className="w-3.5 h-3.5 fill-current transition-transform group-hover:translate-x-0.5" />
+                            Run search
+                        </>
+                    )}
+                </button>
+                {onCustomize && (
+                    <button
+                        type="button"
+                        onClick={onCustomize}
+                        disabled={isRunning}
+                        title="Open this template in the predicate builder so you can add or edit conditions before running."
+                        className={cn(
+                            "shrink-0 inline-flex items-center justify-center gap-1.5",
+                            "px-4 py-3 rounded-xl",
+                            "bg-glass/30 hover:bg-glass/50 border border-glass-border/60",
+                            "text-xs font-medium text-ink-muted hover:text-ink",
+                            "transition-colors",
+                            "disabled:opacity-60 disabled:cursor-not-allowed",
+                        )}
+                    >
+                        <Wand2 className="w-3.5 h-3.5" strokeWidth={2} />
+                        Customize
+                    </button>
                 )}
-            >
-                {isRunning ? (
-                    <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Running…
-                    </>
-                ) : (
-                    <>
-                        <Play className="w-3.5 h-3.5 fill-current transition-transform group-hover:translate-x-0.5" />
-                        Run search
-                    </>
-                )}
-            </button>
+            </div>
         </motion.div>
     )
 }

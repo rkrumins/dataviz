@@ -1,231 +1,360 @@
 /**
- * The production search surface — premium, business-and-technical-grade.
+ * Advanced Search panel — the Query Lens UX.
  *
- * Right-side glass drawer with a backdrop-dim layer that turns the
- * search into a focused workspace mode rather than a floating tool.
- * The header bar matches the canvas's existing gradient-toolbar language
- * (icon container in colored gradient, display-font title, contextual
- * subtitle). The body walks through three states:
+ *     ┌─ Search · this view ──────────────── 📋 ⚙ × ─┐
+ *     ├──────────────────────────────────────────────┤
+ *     │   ╭─ Query · 3 filters ── Visual | Code ──╮   │
+ *     │   │ ⌕  name contains [customer        ]  │   │
+ *     │   │ #  tag is        [#PII] [+ ]         │   │
+ *     │   │ ↑  no upstream lineage               │   │
+ *     │   │ + Add filter   12 tags · 37 keys     │   │
+ *     │   ╰──────────────────────────────────────╯   │
+ *     │                                              │
+ *     │   ── 47 matches · 432 ms ───── ⊞ Frame ──── │
+ *     │   GOLD ▸ REPORTING (8 matches)               │
+ *     │     customer_orders     DATASET              │
+ *     │     customer_profile    DATASET              │
+ *     │   INTERMEDIATE_T2 (6 matches)                │
+ *     │     int_clean_tickets_t2  DATASET            │
+ *     └──────────────────────────────────────────────┘
  *
- *   Pick      → grouped, accent-colored template cards
- *   Configure → inline parameter form
- *   Results   → aggregate bucket cards (with count-up + share bar) and
- *               hit rows (with chip-style ancestor breadcrumb + reveal)
+ * One Query card holds the entire active query. Rows compose with AND;
+ * the Visual ↔ Code toggle switches between row-builder and DSL text.
+ * Templates SEED the rows (no opaque "replace + run"). Advanced drawer
+ * holds Options / JSON / Cypher only — composing happens in the card.
  *
- * Drill semantics: clicking a bucket pushes a scope frame and re-runs
- * the same template; the breadcrumb at the top pops back. Clicking an
- * ancestor chip on a hit row drills to that ancestor.
+ * Canvas integration unchanged: every successful run publishes
+ * matchUrnSet + ancestorMatchCounts + ancestorMatchTypeBreakdowns so
+ * the lineage canvas spotlights matches and shows enriched badges.
  */
 import { motion, AnimatePresence } from 'framer-motion'
+import { AlertTriangle, Code2, LayoutTemplate, Settings2, X, Maximize2 } from 'lucide-react'
 import {
-    AlertTriangle,
-    ChevronRight,
-    Loader2,
-    SearchX,
-    Sparkles,
-    X,
-} from 'lucide-react'
-import { type FC, useMemo } from 'react'
+    type FC,
+    type ReactNode,
+    useCallback,
+    useMemo,
+    useState,
+} from 'react'
 
 import { cn } from '@/lib/utils'
-import { useSchemaStore } from '@/store/schema'
-import type {
-    AncestorRef,
-    SearchAggregateBucket,
-    SearchHit,
-} from '@/types/search'
+import { useAdvancedSearch } from '@/hooks/useAdvancedSearch'
+import {
+    useAncestorMatchCounts,
+    useDraftPredicate,
+    useRecentQueries,
+    useSearchStore,
+    type RecentQueryEntry,
+} from '@/store/searchStore'
+import type { AncestorRef } from '@/types/search'
 
-import { useAdvancedSearch, type ScopeFrame } from '@/hooks/useAdvancedSearch'
+import { DynamicIcon } from '@/components/ui/DynamicIcon'
 
-import { AggregateBucketCard } from './AggregateBucketCard'
-import { SearchHitRow } from './SearchHitRow'
-import { TemplateForm } from './TemplateForm'
-import { TemplatePicker } from './TemplatePicker'
+import { AdvancedDrawer, type DrawerTab } from './panel/AdvancedDrawer'
+import { NoViewState } from './panel/NoViewState'
+import { QueryCard } from './panel/QueryCard'
+import { ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
+import { ResultsPane } from './panel/ResultsPane'
+import { ScopeStrip } from './panel/ScopeStrip'
+import {
+    defaultInputs,
+    featuredTemplates,
+    type SearchTemplate,
+} from './searchTemplates'
 
 
 export interface SearchMapPanelProps {
     open: boolean
     onClose: () => void
-    /** Reveal a node in the host canvas: walks the ancestor chain,
-     * expands each ancestor in turn (lazy-loading children as needed),
-     * then selects + scrolls to the hit. The ancestor path comes from
-     * the search response when `includeAncestorPath: true`. */
+    /** REQUIRED. The view this panel is bound to. */
+    viewId: string
     onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void
-    /** Optional: open the node's details panel. */
     onOpenNode?: (urn: string) => void
+    onFrameMatches?: (urns: string[]) => void
 }
 
-export const SearchMapPanel: FC<SearchMapPanelProps> = ({
-    open, onClose, onRevealNode, onOpenNode,
-}) => (
-    <AnimatePresence>
-        {open && (
-            <>
-                {/* Backdrop — subtle dim so the canvas reads as
-                    secondary while the search is the focused mode.
-                    Click to dismiss. */}
-                <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.18 }}
-                    onClick={onClose}
-                    className={cn(
-                        "absolute inset-0 z-40",
-                        "bg-black/15 dark:bg-black/30 backdrop-blur-[2px]",
-                    )}
-                />
 
-                {/* Drawer */}
-                <motion.div
-                    initial={{ opacity: 0, x: 32 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 32 }}
-                    transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
-                    className={cn(
-                        // z-50 sits above the editor toolbar (z-30), the
-                        // node palette (z-20), and our backdrop (z-40).
-                        // Below the dev-panel (z-9999) by design.
-                        "absolute top-3 right-3 bottom-3 z-50",
-                        "w-[34rem] max-w-[calc(100vw-1.5rem)]",
-                        "flex flex-col overflow-hidden",
-                        "rounded-2xl border border-glass-border",
-                        "bg-gradient-to-br from-canvas-elevated/95 via-canvas-elevated/92 to-canvas-elevated/95",
-                        "backdrop-blur-2xl shadow-2xl",
-                    )}
+export const SearchMapPanel: FC<SearchMapPanelProps> = ({
+    open, onClose, viewId, onRevealNode, onOpenNode, onFrameMatches,
+}) => {
+    const [width, setWidth] = useState<number>(() => readPersistedWidth())
+
+    return (
+        <AnimatePresence>
+            {open && (
+                <motion.aside
+                    data-panel="search-map-panel"
                     data-testid="search-map-panel"
+                    initial={{ width: 0, opacity: 0 }}
+                    animate={{ width, opacity: 1 }}
+                    exit={{ width: 0, opacity: 0 }}
+                    transition={{ type: 'spring', stiffness: 400, damping: 35 }}
+                    className={cn(
+                        'relative h-full flex-shrink-0 overflow-hidden',
+                        'bg-canvas-elevated/98 backdrop-blur-2xl',
+                        'border-r border-glass-border shadow-2xl shadow-black/25',
+                    )}
                 >
-                    <PanelInner
-                        onClose={onClose}
-                        onRevealNode={onRevealNode}
-                        onOpenNode={onOpenNode}
-                    />
-                </motion.div>
-            </>
-        )}
-    </AnimatePresence>
-)
+                    <div
+                        className="h-full flex flex-col overflow-hidden"
+                        style={{ width }}
+                    >
+                        {viewId ? (
+                            <PanelInner
+                                onClose={onClose}
+                                viewId={viewId}
+                                onRevealNode={onRevealNode}
+                                onOpenNode={onOpenNode}
+                                onFrameMatches={onFrameMatches}
+                            />
+                        ) : (
+                            <NoViewState onClose={onClose} />
+                        )}
+                    </div>
+                    <ResizeHandle width={width} onResize={setWidth} />
+                </motion.aside>
+            )}
+        </AnimatePresence>
+    )
+}
+
+
+// =============================================================================
+// Inner orchestrator
+// =============================================================================
+
+interface PanelInnerProps {
+    onClose: () => void
+    viewId: string
+    onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void
+    onOpenNode?: (urn: string) => void
+    onFrameMatches?: (urns: string[]) => void
+}
 
 
 function PanelInner({
-    onClose, onRevealNode, onOpenNode,
-}: {
-    onClose: () => void
-    onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void
-    onOpenNode?: (urn: string) => void
-}) {
+    onClose, viewId, onRevealNode, onOpenNode, onFrameMatches,
+}: PanelInnerProps) {
     const {
-        view, scope,
-        selectTemplate, setInput, resetTemplate,
-        run, drillInto, popScope,
-    } = useAdvancedSearch()
+        view, scope, runPredicate, drillInto, popScope, cancel,
+    } = useAdvancedSearch(viewId)
 
-    const knownEntityTypes = useEntityTypeNames()
+    const draftPredicate = useDraftPredicate()
+    const matchUrnSet = useSearchStore((s) => s.matchUrnSet)
+    const ancestorMatchCounts = useAncestorMatchCounts()
+    const commitDraft = useSearchStore((s) => s.commitDraft)
+    const clearStore = useSearchStore((s) => s.clear)
+    const recentQueries = useRecentQueries(viewId)
+    const togglePinRecent = useSearchStore((s) => s.togglePinRecent)
+    const removeRecent = useSearchStore((s) => s.removeRecent)
+
+    const [advancedOpen, setAdvancedOpen] = useState(false)
+    const [advancedTab, setAdvancedTab] = useState<DrawerTab>('options')
+    const [templatesOpen, setTemplatesOpen] = useState(false)
+
+    const openAdvanced = useCallback((tab: DrawerTab = 'options') => {
+        setAdvancedTab(tab)
+        setAdvancedOpen(true)
+    }, [])
+
+    const handleClear = useCallback(() => {
+        cancel()
+        clearStore()
+    }, [cancel, clearStore])
+
+    /**
+     * Seed-from-template: rather than calling runTemplate (which would
+     * REPLACE the canonical state with the template's full SearchQuery
+     * including its aggregations), we just compile the template's
+     * predicate and seed the draft. The QueryCard's debounced auto-run
+     * then fires with the user's hits-only options — so the result is
+     * an editable set of filter rows the user can refine.
+     */
+    const handleSeedTemplate = useCallback((template: SearchTemplate) => {
+        const built = template.build(defaultInputs(template))
+        if (built.predicate) {
+            commitDraft(built.predicate)
+        }
+        setTemplatesOpen(false)
+    }, [commitDraft])
+
+    const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
+        commitDraft(entry.predicate)
+        setTemplatesOpen(false)
+    }, [commitDraft])
+
+    const frameTargetUrns = useMemo<string[]>(() => {
+        const set = new Set<string>(matchUrnSet)
+        for (const [urn, count] of ancestorMatchCounts) {
+            if (count > 0) set.add(urn)
+        }
+        return Array.from(set)
+    }, [matchUrnSet, ancestorMatchCounts])
+
+    const canFrame = view.kind === 'results'
+        && frameTargetUrns.length > 0
+        && Boolean(onFrameMatches)
+
+    const resultsCount = view.kind === 'results'
+        ? (view.result.candidateCount || view.result.hits?.length || 0)
+        : null
+    const elapsedMs = view.kind === 'results' ? view.elapsedMs : null
+    const truncated = view.kind === 'results' && view.result.truncated === true
+    const showResultsSection = view.kind === 'running'
+        || view.kind === 'results'
+        || view.kind === 'error'
 
     return (
         <>
-            <PanelHeader view={view} onClose={onClose} />
+            <CompactHeader
+                onClose={onClose}
+                onToggleAdvanced={() => openAdvanced('options')}
+                onToggleTemplates={() => setTemplatesOpen((v) => !v)}
+                templatesOpen={templatesOpen}
+            />
 
-            {/* Scope breadcrumb (visible when drilled) */}
-            {scope.length > 1 && (
-                <ScopeBreadcrumb scope={scope} onPop={popScope} />
+            {advancedOpen ? (
+                <AdvancedDrawer
+                    viewId={viewId}
+                    initialTab={advancedTab}
+                    onClose={() => setAdvancedOpen(false)}
+                />
+            ) : (
+                <>
+                    <ScopeStrip scope={scope} onPop={popScope} />
+
+                    <div className={cn(
+                        'flex-1 min-h-0 overflow-y-auto custom-scrollbar',
+                        'px-3 py-3 flex flex-col gap-3',
+                    )}>
+                        <QueryCard
+                            viewId={viewId}
+                            isRunning={view.kind === 'running'}
+                            onRun={(p, options) => void runPredicate(p, options)}
+                            onOpenAdvanced={() => openAdvanced('options')}
+                        />
+
+                        <AnimatePresence>
+                            {templatesOpen && (
+                                <TemplatesStrip
+                                    onSeed={handleSeedTemplate}
+                                    onDismiss={() => setTemplatesOpen(false)}
+                                    activeDraft={Boolean(draftPredicate)}
+                                    recentQueries={recentQueries}
+                                    onLoadRecent={handleLoadRecent}
+                                    onTogglePinRecent={togglePinRecent}
+                                    onRemoveRecent={removeRecent}
+                                />
+                            )}
+                        </AnimatePresence>
+
+                        {showResultsSection && (
+                            <div className="flex flex-col gap-2">
+                                <ResultsHeader
+                                    count={resultsCount}
+                                    elapsedMs={elapsedMs}
+                                    isRunning={view.kind === 'running'}
+                                    errorMessage={view.kind === 'error' ? view.message : null}
+                                    truncated={truncated}
+                                    onFrame={canFrame
+                                        ? () => onFrameMatches?.(frameTargetUrns)
+                                        : undefined}
+                                    onViewCypher={draftPredicate
+                                        ? () => openAdvanced('cypher')
+                                        : undefined}
+                                    onClear={view.kind === 'results' || view.kind === 'error'
+                                        ? handleClear
+                                        : undefined}
+                                />
+                                <ResultsPane
+                                    view={view}
+                                    onDrill={drillInto}
+                                    onReveal={onRevealNode}
+                                    onOpen={onOpenNode}
+                                />
+                            </div>
+                        )}
+                    </div>
+                </>
             )}
-
-            {/* Body */}
-            <div className="flex-1 overflow-y-auto custom-scrollbar p-5">
-                {view.kind === 'idle' && (
-                    <TemplatePicker onPick={(t) => selectTemplate(t.id)} />
-                )}
-
-                {view.kind === 'templateSelected' && (
-                    <TemplateForm
-                        template={view.template}
-                        inputs={view.inputs}
-                        knownEntityTypes={knownEntityTypes}
-                        isRunning={false}
-                        onChange={setInput}
-                        onRun={run}
-                        onBack={resetTemplate}
-                    />
-                )}
-
-                {view.kind === 'running' && (
-                    <RunningSkeleton template={view.template.label} />
-                )}
-
-                {view.kind === 'results' && (
-                    <ResultsView
-                        view={view}
-                        onBack={resetTemplate}
-                        onDrill={drillInto}
-                        onReveal={onRevealNode}
-                        onOpen={onOpenNode}
-                    />
-                )}
-
-                {view.kind === 'error' && (
-                    <ErrorView message={view.message} onBack={resetTemplate} />
-                )}
-            </div>
         </>
     )
 }
 
 
-// ---------------------------------------------------------------------------
-// Header — rich gradient bar matching ContextViewHeader's pattern
-// ---------------------------------------------------------------------------
+// =============================================================================
+// Header (title + ⚙ Advanced + 📋 Templates + ×)
+// =============================================================================
 
-function PanelHeader({
-    view, onClose,
+function CompactHeader({
+    onClose, onToggleAdvanced, onToggleTemplates, templatesOpen,
 }: {
-    view: ReturnType<typeof useAdvancedSearch>['view']
     onClose: () => void
+    onToggleAdvanced: () => void
+    onToggleTemplates: () => void
+    templatesOpen: boolean
 }) {
     return (
         <div className={cn(
-            "shrink-0 relative overflow-hidden",
-            "px-5 py-4",
-            "border-b border-glass-border",
-            "bg-gradient-to-r from-canvas-elevated/60 via-canvas-elevated/40 to-canvas-elevated/60",
+            'flex items-center gap-2 px-4 py-3',
+            'border-b border-glass-border/60 bg-canvas-elevated/60',
         )}>
-            {/* Dark-mode-only subtle gradient overlay for character */}
-            <div className={cn(
-                "absolute inset-0 hidden dark:block pointer-events-none",
-                "bg-gradient-to-r from-accent-lineage/[0.04] via-transparent to-purple-500/[0.04]",
-            )} />
-
-            <div className="relative flex items-center gap-3">
+            <div className="flex items-center gap-2 min-w-0">
                 <div className={cn(
-                    "shrink-0 w-10 h-10 rounded-xl flex items-center justify-center",
-                    "bg-gradient-to-br from-accent-lineage/25 to-purple-500/20",
-                    "shadow-lg shadow-accent-lineage/15",
+                    'w-7 h-7 rounded-lg flex items-center justify-center shrink-0',
+                    'bg-gradient-to-br from-accent-lineage/30 to-cyan-500/20',
+                    'shadow-inner shadow-accent-lineage/20',
                 )}>
-                    <Sparkles
-                        className="w-5 h-5 text-accent-lineage"
-                        strokeWidth={2.2}
-                    />
+                    <svg className="w-3.5 h-3.5 text-accent-lineage" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="11" cy="11" r="7" />
+                        <path d="m21 21-4.3-4.3" />
+                    </svg>
                 </div>
-                <div className="flex-1 min-w-0">
-                    <h2 className="text-base font-display font-semibold text-ink tracking-tight">
-                        Advanced Search
-                    </h2>
-                    <p className="text-[11px] text-ink-muted/80 mt-0.5 flex items-center gap-1.5">
-                        <ChevronRight className="w-3 h-3" strokeWidth={2.5} />
-                        {headerSubtitle(view)}
-                    </p>
+                <div className="flex flex-col min-w-0">
+                    <span className="text-[13px] font-display font-semibold text-ink leading-tight">
+                        Search
+                    </span>
+                    <span className="text-[10px] text-ink-muted/80 leading-tight">
+                        Scoped to this view
+                    </span>
                 </div>
+            </div>
+            <div className="ml-auto flex items-center gap-0.5">
                 <button
-                    onClick={onClose}
+                    type="button"
+                    onClick={onToggleTemplates}
+                    title="Seed the Query card from a template"
+                    aria-pressed={templatesOpen}
                     className={cn(
-                        "shrink-0 p-2 rounded-lg",
-                        "text-ink-muted hover:text-ink",
-                        "hover:bg-glass/40",
-                        "transition-colors",
+                        'inline-flex items-center justify-center w-8 h-8 rounded-lg transition-colors',
+                        templatesOpen
+                            ? 'text-accent-lineage bg-accent-lineage/10'
+                            : 'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10',
                     )}
-                    aria-label="Close advanced search"
                 >
-                    <X className="w-4 h-4" strokeWidth={2} />
+                    <LayoutTemplate className="w-4 h-4" />
+                </button>
+                <button
+                    type="button"
+                    onClick={onToggleAdvanced}
+                    title="Options · JSON · Cypher"
+                    className={cn(
+                        'inline-flex items-center justify-center w-8 h-8 rounded-lg',
+                        'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10 transition-colors',
+                    )}
+                >
+                    <Settings2 className="w-4 h-4" />
+                </button>
+                <button
+                    type="button"
+                    onClick={onClose}
+                    title="Close"
+                    className={cn(
+                        'inline-flex items-center justify-center w-8 h-8 rounded-lg',
+                        'text-ink-muted hover:text-ink hover:bg-glass/40 transition-colors',
+                    )}
+                >
+                    <X className="w-4 h-4" />
                 </button>
             </div>
         </div>
@@ -233,390 +362,339 @@ function PanelHeader({
 }
 
 
-// ---------------------------------------------------------------------------
-// Scope breadcrumb
-// ---------------------------------------------------------------------------
+// =============================================================================
+// Results header (count + Frame + Clear) — sits above the ResultsPane
+// =============================================================================
 
-function ScopeBreadcrumb({
-    scope, onPop,
-}: { scope: ScopeFrame[]; onPop: (toIndex: number) => void }) {
+function ResultsHeader({
+    count, elapsedMs, isRunning, errorMessage, truncated,
+    onFrame, onViewCypher, onClear,
+}: {
+    count: number | null
+    elapsedMs: number | null
+    isRunning: boolean
+    errorMessage?: string | null
+    /** True when the candidate cap (5000) was hit — the count is a
+     *  ceiling, not the true total. Surface this prominently so the
+     *  user understands some matches may be missing from the canvas. */
+    truncated?: boolean
+    onFrame?: () => void
+    /** Open the Advanced drawer on the Cypher tab so a power user can
+     *  see the exact compiled query that ran against FalkorDB (with
+     *  bound parameters + resolved scope). */
+    onViewCypher?: () => void
+    onClear?: () => void
+}) {
+    const isError = Boolean(errorMessage)
+    const showTruncation = Boolean(truncated && !isRunning && !isError)
+    return (
+        <div className="flex flex-col gap-1.5">
+        <div className={cn(
+            'flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg',
+            isError ? 'bg-rose-500/10 border border-rose-500/30' : '',
+        )}>
+            <div className="flex items-baseline gap-2 min-w-0 flex-1">
+                {isRunning ? (
+                    <span className="text-[11.5px] text-ink-muted">Searching…</span>
+                ) : isError ? (
+                    <span className="text-[11.5px] text-rose-300 truncate" title={errorMessage ?? ''}>
+                        Error · {errorMessage}
+                    </span>
+                ) : count !== null ? (
+                    <>
+                        <span className="text-[14px] font-display font-semibold text-ink tabular-nums">
+                            {count.toLocaleString()}{showTruncation && '+'}
+                        </span>
+                        <span className="text-[12px] text-ink-muted">
+                            {count === 1 ? 'match' : 'matches'}
+                        </span>
+                        {elapsedMs !== null && (
+                            <span className="text-[10.5px] text-ink-muted/70 tabular-nums">
+                                · {elapsedMs} ms
+                            </span>
+                        )}
+                    </>
+                ) : null}
+            </div>
+            <div className="flex items-center gap-0.5 shrink-0">
+                {onFrame && !isRunning && !isError && (
+                    <button
+                        type="button"
+                        onClick={onFrame}
+                        title="Frame matches on the canvas"
+                        className={cn(
+                            'inline-flex items-center gap-1 px-2 h-6 rounded-md',
+                            'text-[11px] font-medium',
+                            'bg-accent-lineage/15 text-accent-lineage',
+                            'hover:bg-accent-lineage/25 transition-colors',
+                        )}
+                    >
+                        <Maximize2 className="w-3 h-3" />
+                        Frame
+                    </button>
+                )}
+                {onViewCypher && !isRunning && (
+                    <button
+                        type="button"
+                        onClick={onViewCypher}
+                        title="Show the exact compiled Cypher + bound parameters this search ran against FalkorDB"
+                        className={cn(
+                            'inline-flex items-center gap-1 px-2 h-6 rounded-md',
+                            'text-[11px] font-medium',
+                            'bg-glass/40 text-ink-secondary',
+                            'hover:bg-glass/60 hover:text-ink transition-colors',
+                            'border border-glass-border/60',
+                        )}
+                    >
+                        <Code2 className="w-3 h-3" />
+                        Cypher
+                    </button>
+                )}
+                {onClear && (
+                    <button
+                        type="button"
+                        onClick={onClear}
+                        title="Clear results"
+                        className={cn(
+                            'inline-flex items-center justify-center w-6 h-6 rounded-md',
+                            'text-ink-muted hover:text-rose-400 hover:bg-rose-500/10 transition-colors',
+                        )}
+                    >
+                        <X className="w-3 h-3" />
+                    </button>
+                )}
+            </div>
+        </div>
+        {showTruncation && (
+            <div className={cn(
+                'flex items-start gap-2 px-2.5 py-2 rounded-lg',
+                'border border-amber-500/40 bg-amber-500/10',
+                'text-[11px] leading-snug',
+            )}>
+                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-400" strokeWidth={2.2} />
+                <div className="flex-1 min-w-0 text-amber-200/95">
+                    <span className="font-semibold">Truncated</span>{' '}
+                    — the candidate cap (5,000) was reached. Some matches are not
+                    shown on the canvas. Refine your filters to narrow the candidate
+                    set so every match is returned and highlighted.
+                </div>
+            </div>
+        )}
+        </div>
+    )
+}
+
+
+// =============================================================================
+// Templates strip (shown when 📋 toggled OR on the empty state)
+// =============================================================================
+
+type StripTab = 'starts' | 'recent'
+
+function TemplatesStrip({
+    onSeed, onDismiss, activeDraft,
+    recentQueries, onLoadRecent, onTogglePinRecent, onRemoveRecent,
+}: {
+    onSeed: (template: SearchTemplate) => void
+    onDismiss: () => void
+    activeDraft: boolean
+    recentQueries: ReadonlyArray<RecentQueryEntry>
+    onLoadRecent: (entry: RecentQueryEntry) => void
+    onTogglePinRecent: (timestamp: number) => void
+    onRemoveRecent: (timestamp: number) => void
+}) {
+    const featured = featuredTemplates()
+    // Default to Recent when there are any — power users opening this
+    // strip mid-session usually want their history. Falls back to
+    // Quick starts when Recent is empty (first session on this view).
+    const [tab, setTab] = useState<StripTab>(
+        recentQueries.length > 0 ? 'recent' : 'starts',
+    )
     return (
         <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            transition={{ duration: 0.2 }}
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.12 }}
             className={cn(
-                "shrink-0 px-5 py-2.5",
-                "border-b border-glass-border/60",
-                "bg-gradient-to-r from-accent-lineage/[0.04] via-transparent to-accent-lineage/[0.04]",
+                'rounded-xl border border-glass-border bg-canvas-base/30',
+                'flex flex-col gap-2 px-3 py-2.5',
             )}
         >
-            <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="text-[10px] uppercase tracking-[0.12em] font-semibold text-ink-muted/70 mr-1">
-                    Scoped to
-                </span>
-                {scope.map((frame, i) => {
-                    const isLast = i === scope.length - 1
-                    return (
-                        <span
-                            key={`${frame.urn}-${i}`}
-                            className="inline-flex items-center gap-1.5"
-                        >
-                            {i > 0 && (
-                                <ChevronRight
-                                    className="w-3 h-3 text-ink-muted/50"
-                                    strokeWidth={2.5}
-                                />
-                            )}
+            <div className="flex items-center justify-between gap-2">
+                <div className="inline-flex rounded-md bg-canvas-base/40 border border-glass-border/60 p-0.5">
+                    <StripTabBtn
+                        active={tab === 'starts'}
+                        onClick={() => setTab('starts')}
+                    >
+                        Quick starts
+                    </StripTabBtn>
+                    <StripTabBtn
+                        active={tab === 'recent'}
+                        onClick={() => setTab('recent')}
+                    >
+                        Recent
+                        {recentQueries.length > 0 && (
+                            <span className="ml-1 tabular-nums opacity-70">
+                                {recentQueries.length}
+                            </span>
+                        )}
+                    </StripTabBtn>
+                </div>
+                <button
+                    type="button"
+                    onClick={onDismiss}
+                    className="text-[10.5px] text-ink-muted hover:text-ink"
+                >
+                    Hide
+                </button>
+            </div>
+            {tab === 'starts' ? (
+                <>
+                    <div className="flex flex-wrap gap-1.5">
+                        {featured.map((t) => (
                             <button
-                                onClick={() => onPop(i)}
-                                disabled={isLast}
+                                key={t.id}
+                                type="button"
+                                onClick={() => onSeed(t)}
+                                title={t.description}
                                 className={cn(
-                                    "px-2 py-1 rounded-lg text-[11px] font-medium",
-                                    "transition-all duration-150",
-                                    isLast
-                                        ? "bg-accent-lineage/20 text-accent-lineage cursor-default"
-                                        : "bg-glass/40 text-ink-secondary hover:bg-glass/70 hover:text-ink",
+                                    'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl',
+                                    'text-[11.5px] font-medium',
+                                    'bg-canvas-base/50 border border-glass-border',
+                                    'text-ink-secondary hover:text-ink hover:border-accent-lineage/40',
+                                    'hover:bg-accent-lineage/10 transition-all',
+                                    'active:scale-95',
                                 )}
                             >
-                                {frame.label}
+                                <DynamicIcon name={t.icon} className="w-3.5 h-3.5 text-accent-lineage" />
+                                {t.chipLabel ?? t.label}
                             </button>
-                        </span>
-                    )
-                })}
-            </div>
+                        ))}
+                    </div>
+                    <div className="text-[10.5px] text-ink-muted/70 leading-snug">
+                        {activeDraft
+                            ? 'Picking a template REPLACES your current filters.'
+                            : 'Picking a template fills the Query card with editable rows.'}
+                    </div>
+                </>
+            ) : (
+                <RecentStripList
+                    recentQueries={recentQueries}
+                    onLoad={onLoadRecent}
+                    onTogglePin={onTogglePinRecent}
+                    onRemove={onRemoveRecent}
+                />
+            )}
         </motion.div>
     )
 }
 
 
-// ---------------------------------------------------------------------------
-// Running skeleton
-// ---------------------------------------------------------------------------
-
-function RunningSkeleton({ template }: { template: string }) {
-    return (
-        <div className="flex flex-col">
-            <div className="flex items-center gap-3 mb-6">
-                <div className={cn(
-                    "w-10 h-10 rounded-xl flex items-center justify-center",
-                    "bg-gradient-to-br from-accent-lineage/20 to-purple-500/15",
-                    "shadow-sm",
-                )}>
-                    <Loader2 className="w-5 h-5 text-accent-lineage animate-spin" />
-                </div>
-                <div>
-                    <div className="text-sm font-display font-semibold text-ink">
-                        Running &ldquo;{template}&rdquo;
-                    </div>
-                    <div className="text-xs text-ink-muted mt-0.5">
-                        searching your graph…
-                    </div>
-                </div>
-            </div>
-
-            {/* Skeleton placeholder bucket cards */}
-            <div className="space-y-3">
-                {[0, 1, 2].map((i) => (
-                    <div
-                        key={i}
-                        className={cn(
-                            "rounded-2xl border border-glass-border/40",
-                            "bg-gradient-to-br from-canvas-elevated/40 to-canvas-elevated/20",
-                            "p-5 h-[180px]",
-                            "animate-pulse-soft",
-                        )}
-                        style={{
-                            animationDelay: `${i * 120}ms`,
-                            opacity: 1 - i * 0.2,
-                        }}
-                    >
-                        <div className="flex items-center gap-3">
-                            <div className="w-11 h-11 rounded-xl bg-glass/40" />
-                            <div className="flex-1 space-y-1.5">
-                                <div className="h-3 w-32 rounded bg-glass/40" />
-                                <div className="h-2 w-16 rounded bg-glass/30" />
-                            </div>
-                        </div>
-                        <div className="mt-4 h-8 w-20 rounded bg-glass/40" />
-                        <div className="mt-3 h-2 w-full rounded-full bg-glass/30" />
-                    </div>
-                ))}
-            </div>
-        </div>
-    )
-}
-
-
-// ---------------------------------------------------------------------------
-// Results view — header + summary + bucket grid + hit list
-// ---------------------------------------------------------------------------
-
-function ResultsView({
-    view, onBack, onDrill, onReveal, onOpen,
+function StripTabBtn({
+    active, onClick, children,
 }: {
-    view: Extract<ReturnType<typeof useAdvancedSearch>['view'], { kind: 'results' }>
-    onBack: () => void
-    onDrill: (b: { ancestorUrn: string; ancestorDisplayName: string; ancestorEntityType: string }) => void
-    onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void
-    onOpen?: (urn: string) => void
+    active: boolean
+    onClick: () => void
+    children: ReactNode
 }) {
-    const { template, result, elapsedMs } = view
-
-    const allBuckets: SearchAggregateBucket[] = useMemo(() => {
-        if (!result.aggregates) return []
-        return result.aggregates.flat()
-    }, [result.aggregates])
-    const grandTotal = useMemo(
-        () => allBuckets.reduce((sum, b) => sum + b.matchCount, 0),
-        [allBuckets],
-    )
-    const hits: SearchHit[] = result.hits ?? []
-
-    const hasAggregates = allBuckets.length > 0
-    const hasHits = hits.length > 0
-    const isEmpty = !hasAggregates && !hasHits
-
     return (
-        <div className="flex flex-col gap-5">
-            <ResultsHeader
-                templateLabel={template.label}
-                elapsedMs={elapsedMs}
-                candidateCount={result.candidateCount}
-                bucketCount={allBuckets.length}
-                hitCount={hits.length}
-                truncated={result.truncated}
-                onBack={onBack}
-            />
-
-            {isEmpty && <EmptyResults onBack={onBack} />}
-
-            {hasAggregates && (
-                <section className="space-y-3">
-                    <SectionHeader
-                        title={`${allBuckets.length} ${allBuckets.length === 1 ? 'group' : 'groups'}`}
-                        subtitle="Click any group to drill into it"
-                    />
-                    <div className="space-y-3">
-                        {allBuckets.map((b, i) => (
-                            <AggregateBucketCard
-                                key={`${b.ancestorUrn}-${i}`}
-                                bucket={b}
-                                grandTotal={grandTotal}
-                                index={i}
-                                onDrill={() => onDrill(b)}
-                            />
-                        ))}
-                    </div>
-                </section>
+        <button
+            type="button"
+            onClick={onClick}
+            className={cn(
+                'inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold',
+                'transition-colors',
+                active
+                    ? 'bg-accent-lineage/20 text-accent-lineage'
+                    : 'text-ink-muted hover:text-ink',
             )}
-
-            {hasHits && (
-                <section>
-                    <SectionHeader
-                        title={`${hits.length} ${hits.length === 1 ? 'match' : 'matches'}`}
-                        subtitle={
-                            result.truncated
-                                ? `Showing first ${hits.length} · refine to narrow`
-                                : 'Hover a row for actions'
-                        }
-                    />
-                    <div className="space-y-0.5 mt-2">
-                        {hits.map((hit, i) => (
-                            <SearchHitRow
-                                key={hit.node.urn}
-                                hit={hit}
-                                index={i}
-                                onReveal={onReveal}
-                                onOpen={onOpen}
-                            />
-                        ))}
-                    </div>
-                </section>
-            )}
-        </div>
+        >
+            {children}
+        </button>
     )
 }
 
 
-/** Results header — back link + template name + key metric */
-function ResultsHeader({
-    templateLabel, elapsedMs, candidateCount, bucketCount, hitCount, truncated, onBack,
+function RecentStripList({
+    recentQueries, onLoad, onTogglePin, onRemove,
 }: {
-    templateLabel: string
-    elapsedMs: number
-    candidateCount: number
-    bucketCount: number
-    hitCount: number
-    truncated: boolean
-    onBack: () => void
+    recentQueries: ReadonlyArray<RecentQueryEntry>
+    onLoad: (entry: RecentQueryEntry) => void
+    onTogglePin: (timestamp: number) => void
+    onRemove: (timestamp: number) => void
 }) {
-    const totalMatches = bucketCount > 0 ? candidateCount : hitCount
-    return (
-        <div className={cn(
-            "rounded-2xl p-4",
-            "bg-gradient-to-br from-accent-lineage/[0.06] via-canvas-elevated/40 to-accent-lineage/[0.04]",
-            "border border-accent-lineage/20",
-        )}>
-            <button
-                onClick={onBack}
-                className={cn(
-                    "inline-flex items-center gap-1.5 text-[11px] font-medium",
-                    "text-ink-muted hover:text-ink transition-colors",
-                )}
-            >
-                ← Change question
-            </button>
-            <div className="mt-2 flex items-baseline justify-between gap-3">
-                <h3 className="text-base font-display font-semibold text-ink leading-tight">
-                    {templateLabel}
-                </h3>
-                <div className="text-[10px] uppercase tracking-[0.1em] text-ink-muted tabular-nums shrink-0">
-                    {elapsedMs}ms
-                </div>
+    if (recentQueries.length === 0) {
+        return (
+            <div className="px-2 py-4 text-[11.5px] text-ink-muted italic text-center">
+                No recent searches yet — they'll appear here as you run queries.
             </div>
-            <div className="mt-2 flex items-baseline gap-2">
-                <span className="text-3xl font-display font-semibold text-ink tabular-nums leading-none">
-                    {totalMatches.toLocaleString()}
-                </span>
-                <span className="text-xs text-ink-muted">matches</span>
-                {truncated && (
-                    <span className={cn(
-                        "ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md",
-                        "text-[10px] font-medium",
-                        "bg-amber-500/15 text-amber-700 dark:text-amber-300",
-                        "border border-amber-500/30",
-                    )}>
-                        <AlertTriangle className="w-3 h-3" />
-                        truncated
-                    </span>
-                )}
-            </div>
-        </div>
-    )
-}
-
-
-function SectionHeader({
-    title, subtitle,
-}: { title: string; subtitle?: string }) {
-    return (
-        <div className="px-1">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">
-                {title}
-            </div>
-            {subtitle && (
-                <div className="text-[11px] text-ink-muted/70 mt-0.5">
-                    {subtitle}
-                </div>
-            )}
-        </div>
-    )
-}
-
-
-function EmptyResults({ onBack }: { onBack: () => void }) {
-    return (
-        <div className="flex flex-col items-center text-center py-10 px-4">
-            <div className={cn(
-                "w-14 h-14 rounded-2xl flex items-center justify-center",
-                "bg-gradient-to-br from-glass/50 to-glass/20 border border-glass-border",
-                "text-ink-muted",
-            )}>
-                <SearchX className="w-6 h-6" strokeWidth={1.75} />
-            </div>
-            <div className="mt-4 text-sm font-display font-semibold text-ink">
-                No matches in this scope
-            </div>
-            <p className="mt-1.5 text-xs text-ink-muted max-w-[20rem] leading-relaxed">
-                Try widening the scope, adjusting the parameters, or picking
-                a different question. The Discover tab in the dev panel can
-                show what&apos;s actually present in your data.
-            </p>
-            <button
-                onClick={onBack}
-                className={cn(
-                    "mt-5 px-3.5 py-2 rounded-lg text-xs font-medium",
-                    "bg-glass/40 hover:bg-glass/60 text-ink",
-                    "border border-glass-border",
-                    "transition-colors",
-                )}
-            >
-                Pick another question
-            </button>
-        </div>
-    )
-}
-
-
-function ErrorView({
-    message, onBack,
-}: { message: string; onBack: () => void }) {
-    return (
-        <div className={cn(
-            "rounded-2xl p-5",
-            "bg-gradient-to-br from-rose-500/10 to-amber-500/5",
-            "border border-rose-500/30",
-        )}>
-            <div className="flex items-start gap-3">
-                <div className={cn(
-                    "shrink-0 w-9 h-9 rounded-xl flex items-center justify-center",
-                    "bg-rose-500/15 text-rose-600 dark:text-rose-400",
-                    "border border-rose-500/30",
-                )}>
-                    <AlertTriangle className="w-4 h-4" strokeWidth={2.2} />
-                </div>
-                <div className="flex-1 min-w-0">
-                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-rose-700 dark:text-rose-300">
-                        Search failed
-                    </div>
-                    <div className="mt-2 text-sm text-ink leading-relaxed whitespace-pre-wrap break-words">
-                        {message}
-                    </div>
-                </div>
-            </div>
-            <button
-                onClick={onBack}
-                className={cn(
-                    "mt-4 px-3.5 py-2 rounded-lg text-xs font-medium",
-                    "bg-glass/50 hover:bg-glass/70 text-ink",
-                    "border border-glass-border",
-                    "transition-colors",
-                )}
-            >
-                Back to questions
-            </button>
-        </div>
-    )
-}
-
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function headerSubtitle(
-    view: ReturnType<typeof useAdvancedSearch>['view'],
-): string {
-    switch (view.kind) {
-        case 'idle':
-            return 'Pick a question to explore your graph'
-        case 'templateSelected':
-            return `${view.template.label} · configure parameters`
-        case 'running':
-            return `Searching · ${view.template.label}`
-        case 'results':
-            return view.template.label
-        case 'error':
-            return 'Error · click Back to retry'
+        )
     }
-}
-
-
-function useEntityTypeNames(): string[] {
-    const schema = useSchemaStore((s) => s.schema)
-    return useMemo(
-        () => (schema?.entityTypes ?? []).map((t) => t.id),
-        [schema],
+    return (
+        <div className="flex flex-col gap-1 max-h-72 overflow-y-auto custom-scrollbar">
+            {recentQueries.map((entry) => {
+                const label = entry.label || '(empty)'
+                const truncated = label.length > 80 ? label.slice(0, 77) + '…' : label
+                return (
+                    <div
+                        key={entry.timestamp}
+                        className={cn(
+                            'group/recent flex items-stretch gap-0 rounded-lg overflow-hidden',
+                            'bg-canvas-base/40 hover:bg-canvas-base/70',
+                            'border border-glass-border/60 hover:border-accent-lineage/40',
+                            'transition-colors',
+                        )}
+                    >
+                        <button
+                            type="button"
+                            onClick={() => onLoad(entry)}
+                            title={`Load: ${label}`}
+                            className="flex-1 min-w-0 flex items-center gap-2 px-2.5 py-1.5 text-left"
+                        >
+                            <DynamicIcon name="Search" className="w-3 h-3 text-ink-muted/70 shrink-0" />
+                            <span className="text-[11.5px] font-mono text-ink truncate">
+                                {truncated}
+                            </span>
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => onTogglePin(entry.timestamp)}
+                            title={entry.pinned ? 'Unpin (allow auto-eviction)' : 'Pin to keep this query'}
+                            aria-pressed={entry.pinned}
+                            className={cn(
+                                'inline-flex items-center justify-center w-7 shrink-0',
+                                'transition-colors',
+                                entry.pinned
+                                    ? 'text-amber-400 hover:text-amber-300'
+                                    : 'text-ink-muted/40 hover:text-amber-400 opacity-0 group-hover/recent:opacity-100',
+                            )}
+                        >
+                            <DynamicIcon
+                                name={entry.pinned ? 'Star' : 'Star'}
+                                className="w-3 h-3"
+                                style={{ fill: entry.pinned ? 'currentColor' : 'transparent' }}
+                            />
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => onRemove(entry.timestamp)}
+                            title="Remove from Recent"
+                            className={cn(
+                                'inline-flex items-center justify-center w-6 shrink-0',
+                                'text-ink-muted/40 hover:text-rose-400',
+                                'opacity-0 group-hover/recent:opacity-100 transition-opacity',
+                            )}
+                        >
+                            <DynamicIcon name="X" className="w-3 h-3" />
+                        </button>
+                    </div>
+                )
+            })}
+        </div>
     )
 }
+
+
+// The QueryCard now owns its empty-state hero (with discovery-driven
+// example queries), so SearchMapPanel doesn't need a redundant hint.

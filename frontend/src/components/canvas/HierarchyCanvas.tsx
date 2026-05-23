@@ -32,6 +32,9 @@ import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { EditorToolbar } from './EditorToolbar'
 import { NodePalette } from './NodePalette'
 import { EntityDrawer } from '../panels/EntityDrawer'
+import { SearchMapPanel } from './search/SearchMapPanel'
+import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
+import { useRevealNode } from '@/hooks/useRevealNode'
 import { TraceToolbar } from './TraceToolbar'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -69,11 +72,19 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const { loadChildren, cancelChildLoad, loadingNodes, isLoading: isLoadingChildren } = useGraphHydration()
   useLoadingToast('hier-children', isLoadingChildren, 'Expanding hierarchy')
   const relationshipTypes = useViewRelationshipTypes()
-  // Search state
+  // Legacy inline quick-filter (substring over visible nodes) — left
+  // in place as a complementary quick-filter alongside the new
+  // server-side SearchMapPanel. Full removal is tracked separately
+  // because the searchResults prop is consumed by several sub-trees.
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<string[]>([])
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
   const searchInputRef = useRef<HTMLInputElement>(null)
+  // Advanced search (Map + Builder + Power tools + Ask) — same surface
+  // mounted on ContextView and Graph canvases.
+  const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
+  const activeView = useSchemaStore((s) => s.getActiveView())
+  const revealSearchHit = useRevealNode({ setExpandedNodes, loadChildren })
 
   // Edit Mode State (shared across canvases)
   const [isPaletteOpen, setPaletteOpen] = useState(false)
@@ -460,6 +471,27 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               position="top"
             />
           </div>
+        )}
+      </AnimatePresence>
+
+      {/* Advanced search — same SearchMapPanel surface mounted on every
+          canvas. Trigger handles ⌘K globally; panel is a flex-sibling
+          drawer alongside EntityDrawer. */}
+      <CanvasSearchTrigger
+        open={advancedSearchOpen}
+        onToggle={() => setAdvancedSearchOpen((v) => !v)}
+      />
+      <AnimatePresence>
+        {activeView?.id && advancedSearchOpen && (
+          <SearchMapPanel
+            key="advanced-search-panel"
+            open={advancedSearchOpen}
+            onClose={() => setAdvancedSearchOpen(false)}
+            viewId={activeView.id}
+            onRevealNode={(urn, ancestorPath) =>
+              revealSearchHit(urn, ancestorPath)
+            }
+          />
         )}
       </AnimatePresence>
 

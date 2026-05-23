@@ -15,15 +15,19 @@
  * subtree is the new universe; the same template applies inside it.
  * This is the "orient before drill" UX from the brief.
  *
- * Not stored: the JSON-builder/Advanced tab state. That belongs to a
- * separate dev surface (the existing AdvancedSearchDevPanel) — keeping
- * the production hook focused on the template-driven path.
+ * Not stored: the raw-JSON / Explain / Discover surfaces — those live
+ * in the SearchMapPanel's "Power tools" tab and share the same query
+ * pipeline through `runPredicate`. The hook stays focused on
+ * template-driven + visual-builder paths.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { DEFAULT_DRAFT_OPTIONS, useSearchStore, type AncestorPathInfo } from '@/store/searchStore'
 import type {
+    AncestorRef,
+    Predicate,
     SearchQuery,
     SearchResultPage,
     SearchScope,
@@ -34,6 +38,123 @@ import {
     findTemplate,
     type SearchTemplate,
 } from '@/components/canvas/search/searchTemplates'
+import { stringifyPredicate } from '@/components/canvas/search/panel/predicateDsl'
+
+
+/**
+ * Whitelist of predicate kinds the user might want to re-run from the
+ * Recent list. Path-mode and aggregation-driven templates aren't
+ * meaningfully "re-runnable as a free-form draft" — they need their
+ * full SearchQuery context, not just the predicate.
+ */
+const RECENTABLE_KINDS = new Set([
+    'group', 'text', 'property', 'tag', 'hasProperty',
+    'entityType', 'layer', 'descendantOf', 'withinHops',
+    'degree', 'isOrphan', 'isLeaf', 'isRoot',
+    'hasIncoming', 'hasOutgoing',
+])
+
+function isRecentablePredicate(p: Predicate): boolean {
+    return RECENTABLE_KINDS.has(p.kind ?? '')
+}
+
+
+/**
+ * Walks a predicate tree looking for any PathPredicate. The backend
+ * only allows PathPredicate at top-level AND, but the user may have
+ * authored it nested inside an AND group via the builder — either way
+ * detect it so we can switch the request shape to `results: 'paths'`.
+ */
+function containsPathPredicate(p: Predicate): boolean {
+    if (p.kind === 'path') return true
+    if (p.kind === 'group') {
+        return p.children.some(containsPathPredicate)
+    }
+    return false
+}
+
+
+/**
+ * Collect every node URN the user should perceive as "matched" by a
+ * given result page — flat hits AND each aggregate bucket's
+ * sampleHits. Aggregate-only mode (no `hits` in the response) still
+ * lights up the preview hits on the canvas this way.
+ */
+function collectMatchUrns(result: SearchResultPage): string[] {
+    const urns: string[] = []
+    if (result.hits) {
+        for (const hit of result.hits) {
+            const u = hit.node?.urn
+            if (u) urns.push(u)
+        }
+    }
+    if (result.aggregates) {
+        for (const facet of result.aggregates) {
+            for (const bucket of facet) {
+                for (const hit of bucket.sampleHits ?? []) {
+                    const u = hit.node?.urn
+                    if (u) urns.push(u)
+                }
+            }
+        }
+    }
+    // Path mode: highlight every node that appears on any returned
+    // path. This lets the canvas show the entire traversal chain.
+    if (result.paths) {
+        for (const path of result.paths) {
+            for (const node of path.nodes) {
+                if (node.urn) urns.push(node.urn)
+            }
+        }
+    }
+    return urns
+}
+
+
+/**
+ * Pull the ancestor chain off every hit (and every sample-hit inside
+ * aggregate buckets), paired with the entity type of the leaf hit, so
+ * the canvas can roll up both a total count AND a per-entityType
+ * breakdown for each ancestor URN ("3 inside · 2 fields, 1 dataset").
+ *
+ * Aggregate buckets already encode "this ancestor has N matches under
+ * it" via ``bucket.matchCount``, but we still emit synthetic ancestor
+ * paths for their sample hits — that lets a collapsed grandparent
+ * surface its rolled-up subtree count even in aggregate-only mode.
+ */
+/**
+ * Structural shape we read off any hit-like object: the generated
+ * SearchHit and the curated one (with the FE-patched GraphNode) both
+ * satisfy this — we only touch ancestorPath + node.entityType so a
+ * minimal contract is enough to avoid the dual-type assignment friction.
+ */
+type AnyHitLike = {
+    ancestorPath?: ReadonlyArray<AncestorRef> | null
+    node?: { entityType?: string } | null
+}
+
+function collectAncestorPaths(result: SearchResultPage): AncestorPathInfo[] {
+    const paths: AncestorPathInfo[] = []
+    const push = (hit: AnyHitLike) => {
+        if (hit.ancestorPath && hit.ancestorPath.length > 0) {
+            paths.push({
+                path: hit.ancestorPath,
+                leafEntityType: hit.node?.entityType ?? '',
+            })
+        }
+    }
+    if (result.hits) {
+        for (const hit of result.hits) push(hit)
+    }
+    if (result.aggregates) {
+        for (const facet of result.aggregates) {
+            for (const bucket of facet) {
+                for (const hit of bucket.sampleHits ?? []) push(hit)
+            }
+        }
+    }
+    return paths
+}
 
 
 // ---------------------------------------------------------------------------
@@ -82,6 +203,20 @@ export interface UseAdvancedSearchResult {
     resetTemplate: () => void
     /** Run the search with the current template + inputs. */
     run: () => Promise<void>
+    /** Run a template directly without going through the templateSelected
+     *  intermediate state — used by the AskBar's one-click chips so the
+     *  user never sees the form flash before results appear. Uses
+     *  ``defaultInputs(template)`` unless explicit inputs are supplied. */
+    runTemplate: (template: SearchTemplate,
+                  inputs?: Record<string, string | number>) => Promise<void>
+    /** Run a raw predicate tree (from the visual builder OR the AskBar).
+     *  Bypasses the template form: stamps view scope + drill frame,
+     *  dispatches through the same running → results state machine.
+     *  Optional ``optionsOverride`` lets free-form searches opt out of
+     *  the default aggregation (so a 49-hit search renders 49 rows, not
+     *  one bucket containing 49). */
+    runPredicate: (predicate: Predicate,
+                   optionsOverride?: SearchQuery['options']) => Promise<void>
     /** Drill into an aggregate bucket — pushes a scope frame and re-runs. */
     drillInto: (bucket: { ancestorUrn: string; ancestorDisplayName: string;
                           ancestorEntityType: string }) => void
@@ -96,7 +231,13 @@ export interface UseAdvancedSearchResult {
 // Hook
 // ---------------------------------------------------------------------------
 
-export function useAdvancedSearch(): UseAdvancedSearchResult {
+/**
+ * @param viewId - REQUIRED. The view this search shell is bound to.
+ *   The hook stamps `scope.viewId` onto every outgoing SearchQuery so
+ *   the backend's ViewScopeResolver can enforce view boundaries. There
+ *   is no global / cross-view search — every search is scoped to a view.
+ */
+export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
     const provider = useGraphProvider()
     const [view, setView] = useState<PanelView>({ kind: 'idle' })
     const [scope, setScope] = useState<ScopeFrame[]>([ROOT_FRAME])
@@ -104,8 +245,12 @@ export function useAdvancedSearch(): UseAdvancedSearchResult {
 
     // Cancel any in-flight request when the hook unmounts (panel closed
     // mid-query). Otherwise the resolved promise would set state on an
-    // unmounted component.
-    useEffect(() => () => abortRef.current?.abort(), [])
+    // unmounted component. Also clear the cross-component result-set so
+    // the canvas stops highlighting matches once the panel goes away.
+    useEffect(() => () => {
+        abortRef.current?.abort()
+        useSearchStore.getState().clear()
+    }, [])
 
     const selectTemplate = useCallback((templateId: string) => {
         const t = findTemplate(templateId)
@@ -125,28 +270,47 @@ export function useAdvancedSearch(): UseAdvancedSearchResult {
 
     const resetTemplate = useCallback(() => {
         abortRef.current?.abort()
+        // Drop any in-flight result-set publication from a prior run so
+        // the canvas stops highlighting matches the moment the user
+        // backs out of the form.
+        useSearchStore.getState().clear()
         setView({ kind: 'idle' })
     }, [])
 
-    const buildQueryWithScope = useCallback(
+    const stampScope = useCallback(
         (template: SearchTemplate, inputs: Record<string, string | number>,
-         scopeStack: ScopeFrame[]): SearchQuery => {
-            const query = template.build(inputs)
-            // If we've drilled (non-root scope frames), inject the
-            // current ancestor URN as the scope root. The template's
-            // own scope (if any) wins for its own entityTypes/depth,
-            // but root_urns gets overridden with the drill target.
-            const drillFrame = scopeStack[scopeStack.length - 1]
-            if (drillFrame && drillFrame.urn) {
-                const scope: SearchScope = {
-                    ...(query.scope ?? {}),
-                    rootUrns: [drillFrame.urn],
-                }
-                return { ...query, scope }
+         scopeStack: ScopeFrame[] | null): SearchQuery => {
+            const raw = template.build(inputs)
+            // ALWAYS stamp the viewId — the backend's ViewScopeResolver
+            // requires it on every request. If the user has drilled
+            // (non-root scope frames), additionally pass the current
+            // ancestor URN as a narrowing hint via scope.rootUrns; the
+            // resolver intersects it with the view's allowed roots.
+            const drillFrame = scopeStack
+                ? scopeStack[scopeStack.length - 1]
+                : null
+            const scope: SearchScope = {
+                ...(raw.scope ?? {}),
+                viewId,
+                ...(drillFrame && drillFrame.urn
+                    ? { rootUrns: [drillFrame.urn] }
+                    : {}),
             }
-            return query
+            // Defensive normalisation: the backend's predicate compiler
+            // currently mishandles bare top-level leaf predicates
+            // (text / isOrphan / isLeaf / …) — they evaluate to zero
+            // results even when an equivalent group-wrapped version
+            // returns the expected hits. Wrap leaf-rooted predicates in
+            // a single-child AND group so every outgoing request has the
+            // shape the compiler is happy with. No-op when the root is
+            // already a group.
+            const predicate = raw.predicate.kind === 'group'
+                ? raw.predicate
+                : { kind: 'group' as const, op: 'and' as const,
+                    children: [raw.predicate] }
+            return { ...raw, predicate, scope }
         },
-        [],
+        [viewId],
     )
 
     const runWithInputs = useCallback(async (
@@ -157,7 +321,7 @@ export function useAdvancedSearch(): UseAdvancedSearchResult {
         if (!(provider instanceof RemoteGraphProvider)) {
             setView({
                 kind: 'error', template, inputs,
-                query: template.build(inputs),
+                query: stampScope(template, inputs, null),
                 message:
                     'Active provider is not the remote backend — ' +
                     'advanced search only works against the live API.',
@@ -169,7 +333,7 @@ export function useAdvancedSearch(): UseAdvancedSearchResult {
         const controller = new AbortController()
         abortRef.current = controller
 
-        const query = buildQueryWithScope(template, inputs, scopeStack)
+        const query = stampScope(template, inputs, scopeStack)
         const startedAt = performance.now()
         setView({ kind: 'running', template, inputs, query, startedAt })
 
@@ -180,6 +344,28 @@ export function useAdvancedSearch(): UseAdvancedSearchResult {
                 kind: 'results', template, inputs, query, result,
                 elapsedMs: Math.round(performance.now() - startedAt),
             })
+            // Publish the match URN set so the ContextView canvas
+            // (W3 — useSearchHighlight + SearchPinOverlay +
+            // ChevronMatchBadge) can react. JSON.stringify is
+            // deterministic enough for the consumer's "did the query
+            // change?" check; a real fingerprint can replace it if
+            // ordering ever becomes an issue.
+            useSearchStore.getState().setResult({
+                viewId,
+                matchUrns: collectMatchUrns(result),
+                ancestorPaths: collectAncestorPaths(result),
+                queryHash: JSON.stringify(query),
+            })
+            // Auto-save the dispatched predicate to per-view Recent.
+            // Skips path-mode / template queries whose predicate isn't
+            // a meaningful "free-form draft" the user could re-author.
+            if (isRecentablePredicate(query.predicate)) {
+                useSearchStore.getState().addRecent({
+                    viewId,
+                    predicate: query.predicate,
+                    label: stringifyPredicate(query.predicate),
+                })
+            }
         } catch (e) {
             if (controller.signal.aborted) return
             setView({
@@ -187,13 +373,74 @@ export function useAdvancedSearch(): UseAdvancedSearchResult {
                 message: (e as Error).message,
                 elapsedMs: Math.round(performance.now() - startedAt),
             })
+            // On error, drop any previously-published result-set so the
+            // canvas doesn't keep highlighting stale matches.
+            useSearchStore.getState().clear()
         }
-    }, [provider, buildQueryWithScope])
+    }, [provider, stampScope, viewId])
 
     const run = useCallback(async () => {
         if (view.kind === 'idle' || view.kind === 'running') return
         await runWithInputs(view.template, view.inputs, scope)
     }, [view, scope, runWithInputs])
+
+    const runTemplate = useCallback(
+        async (template: SearchTemplate,
+               inputs?: Record<string, string | number>) => {
+            await runWithInputs(template, inputs ?? defaultInputs(template), scope)
+        },
+        [scope, runWithInputs],
+    )
+
+    const runPredicate = useCallback(async (
+        predicate: Predicate,
+        optionsOverride?: SearchQuery['options'],
+    ) => {
+        // Synthesize a transient template so the existing
+        // running → results state machine handles builder-sourced
+        // queries identically to template-sourced ones. The
+        // SearchMapPanel reads view.template.id to distinguish
+        // "back to builder" from "back to template form" — see the
+        // `__builder__` id below.
+        //
+        // ``options`` MUST be set explicitly. The backend defaults to
+        // ``results: 'aggregates'`` with ``aggregations: None`` — which
+        // means a request with no options returns ``aggregates: []``
+        // and no ``hits`` for any predicate.
+        //
+        // Path mode requires ``results: 'paths'`` because the response
+        // shape is fundamentally different (ordered node→edge→node
+        // sequences instead of flat hits / aggregates). Detect the
+        // PathPredicate either at top-level or nested inside an AND
+        // group (the backend allows the latter; the predicate is
+        // hoisted out of the WHERE fragment).
+        const isPathMode = containsPathPredicate(predicate)
+        const draftOptions =
+            useSearchStore.getState().draftOptions ?? DEFAULT_DRAFT_OPTIONS
+
+        const defaultOptions: SearchQuery['options'] = isPathMode
+            ? { results: 'paths' }
+            : {
+                results: 'both',
+                pageSize: draftOptions.pageSize,
+                aggregations: draftOptions.aggregations,
+                includeAncestorPath: draftOptions.includeAncestorPath,
+            }
+
+        const syntheticTemplate: SearchTemplate = {
+            id: '__builder__',
+            label: 'Custom query',
+            description: 'Built from the predicate editor.',
+            icon: 'Wand2',
+            inputs: [],
+            build: () => ({
+                predicate,
+                scope: undefined,
+                options: optionsOverride ?? defaultOptions,
+            }),
+        }
+        await runWithInputs(syntheticTemplate, {}, scope)
+    }, [scope, runWithInputs])
 
     const drillInto = useCallback((bucket: {
         ancestorUrn: string
@@ -211,7 +458,7 @@ export function useAdvancedSearch(): UseAdvancedSearchResult {
         ]
         setScope(nextScope)
         // Re-run the same template + inputs but now scoped to the
-        // bucket. The buildQueryWithScope helper injects scope.rootUrns.
+        // bucket. The stampScope helper injects scope.rootUrns.
         void runWithInputs(view.template, view.inputs, nextScope)
     }, [view, scope, runWithInputs])
 
@@ -229,6 +476,9 @@ export function useAdvancedSearch(): UseAdvancedSearchResult {
 
     const cancel = useCallback(() => {
         abortRef.current?.abort()
+        // Drop any published result-set so the canvas doesn't keep
+        // highlighting matches from a query the user explicitly killed.
+        useSearchStore.getState().clear()
         if (view.kind === 'running') {
             // Restore the form so the user can adjust + retry without
             // losing their inputs.
@@ -248,6 +498,8 @@ export function useAdvancedSearch(): UseAdvancedSearchResult {
         setInput,
         resetTemplate,
         run,
+        runTemplate,
+        runPredicate,
         drillInto,
         popScope,
         cancel,

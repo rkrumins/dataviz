@@ -505,3 +505,16 @@
   opacity: 0.4;
 }
 
+
+/* === Advanced Search match pulse ===
+   Applied to direct match rows (FlatTreeItem with isSearchResult).
+   Gentle amber pulse to draw the eye; runs 4 cycles then stops so the
+   panel doesn't pulse indefinitely once the user has acknowledged the
+   match set. */
+@keyframes search-match-pulse {
+  0%, 100% { box-shadow: inset 0 0 0 1px rgba(245,158,11,0.4), 0 0 18px -2px rgba(245,158,11,0.45); }
+  50%      { box-shadow: inset 0 0 0 1px rgba(245,158,11,0.6), 0 0 26px 0px rgba(245,158,11,0.7); }
+}
+.search-match-pulse {
+  animation: search-match-pulse 1.6s ease-in-out 4;
+}

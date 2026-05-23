@@ -523,34 +523,72 @@ async def search_nodes(
     return await engine.search_nodes(query, limit=limit, offset=offset)
 
 
+def _map_validation_error(detail: str) -> HTTPException:
+    """Map an AdvancedSearchService ValidationError detail string to the
+    correct HTTP status code.
+
+    The service signals view-scope failure modes via the message prefix
+    (``view_not_found``, ``entity_type_not_in_view``, etc.) so the route
+    layer can map to the right status without leaking the resolver's
+    exception types into the HTTP surface.
+    """
+    if detail.startswith("view_not_found:"):
+        return HTTPException(status_code=404, detail=detail)
+    return HTTPException(status_code=400, detail=detail)
+
+
 @router.post(
     "/search/advanced",
     response_model_by_alias=True,
 )
 async def search_advanced(
     query: SearchQuery,
+    response: Response,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_db_session),
 ):
-    """Advanced server-side search.
+    """Advanced server-side search, strictly scoped to ``scope.viewId``.
 
     Replaces the legacy ``POST /search`` with a structured predicate-tree
-    request. Default response shape is per-ancestor *aggregates* (the
-    'orient before drill' UX) — set ``options.results`` to ``'hits'`` or
+    request. Every search must be bound to a view via ``scope.viewId``;
+    the server-side ``ViewScopeResolver`` enforces that searches never
+    cross the view's boundary, regardless of what the client passes in
+    ``scope.rootUrns``.
+
+    Default response shape is per-ancestor *aggregates* (the "orient
+    before drill" UX) — set ``options.results`` to ``'hits'`` or
     ``'both'`` for the flat list.
 
+    When the client passes ``scope.rootUrns`` that lie outside the view,
+    those URNs are dropped server-side; the count is surfaced via the
+    ``X-Search-Dropped-URNs`` response header so the FE can log /
+    diagnose.
+
     See ``backend/common/models/search.py`` for the full contract and
-    ``docs/api/advanced-search.md`` (to be written) for the AI-agent
-    iterative-drill pattern.
+    ``docs/api/advanced-search.md`` for the AI-agent iterative-drill
+    pattern.
     """
+    if not ws_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required (path param ws_id)",
+        )
     # Lazy imports keep this route free of overhead when feature isn't used.
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService, ValidationError,
     )
-    svc = AdvancedSearchService(engine)
+    svc = AdvancedSearchService(
+        engine,
+        session=session,
+        workspace_id=ws_id,
+        data_source_id=dataSourceId,
+    )
     try:
-        return await svc.search(query)
+        page, eff_scope = await svc.search(query)
     except ValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise _map_validation_error(str(exc)) from exc
     except NotImplementedError as exc:
         raise HTTPException(
             status_code=501,
@@ -561,32 +599,51 @@ async def search_advanced(
             ),
         ) from exc
 
+    if eff_scope.dropped_urns:
+        response.headers["X-Search-Dropped-URNs"] = str(len(eff_scope.dropped_urns))
+    response.headers["X-Search-Scope-Hash"] = eff_scope.scope_hash
+    return page
+
 
 @router.post("/search/explain")
 async def search_explain(
     query: SearchQuery,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Compile a SearchQuery without executing it.
 
     Returns the generated Cypher + bound parameters that
-    ``search_advanced`` would run against the active provider, plus
-    diagnostic notes (e.g. "scope intersection is empty",
-    "containment edge types not configured"). Powers the dev panel's
-    "Show Cypher" button and is the first stop for diagnosing
-    queries that silently return 0 results.
+    ``search_advanced`` would run, plus the resolved-scope summary
+    (``resolvedScope``) showing what URNs and entity types the view
+    actually permits. Powers the dev panel's "Show Cypher" button and
+    is the first stop for diagnosing queries that silently return 0
+    results — most often the cause is "your view doesn't contain these
+    URNs", which the resolved-scope summary makes obvious.
 
     Side-effect-free; safe to call repeatedly without rate-limit
     concerns.
     """
+    if not ws_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required (path param ws_id)",
+        )
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService, ValidationError,
     )
-    svc = AdvancedSearchService(engine)
+    svc = AdvancedSearchService(
+        engine,
+        session=session,
+        workspace_id=ws_id,
+        data_source_id=dataSourceId,
+    )
     try:
-        return svc.explain(query)
+        return await svc.explain(query)
     except ValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise _map_validation_error(str(exc)) from exc
 
 
 @router.get("/search/discover")
@@ -616,8 +673,173 @@ async def search_discover(
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService,
     )
-    svc = AdvancedSearchService(engine)
+    svc = AdvancedSearchService.for_diagnostics(engine)
     return await svc.discover(sample_per_label=samplePerLabel)
+
+
+# Process-level cache of the SearchQuery JSON Schema. It's static
+# within a release (Pydantic builds it from class definitions at import
+# time), so compute once and reuse on every request.
+_search_schema_cache: Optional[dict] = None
+_search_schema_etag: Optional[str] = None
+
+
+def _get_search_schema() -> tuple[dict, str]:
+    """Compute (and memoise) the SearchQuery JSON Schema + a strong ETag."""
+    global _search_schema_cache, _search_schema_etag
+    if _search_schema_cache is None:
+        from backend.common.models.search import SearchQuery
+        schema = SearchQuery.model_json_schema(by_alias=True)
+        body = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+        _search_schema_cache = schema
+        _search_schema_etag = f'W/"{hashlib.sha256(body.encode()).hexdigest()[:16]}"'
+    return _search_schema_cache, _search_schema_etag
+
+
+@router.get("/search/schema")
+async def search_schema(request: Request) -> Response:
+    """Return the canonical SearchQuery JSON Schema.
+
+    This endpoint is the runtime side of the JSON-DSL-as-source-of-truth
+    contract. The FE fetches it once at boot, validates the served
+    ``X-Schema-Version`` against the version of ``@synodic/search-schema``
+    it was built against, and uses the schema to drive Ajv validation
+    in the JSON editor. AI agents and external integrations consume
+    the same shape.
+
+    The schema is published as a versioned npm artifact via a separate
+    CI step (see ``backend/scripts/export_search_schema.py``); this
+    runtime endpoint is the source of truth at request time.
+    """
+    from backend.common.models.search import SCHEMA_VERSION
+    schema, etag = _get_search_schema()
+    # Conditional-GET support — schemas almost never change within a
+    # release, so a long-lived 304 is fine.
+    if request.headers.get("if-none-match") == etag:
+        return Response(
+            status_code=304,
+            headers={
+                "ETag": etag,
+                "X-Schema-Version": SCHEMA_VERSION,
+                "Cache-Control": "public, max-age=300",
+            },
+        )
+    return JSONResponse(
+        content=schema,
+        headers={
+            "ETag": etag,
+            "X-Schema-Version": SCHEMA_VERSION,
+            "Cache-Control": "public, max-age=300",
+        },
+    )
+
+
+# Process-singleton NL service. Owns the in-memory conversation +
+# budget state. Lazy-imported on first request to keep cold-start fast
+# when NL search isn't used.
+_nl_service_singleton = None
+
+
+def _get_nl_service():
+    global _nl_service_singleton
+    if _nl_service_singleton is None:
+        from backend.app.services.nl_search_service import NLSearchService
+        _nl_service_singleton = NLSearchService()
+    return _nl_service_singleton
+
+
+@router.post("/search/nl")
+async def search_nl(
+    body: dict,
+    response: Response,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Natural-Language → SearchQuery translator.
+
+    Accepts ``{question, viewId, scopeHint?, conversationId?}``, asks the
+    configured LLM (default Claude Sonnet 4.6) to translate the question
+    into a `SearchQuery` JSON, validates the result, then runs it through
+    `AdvancedSearchService.search()` so the executed pipeline is identical
+    to every other search (same ViewScopeResolver, same caps, same audit).
+
+    The response carries both the interpreted query (so the UI can show
+    "what I understood") and the result page.
+    """
+    if not ws_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required (path param ws_id)",
+        )
+    from backend.app.services.nl_search_service import (
+        NLBudgetExceededError,
+        NLSearchRequest,
+        NLSearchUnavailableError,
+        NLTranslationError,
+    )
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    try:
+        req = NLSearchRequest.model_validate(body)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Pull a lightweight per-view fact sheet for the prompt. Uses the
+    # same discover surface so the model only ever sees what's
+    # actually queryable.
+    svc_diag = AdvancedSearchService.for_diagnostics(engine)
+    discover = await svc_diag.discover(sample_per_label=50)
+    keys_by_label = {
+        lbl: entry.get("keys", []) if isinstance(entry, dict)
+        else getattr(entry, "keys", [])
+        for lbl, entry in (discover.get("labels", {}) or {}).items()
+    }
+    view_facts = {
+        "entityTypes": sorted(keys_by_label.keys()),
+        "keysByLabel": keys_by_label,
+    }
+
+    nl = _get_nl_service()
+    # The user_id should come from the auth context; for now we key on
+    # the workspace + a request-scoped surrogate. Replace with the real
+    # auth principal when wiring the existing auth middleware here.
+    user_id = f"{ws_id}:anon"
+    try:
+        translated = nl.translate(
+            req, user_id=user_id, view_facts=view_facts,
+        )
+    except NLSearchUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except NLBudgetExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except NLTranslationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    svc = AdvancedSearchService(
+        engine,
+        session=session,
+        workspace_id=ws_id,
+        data_source_id=dataSourceId,
+    )
+    try:
+        page, eff_scope = await svc.search(translated.interpreted_query)
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+
+    if eff_scope.dropped_urns:
+        response.headers["X-Search-Dropped-URNs"] = str(len(eff_scope.dropped_urns))
+    response.headers["X-Search-Scope-Hash"] = eff_scope.scope_hash
+    response.headers["X-NL-Model"] = translated.model_used
+    return {
+        "interpretedQuery": translated.interpreted_query.model_dump(by_alias=True),
+        "interpretationNotes": translated.interpretation_notes,
+        "modelUsed": translated.model_used,
+        "conversationId": translated.conversation_id,
+        "results": page.model_dump(by_alias=True),
+    }
 
 
 @router.get("/edges", response_model=List[GraphEdge], response_model_by_alias=True,
