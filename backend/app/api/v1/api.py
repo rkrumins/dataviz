@@ -52,6 +52,13 @@ api_router.include_router(
     context_models.template_router, prefix="/admin/context-model-templates",
     tags=["admin:context-model-templates"],
 )
+# Primary, permissioned mount for template management UI. Both global and
+# workspace-scoped templates live here; access control is enforced at the
+# handler level rather than via URL split.
+api_router.include_router(
+    context_models.template_router, prefix="/context-model-templates",
+    tags=["context-model-templates"],
+)
 api_router.include_router(
     features.router, prefix="/admin/features", tags=["admin:features"],
 )

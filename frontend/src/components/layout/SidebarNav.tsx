@@ -6,6 +6,7 @@ import {
   Boxes,
   DatabaseZap,
   Layers,
+  LayoutTemplate,
   Shield,
   PanelLeftClose,
   PanelLeftOpen,
@@ -50,6 +51,7 @@ const NAV_ITEMS_CONFIG: Omit<NavItemConfig, 'badge'>[] = [
   { id: 'workspaces', label: 'Workspaces', icon: Boxes, description: 'Manage isolated data environments', color: { bg: 'bg-blue-500/10', text: 'text-blue-500', border: 'border-blue-500/20', hoverBg: 'group-hover:bg-blue-500/10' } },
   { id: 'ingestion', label: 'Ingestion', icon: DatabaseZap, description: 'Connect sources and import data', color: { bg: 'bg-emerald-500/10', text: 'text-emerald-500', border: 'border-emerald-500/20', hoverBg: 'group-hover:bg-emerald-500/10' } },
   { id: 'schema', label: 'Semantic Layers', icon: Layers, description: 'Define and manage ontology models', color: { bg: 'bg-amber-500/10', text: 'text-amber-500', border: 'border-amber-500/20', hoverBg: 'group-hover:bg-amber-500/10' } },
+  { id: 'templates', label: 'Templates', icon: LayoutTemplate, description: 'Reusable ContextViewCanvas blueprints', color: { bg: 'bg-fuchsia-500/10', text: 'text-fuchsia-500', border: 'border-fuchsia-500/20', hoverBg: 'group-hover:bg-fuchsia-500/10' } },
   { id: 'admin', label: 'Administration', icon: Shield, description: 'System settings, users, and health', color: { bg: 'bg-slate-500/10', text: 'text-slate-500', border: 'border-slate-500/20', hoverBg: 'group-hover:bg-slate-500/10' } },
 ]
 
@@ -346,6 +348,7 @@ export function SidebarNav() {
       case 'workspaces': navigate('/workspaces'); break
       case 'ingestion': navigate('/ingestion'); break
       case 'schema': navigate('/schema'); break
+      case 'templates': navigate('/templates'); break
       case 'admin': navigate('/admin/overview'); break
     }
   }

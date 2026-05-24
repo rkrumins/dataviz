@@ -578,6 +578,22 @@ class ContextModelORM(Base):
     created_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                                 # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
+    # Template-specific metadata (nullable; only meaningful when is_template=True).
+    icon = Column(Text, nullable=True)                                 # Lucide icon name
+    accent_color = Column(Text, nullable=True)                         # hex string, e.g. "#6366f1"
+    maintainer = Column(Text, nullable=True)
+    about_markdown = Column(Text, nullable=True)                       # longer-form description
+    # Usage analytics: instantiate_template() bumps the counter and sets last_used_at.
+    instantiation_count = Column(Integer, nullable=False, default=0)
+    last_used_at = Column(Text, nullable=True)
+    # Soft-delete tombstone — matches ViewORM pattern. NULL = active.
+    deleted_at = Column(Text, nullable=True)
+    # Self-FK: set on instances created via instantiate_template; powers usage stats.
+    instantiated_from_id = Column(
+        Text,
+        ForeignKey("context_models.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -590,6 +606,9 @@ class ContextModelORM(Base):
     __table_args__ = (
         Index("idx_cm_workspace", "workspace_id"),
         Index("idx_cm_template", "is_template"),
+        Index("idx_cm_template_workspace", "is_template", "workspace_id"),
+        Index("idx_cm_deleted_at", "deleted_at"),
+        Index("idx_cm_instantiated_from", "instantiated_from_id"),
         CheckConstraint(
             "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_context_models_visibility",
