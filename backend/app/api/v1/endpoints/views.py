@@ -36,6 +36,12 @@ from backend.app.providers.manager import provider_manager as provider_registry 
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services import view_access
+from backend.app.services.view_binding_service import (
+    ViewBindingError,
+    ViewNotBoundError,
+    ensure_branch,
+)
+from backend.app.db.graph_store_engine import get_graph_store_db_session
 from backend.auth_service.interface import User
 from backend.common.models.management import (
     ViewCreateRequest,
@@ -516,3 +522,146 @@ async def unfavourite_view(
     removed = await view_repo.unfavourite_view(session, view_id, _user_id(user))
     if not removed:
         raise HTTPException(status_code=404, detail="Favourite not found")
+
+
+# ── view-as-branch binding ─────────────────────────────────────────
+
+
+@router.post("/{view_id}/enter-edit")
+async def enter_edit_mode(
+    view_id: str = Path(...),
+    user=Depends(get_optional_user),
+    claims=Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+    graph_store_session: AsyncSession = Depends(get_graph_store_db_session),
+):
+    """Resolve the view's editable branch per its branching_policy and
+    materialise it if absent. Idempotent — opens are O(1) once the
+    branch exists.
+
+    Response:
+    ```
+    {
+      "view_id": "view_…",
+      "graph_id": "g_…",
+      "branch": "view/view_…" | "user/<uid>/view/view_…" | "main",
+      "branching_policy": "per_view" | ...,
+      "merge_target_branch": "main",
+      "created_branch": true | false
+    }
+    ```
+
+    Errors:
+    - 404 view not found
+    - 403 caller lacks workspace:view:edit on the view's workspace
+    - 422 view_not_bound (source_graph_id is NULL)
+    """
+    view_orm = await _load_view_orm(session, view_id)
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        ctx = await _viewer_context(session, user, claims)
+        if not await view_access.can_edit_view(session, ctx, view_orm):
+            raise HTTPException(
+                status_code=403,
+                detail="Missing permission: workspace:view:edit",
+            )
+
+    try:
+        binding = await ensure_branch(
+            graph_store_session, view=view_orm, user_id=_user_id(user),
+        )
+    except ViewNotBoundError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "view_not_bound", "view_id": exc.view_id},
+        )
+    except ViewBindingError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "view_binding_error", "message": str(exc)},
+        )
+
+    # Track last-used source_branch on the view (best-effort; the
+    # canonical source of truth is the branch row in the Graph Store).
+    if view_orm.source_branch != binding.branch:
+        view_orm.source_branch = binding.branch
+
+    return {
+        "view_id": binding.view_id,
+        "graph_id": binding.graph_id,
+        "branch": binding.branch,
+        "branching_policy": binding.branching_policy,
+        "merge_target_branch": binding.merge_target_branch,
+        "created_branch": binding.created_branch,
+    }
+
+
+@router.get("/{view_id}/audit")
+async def get_view_audit(
+    view_id: str = Path(...),
+    object_kind: Optional[str] = Query(
+        None, pattern="^(node|edge|graph|branch)$"
+    ),
+    actor: Optional[str] = Query(None),
+    since: Optional[str] = Query(None, description="ISO timestamp."),
+    limit: int = Query(100, le=500),
+    user=Depends(get_optional_user),
+    claims=Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+    graph_store_session: AsyncSession = Depends(get_graph_store_db_session),
+):
+    """Per-view audit convenience. Resolves the view → graph_id then
+    queries graph_change_event with the view_id filter. Returns the
+    same row shape as /graphs/{g}/audit?view_id=<id>."""
+    view_orm = await _load_view_orm(session, view_id)
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        ctx = await _viewer_context(session, user, claims)
+        if not await view_access.can_read_view(session, ctx, view_orm):
+            raise HTTPException(
+                status_code=403,
+                detail="Missing permission: workspace:view:read",
+            )
+
+    if not view_orm.source_graph_id:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "view_not_bound", "view_id": view_id},
+        )
+
+    from sqlalchemy import select
+    from backend.app.db.models_graph import GraphChangeEventORM
+
+    q = select(GraphChangeEventORM).where(
+        GraphChangeEventORM.graph_id == view_orm.source_graph_id,
+        GraphChangeEventORM.view_id == view_id,
+    )
+    if object_kind:
+        q = q.where(GraphChangeEventORM.object_kind == object_kind)
+    if actor:
+        q = q.where(GraphChangeEventORM.actor == actor)
+    if since:
+        q = q.where(GraphChangeEventORM.created_at >= since)
+    q = q.order_by(GraphChangeEventORM.created_at.desc()).limit(limit)
+    rows = (await graph_store_session.execute(q)).scalars().all()
+
+    return {
+        "view_id": view_id,
+        "graph_id": view_orm.source_graph_id,
+        "events": [
+            {
+                "id": r.id,
+                "branch": r.branch,
+                "commit_id": r.commit_id,
+                "object_kind": r.object_kind,
+                "object_id": r.object_id,
+                "action": r.action,
+                "attribute_path": r.attribute_path,
+                "prev_content_hash": r.prev_content_hash,
+                "new_content_hash": r.new_content_hash,
+                "actor": r.actor,
+                "view_id": r.view_id,
+                "pr_id": r.pr_id,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ],
+    }

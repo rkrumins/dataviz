@@ -122,6 +122,8 @@ async def persist_commit(
     message: str | None,
     expected_head_commit_id: str | None,
     actor: str | None = None,
+    view_id: str | None = None,
+    pr_id: str | None = None,
 ) -> CommitResult:
     """Persist *plan* on *branch* and advance the ref. Raises
     :class:`HeadMovedError` if the branch moved since
@@ -247,7 +249,10 @@ async def persist_commit(
         )
     )
 
-    # 5. Stamp audit events with this commit.
+    # 5. Stamp audit events with this commit. view_id propagates from
+    #    the commit request → engine → here so per-view audit queries
+    #    are an indexed lookup, not a branch→view JOIN. pr_id is set
+    #    for PR-merge commits (Phase 2.5).
     for ev in plan.change_events:
         session.add(
             GraphChangeEventORM(
@@ -261,6 +266,8 @@ async def persist_commit(
                 prev_content_hash=ev.prev_content_hash,
                 new_content_hash=ev.new_content_hash,
                 actor=actor,
+                view_id=view_id,
+                pr_id=pr_id,
                 created_at=committed_at,
             )
         )
@@ -294,6 +301,8 @@ async def persist_commit(
             "commit_hash": commit_hash,
             "root_hash": plan.root_hash,
             "actor": actor,
+            "view_id": view_id,
+            "pr_id": pr_id,
             "delta_summary": dict(plan.delta_summary),
         },
     )

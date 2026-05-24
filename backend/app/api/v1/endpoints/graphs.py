@@ -61,6 +61,13 @@ from backend.app.services.graph_versioning.snapshot_reader import (
     StaleBaseError,
     WorkingSetError,
 )
+from backend.app.services.view_binding_service import (
+    ViewBindingError,
+    ViewBranchMismatchError,
+    ViewNotBoundError,
+    assert_branch_matches_view,
+)
+from backend.app.db.models import ViewORM
 
 router = APIRouter()
 
@@ -72,7 +79,10 @@ class CreateGraphRequest(BaseModel):
     description: Optional[str] = None
     schema_mode: str = Field(default="schemaless", pattern="^(schemaless|strict)$")
     ontology_id: Optional[str] = None
-    origin: str = Field(default="authored", pattern="^(authored|connected)$")
+    # Matches the DB CHECK in 0002_fork_and_pr; fork creation goes
+    # through a dedicated endpoint (Phase 2.5) but the DTO must allow
+    # the value so it round-trips through serialization.
+    origin: str = Field(default="authored", pattern="^(authored|connected|fork)$")
     source_data_source_id: Optional[str] = None
 
 
@@ -97,6 +107,15 @@ class StageRequest(BaseModel):
 class CommitRequest(BaseModel):
     message: str
     expected_head_commit_id: Optional[str] = None
+    # Optional view binding context. When set, the commit endpoint:
+    #   1. loads the view from the management DB,
+    #   2. asserts it is bound to this graph and the requested branch
+    #      matches the view's branching policy (defence against a
+    #      client committing under the wrong audit context),
+    #   3. stamps view_id on every graph_change_event row produced by
+    #      this commit (per-view audit query is then a single indexed
+    #      lookup).
+    view_id: Optional[str] = None
 
 
 def _graph_response(g, head: Optional[str]) -> GraphResponse:
@@ -349,6 +368,46 @@ async def commit(
             )
         ontology_spec = await _load_ontology_spec(mgmt_session, graph.ontology_id)
 
+    # View-binding context (optional). When set, validate the view is
+    # bound to this graph and the branch matches the view's policy —
+    # rejects "alice committing under view A's audit context onto a
+    # branch that belongs to view B" with 422.
+    if body.view_id is not None:
+        view = (
+            await mgmt_session.execute(
+                select(ViewORM).where(ViewORM.id == body.view_id)
+            )
+        ).scalar_one_or_none()
+        if view is None or view.deleted_at:
+            raise HTTPException(
+                422,
+                detail={"code": "view_missing", "view_id": body.view_id},
+            )
+        if view.source_graph_id != graph_id:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "view_graph_mismatch",
+                    "view_id": body.view_id,
+                    "expected_graph_id": view.source_graph_id,
+                    "actual_graph_id": graph_id,
+                },
+            )
+        try:
+            assert_branch_matches_view(
+                view, user_id=_uid(user), branch=branch,
+            )
+        except ViewBranchMismatchError as exc:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "view_branch_mismatch",
+                    "view_id": body.view_id,
+                    "expected_branch": exc.expected,
+                    "actual_branch": exc.actual,
+                },
+            )
+
     try:
         outcome = await GraphAuthoringEngine.commit(
             session,
@@ -360,6 +419,7 @@ async def commit(
             expected_head_commit_id=body.expected_head_commit_id,
             ontology=ontology_spec,
             actor=_uid(user),
+            view_id=body.view_id,
         )
     except graph_repo.GraphNotFoundError:
         raise HTTPException(404, detail={"code": "not_found"})
@@ -420,6 +480,130 @@ async def commit(
     }
 
 
+@router.get("/{ws_id}/graphs/{graph_id}/refs/{ref}/snapshot")
+async def get_snapshot(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    ref: str = Path(..., description="Branch name or commit_id"),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    _=Depends(requires("workspace:graph:read", workspace="ws_id")),
+):
+    """Materialised node/edge state at *ref*, where ref is either a
+    branch name or a commit_id.
+
+    Response shape:
+    ```
+    {
+      "ref": "view/<id>",
+      "commit_id": "gcmt_…" | null,
+      "root_hash": "…" | null,
+      "nodes": [
+        {"key": "...", "entity_type": "...", "display_name": "...",
+         "position": {...}, "properties": {...}, "tags": [...],
+         "content_hash": "..."},
+        ...
+      ],
+      "edges": [
+        {"key": "...", "source_key": "...", "target_key": "...",
+         "edge_type": "...", "confidence": ..., "properties": {...},
+         "content_hash": "..."},
+        ...
+      ]
+    }
+    ```
+    O(graph) by design at this layer; Phase 1 add-on swaps for the
+    streaming /manifest + /blobs:batch-get path.
+    """
+    try:
+        graph = await graph_repo.get_graph(session, graph_id)
+    except graph_repo.GraphNotFoundError:
+        raise HTTPException(404, detail={"code": "not_found"})
+
+    # Resolve ref → commit_id. Treat as a branch name first; fall back
+    # to "is this a commit_id" so the same endpoint serves both shapes
+    # (mirrors `git show <ref>`).
+    branch_ref = await graph_repo.get_branch_ref_or_none(
+        session, graph_id=graph_id, branch=ref,
+    )
+    if branch_ref is not None:
+        commit_id = branch_ref.commit_id
+    else:
+        # Treat ref as a commit_id; verify it belongs to this graph.
+        from backend.app.db.models_graph import GraphCommitORM
+        commit = (
+            await session.execute(
+                select(GraphCommitORM).where(
+                    GraphCommitORM.id == ref,
+                    GraphCommitORM.graph_id == graph_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if commit is None:
+            raise HTTPException(404, detail={"code": "ref_not_found", "ref": ref})
+        commit_id = commit.id
+
+    nodes_by_key, edges_by_key = await graph_repo.load_graph_state(
+        session, graph_id=graph_id, commit_id=commit_id,
+    )
+
+    # Re-derive content hashes so the client can cache by hash without
+    # re-canonicalising on its side (and so future delta sync can
+    # compare without a fetch).
+    from backend.app.services.graph_versioning.content_address import (
+        edge_content_hash,
+        node_content_hash,
+    )
+
+    root_hash: str | None = None
+    if commit_id:
+        snap = await graph_repo.load_snapshot(
+            session, graph_id=graph_id, commit_id=commit_id,
+        )
+        root_hash = snap.root_hash
+
+    return {
+        "ref": ref,
+        "commit_id": commit_id,
+        "root_hash": root_hash,
+        "nodes": [
+            {
+                "key": n.key,
+                "entity_type": n.entity_type,
+                "display_name": n.display_name,
+                "position": n.position,
+                "properties": dict(n.properties),
+                "tags": list(n.tags),
+                "content_hash": node_content_hash(
+                    entity_type=n.entity_type,
+                    display_name=n.display_name,
+                    position=n.position,
+                    properties=n.properties,
+                    tags=n.tags,
+                ),
+            }
+            for n in nodes_by_key.values()
+        ],
+        "edges": [
+            {
+                "key": e.key,
+                "source_key": e.source_key,
+                "target_key": e.target_key,
+                "edge_type": e.edge_type,
+                "confidence": e.confidence,
+                "properties": dict(e.properties),
+                "content_hash": edge_content_hash(
+                    source_node_key=e.source_key,
+                    target_node_key=e.target_key,
+                    edge_type=e.edge_type,
+                    confidence=e.confidence,
+                    properties=e.properties,
+                ),
+            }
+            for e in edges_by_key.values()
+        ],
+    }
+
+
 @router.get("/{ws_id}/graphs/{graph_id}/branches/{branch}/commits")
 async def history(
     ws_id: str = Path(...),
@@ -447,6 +631,183 @@ async def history(
         }
         for c in commits
     ]
+
+
+# ── audit / blame / diff (read endpoints) ──────────────────────────
+
+
+@router.get("/{ws_id}/graphs/{graph_id}/audit")
+async def get_graph_audit(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    branch: Optional[str] = Query(
+        None, description="Filter to a single branch (per-view scope)."
+    ),
+    view_id: Optional[str] = Query(
+        None, description="Filter to a single view (uses the dedicated index)."
+    ),
+    object_kind: Optional[str] = Query(
+        None, pattern="^(node|edge|graph|branch)$"
+    ),
+    actor: Optional[str] = Query(None),
+    since: Optional[str] = Query(None, description="ISO timestamp."),
+    limit: int = Query(100, le=500),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    _=Depends(requires("workspace:graph:read", workspace="ws_id")),
+):
+    """Per-source audit by default. ``?branch=`` narrows to a branch;
+    ``?view_id=`` narrows to a view (the two filters can combine).
+
+    Returns newest-first; each row carries actor/view_id/pr_id so a UI
+    can render "alice in view A via PR #3 changed display_name on
+    urn:foo at 2026-05-21T…".
+    """
+    from backend.app.db.models_graph import GraphChangeEventORM
+
+    q = select(GraphChangeEventORM).where(
+        GraphChangeEventORM.graph_id == graph_id
+    )
+    if branch:
+        q = q.where(GraphChangeEventORM.branch == branch)
+    if view_id:
+        q = q.where(GraphChangeEventORM.view_id == view_id)
+    if object_kind:
+        q = q.where(GraphChangeEventORM.object_kind == object_kind)
+    if actor:
+        q = q.where(GraphChangeEventORM.actor == actor)
+    if since:
+        q = q.where(GraphChangeEventORM.created_at >= since)
+    q = q.order_by(GraphChangeEventORM.created_at.desc()).limit(limit)
+    rows = (await session.execute(q)).scalars().all()
+    return {
+        "graph_id": graph_id,
+        "events": [
+            {
+                "id": r.id,
+                "branch": r.branch,
+                "commit_id": r.commit_id,
+                "object_kind": r.object_kind,
+                "object_id": r.object_id,
+                "action": r.action,
+                "attribute_path": r.attribute_path,
+                "prev_content_hash": r.prev_content_hash,
+                "new_content_hash": r.new_content_hash,
+                "actor": r.actor,
+                "view_id": r.view_id,
+                "pr_id": r.pr_id,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/{ws_id}/graphs/{graph_id}/objects/{urn:path}/blame")
+async def get_object_blame(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    urn: str = Path(..., description="Node or edge key (URL-decoded)."),
+    limit: int = Query(50, le=200),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    _=Depends(requires("workspace:graph:read", workspace="ws_id")),
+):
+    """Per-object audit chain. Drives BlamePanel: 'display_name set by
+    alice in c1; tag pii added by bob in c2; …'. Returns newest-first.
+    Uses the existing ``idx_gce_blame`` index."""
+    from backend.app.db.models_graph import GraphChangeEventORM
+
+    q = (
+        select(GraphChangeEventORM)
+        .where(
+            GraphChangeEventORM.graph_id == graph_id,
+            GraphChangeEventORM.object_id == urn,
+        )
+        .order_by(GraphChangeEventORM.created_at.desc())
+        .limit(limit)
+    )
+    rows = (await session.execute(q)).scalars().all()
+    return {
+        "graph_id": graph_id,
+        "object_id": urn,
+        "events": [
+            {
+                "id": r.id,
+                "branch": r.branch,
+                "commit_id": r.commit_id,
+                "action": r.action,
+                "attribute_path": r.attribute_path,
+                "prev_content_hash": r.prev_content_hash,
+                "new_content_hash": r.new_content_hash,
+                "actor": r.actor,
+                "view_id": r.view_id,
+                "pr_id": r.pr_id,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/{ws_id}/graphs/{graph_id}/diff")
+async def get_graph_diff(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    from_commit: str = Query(..., alias="from"),
+    to_commit: str = Query(..., alias="to"),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    _=Depends(requires("workspace:graph:read", workspace="ws_id")),
+):
+    """Snapshot-level diff between two commits on the same graph.
+
+    Pure Merkle diff via ``diff_snapshots`` (the same engine that
+    powers the commit planner). Returns added/modified/removed entries
+    per object kind; the client renders these with `isPending` styling.
+    """
+    from backend.app.services.graph_versioning.manifest import diff_snapshots
+
+    try:
+        from_snap = await graph_repo.load_snapshot(
+            session, graph_id=graph_id, commit_id=from_commit,
+        )
+    except graph_repo.GraphNotFoundError:
+        raise HTTPException(
+            404, detail={"code": "commit_not_found", "commit_id": from_commit}
+        )
+    try:
+        to_snap = await graph_repo.load_snapshot(
+            session, graph_id=graph_id, commit_id=to_commit,
+        )
+    except graph_repo.GraphNotFoundError:
+        raise HTTPException(
+            404, detail={"code": "commit_not_found", "commit_id": to_commit}
+        )
+
+    d = diff_snapshots(from_snap, to_snap)
+    return {
+        "graph_id": graph_id,
+        "from": from_commit,
+        "to": to_commit,
+        "added": [
+            {"key": e.key, "kind": e.kind, "content_hash": e.content_hash}
+            for e in d.added
+        ],
+        "modified": [
+            {
+                "key": new.key,
+                "kind": new.kind,
+                "prev_content_hash": old.content_hash,
+                "new_content_hash": new.content_hash,
+            }
+            for old, new in d.modified
+        ],
+        "removed": [
+            {"key": e.key, "kind": e.kind, "content_hash": e.content_hash}
+            for e in d.removed
+        ],
+    }
+
+
+# ── branch lifecycle ───────────────────────────────────────────────
 
 
 class CreateBranchRequest(BaseModel):

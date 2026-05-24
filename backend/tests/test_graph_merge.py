@@ -10,6 +10,8 @@ from backend.app.services.graph_versioning.merge import (
     UnresolvedConflictsError,
     apply_resolutions,
     check_referential_integrity,
+    finalize_resolved_merge,
+    run_post_merge_checks,
     three_way_merge,
 )
 
@@ -33,7 +35,7 @@ def test_disjoint_changes_auto_merge_clean():
     ours = snap({"a": n("a1"), "b": n("b0")})       # changed a
     theirs = snap({"a": n("a0"), "b": n("b1")})     # changed b
     out = three_way_merge(base, ours, theirs)
-    assert out.is_clean
+    assert out.has_no_conflicts
     assert out.auto == {"a": n("a1"), "b": n("b1")}
 
 
@@ -42,7 +44,7 @@ def test_both_made_same_change_no_conflict():
     ours = snap({"a": n("a1")})
     theirs = snap({"a": n("a1")})
     out = three_way_merge(base, ours, theirs)
-    assert out.is_clean and out.auto["a"] == n("a1")
+    assert out.has_no_conflicts and out.auto["a"] == n("a1")
 
 
 def test_one_side_unchanged_takes_other_incl_delete():
@@ -50,7 +52,7 @@ def test_one_side_unchanged_takes_other_incl_delete():
     ours = snap({"a": n("a0")})                     # deleted b
     theirs = snap({"a": n("a0"), "b": n("b0")})     # unchanged
     out = three_way_merge(base, ours, theirs)
-    assert out.is_clean
+    assert out.has_no_conflicts
     assert "b" not in out.auto and out.auto["a"] == n("a0")
 
 
@@ -59,7 +61,7 @@ def test_modify_modify_conflict():
     ours = snap({"a": n("a1")})
     theirs = snap({"a": n("a2")})
     out = three_way_merge(base, ours, theirs)
-    assert not out.is_clean
+    assert not out.has_no_conflicts
     c = out.conflicts[0]
     assert c.key == "a" and c.conflict_class == "modify_modify"
     assert (c.ours_hash, c.theirs_hash) == ("a1", "a2")
@@ -87,7 +89,7 @@ def test_merkle_prunes_unchanged_partitions():
     ours = snap({**big, "k1": n("CHANGED")})
     theirs = snap(big)
     out = three_way_merge(base, ours, theirs)
-    assert out.is_clean and out.auto["k1"] == n("CHANGED")
+    assert out.has_no_conflicts and out.auto["k1"] == n("CHANGED")
     # Only the divergent partition(s) were hash-scanned, not all.
     assert out.scanned_partitions < out.total_partitions
     assert out.scanned_partitions <= 2
@@ -195,3 +197,57 @@ def test_resolution_can_reintroduce_dangling_caught_on_rerun():
     assert any(x.code == "dangling_edge" for x in v)
     with pytest.raises(MergeIntegrityError):
         raise MergeIntegrityError(v)
+
+
+# ── MergeOutcome gate semantics (the rename + integrity-violations field) ─
+
+def test_has_no_conflicts_alias_of_empty_conflicts():
+    base = snap({"a": n("a0"), "b": n("b0")})
+    ours = snap({"a": n("a1"), "b": n("b0")})
+    theirs = snap({"a": n("a0"), "b": n("b1")})
+    out = three_way_merge(base, ours, theirs)
+    assert out.has_no_conflicts is True
+    assert out.is_mergeable is True  # no integrity check run; gate True by default
+
+
+def test_is_mergeable_false_when_integrity_violations_populated():
+    # A clean three-way that nonetheless leaves a dangling edge.
+    base = snap({"n1": n("h1"), "n2": n("h2"), "e1": ("edge", "eh")})
+    ours = snap({"n1": n("h1"), "e1": ("edge", "eh")})  # ours deletes n2
+    theirs = snap({"n1": n("h1"), "n2": n("h2"), "e1": ("edge", "eh")})
+    out = three_way_merge(base, ours, theirs)
+    assert out.has_no_conflicts  # ours took priority (theirs unchanged)
+    checked = run_post_merge_checks(
+        out,
+        get_edge_endpoints=_edges({"eh": ("n1", "n2", "flows_to")}),
+    )
+    # The merged result drops n2 (ours deleted, theirs unchanged → take ours).
+    # e1 references the now-missing n2 → dangling.
+    assert checked.integrity_violations
+    assert any(v.code == "dangling_edge" for v in checked.integrity_violations)
+    assert checked.is_mergeable is False
+    assert checked.has_no_conflicts is True
+    assert checked.has_no_integrity_violations is False
+
+
+def test_run_post_merge_checks_clean_case_keeps_mergeable_true():
+    base = snap({"a": n("a0"), "b": n("b0")})
+    ours = snap({"a": n("a1"), "b": n("b0")})
+    theirs = snap({"a": n("a0"), "b": n("b1")})
+    out = three_way_merge(base, ours, theirs)
+    checked = run_post_merge_checks(out, get_edge_endpoints=lambda h: ("", "", None))
+    assert checked.integrity_violations == ()
+    assert checked.is_mergeable is True
+
+
+def test_finalize_resolved_merge_runs_check_after_resolutions():
+    base = snap({"n1": n("h1"), "n2": n("h2"), "e1": ("edge", "eh_old")})
+    ours = snap({"n1": n("h1"), "e1": ("edge", "eh_old")})  # del n2
+    theirs = snap({"n1": n("h1"), "n2": n("h2"), "e1": ("edge", "eh_new")})
+    out = three_way_merge(base, ours, theirs)
+    merged, violations = finalize_resolved_merge(
+        out, {"e1": ("edge", "eh_new")},
+        get_edge_endpoints=_edges({"eh_new": ("n1", "n2", "flows_to")}),
+    )
+    assert any(v.code == "dangling_edge" for v in violations)
+    assert merged["e1"] == ("edge", "eh_new")

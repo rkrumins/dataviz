@@ -99,3 +99,35 @@ def test_is_approval_stale_helper():
     # non-approval reviews are never "stale"
     cr = rv("x", "changes_requested", "t", base="B1", head="H1")
     assert is_approval_stale(cr, base_head_commit_id="B9", head_head_commit_id="H9") is False
+
+
+def test_null_reviewed_commit_ids_are_stale_unless_current_heads_also_null():
+    """Pins the chosen semantic: NULL reviewed commit ids on an approval
+    mean "approval is not tied to any concrete state" → treated as stale
+    against any non-NULL current head. Only when BOTH sides are NULL
+    (degenerate, no commits yet) does an approval count as fresh."""
+    a_null = ReviewRecord(
+        reviewer="x", state="approved", created_at="t",
+        reviewed_base_commit_id=None, reviewed_head_commit_id=None,
+    )
+    # Against real heads → stale.
+    assert is_approval_stale(a_null, base_head_commit_id="B1", head_head_commit_id="H1") is True
+    # Both NULL on both sides → not stale (degenerate empty-branch case).
+    assert is_approval_stale(a_null, base_head_commit_id=None, head_head_commit_id=None) is False
+
+
+def test_mergeability_with_null_reviewed_ids_is_blocked():
+    """An approval with NULL reviewed commit ids cannot mergeably gate a
+    PR against a non-empty branch — the PR is flagged as needing
+    re-approval (stale_reviewers populated, not mergeable)."""
+    r = evaluate_mergeability(
+        status="open",
+        reviews=[ReviewRecord(
+            reviewer="alice", state="approved", created_at="t",
+            reviewed_base_commit_id=None, reviewed_head_commit_id=None,
+        )],
+        base_head_commit_id="B1", head_head_commit_id="H1",
+        has_changes=True,
+    )
+    assert r.mergeable is False
+    assert "alice" in r.stale_reviewers

@@ -140,7 +140,20 @@ async def soft_delete_graph(
 async def get_branch_ref(
     session: AsyncSession, *, graph_id: str, branch: str
 ) -> GraphRefORM:
-    ref = (
+    ref = await get_branch_ref_or_none(
+        session, graph_id=graph_id, branch=branch
+    )
+    if ref is None:
+        raise GraphNotFoundError(f"{graph_id}@{branch}")
+    return ref
+
+
+async def get_branch_ref_or_none(
+    session: AsyncSession, *, graph_id: str, branch: str
+) -> GraphRefORM | None:
+    """Non-raising variant used by the view-binding service to test
+    whether a (graph, branch) already exists before deciding to fork."""
+    return (
         await session.execute(
             select(GraphRefORM).where(
                 GraphRefORM.graph_id == graph_id,
@@ -148,9 +161,6 @@ async def get_branch_ref(
             )
         )
     ).scalar_one_or_none()
-    if ref is None:
-        raise GraphNotFoundError(f"{graph_id}@{branch}")
-    return ref
 
 
 async def create_branch(
@@ -325,4 +335,5 @@ __all__ = [
     "create_branch",
     "load_snapshot",
     "load_graph_state",
+    "get_branch_ref_or_none",
 ]

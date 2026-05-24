@@ -56,6 +56,8 @@ from .merge import (  # noqa: F401
     three_way_merge,
     apply_resolutions,
     check_referential_integrity,
+    run_post_merge_checks,
+    finalize_resolved_merge,
 )
 from .pr_policy import (  # noqa: F401
     ReviewRecord,
@@ -101,6 +103,8 @@ __all__ = [
     "three_way_merge",
     "apply_resolutions",
     "check_referential_integrity",
+    "run_post_merge_checks",
+    "finalize_resolved_merge",
     "ReviewRecord",
     "MergeabilityResult",
     "latest_per_reviewer",

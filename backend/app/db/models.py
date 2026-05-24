@@ -635,6 +635,27 @@ class ViewORM(Base):
     created_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                        # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
+    # Version-control binding — see plan section "View-as-branch model".
+    # source_graph_id is a soft ref to user_graphs.id in the Graph Store
+    # DB (cross-DB; no FK). Set on views that drive editing of a
+    # user-authored or hybrid graph. NULL = legacy provider-driven view
+    # (today's behaviour preserved).
+    source_graph_id = Column(Text, nullable=True)
+    # The branch this view renders + commits to. Materialised by the
+    # view_binding_service on first edit-mode entry per the policy.
+    source_branch = Column(Text, nullable=True)
+    # Policy for how branches are scoped per (view, user). Default
+    # `per_view` = one branch per view shared across users; opt into
+    # per_user_per_view for highly contested views; shared_main is the
+    # force-edit-trunk power-user mode.
+    branching_policy = Column(
+        Text, nullable=False, default="per_view",
+    )
+    # Destination branch for "Publish" PRs raised from this view's
+    # branch. Default `main` matches the graph's default_branch.
+    merge_target_branch = Column(
+        Text, nullable=False, default="main",
+    )
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)
@@ -650,9 +671,14 @@ class ViewORM(Base):
         Index("idx_view_visibility", "visibility"),
         Index("idx_view_data_source", "data_source_id"),
         Index("idx_view_deleted_at", "deleted_at"),
+        Index("idx_view_source_graph", "source_graph_id"),
         CheckConstraint(
             "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_views_visibility",
+        ),
+        CheckConstraint(
+            "branching_policy IN ('shared_main', 'per_view', 'per_user_per_view')",
+            name="ck_views_branching_policy",
         ),
     )
 

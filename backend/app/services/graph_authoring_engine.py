@@ -120,6 +120,8 @@ class GraphAuthoringEngine:
         expected_head_commit_id: str | None,
         ontology: OntologySpec | None = None,
         actor: str | None = None,
+        view_id: str | None = None,
+        pr_id: str | None = None,
     ) -> CommitOutcome:
         """Resolve base + working set, plan, persist, clear the working
         set. Raises HeadMovedError / GraphValidationError /
@@ -178,6 +180,8 @@ class GraphAuthoringEngine:
             message=message,
             expected_head_commit_id=base_commit_id,
             actor=actor,
+            view_id=view_id,
+            pr_id=pr_id,
         )
 
         # Commit consumed the working set: clear it and re-pin to the

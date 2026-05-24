@@ -33,6 +33,37 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def coalesce_decision(existing_change_type: str, incoming_change_type: str) -> str:
+    """Pure, unit-testable decision for what to do when re-staging the
+    same object. Mirrors `git add` semantics + the frontend
+    `graphEditorStore.applyOp` coalescing:
+
+    * ``add → delete``  → **drop** the existing row entirely (add + rm
+      of an uncommitted object cancels out — never produces a row
+      that says "delete X" for an X that was never committed; would
+      crash ``apply_changes`` at commit time).
+    * ``add → update``  → **replace_keep_add** (still an add, just with
+      a refreshed payload).
+    * ``add → add``     → **replace** (last-write-wins on the payload).
+    * anything → delete → **replace** (existing intent overwritten by
+      the delete).
+    * everything else   → **replace** (last-write-wins).
+
+    Returns one of ``{"replace", "drop", "replace_keep_add"}``.
+    Caller maps "drop" to a row delete, "replace_keep_add" to an
+    UPDATE that keeps the original ``change_type='add_*'`` but takes
+    the new payload, and "replace" to a straight field update.
+    """
+    is_add = existing_change_type.startswith("add_")
+    inc_is_delete = incoming_change_type.startswith("delete_")
+    inc_is_update = incoming_change_type.startswith("update_")
+    if is_add and inc_is_delete:
+        return "drop"
+    if is_add and inc_is_update:
+        return "replace_keep_add"
+    return "replace"
+
+
 async def get_or_open(
     session: AsyncSession,
     *,
@@ -117,10 +148,21 @@ async def stage_changes(
         ).scalar_one_or_none()
 
         if existing is not None:
-            # Coalesce: keep original seq + before_blob, replace intent.
-            existing.change_type = ct
-            existing.after_blob = ch.get("payload")
-            existing.summary = ch.get("summary", existing.summary)
+            decision = coalesce_decision(existing.change_type, ct)
+            if decision == "drop":
+                # add → delete of an uncommitted object: cancel out.
+                # Bumping ws_change_version below still signals that
+                # the working set changed (other tabs refetch).
+                await session.delete(existing)
+            elif decision == "replace_keep_add":
+                # add → update: stay as 'add_*' with the new payload.
+                existing.after_blob = ch.get("payload")
+                existing.summary = ch.get("summary", existing.summary)
+            else:
+                # Coalesce: keep original seq + before_blob, replace intent.
+                existing.change_type = ct
+                existing.after_blob = ch.get("payload")
+                existing.summary = ch.get("summary", existing.summary)
         else:
             session.add(
                 GraphWorkingChangeORM(
@@ -215,4 +257,5 @@ __all__ = [
     "list_changes",
     "discard_all",
     "to_ordered_ops",
+    "coalesce_decision",
 ]

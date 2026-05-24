@@ -15,10 +15,13 @@ mode behaviour stays single-sourced (see plan item A.1 + A.2).
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from backend.app.db.models import OntologyORM
 from backend.app.services.graph_versioning.validation import OntologySpec
+
+logger = logging.getLogger(__name__)
 
 
 def _load_list(raw: str | None) -> list[Any]:
@@ -78,15 +81,40 @@ def to_spec(orm: OntologyORM) -> OntologySpec:
                 "is_lineage", rdef.get("isLineage", False)
             )
         }
+        legacy_containment_set = frozenset(str(t) for t in legacy_containment)
+        legacy_lineage_set = frozenset(str(t) for t in legacy_lineage)
+        # Warn loudly when the two sources disagree — silent divergence
+        # has bitten ontology-evolution work before. Caller can still
+        # rely on "rich wins"; the warning is the audit trail.
+        if rich_containment and legacy_containment_set and (
+            frozenset(rich_containment) != legacy_containment_set
+        ):
+            logger.warning(
+                "Ontology %r: rich relationship-definition containment flags "
+                "%s disagree with legacy containment_edge_types %s; using rich.",
+                getattr(orm, "id", "<unknown>"),
+                sorted(rich_containment),
+                sorted(legacy_containment_set),
+            )
+        if rich_lineage and legacy_lineage_set and (
+            frozenset(rich_lineage) != legacy_lineage_set
+        ):
+            logger.warning(
+                "Ontology %r: rich relationship-definition lineage flags "
+                "%s disagree with legacy lineage_edge_types %s; using rich.",
+                getattr(orm, "id", "<unknown>"),
+                sorted(rich_lineage),
+                sorted(legacy_lineage_set),
+            )
         containment = (
             frozenset(rich_containment)
             if rich_containment
-            else frozenset(str(t) for t in legacy_containment)
+            else legacy_containment_set
         )
         lineage = (
             frozenset(rich_lineage)
             if rich_lineage
-            else frozenset(str(t) for t in legacy_lineage)
+            else legacy_lineage_set
         )
     else:
         relationship_types = frozenset(str(t) for t in legacy_containment + legacy_lineage)

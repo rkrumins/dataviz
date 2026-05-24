@@ -23,7 +23,7 @@ Pipeline (matches the strategy doc + Key-risk #3):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Mapping
 
 from .manifest import Snapshot
@@ -47,14 +47,54 @@ class MergeConflict:
 
 @dataclass(frozen=True)
 class MergeOutcome:
+    """Result of ``three_way_merge`` + (optionally) ``apply_resolutions``
+    + ``run_post_merge_checks``.
+
+    Two independent failure modes are tracked separately so callers
+    cannot accidentally commit half-merged state:
+
+    * ``conflicts`` — three-way classification disagreements that
+      require human input. Populated by ``three_way_merge``; cleared
+      by ``apply_resolutions``.
+    * ``integrity_violations`` — dangling edges or containment cycles
+      in the final merged entry map. Populated by
+      ``run_post_merge_checks``; MUST be re-checked after every
+      resolution because a resolution can itself reintroduce a
+      dangling edge.
+
+    Use :attr:`is_mergeable` as the single gate before committing —
+    it is the conjunction of both predicates. The legacy ``is_clean``
+    name has been removed (breaking change in this round); read the
+    plan's "Implementation audit — bugs" entry for the rationale.
+    """
+
     auto: EntryMap = field(default_factory=dict)          # cleanly merged
-    conflicts: list[MergeConflict] = field(default_factory=list)
+    conflicts: tuple[MergeConflict, ...] = ()
+    integrity_violations: tuple["IntegrityViolation", ...] = ()
     scanned_partitions: int = 0
     total_partitions: int = 0
 
     @property
-    def is_clean(self) -> bool:
+    def has_no_conflicts(self) -> bool:
+        """True iff three-way merge produced no human-input conflicts."""
         return not self.conflicts
+
+    @property
+    def has_no_integrity_violations(self) -> bool:
+        """True iff post-merge integrity check found no dangling edges
+        or containment cycles. NOTE: when integrity_violations is empty
+        AND the check has not yet been run, this also returns True; use
+        :meth:`with_integrity_checked` to populate the field first."""
+        return not self.integrity_violations
+
+    @property
+    def is_mergeable(self) -> bool:
+        """The single gate callers should check before persisting a
+        merge commit. True iff both conflicts and integrity violations
+        are empty. Run the post-merge integrity check first via
+        :func:`run_post_merge_checks` — otherwise this returns True
+        for un-checked outcomes, which is the trap we removed."""
+        return self.has_no_conflicts and self.has_no_integrity_violations
 
 
 @dataclass(frozen=True)
@@ -163,7 +203,7 @@ def three_way_merge(
 
     return MergeOutcome(
         auto=auto,
-        conflicts=sorted(conflicts, key=lambda c: c.key),
+        conflicts=tuple(sorted(conflicts, key=lambda c: c.key)),
         scanned_partitions=scanned,
         total_partitions=len(all_idx),
     )
@@ -266,6 +306,54 @@ def check_referential_integrity(
     return violations
 
 
+def run_post_merge_checks(
+    outcome: MergeOutcome,
+    *,
+    get_edge_endpoints: EdgeEndpointResolver,
+    containment_edge_types: frozenset[str] = frozenset(),
+) -> MergeOutcome:
+    """Run referential-integrity over ``outcome.auto`` and return a new
+    ``MergeOutcome`` with ``integrity_violations`` populated.
+
+    Use this whenever you intend to auto-commit a clean merge: the
+    post-merge integrity pass is **mandatory** (a clean three-way
+    merge can still leave a dangling edge if two sides each kept one
+    endpoint and not the other). The plan locks
+    :attr:`MergeOutcome.is_mergeable` as the single gate; the gate
+    only works after this helper has been called.
+    """
+    violations = check_referential_integrity(
+        outcome.auto,
+        get_edge_endpoints=get_edge_endpoints,
+        containment_edge_types=containment_edge_types,
+    )
+    return replace(outcome, integrity_violations=tuple(violations))
+
+
+def finalize_resolved_merge(
+    outcome: MergeOutcome,
+    resolutions: Mapping[str, tuple[str, str] | None],
+    *,
+    get_edge_endpoints: EdgeEndpointResolver,
+    containment_edge_types: frozenset[str] = frozenset(),
+) -> tuple[EntryMap, tuple[IntegrityViolation, ...]]:
+    """One-shot: apply human resolutions + re-run integrity check on
+    the resolved result. Caller commits the returned EntryMap only if
+    the returned violations tuple is empty.
+
+    A resolution can re-introduce a dangling edge (e.g. user resolves
+    an edit_delete by keeping the edge but the other side keeps the
+    target deleted). This contract makes the re-check unmissable.
+    """
+    merged = apply_resolutions(outcome, resolutions)
+    violations = check_referential_integrity(
+        merged,
+        get_edge_endpoints=get_edge_endpoints,
+        containment_edge_types=containment_edge_types,
+    )
+    return merged, tuple(violations)
+
+
 __all__ = [
     "EntryMap",
     "EdgeEndpointResolver",
@@ -277,4 +365,6 @@ __all__ = [
     "three_way_merge",
     "apply_resolutions",
     "check_referential_integrity",
+    "run_post_merge_checks",
+    "finalize_resolved_merge",
 ]
