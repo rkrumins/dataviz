@@ -582,6 +582,123 @@ class GraphPrCommentORM(GraphStoreBase):
     __table_args__ = (Index("idx_gprc_pr", "pr_id", "created_at"),)
 
 
+# ------------------------------------------------------------------ #
+# source layer (Mode-2 connected graphs) — see 0005_source_layer       #
+# ------------------------------------------------------------------ #
+
+
+class GraphSourceSnapshotORM(GraphStoreBase):
+    """One source-refresh run for a connected graph. ``status`` walks
+    running → completed | failed. ``source_root_hash`` is a content-
+    derived digest over the entire source layer post-apply; an
+    incoming refresh with an unchanged digest fast-paths to
+    `completed` with zero-change counts."""
+
+    __tablename__ = "graph_source_snapshots"
+
+    id = Column(Text, primary_key=True, default=_id("gss"))
+    graph_id = Column(
+        Text, ForeignKey("user_graphs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_data_source_id = Column(Text, nullable=True)
+    status = Column(Text, nullable=False, default="running")
+    source_root_hash = Column(Text, nullable=True)
+    added_count = Column(Integer, nullable=False, default=0)
+    modified_count = Column(Integer, nullable=False, default=0)
+    removed_count = Column(Integer, nullable=False, default=0)
+    orphan_count = Column(Integer, nullable=False, default=0)
+    error_message = Column(Text, nullable=True)
+    triggered_by = Column(Text, nullable=True)
+    started_at = Column(Text, nullable=False, default=_now)
+    finished_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_gss_graph_started", "graph_id", "started_at"),
+        CheckConstraint(
+            "status IN ('running','completed','failed')",
+            name="ck_gss_status",
+        ),
+    )
+
+
+class GraphSourceNodeORM(GraphStoreBase):
+    """Current source-layer state for a node. PK is (graph_id, urn).
+    ``last_sync_run_id`` tags the row with the run that last touched
+    it so the end-of-run sweep can DELETE anything from a previous
+    run that no longer appears upstream."""
+
+    __tablename__ = "graph_source_nodes"
+
+    graph_id = Column(Text, primary_key=True)
+    urn = Column(Text, primary_key=True)
+    entity_type = Column(Text, nullable=True)
+    display_name = Column(Text, nullable=True)
+    position = Column(JSONB, nullable=True)
+    properties = Column(JSONB, nullable=False, default=dict)
+    tags = Column(JSONB, nullable=False, default=list)
+    content_hash = Column(Text, nullable=False)
+    last_sync_run_id = Column(Text, nullable=False)
+    last_synced_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_gsn_graph_runid", "graph_id", "last_sync_run_id"),
+    )
+
+
+class GraphSourceEdgeORM(GraphStoreBase):
+    """Current source-layer state for an edge. Same row-tagging
+    pattern as GraphSourceNodeORM. ``source_urn`` / ``target_urn``
+    are indexed so composition can quickly resolve endpoint
+    suppression when an enrichment deletes one of the endpoints."""
+
+    __tablename__ = "graph_source_edges"
+
+    graph_id = Column(Text, primary_key=True)
+    urn = Column(Text, primary_key=True)
+    source_urn = Column(Text, nullable=False)
+    target_urn = Column(Text, nullable=False)
+    edge_type = Column(Text, nullable=True)
+    properties = Column(JSONB, nullable=False, default=dict)
+    tags = Column(JSONB, nullable=False, default=list)
+    content_hash = Column(Text, nullable=False)
+    last_sync_run_id = Column(Text, nullable=False)
+    last_synced_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_gse_graph_runid", "graph_id", "last_sync_run_id"),
+        Index("idx_gse_graph_src", "graph_id", "source_urn"),
+        Index("idx_gse_graph_tgt", "graph_id", "target_urn"),
+    )
+
+
+class GraphOrphanEnrichmentORM(GraphStoreBase):
+    """An enrichment object whose source URN vanished. Surfaced to
+    the user for triage (drop / repoint / revive upstream)."""
+
+    __tablename__ = "graph_orphan_enrichments"
+
+    id = Column(Text, primary_key=True, default=_id("goe"))
+    graph_id = Column(Text, nullable=False)
+    urn = Column(Text, nullable=False)
+    object_kind = Column(Text, nullable=False)
+    sync_run_id = Column(Text, nullable=False)
+    discovered_at = Column(Text, nullable=False, default=_now)
+    resolved_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+    resolution = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "idx_goe_graph_unresolved", "graph_id", "resolved_at",
+            postgresql_where=resolved_at.is_(None),
+        ),
+        CheckConstraint(
+            "object_kind IN ('node','edge')", name="ck_goe_kind",
+        ),
+    )
+
+
 __all__ = [
     "UserGraphORM",
     "GraphRefORM",
@@ -598,4 +715,8 @@ __all__ = [
     "GraphPullRequestORM",
     "GraphPrReviewORM",
     "GraphPrCommentORM",
+    "GraphSourceSnapshotORM",
+    "GraphSourceNodeORM",
+    "GraphSourceEdgeORM",
+    "GraphOrphanEnrichmentORM",
 ]

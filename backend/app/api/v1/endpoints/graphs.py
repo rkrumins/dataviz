@@ -99,6 +99,11 @@ class GraphResponse(BaseModel):
     schema_mode: str
     default_branch: str
     head_commit_id: Optional[str] = None
+    # Populated only when create-graph triggers an initial source sync
+    # for an origin='connected' graph. Carries the resulting snapshot
+    # row so the client can render "imported N nodes" or "import
+    # failed" without a follow-up call.
+    initial_source_snapshot: Optional[dict] = None
 
 
 class StageRequest(BaseModel):
@@ -175,7 +180,40 @@ async def create_graph(
         schema_mode=body.schema_mode,
         created_by=_uid(user),
     )
-    return _graph_response(g, head=None)
+
+    # Connected/fork graphs: auto-trigger the initial source sync so
+    # the canvas can open immediately. Inline this round (Phase 2.5
+    # promotes to a background worker). Failures degrade gracefully —
+    # the graph is created, the snapshot row carries status='failed'
+    # + error_message, the canvas surfaces a "source sync failed,
+    # retry?" banner.
+    initial_snapshot = None
+    if body.origin in ("connected",) and body.source_data_source_id:
+        from backend.app.services import graph_source_sync_service
+        try:
+            initial_snapshot = await graph_source_sync_service.sync_data_source(
+                session,
+                graph_id=g.id,
+                workspace_id=ws_id,
+                source_data_source_id=body.source_data_source_id,
+                triggered_by=_uid(user),
+                mgmt_session=mgmt_session,
+            )
+        except graph_source_sync_service.ProviderResolveError:
+            # Surface the create as success; the user can retry the
+            # sync from the canvas's "source sync failed" banner.
+            initial_snapshot = None
+
+    response = _graph_response(g, head=None)
+    if initial_snapshot is not None:
+        response.initial_source_snapshot = {
+            "id": initial_snapshot.id,
+            "status": initial_snapshot.status,
+            "added_count": initial_snapshot.added_count,
+            "modified_count": initial_snapshot.modified_count,
+            "removed_count": initial_snapshot.removed_count,
+        }
+    return response
 
 
 async def _load_ontology_spec(
@@ -489,6 +527,15 @@ async def get_snapshot(
     ws_id: str = Path(...),
     graph_id: str = Path(...),
     ref: str = Path(..., description="Branch name or commit_id"),
+    composed: Optional[bool] = Query(
+        None,
+        description=(
+            "When the graph is connected/fork, default True returns "
+            "source + enrichment composed. composed=false returns "
+            "enrichment-only ('see only my edits' view). For authored "
+            "graphs the flag is ignored (no source layer)."
+        ),
+    ),
     session: AsyncSession = Depends(get_graph_store_db_session),
     _=Depends(requires("workspace:graph:read", workspace="ws_id")),
 ):
@@ -565,12 +612,130 @@ async def get_snapshot(
         )
         root_hash = snap.root_hash
 
-    return {
-        "ref": ref,
-        "commit_id": commit_id,
-        "root_hash": root_hash,
-        "nodes": [
-            {
+    # Resolve compose-mode: default True for connected/fork graphs
+    # (their canvas needs source + enrichment merged); always False
+    # for authored graphs (no source layer to compose).
+    is_layered = graph.origin in ("connected", "fork")
+    effective_composed = bool(
+        is_layered if composed is None else (composed and is_layered)
+    )
+
+    nodes_out: list[dict] = []
+    edges_out: list[dict] = []
+    diagnostics: dict | None = None
+
+    if effective_composed:
+        from backend.app.db.repositories import graph_source_repo
+        from backend.app.services.graph_composition import (
+            EnrichmentEdgeProjection,
+            EnrichmentNodeProjection,
+            SourceEdgeProjection,
+            SourceNodeProjection,
+            compose,
+        )
+
+        source_node_rows = await graph_source_repo.load_source_nodes(
+            session, graph_id=graph_id,
+        )
+        source_edge_rows = await graph_source_repo.load_source_edges(
+            session, graph_id=graph_id,
+        )
+        source_nodes = {
+            urn: SourceNodeProjection(
+                urn=urn,
+                entity_type=r.entity_type,
+                display_name=r.display_name,
+                position=r.position,
+                properties=dict(r.properties or {}),
+                tags=tuple(r.tags or []),
+            )
+            for urn, r in source_node_rows.items()
+        }
+        source_edges = {
+            urn: SourceEdgeProjection(
+                urn=urn,
+                source_urn=r.source_urn,
+                target_urn=r.target_urn,
+                edge_type=r.edge_type,
+                properties=dict(r.properties or {}),
+                tags=tuple(r.tags or []),
+            )
+            for urn, r in source_edge_rows.items()
+        }
+        enrichment_nodes = {
+            k: EnrichmentNodeProjection(
+                urn=k,
+                entity_type=n.entity_type,
+                display_name=n.display_name,
+                position=n.position,
+                properties=dict(n.properties),
+                tags=tuple(n.tags),
+                deleted=False,  # tombstones materialise as absent rows
+            )
+            for k, n in nodes_by_key.items()
+        }
+        enrichment_edges = {
+            k: EnrichmentEdgeProjection(
+                urn=k,
+                source_urn=e.source_key,
+                target_urn=e.target_key,
+                edge_type=e.edge_type,
+                properties=dict(e.properties),
+                tags=(),
+                deleted=False,
+            )
+            for k, e in edges_by_key.items()
+        }
+        composed_g = compose(
+            source_nodes=source_nodes,
+            source_edges=source_edges,
+            enrichment_nodes=enrichment_nodes,
+            enrichment_edges=enrichment_edges,
+        )
+        for urn, cn in composed_g.nodes.items():
+            nodes_out.append({
+                "key": urn,
+                "entity_type": cn.entity_type,
+                "display_name": cn.display_name,
+                "position": cn.position,
+                "properties": dict(cn.properties),
+                "tags": list(cn.tags),
+                "origin": cn.origin,
+                "content_hash": node_content_hash(
+                    entity_type=cn.entity_type,
+                    display_name=cn.display_name,
+                    position=cn.position,
+                    properties=cn.properties,
+                    tags=cn.tags,
+                ),
+            })
+        for urn, ce in composed_g.edges.items():
+            edges_out.append({
+                "key": urn,
+                "source_key": ce.source_urn,
+                "target_key": ce.target_urn,
+                "edge_type": ce.edge_type,
+                "confidence": None,
+                "properties": dict(ce.properties),
+                "origin": ce.origin,
+                "content_hash": edge_content_hash(
+                    source_node_key=ce.source_urn,
+                    target_node_key=ce.target_urn,
+                    edge_type=ce.edge_type,
+                    confidence=None,
+                    properties=ce.properties,
+                ),
+            })
+        d = composed_g.diagnostics
+        diagnostics = {
+            "nodes_suppressed_by_enrichment": d.nodes_suppressed_by_enrichment,
+            "edges_suppressed_by_enrichment": d.edges_suppressed_by_enrichment,
+            "edges_dropped_dangling": d.edges_dropped_dangling,
+            "edges_dropped_endpoint_suppressed": d.edges_dropped_endpoint_suppressed,
+        }
+    else:
+        for n in nodes_by_key.values():
+            nodes_out.append({
                 "key": n.key,
                 "entity_type": n.entity_type,
                 "display_name": n.display_name,
@@ -584,11 +749,9 @@ async def get_snapshot(
                     properties=n.properties,
                     tags=n.tags,
                 ),
-            }
-            for n in nodes_by_key.values()
-        ],
-        "edges": [
-            {
+            })
+        for e in edges_by_key.values():
+            edges_out.append({
                 "key": e.key,
                 "source_key": e.source_key,
                 "target_key": e.target_key,
@@ -602,10 +765,19 @@ async def get_snapshot(
                     confidence=e.confidence,
                     properties=e.properties,
                 ),
-            }
-            for e in edges_by_key.values()
-        ],
+            })
+
+    response = {
+        "ref": ref,
+        "commit_id": commit_id,
+        "root_hash": root_hash,
+        "composed": effective_composed,
+        "nodes": nodes_out,
+        "edges": edges_out,
     }
+    if diagnostics is not None:
+        response["composition_diagnostics"] = diagnostics
+    return response
 
 
 @router.get("/{ws_id}/graphs/{graph_id}/branches/{branch}/commits")
@@ -876,6 +1048,162 @@ async def create_branch(
         created_by=_uid(user),
     )
     return {"branch": ref.name, "commit_id": ref.commit_id}
+
+
+# ── source-sync endpoints (Mode-2 / connected graphs) ─────────────
+
+
+@router.post("/{ws_id}/graphs/{graph_id}/source/refresh")
+async def refresh_source(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    source_data_source_id: Optional[str] = Query(
+        None,
+        description=(
+            "Override the graph's bound source. Defaults to "
+            "user_graphs.source_data_source_id."
+        ),
+    ),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    mgmt_session: AsyncSession = Depends(get_db_session),
+    user=Depends(get_optional_user),
+    _=Depends(requires("workspace:graph:edit", workspace="ws_id")),
+):
+    """Trigger an inline source-sync run for a connected graph.
+
+    Resolves the upstream provider via the management DB's
+    workspace_data_sources, streams nodes + edges, and applies the
+    diff into ``graph_source_*`` tables. Returns the persisted
+    snapshot row (``status='completed'`` on success, ``'failed'``
+    with ``error_message`` on failure — the 5xx still propagates).
+
+    MVP runs inline (no background worker). Cron-scheduled refresh +
+    a dedicated worker process land in Phase 2.5.
+    """
+    from backend.app.services import graph_source_sync_service
+
+    graph = await graph_repo.get_graph(session, graph_id)
+    if graph.origin not in ("connected", "fork"):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "graph_not_connected",
+                "origin": graph.origin,
+                "message": (
+                    "source refresh only applies to connected/fork "
+                    "graphs; authored graphs have no upstream source"
+                ),
+            },
+        )
+
+    ds_id = source_data_source_id or graph.source_data_source_id
+    try:
+        snapshot = await graph_source_sync_service.sync_data_source(
+            session,
+            graph_id=graph_id,
+            workspace_id=graph.workspace_id,
+            source_data_source_id=ds_id,
+            triggered_by=_uid(user),
+            mgmt_session=mgmt_session,
+        )
+    except graph_source_sync_service.ProviderResolveError as exc:
+        raise HTTPException(
+            422,
+            detail={"code": "provider_resolve_failed", "detail": str(exc)},
+        )
+
+    return _snapshot_to_dict(snapshot)
+
+
+@router.get("/{ws_id}/graphs/{graph_id}/source/snapshots")
+async def list_source_snapshots(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    limit: int = Query(50, le=200),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    _=Depends(requires("workspace:graph:read", workspace="ws_id")),
+):
+    """List recent source-refresh runs, newest first."""
+    from backend.app.db.repositories import graph_source_repo
+
+    rows = await graph_source_repo.list_snapshots(
+        session, graph_id=graph_id, limit=limit,
+    )
+    return {
+        "graph_id": graph_id,
+        "snapshots": [_snapshot_to_dict(r) for r in rows],
+    }
+
+
+@router.get("/{ws_id}/graphs/{graph_id}/source/snapshots/{snapshot_id}")
+async def get_source_snapshot(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    snapshot_id: str = Path(...),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    _=Depends(requires("workspace:graph:read", workspace="ws_id")),
+):
+    from backend.app.db.repositories import graph_source_repo
+
+    row = await graph_source_repo.get_snapshot(
+        session, snapshot_id=snapshot_id,
+    )
+    if row is None or row.graph_id != graph_id:
+        raise HTTPException(404, detail={"code": "snapshot_not_found"})
+    return _snapshot_to_dict(row)
+
+
+@router.get("/{ws_id}/graphs/{graph_id}/orphans")
+async def list_graph_orphans(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    include_resolved: bool = Query(False),
+    limit: int = Query(200, le=500),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    _=Depends(requires("workspace:graph:read", workspace="ws_id")),
+):
+    """Enrichment objects whose source URN vanished. Queue for human
+    triage (drop / repoint / revive upstream)."""
+    from backend.app.db.repositories import graph_source_repo
+
+    rows = await graph_source_repo.list_orphans(
+        session, graph_id=graph_id,
+        include_resolved=include_resolved, limit=limit,
+    )
+    return {
+        "graph_id": graph_id,
+        "orphans": [
+            {
+                "id": r.id,
+                "urn": r.urn,
+                "object_kind": r.object_kind,
+                "sync_run_id": r.sync_run_id,
+                "discovered_at": r.discovered_at,
+                "resolved_at": r.resolved_at,
+                "resolved_by": r.resolved_by,
+                "resolution": r.resolution,
+            }
+            for r in rows
+        ],
+    }
+
+
+def _snapshot_to_dict(r) -> dict:
+    return {
+        "id": r.id,
+        "graph_id": r.graph_id,
+        "source_data_source_id": r.source_data_source_id,
+        "status": r.status,
+        "source_root_hash": r.source_root_hash,
+        "added_count": r.added_count,
+        "modified_count": r.modified_count,
+        "removed_count": r.removed_count,
+        "orphan_count": r.orphan_count,
+        "error_message": r.error_message,
+        "triggered_by": r.triggered_by,
+        "started_at": r.started_at,
+        "finished_at": r.finished_at,
+    }
 
 
 # ── merge endpoints ────────────────────────────────────────────────
