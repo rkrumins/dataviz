@@ -21,6 +21,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
+import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
@@ -87,7 +88,15 @@ export function EntityDrawer({
   const [jsonError, setJsonError] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
   const [showSaved, setShowSaved] = useState(false)
-  const [isPinned, setIsPinned] = useState(false)
+  const [isDrawerLocked, setIsDrawerLocked] = useState(false)
+  // Pin to Trace Path — wired to the shared canvas-store action so pinning
+  // from the drawer behaves identically to pinning from a node toolbar,
+  // right-click menu, or tree row. Only meaningful while a trace is active.
+  const isTracingActive = useTraceStore((s) => s.focusId !== null)
+  const pinnedTargetUrns = useCanvasStore((s) => s.pinnedTargetUrns)
+  const togglePinTarget = useCanvasStore((s) => s.togglePinTarget)
+  const drawerUrn = (selectedNode?.data as Record<string, any> | undefined)?.urn || selectedNode?.id
+  const isPinnedToTrace = drawerUrn ? pinnedTargetUrns.includes(drawerUrn) : false
   const [copiedUrn, setCopiedUrn] = useState(false)
   const drawerRef = useRef<HTMLElement>(null)
 
@@ -270,11 +279,11 @@ export function EntityDrawer({
   // sticky: clicking other entities or the canvas background never closes
   // it, it only swaps the data shown inside.
   const handleClose = useCallback(() => {
-    if (!isPinned) {
+    if (!isDrawerLocked) {
       closeNodeDrawer()
       clearSelection()
     }
-  }, [closeNodeDrawer, clearSelection, isPinned])
+  }, [closeNodeDrawer, clearSelection, isDrawerLocked])
 
   // Get external URL
   const externalUrl = useMemo(() => {
@@ -396,11 +405,19 @@ export function EntityDrawer({
           {/* Secondary Quick Actions */}
           <div className="flex items-center gap-2 flex-wrap">
             <ActionButton
-              icon={LucideIcons.Pin}
-              label={isPinned ? "Unpin" : "Pin"}
-              active={isPinned}
-              onClick={() => setIsPinned(!isPinned)}
+              icon={LucideIcons.Anchor}
+              label={isDrawerLocked ? "Unlock" : "Keep Open"}
+              active={isDrawerLocked}
+              onClick={() => setIsDrawerLocked(!isDrawerLocked)}
             />
+            {isTracingActive && drawerUrn && (
+              <ActionButton
+                icon={LucideIcons.Pin}
+                label={isPinnedToTrace ? "Unpin" : "Pin to Trace"}
+                active={isPinnedToTrace}
+                onClick={() => togglePinTarget(drawerUrn)}
+              />
+            )}
             <ActionButton
               icon={LucideIcons.Copy}
               label={copiedUrn ? "Copied!" : "Copy URN"}

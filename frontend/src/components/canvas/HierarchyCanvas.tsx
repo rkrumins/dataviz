@@ -34,6 +34,7 @@ import { NodePalette } from './NodePalette'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { TraceToolbar } from './TraceToolbar'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
+import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { usePinnedLineagePath } from '@/hooks/usePinnedLineagePath'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
@@ -150,6 +151,20 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     return s
   }, [pinPath])
 
+  // Resolve each pinned urn to a display label for the toolbar chip list.
+  const pinnedTargetsForToolbar = useMemo(
+    () =>
+      pinnedTargetUrns.map((urn) => {
+        const node = nodeMap.get(urn)
+        const label =
+          (node?.data?.label as string | undefined) ??
+          (node?.data?.businessLabel as string | undefined) ??
+          urn
+        return { urn, label }
+      }),
+    [pinnedTargetUrns, nodeMap]
+  )
+
   // ESC-driven trace exit. Mirrors ContextViewCanvas: purges trace-merged
   // edges from the canvas store, clears trace state, and reverts ancestor-
   // chain auto-expansion. Without this, ESC fell through to selection-clear
@@ -169,6 +184,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => trace.startTrace(nodeId),
+    onPinNode: (nodeId) => {
+      if (trace.isTracing) togglePinTarget(nodeId)
+    },
     onNodeCreated: (nodeId) => selectNode(nodeId),
     onExitTrace: exitTrace,
   })
@@ -465,14 +483,34 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             </span>
             {searchResults.slice(0, 5).map((id) => {
               const node = flatNodes.find((n) => n.id === id)
+              const isResultPinned = pinnedTargetUrns.includes(id)
               return (
-                <button
+                <span
                   key={id}
-                  onClick={() => expandToNode(id)}
-                  className="px-2 py-1 rounded-md bg-accent-lineage/10 text-accent-lineage text-xs hover:bg-accent-lineage/20 transition-colors"
+                  className="inline-flex items-center rounded-md bg-accent-lineage/10 text-accent-lineage text-xs overflow-hidden"
                 >
-                  {node?.name}
-                </button>
+                  <button
+                    onClick={() => expandToNode(id)}
+                    className="px-2 py-1 hover:bg-accent-lineage/20 transition-colors"
+                  >
+                    {node?.name}
+                  </button>
+                  {trace.isTracing && (
+                    <button
+                      onClick={() => togglePinTarget(id)}
+                      className={cn(
+                        "px-1.5 py-1 border-l border-accent-lineage/20 transition-colors",
+                        isResultPinned
+                          ? "bg-amber-500/20 text-amber-500 hover:bg-amber-500/30"
+                          : "hover:bg-accent-lineage/20"
+                      )}
+                      title={isResultPinned ? "Unpin from trace path" : "Pin to trace path"}
+                      aria-label={isResultPinned ? "Unpin from trace path" : "Pin to trace path"}
+                    >
+                      <LucideIcons.Pin className="w-3 h-3" />
+                    </button>
+                  )}
+                </span>
               )
             })}
             {searchResults.length > 5 && (
@@ -553,6 +591,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               availableLineageEdgeTypes={lineageEdgeTypes}
               position="top"
               pinnedCount={pinnedTargetUrns.length}
+              pinnedTargets={pinnedTargetsForToolbar}
+              unreachablePinUrns={pinPath.unreachablePinUrns}
+              onUnpinTarget={togglePinTarget}
               pinDisplayMode={pinDisplayMode}
               onSetPinDisplayMode={(m) => useCanvasStore.getState().setPinDisplayMode(m)}
               onClearPins={clearPinTargets}
@@ -671,6 +712,13 @@ function HierarchyContainer({
   const isFocusNode = traceFocusId === node.id
   const isDimmed = isTraceActive && !isHighlighted
 
+  // Pin Lineage — surface the same togglePinTarget action used by the
+  // canvas context menu so the hover row reads as the same concept as the
+  // canvas's Pin button and FlatTreeItem's Pin button.
+  const isTracingActive = useTraceStore((s) => s.focusId !== null)
+  const isPinned = useCanvasStore((s) => s.pinnedTargetUrns.includes(node.id))
+  const togglePinTarget = useCanvasStore((s) => s.togglePinTarget)
+
   // Calculate roll-up counts
   const rollUpCounts = useMemo(() => {
     if (hasChildren && !isExpanded) {
@@ -733,7 +781,7 @@ function HierarchyContainer({
         {/* Header (always visible) */}
         <div
           className={cn(
-            "flex items-center gap-3 px-4 py-3 cursor-pointer",
+            "group flex items-center gap-3 px-4 py-3 cursor-pointer",
             "hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
           )}
           onClick={() => onSelect(node.id)}
@@ -783,6 +831,12 @@ function HierarchyContainer({
                   {node.children.length}
                 </span>
               )}
+              {isTracingActive && isPinned && (
+                <LucideIcons.Pin
+                  className="w-3 h-3 text-amber-500 fill-amber-500/20"
+                  aria-label="Pinned to trace path"
+                />
+              )}
             </div>
             <h4 className="text-sm font-medium text-ink truncate">
               {node.name}
@@ -795,6 +849,28 @@ function HierarchyContainer({
               </p>
             )}
           </div>
+
+          {/* Pin to Trace Path — only meaningful during a trace. Hover-only
+              unless already pinned (in which case it stays visible to give
+              the user a one-click un-pin). */}
+          {isTracingActive && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                togglePinTarget(node.id)
+              }}
+              className={cn(
+                "p-1.5 rounded-lg transition-all duration-200 hover:scale-110 active:scale-95",
+                isPinned
+                  ? "bg-amber-500/20 text-amber-500 hover:bg-amber-500/30"
+                  : "bg-white/[0.06] hover:bg-white/[0.12] text-ink-muted/80 hover:text-ink-muted opacity-0 group-hover:opacity-100"
+              )}
+              title={isPinned ? "Unpin from trace path" : "Pin to trace path"}
+              aria-label={isPinned ? "Unpin from trace path" : "Pin to trace path"}
+            >
+              <LucideIcons.Pin className="w-3 h-3" />
+            </button>
+          )}
 
           {/* Tags */}
           {node.data.classifications && Array.isArray(node.data.classifications) && (

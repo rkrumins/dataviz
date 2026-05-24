@@ -124,6 +124,24 @@ describe('computePinnedPath', () => {
     expect([...r.pathEdgeIds].sort()).toEqual(['A->B', 'B->D'])
   })
 
+  it('flags pins with no lineage route to the focus as unreachable', () => {
+    // A→B→D forms one connected lineage; ORPHAN has no edge at all and X→Y
+    // is a separate component disconnected from focus A.
+    const edges = [e('A', 'B'), e('B', 'D'), e('X', 'Y')]
+    const r = computePinnedPath({
+      edges,
+      focusUrn: 'A',
+      pinnedUrns: ['D', 'ORPHAN', 'Y'],
+      containmentParent: noParents,
+    })
+    expect(r.unreachablePinUrns.has('D')).toBe(false)
+    expect([...r.unreachablePinUrns].sort()).toEqual(['ORPHAN', 'Y'])
+    // Unreachable pins still appear in pathNodeUrns so the UI can keep them
+    // visible while warning the user.
+    expect(r.pathNodeUrns.has('ORPHAN')).toBe(true)
+    expect(r.pathNodeUrns.has('Y')).toBe(true)
+  })
+
   it('retains containment ancestors for layout without putting them on the path', () => {
     const containmentParent = new Map<string, string>([
       ['A', 'ROOT'],

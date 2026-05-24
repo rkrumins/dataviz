@@ -62,6 +62,8 @@ export interface UseCanvasInteractionsOptions {
     onMoveToLayer?: (nodeId: string, layerId: string) => void
     /** Callback to trace a node */
     onTraceNode?: (nodeId: string) => void
+    /** Callback to pin/unpin a node to the active trace path (P key). */
+    onPinNode?: (nodeId: string) => void
     /** Callback to close the edge detail panel (ESC cascade). Should return true if it handled the close. */
     onCloseEdgePanel?: () => boolean
     /** Callback to close the entity drawer (ESC cascade). Should return true if it handled the close. */
@@ -120,6 +122,7 @@ export interface UseCanvasInteractionsResult {
         onTrace: () => void
         onCreate: () => void
         onCommandPalette: () => void
+        onPin: () => void
     }
 }
 
@@ -137,6 +140,7 @@ export function useCanvasInteractions(
         onInlineEditSave,
         onEdgeDeleted,
         onTraceNode,
+        onPinNode,
         onCloseEdgePanel,
         onCloseEntityDrawer,
         onExitTrace,
@@ -502,6 +506,13 @@ export function useCanvasInteractions(
             openQuickCreate(lastMousePosition.current)
         },
         onCommandPalette: openCommandPalette,
+        onPin: () => {
+            // Only meaningful when one node is selected; canvas-level gate
+            // on trace-active state lives in the supplied onPinNode handler.
+            if (selectedNodeIds.length === 1 && onPinNode) {
+                onPinNode(selectedNodeIds[0])
+            }
+        },
     }
     
     // Track mouse position for 'N' key create

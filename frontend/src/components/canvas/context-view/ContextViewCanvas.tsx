@@ -311,6 +311,9 @@ export function ContextViewCanvas({
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
+    onPinNode: (nodeId) => {
+      if (trace.isTracing) useCanvasStore.getState().togglePinTarget(nodeId)
+    },
     onNodeCreated: (nodeId) => selectNode(nodeId),
     layers: layers,
     onMoveToLayer: (_nodeId, _layerId) => {
@@ -950,6 +953,20 @@ export function ContextViewCanvas({
     pinPath.keepForLayoutUrns.forEach((u) => s.add(u))
     return s
   }, [pinPath])
+
+  // Resolve each pinned urn to a display label for the toolbar chip list.
+  const pinnedTargetsForToolbar = useMemo(
+    () =>
+      pinnedTargetUrns.map((urn) => {
+        const node = nodeMap.get(urn)
+        const label =
+          (node?.data?.label as string | undefined) ??
+          (node?.data?.businessLabel as string | undefined) ??
+          urn
+        return { urn, label }
+      }),
+    [pinnedTargetUrns, nodeMap]
+  )
 
   // Trace filter — when a trace is active, hides everything outside the trace
   // context (traced URNs + drilldown URNs + their containment ancestors).
@@ -1838,6 +1855,12 @@ export function ContextViewCanvas({
                 const id = urnToIdMap.get(urn) ?? urn
                 startTraceWithSmartLevel(id)
               }}
+              pinnedTargets={pinnedTargetsForToolbar}
+              unreachablePinUrns={pinPath.unreachablePinUrns}
+              onUnpinTarget={(urn) => useCanvasStore.getState().togglePinTarget(urn)}
+              pinDisplayMode={pinDisplayMode}
+              onSetPinDisplayMode={(m) => useCanvasStore.getState().setPinDisplayMode(m)}
+              onClearPins={clearPinTargets}
             />
           )}
         </AnimatePresence>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
 import type { UseUnifiedTraceResult } from '@/hooks/useUnifiedTrace'
@@ -24,6 +25,15 @@ export interface TraceBottomDockProps {
   onToggleExpanded: () => void
   onExit: () => void
   onJumpToUrn: (urn: string) => void
+  // Pin Lineage controls — optional; rendered only when at least one pin
+  // exists. Brings ContextView to feature parity with GraphCanvas /
+  // HierarchyCanvas's TraceToolbar pin section.
+  pinnedTargets?: Array<{ urn: string; label: string }>
+  unreachablePinUrns?: Set<string>
+  onUnpinTarget?: (urn: string) => void
+  pinDisplayMode?: 'hide' | 'dim'
+  onSetPinDisplayMode?: (mode: 'hide' | 'dim') => void
+  onClearPins?: () => void
 }
 
 const COMPACT_HEIGHT = 64
@@ -67,6 +77,12 @@ export function TraceBottomDock({
   onToggleExpanded,
   onExit,
   onJumpToUrn,
+  pinnedTargets,
+  unreachablePinUrns,
+  onUnpinTarget,
+  pinDisplayMode = 'hide',
+  onSetPinDisplayMode,
+  onClearPins,
 }: TraceBottomDockProps) {
   const [expandedHeight, setExpandedHeight] = useState(lastExpandedHeight)
   const [tab, setTab] = useState<TraceDockTab>('overview')
@@ -232,6 +248,20 @@ export function TraceBottomDock({
           onExit={onExit}
         />
 
+        {/* Pin Lineage strip — only when at least one pin exists. Mirrors the
+            chip + mode-toggle + clear surfaces in TraceToolbar so ContextView
+            users can manage pins without leaving the canvas. */}
+        {pinnedTargets && pinnedTargets.length > 0 && (
+          <PinDockStrip
+            pinnedTargets={pinnedTargets}
+            unreachablePinUrns={unreachablePinUrns}
+            onUnpinTarget={onUnpinTarget}
+            pinDisplayMode={pinDisplayMode}
+            onSetPinDisplayMode={onSetPinDisplayMode}
+            onClearPins={onClearPins}
+          />
+        )}
+
         {/* Drill-back breadcrumb — visible whenever one or more drills are
             active, in both compact and expanded modes. Self-hides when
             drilldowns is empty so the dock stays slim during a fresh
@@ -309,5 +339,104 @@ export function TraceBottomDock({
         </AnimatePresence>
       </div>
     </motion.div>
+  )
+}
+
+interface PinDockStripProps {
+  pinnedTargets: Array<{ urn: string; label: string }>
+  unreachablePinUrns?: Set<string>
+  onUnpinTarget?: (urn: string) => void
+  pinDisplayMode: 'hide' | 'dim'
+  onSetPinDisplayMode?: (mode: 'hide' | 'dim') => void
+  onClearPins?: () => void
+}
+
+function PinDockStrip({
+  pinnedTargets,
+  unreachablePinUrns,
+  onUnpinTarget,
+  pinDisplayMode,
+  onSetPinDisplayMode,
+  onClearPins,
+}: PinDockStripProps) {
+  const unreachableCount = unreachablePinUrns?.size ?? 0
+  return (
+    <div className="flex items-center gap-2 px-4 py-1.5 border-t border-glass-border bg-canvas-elevated/40">
+      <div className="flex items-center gap-1 flex-1 min-w-0 overflow-x-auto custom-scrollbar">
+        <LucideIcons.Pin className="w-3 h-3 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+        {pinnedTargets.map((p) => {
+          const isUnreachable = unreachablePinUrns?.has(p.urn) ?? false
+          return (
+            <span
+              key={p.urn}
+              className={cn(
+                'flex items-center gap-1 px-1.5 py-0.5 rounded-md text-2xs font-medium flex-shrink-0',
+                isUnreachable
+                  ? 'bg-red-500/10 text-red-600 dark:text-red-400 ring-1 ring-red-500/40'
+                  : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
+              )}
+              title={isUnreachable ? `${p.label} has no lineage path to the focus` : p.label}
+            >
+              <span className="max-w-[120px] truncate">{p.label}</span>
+              {onUnpinTarget && (
+                <button
+                  onClick={() => onUnpinTarget(p.urn)}
+                  className="hover:bg-black/10 dark:hover:bg-white/10 rounded-sm p-0.5 -mr-0.5"
+                  title="Unpin"
+                >
+                  <LucideIcons.X className="w-2.5 h-2.5" />
+                </button>
+              )}
+            </span>
+          )
+        })}
+        {unreachableCount > 0 && (
+          <span
+            className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-2xs font-medium bg-red-500/10 text-red-600 dark:text-red-400 flex-shrink-0"
+            title="These pins have no lineage path from the focus"
+          >
+            <LucideIcons.AlertTriangle className="w-3 h-3" />
+            {unreachableCount} unreachable
+          </span>
+        )}
+      </div>
+      {onSetPinDisplayMode && (
+        <div className="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 flex-shrink-0">
+          <button
+            onClick={() => onSetPinDisplayMode('hide')}
+            className={cn(
+              'px-2 py-1 rounded-md text-2xs font-medium transition-all',
+              pinDisplayMode === 'hide'
+                ? 'bg-amber-500 text-white shadow-sm'
+                : 'text-ink-muted hover:bg-black/5 dark:hover:bg-white/10'
+            )}
+            title="Hide everything off the pinned path"
+          >
+            Isolate
+          </button>
+          <button
+            onClick={() => onSetPinDisplayMode('dim')}
+            className={cn(
+              'px-2 py-1 rounded-md text-2xs font-medium transition-all',
+              pinDisplayMode === 'dim'
+                ? 'bg-amber-500 text-white shadow-sm'
+                : 'text-ink-muted hover:bg-black/5 dark:hover:bg-white/10'
+            )}
+            title="Keep full graph as dimmed context"
+          >
+            Dim
+          </button>
+        </div>
+      )}
+      {onClearPins && (
+        <button
+          onClick={onClearPins}
+          className="p-1.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted transition-all flex-shrink-0"
+          title="Clear all pins"
+        >
+          <LucideIcons.PinOff className="w-4 h-4" />
+        </button>
+      )}
+    </div>
   )
 }

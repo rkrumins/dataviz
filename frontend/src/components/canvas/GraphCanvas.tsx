@@ -300,6 +300,20 @@ export function GraphCanvas({ className }: { className?: string }) {
     return s
   }, [pinPath])
 
+  // Resolve each pinned urn to a display label for the toolbar chip list.
+  const pinnedTargetsForToolbar = useMemo(
+    () =>
+      pinnedTargetUrns.map((urn) => {
+        const node = nodeMap.get(urn)
+        const label =
+          (node?.data?.label as string | undefined) ??
+          (node?.data?.businessLabel as string | undefined) ??
+          urn
+        return { urn, label }
+      }),
+    [pinnedTargetUrns, nodeMap]
+  )
+
   // 9. Build traceContextSet
   const traceContextSet = useMemo(() => {
     const set = new Set<string>()
@@ -1268,6 +1282,9 @@ export function GraphCanvas({ className }: { className?: string }) {
   // 19. Canvas interactions (context menu, inline edit, quick create, command palette)
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => trace.startTrace(nodeId),
+    onPinNode: (nodeId) => {
+      if (trace.isTracing) togglePinTarget(nodeId)
+    },
     onNodeCreated: (nodeId) => selectNode(nodeId),
     onCloseEdgePanel: () => {
       if (isEdgePanelOpen) {
@@ -1403,6 +1420,9 @@ export function GraphCanvas({ className }: { className?: string }) {
               availableLineageEdgeTypes={lineageEdgeTypes}
               position="top"
               pinnedCount={pinnedTargetUrns.length}
+              pinnedTargets={pinnedTargetsForToolbar}
+              unreachablePinUrns={pinPath.unreachablePinUrns}
+              onUnpinTarget={togglePinTarget}
               pinDisplayMode={pinDisplayMode}
               onSetPinDisplayMode={(m) => useCanvasStore.getState().setPinDisplayMode(m)}
               onClearPins={clearPinTargets}

@@ -12,6 +12,7 @@
  * - Escape: Clear selection / Cancel operation
  * - T: Trace lineage from selected node
  * - N: Create new node
+ * - P: Pin/Unpin selected node to the active trace path
  */
 
 import { useEffect, useCallback, useRef } from 'react'
@@ -38,6 +39,8 @@ export interface CanvasKeyboardHandlers {
     onTrace?: () => void
     /** Create new node */
     onCreate?: () => void
+    /** Pin/Unpin selected node to the active trace path */
+    onPin?: () => void
     /** Undo last action */
     onUndo?: () => void
     /** Redo last undone action */
@@ -191,6 +194,13 @@ export function useCanvasKeyboard({
             handlersRef.current.onCreate?.()
             return
         }
+
+        // Pin/Unpin: P
+        if (e.key === 'p' && !isMod) {
+            e.preventDefault()
+            handlersRef.current.onPin?.()
+            return
+        }
     }, [enabled, defaultDelete, defaultCancel])
     
     // Attach event listener
@@ -226,6 +236,7 @@ export const KEYBOARD_SHORTCUTS = [
     { key: 'Escape', action: 'Cancel / Deselect' },
     { key: 'T', action: 'Trace Lineage' },
     { key: 'N', action: 'New Entity' },
+    { key: 'P', action: 'Pin/Unpin Selected' },
 ]
 
 export default useCanvasKeyboard

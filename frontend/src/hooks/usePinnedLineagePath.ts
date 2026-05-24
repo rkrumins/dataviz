@@ -48,6 +48,12 @@ export interface PinnedPathResult {
    * sub-lineage within its hierarchy.
    */
   keepForLayoutUrns: Set<string>
+  /**
+   * Pinned URNs that have no directed lineage route to/from the focus.
+   * Force-added to pathNodeUrns so they stay visible, but flagged so the UI
+   * can warn the user that the pin contributes nothing.
+   */
+  unreachablePinUrns: Set<string>
   /** True only when there is a focus AND at least one pin. */
   active: boolean
 }
@@ -56,6 +62,7 @@ const EMPTY: PinnedPathResult = {
   pathNodeUrns: new Set(),
   pathEdgeIds: new Set(),
   keepForLayoutUrns: new Set(),
+  unreachablePinUrns: new Set(),
   active: false,
 }
 
@@ -137,7 +144,16 @@ export function computePinnedPath(input: PinnedPathInput): PinnedPathResult {
     }
   }
 
-  return { pathNodeUrns, pathEdgeIds, keepForLayoutUrns, active: true }
+  // A pin is "unreachable" iff it lies in neither focus's downstream nor
+  // upstream lineage reach. The pin itself is in df/bf only when it equals
+  // the focus, so check both sides exclusive of that trivial case.
+  const unreachablePinUrns = new Set<string>()
+  for (const p of pinnedUrns) {
+    if (p === focusUrn) continue
+    if (!df.has(p) && !bf.has(p)) unreachablePinUrns.add(p)
+  }
+
+  return { pathNodeUrns, pathEdgeIds, keepForLayoutUrns, unreachablePinUrns, active: true }
 }
 
 /**

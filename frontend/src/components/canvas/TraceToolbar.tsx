@@ -68,6 +68,13 @@ interface TraceToolbarProps {
     position?: 'top' | 'bottom' | 'floating'
     /** Pin Lineage — number of pinned trace-path endpoints */
     pinnedCount?: number
+    /** Pin Lineage — per-pin chip list (urn + display label). When provided,
+     *  replaces the bare count with individually-removable chips. */
+    pinnedTargets?: Array<{ urn: string; label: string }>
+    /** Pin Lineage — urns whose lineage path to the focus is empty (warned). */
+    unreachablePinUrns?: Set<string>
+    /** Pin Lineage — remove a single pin (chip ✕ button). */
+    onUnpinTarget?: (urn: string) => void
     /** Pin Lineage — how off-path elements are shown */
     pinDisplayMode?: 'hide' | 'dim'
     /** Pin Lineage — switch off-path display mode */
@@ -102,6 +109,9 @@ export function TraceToolbar({
     className,
     position = 'floating',
     pinnedCount = 0,
+    pinnedTargets,
+    unreachablePinUrns,
+    onUnpinTarget,
     pinDisplayMode = 'hide',
     onSetPinDisplayMode,
     onClearPins,
@@ -335,13 +345,58 @@ export function TraceToolbar({
                     <>
                         <div className="h-4 w-[1px] bg-glass-border" />
                         <div className="flex items-center gap-1">
-                            <span
-                                className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                                title="Pinned trace-path endpoints"
-                            >
-                                <LucideIcons.Pin className="w-3 h-3" />
-                                {pinnedCount} pinned
-                            </span>
+                            {pinnedTargets && pinnedTargets.length > 0 ? (
+                                <div className="flex items-center gap-1 max-w-[320px] overflow-x-auto custom-scrollbar">
+                                    <LucideIcons.Pin className="w-3 h-3 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                                    {pinnedTargets.map((p) => {
+                                        const isUnreachable = unreachablePinUrns?.has(p.urn) ?? false
+                                        return (
+                                            <span
+                                                key={p.urn}
+                                                className={cn(
+                                                    "flex items-center gap-1 px-1.5 py-0.5 rounded-md text-2xs font-medium flex-shrink-0",
+                                                    isUnreachable
+                                                        ? "bg-red-500/10 text-red-600 dark:text-red-400 ring-1 ring-red-500/40"
+                                                        : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                                                )}
+                                                title={
+                                                    isUnreachable
+                                                        ? `${p.label} has no lineage path to the focus`
+                                                        : p.label
+                                                }
+                                            >
+                                                <span className="max-w-[120px] truncate">{p.label}</span>
+                                                {onUnpinTarget && (
+                                                    <button
+                                                        onClick={() => onUnpinTarget(p.urn)}
+                                                        className="hover:bg-black/10 dark:hover:bg-white/10 rounded-sm p-0.5 -mr-0.5"
+                                                        title="Unpin"
+                                                    >
+                                                        <LucideIcons.X className="w-2.5 h-2.5" />
+                                                    </button>
+                                                )}
+                                            </span>
+                                        )
+                                    })}
+                                    {unreachablePinUrns && unreachablePinUrns.size > 0 && (
+                                        <span
+                                            className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-2xs font-medium bg-red-500/10 text-red-600 dark:text-red-400 flex-shrink-0"
+                                            title="These pins have no lineage path from the focus"
+                                        >
+                                            <LucideIcons.AlertTriangle className="w-3 h-3" />
+                                            {unreachablePinUrns.size} unreachable
+                                        </span>
+                                    )}
+                                </div>
+                            ) : (
+                                <span
+                                    className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                                    title="Pinned trace-path endpoints"
+                                >
+                                    <LucideIcons.Pin className="w-3 h-3" />
+                                    {pinnedCount} pinned
+                                </span>
+                            )}
                             {onSetPinDisplayMode && (
                                 <div className="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5">
                                     <button
