@@ -34,6 +34,7 @@ import { NodePalette } from './NodePalette'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { TraceToolbar } from './TraceToolbar'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
+import { usePinnedLineagePath } from '@/hooks/usePinnedLineagePath'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 
@@ -116,6 +117,39 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     return set
   }, [trace.isTracing, trace.visibleTraceNodes, parentMap])
 
+  // Pin Lineage — isolate the sub-lineage between the trace focus and the
+  // pinned nodes. Canvas node id === urn, so focusId/pinned urns/edge
+  // endpoints share one key space.
+  const pinnedTargetUrns = useCanvasStore((s) => s.pinnedTargetUrns)
+  const pinDisplayMode = useCanvasStore((s) => s.pinDisplayMode)
+  const togglePinTarget = useCanvasStore((s) => s.togglePinTarget)
+  const clearPinTargets = useCanvasStore((s) => s.clearPinTargets)
+
+  const pinPath = usePinnedLineagePath({
+    edges,
+    isContainmentEdge,
+    focusUrn: trace.focusId,
+    pinnedUrns: pinnedTargetUrns,
+    containmentParent: parentMap,
+  })
+
+  // Pins are scoped to the active trace's focus — drop them whenever the
+  // focus changes (new trace) or the trace is cleared.
+  const lastFocusRef = useRef<string | null>(trace.focusId)
+  useEffect(() => {
+    if (lastFocusRef.current !== trace.focusId) {
+      lastFocusRef.current = trace.focusId
+      clearPinTargets()
+    }
+  }, [trace.focusId, clearPinTargets])
+
+  const pinKeptUrns = useMemo(() => {
+    if (!pinPath.active) return null
+    const s = new Set(pinPath.pathNodeUrns)
+    pinPath.keepForLayoutUrns.forEach((u) => s.add(u))
+    return s
+  }, [pinPath])
+
   // ESC-driven trace exit. Mirrors ContextViewCanvas: purges trace-merged
   // edges from the canvas store, clears trace state, and reverts ancestor-
   // chain auto-expansion. Without this, ESC fell through to selection-clear
@@ -193,6 +227,35 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [nodes.length, hierarchyRoots, childMap, nodeMap])
 
+  // Hide-mode pruning: keep a subtree iff the node itself is on the pinned
+  // sub-lineage OR any descendant is. Dim-mode leaves the tree intact and
+  // relies on the substituted traceContextSet below for opacity.
+  const displayedHierarchyTree = useMemo(() => {
+    if (!pinPath.active || pinDisplayMode !== 'hide' || !pinKeptUrns) {
+      return hierarchyTree
+    }
+    const prune = (node: HierarchyNode): HierarchyNode | null => {
+      const kids = node.children
+        .map(prune)
+        .filter((n): n is HierarchyNode => n !== null)
+      if (kids.length === 0 && !pinKeptUrns.has(node.id)) return null
+      return { ...node, children: kids }
+    }
+    return hierarchyTree
+      .map(prune)
+      .filter((n): n is HierarchyNode => n !== null)
+  }, [hierarchyTree, pinPath.active, pinDisplayMode, pinKeptUrns])
+
+  // Dim-mode: substitute the trace context with the pinned path so off-path
+  // nodes dim via the existing `isDimmed = isTraceActive && !contextSet.has(id)`
+  // styling in HierarchyContainer. Pin-active forces isTraceActive=true below.
+  const effectiveTraceContextSet = useMemo(() => {
+    if (!pinPath.active || pinDisplayMode !== 'dim') return traceContextSet
+    return pinPath.pathNodeUrns
+  }, [pinPath.active, pinPath.pathNodeUrns, pinDisplayMode, traceContextSet])
+
+  const effectiveTraceActive = trace.isTracing || pinPath.active
+
   // Flatten tree for search
   const flatNodes = useMemo(() => {
     const flat: HierarchyNode[] = []
@@ -200,9 +263,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       flat.push({ ...node, data: { ...node.data, _path: [...path, node.id] } })
       node.children.forEach((child) => traverse(child, [...path, node.id]))
     }
-    hierarchyTree.forEach((root) => traverse(root, []))
+    displayedHierarchyTree.forEach((root) => traverse(root, []))
     return flat
-  }, [hierarchyTree])
+  }, [displayedHierarchyTree])
 
   // Search functionality
   // Guard: only update searchResults when the value actually changes to prevent
@@ -423,11 +486,11 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
 
       {/* Hierarchy Content */}
       <div className="flex-1 overflow-auto p-6 custom-scrollbar">
-        {hierarchyTree.length === 0 ? (
+        {displayedHierarchyTree.length === 0 ? (
           <EmptyState />
         ) : (
           <div className="space-y-3">
-            {hierarchyTree.map((rootNode) => (
+            {displayedHierarchyTree.map((rootNode) => (
               <HierarchyContainer
                 key={rootNode.id}
                 node={rootNode}
@@ -456,8 +519,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
                     )
                   }
                 }}
-                isTraceActive={trace.isTracing}
-                traceContextSet={traceContextSet}
+                isTraceActive={effectiveTraceActive}
+                traceContextSet={effectiveTraceContextSet}
                 traceFocusId={trace.focusId}
               />
             ))}
@@ -489,6 +552,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               isLoading={trace.isLoading}
               availableLineageEdgeTypes={lineageEdgeTypes}
               position="top"
+              pinnedCount={pinnedTargetUrns.length}
+              pinDisplayMode={pinDisplayMode}
+              onSetPinDisplayMode={(m) => useCanvasStore.getState().setPinDisplayMode(m)}
+              onClearPins={clearPinTargets}
             />
           </div>
         )}
@@ -515,6 +582,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onDeleteNode={interactions.deleteNode}
         onCreateChild={interactions.createChild}
         onTraceNode={(id) => trace.startTrace(id)}
+        onPinTarget={(id) => togglePinTarget(id)}
+        pinnedTargetIds={pinnedTargetUrns}
+        traceActive={trace.isTracing}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={interactions.deleteEdge}
