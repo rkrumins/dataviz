@@ -48,7 +48,7 @@ from backend.app.jobs.metrics import increment as metrics_increment
 
 from .cancel import JobCancelled, get_registry as get_cancel_registry
 from .models import AggregationJobORM
-from .fingerprint import compute_graph_fingerprint
+from .fingerprint import compute_graph_fingerprint, fingerprints_match
 
 logger = logging.getLogger(__name__)
 
@@ -246,26 +246,41 @@ class AggregationWorker:
 
                 await session.commit()
 
-                # Run cursor-based batch materialization with retry + timeout.
-                # On transient provider failures (AggregationBatchAbort, connection
-                # errors), retry up to max_retries times with exponential backoff.
-                # The overall job is wrapped in a timeout to catch hung queries.
-                # Use per-job timeout if set, otherwise global default
-                job_timeout = job.timeout_secs or _JOB_TIMEOUT_SECS
-
-                result = await asyncio.wait_for(
-                    self._materialize_with_retries(
-                        session=session,
-                        job=job,
-                        provider=provider,
-                        containment_types=containment_types,
-                        lineage_types=lineage_types,
-                        cancel_event=cancel_event,
-                        emitter=emitter,
-                        scope=scope,
-                    ),
-                    timeout=job_timeout,
+                # Enhancement 1 — skip rebuild when the graph (per
+                # ``compute_graph_fingerprint``) and ontology
+                # (per ``job.ontology_fingerprint``) haven't shifted
+                # since the most recent completed job. Returns a
+                # synthetic ``result`` dict that the existing success
+                # block below treats identically to a real provider
+                # result, so all platform/audit/state events still
+                # fire. Returns None when a full rebuild is needed.
+                skip_result = await self._maybe_skip_unchanged(
+                    session, job,
+                    fingerprint_before=job.graph_fingerprint_before,
                 )
+                if skip_result is not None:
+                    result = skip_result
+                else:
+                    # Run cursor-based batch materialization with retry + timeout.
+                    # On transient provider failures (AggregationBatchAbort, connection
+                    # errors), retry up to max_retries times with exponential backoff.
+                    # The overall job is wrapped in a timeout to catch hung queries.
+                    # Use per-job timeout if set, otherwise global default
+                    job_timeout = job.timeout_secs or _JOB_TIMEOUT_SECS
+
+                    result = await asyncio.wait_for(
+                        self._materialize_with_retries(
+                            session=session,
+                            job=job,
+                            provider=provider,
+                            containment_types=containment_types,
+                            lineage_types=lineage_types,
+                            cancel_event=cancel_event,
+                            emitter=emitter,
+                            scope=scope,
+                        ),
+                        timeout=job_timeout,
+                    )
 
                 # Success
                 job.status = "completed"
@@ -505,6 +520,95 @@ class AggregationWorker:
                     setattr(state, key, value)
         except Exception as e:
             logger.warning("Failed to update data source state for %s: %s", data_source_id, e)
+
+    async def _maybe_skip_unchanged(
+        self,
+        session: AsyncSession,
+        job: AggregationJobORM,
+        *,
+        fingerprint_before: Optional[str],
+    ) -> Optional[dict]:
+        """Enhancement 1 — short-circuit when nothing relevant changed.
+
+        Returns a synthetic ``result`` dict that mimics
+        ``materialize_aggregated_edges_batch`` when the current graph
+        + ontology fingerprint matches the most recent completed job
+        on the same data source. Caller falls through to the existing
+        success block which emits all platform / audit / state
+        events identically to a real run.
+
+        Returns None when a full rebuild is needed. The decision is
+        intentionally conservative: any missing or ambiguous input
+        (no prior, no fingerprint, no edge count) defaults to "do
+        not skip" so a corrupted cache can never mask a real change.
+
+        Trigger-source overrides: ``manual``, ``drift``, and ``purge``
+        carry explicit operator/system intent and always rebuild.
+        Routine triggers (``schedule``, ``api``, ``onboarding``)
+        qualify for the skip.
+        """
+        # Kill switch — operators can disable without redeploying.
+        flag = os.getenv("AGGREGATION_SKIP_UNCHANGED_ENABLED", "true")
+        if str(flag).strip().lower() not in ("1", "true", "yes", "on"):
+            return None
+        if job.trigger_source in ("manual", "drift", "purge"):
+            return None
+        if not fingerprint_before:
+            return None
+
+        prior = await session.execute(
+            select(AggregationJobORM)
+            .where(
+                AggregationJobORM.data_source_id == job.data_source_id,
+                AggregationJobORM.status == "completed",
+                AggregationJobORM.graph_fingerprint_after.isnot(None),
+                AggregationJobORM.lineage_edge_count.isnot(None),
+                AggregationJobORM.id != job.id,
+            )
+            .order_by(AggregationJobORM.completed_at.desc())
+            .limit(1)
+        )
+        prior_job = prior.scalar_one_or_none()
+        if prior_job is None:
+            return None
+        if not fingerprints_match(
+            prior_job.graph_fingerprint_after, fingerprint_before,
+        ):
+            return None
+        # Ontology fingerprint guard — catches edits that don't shift
+        # node/edge counts (e.g., re-tagging an existing relationship
+        # type as a containment edge). When either side is NULL we
+        # cannot compare, so default to "do not skip".
+        if (
+            job.ontology_fingerprint
+            and prior_job.ontology_fingerprint
+            and job.ontology_fingerprint != prior_job.ontology_fingerprint
+        ):
+            return None
+
+        try:
+            metrics_increment(
+                "aggregation_skipped_unchanged_total",
+                labels={"trigger_source": job.trigger_source or ""},
+            )
+        except Exception:
+            pass
+
+        logger.info(
+            "Aggregation job %s: skipping rebuild — fingerprint matches "
+            "prior completed job %s (fp=%s, prior_edges=%d, prior_created=%d).",
+            job.id, prior_job.id, (fingerprint_before or "")[:8],
+            prior_job.lineage_edge_count or 0,
+            prior_job.created_edges or 0,
+        )
+        return {
+            "aggregated_edges_affected": prior_job.created_edges or 0,
+            "total_edges": prior_job.lineage_edge_count or 0,
+            "processed": prior_job.lineage_edge_count or 0,
+            "input_edges_processed": prior_job.lineage_edge_count or 0,
+            "errors": 0,
+            "skipped_unchanged": True,
+        }
 
     async def _materialize_with_retries(
         self,
