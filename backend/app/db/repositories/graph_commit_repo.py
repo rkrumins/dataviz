@@ -30,7 +30,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -124,6 +124,8 @@ async def persist_commit(
     actor: str | None = None,
     view_id: str | None = None,
     pr_id: str | None = None,
+    extra_parent_ids: Sequence[str] | None = None,
+    merge_base_id: str | None = None,
 ) -> CommitResult:
     """Persist *plan* on *branch* and advance the ref. Raises
     :class:`HeadMovedError` if the branch moved since
@@ -226,6 +228,11 @@ async def persist_commit(
     # 4. The commit row.
     committed_at = _now()
     parent_ids = [expected_head_commit_id] if expected_head_commit_id else []
+    # Merge commit: append the source-branch head(s) as additional
+    # parents. The hash + the commit row both record every parent so
+    # blame / history traversal see the merge correctly.
+    if extra_parent_ids:
+        parent_ids = parent_ids + list(extra_parent_ids)
     commit_hash = compute_commit_hash(
         root_hash=plan.root_hash,
         parent_ids=parent_ids,
@@ -240,7 +247,7 @@ async def persist_commit(
             graph_id=graph_id,
             commit_hash=commit_hash,
             parent_ids=parent_ids,
-            merge_base_id=None,
+            merge_base_id=merge_base_id,
             root_manifest_hash=plan.root_hash,
             author=author,
             message=message,

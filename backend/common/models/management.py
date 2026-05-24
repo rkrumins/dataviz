@@ -661,6 +661,18 @@ class ViewCreateRequest(BaseModel):
     visibility: str = "private"
     tags: Optional[List[str]] = None
     is_pinned: bool = Field(False, alias="isPinned")
+    # Version-control binding (optional at create time; can also be
+    # set later via POST /views/{id}/enter-edit). Plan section
+    # "View-as-branch model" — Day-0 convenience so the canvas can
+    # open the bound view in a single round-trip.
+    source_graph_id: Optional[str] = Field(None, alias="sourceGraphId")
+    branching_policy: Optional[str] = Field(
+        None, alias="branchingPolicy",
+        pattern="^(shared_main|per_view|per_user_per_view)$",
+    )
+    merge_target_branch: Optional[str] = Field(
+        None, alias="mergeTargetBranch",
+    )
 
     class Config:
         populate_by_name = True
@@ -717,6 +729,11 @@ class ViewResponse(BaseModel):
     # knows some entity classifications may have changed since creation.
     # NULL on legacy rows → wizard treats as "drift check unavailable".
     ontology_digest: Optional[str] = Field(None, alias="ontologyDigest")
+    # View-as-branch binding (NULL on legacy / unbound views).
+    source_graph_id: Optional[str] = Field(None, alias="sourceGraphId")
+    source_branch: Optional[str] = Field(None, alias="sourceBranch")
+    branching_policy: Optional[str] = Field(None, alias="branchingPolicy")
+    merge_target_branch: Optional[str] = Field(None, alias="mergeTargetBranch")
 
     class Config:
         populate_by_name = True

@@ -43,7 +43,11 @@ from backend.app.auth.dependencies import get_optional_user, requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.graph_store_engine import get_graph_store_db_session
 from backend.app.db.models import OntologyORM
-from backend.app.db.repositories import graph_repo, graph_working_set_repo as ws_repo
+from backend.app.db.repositories import (
+    graph_repo,
+    graph_store_outbox_repo,
+    graph_working_set_repo as ws_repo,
+)
 from backend.app.db.repositories.graph_commit_repo import HeadMovedError
 from backend.app.services.graph_authoring_engine import GraphAuthoringEngine
 from backend.app.services.graph_outbox_relay import sse_subscribe
@@ -872,6 +876,301 @@ async def create_branch(
         created_by=_uid(user),
     )
     return {"branch": ref.name, "commit_id": ref.commit_id}
+
+
+# ── merge endpoints ────────────────────────────────────────────────
+
+
+class MergePlanRequest(BaseModel):
+    message: Optional[str] = None
+    auto_commit_if_clean: bool = False
+
+
+class MergeResolveRequest(BaseModel):
+    # {object_id: {"kind": "node"|"edge", "content_hash": "..."} | null}
+    # null = delete the object as the resolution.
+    resolutions: dict[str, Optional[dict[str, str]]]
+    message: Optional[str] = None
+
+
+def _serialise_merge_plan(plan) -> dict:
+    return {
+        "merge_id": plan.merge_id,
+        "graph_id": plan.graph_id,
+        "source_branch": plan.source_branch,
+        "target_branch": plan.target_branch,
+        "base_commit_id": plan.base_commit_id,
+        "source_commit_id": plan.source_commit_id,
+        "target_commit_id": plan.target_commit_id,
+        "status": plan.status,
+        "has_no_conflicts": plan.has_no_conflicts,
+        "has_no_integrity_violations": plan.has_no_integrity_violations,
+        "is_mergeable": plan.is_mergeable,
+        "auto_entry_count": plan.auto_entry_count,
+        "conflicts": plan.conflicts,
+        "integrity_violations": plan.integrity_violations,
+        "result_commit_id": plan.result_commit_id,
+        "delta_summary": dict(plan.delta_summary) if plan.delta_summary else None,
+    }
+
+
+@router.post(
+    "/{ws_id}/graphs/{graph_id}/branches/{source}/merge-into/{target}"
+)
+async def merge_branch_into(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    source: str = Path(...),
+    target: str = Path(...),
+    body: MergePlanRequest = Body(default_factory=MergePlanRequest),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    mgmt_session: AsyncSession = Depends(get_db_session),
+    user=Depends(get_optional_user),
+    _=Depends(requires("workspace:graph:merge", workspace="ws_id")),
+):
+    """Plan (and optionally auto-commit) a three-way merge of *source*
+    into *target* on the same graph.
+
+    - ``auto_commit_if_clean=true`` + the plan is clean + integrity-
+      clean → the merge commit is written inline; response carries
+      ``status='committed'`` + ``result_commit_id``.
+    - Otherwise the plan is persisted as ``status='open'`` with
+      conflicts + integrity violations surfaced for the client to
+      resolve via POST /merges/{id}/resolve.
+    """
+    from backend.app.services import graph_merge_service
+
+    graph = await graph_repo.get_graph(session, graph_id)
+    ontology_spec = None
+    if graph.schema_mode == "strict" and graph.ontology_id:
+        ontology_spec = await _load_ontology_spec(
+            mgmt_session, graph.ontology_id,
+        )
+
+    try:
+        plan = await graph_merge_service.plan_merge(
+            session,
+            graph_id=graph_id,
+            source_branch=source,
+            target_branch=target,
+            user_id=_uid(user),
+            message=body.message,
+            auto_commit_if_clean=body.auto_commit_if_clean,
+            ontology=ontology_spec,
+        )
+    except graph_repo.GraphNotFoundError as exc:
+        raise HTTPException(404, detail={"code": "branch_not_found", "detail": str(exc)})
+    except HeadMovedError:
+        raise HTTPException(409, detail={"code": "head_moved"})
+    except ValueError as exc:
+        raise HTTPException(422, detail={"code": "invalid_merge", "detail": str(exc)})
+
+    return _serialise_merge_plan(plan)
+
+
+@router.get("/{ws_id}/graphs/{graph_id}/merges/{merge_id}")
+async def get_merge(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    merge_id: str = Path(...),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    _=Depends(requires("workspace:graph:read", workspace="ws_id")),
+):
+    """Re-read a previously-planned merge: its current status,
+    conflicts, and (when committed) the merge commit id."""
+    from backend.app.db.models_graph import (
+        GraphMergeORM,
+        GraphMergeConflictORM,
+    )
+
+    merge = (
+        await session.execute(
+            select(GraphMergeORM).where(
+                GraphMergeORM.id == merge_id,
+                GraphMergeORM.graph_id == graph_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if merge is None:
+        raise HTTPException(404, detail={"code": "merge_not_found"})
+
+    conflicts = (
+        await session.execute(
+            select(GraphMergeConflictORM).where(
+                GraphMergeConflictORM.merge_id == merge_id
+            )
+        )
+    ).scalars().all()
+
+    return {
+        "merge_id": merge.id,
+        "graph_id": merge.graph_id,
+        "source_branch": merge.source_branch,
+        "target_branch": merge.target_branch,
+        "base_commit_id": merge.base_commit_id,
+        "source_commit_id": merge.source_commit_id,
+        "target_commit_id": merge.target_commit_id,
+        "status": merge.status,
+        "result_commit_id": merge.result_commit_id,
+        "conflicts": [
+            {
+                "object_kind": c.object_kind,
+                "object_id": c.object_id,
+                "conflict_class": c.conflict_class,
+                "base_value": c.base_value,
+                "source_value": c.source_value,
+                "target_value": c.target_value,
+                "resolution": c.resolution,
+                "resolved_value": c.resolved_value,
+                "resolved_by": c.resolved_by,
+                "resolved_at": c.resolved_at,
+            }
+            for c in conflicts
+        ],
+        "created_by": merge.created_by,
+        "created_at": merge.created_at,
+        "updated_at": merge.updated_at,
+    }
+
+
+@router.post("/{ws_id}/graphs/{graph_id}/merges/{merge_id}/resolve")
+async def resolve_merge(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    merge_id: str = Path(...),
+    body: MergeResolveRequest = Body(...),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    mgmt_session: AsyncSession = Depends(get_db_session),
+    user=Depends(get_optional_user),
+    _=Depends(requires("workspace:graph:merge", workspace="ws_id")),
+):
+    """Apply caller-supplied resolutions to a merge plan and commit
+    it. Re-runs three-way + integrity from scratch so any head
+    advance during human-resolution time is picked up. Returns the
+    committed plan or 422 if integrity violations remain."""
+    from backend.app.services import graph_merge_service
+
+    graph = await graph_repo.get_graph(session, graph_id)
+    ontology_spec = None
+    if graph.schema_mode == "strict" and graph.ontology_id:
+        ontology_spec = await _load_ontology_spec(
+            mgmt_session, graph.ontology_id,
+        )
+
+    # Translate API resolution shape → engine shape.
+    engine_resolutions: dict[str, tuple[str, str] | None] = {}
+    for key, value in body.resolutions.items():
+        if value is None:
+            engine_resolutions[key] = None
+        else:
+            engine_resolutions[key] = (value["kind"], value["content_hash"])
+
+    try:
+        plan = await graph_merge_service.commit_resolved_merge(
+            session,
+            merge_id=merge_id,
+            resolutions=engine_resolutions,
+            user_id=_uid(user),
+            message=body.message,
+            ontology=ontology_spec,
+        )
+    except graph_merge_service.MergeNotFoundError:
+        raise HTTPException(404, detail={"code": "merge_not_found"})
+    except graph_merge_service.MergeNotResolvableError as exc:
+        raise HTTPException(
+            422,
+            detail={"code": "merge_not_resolvable", "detail": str(exc)},
+        )
+    except HeadMovedError:
+        raise HTTPException(409, detail={"code": "head_moved"})
+    except graph_repo.GraphNotFoundError as exc:
+        raise HTTPException(404, detail={"code": "branch_not_found", "detail": str(exc)})
+
+    return _serialise_merge_plan(plan)
+
+
+@router.get("/{ws_id}/graphs/{graph_id}/branches")
+async def list_branches(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    _=Depends(requires("workspace:graph:read", workspace="ws_id")),
+):
+    """All refs on a graph (branches + tags). Newest-touched first."""
+    refs = await graph_repo.list_branches(session, graph_id=graph_id)
+    return {
+        "graph_id": graph_id,
+        "branches": [
+            {
+                "name": r.name,
+                "ref_type": r.ref_type,
+                "commit_id": r.commit_id,
+                "revision": r.revision,
+                "is_protected": r.is_protected,
+                "created_by": r.created_by,
+                "created_at": r.created_at,
+                "updated_at": r.updated_at,
+            }
+            for r in refs
+        ],
+    }
+
+
+@router.delete(
+    "/{ws_id}/graphs/{graph_id}/branches/{branch}", status_code=204
+)
+async def delete_branch(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    branch: str = Path(...),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    mgmt_session: AsyncSession = Depends(get_db_session),
+    user=Depends(get_optional_user),
+    _=Depends(requires("workspace:graph:delete", workspace="ws_id")),
+):
+    """Delete a branch ref. Guards (each returns structured 409):
+
+    - cannot_delete_default: branch is the graph's default_branch
+    - working_sets_open: at least one user has an open working set
+    - views_bound: at least one View still has source_branch=<branch>
+
+    Commits/blobs are content-addressed and untouched — only the ref
+    row is removed. Emits visualization.branch.deleted outbox event.
+    """
+    # Cross-DB bound-view lookup (the repo can't query mgmt DB).
+    bound_view_ids = list(
+        (
+            await mgmt_session.execute(
+                select(ViewORM.id).where(
+                    ViewORM.source_graph_id == graph_id,
+                    ViewORM.source_branch == branch,
+                    ViewORM.deleted_at.is_(None),
+                )
+            )
+        ).scalars()
+    )
+    try:
+        await graph_repo.delete_branch(
+            session,
+            graph_id=graph_id,
+            branch=branch,
+            bound_view_ids=bound_view_ids,
+        )
+    except graph_repo.BranchDeleteBlockedError as exc:
+        raise HTTPException(409, detail={"code": exc.code, **exc.context})
+    except graph_repo.GraphNotFoundError:
+        raise HTTPException(404, detail={"code": "branch_not_found"})
+
+    await graph_store_outbox_repo.emit(
+        session,
+        event_type="visualization.branch.deleted",
+        aggregate_id=graph_id,
+        payload={
+            "graph_id": graph_id,
+            "branch": branch,
+            "actor": _uid(user),
+        },
+    )
 
 
 __all__ = ["router"]

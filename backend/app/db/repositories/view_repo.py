@@ -163,6 +163,10 @@ def _to_response(
         updatedAt=row.updated_at,
         deletedAt=getattr(row, 'deleted_at', None),
         ontologyDigest=getattr(row, 'ontology_digest', None),
+        sourceGraphId=getattr(row, 'source_graph_id', None),
+        sourceBranch=getattr(row, 'source_branch', None),
+        branchingPolicy=getattr(row, 'branching_policy', None),
+        mergeTargetBranch=getattr(row, 'merge_target_branch', None),
     )
 
 
@@ -231,6 +235,9 @@ async def create_view(
         tags=json.dumps(req.tags) if req.tags else None,
         is_pinned=req.is_pinned,
         ontology_digest=ontology_digest,
+        source_graph_id=req.source_graph_id,
+        branching_policy=req.branching_policy or "per_view",
+        merge_target_branch=req.merge_target_branch or "main",
     )
     session.add(row)
     await session.flush()

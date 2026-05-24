@@ -28,6 +28,7 @@ from backend.app.db.models_graph import (
     GraphNodeVersionORM,
     GraphPartitionManifestORM,
     GraphRefORM,
+    GraphWorkingSetORM,
     UserGraphORM,
 )
 from backend.app.services.graph_versioning.commit import EdgeState, NodeState
@@ -161,6 +162,92 @@ async def get_branch_ref_or_none(
             )
         )
     ).scalar_one_or_none()
+
+
+async def list_branches(
+    session: AsyncSession, *, graph_id: str
+) -> list[GraphRefORM]:
+    """All refs on a graph, newest-touched first. Includes branches
+    and tags (caller filters by ref_type if needed)."""
+    return list(
+        (
+            await session.execute(
+                select(GraphRefORM)
+                .where(GraphRefORM.graph_id == graph_id)
+                .order_by(GraphRefORM.updated_at.desc())
+            )
+        ).scalars()
+    )
+
+
+class BranchDeleteBlockedError(Exception):
+    """Raised when a branch cannot be deleted because a guard fails.
+    ``code`` matches the structured 409 error envelope; ``context``
+    carries the offending IDs for the client to render."""
+
+    def __init__(self, code: str, context: dict):
+        self.code = code
+        self.context = context
+        super().__init__(f"{code}: {context}")
+
+
+async def delete_branch(
+    session: AsyncSession,
+    *,
+    graph_id: str,
+    branch: str,
+    bound_view_ids: list[str] | None = None,
+) -> None:
+    """Delete a branch ref. Caller must supply the bound-view list
+    (resolved via the management DB; cross-DB so the repo can't query
+    it itself). Guards:
+
+    1. ``cannot_delete_default`` — branch is the graph's default.
+    2. ``working_sets_open`` — at least one user has an open working
+       set on this branch. ``context.user_ids`` lists them.
+    3. ``views_bound`` — at least one ViewORM still has
+       ``source_branch = branch``. ``context.view_ids`` lists them.
+
+    On success: removes the ``graph_refs`` row (FK cascade does
+    nothing further — commits/blobs are content-addressed and stay).
+    """
+    graph = await get_graph(session, graph_id)
+    if branch == (graph.default_branch or "main"):
+        raise BranchDeleteBlockedError(
+            "cannot_delete_default",
+            {"branch": branch, "default_branch": graph.default_branch},
+        )
+
+    ref = await get_branch_ref_or_none(
+        session, graph_id=graph_id, branch=branch
+    )
+    if ref is None:
+        raise GraphNotFoundError(f"{graph_id}@{branch}")
+
+    open_ws_user_ids = list(
+        (
+            await session.execute(
+                select(GraphWorkingSetORM.user_id).where(
+                    GraphWorkingSetORM.graph_id == graph_id,
+                    GraphWorkingSetORM.branch == branch,
+                    GraphWorkingSetORM.status == "open",
+                )
+            )
+        ).scalars()
+    )
+    if open_ws_user_ids:
+        raise BranchDeleteBlockedError(
+            "working_sets_open",
+            {"branch": branch, "user_ids": open_ws_user_ids},
+        )
+
+    if bound_view_ids:
+        raise BranchDeleteBlockedError(
+            "views_bound",
+            {"branch": branch, "view_ids": bound_view_ids},
+        )
+
+    await session.delete(ref)
 
 
 async def create_branch(
@@ -336,4 +423,7 @@ __all__ = [
     "load_snapshot",
     "load_graph_state",
     "get_branch_ref_or_none",
+    "list_branches",
+    "delete_branch",
+    "BranchDeleteBlockedError",
 ]

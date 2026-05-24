@@ -321,12 +321,20 @@ async def create_view(
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
+    graph_store_session: AsyncSession = Depends(get_graph_store_db_session),
 ):
     """Create a new view. workspaceId is required.
 
     Captures the current ontology digest on the new row so later edits
     can detect ontology drift. Records created_by as the authenticated
     user's ID so views can be filtered by creator in the Explorer.
+
+    When the request carries ``sourceGraphId``, the view is also
+    bound to that graph: ``branchingPolicy`` (default ``per_view``) +
+    ``mergeTargetBranch`` (default ``main``) are persisted, and the
+    view's branch is materialised inline so the canvas can open in
+    one round-trip. Callers that prefer late binding can omit these
+    fields and call ``POST /views/{id}/enter-edit`` later.
 
     Authorization: requires ``workspace:view:create`` in the target
     workspace. Phase 2C enforces; Phase 1 left this open.
@@ -344,9 +352,41 @@ async def create_view(
     digest = await _compute_ontology_digest(
         session, req.workspace_id, req.data_source_id,
     )
-    return await view_repo.create_view(
+    created = await view_repo.create_view(
         session, req, ontology_digest=digest, user_id=_user_id(user),
     )
+
+    if req.source_graph_id:
+        # Day-0 convenience: materialise the view's branch right away
+        # so the next request is a snapshot read, not another bind
+        # call. Load the freshly-created row (the helper repo returns
+        # a DTO, not the ORM) for ensure_branch.
+        from sqlalchemy import select
+        from backend.app.db.models import ViewORM as _V
+        view_orm = (
+            await session.execute(select(_V).where(_V.id == created.id))
+        ).scalar_one()
+        try:
+            binding = await ensure_branch(
+                graph_store_session, view=view_orm, user_id=_user_id(user),
+            )
+        except ViewNotBoundError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "view_not_bound", "view_id": exc.view_id},
+            )
+        except ViewBindingError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "view_binding_error", "message": str(exc),
+                },
+            )
+        view_orm.source_branch = binding.branch
+        # Re-project to pick up the freshly-set source_branch.
+        created = await view_repo.get_view(session, view_orm.id)
+
+    return created
 
 
 @router.get("/{view_id}", response_model=ViewResponse)
