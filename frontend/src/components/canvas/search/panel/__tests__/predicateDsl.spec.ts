@@ -115,6 +115,66 @@ describe('predicateDsl — stringify preserves visual grouping', () => {
 })
 
 
+describe('predicateDsl — descendantOf (Root in view)', () => {
+    // Regression: descendantOf was added to the type system + UI editor
+    // + backend compiler but never wired into the DSL stringifier or
+    // parser. Visual → Code → Visual dropped urns silently, so the BE
+    // compiler received urns: [] and emitted `AND true` (no-op).
+    it('stringifies a single-URN descendantOf via IN form', () => {
+        const p: Predicate = {
+            kind: 'descendantOf',
+            urns: ['urn:synodic:solidatus:layer:LYR-tlB9DRNg'],
+        }
+        expect(stringifyPredicate(p)).toBe(
+            'descendantOf IN ("urn:synodic:solidatus:layer:LYR-tlB9DRNg")',
+        )
+    })
+
+    it('stringifies multi-URN descendantOf with quoted URNs', () => {
+        const p: Predicate = {
+            kind: 'descendantOf',
+            urns: ['urn:a:1', 'urn:b:2'],
+        }
+        expect(stringifyPredicate(p)).toBe(
+            'descendantOf IN ("urn:a:1", "urn:b:2")',
+        )
+    })
+
+    it('parses descendantOf IN (...) to a DescendantOfPredicate', () => {
+        const r = parsePredicate(
+            'descendantOf IN ("urn:synodic:solidatus:layer:LYR-tlB9DRNg")',
+        )
+        expect(r.predicate?.kind).toBe('descendantOf')
+        expect((r.predicate as { urns: string[] }).urns).toEqual([
+            'urn:synodic:solidatus:layer:LYR-tlB9DRNg',
+        ])
+    })
+
+    it('parses multi-URN descendantOf IN (...)', () => {
+        const r = parsePredicate('descendantOf IN ("urn:a:1", "urn:b:2")')
+        expect(r.predicate?.kind).toBe('descendantOf')
+        expect((r.predicate as { urns: string[] }).urns).toEqual([
+            'urn:a:1', 'urn:b:2',
+        ])
+    })
+
+    it('round-trips through Visual → Code → Visual preserving urns', () => {
+        const original: Predicate = {
+            kind: 'group', op: 'and',
+            children: [
+                { kind: 'text', value: 'payment', target: 'name',
+                  match: 'substring', caseSensitive: false, boost: 1.0 },
+                { kind: 'descendantOf',
+                  urns: ['urn:synodic:solidatus:layer:LYR-tlB9DRNg'] },
+            ],
+        }
+        const code = stringifyPredicate(original)
+        const reparsed = parsePredicate(code).predicate
+        expect(JSON.stringify(reparsed)).toBe(JSON.stringify(original))
+    })
+})
+
+
 function leaf(value: string): Predicate {
     return {
         kind: 'text', value, target: 'name',

@@ -201,6 +201,14 @@ function formatAtom(c: Predicate): string {
         case 'isOrphan':     return 'noLineage'
         case 'hasIncoming':  return 'hasUpstream'
         case 'hasOutgoing':  return 'hasDownstream'
+        case 'descendantOf': {
+            // URNs always contain `:`, so quote unconditionally — the
+            // prefix lexer would otherwise misread `urn:foo:bar` as a
+            // `urn:` prefixed token. maxDepth (rare; UI never sets it)
+            // is lossy in DSL — preserve via JSON view if needed.
+            const quoted = c.urns.map((u) => `"${u}"`).join(', ')
+            return `descendantOf IN (${quoted})`
+        }
         default:
             return `[${(c as { kind?: string }).kind ?? 'unknown'}]`
     }
@@ -537,6 +545,12 @@ class Parser {
             predicate = { kind: 'entityType', op: negated ? 'notIn' : 'in', values }
         } else if (fieldName === 'tag' || fieldName === 'tags') {
             predicate = { kind: 'tag', op: negated ? 'notHas' : 'hasAny', values }
+        } else if (fieldName === 'descendantof') {
+            // No `NOT IN` form — DescendantOfPredicate has no negate
+            // field, and the BE compiler doesn't accept negated
+            // descendantOf. Bail out if the user typed `NOT IN`.
+            if (negated) return null
+            predicate = { kind: 'descendantOf', urns: values }
         } else {
             return null
         }
