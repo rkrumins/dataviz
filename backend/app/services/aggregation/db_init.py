@@ -95,6 +95,13 @@ async def init_aggregation_db() -> None:
                 # multi-million-edge graphs.
                 f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
                 "ADD COLUMN IF NOT EXISTS lineage_edge_count BIGINT NULL",
+                # 2026-05-25 — composite index backing the skip-path
+                # lookup in worker._maybe_skip_unchanged. Without it
+                # the ORDER BY completed_at DESC sorts every completed
+                # row for the data source on every job.
+                f"CREATE INDEX IF NOT EXISTS ix_agg_jobs_ds_status_completed_desc "
+                f"ON {SCHEMA_NAME}.aggregation_jobs "
+                f"(data_source_id, status, completed_at DESC)",
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:

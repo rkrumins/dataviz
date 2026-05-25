@@ -259,6 +259,14 @@ class AggregationWorker:
                     fingerprint_before=job.graph_fingerprint_before,
                 )
                 if skip_result is not None:
+                    # Race guard: a cancel that arrived while we were
+                    # computing the skip decision must not be silently
+                    # lost. The materialize path checks ``cancel_event``
+                    # between sub-batches; the skip path bypasses that
+                    # loop entirely, so honour cancellation explicitly
+                    # before falling through to the success block.
+                    if cancel_event.is_set():
+                        raise JobCancelled(job.id, _now())
                     result = skip_result
                 else:
                     # Run cursor-based batch materialization with retry + timeout.

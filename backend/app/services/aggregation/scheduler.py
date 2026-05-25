@@ -15,11 +15,19 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, text
 
 logger = logging.getLogger(__name__)
+
+# Retention task cadence — runs at most once per this many seconds, so
+# the per-minute scheduler tick doesn't hammer the table every minute.
+_RETENTION_TICK_SECS = int(os.getenv("AGGREGATION_RETENTION_TICK_SECS", "3600"))
+# Hard floor on retention age — operators can lift this via env, but a
+# 0/negative value is treated as "disabled" rather than "delete
+# everything" to avoid foot-guns.
+_RETENTION_DAYS = int(os.getenv("AGGREGATION_JOBS_RETENTION_DAYS", "30"))
 
 
 class AggregationScheduler:
@@ -32,6 +40,10 @@ class AggregationScheduler:
         self._session_factory = session_factory
         self._registry = registry
         self._running = False
+        # Last wall-clock time the retention task ran. ``None`` means
+        # "never run this process lifetime"; the first tick will fire
+        # it. Subsequent ticks honour ``_RETENTION_TICK_SECS``.
+        self._last_retention_at: Optional[datetime] = None
 
     async def start(self) -> None:
         """Called on application startup. Runs forever, checking schedules."""
@@ -136,3 +148,76 @@ class AggregationScheduler:
             if stale_jobs:
                 await session.commit()
                 logger.info("Watchdog marked %d stale aggregation jobs as failed", len(stale_jobs))
+
+        # Retention task — runs on a coarser cadence than the per-minute
+        # tick. Uses its own session so a failure here can't roll back
+        # the watchdog commit above.
+        await self._maybe_run_retention()
+
+    async def _maybe_run_retention(self) -> None:
+        """Delete `aggregation_jobs` rows older than the configured
+        retention window, while preserving the most recent completed
+        job per data source (the skip-path lookup in
+        ``worker._maybe_skip_unchanged`` depends on it).
+
+        Honours ``AGGREGATION_RETENTION_TICK_SECS`` so the table isn't
+        scanned every minute. A retention window ≤ 0 disables the task
+        entirely — operators who want unbounded history (e.g. for an
+        external audit warehouse) set
+        ``AGGREGATION_JOBS_RETENTION_DAYS=0``.
+        """
+        if _RETENTION_DAYS <= 0:
+            return
+        now = datetime.now(tz=timezone.utc)
+        if (
+            self._last_retention_at is not None
+            and (now - self._last_retention_at).total_seconds() < _RETENTION_TICK_SECS
+        ):
+            return
+        self._last_retention_at = now
+        cutoff_iso = (now - timedelta(days=_RETENTION_DAYS)).isoformat()
+
+        # The DELETE preserves the most-recent completed row per data
+        # source via a NOT EXISTS sub-query. We use raw SQL because the
+        # set-correlated DISTINCT ON pattern is awkward to express via
+        # the ORM and the table is in a fixed schema we control.
+        stmt = text(
+            """
+            DELETE FROM aggregation.aggregation_jobs AS j
+            WHERE j.completed_at IS NOT NULL
+              AND j.completed_at < :cutoff
+              AND NOT EXISTS (
+                SELECT 1
+                FROM aggregation.aggregation_jobs k
+                WHERE k.data_source_id = j.data_source_id
+                  AND k.status = 'completed'
+                  AND k.completed_at = (
+                    SELECT MAX(m.completed_at)
+                    FROM aggregation.aggregation_jobs m
+                    WHERE m.data_source_id = j.data_source_id
+                      AND m.status = 'completed'
+                  )
+                  AND k.id = j.id
+              )
+            """
+        )
+        try:
+            async with self._session_factory() as session:
+                result = await session.execute(stmt, {"cutoff": cutoff_iso})
+                await session.commit()
+                deleted = getattr(result, "rowcount", -1) or 0
+                if deleted > 0:
+                    logger.info(
+                        "Retention: deleted %d aggregation_jobs rows older than %d days "
+                        "(latest per-data-source completed job preserved)",
+                        deleted, _RETENTION_DAYS,
+                    )
+                else:
+                    logger.debug(
+                        "Retention: no aggregation_jobs rows older than %d days",
+                        _RETENTION_DAYS,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "Retention task failed (will retry next tick): %s", exc,
+            )

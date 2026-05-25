@@ -126,6 +126,17 @@ class AggregationJobORM(Base):
         Index("ix_agg_jobs_ds_status", "data_source_id", "status"),
         Index("ix_agg_jobs_created_at", "created_at"),
         Index("ix_agg_jobs_workspace", "workspace_id"),
+        # Backs the skip-path lookup in worker._maybe_skip_unchanged —
+        # most-recent completed job per data source. Without this the
+        # ORDER BY completed_at DESC sorts every completed row for the
+        # data source on every job. Composite layout lets Postgres do
+        # an index-only seek + 1-row read.
+        Index(
+            "ix_agg_jobs_ds_status_completed_desc",
+            "data_source_id",
+            "status",
+            text("completed_at DESC"),
+        ),
         Index(
             "ix_agg_jobs_idem_active",
             "data_source_id",
