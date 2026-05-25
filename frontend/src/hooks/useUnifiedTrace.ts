@@ -42,8 +42,6 @@ export interface TraceConfig {
     includeInheritedLineage: boolean
     /** Auto-expand ancestors when tracing */
     autoExpandAncestors: boolean
-    /** Show only the traced path vs show with context */
-    pathOnly: boolean
     /** Auto-sync traced nodes to canvas store */
     autoSyncToStore: boolean
     /** Legacy granularity override — superseded by `level` for /trace/v2 */
@@ -264,7 +262,6 @@ const DEFAULT_CONFIG: TraceConfig = {
     excludeContainmentEdges: true,
     includeInheritedLineage: true,
     autoExpandAncestors: true,
-    pathOnly: false,
     autoSyncToStore: true,
     lineageEdgeTypes: [],  // Empty = use all ontology-classified lineage types
     // level=0 returns the top-level Domain skeleton — server-authoritative.

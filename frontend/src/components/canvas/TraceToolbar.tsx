@@ -708,19 +708,6 @@ export function TraceToolbar({
                                 <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                                     <input
                                         type="checkbox"
-                                        checked={config.pathOnly}
-                                        onChange={(e) => onConfigChange({ pathOnly: e.target.checked })}
-                                        className="rounded text-accent-lineage"
-                                    />
-                                    <div>
-                                        <span className="text-xs text-ink block">Path only</span>
-                                        <span className="text-2xs text-ink-muted">Hide non-path context</span>
-                                    </div>
-                                </label>
-
-                                <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
-                                    <input
-                                        type="checkbox"
                                         checked={config.autoExpandAncestors}
                                         onChange={(e) => onConfigChange({ autoExpandAncestors: e.target.checked })}
                                         className="rounded text-accent-lineage"

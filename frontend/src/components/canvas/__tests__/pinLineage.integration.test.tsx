@@ -74,7 +74,6 @@ const baseConfig: TraceConfig = {
   excludeContainmentEdges: true,
   includeInheritedLineage: false,
   autoExpandAncestors: true,
-  pathOnly: false,
   autoSyncToStore: true,
 }
 
