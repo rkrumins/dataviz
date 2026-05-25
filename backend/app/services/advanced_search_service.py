@@ -25,9 +25,8 @@ from typing import Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.providers.falkordb_deep_search import CompileError
 from backend.app.services.context_engine import ContextEngine
-from backend.app.services.deep_search import get_deep_search_settings
+from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.app.services.view_scope import (
     EffectiveViewScope,
     ViewNotFound,
@@ -261,14 +260,11 @@ class AdvancedSearchService:
         ``search()`` would actually run — including the view-derived
         ``root_urns`` and ``entity_types``.
         """
-        from backend.app.providers.falkordb_deep_search import (
-            explain_deep_search,
-        )
         _count_and_validate(query)
         eff_scope = await self._resolve_scope(query.scope)
         query = _stamp_resolved_scope(query, eff_scope)
         try:
-            result = explain_deep_search(self._engine.provider, query)
+            result = await self._engine.provider.deep_search_explain(query)
         except CompileError as exc:
             raise ValidationError(str(exc)) from exc
         # Attach the resolved-scope summary so the dev panel can show
@@ -293,11 +289,7 @@ class AdvancedSearchService:
         graph, per entity-type label. Diagnostic counterpart to the
         predicate compiler — answers "what can I actually query?".
         """
-        from backend.app.providers.falkordb_deep_search import (
-            discover_native_property_keys,
-        )
-        return await discover_native_property_keys(
-            self._engine.provider,
+        return await self._engine.provider.deep_search_discover(
             sample_per_label=sample_per_label,
         )
 

@@ -118,6 +118,37 @@ class GraphDataProvider(ABC):
             "Override this method or use the legacy search_nodes path."
         )
 
+    async def deep_search_explain(self, query: SearchQuery) -> Dict[str, Any]:
+        """Compile a SearchQuery to its provider-native query text without
+        executing. Powers ``POST /search/explain`` and the FE dev panel.
+
+        Returns ``{cypher, hits_cypher, params, candidate_cap,
+        hoisted_root_urns, effective_root_urns, notes}`` for graph
+        providers; equivalent diagnostic shape for non-Cypher backends.
+
+        Default raises ``NotImplementedError`` — providers ship native
+        implementations one at a time, matching the ``deep_search``
+        pattern. Service layer translates to HTTP 501.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no deep_search_explain implementation."
+        )
+
+    async def deep_search_discover(
+        self,
+        *,
+        sample_per_label: int = 200,
+    ) -> Dict[str, Any]:
+        """Sample the graph and surface what's queryable: per-label
+        property keys, value samples, tag-value frequencies, edge
+        metadata. Powers ``GET /search/discover`` and the FE pickers.
+
+        Default raises ``NotImplementedError``; providers override.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no deep_search_discover implementation."
+        )
+
     # ==========================================
     # Edge Operations
     # ==========================================

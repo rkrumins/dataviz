@@ -58,7 +58,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from backend.app.services.deep_search import get_deep_search_settings
+from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.common.models.search import (
     AggregationSpec,
     AncestorRef,
@@ -99,15 +99,6 @@ def __getattr__(name: str):
     if field is not None:
         return getattr(get_deep_search_settings(), field)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-class CompileError(ValueError):
-    """Raised when a predicate cannot be compiled in v1.
-
-    Service layer translates this to HTTP 400 with the message intact —
-    the message is user-facing and tells them which feature to use
-    instead.
-    """
 
 
 # ---------------------------------------------------------------------------

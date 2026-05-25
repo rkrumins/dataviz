@@ -1418,6 +1418,21 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         return await execute_deep_search(self, query, deadline_ms=deadline_ms)
 
+    async def deep_search_explain(self, query):
+        """Compile-only path. Mirrors ``deep_search`` (lazy import to
+        avoid the circular load order)."""
+        from .falkordb_deep_search import explain_deep_search
+        await self._ensure_connected()
+        return explain_deep_search(self, query)
+
+    async def deep_search_discover(self, *, sample_per_label: int = 200):
+        """Schema discovery. Mirrors ``deep_search`` (lazy import)."""
+        from .falkordb_deep_search import discover_native_property_keys
+        await self._ensure_connected()
+        return await discover_native_property_keys(
+            self, sample_per_label=sample_per_label,
+        )
+
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
         await self._ensure_connected()
 
