@@ -51,6 +51,7 @@ jobs:
             backend/tests/test_aggregation_skip_propagation.py \
             backend/tests/test_aggregation_skip_unchanged.py \
             backend/tests/test_aggregation_verifier.py \
+            backend/tests/test_aggregation_watchdog.py \
             --noconftest \
             -q \
             --tb=short

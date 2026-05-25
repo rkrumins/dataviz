@@ -31,6 +31,18 @@ _RETENTION_DAYS = int(os.getenv("AGGREGATION_JOBS_RETENTION_DAYS", "30"))
 # Consistency verifier cadence. Default 24h aligns with the
 # operational guidance documented in verifier.py. <= 0 disables.
 _VERIFIER_TICK_SECS = int(os.getenv("AGGREGATION_VERIFIER_TICK_SECS", "86400"))
+# Per-tick sleep for the scheduler loop. Used to be hardcoded at 60s;
+# now operator-tunable so deployments with tight drift-detection SLAs
+# can dial it down (e.g. 15s) and quiet deployments can lift it (e.g.
+# 300s) to cut wakeups. The whole tick is bounded — at this cadence the
+# only cost is the drift loop iterating idle data sources.
+_SCHEDULER_TICK_SECS = max(1, int(os.getenv("AGGREGATION_SCHEDULER_TICK_SECS", "60")))
+# Watchdog cutoff for jobs stuck in status='pending'. A pending job
+# that never reached 'running' usually means the trigger handler or
+# skip-decision crashed mid-transaction. Default 10 min: large enough
+# to absorb a slow trigger (provider warmup, lock contention) but
+# small enough to flip a real crash before operators notice.
+_PENDING_WATCHDOG_SECS = int(os.getenv("AGGREGATION_PENDING_WATCHDOG_SECS", "600"))
 
 
 class AggregationScheduler:
@@ -60,7 +72,7 @@ class AggregationScheduler:
                 await self._tick()
             except Exception as e:
                 logger.error("Scheduler tick error: %s", e, exc_info=True)
-            await asyncio.sleep(60)  # Check every minute for due schedules
+            await asyncio.sleep(_SCHEDULER_TICK_SECS)
 
     async def stop(self) -> None:
         """Gracefully stop the scheduler."""
@@ -121,39 +133,7 @@ class AggregationScheduler:
                         state.data_source_id, e,
                     )
 
-            # Stale-job watchdog — catch jobs stuck in 'running' with no
-            # checkpoint update (e.g. worker died silently).
-            job_timeout = int(os.getenv("AGGREGATION_JOB_TIMEOUT_SECS", "7200"))
-            watchdog_cutoff = datetime.now(tz=timezone.utc) - timedelta(seconds=job_timeout * 2)
-
-            stale_stmt = select(AggregationJobORM).where(
-                and_(
-                    AggregationJobORM.status == "running",
-                    AggregationJobORM.updated_at < watchdog_cutoff.isoformat(),
-                )
-            )
-            stale_result = await session.execute(stale_stmt)
-            stale_jobs = stale_result.scalars().all()
-
-            for stale_job in stale_jobs:
-                elapsed = (datetime.now(tz=timezone.utc) - datetime.fromisoformat(stale_job.updated_at)).total_seconds()
-                stale_job.status = "failed"
-                stale_job.error_message = f"Watchdog timeout: no checkpoint update in {int(elapsed)}s"
-                stale_job.updated_at = datetime.now(tz=timezone.utc).isoformat()
-                logger.warning(
-                    "Watchdog marked stale job %s as failed (no update in %ds)",
-                    stale_job.id, int(elapsed),
-                )
-                # Update aggregation-owned state table
-                state = await session.get(
-                    AggregationDataSourceStateORM, stale_job.data_source_id,
-                )
-                if state:
-                    state.aggregation_status = "failed"
-
-            if stale_jobs:
-                await session.commit()
-                logger.info("Watchdog marked %d stale aggregation jobs as failed", len(stale_jobs))
+            await self._run_watchdog(session)
 
         # Retention task — runs on a coarser cadence than the per-minute
         # tick. Uses its own session so a failure here can't roll back
@@ -164,6 +144,89 @@ class AggregationScheduler:
         # safety net for the documented skip-path eventual-consistency
         # window. Failures emit metrics + log but never auto-rebuild.
         await self._maybe_run_consistency_verifier()
+
+    async def _run_watchdog(self, session: Any) -> None:
+        """Sweep aggregation_jobs for stuck rows and mark them failed.
+
+        Two stuck states are covered:
+
+          1. ``status='running'`` with no checkpoint update for
+             ``AGGREGATION_JOB_TIMEOUT_SECS * 2`` — the original
+             watchdog. Catches worker crashes mid-materialise.
+          2. ``status='pending'`` older than
+             ``AGGREGATION_PENDING_WATCHDOG_SECS`` — the P2-3 addition.
+             Catches trigger / skip-decision crashes that left the row
+             never transitioning to running; without this the data
+             source would be permanently blocked (the trigger endpoint
+             rejects new triggers while any pending/running job exists).
+
+        Commits at most once per call; if both queries return empty
+        the session is left untouched.
+        """
+        from .models import AggregationDataSourceStateORM, AggregationJobORM
+
+        now = datetime.now(tz=timezone.utc)
+        job_timeout = int(os.getenv("AGGREGATION_JOB_TIMEOUT_SECS", "7200"))
+        running_cutoff = now - timedelta(seconds=job_timeout * 2)
+
+        stale_stmt = select(AggregationJobORM).where(
+            and_(
+                AggregationJobORM.status == "running",
+                AggregationJobORM.updated_at < running_cutoff.isoformat(),
+            )
+        )
+        stale_jobs = (await session.execute(stale_stmt)).scalars().all()
+        for stale_job in stale_jobs:
+            elapsed = (now - datetime.fromisoformat(stale_job.updated_at)).total_seconds()
+            stale_job.status = "failed"
+            stale_job.error_message = (
+                f"Watchdog timeout: no checkpoint update in {int(elapsed)}s"
+            )
+            stale_job.updated_at = now.isoformat()
+            logger.warning(
+                "Watchdog marked stale job %s as failed (no update in %ds)",
+                stale_job.id, int(elapsed),
+            )
+            state = await session.get(
+                AggregationDataSourceStateORM, stale_job.data_source_id,
+            )
+            if state:
+                state.aggregation_status = "failed"
+
+        pending_cutoff = now - timedelta(seconds=_PENDING_WATCHDOG_SECS)
+        stuck_pending_stmt = select(AggregationJobORM).where(
+            and_(
+                AggregationJobORM.status == "pending",
+                AggregationJobORM.created_at < pending_cutoff.isoformat(),
+            )
+        )
+        stuck_pending = (await session.execute(stuck_pending_stmt)).scalars().all()
+        for job in stuck_pending:
+            elapsed = (now - datetime.fromisoformat(job.created_at)).total_seconds()
+            job.status = "failed"
+            job.error_message = (
+                f"Watchdog: pending job never reached 'running' after {int(elapsed)}s "
+                f"(likely trigger or skip-decision crash)"
+            )
+            job.updated_at = now.isoformat()
+            logger.warning(
+                "Watchdog marked stuck-pending job %s as failed (created %ds ago, "
+                "never transitioned to running)", job.id, int(elapsed),
+            )
+            state = await session.get(
+                AggregationDataSourceStateORM, job.data_source_id,
+            )
+            # Only clear DS state if it still reflects the crashed job
+            # — don't stomp a state advanced by a subsequent run.
+            if state and state.aggregation_status in ("pending", "running"):
+                state.aggregation_status = "failed"
+
+        if stale_jobs or stuck_pending:
+            await session.commit()
+            logger.info(
+                "Watchdog marked %d stale + %d stuck-pending aggregation jobs as failed",
+                len(stale_jobs), len(stuck_pending),
+            )
 
     async def _maybe_run_retention(self) -> None:
         """Delete `aggregation_jobs` rows older than the configured
