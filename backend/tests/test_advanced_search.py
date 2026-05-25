@@ -324,15 +324,15 @@ class TestCompilerLeaves:
         # ``target='name'`` widens to OR across the canonical name-like
         # fields the storage layer commits to (displayName, qualifiedName,
         # searchableText). A null field on a given node reads as an empty
-        # string via COALESCE so the predicate matches when ANY of the
-        # listed columns contains the value, instead of getting
-        # blackholed by one nullish field.
+        # null on a given node — Cypher's three-valued logic returns
+        # null for that CONTAINS, and the OR over the other terms
+        # decides the result.
         c = _Compiler()
         where = c.compile(TextPredicate(value="Customer", target="name"))
         assert where == (
-            "(toLower(toString(COALESCE(n.displayName, ''))) CONTAINS $p0"
-            " OR toLower(toString(COALESCE(n.qualifiedName, ''))) CONTAINS $p0"
-            " OR toLower(toString(COALESCE(n.searchableText, ''))) CONTAINS $p0)"
+            "(toLower(toString(n.displayName)) CONTAINS $p0"
+            " OR toLower(toString(n.qualifiedName)) CONTAINS $p0"
+            " OR toLower(toString(n.searchableText)) CONTAINS $p0)"
         )
         assert c.params == {"p0": "customer"}
 
@@ -342,9 +342,9 @@ class TestCompilerLeaves:
             value="Cust", target="name", match="prefix",
         ))
         assert where == (
-            "(toLower(toString(COALESCE(n.displayName, ''))) STARTS WITH $p0"
-            " OR toLower(toString(COALESCE(n.qualifiedName, ''))) STARTS WITH $p0"
-            " OR toLower(toString(COALESCE(n.searchableText, ''))) STARTS WITH $p0)"
+            "(toLower(toString(n.displayName)) STARTS WITH $p0"
+            " OR toLower(toString(n.qualifiedName)) STARTS WITH $p0"
+            " OR toLower(toString(n.searchableText)) STARTS WITH $p0)"
         )
         assert c.params == {"p0": "cust"}
 
@@ -354,9 +354,9 @@ class TestCompilerLeaves:
             value="Customer", target="name", match="exact",
         ))
         assert where == (
-            "(toLower(toString(COALESCE(n.displayName, ''))) = $p0"
-            " OR toLower(toString(COALESCE(n.qualifiedName, ''))) = $p0"
-            " OR toLower(toString(COALESCE(n.searchableText, ''))) = $p0)"
+            "(toLower(toString(n.displayName)) = $p0"
+            " OR toLower(toString(n.qualifiedName)) = $p0"
+            " OR toLower(toString(n.searchableText)) = $p0)"
         )
         assert c.params == {"p0": "customer"}
 
@@ -369,9 +369,9 @@ class TestCompilerLeaves:
             value="_v2", target="name", match="suffix",
         ))
         assert where == (
-            "(toLower(toString(COALESCE(n.displayName, ''))) ENDS WITH $p0"
-            " OR toLower(toString(COALESCE(n.qualifiedName, ''))) ENDS WITH $p0"
-            " OR toLower(toString(COALESCE(n.searchableText, ''))) ENDS WITH $p0)"
+            "(toLower(toString(n.displayName)) ENDS WITH $p0"
+            " OR toLower(toString(n.qualifiedName)) ENDS WITH $p0"
+            " OR toLower(toString(n.searchableText)) ENDS WITH $p0)"
         )
         assert c.params == {"p0": "_v2"}
 
@@ -393,22 +393,22 @@ class TestCompilerLeaves:
             value="abc", target="qualifiedName",
         ))
         assert where == (
-            "(toLower(toString(COALESCE(n.qualifiedName, ''))) CONTAINS $p0"
-            " OR toLower(toString(COALESCE(n.searchableText, ''))) CONTAINS $p0)"
+            "(toLower(toString(n.qualifiedName)) CONTAINS $p0"
+            " OR toLower(toString(n.searchableText)) CONTAINS $p0)"
         )
         assert c.params == {"p0": "abc"}
 
     def test_text_exact_case_sensitive(self):
         # Case-sensitive paths skip the toLower() wrap — the column read
-        # is raw — but still apply COALESCE for the multi-field expansion.
+        # is raw — for the multi-field expansion.
         c = _Compiler()
         where = c.compile(TextPredicate(
             value="X", target="qualifiedName",
             match="exact", case_sensitive=True,
         ))
         assert where == (
-            "(COALESCE(n.qualifiedName, '') = $p0"
-            " OR COALESCE(n.searchableText, '') = $p0)"
+            "(n.qualifiedName = $p0"
+            " OR n.searchableText = $p0)"
         )
         assert c.params == {"p0": "X"}
 
@@ -857,9 +857,9 @@ class TestCompilerGroups:
             HasPropertyPredicate(key="foo"),
         ]))
         assert where == (
-            "((toLower(toString(COALESCE(n.displayName, ''))) = $p0"
-            " OR toLower(toString(COALESCE(n.qualifiedName, ''))) = $p0"
-            " OR toLower(toString(COALESCE(n.searchableText, ''))) = $p0)"
+            "((toLower(toString(n.displayName)) = $p0"
+            " OR toLower(toString(n.qualifiedName)) = $p0"
+            " OR toLower(toString(n.searchableText)) = $p0)"
             " OR EXISTS(n.foo))"
         )
 

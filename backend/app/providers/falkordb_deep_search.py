@@ -308,19 +308,21 @@ class _Compiler:
             raise CompileError(f"unknown text target: {target!r}")
 
         pn = self._next()
-        is_multi = len(cols) > 1
 
         def wrap_col(c: str) -> str:
-            # Multi-field cases wrap in COALESCE(...) so a null property
-            # reads as an empty string, making the OR-disjunction
-            # explicit about null handling. Single-field cases keep the
-            # bare column expression for backwards compatibility — Cypher
-            # treats `null CONTAINS 'x'` as null (no match) which is
-            # already the correct behaviour for one column.
-            base = c if not is_multi else f"COALESCE({c}, '')"
+            # Mirror the pattern the provider's own simple search uses
+            # (see ``falkordb_provider._build_native_storage_filters``):
+            # ``toLower(toString(n.foo)) CONTAINS $v``. No COALESCE — a
+            # missing property yields null, ``null CONTAINS 'x'`` is
+            # null, and within a multi-field OR the other terms still
+            # decide the result. Adding ``COALESCE(n.foo, '')`` here
+            # has been observed to make some FalkorDB plans return 0
+            # rows for predicates that should match; the simple-search
+            # path doesn't use COALESCE and works against the same
+            # data, so we align with that.
             if t.case_sensitive:
-                return base
-            return f"toLower(toString({base}))"
+                return c
+            return f"toLower(toString({c}))"
 
         if t.case_sensitive:
             self.params[pn] = t.value
@@ -336,7 +338,7 @@ class _Compiler:
         else:
             op = "CONTAINS"  # substring
 
-        if not is_multi:
+        if len(cols) == 1:
             return f"{wrap_col(cols[0])} {op} ${pn}"
         # Multi-field OR — wrap in parens so it composes inside an AND.
         clauses = [f"{wrap_col(c)} {op} ${pn}" for c in cols]

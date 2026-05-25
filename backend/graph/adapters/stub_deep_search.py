@@ -280,19 +280,44 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
         return node.get("layerAssignment") == predicate.layer_assignment
 
     if isinstance(predicate, TextPredicate):
-        # Default target='any' searches displayName + qualifiedName +
-        # description + tag list. Match modes: substring, exact, prefix.
+        # Mirror the FalkorDB compiler's column mapping (see
+        # ``_visit_text`` in ``falkordb_deep_search.py``):
+        #   name           → displayName + qualifiedName + searchableText
+        #   qualifiedName  → qualifiedName + searchableText
+        #   description    → description
+        #   tags           → tag list
+        #   any            → searchableText
+        # Otherwise the stub silently produces different results than
+        # production for the same predicate.
         target = predicate.target or "any"
         needle = (predicate.value or "").lower()
         if not needle:
             return True
-        if target == "any":
+        if target == "name":
             haystack = " ".join(
                 str(node.get(k) or "") for k in
-                ("displayName", "qualifiedName", "description")
+                ("displayName", "qualifiedName", "searchableText")
             ).lower()
-            tags_text = " ".join(node.get("tags") or []).lower()
-            haystack = f"{haystack} {tags_text}"
+        elif target == "qualifiedName":
+            haystack = " ".join(
+                str(node.get(k) or "") for k in
+                ("qualifiedName", "searchableText")
+            ).lower()
+        elif target == "description":
+            haystack = str(node.get("description") or "").lower()
+        elif target == "tags":
+            haystack = " ".join(node.get("tags") or []).lower()
+        elif target == "any":
+            haystack = str(node.get("searchableText") or "").lower()
+            # Belt-and-braces: a fixture node that hasn't been
+            # pre-computed ``searchableText`` shouldn't silently fail
+            # — fall back to the same fields the production write path
+            # would have denormalised.
+            if not haystack:
+                haystack = " ".join(
+                    str(node.get(k) or "") for k in
+                    ("displayName", "qualifiedName", "description")
+                ).lower()
         else:
             haystack = str(node.get(target) or "").lower()
         if predicate.match == "exact":
