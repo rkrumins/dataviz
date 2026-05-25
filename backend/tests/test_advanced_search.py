@@ -1650,3 +1650,101 @@ class TestEdgePredicateCompile:
             c.hoisted_within_hops, c._param_counter,
         )
         assert "ALL(rel IN" not in cont
+
+
+# ---------------------------------------------------------------------------
+# Batched ancestor hydration (W1.1c)
+# ---------------------------------------------------------------------------
+
+class TestHydrateAncestorsBatched:
+    """``_hydrate_ancestors`` must batch the ancestor-summary fetch
+    so a 1000-hit result with 50 unique ancestors doesn't fire 50
+    sequential ``get_node`` calls. The provider exposes
+    ``get_nodes_batch`` — this test asserts the hydration uses it."""
+
+    @pytest.mark.asyncio
+    async def test_uses_batched_node_fetch(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _hydrate_ancestors,
+        )
+        from backend.common.models.search import SearchHit
+
+        get_nodes_batch_call_count = 0
+        get_node_call_count = 0
+
+        # Six hits sharing two ancestors → ``needed_urns`` = 2 URNs.
+        chains = {
+            "urn:hit:1": ["urn:anc:a", "urn:anc:b"],
+            "urn:hit:2": ["urn:anc:a", "urn:anc:b"],
+            "urn:hit:3": ["urn:anc:a"],
+            "urn:hit:4": ["urn:anc:b"],
+            "urn:hit:5": [],
+            "urn:hit:6": ["urn:anc:a"],
+        }
+
+        class _FakeAnc:
+            def __init__(self, urn, display_name, entity_type):
+                self.urn = urn
+                self.display_name = display_name
+                self.entity_type = entity_type
+
+        class _StubProvider:
+            async def _get_ancestor_chain(self, urn):
+                return chains.get(urn, [])
+
+            async def get_nodes_batch(self, urns):
+                nonlocal get_nodes_batch_call_count
+                get_nodes_batch_call_count += 1
+                summaries = {
+                    "urn:anc:a": _FakeAnc("urn:anc:a", "Ancestor A", "domain"),
+                    "urn:anc:b": _FakeAnc("urn:anc:b", "Ancestor B", "container"),
+                }
+                return [summaries[u] for u in urns if u in summaries]
+
+            async def get_node(self, urn):
+                nonlocal get_node_call_count
+                get_node_call_count += 1
+                return None
+
+        hits = [
+            SearchHit(node={
+                "urn": urn, "entityType": "dataset", "displayName": urn,
+            }, score=1.0, matched_predicates=[], highlights=[],
+                ancestor_path=[])
+            for urn in chains
+        ]
+
+        await _hydrate_ancestors(_StubProvider(), hits)
+
+        assert get_nodes_batch_call_count == 1, (
+            f"expected exactly 1 batched ancestor-summary fetch; got "
+            f"{get_nodes_batch_call_count}"
+        )
+        assert get_node_call_count == 0, (
+            "per-URN get_node fallback must not run when batch path is wired"
+        )
+        # Every hit with a non-empty chain should have its ancestor_path
+        # populated. chain ordering is parent→root in the input; the
+        # hydrator reverses to root→parent.
+        h1 = next(h for h in hits if h.node.urn == "urn:hit:1")
+        assert [a.urn for a in h1.ancestor_path] == [
+            "urn:anc:b", "urn:anc:a",
+        ]
+        h5 = next(h for h in hits if h.node.urn == "urn:hit:5")
+        assert h5.ancestor_path == []
+
+    @pytest.mark.asyncio
+    async def test_no_op_on_empty_hit_list(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _hydrate_ancestors,
+        )
+
+        class _UnusedProvider:
+            async def _get_ancestor_chain(self, urn):  # pragma: no cover
+                raise AssertionError("should not be called for empty hits")
+
+            async def get_nodes_batch(self, urns):  # pragma: no cover
+                raise AssertionError("should not be called for empty hits")
+
+        # Should return cleanly without touching the provider.
+        await _hydrate_ancestors(_UnusedProvider(), [])

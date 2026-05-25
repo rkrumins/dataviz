@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import asyncio
 import hashlib
 import json
 import logging
@@ -2211,26 +2212,57 @@ def _build_hits_from_rows(
 
 async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:
     """Populate ``hit.ancestor_path`` for each hit using the provider's
-    Redis-backed ancestor cache."""
-    needed_urns: set = set()
-    chains: Dict[str, List[str]] = {}
-    for h in hits:
+    Redis-backed ancestor cache.
+
+    W1.1c — batched hydration. Two changes vs. the original per-hit
+    pattern:
+
+      * The N ``_get_ancestor_chain(urn)`` calls run concurrently via
+        ``asyncio.gather`` so the worst case is ``max(latency)``
+        instead of ``sum(latency)``. The cache layer is per-URN so
+        true Redis pipelining would need a provider extension; for
+        v1 the cheap concurrency dominates the cost.
+      * The N ``get_node(anc_urn)`` summary lookups collapse to ONE
+        ``get_nodes_batch(unique_ancestor_urns)`` Cypher round-trip.
+        On a 10K-hit / 1K-unique-ancestor result this drops 1000
+        DB calls to 1.
+    """
+    if not hits:
+        return
+
+    async def _safe_chain(h: SearchHit) -> Tuple[str, List[str]]:
         try:
             chain = await provider._get_ancestor_chain(h.node.urn)
         except Exception:
             chain = []
-        chains[h.node.urn] = chain
-        needed_urns.update(chain)
+        return h.node.urn, chain
 
-    # Batch-fetch ancestor node summaries
-    summaries: Dict[str, Tuple[str, str]] = {}  # urn -> (displayName, entityType)
-    for anc_urn in needed_urns:
+    # 1. Parallel-fetch every hit's ancestor chain.
+    chain_results = await asyncio.gather(
+        *(_safe_chain(h) for h in hits), return_exceptions=False,
+    )
+    chains: Dict[str, List[str]] = dict(chain_results)
+    needed_urns: set = set()
+    for urns in chains.values():
+        needed_urns.update(urns)
+
+    # 2. Single batched node fetch for every unique ancestor URN —
+    # collapses what was N round-trips into one.
+    summaries: Dict[str, Tuple[str, str]] = {}
+    if needed_urns:
         try:
-            anc = await provider.get_node(anc_urn)
-            if anc:
-                summaries[anc_urn] = (anc.display_name, anc.entity_type)
+            nodes = await provider.get_nodes_batch(list(needed_urns))
+            for anc in nodes:
+                if anc and anc.urn:
+                    summaries[anc.urn] = (anc.display_name, anc.entity_type)
         except Exception:
-            continue
+            # If batch fetch fails, leave ancestor_path empty rather
+            # than fall back to N single-fetches — the page still
+            # returns hits, just without the ancestor decoration.
+            logger.warning(
+                "deep_search: batched ancestor hydration failed; "
+                "ancestor_path will be empty on this page",
+            )
 
     for h in hits:
         chain = chains.get(h.node.urn, [])
