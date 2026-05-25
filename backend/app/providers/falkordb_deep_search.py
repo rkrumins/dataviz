@@ -1216,10 +1216,14 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
                 "no candidate filter applied. Falling back to "
                 "view-scope semantics."
             )
-        # Even in visible mode, if visible_urns wasn't supplied, fall
-        # back to view-scope so the search still respects the view's
-        # boundary (defensive default).
-        if not visible_clause_added and eff_root_urns:
+        # Hoisted DescendantOf URNs always apply as a scope continuation,
+        # composing with the visible clause via AND (n must be visible
+        # AND descend from one of the chosen roots). When visible_urns
+        # is empty, this is also the view-scope fallback for the note
+        # above. Previously a `not visible_clause_added` guard here
+        # silently dropped DescendantOf whenever visible_urns was
+        # supplied — see test_visible_with_descendantof_emits_both_clauses.
+        if eff_root_urns:
             scope_continuation, scope_params = _build_scope_continuation(
                 provider, eff_root_urns, query.scope.max_depth or 12,
             )
@@ -1791,10 +1795,17 @@ async def execute_deep_search(
     if scope_mode == "data_source":
         # No containment clamp.
         pass
-    elif scope_mode == "visible" and visible_clause_added:
-        # Visible filter applied directly to the candidate WHERE; no
-        # extra continuation needed.
-        pass
+    elif scope_mode == "visible":
+        # The visible_urns clause (if added) lives in the candidate
+        # WHERE. Hoisted DescendantOf URNs still apply as a scope
+        # continuation — AND'd with the visible filter, not replaced
+        # by it. When visible_urns is empty this is also the
+        # view-scope fallback. Mirrors explain_deep_search.
+        if eff_root_urns:
+            scope_continuation, scope_params = _build_scope_continuation(
+                provider, eff_root_urns, query.scope.max_depth or 12,
+            )
+            base_params.update(scope_params)
     elif eff_root_urns:
         scope_continuation, scope_params = _build_scope_continuation(
             provider, eff_root_urns, query.scope.max_depth or 12,

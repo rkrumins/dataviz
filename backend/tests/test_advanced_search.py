@@ -931,6 +931,111 @@ class TestEffectiveRootUrns:
 
 
 # ---------------------------------------------------------------------------
+# Visible-mode + DescendantOf compose (regression for the bug where the
+# scope-continuation was silently dropped when visible_urns was supplied,
+# making "Visible nodes" + Root-in-view return the full visible set
+# instead of the visible∩subtree intersection)
+# ---------------------------------------------------------------------------
+
+class _StubScopeProvider:
+    """Minimal provider stub for explain_deep_search shape tests.
+
+    The explain pipeline reads three things off the provider:
+      * ``_get_lineage_edge_types()`` — used by _Compiler for degree
+        predicates; unused here but required by _build_compiler_for_provider.
+      * ``_get_containment_edge_types()`` — drives the scope-continuation
+        edge type.
+      * ``_entity_type_levels`` — drives _resolve_entity_types_scope's
+        default-to-live behaviour.
+    """
+    _entity_type_levels = {"dataset": 0, "container": 0}
+
+    def _get_lineage_edge_types(self):
+        return {"PRODUCES"}
+
+    def _get_containment_edge_types(self):
+        return {"CONTAINS"}
+
+
+class TestVisibleModeWithDescendantOf:
+    def test_visible_with_descendantof_emits_both_clauses(self):
+        """The fix: when both visible_urns AND a top-level descendantOf
+        are present, the executor must AND the visible clause and the
+        scope continuation. Previously the continuation was silently
+        skipped because of a guard that read 'not visible_clause_added'."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                TagPredicate(values=["PII"]),
+                DescendantOfPredicate(urns=["urn:reporting"]),
+            ]),
+            scope=SearchScope(
+                view_id="view_test",
+                scope_mode="visible",
+                visible_urns=["urn:reporting", "urn:reporting.child"],
+            ),
+        )
+        result = explain_deep_search(_StubScopeProvider(), q)
+        cypher = result["cypher"]
+        # Visible clause is in the candidate WHERE.
+        assert "n.urn IN $_visibleUrns" in cypher
+        # Scope continuation is appended after WITH n LIMIT $cap.
+        assert "MATCH (root)-[:CONTAINS*0..12]->(n)" in cypher
+        assert "root.urn IN $_rootUrns" in cypher
+        # Both params are bound; their sets are independent.
+        assert result["params"]["_rootUrns"] == ["urn:reporting"]
+        assert "urn:reporting" in result["params"]["_visibleUrns"]
+
+    def test_visible_without_descendantof_emits_no_continuation(self):
+        """Guard against over-applying the fix: visible-only queries
+        keep their current shape (no scope continuation)."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=TagPredicate(values=["PII"]),
+            scope=SearchScope(
+                view_id="view_test",
+                scope_mode="visible",
+                visible_urns=["urn:a", "urn:b"],
+            ),
+        )
+        result = explain_deep_search(_StubScopeProvider(), q)
+        cypher = result["cypher"]
+        assert "n.urn IN $_visibleUrns" in cypher
+        assert "MATCH (root)" not in cypher
+        assert "_rootUrns" not in result["params"]
+
+    def test_visible_empty_urns_with_descendantof_still_emits_continuation(self):
+        """The pre-existing fallback path: visible mode + empty
+        visible_urns + a descendantOf hoist → emit the scope
+        continuation. This test guards the fallback from regressing
+        as a side effect of dropping the 'not visible_clause_added'
+        guard."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                TagPredicate(values=["PII"]),
+                DescendantOfPredicate(urns=["urn:reporting"]),
+            ]),
+            scope=SearchScope(
+                view_id="view_test",
+                scope_mode="visible",
+                visible_urns=[],
+            ),
+        )
+        result = explain_deep_search(_StubScopeProvider(), q)
+        cypher = result["cypher"]
+        assert "n.urn IN $_visibleUrns" not in cypher
+        assert "MATCH (root)-[:CONTAINS*0..12]->(n)" in cypher
+        assert "root.urn IN $_rootUrns" in cypher
+
+
+# ---------------------------------------------------------------------------
 # Candidate Cypher assembly
 # ---------------------------------------------------------------------------
 
