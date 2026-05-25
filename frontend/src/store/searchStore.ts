@@ -216,6 +216,22 @@ interface SearchStoreState {
      * the panel doesn't replay the same seed.
      */
     pendingSearchSeed: string | null
+
+    /**
+     * Scope mode for the next search run.
+     *
+     *   visible    — Only URNs currently rendered on the canvas. Fast
+     *                feedback regardless of graph size, matches the
+     *                user's mental model of "search what I see." The
+     *                default.
+     *   view       — The view's authorised root URNs + containment
+     *                expansion. Searches everything in the view, even
+     *                folders the user has collapsed.
+     *   data_source — Entire data source. Power-user override; results
+     *                may include URNs not in this view (the panel
+     *                surfaces a disclaimer).
+     */
+    scopeMode: 'visible' | 'view' | 'data_source'
 }
 
 
@@ -292,6 +308,9 @@ interface SearchStoreActions {
      *  (or ``null``) and resets the field in the same set so the
      *  seed cannot be replayed by a second consumer. */
     consumePendingSearchSeed: () => string | null
+    /** Persist the scope mode chosen by the user in the panel header.
+     *  Applies to every subsequent run until changed. */
+    setScopeMode: (mode: 'visible' | 'view' | 'data_source') => void
 }
 
 const EMPTY_SET: ReadonlySet<string> = new Set<string>()
@@ -406,6 +425,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     historyFuture: EMPTY_HISTORY,
     recentQueries: loadRecentFromStorage(),
     pendingSearchSeed: null,
+    scopeMode: 'visible',
 
     setResult: ({ viewId, matchUrns, ancestorPaths, queryHash }) => {
         const next = new Set<string>()
@@ -581,6 +601,10 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         const current = get().pendingSearchSeed
         if (current !== null) set({ pendingSearchSeed: null })
         return current
+    },
+
+    setScopeMode: (mode) => {
+        set({ scopeMode: mode })
     },
 
     clear: () => {

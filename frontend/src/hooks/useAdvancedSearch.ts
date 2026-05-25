@@ -24,6 +24,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { useCanvasStore } from '@/store/canvas'
 import { DEFAULT_DRAFT_OPTIONS, useSearchStore, type AncestorPathInfo } from '@/store/searchStore'
 import type {
     AncestorRef,
@@ -297,9 +298,24 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
             const drillFrame = scopeStack
                 ? scopeStack[scopeStack.length - 1]
                 : null
+            const scopeMode = useSearchStore.getState().scopeMode
+            // Collect the visible URN set straight from the canvas
+            // store. Always attach when mode='visible' so the backend
+            // doesn't have to guess. The BE quietly falls back to
+            // view-scope if the list is empty (e.g. canvas hasn't
+            // hydrated yet).
+            const visibleUrns = scopeMode === 'visible'
+                ? Array.from(new Set(
+                    useCanvasStore.getState().nodes
+                        .map((n) => n.id ?? n.data?.urn)
+                        .filter((u): u is string => typeof u === 'string' && u.length > 0),
+                ))
+                : undefined
             const scope: SearchScope = {
                 ...(raw.scope ?? {}),
                 viewId,
+                scopeMode,
+                ...(visibleUrns ? { visibleUrns } : {}),
                 ...(drillFrame && drillFrame.urn
                     ? { rootUrns: [drillFrame.urn] }
                     : {}),

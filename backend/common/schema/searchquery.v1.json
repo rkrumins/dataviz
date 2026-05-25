@@ -1882,7 +1882,7 @@
       "type": "object"
     },
     "SearchScope": {
-      "description": "Bounds the search to a subtree of a specific *view*.\n\n``view_id`` is **required** \u2014 every search must be bound to a view.\nThe backend's ``ViewScopeResolver`` reads the view's config and\nproduces an ``EffectiveViewScope`` (root URNs + entity-type allow-list\n+ layer allow-list + max depth) that the compiler enforces.\n\n``root_urns`` / ``entity_types`` / ``layer_assignment`` / ``max_depth``\nare **narrowing hints** from the client (e.g. a drill into one bucket\nin the canvas). The resolver intersects them with the view's allowed\nscope \u2014 never widens.",
+      "description": "Bounds the search.\n\n``view_id`` is **required** \u2014 every search must be bound to a view\n(for security + telemetry), but the *scope* of the search is now\ncontrolled by ``scope_mode``:\n\n  * ``visible`` (default UI mode): only the URNs the user can\n    actually see right now on the canvas (passed in\n    ``visible_urns``). This is the \"fast feedback\" mode that\n    matches the user's mental model of \"search what's in front of\n    me.\" Falls back to ``view`` mode when ``visible_urns`` is\n    empty.\n\n  * ``view``: classic behaviour \u2014 the view's authorised roots,\n    expanded via containment, then narrowed by client hints.\n\n  * ``data_source``: power-user override. Searches the entire data\n    source (no view containment clamp). Results may include URNs\n    that are not in this view; the FE surfaces a disclaimer.\n\n``root_urns`` / ``entity_types`` / ``layer_assignment`` / ``max_depth``\nare **narrowing hints** that always apply (regardless of mode).\nThe resolver intersects them with the view's authorised scope.",
       "properties": {
         "entityTypes": {
           "anyOf": [
@@ -1945,11 +1945,39 @@
           "description": "Optional narrowing hint. Each URN must be a descendant of (or equal to) one of the view's allowed roots; URNs that fail validation are dropped server-side.",
           "title": "Rooturns"
         },
+        "scopeMode": {
+          "default": "view",
+          "description": "visible: filter to URNs in scope.visible_urns (fast in-view search). view: view's authorised roots + containment expansion (default for server-direct callers). data_source: entire data source \u2014 power-user override.",
+          "enum": [
+            "visible",
+            "view",
+            "data_source"
+          ],
+          "title": "Scopemode",
+          "type": "string"
+        },
         "viewId": {
-          "description": "Required. The view this search is scoped to. Searches CANNOT cross the view's boundary into the rest of the graph.",
+          "description": "Required. The view the search is bound to (security context + telemetry). Scope behaviour depends on ``scope_mode``.",
           "minLength": 1,
           "title": "Viewid",
           "type": "string"
+        },
+        "visibleUrns": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 20000,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "URNs currently rendered in the canvas. Required when scope_mode='visible'. Ignored in other modes. Capped at DEEP_SEARCH_VISIBLE_URNS_CAP entries (default 20000).",
+          "title": "Visibleurns"
         }
       },
       "required": [

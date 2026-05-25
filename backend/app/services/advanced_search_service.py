@@ -236,6 +236,11 @@ def _stamp_resolved_scope(
     """
     new_scope = SearchScope(
         view_id=eff_scope.view_id,
+        scope_mode=query.scope.scope_mode,
+        visible_urns=(
+            list(query.scope.visible_urns)
+            if query.scope.visible_urns else None
+        ),
         root_urns=list(eff_scope.root_urns) if eff_scope.root_urns else None,
         max_depth=eff_scope.max_depth,
         entity_types=(

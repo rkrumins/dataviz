@@ -497,24 +497,56 @@ AggregationSpec.model_rebuild()
 ResultShape = Literal["aggregates", "hits", "both", "paths"]
 
 
-class SearchScope(_Base):
-    """Bounds the search to a subtree of a specific *view*.
+ScopeMode = Literal["visible", "view", "data_source"]
 
-    ``view_id`` is **required** — every search must be bound to a view.
-    The backend's ``ViewScopeResolver`` reads the view's config and
-    produces an ``EffectiveViewScope`` (root URNs + entity-type allow-list
-    + layer allow-list + max depth) that the compiler enforces.
+
+class SearchScope(_Base):
+    """Bounds the search.
+
+    ``view_id`` is **required** — every search must be bound to a view
+    (for security + telemetry), but the *scope* of the search is now
+    controlled by ``scope_mode``:
+
+      * ``visible`` (default UI mode): only the URNs the user can
+        actually see right now on the canvas (passed in
+        ``visible_urns``). This is the "fast feedback" mode that
+        matches the user's mental model of "search what's in front of
+        me." Falls back to ``view`` mode when ``visible_urns`` is
+        empty.
+
+      * ``view``: classic behaviour — the view's authorised roots,
+        expanded via containment, then narrowed by client hints.
+
+      * ``data_source``: power-user override. Searches the entire data
+        source (no view containment clamp). Results may include URNs
+        that are not in this view; the FE surfaces a disclaimer.
 
     ``root_urns`` / ``entity_types`` / ``layer_assignment`` / ``max_depth``
-    are **narrowing hints** from the client (e.g. a drill into one bucket
-    in the canvas). The resolver intersects them with the view's allowed
-    scope — never widens.
+    are **narrowing hints** that always apply (regardless of mode).
+    The resolver intersects them with the view's authorised scope.
     """
     view_id: str = Field(
         alias="viewId", min_length=1,
         description=(
-            "Required. The view this search is scoped to. Searches CANNOT "
-            "cross the view's boundary into the rest of the graph."
+            "Required. The view the search is bound to (security context "
+            "+ telemetry). Scope behaviour depends on ``scope_mode``."
+        ),
+    )
+    scope_mode: ScopeMode = Field(
+        "view", alias="scopeMode",
+        description=(
+            "visible: filter to URNs in scope.visible_urns (fast in-view "
+            "search). view: view's authorised roots + containment "
+            "expansion (default for server-direct callers). data_source: "
+            "entire data source — power-user override."
+        ),
+    )
+    visible_urns: Optional[List[str]] = Field(
+        None, alias="visibleUrns", max_length=20000,
+        description=(
+            "URNs currently rendered in the canvas. Required when "
+            "scope_mode='visible'. Ignored in other modes. Capped at "
+            "DEEP_SEARCH_VISIBLE_URNS_CAP entries (default 20000)."
         ),
     )
     root_urns: Optional[List[str]] = Field(

@@ -923,6 +923,30 @@ def _build_compiler_for_provider(provider) -> _Compiler:
     )
 
 
+def _maybe_add_visible_urns_clause(
+    where_fragment: str,
+    scope_mode: str,
+    visible_urns: List[str],
+    base_params: Dict[str, Any],
+) -> Tuple[str, bool]:
+    """When ``scope_mode='visible'`` and ``visible_urns`` is non-empty,
+    AND ``n.urn IN $_visibleUrns`` into the candidate where-fragment and
+    bind the param. Returns ``(updated_fragment, did_inject)``.
+
+    The visible filter is the cheapest possible scope clamp (single
+    indexed lookup per row) and replaces both the containment scope
+    continuation and the entity-type label scan for the user-facing
+    "fast feedback" mode.
+    """
+    if scope_mode != "visible" or not visible_urns:
+        return where_fragment, False
+    base_params["_visibleUrns"] = list(visible_urns)
+    clause = "n.urn IN $_visibleUrns"
+    if where_fragment and where_fragment != "true":
+        return f"({clause}) AND ({where_fragment})", True
+    return clause, True
+
+
 def _build_scope_continuation(
     provider,
     effective_root_urns: List[str],
@@ -1135,8 +1159,51 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
             "predicates produced an empty set — no rows can match."
         )
 
+    # Scope mode resolution.
+    #
+    # ``visible``      → narrow the candidate scan to the URN set the FE
+    #                    just rendered. ``MATCH (n) WHERE n.urn IN $vis``
+    #                    is index-backed by the URN unique constraint and
+    #                    is the fastest possible scope. No scope
+    #                    continuation needed.
+    # ``data_source``  → no containment clamp; the candidate scan is
+    #                    bounded only by entity-type filter + cap.
+    # ``view`` (else)  → today's behaviour: containment expansion from
+    #                    the view's authorised roots.
+    scope_mode = query.scope.scope_mode
+    visible_urns = list(query.scope.visible_urns or [])
+    where_fragment, visible_clause_added = _maybe_add_visible_urns_clause(
+        where_fragment, scope_mode, visible_urns, base_params,
+    )
+
     scope_continuation = ""
-    if eff_root_urns:
+    if scope_mode == "data_source":
+        # Skip the containment scope clamp. Effective root URNs are
+        # still resolved for ``ScopeDiagnostics`` consumers; the
+        # candidate Cypher just doesn't apply them.
+        if eff_root_urns:
+            notes.append(
+                "scope_mode='data_source' — searching the entire data "
+                "source; the view's authorised root URNs are not "
+                "enforced. Results may include nodes that are not in "
+                "this view."
+            )
+    elif scope_mode == "visible":
+        if not visible_clause_added:
+            notes.append(
+                "scope_mode='visible' but scope.visible_urns is empty — "
+                "no candidate filter applied. Falling back to "
+                "view-scope semantics."
+            )
+        # Even in visible mode, if visible_urns wasn't supplied, fall
+        # back to view-scope so the search still respects the view's
+        # boundary (defensive default).
+        if not visible_clause_added and eff_root_urns:
+            scope_continuation, scope_params = _build_scope_continuation(
+                provider, eff_root_urns, query.scope.max_depth or 12,
+            )
+            base_params.update(scope_params)
+    elif eff_root_urns:
         # Post-filter scope check: ``MATCH (root)-[:CONTAINS*1..D]->(n)``
         # appended after the candidate ``WITH n LIMIT $cap``. Anchor-
         # form pre-filter (``_build_scope_pre_filter``) exists but is
@@ -1688,12 +1755,24 @@ async def execute_deep_search(
         # Intersection is empty → no rows can match
         return _empty_result(query.options.results, start)
 
-    # 3. Scope continuation Cypher (after the candidate WITH n).
-    #    Post-filter shape — anchor-form pre-filter is NOT activated
-    #    by default. See ``_build_scope_pre_filter`` docstring + the
-    #    explain branch above for the regression notes.
+    # 3. Scope mode resolution (see explain_deep_search for full notes).
+    #    visible: AND n.urn IN $_visibleUrns into the where-fragment.
+    #    data_source: skip the containment scope check.
+    #    view: today's post-filter shape.
+    scope_mode = query.scope.scope_mode
+    visible_urns_list = list(query.scope.visible_urns or [])
+    where_fragment, visible_clause_added = _maybe_add_visible_urns_clause(
+        where_fragment, scope_mode, visible_urns_list, base_params,
+    )
     scope_continuation = ""
-    if eff_root_urns:
+    if scope_mode == "data_source":
+        # No containment clamp.
+        pass
+    elif scope_mode == "visible" and visible_clause_added:
+        # Visible filter applied directly to the candidate WHERE; no
+        # extra continuation needed.
+        pass
+    elif eff_root_urns:
         scope_continuation, scope_params = _build_scope_continuation(
             provider, eff_root_urns, query.scope.max_depth or 12,
         )

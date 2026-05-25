@@ -55,6 +55,7 @@ import { NoViewState } from './panel/NoViewState'
 import { QueryCard } from './panel/QueryCard'
 import { ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
 import { ResultsPane } from './panel/ResultsPane'
+import { ScopeModePicker } from './panel/ScopeModePicker'
 import { ScopeStrip } from './panel/ScopeStrip'
 import { TemplatePicker } from './TemplatePicker'
 import {
@@ -321,13 +322,11 @@ function CompactHeader({
                         <path d="m21 21-4.3-4.3" />
                     </svg>
                 </div>
-                <div className="flex flex-col min-w-0">
+                <div className="flex flex-col min-w-0 gap-1">
                     <span className="text-[13px] font-display font-semibold text-ink leading-tight">
                         Search
                     </span>
-                    <span className="text-[10px] text-ink-muted/80 leading-tight">
-                        Scoped to this view
-                    </span>
+                    <ScopeModePicker />
                 </div>
             </div>
             <div className="ml-auto flex items-center gap-0.5">
