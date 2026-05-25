@@ -9,6 +9,12 @@
 
 @layer base {
   :root {
+    /* Lets the browser render native form controls (inputs, selects,
+       scrollbars) using the matching light/dark UA palette so the
+       Tailwind opacity-modified backgrounds aren't punched through by
+       the user-agent default. */
+    color-scheme: light;
+
     /* === Color Primitives === */
     --nx-bg-canvas: #fafbfc;
     --nx-bg-elevated: #ffffff;
@@ -49,6 +55,7 @@
   }
 
   .dark {
+    color-scheme: dark;
     --nx-bg-canvas: #0d1117;
     --nx-bg-elevated: #161b22;
     --nx-bg-overlay: rgba(22, 27, 34, 0.95);
