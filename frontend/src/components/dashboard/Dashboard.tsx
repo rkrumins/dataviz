@@ -147,6 +147,7 @@ export function Dashboard() {
                                 subtitle="Pre-built context models to accelerate setup"
                                 items={templates}
                                 icon={LayoutTemplate}
+                                onBrowseAll={() => navigate('/templates')}
                             />
                         </motion.div>
                     )}
@@ -230,6 +231,7 @@ export function Dashboard() {
                         subtitle="Pre-built context models to accelerate setup"
                         items={templates}
                         icon={LayoutTemplate}
+                        onBrowseAll={() => navigate('/templates')}
                     />
                 </motion.div>
 

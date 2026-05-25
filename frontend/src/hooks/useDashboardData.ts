@@ -6,6 +6,7 @@ import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { withTimeout } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
 import type { ViewConfiguration } from '@/types/schema'
+import type { ContextModel } from '@/services/contextModelService'
 
 const EMPTY_VIEWS: ViewConfiguration[] = []
 
@@ -22,13 +23,13 @@ export interface DataSourceStats {
     entityTypes: string[]
 }
 
-export interface TemplateBrief {
-    id: string
-    name: string
-    description?: string
-    category?: string
-    entityTypesCount?: number
-}
+/**
+ * TemplateBrief — alias for the full ContextModel returned by the templates
+ * endpoint. The dashboard formerly truncated the response to a tiny shape;
+ * we now keep the rich fields so the dashboard's featured tile can render
+ * the accent color, icon, and instantiation count.
+ */
+export type TemplateBrief = ContextModel
 
 export interface OntologyBrief {
     id: string
