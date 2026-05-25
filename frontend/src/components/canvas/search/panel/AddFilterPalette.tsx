@@ -40,14 +40,13 @@ import {
     ArrowDownToLine,
     ArrowUpFromLine,
     Boxes,
-    CircleOff,
-    CornerDownRight,
-    CornerLeftUp,
     Equal,
     Flag,
     GitBranch,
     Hash,
+    KeyRound,
     Layers,
+    Milestone,
     Parentheses,
     Plus,
     Radar,
@@ -56,6 +55,7 @@ import {
     Sparkles,
     Tag,
     Type,
+    Unplug,
     type LucideIcon,
 } from 'lucide-react'
 import {
@@ -341,7 +341,7 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'has-property',
-                    icon: Flag, tone: 'governance',
+                    icon: KeyRound, tone: 'governance',
                     label: 'Has property…',
                     description: 'A given metadata key is set on the node',
                     count: counts.propertyKeys,
@@ -370,9 +370,9 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
             entries: [
                 {
                     id: 'no-upstream',
-                    icon: CornerLeftUp, tone: 'lineage',
+                    icon: Milestone, tone: 'lineage',
                     label: 'No upstream lineage',
-                    description: 'Nodes with no incoming lineage edges',
+                    description: 'Source nodes — nothing feeds them',
                     action: 'emit',
                     build: () => ({
                         kind: 'isRoot', edgeClass: DEFAULT_EDGE_CLASS,
@@ -380,9 +380,9 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'no-downstream',
-                    icon: CornerDownRight, tone: 'lineage',
+                    icon: Flag, tone: 'lineage',
                     label: 'No downstream lineage',
-                    description: 'Nodes with no outgoing lineage edges',
+                    description: 'Terminal nodes — nothing reads from them',
                     action: 'emit',
                     build: () => ({
                         kind: 'isLeaf', edgeClass: DEFAULT_EDGE_CLASS,
@@ -390,9 +390,9 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'no-lineage',
-                    icon: CircleOff, tone: 'lineage',
+                    icon: Unplug, tone: 'lineage',
                     label: 'No lineage edges',
-                    description: 'Disconnected nodes (no upstream and no downstream)',
+                    description: 'Disconnected nodes — no upstream AND no downstream',
                     action: 'emit',
                     build: () => ({
                         kind: 'isOrphan', edgeClass: DEFAULT_EDGE_CLASS,

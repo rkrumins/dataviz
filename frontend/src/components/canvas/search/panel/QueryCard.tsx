@@ -659,6 +659,16 @@ function PremiumEmptyHero({
     onRemoveRecent: (timestamp: number) => void
 }) {
     const [quickValue, setQuickValue] = useState('')
+    // W2.7 — when the user escalated from ContextViewHeader with a
+    // typed quick-search query, the panel set
+    // ``pendingSearchSeed`` on the store right before opening. The
+    // hero consumes + atomically clears it on mount so the input
+    // opens pre-filled with the user's text. Subsequent re-opens
+    // see ``null`` and start empty as usual.
+    useEffect(() => {
+        const seed = useSearchStore.getState().consumePendingSearchSeed()
+        if (seed) setQuickValue(seed)
+    }, [])
     const submitQuick = () => {
         const trimmed = quickValue.trim()
         if (!trimmed) return

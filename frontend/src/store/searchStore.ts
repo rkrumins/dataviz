@@ -202,6 +202,20 @@ interface SearchStoreState {
      * localStorage so they survive page reloads.
      */
     recentQueries: ReadonlyArray<RecentQueryEntry>
+    /**
+     * One-shot seed for the SearchMapPanel's empty-hero quick-search
+     * input (W2.7). When a caller (typically the ContextViewHeader
+     * escalation flow) opens the Advanced Search panel WITH a typed
+     * quick-search query, the empty hero reads + atomically clears
+     * this on mount so the visible input opens pre-filled with the
+     * user's text instead of being bypassed by a silent
+     * draft-predicate seed.
+     *
+     * ``null`` means "nothing pending — render the hero empty as
+     * usual". Always cleared on consume so a subsequent re-open of
+     * the panel doesn't replay the same seed.
+     */
+    pendingSearchSeed: string | null
 }
 
 
@@ -271,6 +285,13 @@ interface SearchStoreActions {
      *  to undo back to their previous draft. */
     clearSearchResults: () => void
     clear: () => void
+    /** Stash a quick-search query for the empty hero to pick up on
+     *  mount. Pass ``null`` to clear without consuming. */
+    setPendingSearchSeed: (seed: string | null) => void
+    /** Atomic read-and-clear. Returns the previously-stashed seed
+     *  (or ``null``) and resets the field in the same set so the
+     *  seed cannot be replayed by a second consumer. */
+    consumePendingSearchSeed: () => string | null
 }
 
 const EMPTY_SET: ReadonlySet<string> = new Set<string>()
@@ -384,6 +405,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     historyPast: EMPTY_HISTORY,
     historyFuture: EMPTY_HISTORY,
     recentQueries: loadRecentFromStorage(),
+    pendingSearchSeed: null,
 
     setResult: ({ viewId, matchUrns, ancestorPaths, queryHash }) => {
         const next = new Set<string>()
@@ -549,6 +571,16 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             ancestorMatchCounts: EMPTY_MAP,
             ancestorMatchTypeBreakdowns: EMPTY_BREAKDOWN_MAP,
         })
+    },
+
+    setPendingSearchSeed: (seed) => {
+        set({ pendingSearchSeed: seed && seed.trim() ? seed : null })
+    },
+
+    consumePendingSearchSeed: () => {
+        const current = get().pendingSearchSeed
+        if (current !== null) set({ pendingSearchSeed: null })
+        return current
     },
 
     clear: () => {

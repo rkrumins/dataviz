@@ -1590,22 +1590,15 @@ export function ContextViewCanvas({
           // Toggle the panel. When the user escalates from the
           // quick search (passes a seed string), force-open the
           // panel + clear the quick-search input (so the no-match
-          // escalation card disappears) + seed the Advanced
-          // panel's draft predicate with a name-text predicate so
-          // they pick up where they left off without retyping.
+          // escalation card disappears) + stash the typed query as
+          // a one-shot ``pendingSearchSeed`` (W2.7) so the empty
+          // hero's "Type to search by name across this view…"
+          // input opens pre-filled with the user's text. The hero
+          // consumes + clears the seed on mount.
           if (seedQuery && seedQuery.trim()) {
             const trimmed = seedQuery.trim()
             setSearchQuery('')
-            useSearchStore.getState().seedDraftPredicate({
-              kind: 'group',
-              op: 'and',
-              children: [{
-                kind: 'text',
-                value: trimmed,
-                target: 'name',
-                match: 'substring',
-              }],
-            })
+            useSearchStore.getState().setPendingSearchSeed(trimmed)
             setAdvancedSearchOpen(true)
             return
           }
