@@ -117,6 +117,12 @@ export interface TraceModeIndicatorProps {
   isLoading?: boolean
   /** When true, hide the text block (icon-only). Useful below sm viewports. */
   iconOnly?: boolean
+  /**
+   * Compact layout for floating toolbars: 28px badge, single-line label,
+   * no "TRACE" micro-pill or sublabel. Use in the TraceToolbar (Hierarchy /
+   * Graph canvases). Default `false` matches the bottom-dock density.
+   */
+  compact?: boolean
   className?: string
 }
 
@@ -124,6 +130,7 @@ export function TraceModeIndicator({
   mode,
   isLoading,
   iconOnly,
+  compact,
   className,
 }: TraceModeIndicatorProps) {
   const style = MODE_STYLES[mode]
@@ -132,13 +139,25 @@ export function TraceModeIndicator({
   const sub = isLoading ? 'building lineage' : style.sublabel
   const ariaLabel = `${style.label} trace mode. ${style.meaning}`
 
+  // Compact dials down the badge + text scale so the indicator sits cleanly
+  // in a 32-36px row without dominating the surrounding controls.
+  const badgeSize = compact ? 'w-7 h-7 rounded-lg' : 'w-10 h-10 rounded-xl'
+  const iconSize = compact ? 'w-4 h-4' : 'w-5 h-5'
+  const pulseSize = compact ? 'w-2 h-2' : 'w-2.5 h-2.5'
+  const labelSize = compact ? 'text-[11px]' : 'text-[12px]'
+  const subSize = compact ? 'text-[9px]' : 'text-[10px]'
+
   return (
     <div
       role="status"
       aria-live="polite"
       aria-label={ariaLabel}
       title={style.meaning}
-      className={cn('relative flex items-center gap-2.5 shrink-0', className)}
+      className={cn(
+        'relative flex items-center shrink-0',
+        compact ? 'gap-2' : 'gap-2.5',
+        className,
+      )}
     >
       {/* Identity badge — mode-coloured gradient + live pulse dot */}
       <motion.div
@@ -147,7 +166,8 @@ export function TraceModeIndicator({
         animate={{ scale: 1, opacity: 1 }}
         transition={{ duration: 0.22, ease: 'easeOut' }}
         className={cn(
-          'relative w-10 h-10 rounded-xl flex items-center justify-center shrink-0',
+          'relative flex items-center justify-center shrink-0',
+          badgeSize,
           'bg-gradient-to-br', style.gradient,
           'border', style.border,
           'shadow-lg', style.shadow,
@@ -155,20 +175,20 @@ export function TraceModeIndicator({
       >
         {isLoading ? (
           <Loader2
-            className="w-5 h-5 text-white animate-spin motion-reduce:animate-none"
+            className={cn('text-white animate-spin motion-reduce:animate-none', iconSize)}
             strokeWidth={2.4}
             aria-hidden
           />
         ) : (
           <Icon
-            className={cn('w-5 h-5 text-white', style.glow)}
+            className={cn('text-white', iconSize, style.glow)}
             strokeWidth={2.4}
             aria-hidden
           />
         )}
         {/* Pulse — anchored bottom-right; signals "trace is live" */}
         <span
-          className="absolute -bottom-0.5 -right-0.5 inline-flex w-2.5 h-2.5"
+          className={cn('absolute -bottom-0.5 -right-0.5 inline-flex', pulseSize)}
           aria-hidden
         >
           <span
@@ -179,7 +199,8 @@ export function TraceModeIndicator({
           />
           <span
             className={cn(
-              'relative w-2.5 h-2.5 rounded-full border-2 border-canvas-elevated',
+              'relative rounded-full border-2 border-canvas-elevated',
+              pulseSize,
               style.pulseDot,
             )}
           />
@@ -196,10 +217,10 @@ export function TraceModeIndicator({
           className="flex flex-col leading-tight min-w-0"
         >
           <div className="flex items-center gap-1.5">
-            <span className="text-[12px] font-bold text-ink tracking-tight whitespace-nowrap">
+            <span className={cn('font-bold text-ink tracking-tight whitespace-nowrap', labelSize)}>
               {headline}
             </span>
-            {!isLoading && (
+            {!isLoading && !compact && (
               <span
                 className={cn(
                   'hidden xl:inline-flex shrink-0 px-1.5 py-0.5 rounded-md',
@@ -213,9 +234,11 @@ export function TraceModeIndicator({
               </span>
             )}
           </div>
-          <span className="text-[10px] text-ink-muted tracking-wide whitespace-nowrap">
-            {sub}
-          </span>
+          {!compact && (
+            <span className={cn('text-ink-muted tracking-wide whitespace-nowrap', subSize)}>
+              {sub}
+            </span>
+          )}
         </motion.div>
       )}
     </div>
