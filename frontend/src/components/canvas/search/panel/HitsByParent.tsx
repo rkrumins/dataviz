@@ -14,18 +14,33 @@
  * full candidate set would be a richer follow-up.
  */
 import { ChevronDown, ChevronRight, Folder } from 'lucide-react'
-import { type FC, useMemo, useState } from 'react'
+import { type FC, type RefObject, useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import type { AncestorRef, SearchHit } from '@/types/search'
 
 import { SearchHitRow } from '../SearchHitRow'
+import { VirtualizedHitList } from './VirtualizedHitList'
+
+
+/** Above this hit count the grouped folder UX stops being meaningful
+ *  (1000 hits across 50 parents is read as a flat list anyway) and the
+ *  cost of mounting every row up-front dominates first-paint time.
+ *  Cursor pagination (W2.2) makes pages of 500+ rows reachable, so
+ *  this threshold needs to gate the virtualized render path
+ *  (W2.4). */
+const VIRTUALIZE_THRESHOLD = 200
 
 
 export interface HitsByParentProps {
     hits: SearchHit[]
     onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpen?: (urn: string) => void
+    /** Ref to the scrollable parent in ``ResultsPane``. Required for
+     *  the virtualized render path to measure its viewport. When
+     *  unset, ``HitsByParent`` always uses the grouped folder render
+     *  regardless of hit count (test environments / small lists). */
+    scrollElementRef?: RefObject<HTMLElement | null>
     /** Above this group size, render as a collapsible folder header.
      *  Smaller groups (and singletons) render flat. Default 1 — every
      *  hit appears under its parent's folder so the layout is uniform;
@@ -43,9 +58,26 @@ interface Group {
 
 
 export const HitsByParent: FC<HitsByParentProps> = ({
-    hits, onReveal, onOpen, minGroupSize = 1,
+    hits, onReveal, onOpen, minGroupSize = 1, scrollElementRef,
 }) => {
+    // Compute groups upfront so the hook order is stable across the
+    // virtualized / grouped render branches below.
     const { flat, groups } = useMemo(() => groupByParent(hits, minGroupSize), [hits, minGroupSize])
+
+    // Large-result fast path (W2.4): drop grouping and render the hits
+    // as a flat virtualized list. Mounting every SearchHitRow for a
+    // 1000-row page stalls first paint; the grouping signal isn't
+    // meaningful at that scale either.
+    if (hits.length > VIRTUALIZE_THRESHOLD && scrollElementRef) {
+        return (
+            <VirtualizedHitList
+                hits={hits}
+                scrollElementRef={scrollElementRef}
+                onReveal={onReveal}
+                onOpen={onOpen}
+            />
+        )
+    }
 
     if (flat.length === 0 && groups.length === 0) {
         return (

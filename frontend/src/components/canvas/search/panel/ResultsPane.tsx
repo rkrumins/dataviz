@@ -8,7 +8,7 @@
  * scrollable body that paints aggregates / hits / paths / error.
  */
 import { Filter, X } from 'lucide-react'
-import { type FC, useCallback, useMemo, useState } from 'react'
+import { type FC, type RefObject, useCallback, useMemo, useRef, useState } from 'react'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
@@ -49,6 +49,11 @@ export interface ResultsPaneProps {
 export const ResultsPane: FC<ResultsPaneProps> = ({
     view, onDrill, onReveal, onOpen, onLoadMore, isLoadingMore,
 }) => {
+    // Ref to the scroll container. Threaded through to HitsByParent →
+    // VirtualizedHitList so the virtualizer can measure the visible
+    // viewport when the hit page exceeds the virtualization threshold.
+    const scrollContainerRef = useRef<HTMLDivElement>(null)
+
     // The panel doesn't render ResultsPane for idle / templateSelected —
     // the AskBar is the empty state. Defensive null kept for safety.
     if (view.kind === 'idle' || view.kind === 'templateSelected') return null
@@ -59,7 +64,10 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
             "overflow-hidden",
             "min-h-[180px] max-h-[60vh] flex flex-col",
         )}>
-            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+            <div
+                ref={scrollContainerRef}
+                className="flex-1 min-h-0 overflow-y-auto custom-scrollbar"
+            >
                 <Dispatch
                     view={view}
                     onDrill={onDrill}
@@ -67,6 +75,7 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
                     onOpen={onOpen}
                     onLoadMore={onLoadMore}
                     isLoadingMore={isLoadingMore}
+                    scrollElementRef={scrollContainerRef}
                 />
             </div>
         </div>
@@ -76,7 +85,8 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
 
 function Dispatch({
     view, onDrill, onReveal, onOpen, onLoadMore, isLoadingMore,
-}: ResultsPaneProps) {
+    scrollElementRef,
+}: ResultsPaneProps & { scrollElementRef: RefObject<HTMLDivElement | null> }) {
     switch (view.kind) {
         case 'running':
             return <RunningSkeleton label="Searching…" />
@@ -91,6 +101,7 @@ function Dispatch({
                     onOpen={onOpen}
                     onLoadMore={onLoadMore}
                     isLoadingMore={isLoadingMore}
+                    scrollElementRef={scrollElementRef}
                 />
             )
         default:
@@ -101,6 +112,7 @@ function Dispatch({
 
 function ResultsContent({
     view, onDrill, onReveal, onOpen, onLoadMore, isLoadingMore,
+    scrollElementRef,
 }: {
     view: Extract<PanelView, { kind: 'results' }>
     onDrill: ResultsPaneProps['onDrill']
@@ -108,6 +120,7 @@ function ResultsContent({
     onOpen?: ResultsPaneProps['onOpen']
     onLoadMore?: ResultsPaneProps['onLoadMore']
     isLoadingMore?: ResultsPaneProps['isLoadingMore']
+    scrollElementRef: RefObject<HTMLDivElement | null>
 }) {
     const { result } = view
 
@@ -271,6 +284,7 @@ function ResultsContent({
                                 hits={filteredHits}
                                 onReveal={onReveal}
                                 onOpen={onOpen}
+                                scrollElementRef={scrollElementRef}
                             />
                         )}
                         {/* W2.2 — cursor pagination. The backend echoes
