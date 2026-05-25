@@ -58,6 +58,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from backend.app.services.deep_search import get_deep_search_settings
 from backend.common.models.search import (
     AggregationSpec,
     AncestorRef,
@@ -78,7 +79,26 @@ logger = logging.getLogger(__name__)
 # Tuned for "predicate-first, scope-verified" semantics: smaller is
 # safer, larger gives more accurate aggregate counts on permissive
 # predicates. 5k is the sweet spot per the plan's budget.
-CANDIDATE_CAP = 5000
+#
+# Tunables (CANDIDATE_CAP and the discovery caps below) now live in
+# ``DeepSearchSettings`` (env-overridable). These module-level names
+# are kept as a back-compat surface for tests / external callers that
+# import them by name — they resolve to live settings via PEP 562
+# ``__getattr__`` so env overrides take effect immediately.
+_BACKCOMPAT_SETTINGS_KEYS = {
+    "CANDIDATE_CAP": "candidate_cap",
+    "_DISCOVER_VALUE_SAMPLES_PER_KEY": "discover_value_samples_per_key",
+    "_DISCOVER_VALUE_KEYS_PER_LABEL": "discover_value_keys_per_label",
+    "_DISCOVER_TAG_VALUES_CAP": "discover_tag_values_cap",
+    "_DISCOVER_EDGE_SAMPLE_CAP": "discover_edge_sample_cap",
+}
+
+
+def __getattr__(name: str):
+    field = _BACKCOMPAT_SETTINGS_KEYS.get(name)
+    if field is not None:
+        return getattr(get_deep_search_settings(), field)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class CompileError(ValueError):
@@ -1014,6 +1034,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     continuation isn't materialised here (would be ~one extra line
     per AggregationSpec — left to caller's understanding).
     """
+    _s = get_deep_search_settings()
     notes: List[str] = []
     compiler = _build_compiler_for_provider(provider)
     where_fragment = compiler.compile(query.predicate)
@@ -1063,7 +1084,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         where_fragment=where_fragment,
         entity_types_param=use_entity_types,
         scope_continuation=scope_continuation,
-        candidate_cap=CANDIDATE_CAP,
+        candidate_cap=_s.candidate_cap,
         within_hops_continuation=wh_continuation,
     )
 
@@ -1078,7 +1099,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         "cypher": cand_cypher,
         "hits_cypher": cand_cypher + " RETURN n",
         "params": base_params,
-        "candidate_cap": CANDIDATE_CAP,
+        "candidate_cap": _s.candidate_cap,
         "hoisted_root_urns": [list(s) for s in compiler.hoisted_root_urns],
         "effective_root_urns": eff_root_urns,
         "notes": notes,
@@ -1107,20 +1128,10 @@ _DISCOVER_RESERVED_KEYS = frozenset({
 })
 
 
-# Maximum distinct values surfaced per (label, property-key) sample.
-# Caps the response payload at a sane size while still being enough to
-# populate a dropdown of "common values" in the FE's property-value
-# picker. Higher than ~20 stops being useful for a UI hint.
-_DISCOVER_VALUE_SAMPLES_PER_KEY = 20
-# Maximum entries surfaced in the per-key value-sample dict (per label).
-# A label with hundreds of unique property keys would otherwise blow up
-# the response — most callers don't need values for every fringe key.
-_DISCOVER_VALUE_KEYS_PER_LABEL = 64
-# Maximum entries surfaced in the top-level tag-value list.
-_DISCOVER_TAG_VALUES_CAP = 200
-# Hard cap on edges sampled when collecting edge-type metadata. Edges
-# can vastly outnumber nodes; capping keeps the query bounded.
-_DISCOVER_EDGE_SAMPLE_CAP = 5000
+# Discovery caps (per-key value samples, value keys per label, tag-value
+# cap, edge-sample cap) live in ``DeepSearchSettings``. The PEP 562
+# ``__getattr__`` above exposes the old constant names for back-compat
+# with test imports; internal call sites read settings directly.
 
 
 async def discover_native_property_keys(
@@ -1166,6 +1177,7 @@ async def discover_native_property_keys(
     UI's autocomplete pickers. They can be skipped via the
     ``include_*`` flags when only the legacy key list is needed.
     """
+    _s = get_deep_search_settings()
     t0 = time.monotonic()
     out_labels: Dict[str, Dict[str, Any]] = {}
     blob_only: List[str] = []
@@ -1233,13 +1245,13 @@ async def discover_native_property_keys(
                     continue
                 if v is None:
                     continue
-                if len(value_samples) >= _DISCOVER_VALUE_KEYS_PER_LABEL \
+                if len(value_samples) >= _s.discover_value_keys_per_label \
                    and k not in value_samples:
                     # Already at the per-label value-key cap.
                     continue
                 try:
                     sample = seen_values_per_key.setdefault(k, set())
-                    if len(sample) >= _DISCOVER_VALUE_SAMPLES_PER_KEY:
+                    if len(sample) >= _s.discover_value_samples_per_key:
                         continue
                     sample.add(v)
                     value_samples.setdefault(k, []).append(v)
@@ -1278,7 +1290,7 @@ async def discover_native_property_keys(
         # so the UI shows the most-used tags first.
         ordered = sorted(
             tag_value_counts.items(), key=lambda kv: (-kv[1], kv[0]),
-        )[:_DISCOVER_TAG_VALUES_CAP]
+        )[:_s.discover_tag_values_cap]
         tag_values_payload = dict(ordered)
 
     return {
@@ -1333,10 +1345,11 @@ async def _discover_edge_metadata(
     editor (W2) and by the property-value picker when the user
     composes a path query against a specific edge type.
     """
+    _s = get_deep_search_settings()
     try:
         res = await provider._ro_query(
             "MATCH ()-[r]->() WITH r LIMIT $lim RETURN type(r) AS edgeType, r",
-            params={"lim": _DISCOVER_EDGE_SAMPLE_CAP},
+            params={"lim": _s.discover_edge_sample_cap},
             timeout=timeout_s,
         )
     except Exception as exc:
@@ -1366,7 +1379,7 @@ async def _discover_edge_metadata(
                 continue
             try:
                 seen = entry["seen_per_key"].setdefault(k, set())
-                if len(seen) >= _DISCOVER_VALUE_SAMPLES_PER_KEY:
+                if len(seen) >= _s.discover_value_samples_per_key:
                     continue
                 seen.add(v)
                 entry["value_samples"].setdefault(k, []).append(v)
@@ -1516,6 +1529,7 @@ async def execute_deep_search(
     cache (``provider._get_ancestor_chain``). This function only sees
     the public-ish provider surface.
     """
+    _s = get_deep_search_settings()
     start = time.monotonic()
     timeout_s = (deadline_ms or query.options.soft_deadline_ms) / 1000.0
 
@@ -1590,7 +1604,7 @@ async def execute_deep_search(
         where_fragment=where_fragment,
         entity_types_param=use_entity_types,
         scope_continuation=scope_continuation,
-        candidate_cap=CANDIDATE_CAP,
+        candidate_cap=_s.candidate_cap,
         within_hops_continuation=wh_continuation,
     )
 
@@ -1634,7 +1648,7 @@ async def execute_deep_search(
             )
             rows = result.result_set or []
             candidate_count = len(rows)
-            truncated = candidate_count >= CANDIDATE_CAP
+            truncated = candidate_count >= _s.candidate_cap
             hits, hits_offset_after, hits_total_sorted = _build_hits_from_rows(
                 provider, rows, query,
             )
@@ -1715,7 +1729,7 @@ async def _run_count(
     )
     rs = result.result_set or []
     n = int(rs[0][0]) if rs and rs[0] else 0
-    return n, (n >= CANDIDATE_CAP)
+    return n, (n >= get_deep_search_settings().candidate_cap)
 
 
 async def _run_aggregation(

@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.providers.falkordb_deep_search import CompileError
 from backend.app.services.context_engine import ContextEngine
+from backend.app.services.deep_search import get_deep_search_settings
 from backend.app.services.view_scope import (
     EffectiveViewScope,
     ViewNotFound,
@@ -45,12 +46,22 @@ from backend.common.models.search import (
 logger = logging.getLogger(__name__)
 
 
-# Tree-shape caps from the plan. Enforced here (not in the model) so we
-# can surface a meaningful path-into-tree error message instead of a
-# Pydantic ValidationError that just says ``len(children) > 24``.
-MAX_TREE_DEPTH = 6
-MAX_LEAF_COUNT = 64
-MAX_OR_BRANCH = 24
+# Predicate-tree caps now live in DeepSearchSettings (env-overridable).
+# These module-level names are kept as a back-compat surface for tests
+# that import them by name — they resolve to live settings via PEP 562
+# ``__getattr__`` so env overrides take effect immediately.
+_BACKCOMPAT_SETTINGS_KEYS = {
+    "MAX_TREE_DEPTH": "max_tree_depth",
+    "MAX_LEAF_COUNT": "max_leaf_count",
+    "MAX_OR_BRANCH": "max_or_branch",
+}
+
+
+def __getattr__(name: str):
+    field = _BACKCOMPAT_SETTINGS_KEYS.get(name)
+    if field is not None:
+        return getattr(get_deep_search_settings(), field)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class ValidationError(ValueError):
@@ -63,17 +74,19 @@ def _validate_predicate(predicate, *, depth: int = 1, path: str = "$") -> int:
     Each leaf and each group counts as one node toward depth; OR groups
     additionally cap their child count separately. The traversal is
     iterative-friendly (recursive here for simplicity; predicate trees
-    are small).
+    are small). Caps are read from ``DeepSearchSettings`` so operators
+    can tune via env vars (DEEP_SEARCH_MAX_TREE_DEPTH etc.).
     """
-    if depth > MAX_TREE_DEPTH:
+    s = get_deep_search_settings()
+    if depth > s.max_tree_depth:
         raise ValidationError(
-            f"predicate tree at {path} exceeds max depth {MAX_TREE_DEPTH}"
+            f"predicate tree at {path} exceeds max depth {s.max_tree_depth}"
         )
     if isinstance(predicate, GroupPredicate):
-        if predicate.op == "or" and len(predicate.children) > MAX_OR_BRANCH:
+        if predicate.op == "or" and len(predicate.children) > s.max_or_branch:
             raise ValidationError(
                 f"OR group at {path} has {len(predicate.children)} children "
-                f"(max {MAX_OR_BRANCH})"
+                f"(max {s.max_or_branch})"
             )
         if predicate.op == "not" and len(predicate.children) != 1:
             raise ValidationError(
@@ -90,9 +103,10 @@ def _validate_predicate(predicate, *, depth: int = 1, path: str = "$") -> int:
 
 def _count_and_validate(query: SearchQuery) -> int:
     leaves = _validate_predicate(query.predicate)
-    if leaves > MAX_LEAF_COUNT:
+    max_leaves = get_deep_search_settings().max_leaf_count
+    if leaves > max_leaves:
         raise ValidationError(
-            f"predicate has {leaves} leaves (max {MAX_LEAF_COUNT})"
+            f"predicate has {leaves} leaves (max {max_leaves})"
         )
     return leaves
 
