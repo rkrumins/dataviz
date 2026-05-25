@@ -1294,7 +1294,7 @@
       "description": "Per-label discovery payload from ``GET /search/discover``.",
       "properties": {
         "keys": {
-          "description": "Native property keys found on at least one sampled node.",
+          "description": "Native property keys found on at least one sampled node, capped at the top N by frequency in the sample (see ``truncatedProperties``).",
           "items": {
             "type": "string"
           },
@@ -1305,6 +1305,12 @@
           "description": "How many nodes were sampled for this label.",
           "title": "Sampled",
           "type": "integer"
+        },
+        "truncatedProperties": {
+          "default": false,
+          "description": "True when the sample yielded more property keys than the configured per-label cap (DEEP_SEARCH_DISCOVER_KEY_CAP). FE shows a 'X of ~N properties \u2014 narrow the sample to see rare keys' hint.",
+          "title": "Truncatedproperties",
+          "type": "boolean"
         },
         "valueSamplesByKey": {
           "anyOf": [

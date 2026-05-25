@@ -40,6 +40,7 @@ from backend.common.models.search import (
     SearchQuery,
     SearchResultPage,
     SearchScope,
+    TextPredicate,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,7 +108,60 @@ def _count_and_validate(query: SearchQuery) -> int:
         raise ValidationError(
             f"predicate has {leaves} leaves (max {max_leaves})"
         )
+    _reject_unbounded_text_any(query)
     return leaves
+
+
+def _is_unbounded_text_any(predicate) -> bool:
+    """True if every leaf reachable from ``predicate`` is a TextPredicate
+    with ``target='any'``.
+
+    The ``target='any'`` text search compiles to a ``CONTAINS`` scan on
+    the denormalised ``n.searchableText`` column — fast for small label
+    sets, catastrophic on a 10M-node graph with no other clamp. This
+    helper drives a service-layer guard that requires at least one
+    bounding leaf (entityType, property, tag, layer, path, …) so the
+    candidate scan never runs unbounded.
+    """
+    if isinstance(predicate, GroupPredicate):
+        # All branches of any group op must be unbounded for the
+        # whole tree to be unbounded. (``not(unbounded)`` is still
+        # unbounded — matches "everything that doesn't contain X".)
+        if not predicate.children:
+            return False
+        return all(_is_unbounded_text_any(c) for c in predicate.children)
+    if isinstance(predicate, TextPredicate):
+        return (predicate.target or "any") == "any"
+    return False
+
+
+def _reject_unbounded_text_any(query: SearchQuery) -> None:
+    """Reject queries that would force a full-graph CONTAINS scan.
+
+    Bypass conditions (any one is sufficient to bound the scan):
+      * ``scope.root_urns`` set — search anchors on a known subtree.
+      * ``scope.entity_types`` set — candidate scan restricts to a
+        bounded label list.
+      * Predicate tree contains at least one non-text-any leaf — the
+        compiler routes the bounding leaf to an indexed Cypher path
+        and the text filter applies only to that pre-filtered set.
+
+    Without any of the above, a ``text(target='any')`` query against
+    a million-node graph hangs until the candidate cap fires. Better
+    to reject up-front with a clear remediation message than to let
+    the user wait 30s for a truncated result.
+    """
+    if query.scope.root_urns:
+        return
+    if query.scope.entity_types:
+        return
+    if not _is_unbounded_text_any(query.predicate):
+        return
+    raise ValidationError(
+        "Text search with target='any' must be combined with another "
+        "filter (entity type, tag, property, layer, or path) when the "
+        "view doesn't restrict scope. Add a filter to bound the scan."
+    )
 
 
 def _empty_page(query: SearchQuery) -> SearchResultPage:

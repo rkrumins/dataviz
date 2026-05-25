@@ -203,6 +203,79 @@ class TestServiceValidator:
         with pytest.raises(ValidationError, match="NOT group"):
             _count_and_validate(q)
 
+    def test_bare_text_any_without_scope_rejected(self):
+        """A standalone ``text(target='any')`` with no scope clamp
+        triggers a full-graph CONTAINS scan. Service rejects it so
+        the user gets a clear remediation message instead of a
+        candidate-cap timeout."""
+        q = SearchQuery(
+            predicate=TextPredicate(value="snowflake", target="any"),
+            scope=_TEST_SCOPE,  # view_id only, no root_urns / entity_types
+        )
+        with pytest.raises(ValidationError, match="target='any'.*filter"):
+            _count_and_validate(q)
+
+    def test_text_any_or_text_any_without_scope_rejected(self):
+        """An OR group of two text-any predicates is also unbounded."""
+        q = SearchQuery(
+            predicate=GroupPredicate(op="or", children=[
+                TextPredicate(value="a", target="any"),
+                TextPredicate(value="b", target="any"),
+            ]),
+            scope=_TEST_SCOPE,
+        )
+        with pytest.raises(ValidationError, match="target='any'"):
+            _count_and_validate(q)
+
+    def test_text_any_with_entity_type_filter_allowed(self):
+        """A text-any predicate combined with a bounding leaf is
+        allowed — the entityType filter narrows the candidate scan
+        before the CONTAINS runs."""
+        q = SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                TextPredicate(value="snowflake", target="any"),
+                EntityTypePredicate(op="in", values=["dataset"]),
+            ]),
+            scope=_TEST_SCOPE,
+        )
+        # No exception expected.
+        _count_and_validate(q)
+
+    def test_text_any_with_scope_root_urns_allowed(self):
+        """Scope-level root URNs bound the scan; predicate guard
+        bypassed even if the predicate is purely text-any."""
+        scope_with_roots = _TEST_SCOPE.model_copy(
+            update={"root_urns": ["urn:dataset:orders"]},
+        )
+        q = SearchQuery(
+            predicate=TextPredicate(value="snowflake", target="any"),
+            scope=scope_with_roots,
+        )
+        _count_and_validate(q)
+
+    def test_text_any_with_scope_entity_types_allowed(self):
+        """Scope-level entity_types clamp the candidate scan; bare
+        text-any is acceptable in that case."""
+        scope_with_types = _TEST_SCOPE.model_copy(
+            update={"entity_types": ["dataset"]},
+        )
+        q = SearchQuery(
+            predicate=TextPredicate(value="snowflake", target="any"),
+            scope=scope_with_types,
+        )
+        _count_and_validate(q)
+
+    def test_text_specific_field_without_scope_allowed(self):
+        """``text(target='qualifiedName')`` hits an indexed column —
+        not subject to the unbounded-CONTAINS-scan guard."""
+        q = SearchQuery(
+            predicate=TextPredicate(
+                value="orders", target="qualifiedName",
+            ),
+            scope=_TEST_SCOPE,
+        )
+        _count_and_validate(q)
+
 
 # ---------------------------------------------------------------------------
 # Predicate compiler — WHERE fragment + parameter binding

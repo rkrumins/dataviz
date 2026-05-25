@@ -308,3 +308,55 @@ async def test_unsupported_predicate_raises_compile_error(stub):
     ))
     with pytest.raises(CompileError):
         await stub.deep_search(query)
+
+
+# ---------------------------------------------------------------------------
+# Discovery property-frequency cap (W1.1a)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discovery_truncates_when_too_many_property_keys(monkeypatch):
+    """When a label has more property keys than the per-label cap,
+    discovery keeps the top-N by frequency and sets
+    ``truncatedProperties=True`` so the FE can hint."""
+    from backend.app.services.deep_search import get_deep_search_settings
+    monkeypatch.setenv("DEEP_SEARCH_DISCOVER_KEY_CAP", "3")
+    get_deep_search_settings.cache_clear()
+
+    # Six property keys; the most common three should win.
+    nodes = [
+        {
+            "urn": f"urn:dataset:n{i}",
+            "entityType": "dataset",
+            "common_a": "x",
+            "common_b": "y",
+            "common_c": "z",
+            "rare_d": "w" if i < 2 else None,
+            "rare_e": "v" if i < 1 else None,
+            "rare_f": None,
+        }
+        for i in range(10)
+    ]
+    stub = StubDeepSearchProvider(nodes=nodes)
+    result = await stub.deep_search_discover(sample_per_label=200)
+
+    info = result["labels"]["dataset"]
+    assert set(info["keys"]) == {"common_a", "common_b", "common_c"}
+    assert info["truncatedProperties"] is True
+
+
+@pytest.mark.asyncio
+async def test_discovery_truncated_false_when_below_cap(monkeypatch):
+    """``truncatedProperties=False`` when the sample yields fewer
+    property keys than the cap."""
+    from backend.app.services.deep_search import get_deep_search_settings
+    monkeypatch.setenv("DEEP_SEARCH_DISCOVER_KEY_CAP", "32")
+    get_deep_search_settings.cache_clear()
+
+    nodes = [
+        {"urn": "urn:dataset:n1", "entityType": "dataset", "owner": "x"},
+    ]
+    stub = StubDeepSearchProvider(nodes=nodes)
+    result = await stub.deep_search_discover(sample_per_label=200)
+    assert result["labels"]["dataset"]["truncatedProperties"] is False

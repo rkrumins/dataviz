@@ -56,6 +56,7 @@ import hashlib
 import json
 import logging
 import time
+from collections import Counter
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
@@ -1213,7 +1214,11 @@ async def discover_native_property_keys(
             )
             continue
 
-        user_keys_set: set = set()
+        # Track each key's frequency across the sample so we can keep
+        # the most common keys when a label exceeds the per-label cap.
+        # Pathological schemas (1000+ properties on one label) would
+        # otherwise blow up the response payload.
+        key_counts: Counter = Counter()
         value_samples: Dict[str, list] = {}
         # Track seen values per key as a set when hashable; lists when
         # not. We never let a per-key sample grow past the cap.
@@ -1231,7 +1236,7 @@ async def discover_native_property_keys(
                     if k == "tags" and include_tag_values:
                         _accumulate_tag_values(v, tag_value_counts)
                     continue
-                user_keys_set.add(k)
+                key_counts[k] += 1
                 if not include_value_samples:
                     continue
                 if v is None:
@@ -1251,18 +1256,32 @@ async def discover_native_property_keys(
                     # silently de-duplicating wrongly.
                     continue
 
-        user_keys = sorted(user_keys_set)
+        # Frequency-based cap: keep the top N keys by occurrence.
+        # ``truncatedProperties`` tells the FE there were rarer keys
+        # the sample didn't surface — encourages a tighter sample
+        # (filter by a known key) to drill into them.
+        total_keys = len(key_counts)
+        top_keys = {
+            k for k, _ in key_counts.most_common(
+                _s.discover_value_keys_per_label,
+            )
+        }
+        truncated_properties = total_keys > len(top_keys)
+
         out_labels[label] = {
-            "keys": user_keys,
+            "keys": sorted(top_keys),
             "sampled": sampled_count,
+            "truncatedProperties": truncated_properties,
         }
         if include_value_samples and value_samples:
-            # Stable ordering for diff-friendly responses + UI render.
+            # Stable ordering + filter to top keys only (value_samples
+            # may have entries for keys not in top_keys when the
+            # 64-key cap was hit before frequency was known).
             out_labels[label]["valueSamplesByKey"] = {
                 k: sorted(value_samples[k], key=lambda x: (str(type(x)), str(x)))
-                for k in sorted(value_samples.keys())
+                for k in sorted(value_samples.keys() & top_keys)
             }
-        if sampled_count > 0 and not user_keys:
+        if sampled_count > 0 and not top_keys:
             blob_only.append(label)
 
     missing_containment = False

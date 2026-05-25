@@ -141,22 +141,27 @@ class StubDeepSearchProvider:
         start = time.monotonic()
         settings = get_deep_search_settings()
 
-        # Per-label aggregates.
+        # Per-label aggregates. ``key_counts`` tracks how often each
+        # property key appears across the sample so we can keep the
+        # top-N when a label exceeds the per-label cap — mirrors the
+        # FalkorDB discover behaviour (W1.1a).
         labels: Dict[str, Dict[str, Any]] = {}
         for n in self._nodes[: max(1, sample_per_label) * 32]:
             label = n.get("entityType")
             if not label:
                 continue
-            entry = labels.setdefault(
-                label, {"keys": set(), "sampled": 0, "valueSamplesByKey": {}},
-            )
+            entry = labels.setdefault(label, {
+                "key_counts": Counter(),
+                "sampled": 0,
+                "valueSamplesByKey": {},
+            })
             if entry["sampled"] >= sample_per_label:
                 continue
             entry["sampled"] += 1
             for k, v in n.items():
                 if k in {"urn", "entityType", "tags", "ancestorUrns"}:
                     continue
-                entry["keys"].add(k)
+                entry["key_counts"][k] += 1
                 if v is None:
                     continue
                 samples = entry["valueSamplesByKey"].setdefault(k, [])
@@ -166,15 +171,24 @@ class StubDeepSearchProvider:
                 ):
                     samples.append(v)
 
-        # Finalise: sets -> sorted lists.
+        # Finalise: apply per-label key cap by frequency.
         out_labels: Dict[str, Dict[str, Any]] = {}
         for label, entry in labels.items():
+            total_keys = len(entry["key_counts"])
+            top_keys = {
+                k for k, _ in entry["key_counts"].most_common(
+                    settings.discover_value_keys_per_label,
+                )
+            }
+            truncated = total_keys > len(top_keys)
             out_labels[label] = {
-                "keys": sorted(entry["keys"]),
+                "keys": sorted(top_keys),
                 "sampled": entry["sampled"],
+                "truncatedProperties": truncated,
                 "valueSamplesByKey": {
                     k: sorted(map(str, vs))
                     for k, vs in entry["valueSamplesByKey"].items()
+                    if k in top_keys
                 },
             }
 

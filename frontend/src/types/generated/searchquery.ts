@@ -60,13 +60,17 @@ export type Valuesamplesbykey = {
  */
 export type Elapsedms = number
 /**
- * Native property keys found on at least one sampled node.
+ * Native property keys found on at least one sampled node, capped at the top N by frequency in the sample (see ``truncatedProperties``).
  */
 export type Keys1 = string[]
 /**
  * How many nodes were sampled for this label.
  */
 export type Sampled1 = number
+/**
+ * True when the sample yielded more property keys than the configured per-label cap (DEEP_SEARCH_DISCOVER_KEY_CAP). FE shows a 'X of ~N properties — narrow the sample to see rare keys' hint.
+ */
+export type Truncatedproperties = boolean
 /**
  * Distinct values seen for each property key in the sample (capped at ~20 per key, ~64 keys per label). Powers the FE's property-value picker so users can choose from known values instead of typing blind. Absent when value-sample collection is disabled via the request flag.
  */
@@ -130,9 +134,15 @@ export type Propertykey = string | null
  * Tiny preview list shown next to each bucket — for the UI's hover-card and the AI-agent's at-a-glance context.
  */
 export type Samplehitsperbucket = number
+/**
+ * Opaque pagination cursor. When set, hits start from the cursor's recorded offset within the candidate set. The response echoes a new cursor when more rows are available (``hits.length == pageSize`` AND the slice didn't exhaust the candidate set).
+ */
 export type Cursor = string | null
 export type Highlights = boolean
 export type Includeancestorpath = boolean
+/**
+ * Number of hits returned per page. Default 50 (sane for browsing); the panel sets it to the candidate cap (5000) when it wants the full match set in one round-trip so canvas highlighting can cover every match without paginating. Bounded at 5000 (matches CANDIDATE_CAP) — larger pages require cursor pagination.
+ */
 export type Pagesize = number
 export type Results = 'aggregates' | 'hits' | 'both' | 'paths'
 /**
@@ -483,6 +493,7 @@ export interface Labels {
 export interface SearchDiscoverLabelInfo {
     keys?: Keys1
     sampled: Sampled1
+    truncatedProperties?: Truncatedproperties
     valueSamplesByKey?: Valuesamplesbykey1
 }
 /**

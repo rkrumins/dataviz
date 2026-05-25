@@ -844,7 +844,7 @@ class SearchExplainResult(_Base):
 class SearchDiscoverLabelInfo(_Base):
     """Per-label discovery payload from ``GET /search/discover``."""
     sampled: int = Field(description="How many nodes were sampled for this label.")
-    keys: List[str] = Field(default_factory=list, description="Native property keys found on at least one sampled node.")
+    keys: List[str] = Field(default_factory=list, description="Native property keys found on at least one sampled node, capped at the top N by frequency in the sample (see ``truncatedProperties``).")
     value_samples_by_key: Optional[Dict[str, List[Any]]] = Field(
         None,
         alias="valueSamplesByKey",
@@ -854,6 +854,16 @@ class SearchDiscoverLabelInfo(_Base):
             "FE's property-value picker so users can choose from known "
             "values instead of typing blind. Absent when value-sample "
             "collection is disabled via the request flag."
+        ),
+    )
+    truncated_properties: bool = Field(
+        False,
+        alias="truncatedProperties",
+        description=(
+            "True when the sample yielded more property keys than the "
+            "configured per-label cap (DEEP_SEARCH_DISCOVER_KEY_CAP). "
+            "FE shows a 'X of ~N properties — narrow the sample to see "
+            "rare keys' hint."
         ),
     )
 
