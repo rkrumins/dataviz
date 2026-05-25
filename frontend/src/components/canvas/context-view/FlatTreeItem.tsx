@@ -8,13 +8,8 @@ import type { ViewLayerConfig } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
 import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore, stagedChangeColor } from '@/store/stagedChangesStore'
-import {
-  useAncestorMatchBreakdown,
-  useAncestorMatchCount,
-  useIsMatch,
-  useIsSearchSpotlightActive,
-} from '@/store/searchStore'
-import { SearchMatchBadge } from './SearchMatchBadge'
+import { SearchMatchBadge } from '../search/SearchMatchBadge'
+import { useSearchHighlight } from '../search/useSearchHighlight'
 
 interface FlatTreeItemProps {
   node: HierarchyNode
@@ -134,11 +129,22 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // node's subtree (N levels deep, deduped per hit). Drives the
   // "[N matches inside]" badge on collapsed ancestor rows so a user
   // can see, before expanding, that a domain contains 47 PII fields.
+  //
+  // W2.1: the row-decoration bundle is now produced by
+  // ``useSearchHighlight`` so GraphCanvas + HierarchyCanvas can light
+  // up identically with a single hook call.
   const urnOrId = node.urn ?? node.id
-  const ancestorMatchCount = useAncestorMatchCount(urnOrId)
-  const ancestorMatchBreakdown = useAncestorMatchBreakdown(urnOrId)
-  const isDirectSearchMatch = useIsMatch(urnOrId)
-  const isSearchSpotlightActive = useIsSearchSpotlightActive()
+  // Note: FlatTreeItem receives ``isSearchResult`` from its parent
+  // (ContextViewCanvas merges quick-search + advanced-search hits),
+  // which already drives the pulse class — so we don't destructure
+  // ``isDirectMatch`` here. Other canvases (GraphCanvas /
+  // HierarchyCanvas) consume ``isDirectMatch`` directly because they
+  // bind to the store, not the prop.
+  const {
+    ancestorMatchCount,
+    ancestorBreakdown: ancestorMatchBreakdown,
+    isSpotlightDim,
+  } = useSearchHighlight(urnOrId, { isSelected })
   // In trace mode, useTraceFilteredHierarchy already prunes node.children to
   // the trace context, so children.length reflects what the user will see on
   // expand. The graph-wide childCount would mislead them with siblings the
@@ -157,20 +163,17 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const iconContainerSize = isRoot ? 'w-9 h-9' : 'w-7 h-7'
 
   // Dimming applies to (a) the click-highlight feature, and (b) the
-  // advanced-search "spotlight" mode: when any search has matches, every
-  // node that's NOT a direct match AND NOT an ancestor of one fades to
-  // 40% so the matched chain is visually unmissable. Selected rows stay
-  // bright regardless so the user never loses their focus during search.
-  // Trace mode used to dim non-traced nodes here, but ContextViewCanvas's
-  // `useTraceFilteredHierarchy` removes them from the render tree entirely
-  // — so anything that reaches FlatTreeItem during trace IS in the trace
-  // context and should render at full opacity.
-  const isSearchDim =
-    isSearchSpotlightActive
-    && !isDirectSearchMatch
-    && ancestorMatchCount === 0
-    && !isSelected
-  const isDimmed = isDimmedByHighlight || isSearchDim
+  // advanced-search "spotlight" mode (sourced from useSearchHighlight
+  // above): when any search has matches, every node that's NOT a
+  // direct match AND NOT an ancestor of one fades to 40% so the
+  // matched chain is visually unmissable. Selected rows stay bright
+  // regardless so the user never loses their focus during search.
+  // Trace mode used to dim non-traced nodes here, but
+  // ContextViewCanvas's ``useTraceFilteredHierarchy`` removes them
+  // from the render tree entirely — so anything that reaches
+  // FlatTreeItem during trace IS in the trace context and should
+  // render at full opacity.
+  const isDimmed = isDimmedByHighlight || isSpotlightDim
 
   // Tree line indent - reduced to save horizontal space
   const indentWidth = depth * 16

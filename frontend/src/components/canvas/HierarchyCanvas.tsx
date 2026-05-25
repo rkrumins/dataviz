@@ -25,6 +25,8 @@ import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
 import { InlineNodeEditor } from './InlineNodeEditor'
 import { QuickCreateNode } from './QuickCreateNode'
 import { CommandPalette } from './CommandPalette'
+import { SearchMatchBadge } from './search/SearchMatchBadge'
+import { useSearchHighlight } from './search/useSearchHighlight'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
@@ -596,10 +598,22 @@ function HierarchyContainer({
   const isSelected = selectedNodeId === node.id
   const isSearchResult = searchResults.includes(node.id)
 
+  // W2.1 — advanced-search match decoration. Lights up the row when
+  // the URN is a direct match, surfaces an N-level subtree count
+  // badge when this is a collapsed ancestor of matches, and dims
+  // the row when spotlight mode is active and nothing in this
+  // subtree matched.
+  const {
+    isDirectMatch: isAdvancedSearchMatch,
+    ancestorMatchCount,
+    ancestorBreakdown,
+    isSpotlightDim,
+  } = useSearchHighlight(node.urn ?? node.id, { isSelected })
+
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)
   const isFocusNode = traceFocusId === node.id
-  const isDimmed = isTraceActive && !isHighlighted
+  const isDimmed = (isTraceActive && !isHighlighted) || isSpotlightDim
 
   // Calculate roll-up counts
   const rollUpCounts = useMemo(() => {
@@ -649,6 +663,11 @@ function HierarchyContainer({
           "bg-canvas-elevated",
           isSelected && !isFocusNode && "ring-2 ring-offset-2",
           isSearchResult && !isSelected && "ring-2 ring-amber-400/50 ring-offset-1",
+          // W2.1 — advanced-search direct-match glow (reuses the
+          // shared ``search-match-pulse`` keyframes already used by
+          // FlatTreeItem so all canvases pulse identically).
+          isAdvancedSearchMatch && !isSelected && !isFocusNode
+            && "ring-2 ring-amber-500/60 shadow-[0_0_22px_-2px_rgba(245,158,11,0.55)] search-match-pulse",
           // Trace styling - consistent across all canvases
           isFocusNode && "ring-4 ring-amber-400 ring-offset-2 shadow-[0_0_30px_rgba(251,191,36,0.5)] scale-[1.02] z-50",
           isHighlighted && !isFocusNode && "ring-2 ring-purple-400 ring-offset-1 shadow-[0_0_15px_rgba(192,132,252,0.3)]",
@@ -714,9 +733,21 @@ function HierarchyContainer({
                 </span>
               )}
             </div>
-            <h4 className="text-sm font-medium text-ink truncate">
-              {node.name}
-            </h4>
+            <div className="flex items-center gap-2 min-w-0">
+              <h4 className="text-sm font-medium text-ink truncate flex-1 min-w-0">
+                {node.name}
+              </h4>
+              {/* W2.1 — N-level subtree match count. Shown only on
+                  collapsed rows so the badge doesn't double-up
+                  the visible matches once the user expands. */}
+              {ancestorMatchCount > 0 && !isExpanded && hasChildren && schema && (
+                <SearchMatchBadge
+                  count={ancestorMatchCount}
+                  breakdown={ancestorBreakdown}
+                  schema={schema}
+                />
+              )}
+            </div>
 
             {/* Roll-up counts when collapsed */}
             {rollUpDisplay && !isExpanded && (
