@@ -224,6 +224,14 @@ export interface UseAdvancedSearchResult {
     popScope: (toIndex: number) => void
     /** Abort any in-flight query and return to idle. */
     cancel: () => void
+    /** Fetch the next page of hits using the cursor on the current
+     *  result. No-op when ``view.kind !== 'results'`` or the result has
+     *  no cursor. New hits are APPENDED to the existing list — the
+     *  panel stays on the same query, just with a longer result page. */
+    loadMore: () => Promise<void>
+    /** True while a ``loadMore`` request is in flight. Drives the
+     *  "Load more" button's spinner. */
+    isLoadingMore: boolean
 }
 
 
@@ -475,6 +483,80 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
         }
     }, [scope, view, runWithInputs])
 
+    // ---------------------------------------------------------------
+    // loadMore — cursor pagination (W2.2).
+    //
+    // The backend returns ``result.cursor`` when more hits are
+    // available (``hits.length == pageSize`` AND the slice didn't
+    // exhaust the candidate set). Re-issuing the SAME query with
+    // ``options.cursor`` set returns the next page; we append those
+    // hits onto the existing result so the user sees a longer list,
+    // not a replacement.
+    //
+    // Aggregations are pinned to the first page (re-running the
+    // aggregation per pagination round-trip would be wasteful and
+    // wouldn't change the bucket counts).
+    // ---------------------------------------------------------------
+    const [isLoadingMore, setIsLoadingMore] = useState(false)
+
+    const loadMore = useCallback(async () => {
+        if (view.kind !== 'results') return
+        const cursor = view.result.cursor
+        if (!cursor) return
+        if (!(provider instanceof RemoteGraphProvider)) return
+        if (isLoadingMore) return
+
+        setIsLoadingMore(true)
+        try {
+            const nextQuery: SearchQuery = {
+                ...view.query,
+                options: {
+                    ...(view.query.options ?? {}),
+                    cursor,
+                    // Drop aggregations on subsequent pages — we
+                    // already have them from page 1.
+                    aggregations: undefined,
+                    results: 'hits',
+                },
+            }
+            const nextPage = await provider.searchAdvanced(nextQuery)
+            // Merge: append new hits, replace cursor (may now be null
+            // signalling "no more pages"), keep aggregates from p1.
+            const mergedHits = [
+                ...(view.result.hits ?? []),
+                ...(nextPage.hits ?? []),
+            ]
+            const merged: SearchResultPage = {
+                ...view.result,
+                hits: mergedHits,
+                cursor: nextPage.cursor ?? undefined,
+                candidateCount: nextPage.candidateCount
+                    ?? view.result.candidateCount,
+            }
+            setView({
+                ...view,
+                result: merged,
+            })
+            // Recompute the canvas match-URN set from the merged page
+            // so the spotlight covers newly-paginated hits too.
+            useSearchStore.getState().setResult({
+                viewId,
+                matchUrns: collectMatchUrns(merged),
+                ancestorPaths: collectAncestorPaths(merged),
+                queryHash: JSON.stringify(view.query),
+            })
+        } catch (e) {
+            // On error, leave the existing result intact. We log here
+            // (console — no project logger in the FE) rather than
+            // swallowing silently; the user will see a stable page
+            // and the next Run will surface any underlying issue.
+            // eslint-disable-next-line no-console
+            console.warn('loadMore failed', e)
+        } finally {
+            setIsLoadingMore(false)
+        }
+    }, [view, provider, isLoadingMore, viewId])
+
     const cancel = useCallback(() => {
         abortRef.current?.abort()
         // Drop any published result-set so the canvas doesn't keep
@@ -504,5 +586,7 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
         drillInto,
         popScope,
         cancel,
+        loadMore,
+        isLoadingMore,
     }
 }

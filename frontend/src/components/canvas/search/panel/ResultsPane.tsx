@@ -38,11 +38,16 @@ export interface ResultsPaneProps {
     }) => void
     onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpen?: (urn: string) => void
+    /** W2.2 — Fetch the next page of hits using the current cursor.
+     *  Only invoked when ``view.result.cursor`` is set. */
+    onLoadMore?: () => void
+    /** True while a ``loadMore`` request is in flight. */
+    isLoadingMore?: boolean
 }
 
 
 export const ResultsPane: FC<ResultsPaneProps> = ({
-    view, onDrill, onReveal, onOpen,
+    view, onDrill, onReveal, onOpen, onLoadMore, isLoadingMore,
 }) => {
     // The panel doesn't render ResultsPane for idle / templateSelected —
     // the AskBar is the empty state. Defensive null kept for safety.
@@ -60,6 +65,8 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
                     onDrill={onDrill}
                     onReveal={onReveal}
                     onOpen={onOpen}
+                    onLoadMore={onLoadMore}
+                    isLoadingMore={isLoadingMore}
                 />
             </div>
         </div>
@@ -68,7 +75,7 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
 
 
 function Dispatch({
-    view, onDrill, onReveal, onOpen,
+    view, onDrill, onReveal, onOpen, onLoadMore, isLoadingMore,
 }: ResultsPaneProps) {
     switch (view.kind) {
         case 'running':
@@ -82,6 +89,8 @@ function Dispatch({
                     onDrill={onDrill}
                     onReveal={onReveal}
                     onOpen={onOpen}
+                    onLoadMore={onLoadMore}
+                    isLoadingMore={isLoadingMore}
                 />
             )
         default:
@@ -91,12 +100,14 @@ function Dispatch({
 
 
 function ResultsContent({
-    view, onDrill, onReveal, onOpen,
+    view, onDrill, onReveal, onOpen, onLoadMore, isLoadingMore,
 }: {
     view: Extract<PanelView, { kind: 'results' }>
     onDrill: ResultsPaneProps['onDrill']
     onReveal?: ResultsPaneProps['onReveal']
     onOpen?: ResultsPaneProps['onOpen']
+    onLoadMore?: ResultsPaneProps['onLoadMore']
+    isLoadingMore?: ResultsPaneProps['isLoadingMore']
 }) {
     const { result } = view
 
@@ -261,6 +272,35 @@ function ResultsContent({
                                 onReveal={onReveal}
                                 onOpen={onOpen}
                             />
+                        )}
+                        {/* W2.2 — cursor pagination. The backend echoes
+                            ``result.cursor`` when more hits exist beyond the
+                            current page (hits.length === pageSize AND the
+                            candidate set wasn't exhausted). Clicking
+                            "Load more" re-issues the SAME query with the
+                            cursor set and appends the new hits onto this
+                            list — same query, longer result. */}
+                        {result.cursor && onLoadMore && (
+                            <div className="mt-2 px-3 pb-2">
+                                <button
+                                    type="button"
+                                    onClick={() => onLoadMore()}
+                                    disabled={isLoadingMore}
+                                    className={cn(
+                                        'w-full rounded-lg px-3 py-2',
+                                        'border border-glass-border',
+                                        'bg-canvas-base/40 hover:bg-canvas-base/60',
+                                        'text-[12px] font-medium text-ink',
+                                        'transition-colors',
+                                        'disabled:opacity-60 disabled:cursor-progress',
+                                        'flex items-center justify-center gap-2',
+                                    )}
+                                >
+                                    {isLoadingMore
+                                        ? 'Loading…'
+                                        : `Load more (${hits.length} so far)`}
+                                </button>
+                            </div>
                         )}
                     </div>
                 </section>

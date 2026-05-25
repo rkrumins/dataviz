@@ -138,6 +138,7 @@ function PanelInner({
 }: PanelInnerProps) {
     const {
         view, scope, runPredicate, drillInto, popScope, cancel,
+        loadMore, isLoadingMore,
     } = useAdvancedSearch(viewId)
 
     const draftPredicate = useDraftPredicate()
@@ -272,6 +273,8 @@ function PanelInner({
                                     onDrill={drillInto}
                                     onReveal={onRevealNode}
                                     onOpen={onOpenNode}
+                                    onLoadMore={loadMore}
+                                    isLoadingMore={isLoadingMore}
                                 />
                             </div>
                         )}
