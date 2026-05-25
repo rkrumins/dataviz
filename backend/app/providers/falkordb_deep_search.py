@@ -884,6 +884,24 @@ def _resolve_entity_types_scope(
     return sorted(overlap), note
 
 
+def _resolve_candidate_cap(query: SearchQuery, settings) -> int:
+    """Pick the effective candidate-scan ceiling for one request.
+
+    Precedence:
+      1. ``query.options.candidate_cap`` (per-request override) if set
+      2. ``settings.candidate_cap`` (deployment default; env var
+         ``DEEP_SEARCH_CANDIDATE_CAP``, default 10000)
+
+    Always clamped to ``[100, settings.candidate_cap_max]`` so a
+    malformed override can't accidentally request 10M candidates.
+    The service-layer validator rejects above-max requests up-front
+    with a clear error, but we still clamp here defensively.
+    """
+    requested = getattr(query.options, "candidate_cap", None)
+    base = requested if requested else settings.candidate_cap
+    return max(100, min(int(base), settings.candidate_cap_max))
+
+
 def _build_compiler_for_provider(provider) -> _Compiler:
     """Construct a `_Compiler` with the provider's ontology-resolved
     edge type sets. Missing-injection is tolerated (the compiler will
@@ -1104,6 +1122,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     per AggregationSpec — left to caller's understanding).
     """
     _s = get_deep_search_settings()
+    effective_candidate_cap = _resolve_candidate_cap(query, _s)
     notes: List[str] = []
     compiler = _build_compiler_for_provider(provider)
     where_fragment = compiler.compile(query.predicate)
@@ -1117,35 +1136,27 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         )
 
     scope_continuation = ""
-    scope_pre_filter = ""
     if eff_root_urns:
-        # Decide scope shape (W1.1b): for small root sets, anchor on
-        # the indexed root.urn lookup and walk the subtree forward
-        # (pre-filter). For larger root sets, fall back to the
-        # post-filter shape — many roots × max_depth expansion costs
-        # more than a label scan over the bounded candidate set.
-        if len(eff_root_urns) <= _s.scope_pre_filter_threshold:
-            scope_pre_filter, scope_params = _build_scope_pre_filter(
-                provider, eff_root_urns, query.scope.max_depth or 12,
+        # Post-filter scope check: ``MATCH (root)-[:CONTAINS*1..D]->(n)``
+        # appended after the candidate ``WITH n LIMIT $cap``. Anchor-
+        # form pre-filter (``_build_scope_pre_filter``) exists but is
+        # NOT activated by default — variable-length expansion on a
+        # deep subtree (max_depth=12) materialises far more paths than
+        # the candidate cap would have bounded, causing FalkorDB 504s
+        # on common workloads (regression from W1.1b). The post-filter
+        # shape keeps the 5000-candidate ceiling and the planner does
+        # the right thing.
+        scope_continuation, scope_params = _build_scope_continuation(
+            provider, eff_root_urns, query.scope.max_depth or 12,
+        )
+        base_params.update(scope_params)
+        if not scope_continuation:
+            notes.append(
+                "scope.root_urns supplied but the provider has no "
+                "containment edge types configured — the scope check "
+                "was dropped. All matching predicates pass without "
+                "ancestry verification."
             )
-            if scope_pre_filter:
-                base_params.update(scope_params)
-                notes.append(
-                    f"scope.root_urns has {len(eff_root_urns)} URN(s); "
-                    f"using anchor-form pre-filter (W1.1b)."
-                )
-        if not scope_pre_filter:
-            scope_continuation, scope_params = _build_scope_continuation(
-                provider, eff_root_urns, query.scope.max_depth or 12,
-            )
-            base_params.update(scope_params)
-            if not scope_continuation:
-                notes.append(
-                    "scope.root_urns supplied but the provider has no "
-                    "containment edge types configured — the scope check "
-                    "was dropped. All matching predicates pass without "
-                    "ancestry verification."
-                )
 
     effective_types, et_note = _resolve_entity_types_scope(
         provider, list(query.scope.entity_types or []),
@@ -1170,9 +1181,8 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         where_fragment=where_fragment,
         entity_types_param=use_entity_types,
         scope_continuation=scope_continuation,
-        candidate_cap=_s.candidate_cap,
+        candidate_cap=effective_candidate_cap,
         within_hops_continuation=wh_continuation,
-        scope_pre_filter=scope_pre_filter,
     )
 
     if query.options.results == "aggregates" and not query.options.aggregations:
@@ -1186,7 +1196,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         "cypher": cand_cypher,
         "hits_cypher": cand_cypher + " RETURN n",
         "params": base_params,
-        "candidate_cap": _s.candidate_cap,
+        "candidate_cap": effective_candidate_cap,
         "hoisted_root_urns": [list(s) for s in compiler.hoisted_root_urns],
         "effective_root_urns": eff_root_urns,
         "notes": notes,
@@ -1635,6 +1645,7 @@ async def execute_deep_search(
     the public-ish provider surface.
     """
     _s = get_deep_search_settings()
+    effective_candidate_cap = _resolve_candidate_cap(query, _s)
     start = time.monotonic()
     timeout_s = (deadline_ms or query.options.soft_deadline_ms) / 1000.0
 
@@ -1678,22 +1689,15 @@ async def execute_deep_search(
         return _empty_result(query.options.results, start)
 
     # 3. Scope continuation Cypher (after the candidate WITH n).
-    #    For small root sets the pre-filter shape wins; otherwise we
-    #    fall back to the post-filter shape (W1.1b).
+    #    Post-filter shape — anchor-form pre-filter is NOT activated
+    #    by default. See ``_build_scope_pre_filter`` docstring + the
+    #    explain branch above for the regression notes.
     scope_continuation = ""
-    scope_pre_filter = ""
     if eff_root_urns:
-        if len(eff_root_urns) <= _s.scope_pre_filter_threshold:
-            scope_pre_filter, scope_params = _build_scope_pre_filter(
-                provider, eff_root_urns, query.scope.max_depth or 12,
-            )
-            if scope_pre_filter:
-                base_params.update(scope_params)
-        if not scope_pre_filter:
-            scope_continuation, scope_params = _build_scope_continuation(
-                provider, eff_root_urns, query.scope.max_depth or 12,
-            )
-            base_params.update(scope_params)
+        scope_continuation, scope_params = _build_scope_continuation(
+            provider, eff_root_urns, query.scope.max_depth or 12,
+        )
+        base_params.update(scope_params)
 
     # 4. WithinHops continuation (each anchor → reachable-within-N-hops set)
     wh_continuation, wh_params, _ = _build_within_hops_continuation(
@@ -1719,9 +1723,8 @@ async def execute_deep_search(
         where_fragment=where_fragment,
         entity_types_param=use_entity_types,
         scope_continuation=scope_continuation,
-        candidate_cap=_s.candidate_cap,
+        candidate_cap=effective_candidate_cap,
         within_hops_continuation=wh_continuation,
-        scope_pre_filter=scope_pre_filter,
     )
 
     # 5. Execute according to requested result shape
@@ -1752,7 +1755,9 @@ async def execute_deep_search(
                 )
                 aggregates.append(buckets)
             candidate_count, truncated_count = await _run_count(
-                provider, cand_cypher, base_params, timeout_s=timeout_s,
+                provider, cand_cypher, base_params,
+                timeout_s=timeout_s,
+                candidate_cap=effective_candidate_cap,
             )
             truncated = truncated_count
         else:
@@ -1764,7 +1769,7 @@ async def execute_deep_search(
             )
             rows = result.result_set or []
             candidate_count = len(rows)
-            truncated = candidate_count >= _s.candidate_cap
+            truncated = candidate_count >= effective_candidate_cap
             hits, hits_offset_after, hits_total_sorted = _build_hits_from_rows(
                 provider, rows, query,
             )
@@ -1837,7 +1842,8 @@ def _empty_result(shape, start) -> SearchResultPage:
 
 
 async def _run_count(
-    provider, cand_cypher: str, params: Dict[str, Any], *, timeout_s: float,
+    provider, cand_cypher: str, params: Dict[str, Any], *,
+    timeout_s: float, candidate_cap: Optional[int] = None,
 ) -> Tuple[int, bool]:
     result = await provider._ro_query(
         cand_cypher + " RETURN count(n) AS c",
@@ -1845,7 +1851,9 @@ async def _run_count(
     )
     rs = result.result_set or []
     n = int(rs[0][0]) if rs and rs[0] else 0
-    return n, (n >= get_deep_search_settings().candidate_cap)
+    cap = candidate_cap if candidate_cap is not None \
+        else get_deep_search_settings().candidate_cap
+    return n, (n >= cap)
 
 
 async def _run_aggregation(

@@ -1559,6 +1559,21 @@
           "description": "Parallel facets \u2014 each spec produces its own bucket list in the response. Omit for hits-only requests.",
           "title": "Aggregations"
         },
+        "candidateCap": {
+          "anyOf": [
+            {
+              "maximum": 100000,
+              "minimum": 100,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-request override of the candidate-scan ceiling. ``None`` uses the deployment default from ``DEEP_SEARCH_CANDIDATE_CAP`` (default 10000). Requests can raise this up to ``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the user explicitly opts into a larger scan. The service validator rejects values above the deployment max.",
+          "title": "Candidatecap"
+        },
         "cursor": {
           "anyOf": [
             {
@@ -1602,9 +1617,9 @@
           "type": "string"
         },
         "softDeadlineMs": {
-          "default": 3000,
-          "description": "Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses.",
-          "maximum": 10000,
+          "default": 30000,
+          "description": "Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 30s (was 3s) so deep queries on large graphs complete; user can override per-request up to 120s.",
+          "maximum": 120000,
           "minimum": 200,
           "title": "Softdeadlinems",
           "type": "integer"

@@ -55,10 +55,10 @@ class DeepSearchSettings:
             max_tree_depth=_read_int("DEEP_SEARCH_MAX_TREE_DEPTH", 6),
             max_leaf_count=_read_int("DEEP_SEARCH_MAX_LEAF_COUNT", 64),
             max_or_branch=_read_int("DEEP_SEARCH_MAX_OR_BRANCH", 24),
-            candidate_cap=_read_int("DEEP_SEARCH_CANDIDATE_CAP", 5000),
-            candidate_cap_max=_read_int("DEEP_SEARCH_CANDIDATE_CAP_MAX", 50000),
+            candidate_cap=_read_int("DEEP_SEARCH_CANDIDATE_CAP", 10000),
+            candidate_cap_max=_read_int("DEEP_SEARCH_CANDIDATE_CAP_MAX", 100000),
             default_soft_deadline_ms=_read_int(
-                "DEEP_SEARCH_SOFT_DEADLINE_MS", 3000,
+                "DEEP_SEARCH_SOFT_DEADLINE_MS", 30000,
             ),
             discover_samples_per_label=_read_int(
                 "DEEP_SEARCH_DISCOVER_SAMPLES", 200,

@@ -135,6 +135,10 @@ export type Propertykey = string | null
  */
 export type Samplehitsperbucket = number
 /**
+ * Per-request override of the candidate-scan ceiling. ``None`` uses the deployment default from ``DEEP_SEARCH_CANDIDATE_CAP`` (default 10000). Requests can raise this up to ``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the user explicitly opts into a larger scan. The service validator rejects values above the deployment max.
+ */
+export type Candidatecap = number | null
+/**
  * Opaque pagination cursor. When set, hits start from the cursor's recorded offset within the candidate set. The response echoes a new cursor when more rows are available (``hits.length == pageSize`` AND the slice didn't exhaust the candidate set).
  */
 export type Cursor = string | null
@@ -146,7 +150,7 @@ export type Includeancestorpath = boolean
 export type Pagesize = number
 export type Results = 'aggregates' | 'hits' | 'both' | 'paths'
 /**
- * Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses.
+ * Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 30s (was 3s) so deep queries on large graphs complete; user can override per-request up to 120s.
  */
 export type Softdeadlinems = number
 export type Sort = 'relevance' | 'displayName' | 'qualifiedName' | 'depth' | 'matchCount'
@@ -552,6 +556,7 @@ export interface SearchQuery {
  */
 export interface SearchOptions {
     aggregations?: Aggregations
+    candidateCap?: Candidatecap
     cursor?: Cursor
     highlights?: Highlights
     includeAncestorPath?: Includeancestorpath

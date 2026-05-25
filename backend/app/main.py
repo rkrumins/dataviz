@@ -895,7 +895,8 @@ class _TimeoutMiddleware:
     Tiers (P1.8 — anchored prefix match, ordered most-specific first):
         ANY path in SSE_PATHS                exempt entirely (long-lived)
         prefix /api/v1/health        ->  5s  (probes must be fast)
-        prefix /api/v1/graph         -> 15s  (read queries, per-query bounded)
+        prefix /api/v1/graph         -> 60s  (read queries inc. advanced search;
+                                              per-query bounded by soft deadline)
         prefix /api/v1/aggregation/  -> 45s  (write-heavy operations)
         everything else              -> 30s  (default)
 
@@ -963,8 +964,8 @@ class _TimeoutMiddleware:
             ("/api/v1/graph/edges/between",    float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
             ("/api/v1/graph/trace",   float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "60"))),
             ("/api/v2/graph/trace",   float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "60"))),
-            ("/api/v1/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "15"))),
-            ("/api/v2/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "15"))),
+            ("/api/v1/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))),
+            ("/api/v2/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))),
             ("/api/v1/aggregation/",  float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
         ]
         self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))

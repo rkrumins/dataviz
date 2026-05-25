@@ -202,6 +202,11 @@ function PanelInner({
         : null
     const elapsedMs = view.kind === 'results' ? view.elapsedMs : null
     const truncated = view.kind === 'results' && view.result.truncated === true
+    const deadlineExceeded = view.kind === 'results'
+        && view.result.deadlineExceeded === true
+    const candidateCount = view.kind === 'results'
+        ? (view.result.candidateCount ?? null)
+        : null
     const showResultsSection = view.kind === 'running'
         || view.kind === 'results'
         || view.kind === 'error'
@@ -258,6 +263,8 @@ function PanelInner({
                                     isRunning={view.kind === 'running'}
                                     errorMessage={view.kind === 'error' ? view.message : null}
                                     truncated={truncated}
+                                    deadlineExceeded={deadlineExceeded}
+                                    candidateCount={candidateCount}
                                     onFrame={canFrame
                                         ? () => onFrameMatches?.(frameTargetUrns)
                                         : undefined}
@@ -372,6 +379,7 @@ function CompactHeader({
 
 function ResultsHeader({
     count, elapsedMs, isRunning, errorMessage, truncated,
+    deadlineExceeded, candidateCount,
     onFrame, onViewCypher, onClear,
 }: {
     count: number | null
@@ -382,6 +390,8 @@ function ResultsHeader({
      *  ceiling, not the true total. Surface this prominently so the
      *  user understands some matches may be missing from the canvas. */
     truncated?: boolean
+    deadlineExceeded?: boolean
+    candidateCount?: number | null
     onFrame?: () => void
     /** Open the Advanced drawer on the Cypher tab so a power user can
      *  see the exact compiled query that ran against FalkorDB (with
@@ -391,6 +401,9 @@ function ResultsHeader({
 }) {
     const isError = Boolean(errorMessage)
     const showTruncation = Boolean(truncated && !isRunning && !isError)
+    const showDeadlineExceeded = Boolean(
+        deadlineExceeded && !isRunning && !isError,
+    )
     return (
         <div className="flex flex-col gap-1.5">
         <div className={cn(
@@ -469,21 +482,95 @@ function ResultsHeader({
                 )}
             </div>
         </div>
-        {showTruncation && (
-            <div className={cn(
-                'flex items-start gap-2 px-2.5 py-2 rounded-lg',
-                'border border-amber-500/40 bg-amber-500/10',
-                'text-[11px] leading-snug',
-            )}>
-                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-400" strokeWidth={2.2} />
-                <div className="flex-1 min-w-0 text-amber-200/95">
-                    <span className="font-semibold">Truncated</span>{' '}
-                    — the candidate cap (5,000) was reached. Some matches are not
-                    shown on the canvas. Refine your filters to narrow the candidate
-                    set so every match is returned and highlighted.
-                </div>
-            </div>
+        {(showTruncation || showDeadlineExceeded) && (
+            <WarningBanner
+                truncated={showTruncation}
+                deadlineExceeded={showDeadlineExceeded}
+                candidateCount={candidateCount ?? null}
+            />
         )}
+        </div>
+    )
+}
+
+
+/**
+ * High-contrast warning banner for ``truncated`` / ``deadlineExceeded``
+ * result states. The previous ``text-amber-200/95`` on
+ * ``bg-amber-500/10`` was barely legible on the panel's translucent
+ * background — users missed that their result set was incomplete.
+ *
+ * This version uses a saturated amber border + brighter text +
+ * ``font-semibold`` body copy + an emoji icon backed by a tinted
+ * pill so the warning reads as a deliberate callout, not subtle
+ * styling. Truncation and deadline-exceeded share the layout but
+ * each gets its own headline + remediation.
+ */
+function WarningBanner({
+    truncated, deadlineExceeded, candidateCount,
+}: {
+    truncated: boolean
+    deadlineExceeded: boolean
+    candidateCount: number | null
+}) {
+    return (
+        <div className={cn(
+            'flex flex-col gap-2',
+        )}>
+            {truncated && (
+                <div className={cn(
+                    'flex items-start gap-2.5 px-3 py-2.5 rounded-lg',
+                    'border-l-4 border-l-amber-400 border border-amber-400/50',
+                    'bg-amber-500/[0.18] dark:bg-amber-500/[0.14]',
+                    'shadow-[0_0_18px_-4px_rgba(245,158,11,0.35)]',
+                )}>
+                    <div className={cn(
+                        'shrink-0 w-6 h-6 rounded-md flex items-center justify-center',
+                        'bg-amber-400/30 border border-amber-400/60',
+                    )}>
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-700 dark:text-amber-200" strokeWidth={2.6} />
+                    </div>
+                    <div className="flex-1 min-w-0 text-[12px] leading-snug">
+                        <div className="font-display font-semibold text-amber-900 dark:text-amber-100">
+                            Results truncated — candidate cap reached
+                        </div>
+                        <div className="mt-0.5 text-amber-900/85 dark:text-amber-100/90">
+                            {candidateCount !== null
+                                ? `${candidateCount.toLocaleString()} candidates scanned before the cap fired. `
+                                : 'The candidate-scan cap fired before the full result set was returned. '}
+                            Some matches aren't shown. Narrow your filters,
+                            tighten the scope, or raise the candidate cap in
+                            Advanced options.
+                        </div>
+                    </div>
+                </div>
+            )}
+            {deadlineExceeded && (
+                <div className={cn(
+                    'flex items-start gap-2.5 px-3 py-2.5 rounded-lg',
+                    'border-l-4 border-l-rose-400 border border-rose-400/50',
+                    'bg-rose-500/[0.18] dark:bg-rose-500/[0.14]',
+                    'shadow-[0_0_18px_-4px_rgba(244,63,94,0.35)]',
+                )}>
+                    <div className={cn(
+                        'shrink-0 w-6 h-6 rounded-md flex items-center justify-center',
+                        'bg-rose-400/30 border border-rose-400/60',
+                    )}>
+                        <AlertTriangle className="w-3.5 h-3.5 text-rose-700 dark:text-rose-200" strokeWidth={2.6} />
+                    </div>
+                    <div className="flex-1 min-w-0 text-[12px] leading-snug">
+                        <div className="font-display font-semibold text-rose-900 dark:text-rose-100">
+                            Soft deadline exceeded — partial results
+                        </div>
+                        <div className="mt-0.5 text-rose-900/85 dark:text-rose-100/90">
+                            The provider returned what it had when the
+                            timeout fired. Some matches are missing.
+                            Tighten the predicate, lower the candidate cap,
+                            or raise the deadline in Advanced options.
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }

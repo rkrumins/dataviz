@@ -594,10 +594,23 @@ class SearchOptions(_Base):
     include_ancestor_path: bool = Field(False, alias="includeAncestorPath")
     highlights: bool = True
     soft_deadline_ms: int = Field(
-        3000, alias="softDeadlineMs", ge=200, le=10000,
+        30000, alias="softDeadlineMs", ge=200, le=120000,
         description="Provider returns partial rows + deadline_exceeded=true "
                     "on expiry. Service does not cache deadline-exceeded "
-                    "responses.",
+                    "responses. Default 30s (was 3s) so deep queries on "
+                    "large graphs complete; user can override per-request "
+                    "up to 120s.",
+    )
+    candidate_cap: Optional[int] = Field(
+        None, alias="candidateCap", ge=100, le=100000,
+        description=(
+            "Per-request override of the candidate-scan ceiling. ``None`` "
+            "uses the deployment default from ``DEEP_SEARCH_CANDIDATE_CAP`` "
+            "(default 10000). Requests can raise this up to "
+            "``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the "
+            "user explicitly opts into a larger scan. The service "
+            "validator rejects values above the deployment max."
+        ),
     )
 
 

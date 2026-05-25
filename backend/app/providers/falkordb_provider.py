@@ -5968,13 +5968,23 @@ class FalkorDBProvider(GraphDataProvider):
         return out
 
     async def get_nodes_batch(self, urns: List[str]) -> List[GraphNode]:
-        """Bulk node fetch by URN — used by trace v2 to hydrate nodes after BFS."""
+        """Bulk node fetch by URN — used by trace v2 to hydrate nodes after
+        BFS AND by advanced search's batched ancestor hydration (W1.1c).
+
+        Uses the longer ``FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS`` (15s
+        default) rather than the generic 5s read timeout because a
+        single batch may carry hundreds of URNs from a large search
+        page; the IN-list scan on a million-node graph is the same
+        cost class as the children-fetch this timeout was tuned for.
+        """
         if not urns:
             return []
+        from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
         try:
             result = await self._ro_query(
                 "MATCH (n) WHERE n.urn IN $urns RETURN n",
                 params={"urns": urns},
+                timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
             )
             out: List[GraphNode] = []
             for row in (result.result_set or []):

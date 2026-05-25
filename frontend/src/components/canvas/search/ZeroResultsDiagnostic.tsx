@@ -93,18 +93,21 @@ function CauseCard({ cause, highlighted }: { cause: Cause; highlighted: boolean 
         cause.severity === 'warn' ? AlertTriangle :
         Info
 
+    // High-contrast tones so warnings actually read on a translucent
+    // background. The previous ``/[0.06]`` tints were near-invisible
+    // in dark mode and users missed them entirely.
     const tone = highlighted
         ? cause.severity === 'error'
-            ? 'border-red-500/40 bg-red-500/[0.06]'
+            ? 'border-l-4 border-l-red-400 border border-red-400/50 bg-red-500/[0.18] dark:bg-red-500/[0.14]'
             : cause.severity === 'warn'
-            ? 'border-amber-500/40 bg-amber-500/[0.06]'
-            : 'border-cyan-500/30 bg-cyan-500/[0.04]'
+            ? 'border-l-4 border-l-amber-400 border border-amber-400/50 bg-amber-500/[0.18] dark:bg-amber-500/[0.14]'
+            : 'border-l-4 border-l-cyan-400 border border-cyan-400/45 bg-cyan-500/[0.14] dark:bg-cyan-500/[0.10]'
         : 'border-glass-border/60 bg-glass/20'
 
     const iconTone =
-        cause.severity === 'error' ? 'text-red-400' :
-        cause.severity === 'warn' ? 'text-amber-400' :
-        'text-cyan-400'
+        cause.severity === 'error' ? 'text-red-600 dark:text-red-300' :
+        cause.severity === 'warn' ? 'text-amber-700 dark:text-amber-200' :
+        'text-cyan-700 dark:text-cyan-300'
 
     return (
         <div className={cn(
@@ -112,12 +115,30 @@ function CauseCard({ cause, highlighted }: { cause: Cause; highlighted: boolean 
             tone,
         )}>
             <div className="flex items-start gap-2.5">
-                <Icon className={cn("w-3.5 h-3.5 mt-0.5 shrink-0", iconTone)} strokeWidth={2} />
+                <Icon className={cn("w-4 h-4 mt-0.5 shrink-0", iconTone)} strokeWidth={2.4} />
                 <div className="min-w-0 flex-1">
-                    <div className="text-[12px] font-semibold text-ink leading-tight">
+                    <div className={cn(
+                        "text-[12.5px] font-display font-semibold leading-tight",
+                        highlighted && cause.severity === 'error'
+                            ? 'text-red-900 dark:text-red-100'
+                            : highlighted && cause.severity === 'warn'
+                            ? 'text-amber-900 dark:text-amber-100'
+                            : highlighted && cause.severity === 'info'
+                            ? 'text-cyan-900 dark:text-cyan-100'
+                            : 'text-ink',
+                    )}>
                         {cause.title}
                     </div>
-                    <p className="mt-1 text-[11.5px] text-ink-muted leading-snug">
+                    <p className={cn(
+                        "mt-1 text-[11.5px] leading-snug",
+                        highlighted && cause.severity === 'error'
+                            ? 'text-red-900/85 dark:text-red-100/90'
+                            : highlighted && cause.severity === 'warn'
+                            ? 'text-amber-900/85 dark:text-amber-100/90'
+                            : highlighted && cause.severity === 'info'
+                            ? 'text-cyan-900/85 dark:text-cyan-100/90'
+                            : 'text-ink-muted',
+                    )}>
                         {cause.body}
                     </p>
                     {cause.action && (

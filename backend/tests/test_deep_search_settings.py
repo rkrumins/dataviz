@@ -54,9 +54,9 @@ def test_settings_defaults(monkeypatch):
     assert s.max_tree_depth == 6
     assert s.max_leaf_count == 64
     assert s.max_or_branch == 24
-    assert s.candidate_cap == 5000
-    assert s.candidate_cap_max == 50000
-    assert s.default_soft_deadline_ms == 3000
+    assert s.candidate_cap == 10000
+    assert s.candidate_cap_max == 100000
+    assert s.default_soft_deadline_ms == 30000
     assert s.discover_samples_per_label == 200
     assert s.discover_value_samples_per_key == 20
     assert s.discover_value_keys_per_label == 64
@@ -97,7 +97,7 @@ def test_settings_invalid_int_falls_back_to_default(monkeypatch):
     get_deep_search_settings.cache_clear()
 
     s = get_deep_search_settings()
-    assert s.candidate_cap == 5000
+    assert s.candidate_cap == 10000
 
 
 def test_settings_empty_env_var_falls_back_to_default(monkeypatch):

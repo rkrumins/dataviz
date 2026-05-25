@@ -22,6 +22,7 @@
  */
 import { motion, AnimatePresence } from 'framer-motion'
 import {
+    AlertTriangle,
     Code2,
     Eye,
     Loader2,
@@ -388,6 +389,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                     </motion.div>
                                 ))}
                             </AnimatePresence>
+                            <ExpensiveQueryNotice predicate={draftPredicate} />
                             <div className="flex items-center gap-2 pt-1 flex-wrap">
                                 <AddFilterPalette
                                     counts={{
@@ -418,6 +420,84 @@ export const QueryCard: FC<QueryCardProps> = ({
                         onCommit={(p) => commitDraft(p)}
                     />
                 )}
+            </div>
+        </div>
+    )
+}
+
+
+// ---------------------------------------------------------------------------
+// Expensive-query warning (W2 / regression follow-up)
+// ---------------------------------------------------------------------------
+
+/**
+ * Inspect the current draft for predicate shapes that historically
+ * cost the FalkorDB planner the most: topology probes (isOrphan /
+ * isRoot / isLeaf) without any narrowing leaf next to them, plus
+ * unscoped degree-zero filters. Surfaces a visible warning above
+ * the Run controls so the user knows BEFORE clicking Run that the
+ * query may take longer.
+ */
+function detectExpensiveShape(p: Predicate | null): string | null {
+    if (!p) return null
+    // Top-level orphan / root / leaf with no other leaf at the same
+    // level: this walks every node in scope to check the absence of
+    // incoming or outgoing edges. With the default ontology-bounded
+    // scan it's bounded but still touches the full label set.
+    const topology = new Set([
+        'isOrphan', 'isRoot', 'isLeaf', 'hasIncoming', 'hasOutgoing',
+    ])
+    const collectLeafKinds = (node: Predicate, out: string[]) => {
+        if (node.kind === 'group') {
+            for (const c of node.children) collectLeafKinds(c, out)
+        } else if (node.kind) {
+            out.push(node.kind)
+        }
+    }
+    const leaves: string[] = []
+    collectLeafKinds(p, leaves)
+    const hasTopology = leaves.some((k) => topology.has(k))
+    const otherLeafCount = leaves.filter(
+        (k) => !topology.has(k) && k !== 'text',
+    ).length
+    if (hasTopology && otherLeafCount === 0) {
+        return (
+            'Topology-only query (isRoot / isLeaf / isOrphan / hasIncoming / ' +
+            'hasOutgoing) — runs a full scan against the bounded ontology. ' +
+            'On large graphs this may take 10-30 seconds. Add a tag, ' +
+            'entity type, or layer filter to narrow the candidate set.'
+        )
+    }
+    if (leaves.length === 0) {
+        return 'Empty predicate — every node in scope will be returned.'
+    }
+    return null
+}
+
+
+function ExpensiveQueryNotice({ predicate }: { predicate: Predicate | null }) {
+    const reason = detectExpensiveShape(predicate)
+    if (!reason) return null
+    return (
+        <div className={cn(
+            'flex items-start gap-2.5 px-3 py-2.5 rounded-lg mt-1',
+            'border-l-4 border-l-amber-400 border border-amber-400/50',
+            'bg-amber-500/[0.18] dark:bg-amber-500/[0.14]',
+            'shadow-[0_0_18px_-4px_rgba(245,158,11,0.35)]',
+        )}>
+            <div className={cn(
+                'shrink-0 w-6 h-6 rounded-md flex items-center justify-center',
+                'bg-amber-400/30 border border-amber-400/60',
+            )}>
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-700 dark:text-amber-200" strokeWidth={2.6} />
+            </div>
+            <div className="flex-1 min-w-0 text-[12px] leading-snug">
+                <div className="font-display font-semibold text-amber-900 dark:text-amber-100">
+                    This query may be expensive
+                </div>
+                <div className="mt-0.5 text-amber-900/85 dark:text-amber-100/90">
+                    {reason}
+                </div>
             </div>
         </div>
     )
