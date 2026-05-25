@@ -43,6 +43,9 @@ import type {
 import { UnifiedPicker } from '../builder/editors/UnifiedPicker'
 
 import { OperatorMenu } from './OperatorMenu'
+import { RowCard } from './builder-atoms/RowCard'
+import { RowMenu } from './builder-atoms/RowMenu'
+import type { OpTone } from './builder-atoms/tones'
 import type { LayerOption } from './layerOptions'
 
 
@@ -65,12 +68,18 @@ export interface ConditionRowProps {
     /** Pressing Enter inside a scalar value field fires this. The
      *  panel wires it to the same dispatch the Run button uses. */
     onSubmit?: () => void
+    /** "⋯ → Wrap in AND/OR/NOT group" — replaces this row with a
+     *  single-child group of the chosen op at the same position. */
+    onWrap?: (op: OpTone) => void
+    /** "⋯ → Duplicate" — clone this row in place. */
+    onDuplicate?: () => void
 }
 
 
 export const ConditionRow: FC<ConditionRowProps> = ({
     value, discovery, knownEntityTypes, activeEntityTypes, discoveredLayers,
     isRunning, autoFocus, onChange, onRemove, onOpenAdvanced, onSubmit,
+    onWrap, onDuplicate,
 }) => {
     const meta = getKindMeta(value.kind)
     const incomplete = isIncomplete(value)
@@ -82,50 +91,56 @@ export const ConditionRow: FC<ConditionRowProps> = ({
     })
 
     return (
-        <div className={cn(
-            'group/row rounded-xl border transition-colors',
-            'flex flex-col gap-3 px-3.5 py-3',
-            incomplete
-                ? 'border-dashed border-amber-500/40 bg-amber-500/[0.05]'
-                : 'border-glass-border bg-canvas-base/40 hover:border-glass-border/80',
-        )}>
-            {/* Header — icon + descriptive label + remove */}
-            <div className="flex items-start gap-2.5">
-                <span className={cn(
-                    'inline-flex items-center justify-center shrink-0',
-                    'w-6 h-6 rounded-md text-[14px]',
-                    'bg-accent-lineage/12 text-accent-lineage',
-                )}>
-                    {meta.icon}
-                </span>
-                <div className="flex-1 min-w-0 flex flex-col leading-tight">
-                    <span className="text-[12.5px] font-medium text-ink">
-                        {meta.label}
+        <RowCard tone="neutral" incomplete={incomplete}>
+            <div className="flex flex-col gap-3">
+                {/* Header — icon + descriptive label + actions */}
+                <div className="flex items-start gap-2.5">
+                    <span className={cn(
+                        'inline-flex items-center justify-center shrink-0',
+                        'w-6 h-6 rounded-md text-[14px]',
+                        'bg-accent-lineage/12 text-accent-lineage',
+                    )}>
+                        {meta.icon}
                     </span>
-                    {meta.description && (
-                        <span className="text-[10.5px] text-ink-muted/80 leading-snug">
-                            {meta.description}
+                    <div className="flex-1 min-w-0 flex flex-col leading-tight">
+                        <span className="text-[12.5px] font-medium text-ink">
+                            {meta.label}
                         </span>
-                    )}
+                        {meta.description && (
+                            <span className="text-[10.5px] text-ink-muted/80 leading-snug">
+                                {meta.description}
+                            </span>
+                        )}
+                    </div>
+                    <div className="flex items-center gap-0.5 shrink-0">
+                        {(onWrap || onDuplicate) && (
+                            <RowMenu
+                                onWrap={(w) => onWrap?.(w)}
+                                onDuplicate={() => onDuplicate?.()}
+                                onDelete={onRemove}
+                                disabled={isRunning}
+                            />
+                        )}
+                        <button
+                            type="button"
+                            onClick={onRemove}
+                            disabled={isRunning}
+                            title="Remove this filter"
+                            className={cn(
+                                'inline-flex items-center justify-center w-6 h-6 rounded-md',
+                                'text-ink-muted/70 hover:text-rose-400 hover:bg-rose-500/10',
+                                'transition-colors',
+                            )}
+                        >
+                            <X className="w-3.5 h-3.5" />
+                        </button>
+                    </div>
                 </div>
-                <button
-                    type="button"
-                    onClick={onRemove}
-                    disabled={isRunning}
-                    title="Remove this filter"
-                    className={cn(
-                        'inline-flex items-center justify-center w-6 h-6 rounded-md shrink-0',
-                        'text-ink-muted/70 hover:text-rose-400 hover:bg-rose-500/10',
-                        'transition-colors',
-                    )}
-                >
-                    <X className="w-3.5 h-3.5" />
-                </button>
-            </div>
 
-            {/* Editor body (per-kind) */}
-            {editor && <div className="flex flex-col gap-3 pl-8">{editor}</div>}
-        </div>
+                {/* Editor body (per-kind) */}
+                {editor && <div className="flex flex-col gap-3 pl-8">{editor}</div>}
+            </div>
+        </RowCard>
     )
 }
 

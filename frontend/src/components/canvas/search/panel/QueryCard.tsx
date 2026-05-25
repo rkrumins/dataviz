@@ -70,16 +70,21 @@ import type { Predicate, SearchQuery } from '@/types/search'
 import { useDiscovery } from '../builder/useDiscovery'
 
 import { AddFilterPalette } from './AddFilterPalette'
+import { OperatorPill } from './builder-atoms/OperatorPill'
+import { RowJoiner } from './builder-atoms/RowJoiner'
+import type { OpTone } from './builder-atoms/tones'
 import { ConditionRow, isRowIncomplete } from './ConditionRow'
 import type { LayerOption } from './layerOptions'
 import { NestedGroupCard } from './NestedGroupCard'
 import {
     appendCondition,
+    duplicateConditionAt,
     removeConditionAt,
     replaceConditionAt,
     rootGroupOp,
     setRootGroupOp,
     topLevelConditions,
+    wrapConditionAt,
     type RootGroupOp,
 } from './predicateComposition'
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
@@ -244,6 +249,16 @@ export const QueryCard: FC<QueryCardProps> = ({
         commitDraft(next)
     }, [draftPredicate, commitDraft])
 
+    const handleRowWrap = useCallback((index: number, op: OpTone) => {
+        const next = wrapConditionAt(draftPredicate, index, op)
+        commitDraft(next)
+    }, [draftPredicate, commitDraft])
+
+    const handleRowDuplicate = useCallback((index: number) => {
+        const next = duplicateConditionAt(draftPredicate, index)
+        commitDraft(next)
+    }, [draftPredicate, commitDraft])
+
     const currentRootOp = rootGroupOp(draftPredicate)
 
     const handleClearAll = useCallback(() => {
@@ -379,7 +394,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                     ) : (
                         <>
                             {conditions.length >= 2 && (
-                                <MatchOpHeader
+                                <RootMatchHeader
                                     op={currentRootOp}
                                     onChange={handleRootOpChange}
                                     disabled={isRunning}
@@ -397,7 +412,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                         {i > 0 && (
                                             <RowJoiner
                                                 op={currentRootOp}
-                                                onChange={handleRootOpChange}
+                                                onChange={(next) => handleRootOpChange(next)}
                                                 disabled={isRunning}
                                             />
                                         )}
@@ -409,6 +424,8 @@ export const QueryCard: FC<QueryCardProps> = ({
                                                     else handleRowChange(i, next)
                                                 }}
                                                 onRemove={() => handleRowRemove(i)}
+                                                onWrap={(w) => handleRowWrap(i, w)}
+                                                onDuplicate={() => handleRowDuplicate(i)}
                                                 onOpenAdvanced={onOpenAdvanced}
                                                 onSubmit={dispatchRun}
                                                 disabled={isRunning}
@@ -438,6 +455,8 @@ export const QueryCard: FC<QueryCardProps> = ({
                                                 autoFocus={cond.kind === freshKind}
                                                 onChange={(next) => handleRowChange(i, next)}
                                                 onRemove={() => handleRowRemove(i)}
+                                                onWrap={(w) => handleRowWrap(i, w)}
+                                                onDuplicate={() => handleRowDuplicate(i)}
                                                 onOpenAdvanced={onOpenAdvanced}
                                                 onSubmit={dispatchRun}
                                             />
@@ -1426,7 +1445,7 @@ function buildRunnablePredicate(
  * combined — the DSL has always supported both ops, the UI just
  * hid it.
  */
-function MatchOpHeader({
+function RootMatchHeader({
     op, onChange, disabled,
 }: {
     op: RootGroupOp
@@ -1440,94 +1459,18 @@ function MatchOpHeader({
             'text-ink-muted',
         )}>
             <span>Match</span>
-            <div className={cn(
-                'inline-flex rounded-full border border-glass-border/70 p-0.5',
-                'bg-canvas-base/40 backdrop-blur-sm',
-            )}>
-                <MatchOpPill
-                    active={op === 'and'}
-                    onClick={() => !disabled && op !== 'and' && onChange('and')}
-                    label="ALL"
-                    sublabel="and"
-                    disabled={disabled}
-                />
-                <MatchOpPill
-                    active={op === 'or'}
-                    onClick={() => !disabled && op !== 'or' && onChange('or')}
-                    label="ANY"
-                    sublabel="or"
-                    disabled={disabled}
-                />
-            </div>
-            <span className="text-ink-muted/60">of the filters below</span>
-        </div>
-    )
-}
-
-
-function MatchOpPill({
-    active, onClick, label, sublabel, disabled,
-}: {
-    active: boolean
-    onClick: () => void
-    label: string
-    sublabel: string
-    disabled?: boolean
-}) {
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            disabled={disabled}
-            className={cn(
-                'inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full',
-                'text-[11px] font-semibold transition-colors',
-                active
-                    ? 'bg-accent-lineage/20 text-accent-lineage shadow-sm'
-                    : 'text-ink-muted hover:text-ink',
-                disabled && 'opacity-50 cursor-not-allowed',
-            )}
-        >
-            <span>{label}</span>
-            <span className="text-[9px] uppercase tracking-wider opacity-60">{sublabel}</span>
-        </button>
-    )
-}
-
-
-/**
- * Connector rendered between condition rows showing the active op
- * (AND/OR). Clickable — clicking flips the root group op so the user
- * doesn't have to scroll back to the header.
- */
-function RowJoiner({
-    op, onChange, disabled,
-}: {
-    op: RootGroupOp
-    onChange: (next: RootGroupOp) => void
-    disabled?: boolean
-}) {
-    const next: RootGroupOp = op === 'and' ? 'or' : 'and'
-    return (
-        <div className="flex items-center justify-center py-1 -my-1">
-            <button
-                type="button"
-                onClick={() => !disabled && onChange(next)}
+            <OperatorPill
+                value={op}
+                onChange={onChange}
+                segments="three"
+                size="md"
                 disabled={disabled}
-                title={`Switch to ${next.toUpperCase()}`}
-                className={cn(
-                    'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full',
-                    'text-[10px] font-semibold uppercase tracking-wider',
-                    'border border-glass-border/40 bg-canvas-base/40',
-                    op === 'and'
-                        ? 'text-accent-lineage/85'
-                        : 'text-amber-300/90',
-                    'hover:bg-canvas-base/70 hover:border-glass-border/70 transition-colors',
-                    disabled && 'opacity-50 cursor-not-allowed',
-                )}
-            >
-                {op === 'and' ? 'AND' : 'OR'}
-            </button>
+            />
+            <span className="text-ink-muted/60 normal-case tracking-normal">
+                {op === 'not'
+                    ? 'inverts the entire query'
+                    : 'of the filters below'}
+            </span>
         </div>
     )
 }

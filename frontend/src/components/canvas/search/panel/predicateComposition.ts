@@ -40,7 +40,7 @@ export type ChipConditionKind =
     | 'isRoot'
 
 
-export type RootGroupOp = 'and' | 'or'
+export type RootGroupOp = 'and' | 'or' | 'not'
 
 
 /** Toggle-style kinds that must stay unique in the root group. */
@@ -105,8 +105,10 @@ export function topLevelConditions(draft: Predicate | null): Predicate[] {
 
 /** Root operator (defaults to 'and' when there's no explicit group). */
 export function rootGroupOp(draft: Predicate | null): RootGroupOp {
-    if (draft && draft.kind === 'group' && (draft.op === 'and' || draft.op === 'or')) {
-        return draft.op
+    if (draft && draft.kind === 'group') {
+        if (draft.op === 'and' || draft.op === 'or' || draft.op === 'not') {
+            return draft.op
+        }
     }
     return 'and'
 }
@@ -189,17 +191,72 @@ export function removeConditionAt(
 }
 
 /**
- * Switch the root group's op between ``and`` / ``or``. No-op when the
- * draft has zero or one top-level condition (the op only matters with
- * 2+ children).
+ * Switch the root group's op. Now supports the full three-segment
+ * AND / OR / NOT toggle:
+ *
+ *   - ``and`` / ``or`` — flip the root group's op (no-op when there's
+ *     fewer than 2 children, since the op is irrelevant there).
+ *   - ``not`` — wrap the entire current tree in a NOT group. When the
+ *     tree is already a NOT group, unwrap to its child.
  */
 export function setRootGroupOp(
     draft: Predicate | null,
-    op: RootGroupOp,
+    op: 'and' | 'or' | 'not',
 ): Predicate | null {
-    const root = ensureRootGroup(draft)
-    if (root.children.length < 2) return draft
+    if (op === 'not') {
+        if (!draft) return null
+        // Already a NOT root → unwrap.
+        if (draft.kind === 'group' && draft.op === 'not' && draft.children.length === 1) {
+            return draft.children[0]
+        }
+        return { kind: 'group', op: 'not', children: [draft] }
+    }
+    // Unwrapping out of a NOT root via ``and`` / ``or`` — drop the NOT
+    // wrapper first so the user can pick the desired op.
+    let inner: Predicate | null = draft
+    if (draft && draft.kind === 'group' && draft.op === 'not') {
+        inner = draft.children[0] ?? null
+    }
+    const root = ensureRootGroup(inner)
+    if (root.children.length < 2) return inner
     root.op = op
+    return collapseRoot(root)
+}
+
+
+/**
+ * Wrap the child at ``index`` in a new group of the given op. The
+ * new group becomes the child at the same position. Used by the
+ * per-row "⋯ → Wrap in AND/OR/NOT group" action — the user builds
+ * flat then iteratively groups what they want.
+ */
+export function wrapConditionAt(
+    draft: Predicate | null,
+    index: number,
+    op: 'and' | 'or' | 'not',
+): Predicate | null {
+    if (!draft) return null
+    const root = ensureRootGroup(draft)
+    if (index < 0 || index >= root.children.length) return draft
+    const target = root.children[index]
+    root.children[index] = { kind: 'group', op, children: [target] }
+    return collapseRoot(root)
+}
+
+
+/**
+ * Insert a deep clone of the child at ``index`` immediately after it.
+ * Used by the "⋯ → Duplicate" row action.
+ */
+export function duplicateConditionAt(
+    draft: Predicate | null,
+    index: number,
+): Predicate | null {
+    if (!draft) return null
+    const root = ensureRootGroup(draft)
+    if (index < 0 || index >= root.children.length) return draft
+    const clone = structuredClone(root.children[index]) as Predicate
+    root.children.splice(index + 1, 0, clone)
     return collapseRoot(root)
 }
 

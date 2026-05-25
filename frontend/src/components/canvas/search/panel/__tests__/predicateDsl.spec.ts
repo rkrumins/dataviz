@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import { parsePredicate, stringifyPredicate } from '../predicateDsl'
+import {
+    appendCondition,
+    duplicateConditionAt,
+    setRootGroupOp,
+    wrapConditionAt,
+} from '../predicateComposition'
+import type { Predicate } from '@/types/search'
 
 describe('predicateDsl — boolean grammar', () => {
     it('parses bareword as substring text', () => {
@@ -63,5 +70,73 @@ describe('predicateDsl — boolean grammar', () => {
         expect(p.children[1].op).toBe('or')
         const dGroup = p.children[1].children[1]
         expect(dGroup.op).toBe('not')
+    })
+})
+
+
+function leaf(value: string): Predicate {
+    return {
+        kind: 'text', value, target: 'name',
+        match: 'substring', caseSensitive: false, boost: 1.0,
+    }
+}
+
+
+describe('predicateComposition — wrap / duplicate / root NOT', () => {
+    it('wrapConditionAt wraps the right child only', () => {
+        const draft: Predicate = {
+            kind: 'group', op: 'and',
+            children: [leaf('a'), leaf('b'), leaf('c')],
+        }
+        const next = wrapConditionAt(draft, 1, 'or') as any
+        expect(next.op).toBe('and')
+        expect(next.children).toHaveLength(3)
+        expect(next.children[0].value).toBe('a')
+        expect(next.children[1].kind).toBe('group')
+        expect(next.children[1].op).toBe('or')
+        expect(next.children[1].children[0].value).toBe('b')
+        expect(next.children[2].value).toBe('c')
+    })
+
+    it('wrapConditionAt no-ops when index is out of bounds', () => {
+        const draft = appendCondition(null, leaf('a'))
+        const next = wrapConditionAt(draft, 5, 'or')
+        expect(next).toBe(draft)
+    })
+
+    it('duplicateConditionAt inserts a clone after the source', () => {
+        const draft: Predicate = {
+            kind: 'group', op: 'and',
+            children: [leaf('a'), leaf('b')],
+        }
+        const next = duplicateConditionAt(draft, 0) as any
+        expect(next.children).toHaveLength(3)
+        expect(next.children[0].value).toBe('a')
+        expect(next.children[1].value).toBe('a')
+        expect(next.children[2].value).toBe('b')
+    })
+
+    it('setRootGroupOp("not") wraps the whole tree in NOT', () => {
+        const draft: Predicate = {
+            kind: 'group', op: 'and',
+            children: [leaf('a'), leaf('b')],
+        }
+        const next = setRootGroupOp(draft, 'not') as any
+        expect(next.op).toBe('not')
+        expect(next.children).toHaveLength(1)
+        expect(next.children[0].op).toBe('and')
+    })
+
+    it('setRootGroupOp toggles back out of NOT cleanly', () => {
+        const draft: Predicate = {
+            kind: 'group', op: 'not',
+            children: [{
+                kind: 'group', op: 'and',
+                children: [leaf('a'), leaf('b')],
+            }],
+        }
+        const next = setRootGroupOp(draft, 'or') as any
+        expect(next.op).toBe('or')
+        expect(next.children).toHaveLength(2)
     })
 })
