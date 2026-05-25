@@ -168,6 +168,92 @@ Returns the caller's working set: `{ops: [...], ws_change_version}`.
 
 Discards all uncommitted ops in the caller's working set.
 
+### `POST /{ws_id}/graphs/{graph_id}/branches/{branch}/working-set/pull` (V1-6)
+
+Re-anchor the caller's working set against the current branch HEAD
+with per-entity conflict classification. The endpoint takes **no
+body** — it reads the current HEAD ref and the caller's working
+set itself. See [V1 collaboration
+model](./architecture.md#v1-collaboration-model--shared-branch--pullcommitpush)
+for the design context.
+
+**Behaviour.** For each staged op:
+- `staged.base_content_hash == current_hash` → clean rebase; op
+  stays in the working set with `base_content_hash` refreshed to
+  the current value.
+- both sides deleted the same key → staged delete dropped silently
+  from the working set.
+- otherwise → per-entity conflict surfaced in the response;
+  staged op LEFT IN PLACE with its **original**
+  `base_content_hash` so the resolver UI can render ours/theirs
+  without losing work.
+
+`working_set.base_commit_id` always advances to the current HEAD,
+even when conflicts surface. A subsequent commit still enforces the
+head CAS + the per-entity stale-base guard at commit time, so a
+stale resolution becomes a clean 422 rather than corruption.
+
+**Response** (`PullResult`):
+```json
+{
+  "previous_base": "gcmt_OLD | null",
+  "new_base":      "gcmt_NEW | null",
+  "rebased":       2,
+  "dropped":       1,
+  "conflicts": [
+    {
+      "object_kind":           "node | edge",
+      "object_id":             "u:n1",
+      "conflict_class":        "edit_edit | edit_delete | delete_edit | add_add",
+      "base_content_hash":     "h_BASE | null",
+      "current_content_hash":  "h_REMOTE | null",
+      "staged_change_type":    "update_node | delete_node | add_node | ..."
+    }
+  ]
+}
+```
+
+The four `conflict_class` values:
+
+| Class | Trigger |
+|---|---|
+| `edit_edit` | both sides modified the same object; hashes differ |
+| `edit_delete` | we edited; remote deleted the object |
+| `delete_edit` | we deleted; remote modified the object |
+| `add_add` | both sides independently created the same key |
+
+Conflicts dropped from the response automatically: `delete_delete`
+(both sides removed) — these silently `dropped++`. A clean op (any
+non-conflict outcome) becomes `rebased++` and stays in the working
+set.
+
+**RBAC**: `workspace:graph:edit`.
+
+**Errors**:
+- `404 not_found` — graph deleted between client open + pull.
+
+**Backend code flow:**
+1. `endpoints/graphs.py::pull_working_set:384` validates the graph
+   + RBAC, resolves the current branch ref, loads the caller's
+   working set via `get_or_open`.
+2. Calls `snapshot_reader.load_snapshot(graph_id, commit_id=
+   ref.commit_id)` to materialize the Merkle snapshot at the
+   current HEAD.
+3. `graph_working_set_repo.rebase_against_snapshot:254` walks each
+   staged op, looks up the object's current `content_hash` via
+   `manifest.partition_for(object_id, partition_count)` →
+   `snapshot.partitions[idx].entries`, classifies per the table
+   above, mutates the working set in place
+   (refreshes `base_content_hash` on rebased, deletes on dropped),
+   and advances `working_set.base_commit_id`.
+4. Endpoint returns the `PullResult` in the same response. No
+   outbox event — pull is a per-user reconciliation, not a
+   broadcast.
+
+**Pinned by**: `backend/tests/test_graph_working_set_pull.py`
+(10 cases) + frontend `graphEditorStore.test.ts` (7 cases covering
+the `applyPullResult` store contract).
+
 ## Commits
 
 ### `POST /{ws_id}/graphs/{graph_id}/branches/{branch}/commits`
@@ -186,6 +272,19 @@ apply working set → plan commit (compute diff vs base) → dedup-insert
 blobs + manifests + commit row → advance ref via CAS → write per-
 object `graph_change_event` rows (each carries `view_id` if set) →
 emit `visualization.graph.committed` outbox event.
+
+**V1 trunk semantics** (`graph_commit_repo.py:150-151`,
+`:319-329`): when the URL `{branch}` is the graph's
+`default_branch`, the same transaction also (a) drops any
+`extra_parent_ids` so the trunk commit is single-parent
+(linear-trunk invariant; README decision 23), and (b) appends a
+`graph_trunk_log` row for the `/as_of` index. On squash merges
+into trunk, the orchestrator additionally sets
+`merge_source_commit_id` + `merge_source_branch` on the commit
+row (README decision 24) and re-stamps every draft
+`graph_change_event` onto the new trunk `commit_id` (README
+decision 25). See [Squash semantics on
+trunk](./architecture.md#squash-semantics-on-trunk).
 
 When `view_id` is set: the endpoint loads the view, asserts
 `source_graph_id == graph_id` AND the resolved branch matches the
@@ -266,6 +365,58 @@ Walks from the branch head following the first `parent_id` until
 ```
 
 **RBAC**: `workspace:graph:read`.
+
+## Time-travel
+
+### `GET /{ws_id}/graphs/{graph_id}/as_of?at=<iso8601>` (V1-9)
+
+Return the graph snapshot at the latest trunk commit at-or-before
+`at`. Backed by [`graph_trunk_log`](./architecture.md#linear-trunk--graph_trunk_log)
++ the existing snapshot reader. Trunk-only by design — drafts /
+view branches are NOT queryable through this endpoint (use
+`GET /refs/{commit_id}/snapshot` with a specific commit instead).
+
+**Query**: `?at=<ISO8601>` (required).
+
+**Response**:
+```json
+{
+  "as_of":        "2025-03-14T11:42:00Z",   // echoes the request
+  "commit_id":    "gcmt_…",                  // the resolved trunk commit
+  "committed_at": "2025-03-14T11:30:12Z",    // its actual timestamp
+  "commit_seq":   42,                        // monotonic trunk index
+  "root_hash":    "...",
+  "nodes": [ /* same shape as /refs/.../snapshot */ ],
+  "edges": [ /* ... */ ]
+}
+```
+
+The response shape mirrors [`GET
+/refs/{ref}/snapshot`](#get-ws_idgraphsgraph_idrefsrefsnapshot)
+except for the three additional `as_of` / `committed_at` /
+`commit_seq` fields at the root.
+
+**RBAC**: `workspace:graph:read`.
+
+**Errors**:
+- `404 no_trunk_commit_at_or_before` — `at` precedes the genesis
+  trunk commit (no row in `graph_trunk_log` satisfies
+  `committed_at <= at`).
+- `422 invalid_at` — `at` is not parseable as ISO 8601.
+
+**Backend code flow:**
+1. `endpoints/graphs.py::get_graph_as_of:895` parses `at`,
+   validates RBAC.
+2. Single indexed query against `graph_trunk_log` using
+   `idx_trunk_log_committed_at`: `ORDER BY committed_at DESC,
+   commit_seq DESC LIMIT 1 WHERE committed_at <= :at`.
+3. `snapshot_reader.load_snapshot(graph_id,
+   commit_id=row.commit_id)` materializes the snapshot — same
+   path as `/refs/{ref}/snapshot`.
+4. Returns the combined payload.
+
+**Pinned by**: `backend/tests/test_graph_commit_repo.py`
+(trunk_log substrate tests) + integration suite for the endpoint.
 
 ## Audit / blame / diff
 

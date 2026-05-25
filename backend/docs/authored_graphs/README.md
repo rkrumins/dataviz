@@ -90,6 +90,71 @@ document it in this file when it happens.
 22. **Hot projection is per-branch namespace** — Phase 2
     materialization worker creates one FalkorDB namespace per active
     branch so views read the right scope.
+23. **Linear trunk invariant (V1-1).** Every commit on the graph's
+    `default_branch` has exactly one parent. The squash gate at
+    `graph_commit_repo.py:150-151` drops `extra_parent_ids` when
+    `is_default_branch=True` — trunk history is a chain, not a DAG.
+    Multi-parent merges live only on draft branches; landing them on
+    trunk happens via squash with a non-parent provenance pointer
+    (decision 24). Why: O(1) blame walks, predictable `/as_of`,
+    forensic-readable history for compliance.
+24. **Squash provenance pointer (V1-2).** When a draft branch is
+    merged into the default branch, the resulting trunk commit
+    carries `merge_source_commit_id` (the draft tip) and
+    `merge_source_branch` (the draft name) as non-parent columns on
+    `graph_commits` (`models_graph.py:187-188`). They are GC-safe
+    (a future draft-GC sweep can prune the draft chain without
+    breaking the link), they don't show up in parent-chain walks, and
+    they're set by `graph_merge_service._persist_merge_commit:699`
+    only when `target == graph.default_branch`.
+25. **Wave 6 audit-row copy + contributor manifest (V1-3).** On
+    squash, every `graph_change_event` from the draft chain is
+    re-stamped onto the new trunk commit (preserving original actor /
+    timestamp / attribute_path) so `/blame` on any touched node
+    still returns the original draft author, not the merger.
+    Per-actor `ops_count` rolls up into `graph_commit_contributors`
+    via `INSERT ... ON CONFLICT (commit_id, actor) DO UPDATE`,
+    implemented in
+    `graph_merge_service._copy_squashed_audit_and_contributors:717`.
+    Squash compresses the *parent graph*, never the audit detail.
+26. **`graph_trunk_log` — trunk-only date index (V1-4).** Insert-
+    only table appended atomically inside the same transaction as
+    every default-branch commit (`graph_commit_repo.py:319-329`).
+    Backs `/as_of?at=`: one indexed lookup (`idx_trunk_log_committed_at`,
+    `models_graph.py:736`) + one snapshot read. SCD2 lineage tables
+    are explicitly killed; trunk_log is the trunk index, the parent
+    DAG is the source-of-truth, and `snapshot_reader.load_snapshot`
+    materializes any point in time.
+27. **FalkorDB per-graph hot projection of main HEAD (V1-5).**
+    `graph_falkor_projector` subscribes to `graph.outbox`, filters
+    to commits on each graph's `default_branch`, and projects them
+    into a per-graph FalkorDB namespace `authored_<graph_id>` —
+    never the shared `nexus_lineage` namespace used by external
+    lineage. Idempotent replay via `graph_projector_cursor` keyed by
+    `(graph_id, target)` so the cursor table extends to future
+    read-replica / warehouse / search projectors without schema
+    churn. Batched `UNWIND … MERGE` / `DELETE` Cypher at
+    `_BATCH_SIZE=1000` rows so million-node commits don't blow up
+    FalkorDB. Decision 15 still holds — the cold Postgres store is
+    system-of-record; FalkorDB is rebuildable.
+28. **Functional pull endpoint, not "refresh to continue" (V1-6).**
+    `POST …/working-set/pull` re-anchors the caller's working set
+    against the current HEAD with per-entity conflict classification
+    (`edit_edit` / `edit_delete` / `delete_edit` / `add_add`).
+    Conflicted ops stay in the working set with their **original**
+    `base_content_hash` so the resolver UI can render ours/theirs
+    and the user does NOT lose work. delete/delete coincidences
+    drop silently. Multi-user collaboration on a shared branch is
+    Git-flow (pull → resolve → commit), explicitly not Google-Docs
+    CRDT real-time co-editing.
+29. **Time-travel via DAG + date index, not SCD2 (V1-9).**
+    `GET /{ws_id}/graphs/{graph_id}/as_of?at=<iso8601>` does one
+    indexed lookup in `graph_trunk_log` (committed_at ≤ at) + one
+    `snapshot_reader.load_snapshot`. Wave 5 SCD2 lineage tables
+    rejected — content addressing + parent DAG already encode every
+    historical state at full fidelity. Time-travel is a query over
+    existing data, not a separate denormalised projection to
+    maintain.
 
 ## Layer cake
 
@@ -132,7 +197,24 @@ document it in this file when it happens.
        │  graph_source_edges                         │
        │  graph_orphan_enrichments                   │
        │  graph_outbox_events ─────► relay ─► Redis ─┴─► SSE
-       └──────────────────────┘
+       │  graph_trunk_log     │        │              │
+       │  graph_commit_       │        │              ▼
+       │   contributors       │        │      ┌───────────────────┐
+       │  graph_projector_    │        │      │ graph_falkor_     │
+       │   cursor             │        │      │ projector  (V1-5) │
+       └──────────────────────┘        │      │ default-branch    │
+                                       └─────►│ commits → Cypher  │
+                                              │ UNWIND MERGE/     │
+                                              │ DELETE into       │
+                                              │ authored_<g_id>   │
+                                              └───────────────────┘
+                                                      │
+                                                      ▼
+                                              ┌───────────────────┐
+                                              │  FalkorDB         │
+                                              │  authored_<g_id>  │
+                                              │  (main HEAD only) │
+                                              └───────────────────┘
 ```
 
 Three layers stacked at read time for connected graphs:
@@ -168,9 +250,21 @@ clarity:
   `publish_runs` machinery in plan §C.7. Designed, not built.
 - **Federated overlay (mode-3)** — no materialisation, runtime
   composition only. Phase 3.
-- **Hot projection per-branch namespace** — Phase 2 materialization
-  worker. Without it, canvas reads fall back to the cold store
-  (current behaviour; correct but slower).
+- **Per-draft FalkorDB ephemeral namespaces** — the V1 projector
+  (decision 27) covers each graph's `main` HEAD only. Reads of
+  non-default branches fall back to `snapshot_reader.load_snapshot`
+  against Postgres (correct, slower). Spinning up
+  `authored_<g_id>_<branch>` namespaces per active draft is a
+  follow-on once branch read traffic justifies it.
+- **PullChangesDialog visual component** — the pull/rebase backend
+  (decision 28) is functional and the store contract
+  (`pendingConflicts`, `dismissConflict`) is stable; the visual
+  ours/theirs conflict resolver UI is the next user-visible
+  deliverable.
+- **Draft-branch GC** — a sweep over commits that are unreachable
+  from any live ref AND from any `merge_source_commit_id`. Squash
+  provenance (decision 24) keeps the linkage non-blocking; the
+  sweep itself is operational work, not a correctness gap.
 - **Blame across enrichment + source-sync** — `graph_change_event`
   is enrichment-only by design; a "blended audit" union query is
   Phase 2.5.

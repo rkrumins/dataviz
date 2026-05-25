@@ -759,6 +759,525 @@ difference is purely client-side.
 
 ---
 
+### DN-m — Shared-branch pull/commit cycle (V1-6)
+
+**User does**: alice and bob both have `main` open via the
+graph admin canvas (no view). Alice stages two edits and commits.
+Bob — who has his own working set on `main` with one staged edit
+that touches the same node alice touched, plus a clean add — sees
+a "Pull required" banner via SSE, clicks Pull, sees one conflict
+in the resolver, picks "ours", re-commits. The end-state is a
+linear trunk with alice's commit then bob's commit; both authors
+preserved in `/blame`.
+
+**Endpoint sequence**:
+
+```
+─── alice's tab ────────────────────────────────────────────
+1. POST /api/v1/{ws}/graphs/g_xyz/branches/main/stage      ───┐
+   body: {changes: [                                          │
+     {change_type: "update_node", object_id: "u:n1",          │  alice
+      payload: {…, display_name: "Customers"},                │  edits
+      base_content_hash: "h_n1_v0"},                          │  + commits
+     {change_type: "update_node", object_id: "u:n2",          │
+      payload: {…}, base_content_hash: "h_n2_v0"}             │
+   ]}                                                          │
+   → 200 {ws_change_version: 1}                               │
+                                                               │
+2. POST /api/v1/{ws}/graphs/g_xyz/branches/main/commits     │
+   body: {message: "rename u:n1, retag u:n2",                 │
+          expected_head_commit_id: "gcmt_A"}                  │
+   → 200 {commit_id: "gcmt_B", commit_hash: "...",            │
+          delta_summary: {nodes_modified: 2}}                 │
+                                                               │
+   (SSE: visualization.graph.committed fans out to bob's      │
+    tab carrying {commit_id: "gcmt_B", branch: "main"})       ┘
+
+─── bob's tab — working set already has 2 staged ops ──────
+   bob's prior stage (BEFORE alice's commit):
+     - update_node u:n1 base_content_hash="h_n1_v0"   ← SAME OBJECT
+     - add_node    u:n9 base_content_hash=null         ← INDEPENDENT
+
+3. (SSE: graph.committed {commit_id: "gcmt_B"} arrives → UI    ───┐
+       shows "Pull required" banner — base differs from local    │
+       graphEditorStore.baseCommitId="gcmt_A")                    │  bob
+                                                                   │  pulls
+4. POST /api/v1/{ws}/graphs/g_xyz/branches/main/working-set/pull   │
+   (empty body — server reads bob's working set + current HEAD)    │
+   → 200 PullResult {                                              │
+       previous_base: "gcmt_A",                                    │
+       new_base:      "gcmt_B",                                    │
+       rebased:       1,                                           │
+       dropped:       0,                                           │
+       conflicts: [                                                │
+         {object_kind: "node", object_id: "u:n1",                  │
+          conflict_class: "edit_edit",                             │
+          base_content_hash:    "h_n1_v0",                         │
+          current_content_hash: "h_n1_v1",                         │
+          staged_change_type: "update_node"}                       │
+       ]                                                            │
+     }                                                              ┘
+
+5. (bob opens the resolver UI; the add_node u:n9 has already       ───┐
+    re-anchored cleanly — base_content_hash refreshed silently.       │
+    For u:n1 he picks "ours" — his display_name change wins.          │  bob
+    Frontend dismissConflict("node","u:n1") → pendingConflicts        │  resolves
+    empty → syncState returns to 'dirty'.)                            │  + commits
+
+6. POST /api/v1/{ws}/graphs/g_xyz/branches/main/stage              │
+   body: {changes: [{change_type: "update_node", object_id: "u:n1",│
+                     payload: {…, display_name: "VIP Customers"},  │
+                     base_content_hash: "h_n1_v1"}]}               │
+   → 200 {ws_change_version: N+1}                                  │
+                                                                    │
+7. POST /api/v1/{ws}/graphs/g_xyz/branches/main/commits            │
+   body: {message: "rename u:n1 + add u:n9",                       │
+          expected_head_commit_id: "gcmt_B"}                       │
+   → 200 {commit_id: "gcmt_C", delta_summary:                      │
+          {nodes_added: 1, nodes_modified: 1}}                     ┘
+```
+
+**Backend code flow** (step 4 — the pull):
+
+1. `endpoints/graphs.py::pull_working_set:384` validates graph +
+   `workspace:graph:edit`, calls `get_branch_ref(graph_id,
+   branch="main")` → ref points at `gcmt_B`.
+2. `ws_repo.get_or_open(graph_id, branch="main",
+   user_id=bob)` returns bob's open working set (base=`gcmt_A`).
+3. `graph_repo.load_snapshot(graph_id, commit_id="gcmt_B")` →
+   reads `graph_commits.root_manifest_hash` for B, materializes
+   the Merkle snapshot via the existing
+   `snapshot_reader.load_snapshot` path. Per-partition decode is
+   the standard reader code; no V1-6-specific work here.
+4. `graph_working_set_repo.rebase_against_snapshot:254` walks bob's
+   working set:
+   - For `u:n9` (add_node, `base_content_hash=null`): partition
+     lookup → `partition_for("u:n9", partition_count)` → checks
+     `snapshot.partitions[idx].entries` → key absent → matches
+     the "create + remote-absent" branch → clean rebase,
+     `rebased += 1`. No conflict.
+   - For `u:n1` (update_node, `base_content_hash="h_n1_v0"`):
+     partition lookup → entry present with `content_hash="h_n1_v1"`
+     → staged base differs from current → conflict_class
+     `"edit_edit"`. Op LEFT IN PLACE in
+     `graph_working_change` row — `base_content_hash` is NOT
+     refreshed so the resolver can show the user what changed.
+5. `working_set.base_commit_id = "gcmt_B"`,
+   `working_set.ws_change_version += 1`. Return.
+
+**Audit footprint**:
+
+| Row | Why |
+|---|---|
+| `graph_change_event` × 2 (alice's commit_id=gcmt_B; u:n1, u:n2) | alice's two edits |
+| `graph_commits` × 1 (gcmt_B; parent_ids=[gcmt_A], single parent — linear trunk) | alice's commit |
+| `graph_trunk_log` × 1 (commit_seq=N+1, committed_at=T_alice) | trunk index append on default branch |
+| `graph_commit_contributors` × 1 (commit_id=gcmt_B, actor=alice, ops_count=2) | per-actor manifest for direct-main commit |
+| `graph_outbox_events` × 1 (`graph.committed`) | SSE fan-out triggering bob's pull banner |
+| (pull endpoint itself writes **no audit rows**) | pull is a per-user reconciliation, not a state change anyone else sees |
+| `graph_change_event` × 2 (bob's commit_id=gcmt_C; u:n1 re-renamed, u:n9 added) | bob's second commit, after resolve |
+| `graph_commits` × 1 (gcmt_C; parent_ids=[gcmt_B]) | bob's commit; trunk stays linear |
+| `graph_trunk_log` × 1 (commit_seq=N+2) | second trunk row |
+| `graph_commit_contributors` × 1 (commit_id=gcmt_C, actor=bob, ops_count=2) | bob's manifest |
+
+**Blame after the cycle**:
+
+```
+GET /graphs/g_xyz/objects/u:n1/blame
+  → returns the chain:
+    [{actor: "bob",   commit_id: "gcmt_C", new_content_hash: "h_n1_v2"},
+     {actor: "alice", commit_id: "gcmt_B", new_content_hash: "h_n1_v1"},
+     {actor: "...",   commit_id: "gcmt_A", new_content_hash: "h_n1_v0"}]
+```
+
+Each user's own edit is preserved with their own actor; bob's
+resolution did not "rewrite" alice's history.
+
+**Edge cases**:
+
+- Bob skips the pull and just commits → `persist_commit` reads
+  the live ref (`gcmt_B`) but `expected_head_commit_id="gcmt_A"`
+  → `HeadMovedError` → endpoint returns `409 head_moved`. Bob's
+  UI shows the same banner; bob's next move is the same pull.
+  The pull is the smooth path, the 409 is the safety net.
+- Pull race: another commit lands while bob is in the resolver.
+  His next commit attempt against `expected_head_commit_id=
+  "gcmt_B"` then 409s — pull again, resolve again. The cycle is
+  self-correcting.
+- Bob's `add_node u:n9` collides with a concurrent commit that
+  added `u:n9` independently → conflict_class `"add_add"`.
+  Resolver lets bob pick keep-ours (he wins; he commits a new
+  add) or keep-theirs (his add becomes a no-op; he dismisses).
+- Conflict_class `"edit_delete"` (bob edits u:n2; another commit
+  deletes u:n2): resolver shows "the object is gone — discard your
+  edit?" If bob keeps editing, the next commit raises
+  `WorkingSetError` on a base mismatch (`current_hash=null`); the
+  UI prompts again. The pull never silently drops in-flight work.
+
+---
+
+### DN-n — Draft squash to `main` with audit preservation (V1-1, V1-2, V1-3)
+
+**User does**: alice creates a `feature/etl` draft branch off
+`main`, makes 3 commits over a few hours. Carol pulls alice's
+draft branch, makes 2 more commits on the same draft. Alice clicks
+"Merge to main"; the merge runs clean (no conflicts) and lands as
+a single squash commit on trunk. `/blame` on every touched node
+still returns the original draft author; `/audit?commit_id=
+<trunk>` returns all 5 events.
+
+**Endpoint sequence**:
+
+```
+1. POST /branches body: {name: "feature/etl", from_commit_id: "gcmt_M"}
+   → 201
+
+2-4. alice: stage + commit × 3 on feature/etl
+     → gcmt_F1 (parent=gcmt_M, alice, 1 op)
+     → gcmt_F2 (parent=gcmt_F1, alice, 1 op)
+     → gcmt_F3 (parent=gcmt_F2, alice, 1 op)
+
+5-6. carol: stage + commit × 2 on feature/etl
+     → gcmt_F4 (parent=gcmt_F3, carol, 1 op)
+     → gcmt_F5 (parent=gcmt_F4, carol, 1 op)
+
+7. POST /branches/feature/etl/merge-into/main
+   body: {message: "ETL cleanup", auto_commit_if_clean: true}
+   → 200 MergePlan {status: "committed",
+                    is_mergeable: true,
+                    conflicts: [], integrity_violations: [],
+                    result_commit_id: "gcmt_T"}    ← the single trunk commit
+
+   (SSE: visualization.graph.merged + visualization.graph.committed)
+```
+
+**Backend code flow** (step 7 — the squash):
+
+1. `endpoints/graphs.py::merge_branch_into` calls
+   `graph_merge_service.plan_merge(..., target_branch="main",
+   auto_commit_if_clean=true)`.
+2. Standard merge resolution + three-way merge (DN-f flow); clean
+   outcome with `is_mergeable=true`.
+3. `_persist_merge_commit:617` detects
+   `is_squash = (target_branch == graph.default_branch)` → True.
+4. Calls `persist_commit(..., is_default_branch=True,
+   extra_parent_ids=[gcmt_F5], merge_source_commit_id="gcmt_F5",
+   merge_source_branch="feature/etl",
+   expected_head_commit_id=gcmt_M_now)`.
+5. **The squash gate** at `graph_commit_repo.py:150-151` fires:
+   `extra_parent_ids = None`. The commit row written has
+   `parent_ids=[gcmt_M_now]` (single parent) — NOT a 2-parent
+   merge commit. `merge_source_commit_id="gcmt_F5"` and
+   `merge_source_branch="feature/etl"` go on the same row.
+6. Trunk index append: `graph_commit_repo.py:319-329` inserts the
+   `graph_trunk_log` row with `commit_seq` = previous_seq + 1.
+7. Back in `_persist_merge_commit`, after the commit insert,
+   `_copy_squashed_audit_and_contributors:717` runs:
+   - Walks parent chain `gcmt_F5 → gcmt_F4 → gcmt_F3 → gcmt_F2
+     → gcmt_F1` collecting commit ids until reaching
+     `base_commit_id=gcmt_M`.
+   - For each draft commit, reads its `graph_change_event` rows
+     and re-inserts each one with `commit_id="gcmt_T"` (the new
+     trunk id) but preserving original `actor`, `created_at`,
+     `attribute_path`, `prev_content_hash`, `new_content_hash`.
+     Five rows in total (alice ×3, carol ×2).
+   - Aggregates per-actor counts into
+     `graph_commit_contributors` via `INSERT ... ON CONFLICT
+     (commit_id, actor) DO UPDATE SET ops_count = ops_count +
+     EXCLUDED.ops_count`. Two rows: (gcmt_T, alice, 3),
+     (gcmt_T, carol, 2).
+8. Updates `graph_merge.status='committed',
+   result_commit_id="gcmt_T"`; emits `graph.merged` and
+   `graph.committed` outbox events.
+
+**Audit footprint**:
+
+| Row | Why |
+|---|---|
+| `graph_commits` × 1 (gcmt_T; parent_ids=[gcmt_M_now]; merge_source_commit_id="gcmt_F5"; merge_source_branch="feature/etl") | the squash trunk commit — single parent, non-parent provenance pointer |
+| `graph_trunk_log` × 1 (commit_seq=N+1, committed_at=T_merge) | trunk index append |
+| `graph_change_event` × 5 (commit_id=gcmt_T; original actors: alice ×3, carol ×2; original `created_at` preserved) | re-stamped draft audit |
+| `graph_commit_contributors` × 2 ((gcmt_T, alice, 3), (gcmt_T, carol, 2)) | per-actor manifest |
+| `graph_merge` × 1 (status=committed, result_commit_id=gcmt_T) | merge attempt record |
+| `graph_outbox_events` × 2 (`graph.merged` + `graph.committed`) | SSE fan-out |
+| (the original `graph_change_event` rows on `gcmt_F1…F5` ARE NOT deleted) | the draft chain is still a valid sub-history; a future draft-GC sweep may prune it, but provenance via `merge_source_commit_id` stays intact regardless |
+
+**Blame after the squash**:
+
+```
+GET /graphs/g_xyz/objects/<any-touched-node>/blame
+  → returns rows whose commit_id is gcmt_T but whose actor is the
+    ORIGINAL draft author (alice or carol), not the merger.
+```
+
+This is the V1-3 invariant — squash compresses the parent DAG,
+NEVER the audit detail.
+
+**Verifying the linear-trunk invariant**:
+
+```
+SELECT parent_ids FROM graph_commits WHERE id = 'gcmt_T'
+  → ['gcmt_M_now']     -- exactly one parent
+
+SELECT merge_source_commit_id, merge_source_branch FROM graph_commits
+WHERE id = 'gcmt_T'
+  → ('gcmt_F5', 'feature/etl')   -- non-parent provenance
+```
+
+**Edge cases**:
+
+- Direct-main commit (no draft, no merge): same code path but with
+  `merge_source_commit_id=NULL` and no audit-copy step (there's
+  no draft chain). `graph_commit_contributors` is a single row;
+  the original `graph_change_event` rows already carry the right
+  `commit_id`.
+- Merge to a non-default branch (e.g. `feature-x → feature-y`):
+  `is_squash=False` → squash gate is a no-op; the commit ends up
+  with two parents (traditional merge commit); no trunk_log
+  append; no audit copy. The draft DAG stays exactly as merged
+  branches have always behaved.
+- Merge conflict path (alice + main touched the same node):
+  `plan_merge` returns `status="open"` with conflicts; user
+  resolves via `POST /merges/{id}/resolve`; `commit_resolved_merge`
+  takes the same squash path on commit. Resolution doesn't
+  bypass the trunk invariant.
+
+---
+
+### DN-o — Time-travel via `/as_of` (V1-9 forensic flow)
+
+**User does**: an auditor needs to know what the graph looked like
+on the morning of 2025-03-14 to investigate why a downstream alert
+fired then. They hit `/as_of?at=2025-03-14T11:00:00Z`.
+
+**Endpoint sequence**:
+
+```
+1. GET /api/v1/{ws}/graphs/g_xyz/as_of?at=2025-03-14T11:00:00Z
+   → 200 {
+       as_of:        "2025-03-14T11:00:00Z",
+       commit_id:    "gcmt_T7",
+       committed_at: "2025-03-14T10:42:11Z",
+       commit_seq:   42,
+       root_hash:    "…",
+       nodes:        [ … snapshot at gcmt_T7 … ],
+       edges:        [ … ]
+     }
+```
+
+**Backend code flow**:
+
+1. `endpoints/graphs.py::get_graph_as_of:895` parses
+   `at=2025-03-14T11:00:00Z`, validates `workspace:graph:read`.
+2. Single indexed query:
+   ```sql
+   SELECT commit_id, committed_at, commit_seq
+   FROM graph_trunk_log
+   WHERE graph_id = :g AND committed_at <= :at
+   ORDER BY committed_at DESC, commit_seq DESC
+   LIMIT 1
+   ```
+   Uses `idx_trunk_log_committed_at`. Returns
+   (`gcmt_T7`, `2025-03-14T10:42:11Z`, `42`).
+3. `snapshot_reader.load_snapshot(graph_id,
+   commit_id="gcmt_T7")` — exact same path as
+   `/refs/{commit_id}/snapshot`. Reads the root manifest, decodes
+   partitions, materializes node/edge maps from
+   `graph_node_versions` / `graph_edge_versions`.
+4. Returns the combined payload (snapshot fields + the three
+   `as_of` / `committed_at` / `commit_seq` extras).
+
+**Why this works**: decision 26. The parent DAG already encodes
+every historical state (each commit's root_hash deterministically
+identifies its snapshot). `graph_trunk_log` is a thin date index
+that lets `/as_of` do one indexed lookup instead of walking the
+DAG to find "the latest trunk-reachable commit at-or-before T."
+SCD2 lineage tables explicitly killed (decision 29).
+
+**Audit footprint**:
+
+| Row | Why |
+|---|---|
+| (none) | `/as_of` is a pure read; no audit, no outbox event |
+
+**Edge cases**:
+
+- `at` precedes the genesis trunk commit → no row matches →
+  `404 no_trunk_commit_at_or_before` with the genesis timestamp
+  in the response detail.
+- `at` is after the latest trunk commit → returns the latest
+  trunk commit (the response shape is identical to a present-day
+  snapshot read). The endpoint doesn't try to be clever about
+  "future" timestamps.
+- `at` falls between two trunk commits → returns the earlier of
+  the two (the snapshot was in force at that moment).
+- `at` is unparseable → `422 invalid_at` from the endpoint's
+  ISO-8601 validator.
+- Draft branches are NOT queryable via `/as_of` — trunk-only by
+  design. For a specific non-trunk commit, the client uses
+  `GET /refs/{commit_id}/snapshot` directly.
+
+**Pinned by**: `test_graph_commit_repo.py` trunk_log substrate
+tests + integration tests for the endpoint. The decision to
+expose `commit_seq` in the response is for clients building
+"forensic diff" views — `GET /diff?from=<gcmt_T6>&to=<gcmt_T7>`
+shows exactly what the auditor's `gcmt_T7` snapshot inherited
+from the prior trunk state.
+
+---
+
+### DN-p — FalkorDB projector convergence + idempotent replay (V1-5)
+
+**User does** (mostly invisible to the user — this is operator-
+facing flow): an admin commits to `main`, then opens the canvas
+and runs a "neighbours of u:n1" query. Within the convergence SLO
+the query reads against `authored_<graph_id>` in FalkorDB. Later
+the admin force-replays the projection to verify recoverability.
+
+**Endpoint sequence (a)** — normal happy path:
+
+```
+1. POST /branches/main/commits         (any committing user)
+   → 200 {commit_id: "gcmt_T8", …}
+   (SSE: visualization.graph.committed)
+
+2. (in background, within seconds:)
+   graph_falkor_projector picks up the event off graph.outbox stream
+   → reads change-events for gcmt_T8 → batches → applies UNWIND
+   MERGE/DELETE Cypher into authored_<graph_id>
+   → updates graph_projector_cursor for (graph_id, target='falkordb')
+
+3. POST /api/v1/graph (FalkorDB query proxy — existing endpoint)
+   body: {graph: "authored_<g_xyz>",
+          query: "MATCH (n:Node {urn:'u:n1'})-[:CONNECTS]-(m) RETURN m"}
+   → 200 {nodes: [m1, m2, …]}    ← reflects gcmt_T8's state
+```
+
+**Backend code flow** (step 2 — the projection):
+
+1. `run_falkor_projector:93` polls
+   `XREADGROUP GROUP falkor_projector_v1 <consumer> COUNT 32
+    BLOCK 5000 STREAMS graph.outbox >` → receives the
+   `visualization.graph.committed` entry.
+2. `_process_event:194` decodes the payload. Reads
+   `user_graphs.default_branch` for the graph (cached in
+   `_ProjectorState.default_branches`) → confirms
+   `payload.branch == "main"` (the default). Non-default-branch
+   events are silently ACK'd here.
+3. Loads `graph_projector_cursor` for
+   `(graph_id, target='falkordb')`. If
+   `last_applied_commit_seq >= this commit_seq` (replay /
+   already-applied), ACKs and returns. Otherwise reads
+   `graph_change_event` rows for the commit + content blobs from
+   `graph_node_versions` / `graph_edge_versions` by
+   `new_content_hash`.
+4. `_apply_to_falkor:451` builds four batched lists
+   (node_upserts / edge_upserts / edge_deletes / node_deletes),
+   chunks each at `_BATCH_SIZE=1000` rows, and emits one Cypher
+   per chunk in **strict order**:
+
+   ```cypher
+   -- chunk: node upserts
+   UNWIND $rows AS r
+   MERGE (n:Node {urn: r.urn})
+   SET n.entity_type=r.entity_type, n.display_name=r.display_name,
+       n.properties=r.props_json, n.tags=r.tags_json,
+       n.position=r.position_json, n.content_hash=r.content_hash
+
+   -- chunk: edge upserts
+   UNWIND $rows AS r
+   MERGE (s:Node {urn: r.source_urn})
+   MERGE (t:Node {urn: r.target_urn})
+   MERGE (s)-[e:CONNECTS {urn: r.urn}]->(t)
+   SET e.edge_type=r.edge_type, e.properties=r.props_json,
+       e.confidence=r.confidence, e.content_hash=r.content_hash
+
+   -- chunk: edge deletes      MATCH ()-[e:CONNECTS {urn:r.urn}]->() DELETE e
+   -- chunk: node deletes      MATCH (n:Node {urn:r.urn}) DETACH DELETE n
+   ```
+
+5. After every chunk succeeds, the projector opens a fresh
+   Graph-Store session and upserts the
+   `graph_projector_cursor` row via `INSERT ... ON CONFLICT
+   (graph_id, target) DO UPDATE` with the new
+   (commit_seq, commit_id, stream_id, lag_seconds_observed).
+   Commits the session.
+6. Then `XACK graph.outbox falkor_projector_v1 <stream_id>` —
+   removes the entry from the consumer-group PEL.
+
+**Endpoint sequence (b)** — operator-initiated replay:
+
+```
+1. (admin manually executes against the Graph Store DB:)
+   DELETE FROM graph_projector_cursor
+   WHERE graph_id='g_xyz' AND target='falkordb';
+
+2. (optional: admin DROPs `authored_g_xyz` in FalkorDB)
+
+3. (projector resumes; next poll picks up subsequent events; for
+   already-XACK'd commits the operator can use the existing
+   `XREADGROUP` PEL re-read pattern, or push a manual replay
+   command — out of scope this round)
+```
+
+The current V1 cursor logic makes future commits idempotent: a
+commit projected twice produces the same Cypher (`MERGE` is
+content-addressed via `urn` + `content_hash`), so the second apply
+is a no-op against the existing FalkorDB state.
+
+**Audit footprint (per applied commit)**:
+
+| Row | Why |
+|---|---|
+| (NO change to graph_change_event / graph_commits / etc.) | projector is read-only against Postgres state-of-record |
+| `graph_projector_cursor` UPSERT × 1 | (graph_id, target='falkordb') row advances to the new commit_seq |
+| (NO outbox event) | projector consumes; nothing else listens for "projection complete" in V1 |
+| FalkorDB namespace `authored_<g_xyz>` mutated via UNWIND MERGE/DELETE | the projected state |
+
+**Failure modes**:
+
+- **FalkorDB unreachable** → Cypher call raises → outer loop logs
+  and re-polls without ACK; entry stays in PEL. Cursor not
+  advanced. Reads of `authored_<g_xyz>` against a stale projection
+  are still serviceable (they return the last-good state); reads
+  against a never-projected graph just degrade — the canvas falls
+  back to `GET /refs/main/snapshot` against Postgres. Backoff:
+  `_BACKOFF_MIN_S=0.5` … `_BACKOFF_MAX_S=30` seconds.
+- **Postgres unreachable** → projector can't decode the event
+  payload (no `_load_content_blobs`); same backoff path. The
+  outbox relay is also stalled, so no NEW events arrive — the
+  system is in a coherent paused state.
+- **Malformed payload** → ACK + drop with a single warning log
+  line. Doesn't block the queue.
+- **Projector dies mid-commit** (e.g. SIGKILL after the FalkorDB
+  Cypher applied but before the cursor advanced) → next poll
+  re-reads the entry, the cursor check still passes (cursor was
+  not advanced), the projector re-applies the same Cypher; MERGE
+  is idempotent so FalkorDB converges to the same state; cursor
+  advances second time around; ACK. The dual-write to two
+  systems is reconciled via the cursor.
+
+**Verifying convergence**:
+
+```
+SELECT last_applied_commit_seq, last_applied_commit_id,
+       lag_seconds_observed, last_error
+FROM graph_projector_cursor
+WHERE graph_id='g_xyz' AND target='falkordb';
+  → (42, 'gcmt_T8', 0.183, NULL)
+```
+
+`lag_seconds_observed` is the time between the projector picking
+up the event and finishing the Cypher apply — operators alert on
+this when it grows (indicates FalkorDB pressure or projector
+saturation).
+
+**Pinned by**: `backend/tests/test_graph_falkor_projector.py`
+(8 cases covering ordering / idempotency / batching / namespace
+isolation / serialization).
+
+---
+
 ## Map: scenarios → tests + code
 
 | Scenario | Pinned by | Critical code paths |
@@ -778,3 +1297,7 @@ difference is purely client-side.
 | DN-j | `test_view_binding_service::test_ensure_branch_fast_path` | `ensure_branch` idempotent |
 | DN-k | (existing commit tests) | `commit` path without `view_id` |
 | DN-l | docs only | SSE + client UX |
+| DN-m | `test_graph_working_set_pull.py` (10 cases) + frontend `graphEditorStore.test.ts` V1-6 cases (7 cases) | `endpoints/graphs.py::pull_working_set:384`, `graph_working_set_repo.rebase_against_snapshot:254`, `graphEditorStore.applyPullResult` / `dismissConflict` |
+| DN-n | `test_graph_commit_repo.py` (squash gate + trunk_log substrate) + integration | `graph_commit_repo.persist_commit:150-151` (squash gate), `:319-329` (trunk_log append), `graph_merge_service._persist_merge_commit:617` + `_copy_squashed_audit_and_contributors:717` |
+| DN-o | `test_graph_commit_repo.py` (trunk_log substrate) + integration | `endpoints/graphs.py::get_graph_as_of:895`, `graph_trunk_log` (`models_graph.py:715-742`), `snapshot_reader.load_snapshot` |
+| DN-p | `test_graph_falkor_projector.py` (8 cases) + integration | `graph_falkor_projector.run_falkor_projector:93`, `_process_event:194`, `_apply_to_falkor:451`, `graph_projector_cursor` (`models_graph.py:770-786`) |

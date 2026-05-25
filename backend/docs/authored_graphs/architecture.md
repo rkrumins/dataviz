@@ -24,6 +24,26 @@ needs to enumerate views bound to the branch; the endpoint queries
 the management DB and passes the IDs to the graph-store repo). No
 service-layer code holds both sessions.
 
+## Read routing matrix (V1)
+
+Different read shapes hit different stores. The cold Postgres store
+is always system-of-record (decision 15); FalkorDB and the composed
+snapshot cache are rebuildable downstream projections.
+
+| Read shape | Source | Why |
+|---|---|---|
+| `main` HEAD raw graph query (neighbours, paths, traversals) | FalkorDB namespace `authored_<graph_id>` (V1-5 projector) | hot, indexed, sub-100ms even at millions of nodes |
+| `main` HEAD composed view (mode-2: source + enrichment) | Postgres composed snapshot via `graph_composition.compose` | composition is a render concern; mode-2 has no hot projection in V1 |
+| draft branch reads (any non-default branch) | Postgres via `snapshot_reader.load_snapshot` | per-draft Falkor namespaces are deferred (see README "What's intentionally not built") |
+| `/as_of?at=<iso8601>` time-travel | `graph_trunk_log` indexed lookup + `snapshot_reader.load_snapshot` | trunk-only index (decision 26) + reuse of the snapshot reader |
+| `/audit`, `/blame`, `/diff` | `graph_change_event` + `graph_commits` in Postgres | per-attribute history is dense; the row store is the right fit |
+| Working-set state (uncommitted ops) | Postgres `graph_working_set` + `graph_working_change` | client-visible only to the owning user; transactional with stage/commit |
+
+The projector is **best-effort downstream**: a FalkorDB outage
+pauses `graph_projector_cursor` advancement and `main` HEAD raw
+queries transparently degrade to the Postgres snapshot reader.
+Correctness is unaffected; only `main` hot-path latency suffers.
+
 ## Layered model — source + enrichment + composition
 
 Three layers at read time for connected (mode-2) graphs:
@@ -152,6 +172,60 @@ base blob's content_hash. `apply_changes` (in
 against the live snapshot at commit time and raises `WorkingSetError`
 if a concurrent commit changed the same field.
 
+## V1 collaboration model — shared branch + pull/commit/push
+
+The product commitment (decision 28): multiple users target the
+same branch with private working sets and reconcile via Git-flow
+pull/commit/push. Explicitly NOT Google-Docs CRDT real-time
+co-editing — the cost-vs-value tradeoff there isn't worth it for
+analyst-scale graphs.
+
+The four collaboration primitives:
+
+1. **Isolation.** `UNIQUE(graph_id, branch, user_id)` on
+   `graph_working_set` means each user gets at most one working set
+   per branch; their staged ops are invisible to other users until
+   commit.
+2. **First-commit-wins on the ref.** `persist_commit` CAS-advances
+   `graph_refs.commit_id` from `expected_head_commit_id` to the new
+   id. If the ref already advanced, `HeadMovedError` → 409
+   `head_moved` (see "Failure modes"). The losing user pulls
+   (below) and retries.
+3. **Per-entity stale-base guard.** Every staged update/delete
+   carries `base_content_hash` (the blob hash the user observed).
+   `apply_changes` re-checks it against the live snapshot at commit
+   time and raises `StaleEntityViolation` if any other user
+   modified the same field — surfaced as 422
+   `working_set_invalid`. Field-level lost-update protection, not
+   just ref-level.
+4. **Functional pull (V1-6).** `POST …/working-set/pull` re-anchors
+   the working set against the current HEAD using
+   `graph_working_set_repo.rebase_against_snapshot`. For each
+   staged op, the rebase classifies:
+
+   | Outcome | Trigger | Behaviour |
+   |---|---|---|
+   | clean rebase | `staged.base_content_hash == current_hash` (or both sides agree the object is absent) | op stays in working set; `base_content_hash` refreshed to the new value |
+   | drop | both sides deleted the same key | staged op removed silently from the working set |
+   | `edit_edit` | both sides modified, hashes differ | conflict; op LEFT IN PLACE with original `base_content_hash` |
+   | `edit_delete` | we edited; remote deleted | conflict; same in-place semantics |
+   | `delete_edit` | we deleted; remote modified | conflict; same |
+   | `add_add` | both sides independently created the same key | conflict; same |
+
+   After the call, `working_set.base_commit_id` advances to the
+   current HEAD unconditionally; conflicted ops remain with their
+   **original** `base_content_hash` so the resolver UI can render
+   ours/theirs without losing work. The commit endpoint still
+   re-runs the per-entity stale guard at commit time, so a stale
+   resolution becomes a clean 422 rather than corruption.
+
+The `visualization.graph.committed` SSE event (see "Outbox + relay
++ SSE") is the smooth path: the canvas auto-prompts pull before the
+user attempts a doomed commit. The 409 / 422 path is the safety
+net for missed events or offline tabs.
+
+End-to-end walkthrough: `scenarios.md` DN-m.
+
 ## Three-way merge
 
 Code: `backend/app/services/graph_versioning/merge.py` (pure) +
@@ -182,6 +256,113 @@ integrity field — callers must invoke it before reading the gate.
 `commit_resolved_merge` re-runs steps 1-3 from scratch (catches base
 advance during human resolution time), applies the resolutions,
 re-checks integrity, then commits.
+
+## Linear trunk + `graph_trunk_log`
+
+V1 separates the parent DAG (every branch, every parent edge) from
+the trunk index (just `default_branch` commits, indexed by time).
+Trunk commits are single-parent by construction; merges from a
+draft branch land via squash with a non-parent provenance pointer
+(next section). Why:
+
+- O(1) blame / history walk on `main` — no DAG traversal needed to
+  identify trunk commits.
+- Predictable `/as_of?at=` via a single indexed lookup
+  (decision 26) instead of "find the latest trunk-reachable commit
+  at-or-before T in the parent DAG."
+- Forensic-readable history for compliance — every line on `main`
+  has exactly one parent and one author column on
+  `graph_commits.author` (the squasher), with the original draft
+  contributors preserved in `graph_commit_contributors` (next
+  section).
+
+**The squash gate** lives in `graph_commit_repo.persist_commit`
+(`graph_commit_repo.py:150-151`):
+
+```python
+if is_default_branch:
+    extra_parent_ids = None   # trunk is single-parent
+```
+
+`is_default_branch` is set by the merge orchestrator when
+`target_branch == graph.default_branch`
+(`graph_merge_service._persist_merge_commit:699`). Direct commits
+to `main` pass through without merge: the same gate is a no-op
+because no `extra_parent_ids` are passed in the first place.
+
+**The trunk index** is `graph_trunk_log` — insert-only, schema in
+`models_graph.py:715-742`:
+
+```
+graph_trunk_log
+  ├─ id, graph_id, commit_id
+  ├─ commit_seq                    monotonic per-graph
+  ├─ committed_at                  indexed for /as_of
+  └─ INDEX: (graph_id, committed_at)   idx_trunk_log_committed_at
+```
+
+Atomic append happens inside `persist_commit` in the same
+transaction as the commit row + ref advance + audit + outbox
+(`graph_commit_repo.py:319-329`). The pure-trunk constraint means
+this table is the **authoritative trunk timeline** — readers
+don't filter `graph_commits` by parent-chain shape, they read this
+table.
+
+### Squash semantics on trunk
+
+When a draft branch merges into the default branch the trunk
+commit needs (a) single-parent shape, (b) a non-parent pointer to
+the draft tip so the original chain is traceable, (c) every
+per-attribute audit row from the draft chain re-stamped under the
+new trunk commit so `/blame` returns the original author, and
+(d) a contributor manifest aggregating per-actor op counts.
+Decisions 23-25.
+
+Code paths:
+
+1. `graph_merge_service._persist_merge_commit:617` detects squash
+   via `is_squash = (target == graph.default_branch)`.
+2. Calls `persist_commit(..., is_default_branch=is_squash,
+   merge_source_commit_id=source_head,
+   merge_source_branch=source_branch_name)`.
+3. The squash gate (above) drops `extra_parent_ids`; the trunk
+   commit row carries `parent_ids=[target_head]` (single parent)
+   plus the new non-parent columns
+   `merge_source_commit_id` + `merge_source_branch`
+   (`models_graph.py:187-188`).
+4. After commit insert, `_copy_squashed_audit_and_contributors`
+   (`graph_merge_service.py:717`) walks the draft chain from
+   `source_commit_id` back to `base_commit_id` collecting commit
+   ids, then for each draft commit:
+   - Re-inserts every `graph_change_event` row stamped with the
+     **new trunk commit_id** but preserving the original
+     `actor`, `committed_at`, `attribute_path`,
+     `prev_content_hash`, `new_content_hash`. `/audit?commit_id=
+     <trunk>` and `/blame` then return the original draft author.
+   - Aggregates per-actor `ops_count` into
+     `graph_commit_contributors` via
+     `INSERT ... ON CONFLICT (commit_id, actor) DO UPDATE SET
+     ops_count = ops_count + EXCLUDED.ops_count`
+     (`models_graph.py:743-768`).
+
+**Direct-main commit carve-out.** A user can commit directly to
+`main` without going through a draft branch. The commit endpoint
+takes the same path but with no merge — `is_default_branch=True`
+still triggers the trunk_log append, but
+`merge_source_commit_id` / `merge_source_branch` remain NULL and
+no audit-copy step fires (there's no draft chain to copy from).
+The original `graph_change_event` rows from that commit already
+carry the correct `commit_id`. `graph_commit_contributors` is
+single-row for direct-main commits.
+
+**Why provenance is non-parent, not extra parent.** Two reasons:
+(a) a future draft-branch GC can prune unreachable commits without
+breaking the provenance link (drafts merged to main are usually
+ephemeral), and (b) parent-chain walks (blame, ancestry) stay
+strictly linear on trunk — provenance is a query-able sidecar,
+not a graph edge.
+
+End-to-end walkthrough: `scenarios.md` DN-n.
 
 ## PR machinery (designed, not built this round)
 
@@ -227,6 +408,95 @@ emits heartbeats every 15s of silence.
 The `working_set.advanced` events carry `user_id` so the subscriber
 filters them to "only events for the user opening this canvas",
 preventing one user's staging from refetching every other user's tab.
+
+## FalkorDB projector for `authored_<graph_id>`
+
+Code: `backend/app/services/graph_falkor_projector.py`.
+
+The V1 hot projection for the read-routing-matrix top row. Each
+graph's `main` HEAD lives in a per-graph FalkorDB namespace
+`authored_<graph_id>` — never the shared `nexus_lineage` namespace
+used by external lineage. Per-graph isolation means an authored
+graph can't pollute lineage keys, and a corrupted projection can
+be dropped + replayed without affecting any other graph.
+
+**Pipeline per `visualization.graph.committed` event:**
+
+1. `run_falkor_projector` (`graph_falkor_projector.py:93`) does an
+   `XREADGROUP` on the `graph.outbox` Redis stream as consumer
+   group `falkor_projector_v1`, count 32, blocking poll.
+2. `_process_event` (`graph_falkor_projector.py:194`) decodes the
+   payload and applies a strict default-branch filter — reads the
+   graph's `default_branch` from Postgres (cached in
+   `_ProjectorState`) and silently ACKs any event whose `branch`
+   isn't the default. Draft-branch commits stay in cold storage
+   only.
+3. **Idempotency guard** against `graph_projector_cursor` keyed by
+   `(graph_id, target='falkordb')` (`models_graph.py:770-786`). If
+   `last_applied_commit_seq >= this commit's commit_seq`, ACK and
+   skip. Replays converge because (a) the cursor advances strictly
+   monotonically and (b) Cypher MERGE on `urn` is itself idempotent.
+4. Read `graph_change_event` rows for the commit + the resulting
+   content blobs from `graph_node_versions` /
+   `graph_edge_versions` keyed by `new_content_hash`.
+5. `_apply_to_falkor` (`graph_falkor_projector.py:451`) batches the
+   deltas by kind + action and emits one Cypher query per chunk of
+   `_BATCH_SIZE=1000` rows:
+
+   ```cypher
+   UNWIND $rows AS r
+   MERGE (n:Node {urn: r.urn})
+   SET   n.entity_type  = r.entity_type,
+         n.display_name = r.display_name,
+         n.properties   = r.props_json,  // JSON string (Falkor primitive)
+         n.tags         = r.tags_json,
+         n.position     = r.position_json,
+         n.content_hash = r.content_hash
+   ```
+
+   Edges use `MERGE (s)-[e:CONNECTS {urn: r.urn}]->(t)` with
+   `edge_type` as a property. V1 uses a uniform schema (single
+   `:Node` label, single `:CONNECTS` relationship) so projection
+   doesn't have to generate dynamic Cypher per entity-type;
+   higher-fidelity per-label projection is a v2 enhancement gated
+   on actual query patterns.
+
+6. **Strict apply order**: node-upsert → edge-upsert → edge-delete
+   → node-delete. A node being deleted in the same commit as edges
+   that reference it is detached cleanly: edges go away first.
+
+7. Cursor advances (commit_seq, commit_id, stream_id,
+   lag_seconds_observed) in Postgres in its own transaction after
+   FalkorDB succeeds; the stream entry is then XACK'd. Order
+   matters — the cursor is the durable ledger; the Redis XACK is
+   the optimisation. If Falkor succeeds but XACK fails, the next
+   poll re-reads the entry, the cursor short-circuits the work,
+   and XACK retries.
+
+**Failure modes (best-effort):**
+
+- FalkorDB unreachable mid-apply → exception bubbles up to the
+  outer loop; cursor stays put; the stream entry stays in the
+  consumer group's pending list. Next poll retries with
+  exponential backoff (`_BACKOFF_MIN_S=0.5` … `_BACKOFF_MAX_S=30`).
+  Reads of `main` HEAD raw queries transparently fall back to
+  `snapshot_reader.load_snapshot` against Postgres while the
+  projector is paused. Correctness intact; hot-path latency
+  degrades.
+- Postgres unreachable → projector can't decode the event payload;
+  same backoff loop. The outbox relay itself paused, so no new
+  events fan in.
+- Malformed payload → ACK + drop; logged once at warning. Doesn't
+  block the queue.
+
+**Multi-target extensibility.** `graph_projector_cursor.target` is
+a free-form text column with `UNIQUE(graph_id, target)`. Future
+projectors (read-replica, analytics warehouse, search index) slot
+in as new rows with `target='warehouse'`, `target='search'`, etc.
+— they share the cursor model, the consumer-group pattern, and
+the idempotency contract without schema churn.
+
+End-to-end walkthrough: `scenarios.md` DN-p.
 
 ## Authored-graph schema (Graph Store)
 
@@ -312,7 +582,41 @@ graph_orphan_enrichments          ◀── triage queue
   ├─ id, graph_id, urn, object_kind {node | edge}
   ├─ sync_run_id, discovered_at
   └─ resolved_at, resolved_by, resolution
+
+graph_trunk_log                   ◀── trunk-only date index (V1-4)
+  ├─ id, graph_id, commit_id
+  ├─ commit_seq                   (monotonic per-graph)
+  ├─ committed_at                 (indexed)
+  └─ INDEX: (graph_id, committed_at)   idx_trunk_log_committed_at
+
+graph_commit_contributors         ◀── per-actor manifest (V1-3)
+  ├─ commit_id (PK)
+  ├─ actor (PK)
+  └─ ops_count                    (incremented on squash)
+
+graph_projector_cursor            ◀── multi-target projection state (V1-5)
+  ├─ graph_id, target             (PK; target='falkordb' in V1)
+  ├─ last_applied_commit_seq
+  ├─ last_applied_commit_id
+  ├─ last_stream_id               (Redis XACK reference)
+  ├─ lag_seconds_observed
+  ├─ last_error
+  └─ updated_at
 ```
+
+The two V1 columns added to `graph_commits` itself:
+
+```
+graph_commits  (extended; see models_graph.py:187-188)
+  ├─ merge_source_commit_id       (non-parent provenance; V1-2)
+  └─ merge_source_branch          (non-parent provenance; V1-2)
+```
+
+Both are NULL on direct-main commits; both are set on squash
+merges by `_persist_merge_commit`. Partial index
+`idx_commits_merge_source` (where `merge_source_commit_id IS NOT
+NULL`) supports "which trunk commit landed this draft?" lookups
+without scanning the full commit table.
 
 ## Authored-graph schema (Management DB additions)
 
@@ -362,6 +666,30 @@ Structured errors so the frontend can branch on code, not text:
 | `graph_not_connected` | 422 | `refresh_source` | Authored graphs have no upstream to refresh |
 | `provider_resolve_failed` | 422 | `sync_data_source` | Provider registry couldn't instantiate the upstream client |
 | `merge_not_found` / `branch_not_found` / `snapshot_not_found` / `commit_not_found` | 404 | various | Standard 404 |
+| `no_trunk_commit_at_or_before` | 404 | `get_graph_as_of` | `/as_of?at=<T>` where `T` precedes the genesis trunk commit |
+
+The pull endpoint (V1-6) does NOT return errors in the normal
+case: conflicts are part of the success response shape, not error
+envelopes. The two HTTP errors it can still raise are the standard
+`404 not_found` (graph deleted) and 403 (RBAC). Successful pull
+responses always carry:
+
+```
+{
+  "previous_base": "gcmt_OLD | null",
+  "new_base":      "gcmt_NEW | null",
+  "rebased":       <int>,
+  "dropped":       <int>,
+  "conflicts":     [{object_kind, object_id, conflict_class, ...}]
+}
+```
+
+The four `conflict_class` values are `edit_edit`, `edit_delete`,
+`delete_edit`, `add_add` (see § "V1 collaboration model" for the
+classification table). The frontend renders conflicts in the
+resolver UI; staged ops stay in the working set with their
+original `base_content_hash` until the user resolves and
+re-commits.
 
 ## What's deferred and why
 
@@ -373,10 +701,23 @@ Structured errors so the frontend can branch on code, not text:
   place. Blob copy is async-friendly (content addressing makes it a
   pure stream from one graph to another); needs a worker process to
   avoid blocking the request.
-- **Hot projection per-branch namespace (Phase 2)** — currently the
-  canvas reads from the cold store (correct, slower). The
-  materialization worker is its own commit-driven process; we'd
-  rather ship after the merge orchestrator stabilises.
+- **Per-draft FalkorDB namespaces (Phase 2)** — the V1 projector
+  covers each graph's `main` HEAD only. Reads of non-default
+  branches transparently fall back to
+  `snapshot_reader.load_snapshot` against Postgres (correct,
+  slower). The multi-target cursor (`graph_projector_cursor`)
+  already accommodates this — Phase 2 adds rows with
+  `target='falkordb_draft_<branch>'` against the same machinery.
+- **PullChangesDialog visual component (Phase 2)** — the V1-6
+  pull/rebase backend is functional and the frontend
+  `graphEditorStore` contract is stable (`pendingConflicts`,
+  `dismissConflict`). The visual ours/theirs conflict resolver UI
+  is the next user-visible deliverable.
+- **Draft-branch GC (Phase 2)** — a sweep over commits that are
+  unreachable from any live ref AND from any
+  `merge_source_commit_id`. Squash provenance is non-parent
+  precisely so this sweep stays simple. Operational, not a
+  correctness gap.
 - **Genesis-import worker (Phase 2.5)** — Mode-2 sync runs inline
   at the endpoint today. Moving it to a worker is a deployability
   improvement, not a correctness one.
