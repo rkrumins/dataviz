@@ -69,6 +69,7 @@ import { useEdgeProjection } from '@/hooks/useEdgeProjection'
 import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { usePinnedLineagePath } from '@/hooks/usePinnedLineagePath'
+import { usePinHopDistance } from '@/hooks/usePinHopDistance'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
@@ -973,42 +974,13 @@ export function ContextViewCanvas({
   )
 
   // Hop distance from focus to every reachable urn — used for the chip
-  // tooltips so the user can reason about pin depth. Orientation-agnostic
-  // BFS over the lineage adjacency (skipping containment edges).
-  const hopFromFocus = useMemo(() => {
-    const m = new Map<string, number>()
-    if (!trace.focusId) return m
-    const fwd = new Map<string, string[]>()
-    const bwd = new Map<string, string[]>()
-    for (const e of edges) {
-      if (isContainmentEdge(normalizeEdgeType(e as any))) continue
-      if (!fwd.has(e.source)) fwd.set(e.source, [])
-      fwd.get(e.source)!.push(e.target)
-      if (!bwd.has(e.target)) bwd.set(e.target, [])
-      bwd.get(e.target)!.push(e.source)
-    }
-    const bfs = (adj: Map<string, string[]>): Map<string, number> => {
-      const dist = new Map<string, number>([[trace.focusId!, 0]])
-      const queue: string[] = [trace.focusId!]
-      while (queue.length) {
-        const cur = queue.shift()!
-        const d = dist.get(cur)!
-        for (const next of adj.get(cur) ?? []) {
-          if (!dist.has(next)) { dist.set(next, d + 1); queue.push(next) }
-        }
-      }
-      return dist
-    }
-    const df = bfs(fwd)
-    const db = bfs(bwd)
-    const seen = new Set<string>([...df.keys(), ...db.keys()])
-    for (const u of seen) {
-      const a = df.get(u) ?? Infinity
-      const b = db.get(u) ?? Infinity
-      m.set(u, Math.min(a, b))
-    }
-    return m
-  }, [edges, trace.focusId, isContainmentEdge])
+  // tooltips. Shared hook so Graph / Hierarchy / ContextView all read
+  // the same numbers.
+  const hopFromFocus = usePinHopDistance({
+    edges,
+    isContainmentEdge,
+    focusUrn: trace.focusId,
+  })
 
   // Trace filter — when a trace is active, hides everything outside the trace
   // context (traced URNs + drilldown URNs + their containment ancestors).

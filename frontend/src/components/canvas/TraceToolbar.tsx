@@ -14,6 +14,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { PinOptionsPopover, PinHelpPopover } from './trace/TraceBottomDock'
 import {
     useTraceStore,
     type TraceConfig,
@@ -81,6 +82,12 @@ interface TraceToolbarProps {
     onSetPinDisplayMode?: (mode: 'hide' | 'dim') => void
     /** Pin Lineage — clear all pins */
     onClearPins?: () => void
+    /** Pin Lineage — size of pinPath.pathNodeUrns; drives the "Showing path" status line. */
+    pathNodeCount?: number
+    /** Pin Lineage — size of pinPath.pathEdgeIds. */
+    pathEdgeCount?: number
+    /** Pin Lineage — hop distance per URN (orientation-agnostic) for chip tooltips/badges. */
+    hopFromFocus?: Map<string, number>
 }
 
 // ============================================
@@ -115,7 +122,12 @@ export function TraceToolbar({
     pinDisplayMode = 'hide',
     onSetPinDisplayMode,
     onClearPins,
+    pathNodeCount,
+    pathEdgeCount,
+    hopFromFocus,
 }: TraceToolbarProps) {
+    const [pinOptionsOpen, setPinOptionsOpen] = useState(false)
+    const [pinHelpOpen, setPinHelpOpen] = useState(false)
     const [isExpanded, setIsExpanded] = useState(false)
     const [showStats, setShowStats] = useState(false)
     const [copiedMessage, setCopiedMessage] = useState<string | null>(null)
@@ -344,95 +356,152 @@ export function TraceToolbar({
                 {pinnedCount > 0 && (
                     <>
                         <div className="h-4 w-[1px] bg-glass-border" />
-                        <div className="flex items-center gap-1">
-                            {pinnedTargets && pinnedTargets.length > 0 ? (
-                                <div className="flex items-center gap-1 max-w-[320px] overflow-x-auto custom-scrollbar">
-                                    <LucideIcons.Pin className="w-3 h-3 text-amber-600 dark:text-amber-400 flex-shrink-0" />
-                                    {pinnedTargets.map((p) => {
-                                        const isUnreachable = unreachablePinUrns?.has(p.urn) ?? false
-                                        return (
+                        <div className="flex flex-col gap-0.5">
+                            <div className="flex items-center gap-1">
+                                {pinnedTargets && pinnedTargets.length > 0 ? (
+                                    <div className="flex items-center gap-1 max-w-[320px] overflow-x-auto custom-scrollbar">
+                                        <LucideIcons.Pin className="w-3 h-3 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                                        {pinnedTargets.map((p) => {
+                                            const isUnreachable = unreachablePinUrns?.has(p.urn) ?? false
+                                            const hops = hopFromFocus?.get(p.urn)
+                                            const titleParts: string[] = [p.label]
+                                            if (isUnreachable) {
+                                                titleParts.push('unreachable from focus')
+                                            } else if (hops !== undefined && Number.isFinite(hops)) {
+                                                titleParts.push(`${hops} ${hops === 1 ? 'hop' : 'hops'} from focus`)
+                                            }
+                                            return (
+                                                <span
+                                                    key={p.urn}
+                                                    className={cn(
+                                                        "flex items-center gap-1 px-1.5 py-0.5 rounded-md text-2xs font-medium flex-shrink-0",
+                                                        isUnreachable
+                                                            ? "bg-red-500/10 text-red-600 dark:text-red-400 ring-1 ring-red-500/40"
+                                                            : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                                                    )}
+                                                    title={titleParts.join(' · ')}
+                                                >
+                                                    <span className="max-w-[120px] truncate">{p.label}</span>
+                                                    {!isUnreachable && hops !== undefined && Number.isFinite(hops) && (
+                                                        <span className="text-amber-700/70 dark:text-amber-300/70 tabular-nums">
+                                                            {hops}h
+                                                        </span>
+                                                    )}
+                                                    {onUnpinTarget && (
+                                                        <button
+                                                            onClick={() => onUnpinTarget(p.urn)}
+                                                            className="hover:bg-black/10 dark:hover:bg-white/10 rounded-sm p-0.5 -mr-0.5"
+                                                            title="Unpin"
+                                                        >
+                                                            <LucideIcons.X className="w-2.5 h-2.5" />
+                                                        </button>
+                                                    )}
+                                                </span>
+                                            )
+                                        })}
+                                        {unreachablePinUrns && unreachablePinUrns.size > 0 && (
                                             <span
-                                                key={p.urn}
-                                                className={cn(
-                                                    "flex items-center gap-1 px-1.5 py-0.5 rounded-md text-2xs font-medium flex-shrink-0",
-                                                    isUnreachable
-                                                        ? "bg-red-500/10 text-red-600 dark:text-red-400 ring-1 ring-red-500/40"
-                                                        : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                                                )}
-                                                title={
-                                                    isUnreachable
-                                                        ? `${p.label} has no lineage path to the focus`
-                                                        : p.label
-                                                }
+                                                className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-2xs font-medium bg-red-500/10 text-red-600 dark:text-red-400 flex-shrink-0"
+                                                title="These pins have no lineage path from the focus"
                                             >
-                                                <span className="max-w-[120px] truncate">{p.label}</span>
-                                                {onUnpinTarget && (
-                                                    <button
-                                                        onClick={() => onUnpinTarget(p.urn)}
-                                                        className="hover:bg-black/10 dark:hover:bg-white/10 rounded-sm p-0.5 -mr-0.5"
-                                                        title="Unpin"
-                                                    >
-                                                        <LucideIcons.X className="w-2.5 h-2.5" />
-                                                    </button>
-                                                )}
+                                                <LucideIcons.AlertTriangle className="w-3 h-3" />
+                                                {unreachablePinUrns.size} unreachable
                                             </span>
-                                        )
-                                    })}
-                                    {unreachablePinUrns && unreachablePinUrns.size > 0 && (
-                                        <span
-                                            className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-2xs font-medium bg-red-500/10 text-red-600 dark:text-red-400 flex-shrink-0"
-                                            title="These pins have no lineage path from the focus"
+                                        )}
+                                    </div>
+                                ) : (
+                                    <span
+                                        className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                                        title="Pinned trace-path endpoints"
+                                    >
+                                        <LucideIcons.Pin className="w-3 h-3" />
+                                        {pinnedCount} pinned
+                                    </span>
+                                )}
+                                {onSetPinDisplayMode && (
+                                    <div className="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5">
+                                        <button
+                                            onClick={() => onSetPinDisplayMode('hide')}
+                                            className={cn(
+                                                "px-2 py-1 rounded-md text-2xs font-medium transition-all",
+                                                pinDisplayMode === 'hide'
+                                                    ? "bg-amber-500 text-white shadow-sm"
+                                                    : "text-ink-muted hover:bg-black/5 dark:hover:bg-white/10"
+                                            )}
+                                            title="Isolate — hide every node and edge that isn't on the pinned route"
                                         >
-                                            <LucideIcons.AlertTriangle className="w-3 h-3" />
-                                            {unreachablePinUrns.size} unreachable
-                                        </span>
-                                    )}
-                                </div>
-                            ) : (
-                                <span
-                                    className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                                    title="Pinned trace-path endpoints"
-                                >
-                                    <LucideIcons.Pin className="w-3 h-3" />
-                                    {pinnedCount} pinned
-                                </span>
-                            )}
-                            {onSetPinDisplayMode && (
-                                <div className="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5">
+                                            Isolate
+                                        </button>
+                                        <button
+                                            onClick={() => onSetPinDisplayMode('dim')}
+                                            className={cn(
+                                                "px-2 py-1 rounded-md text-2xs font-medium transition-all",
+                                                pinDisplayMode === 'dim'
+                                                    ? "bg-amber-500 text-white shadow-sm"
+                                                    : "text-ink-muted hover:bg-black/5 dark:hover:bg-white/10"
+                                            )}
+                                            title="Dim — keep the full trace visible but grey out off-path elements"
+                                        >
+                                            Dim
+                                        </button>
+                                    </div>
+                                )}
+                                <div className="relative">
                                     <button
-                                        onClick={() => onSetPinDisplayMode('hide')}
+                                        onClick={() => { setPinOptionsOpen(v => !v); setPinHelpOpen(false) }}
                                         className={cn(
-                                            "px-2 py-1 rounded-md text-2xs font-medium transition-all",
-                                            pinDisplayMode === 'hide'
-                                                ? "bg-amber-500 text-white shadow-sm"
-                                                : "text-ink-muted hover:bg-black/5 dark:hover:bg-white/10"
+                                            "p-1.5 rounded-md transition-all",
+                                            pinOptionsOpen
+                                                ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                                                : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
                                         )}
-                                        title="Hide everything off the pinned path"
+                                        title="Path highlight options"
+                                        aria-label="Path highlight options"
+                                        aria-expanded={pinOptionsOpen}
                                     >
-                                        Isolate
+                                        <LucideIcons.SlidersHorizontal className="w-4 h-4" />
                                     </button>
-                                    <button
-                                        onClick={() => onSetPinDisplayMode('dim')}
-                                        className={cn(
-                                            "px-2 py-1 rounded-md text-2xs font-medium transition-all",
-                                            pinDisplayMode === 'dim'
-                                                ? "bg-amber-500 text-white shadow-sm"
-                                                : "text-ink-muted hover:bg-black/5 dark:hover:bg-white/10"
-                                        )}
-                                        title="Keep full graph as dimmed context"
-                                    >
-                                        Dim
-                                    </button>
+                                    {pinOptionsOpen && <PinOptionsPopover onClose={() => setPinOptionsOpen(false)} />}
                                 </div>
-                            )}
-                            {onClearPins && (
-                                <button
-                                    onClick={onClearPins}
-                                    className="p-1.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted transition-all"
-                                    title="Clear all pins"
-                                >
-                                    <LucideIcons.PinOff className="w-4 h-4" />
-                                </button>
+                                <div className="relative">
+                                    <button
+                                        onClick={() => { setPinHelpOpen(v => !v); setPinOptionsOpen(false) }}
+                                        className={cn(
+                                            "p-1.5 rounded-md transition-all",
+                                            pinHelpOpen
+                                                ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                                                : "hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted"
+                                        )}
+                                        title="What does Pin Lineage do?"
+                                        aria-label="Pin Lineage help"
+                                        aria-expanded={pinHelpOpen}
+                                    >
+                                        <LucideIcons.HelpCircle className="w-4 h-4" />
+                                    </button>
+                                    {pinHelpOpen && <PinHelpPopover onClose={() => setPinHelpOpen(false)} />}
+                                </div>
+                                {onClearPins && (
+                                    <button
+                                        onClick={onClearPins}
+                                        className="p-1.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 text-ink-muted transition-all"
+                                        title="Clear all pins"
+                                    >
+                                        <LucideIcons.PinOff className="w-4 h-4" />
+                                    </button>
+                                )}
+                            </div>
+                            {pathNodeCount !== undefined && pathEdgeCount !== undefined && (
+                                <div className="text-2xs text-ink-muted pl-4">
+                                    Showing path:{' '}
+                                    <span className="text-amber-700 dark:text-amber-400 font-medium tabular-nums">
+                                        {pathNodeCount}
+                                    </span>{' '}
+                                    {pathNodeCount === 1 ? 'node' : 'nodes'} ·{' '}
+                                    <span className="text-amber-700 dark:text-amber-400 font-medium tabular-nums">
+                                        {pathEdgeCount}
+                                    </span>{' '}
+                                    {pathEdgeCount === 1 ? 'edge' : 'edges'}
+                                </div>
                             )}
                         </div>
                     </>

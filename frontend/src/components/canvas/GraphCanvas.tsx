@@ -65,6 +65,7 @@ import { useElkLayout } from '@/hooks/useElkLayout'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
 import { usePinnedLineagePath } from '@/hooks/usePinnedLineagePath'
+import { usePinHopDistance } from '@/hooks/usePinHopDistance'
 import { useAggregatedLineage } from '@/hooks/useAggregatedLineage'
 import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
 import { useEdgeDetailPanel, useEdgeTypeFilters, useEdgeFiltersStore } from '@/hooks/useEdgeFilters'
@@ -278,6 +279,13 @@ export function GraphCanvas({ className }: { className?: string }) {
     focusUrn: trace.focusId,
     pinnedUrns: pinnedTargetUrns,
     containmentParent: parentMap,
+  })
+
+  // Hop distance from focus, driving the chip "{N}h" badge + tooltip.
+  const hopFromFocus = usePinHopDistance({
+    edges: rawEdges,
+    isContainmentEdge,
+    focusUrn: trace.focusId,
   })
 
   // Pins are scoped to the active trace's focus — drop them whenever the
@@ -1426,6 +1434,9 @@ export function GraphCanvas({ className }: { className?: string }) {
               onUnpinTarget={togglePinTarget}
               pinDisplayMode={pinDisplayMode}
               onSetPinDisplayMode={(m) => useCanvasStore.getState().setPinDisplayMode(m)}
+              pathNodeCount={pinPath.pathNodeUrns.size}
+              pathEdgeCount={pinPath.pathEdgeIds.size}
+              hopFromFocus={hopFromFocus}
               onClearPins={clearPinTargets}
             />
           </div>

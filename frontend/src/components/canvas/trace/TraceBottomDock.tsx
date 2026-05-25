@@ -530,7 +530,7 @@ function PinDockStrip({
   )
 }
 
-function PinOptionsPopover({ onClose }: { onClose: () => void }) {
+export function PinOptionsPopover({ onClose }: { onClose: () => void }) {
   const pinPathStyle = useCanvasStore((s) => s.pinPathStyle)
   const setPinPathStyle = useCanvasStore((s) => s.setPinPathStyle)
   const ref = useRef<HTMLDivElement>(null)
@@ -592,7 +592,7 @@ function PinOptionsPopover({ onClose }: { onClose: () => void }) {
   )
 }
 
-function PinHelpPopover({ onClose }: { onClose: () => void }) {
+export function PinHelpPopover({ onClose }: { onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {

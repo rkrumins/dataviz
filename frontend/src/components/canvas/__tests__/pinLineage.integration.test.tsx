@@ -138,7 +138,7 @@ describe('TraceToolbar — Pin Lineage section', () => {
 
     // Per-pin warning is encoded as the chip's title attribute so screen
     // readers + hover tooltip both surface the cause.
-    const orphanedChip = screen.getByTitle(/ReportB has no lineage path/i)
+    const orphanedChip = screen.getByTitle(/ReportB\s*·\s*unreachable from focus/i)
     expect(orphanedChip).toBeInTheDocument()
 
     // Summary warning aggregates the count.
