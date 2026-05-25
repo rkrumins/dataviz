@@ -1057,25 +1057,15 @@ export function ContextViewCanvas({
   // Toggle node expansion with Lazy Loading
   const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes } = useGraphHydration()
 
-  // Bring a just-revealed hit's row into the horizontal viewport.
-  // rAF-polls because the DOM node may not exist immediately after the
-  // spine expansion (React hasn't re-rendered the parent containers
-  // yet). Silent no-op if the row never materialises — the store
-  // selection still gives the user feedback via SearchMapPanel.
+  // Reveal-into-view: the LayerColumn that owns the hit URN uses its
+  // virtualizer's scrollToIndex (DOM scrollIntoView can't work — rows
+  // below the overscan window aren't in the DOM at all). We signal via
+  // a pulse-counter object so re-revealing the same URN still scrolls.
+  const [revealTarget, setRevealTarget] = useState<{ id: string; pulse: number } | null>(null)
+  const revealPulseRef = useRef(0)
   const scrollHitIntoView = useCallback((nodeId: string) => {
-    let frames = 0
-    const MAX_FRAMES = 12  // ~200ms at 60fps — covers post-expand re-render
-    const tick = () => {
-      const el =
-        document.getElementById(`layer-node-${nodeId}`) ??
-        document.querySelector<HTMLElement>(`[id^="layer-node-"][data-urn="${CSS.escape(nodeId)}"]`)
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' })
-        return
-      }
-      if (++frames < MAX_FRAMES) requestAnimationFrame(tick)
-    }
-    requestAnimationFrame(tick)
+    revealPulseRef.current += 1
+    setRevealTarget({ id: nodeId, pulse: revealPulseRef.current })
   }, [])
 
   // Reveal callback for advanced-search hits and pin clicks. Walks the
@@ -1808,6 +1798,7 @@ export function ContextViewCanvas({
                 failedNodes={failedNodes}
                 onScroll={handleLayerScroll}
                 onAssignToLayer={(entityId) => handleAssignToLayer(entityId, layer.id)}
+                revealTarget={revealTarget}
               />
             ))}
           </div>
