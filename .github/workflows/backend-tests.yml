@@ -1,0 +1,55 @@
+name: backend-tests
+
+# Runs the sandbox-friendly aggregation unit tests on every PR + push
+# to main. Scope is intentionally narrow on first iteration: only the
+# four test files that load with ``--noconftest`` (the project's
+# conftest pulls in the full auth stack which the runner doesn't need
+# to bootstrap for these tests). Broaden over time as additional test
+# files are made conftest-friendly or as the conftest itself becomes
+# lighter to bootstrap.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  aggregation-unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-test.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install -r backend/requirements-test.txt
+
+      - name: Run aggregation unit tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m pytest \
+            backend/tests/test_aggregation_overrides.py \
+            backend/tests/test_aggregation_retention.py \
+            backend/tests/test_aggregation_skip_propagation.py \
+            backend/tests/test_aggregation_skip_unchanged.py \
+            --noconftest \
+            -q \
+            --tb=short
