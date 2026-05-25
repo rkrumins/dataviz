@@ -545,12 +545,16 @@ class TestCompilerLeaves:
     def test_entity_type_in(self):
         c = _Compiler()
         where = c.compile(EntityTypePredicate(values=["dataset", "schemaField"]))
-        assert where == "labels(n)[0] IN $p0"
+        # Case-insensitive comparison guards against label-casing drift
+        # between the ontology config and ingested data.
+        assert where == "toLower(labels(n)[0]) IN $p0"
+        assert c.params == {"p0": ["dataset", "schemafield"]}
 
     def test_entity_type_not_in(self):
         c = _Compiler()
         where = c.compile(EntityTypePredicate(op="notIn", values=["domain"]))
-        assert where == "NOT (labels(n)[0] IN $p0)"
+        assert where == "NOT (toLower(labels(n)[0]) IN $p0)"
+        assert c.params == {"p0": ["domain"]}
 
     def test_layer(self):
         c = _Compiler()
@@ -950,10 +954,10 @@ class TestCandidateCypher:
             candidate_cap=CANDIDATE_CAP,
         )
         # When fragment is the trivial "true", drop it to avoid noise.
-        # Multi-label-safe shape: ``ANY(l IN labels(n) WHERE l IN ...)``
-        # catches every label, not just ``labels(n)[0]`` (which silently
-        # drops multi-labeled nodes whose first label isn't in scope).
-        assert "WHERE ANY(l IN labels(n) WHERE l IN $_scopeEntityTypes)" in cypher
+        # Multi-label-safe + case-insensitive shape — catches every
+        # label whatever its case (label drift between ontology IDs and
+        # ingested data is silently corrected).
+        assert "WHERE ANY(l IN labels(n) WHERE toLower(l) IN $_scopeEntityTypes)" in cypher
         assert " AND true" not in cypher
 
     def test_with_scope_continuation(self):

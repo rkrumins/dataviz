@@ -407,8 +407,12 @@ class _Compiler:
 
     def _visit_entity_type(self, e) -> str:
         pn = self._next()
-        self.params[pn] = list(e.values)
-        clause = f"labels(n)[0] IN ${pn}"
+        # Lowercase the comparison both ways so a user who picks
+        # "Dataset" in the FE still matches nodes whose stored label
+        # is "dataset" (or any other case) — see the matching
+        # ``toLower(l)`` in ``_build_candidate_cypher``.
+        self.params[pn] = [str(v).lower() for v in e.values]
+        clause = f"toLower(labels(n)[0]) IN ${pn}"
         return f"NOT ({clause})" if e.op == "notIn" else clause
 
     def _visit_layer(self, l) -> str:
@@ -784,8 +788,15 @@ def _build_candidate_cypher(
         # checks every label and matches if any is in scope. Same cost
         # for single-labeled nodes (the common case) and strictly more
         # correct for multi-labeled nodes.
+        #
+        # Case-insensitive: the ontology stores entity-type IDs with
+        # the casing the config author chose (``dataset`` /
+        # ``DataPlatform`` / etc.), but ingestion can write labels with
+        # any case if the source system varies. ``toLower`` on both
+        # sides guarantees the filter never silently drops nodes due to
+        # case-drift between the ontology and the data.
         where_parts.append(
-            "ANY(l IN labels(n) WHERE l IN $_scopeEntityTypes)",
+            "ANY(l IN labels(n) WHERE toLower(l) IN $_scopeEntityTypes)",
         )
     if where_fragment and where_fragment != "true":
         where_parts.append(where_fragment)
@@ -1230,7 +1241,9 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     )
     use_entity_types = effective_types is not None
     if use_entity_types:
-        base_params["_scopeEntityTypes"] = effective_types
+        # Lowercased to pair with the case-insensitive ``toLower(l)``
+        # check in the candidate WHERE — see ``_build_candidate_cypher``.
+        base_params["_scopeEntityTypes"] = [t.lower() for t in effective_types]
     if et_note:
         notes.append(et_note)
 
@@ -1790,7 +1803,9 @@ async def execute_deep_search(
     )
     use_entity_types = effective_types is not None
     if use_entity_types:
-        base_params["_scopeEntityTypes"] = effective_types
+        # Lowercased to pair with the case-insensitive ``toLower(l)``
+        # check in the candidate WHERE — see ``_build_candidate_cypher``.
+        base_params["_scopeEntityTypes"] = [t.lower() for t in effective_types]
     if et_note:
         # execute_deep_search has no diagnostic-notes channel
         # (explain_deep_search does — see the parallel branch). Log at
