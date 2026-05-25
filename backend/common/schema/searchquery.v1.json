@@ -1563,6 +1563,7 @@
             }
           ],
           "default": null,
+          "description": "Opaque pagination cursor. When set, hits start from the cursor's recorded offset within the candidate set. The response echoes a new cursor when more rows are available (``hits.length == pageSize`` AND the slice didn't exhaust the candidate set).",
           "title": "Cursor"
         },
         "highlights": {
@@ -1577,7 +1578,8 @@
         },
         "pageSize": {
           "default": 50,
-          "maximum": 200,
+          "description": "Number of hits returned per page. Default 50 (sane for browsing); the panel sets it to the candidate cap (5000) when it wants the full match set in one round-trip so canvas highlighting can cover every match without paginating. Bounded at 5000 (matches CANDIDATE_CAP) \u2014 larger pages require cursor pagination.",
+          "maximum": 5000,
           "minimum": 1,
           "title": "Pagesize",
           "type": "integer"
@@ -1998,6 +2000,7 @@
           "enum": [
             "exact",
             "prefix",
+            "suffix",
             "substring",
             "fulltext",
             "regex"

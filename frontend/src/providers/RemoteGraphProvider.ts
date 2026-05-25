@@ -36,7 +36,6 @@ import type {
     SearchResultPage,
     SearchExplainResult,
     SearchDiscoverResult,
-    NLSearchResponse,
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
@@ -350,26 +349,6 @@ export class RemoteGraphProvider implements GraphDataProvider {
             '/search/discover',
             { extraParams: { samplePerLabel: String(samplePerLabel) } },
         )
-    }
-
-    /**
-     * Natural-Language → SearchQuery. Backend translates the English
-     * question via Claude, validates the produced `SearchQuery`, runs
-     * it through the same pipeline as every structured search, and
-     * returns both the interpreted query (for the UI's "what I
-     * understood" affordance) and the results. The API key never
-     * touches the browser.
-     */
-    async searchNL(body: {
-        question: string
-        viewId: string
-        scopeHint?: 'view' | 'workspace'
-        conversationId?: string
-    }): Promise<NLSearchResponse> {
-        return await this.fetch<NLSearchResponse>('/search/nl', {
-            method: 'POST',
-            body: JSON.stringify(body),
-        })
     }
 
     // ==========================================

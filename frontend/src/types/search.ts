@@ -21,8 +21,8 @@
  *      source is impossible because they're sourced from it.
  *
  * Anything that isn't part of the generated SearchApiContract
- * (e.g. `NLSearchResponse`, which W9 removes; transitional shapes) is
- * kept here as a temporary hand-written type, clearly marked.
+ * (transitional shapes) is kept here as a temporary hand-written type,
+ * clearly marked.
  */
 
 import type { GraphNode } from '@/providers/GraphDataProvider'
@@ -221,17 +221,3 @@ export type ScopeDiagnostics = RequireKeys<
 >
 
 
-// ---------------------------------------------------------------------------
-// NL Ask response — W9 removes this surface. Kept here only so the
-// remaining importers in `AskTab.tsx` and `RemoteGraphProvider.ts`
-// compile until they're deleted in W9.
-// ---------------------------------------------------------------------------
-
-/** @deprecated NL Ask tab is dropped in v1 (W9). */
-export interface NLSearchResponse {
-    interpretedQuery: SearchQuery
-    interpretationNotes: string
-    modelUsed: string
-    conversationId: string
-    results: SearchResultPage
-}

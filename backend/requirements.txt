@@ -26,10 +26,6 @@ httpx>=0.26.0            # DataHub GraphQL HTTP client + async test client
 google-cloud-spanner>=3.49.0                 # Spanner Graph adapter (bundles spanner_admin_database_v1 for CREATE TABLE / CREATE PROPERTY GRAPH bootstrap)
 anyio>=4.0.0                                 # Threadpool used by Spanner async/sync seam
 
-# Natural-Language → SearchQuery translator ("Ask" tab in SearchMapPanel).
-# Server-side Anthropic SDK so the API key never reaches the browser.
-anthropic>=0.40.0
-
 # Structured logging
 python-json-logger>=2.0.7
 
