@@ -71,3 +71,17 @@ export const OP_HINTS: Record<OpTone, string> = {
     or:  'ANY — at least one condition matches',
     not: 'NOT — invert the result',
 }
+
+
+/**
+ * Depth-attenuated background gradients used by NestedGroupCard at
+ * depth ≥ 1. The accent stripe stays at full saturation (so the role
+ * of the card is still glanceable) but the background tint is muted
+ * so deeply-nested groups don't compete with the parent for
+ * attention. Top-level groups (depth 0) use ``TONE_STYLES[op].bg``.
+ */
+export const NESTED_TONE_BG: Record<OpTone, string> = {
+    and: 'from-accent-lineage/[0.035] to-accent-lineage/[0.01]',
+    or:  'from-amber-500/[0.035] to-amber-500/[0.01]',
+    not: 'from-rose-500/[0.035] to-rose-500/[0.01]',
+}

@@ -11,11 +11,40 @@
  * Active segment uses its tone (purple AND, amber OR, rose NOT) on a
  * soft canvas chip. Inactive segments are muted ink with a hover lift.
  */
-import type { FC } from 'react'
+import type { FC, ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
 
-import { OP_HINTS, TONE_STYLES, type OpTone } from './tones'
+import { InfoTooltip } from './InfoTooltip'
+import { TONE_STYLES, type OpTone } from './tones'
+
+
+/**
+ * Friendly tooltip copy aimed at non-technical users. Lives here
+ * because it's tightly coupled to the pill UX; ``OP_HINTS`` in
+ * tones.ts keeps the shorter one-liner copy used by other consumers.
+ */
+const TOOLTIP_COPY: Record<OpTone, ReactNode> = {
+    and: (
+        <span>
+            <strong className="font-semibold text-accent-lineage">ALL</strong>{' '}
+            — match <em>every</em> condition below. Narrows the search.
+        </span>
+    ),
+    or: (
+        <span>
+            <strong className="font-semibold text-amber-300">ANY</strong>{' '}
+            — match <em>at least one</em> condition below. Widens the search.
+        </span>
+    ),
+    not: (
+        <span>
+            <strong className="font-semibold text-rose-300">NOT</strong>{' '}
+            — invert: show only entities that <em>don&apos;t</em> match.
+            Useful for &quot;everything except…&quot; patterns.
+        </span>
+    ),
+}
 
 
 export type OperatorSize = 'sm' | 'md'
@@ -50,29 +79,37 @@ export const OperatorPill: FC<OperatorPillProps> = ({
     if (compact) {
         const meta = TONE_STYLES[value]
         return (
-            <button
-                type="button"
-                onClick={() => {
-                    if (disabled) return
-                    // Cycle through the available segments.
-                    const idx = values.indexOf(value)
-                    const next = values[(idx + 1) % values.length]
-                    onChange(next)
-                }}
-                disabled={disabled}
-                className={cn(
-                    'inline-flex items-center gap-1 rounded-full',
-                    'border border-glass-border/70 bg-canvas-base/50',
-                    padX, textSize,
-                    'font-semibold uppercase tracking-wider',
-                    meta.ink,
-                    'hover:bg-canvas-base/80 transition-colors',
-                    disabled && 'opacity-50 cursor-not-allowed',
-                )}
-                title={`${OP_HINTS[value]} — click to switch`}
-            >
-                {meta.label}
-            </button>
+            <InfoTooltip content={
+                <>
+                    {TOOLTIP_COPY[value]}
+                    <div className="mt-1 text-ink-muted text-[10.5px]">
+                        Click to switch.
+                    </div>
+                </>
+            }>
+                <button
+                    type="button"
+                    onClick={() => {
+                        if (disabled) return
+                        // Cycle through the available segments.
+                        const idx = values.indexOf(value)
+                        const next = values[(idx + 1) % values.length]
+                        onChange(next)
+                    }}
+                    disabled={disabled}
+                    className={cn(
+                        'inline-flex items-center gap-1 rounded-full',
+                        'border border-glass-border/70 bg-canvas-base/50',
+                        padX, textSize,
+                        'font-semibold uppercase tracking-wider',
+                        meta.ink,
+                        'hover:bg-canvas-base/80 transition-colors',
+                        disabled && 'opacity-50 cursor-not-allowed',
+                    )}
+                >
+                    {meta.label}
+                </button>
+            </InfoTooltip>
         )
     }
 
@@ -89,33 +126,36 @@ export const OperatorPill: FC<OperatorPillProps> = ({
                 const meta = TONE_STYLES[candidate]
                 const active = value === candidate
                 return (
-                    <button
+                    <InfoTooltip
                         key={candidate}
-                        type="button"
-                        role="radio"
-                        aria-checked={active}
-                        onClick={() => !disabled && onChange(candidate)}
-                        disabled={disabled}
-                        title={OP_HINTS[candidate]}
-                        className={cn(
-                            'inline-flex items-center gap-1 rounded-full',
-                            'font-semibold uppercase tracking-wider',
-                            'transition-colors',
-                            padX, textSize,
-                            active
-                                ? cn(meta.ink, 'bg-canvas-base/50 shadow-sm')
-                                : 'text-ink-muted/70 hover:text-ink',
-                            disabled && 'opacity-50 cursor-not-allowed',
-                        )}
+                        content={TOOLTIP_COPY[candidate]}
                     >
-                        {meta.label}
-                        <span className={cn(
-                            'text-[8.5px] uppercase tracking-wider',
-                            active ? 'opacity-60' : 'opacity-40',
-                        )}>
-                            {meta.sub}
-                        </span>
-                    </button>
+                        <button
+                            type="button"
+                            role="radio"
+                            aria-checked={active}
+                            onClick={() => !disabled && onChange(candidate)}
+                            disabled={disabled}
+                            className={cn(
+                                'inline-flex items-center gap-1 rounded-full',
+                                'font-semibold uppercase tracking-wider',
+                                'transition-colors',
+                                padX, textSize,
+                                active
+                                    ? cn(meta.ink, 'bg-canvas-base/50 shadow-sm')
+                                    : 'text-ink-muted/70 hover:text-ink',
+                                disabled && 'opacity-50 cursor-not-allowed',
+                            )}
+                        >
+                            {meta.label}
+                            <span className={cn(
+                                'text-[8.5px] uppercase tracking-wider',
+                                active ? 'opacity-60' : 'opacity-40',
+                            )}>
+                                {meta.sub}
+                            </span>
+                        </button>
+                    </InfoTooltip>
                 )
             })}
         </div>

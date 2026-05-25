@@ -20,6 +20,7 @@ import { Sparkles, X } from 'lucide-react'
 import { type FC } from 'react'
 
 import { cn } from '@/lib/utils'
+import { useSearchStore } from '@/store/searchStore'
 import type { GroupPredicate, Predicate } from '@/types/search'
 
 import { AddRowButton } from './builder-atoms/AddRowButton'
@@ -27,9 +28,16 @@ import { OperatorPill } from './builder-atoms/OperatorPill'
 import { RowCard } from './builder-atoms/RowCard'
 import { RowJoiner } from './builder-atoms/RowJoiner'
 import { RowMenu } from './builder-atoms/RowMenu'
-import { OP_HINTS, TONE_STYLES, type OpTone } from './builder-atoms/tones'
+import { RowSelectionCheckbox } from './builder-atoms/RowSelectionCheckbox'
+import { NESTED_TONE_BG, OP_HINTS, TONE_STYLES, type OpTone } from './builder-atoms/tones'
 import { ConditionRow } from './ConditionRow'
 import type { LayerOption } from './layerOptions'
+
+
+/** Compose a dot-path: '' + 0 → '0'; '0' + 1 → '0.1'. */
+function joinPath(parentPath: string, index: number): string {
+    return parentPath === '' ? String(index) : `${parentPath}.${index}`
+}
 
 
 type GroupOp = NonNullable<GroupPredicate['op']>
@@ -61,6 +69,13 @@ export interface NestedGroupCardProps {
     knownEntityTypes: string[]
     activeEntityTypes: string[]
     discoveredLayers: LayerOption[]
+    /** Multi-select context for this group itself. ``parentPath`` is
+     *  the dot-path of THIS group's parent (so we can render a
+     *  selection checkbox on the group header). When the group
+     *  renders its own children, the children's parentPath is this
+     *  group's full path. */
+    parentPath?: string
+    index?: number
 }
 
 
@@ -68,6 +83,7 @@ export const NestedGroupCard: FC<NestedGroupCardProps> = ({
     group, depth = 0,
     onChange, onRemove, onWrap, onDuplicate, onOpenAdvanced, onSubmit, disabled,
     discovery, knownEntityTypes, activeEntityTypes, discoveredLayers,
+    parentPath, index,
 }) => {
     const op: GroupOp = (group.op ?? 'and') as GroupOp
 
@@ -164,16 +180,47 @@ export const NestedGroupCard: FC<NestedGroupCardProps> = ({
 
     const canAddLeaf = op !== 'not' || group.children.length === 0
 
+    // Depth-aware visual weight: at depth ≥ 1, attenuate the
+    // background tint so nested groups read as "child of the row
+    // above" rather than competing with the parent. The accent
+    // stripe stays at full saturation so the role of the card is
+    // still glanceable.
+    const bgOverride = depth >= 1 ? NESTED_TONE_BG[op] : undefined
+    // And use a smaller operator pill at depth ≥ 1 so the visual
+    // weight reflects the hierarchy.
+    const pillSize = depth >= 1 ? 'sm' : 'md'
+
+    // Multi-select state — this group as a single row in its parent.
+    const selectableAsRow = parentPath !== undefined && index !== undefined
+    const selected = useSearchStore((s) =>
+        selectableAsRow
+        && s.selectionParent === parentPath
+        && s.selectedIndices.includes(index!),
+    )
+    const toggleRowSelection = useSearchStore((s) => s.toggleRowSelection)
+    // Path used as the parent for THIS group's children.
+    const childParentPath = selectableAsRow
+        ? joinPath(parentPath!, index!)
+        : undefined
+
     return (
-        <RowCard tone={op}>
-            <div className="flex flex-col gap-2.5">
+        <RowCard tone={op} bgOverride={bgOverride}>
+            <div className="group/row flex flex-col gap-2.5">
                 {/* Header */}
                 <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 min-w-0">
+                        {selectableAsRow && (
+                            <RowSelectionCheckbox
+                                selected={selected}
+                                onToggle={() => toggleRowSelection(parentPath!, index!)}
+                                ariaLabel={`Select ${op.toUpperCase()} group`}
+                            />
+                        )}
                         <OperatorPill
                             value={op}
                             onChange={setOp}
                             segments="three"
+                            size={pillSize}
                             disabled={disabled}
                         />
                         <span className="text-[10.5px] text-ink-muted/80 leading-snug truncate">
@@ -210,7 +257,7 @@ export const NestedGroupCard: FC<NestedGroupCardProps> = ({
                     <EmptyGroupState op={op} />
                 ) : (
                     <AnimatePresence initial={false}>
-                        <div className="flex flex-col gap-1.5">
+                        <div className="flex flex-col gap-2">
                             {group.children.map((child, i) => (
                                 <motion.div
                                     key={`${child.kind}-${i}`}
@@ -237,6 +284,8 @@ export const NestedGroupCard: FC<NestedGroupCardProps> = ({
                                             knownEntityTypes={knownEntityTypes}
                                             activeEntityTypes={activeEntityTypes}
                                             discoveredLayers={discoveredLayers}
+                                            parentPath={childParentPath}
+                                            index={i}
                                         />
                                     ) : (
                                         <ConditionRow
@@ -252,6 +301,8 @@ export const NestedGroupCard: FC<NestedGroupCardProps> = ({
                                             onDuplicate={() => duplicateChildAt(i)}
                                             onOpenAdvanced={onOpenAdvanced}
                                             onSubmit={onSubmit}
+                                            parentPath={childParentPath}
+                                            index={i}
                                         />
                                     )}
                                 </motion.div>

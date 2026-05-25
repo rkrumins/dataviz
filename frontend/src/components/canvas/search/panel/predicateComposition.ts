@@ -20,7 +20,7 @@
  * builder uses. JSON DSL stays in sync because both write to the same
  * draft.
  */
-import type { Predicate, EdgeClass } from '@/types/search'
+import type { EdgeClass, GroupPredicate, Predicate } from '@/types/search'
 
 
 /**
@@ -257,6 +257,82 @@ export function duplicateConditionAt(
     if (index < 0 || index >= root.children.length) return draft
     const clone = structuredClone(root.children[index]) as Predicate
     root.children.splice(index + 1, 0, clone)
+    return collapseRoot(root)
+}
+
+
+/**
+ * Path navigation for multi-select row grouping. A path is a
+ * dot-separated string of child indices like ``""`` (root group),
+ * ``"0"`` (root → child 0), ``"0.2"`` (root → child 0 → child 2).
+ *
+ * The path always identifies a GROUP — the bulk-group action wraps a
+ * subset of that group's children into a new sub-group.
+ */
+function splitPath(parentPath: string): number[] {
+    if (parentPath === '') return []
+    return parentPath.split('.').map((seg) => parseInt(seg, 10))
+}
+
+
+/**
+ * Wrap the children at ``indices`` inside the group at ``parentPath``
+ * into a new sub-group of ``op``. The new group is inserted at the
+ * position of the first selected index; the other selected children
+ * are removed from their original positions.
+ *
+ * Used by the "Group selected as AND / OR" floating action bar.
+ *
+ * Returns the new predicate tree (clone), or ``draft`` unchanged on
+ * any validation failure (path doesn't resolve to a group, fewer
+ * than 2 indices, indices out of range).
+ */
+export function groupChildrenAtPath(
+    draft: Predicate | null,
+    parentPath: string,
+    indices: ReadonlyArray<number>,
+    op: 'and' | 'or',
+): Predicate | null {
+    if (!draft) return null
+    if (indices.length < 2) return draft
+
+    // Deep-clone first so we don't mutate the caller's tree.
+    const next = structuredClone(draft) as Predicate
+    const root = ensureRootGroup(next)
+
+    const path = splitPath(parentPath)
+    // Walk the path to find the group whose children we're regrouping.
+    let cursor: Predicate = root as Predicate
+    for (const segIdx of path) {
+        if (cursor.kind !== 'group') return draft
+        const childAtSeg: Predicate | undefined = cursor.children[segIdx]
+        if (!childAtSeg) return draft
+        cursor = childAtSeg
+    }
+    if (cursor.kind !== 'group') return draft
+    const group: GroupPredicate = cursor
+
+    // Validate every index resolves to a current child.
+    const sorted = [...indices].sort((a, b) => a - b)
+    if (sorted[0] < 0 || sorted[sorted.length - 1] >= group.children.length) {
+        return draft
+    }
+
+    // Collect the selected children IN INSERTION ORDER (preserves the
+    // ordering the user clicked). Remove them from the parent's
+    // children array, then insert the new sub-group at the position
+    // of the first selected index (in the original order).
+    const insertAt = sorted[0]
+    const picked: Predicate[] = indices.map((i) => group.children[i] as Predicate)
+    const remaining: Predicate[] = group.children.filter(
+        (_, i) => !indices.includes(i),
+    ) as Predicate[]
+    const newGroup: GroupPredicate = {
+        kind: 'group', op, children: picked,
+    }
+    remaining.splice(insertAt, 0, newGroup)
+    group.children = remaining
+
     return collapseRoot(root)
 }
 

@@ -232,6 +232,24 @@ interface SearchStoreState {
      *                surfaces a disclaimer).
      */
     scopeMode: 'visible' | 'view' | 'data_source'
+
+    /**
+     * Row-selection state for the multi-select "Group selected as
+     * AND / OR" affordance in the visual builder.
+     *
+     * ``selectionParent`` is a stable path key: ``''`` = root,
+     * ``'0'`` = child at index 0 of root, ``'0/1'`` = the second
+     * child of root's first group, etc. Selection is scoped to one
+     * parent at a time — clicking a checkbox in a different parent
+     * clears the prior selection and starts fresh. Reason: crossing
+     * depths would mean rewriting tree topology, which is the
+     * territory of drag-drop (deferred).
+     *
+     * Cleared automatically when ``draftPredicate`` changes (the
+     * indices may no longer be valid after an edit).
+     */
+    selectionParent: string | null
+    selectedIndices: ReadonlyArray<number>
 }
 
 
@@ -311,6 +329,12 @@ interface SearchStoreActions {
     /** Persist the scope mode chosen by the user in the panel header.
      *  Applies to every subsequent run until changed. */
     setScopeMode: (mode: 'visible' | 'view' | 'data_source') => void
+    /** Toggle a row at ``index`` inside ``parentPath`` selected /
+     *  unselected. Selecting in a different parent clears the prior
+     *  selection (single-parent scope). */
+    toggleRowSelection: (parentPath: string, index: number) => void
+    /** Clear all row selection. */
+    clearRowSelection: () => void
 }
 
 const EMPTY_SET: ReadonlySet<string> = new Set<string>()
@@ -426,6 +450,8 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     recentQueries: loadRecentFromStorage(),
     pendingSearchSeed: null,
     scopeMode: 'visible',
+    selectionParent: null,
+    selectedIndices: [],
 
     setResult: ({ viewId, matchUrns, ancestorPaths, queryHash }) => {
         const next = new Set<string>()
@@ -449,6 +475,10 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         set((s) => ({
             draftPredicate: predicate,
             draftRevision: s.draftRevision + 1,
+            // Reset row-selection: indices into the old draft are no
+            // longer valid against the new one.
+            selectionParent: null,
+            selectedIndices: [],
         }))
     },
 
@@ -471,6 +501,9 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
                 draftRevision: s.draftRevision + 1,
                 historyPast: cappedPast,
                 historyFuture: EMPTY_HISTORY,
+                // Reset row-selection — see seedDraftPredicate above.
+                selectionParent: null,
+                selectedIndices: [],
             }
         })
     },
@@ -605,6 +638,35 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
 
     setScopeMode: (mode) => {
         set({ scopeMode: mode })
+    },
+
+    toggleRowSelection: (parentPath, index) => {
+        const cur = get()
+        // Switching parents → start a fresh selection at the new
+        // parent with just this row.
+        if (cur.selectionParent !== parentPath) {
+            set({ selectionParent: parentPath, selectedIndices: [index] })
+            return
+        }
+        const idx = cur.selectedIndices.indexOf(index)
+        if (idx >= 0) {
+            const next = cur.selectedIndices.filter((i) => i !== index)
+            set({
+                selectionParent: next.length === 0 ? null : parentPath,
+                selectedIndices: next,
+            })
+        } else {
+            // Preserve insertion order — important when the bulk-group
+            // action wraps "in the position of the first selected row".
+            set({
+                selectionParent: parentPath,
+                selectedIndices: [...cur.selectedIndices, index],
+            })
+        }
+    },
+
+    clearRowSelection: () => {
+        set({ selectionParent: null, selectedIndices: [] })
     },
 
     clear: () => {

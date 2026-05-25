@@ -55,6 +55,7 @@ import { NoViewState } from './panel/NoViewState'
 import { QueryCard } from './panel/QueryCard'
 import { ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
 import { ResultsPane } from './panel/ResultsPane'
+import { BulkGroupActionBar } from './panel/builder-atoms/BulkGroupActionBar'
 import { ScopeModePicker } from './panel/ScopeModePicker'
 import { ScopeStrip } from './panel/ScopeStrip'
 import { TemplatePicker } from './TemplatePicker'
@@ -113,6 +114,9 @@ export const SearchMapPanel: FC<SearchMapPanelProps> = ({
                             <NoViewState onClose={onClose} />
                         )}
                     </div>
+                    {/* Multi-select "Group as AND / OR" floating bar.
+                        Self-hides when fewer than 2 rows selected. */}
+                    {viewId && <BulkGroupActionBar />}
                     <ResizeHandle width={width} onResize={setWidth} />
                 </motion.aside>
             )}

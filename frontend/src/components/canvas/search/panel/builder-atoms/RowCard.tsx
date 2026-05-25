@@ -22,20 +22,29 @@ export interface RowCardProps {
     children: ReactNode
     className?: string
     incomplete?: boolean
+    /** Optional override of the gradient tint (Tailwind ``from-X to-X``
+     *  pair). Used by NestedGroupCard to attenuate the background at
+     *  depth ≥ 1 so deeply-nested cards don't compete with the parent
+     *  for visual weight. Stripe + ink colour stay unchanged. */
+    bgOverride?: string
 }
 
 
 export const RowCard: FC<RowCardProps> = ({
-    tone, children, className, incomplete,
+    tone, children, className, incomplete, bgOverride,
 }) => {
     const styles = TONE_STYLES[tone]
     return (
         <div className={cn(
             'relative rounded-xl border bg-gradient-to-br backdrop-blur-sm',
             'transition-colors',
-            'pl-4 pr-3 py-3',
+            // Outer padding — pl stays at 4 (the accent stripe needs
+            // the breathing room) but pr/py tighten slightly so the
+            // overall card height is more compact without sacrificing
+            // any inner content (labels, descriptions, spacing).
+            'pl-4 pr-2.5 py-2.5',
             // Tone-tinted body
-            styles.bg,
+            bgOverride ?? styles.bg,
             // Left-accent stripe — drawn as a pseudo-element so it
             // sits flush with the rounded corner.
             'before:absolute before:left-0 before:top-3 before:bottom-3',

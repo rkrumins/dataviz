@@ -40,11 +40,14 @@ import type {
     TextTarget,
 } from '@/types/search'
 
+import { useSearchStore } from '@/store/searchStore'
+
 import { UnifiedPicker } from '../builder/editors/UnifiedPicker'
 
 import { OperatorMenu } from './OperatorMenu'
 import { RowCard } from './builder-atoms/RowCard'
 import { RowMenu } from './builder-atoms/RowMenu'
+import { RowSelectionCheckbox } from './builder-atoms/RowSelectionCheckbox'
 import type { OpTone } from './builder-atoms/tones'
 import type { LayerOption } from './layerOptions'
 
@@ -73,13 +76,20 @@ export interface ConditionRowProps {
     onWrap?: (op: OpTone) => void
     /** "⋯ → Duplicate" — clone this row in place. */
     onDuplicate?: () => void
+    /** Multi-select context: identifies this row in the selection
+     *  store. ``parentPath`` is the dot-path of this row's parent
+     *  group ('' for the root group); ``index`` is the row's
+     *  position inside that parent. When both are supplied a
+     *  hover-revealed selection checkbox appears on the left side. */
+    parentPath?: string
+    index?: number
 }
 
 
 export const ConditionRow: FC<ConditionRowProps> = ({
     value, discovery, knownEntityTypes, activeEntityTypes, discoveredLayers,
     isRunning, autoFocus, onChange, onRemove, onOpenAdvanced, onSubmit,
-    onWrap, onDuplicate,
+    onWrap, onDuplicate, parentPath, index,
 }) => {
     const meta = getKindMeta(value.kind)
     const incomplete = isIncomplete(value)
@@ -90,11 +100,31 @@ export const ConditionRow: FC<ConditionRowProps> = ({
         onOpenAdvanced,
     })
 
+    // Multi-select state — only active when the row caller supplied
+    // both ``parentPath`` and ``index``. Off otherwise (e.g. when the
+    // row renders in a context that doesn't support bulk-grouping).
+    const selectable = parentPath !== undefined && index !== undefined
+    const selected = useSearchStore((s) =>
+        selectable
+        && s.selectionParent === parentPath
+        && s.selectedIndices.includes(index!),
+    )
+    const toggleRowSelection = useSearchStore((s) => s.toggleRowSelection)
+
     return (
         <RowCard tone="neutral" incomplete={incomplete}>
-            <div className="flex flex-col gap-3">
-                {/* Header — icon + descriptive label + actions */}
+            <div className="group/row flex flex-col gap-3">
+                {/* Header — checkbox + icon + descriptive label + actions */}
                 <div className="flex items-start gap-2.5">
+                    {selectable && (
+                        <div className="pt-1">
+                            <RowSelectionCheckbox
+                                selected={selected}
+                                onToggle={() => toggleRowSelection(parentPath!, index!)}
+                                ariaLabel={`Select filter row ${meta.label}`}
+                            />
+                        </div>
+                    )}
                     <span className={cn(
                         'inline-flex items-center justify-center shrink-0',
                         'w-6 h-6 rounded-md text-[14px]',

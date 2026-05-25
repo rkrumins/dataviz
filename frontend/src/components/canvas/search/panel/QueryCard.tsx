@@ -89,6 +89,7 @@ import {
 } from './predicateComposition'
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
+import { WhatThisMeansDisclosure } from './WhatThisMeansDisclosure'
 
 
 export interface QueryCardProps {
@@ -394,6 +395,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                         />
                     ) : (
                         <>
+                            <WhatThisMeansDisclosure />
                             {conditions.length >= 2 && (
                                 <RootMatchHeader
                                     op={currentRootOp}
@@ -439,6 +441,8 @@ export const QueryCard: FC<QueryCardProps> = ({
                                                 knownEntityTypes={knownEntityTypes}
                                                 activeEntityTypes={activeEntityTypes}
                                                 discoveredLayers={discoveredLayers}
+                                                parentPath=""
+                                                index={i}
                                             />
                                         ) : (
                                             <ConditionRow
@@ -460,6 +464,8 @@ export const QueryCard: FC<QueryCardProps> = ({
                                                 onDuplicate={() => handleRowDuplicate(i)}
                                                 onOpenAdvanced={onOpenAdvanced}
                                                 onSubmit={dispatchRun}
+                                                parentPath=""
+                                                index={i}
                                             />
                                         )}
                                     </motion.div>
