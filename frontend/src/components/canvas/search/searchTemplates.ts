@@ -69,6 +69,19 @@ export interface TemplateContext {
     knownEntityTypes: string[]
 }
 
+/** Section taxonomy. The picker groups templates by this field rather
+ *  than maintaining a hardcoded ID list — adding a template only
+ *  requires setting ``section`` on the new entry, never touching
+ *  TemplatePicker. New section ids: register display metadata in
+ *  ``SECTION_META`` in TemplatePicker.tsx. */
+export type TemplateSection =
+    | 'overview'    // counts and distributions
+    | 'find'        // locate specific entities
+    | 'governance'  // PII, compliance, coverage gaps
+    | 'lineage'     // graph topology, paths, reach
+    | 'discovery'   // explore metadata shape
+
+
 export interface SearchTemplate {
     id: string
     /** Verb-style label shown to the user. Keep short. */
@@ -77,6 +90,8 @@ export interface SearchTemplate {
     description: string
     /** Lucide icon name (e.g. 'BarChart3', 'Layers', 'Search'). Rendered via DynamicIcon. */
     icon: string
+    /** Which section the picker groups this template under. */
+    section: TemplateSection
     inputs: TemplateInput[]
     /**
      * Surfaced as a one-click chip on the AskBar. Only set this for templates
@@ -104,6 +119,7 @@ export const TEMPLATES: SearchTemplate[] = [
         label: 'Overview by entity type',
         description: 'Count every node in scope, grouped by what kind of entity it is.',
         icon: 'PieChart',
+        section: 'overview',
         featured: true,
         chipLabel: 'Overview',
         inputs: [],
@@ -120,6 +136,7 @@ export const TEMPLATES: SearchTemplate[] = [
         label: 'Layout by layer',
         description: 'Bucket every node by the value of a property like "layer".',
         icon: 'Layers',
+        section: 'overview',
         inputs: [
             {
                 name: 'propertyKey',
@@ -149,6 +166,7 @@ export const TEMPLATES: SearchTemplate[] = [
         label: 'Find all of one entity type',
         description: 'List every node of a chosen type — datasets, containers, etc.',
         icon: 'List',
+        section: 'find',
         featured: true,
         chipLabel: 'All datasets',
         inputs: [
@@ -178,6 +196,7 @@ export const TEMPLATES: SearchTemplate[] = [
         label: 'Find by name',
         description: 'Substring search on the display name. Case-insensitive.',
         icon: 'Search',
+        section: 'find',
         inputs: [
             {
                 name: 'text',
@@ -203,6 +222,7 @@ export const TEMPLATES: SearchTemplate[] = [
         label: 'Find by property value',
         description: 'Find every node where a property matches exactly.',
         icon: 'Equal',
+        section: 'find',
         inputs: [
             {
                 name: 'key',
@@ -237,6 +257,7 @@ export const TEMPLATES: SearchTemplate[] = [
         label: 'Top N by numeric property',
         description: 'Sort by a numeric property like rowCount, biggest first.',
         icon: 'TrendingUp',
+        section: 'find',
         inputs: [
             {
                 name: 'entityType',
@@ -290,6 +311,7 @@ export const TEMPLATES: SearchTemplate[] = [
         label: 'Find by tag',
         description: 'All nodes tagged with a value, rolled up by domain.',
         icon: 'Tag',
+        section: 'find',
         featured: true,
         chipLabel: 'PII tagged',
         inputs: [
@@ -326,6 +348,7 @@ export const TEMPLATES: SearchTemplate[] = [
         label: 'Nodes that have a property',
         description: 'Discover which nodes carry a given metadata field.',
         icon: 'CheckCircle2',
+        section: 'discovery',
         inputs: [
             {
                 name: 'key',
@@ -360,6 +383,7 @@ export const TEMPLATES: SearchTemplate[] = [
             'Disconnected nodes — no upstream producers, no downstream consumers. ' +
             'Lineage edges are resolved from the ontology of the data source.',
         icon: 'CircleOff',
+        section: 'lineage',
         featured: true,
         chipLabel: 'No lineage',
         inputs: [
@@ -398,6 +422,7 @@ export const TEMPLATES: SearchTemplate[] = [
             'Nodes with no outgoing lineage edges — terminal data products. ' +
             'Lineage edges are resolved from the ontology.',
         icon: 'CornerDownRight',
+        section: 'lineage',
         featured: true,
         chipLabel: 'No downstream',
         inputs: [],
@@ -418,6 +443,7 @@ export const TEMPLATES: SearchTemplate[] = [
             'Nodes with no incoming lineage edges — sources of truth. ' +
             'Lineage edges are resolved from the ontology.',
         icon: 'CornerLeftUp',
+        section: 'lineage',
         featured: true,
         chipLabel: 'No upstream',
         inputs: [],
@@ -438,6 +464,7 @@ export const TEMPLATES: SearchTemplate[] = [
             'Find everything reachable along lineage edges within the ' +
             'specified number of steps from an anchor URN.',
         icon: 'Radar',
+        section: 'lineage',
         inputs: [
             {
                 name: 'anchorUrn',
@@ -488,6 +515,7 @@ export const TEMPLATES: SearchTemplate[] = [
             'up to a max hop length. Returns ordered node→edge→node ' +
             'sequences.',
         icon: 'Workflow',
+        section: 'lineage',
         inputs: [
             {
                 name: 'sourceUrn',
@@ -528,6 +556,7 @@ export const TEMPLATES: SearchTemplate[] = [
             'confidence property exceeds the threshold. Surfaces only ' +
             'reliable lineage chains.',
         icon: 'ShieldCheck',
+        section: 'lineage',
         inputs: [
             {
                 name: 'sourceUrn',
@@ -570,6 +599,384 @@ export const TEMPLATES: SearchTemplate[] = [
                 },
             },
             options: { results: 'paths' },
+        }),
+    },
+
+    /* --------------------------------------------------------------
+     * W2.5 — Named business-insight templates.
+     *
+     * These nine templates answer the recurring "what do I check
+     * on a Monday morning" questions a data-platform owner asks:
+     *
+     *   Governance   PII spread, untagged datasets, ownership gap
+     *   Lineage      lineage gaps, stale lineage, cross-layer paths,
+     *                most-referenced datasets
+     *   Discovery    orphan datasets by layer, schema-field types
+     *
+     * The tag-storage refactor is deferred (tags remain JSON-string),
+     * so tag-driven aggregations roll up by ``ancestorType`` (domain)
+     * rather than by tag itself.
+     * -------------------------------------------------------------- */
+    {
+        id: 'pii-spread',
+        label: 'PII spread by domain',
+        description:
+            'Datasets tagged PII / GDPR / HIPAA, rolled up by domain ' +
+            'so you can see which business areas hold sensitive data.',
+        icon: 'ShieldAlert',
+        section: 'governance',
+        featured: true,
+        chipLabel: 'PII spread',
+        inputs: [
+            {
+                name: 'tags',
+                kind: 'text',
+                label: 'PII tags (comma-separated)',
+                placeholder: 'PII, GDPR, HIPAA',
+                defaultValue: 'PII, GDPR, HIPAA',
+            },
+        ],
+        build: (inputs) => {
+            const tags = String(inputs.tags || 'PII, GDPR, HIPAA')
+                .split(',')
+                .map((t) => t.trim())
+                .filter(Boolean)
+            return {
+                predicate: { kind: 'tag', op: 'hasAny', values: tags.length ? tags : ['PII'] },
+                options: {
+                    results: 'both',
+                    pageSize: 50,
+                    aggregations: [{
+                        by: 'ancestorType',
+                        ancestorEntityTypes: ['domain'],
+                        maxBuckets: 20,
+                        sampleHitsPerBucket: 3,
+                    }],
+                    includeAncestorPath: true,
+                },
+            }
+        },
+    },
+    {
+        id: 'untagged-datasets',
+        label: 'Untagged datasets by domain',
+        description:
+            'Datasets that carry NONE of the listed governance tags. ' +
+            'Drives the "what slipped through" report. Rolls up by domain.',
+        icon: 'TagOff',
+        section: 'governance',
+        inputs: [
+            {
+                name: 'tags',
+                kind: 'text',
+                label: 'Governance tags (comma-separated)',
+                placeholder: 'PII, GDPR, HIPAA, SENSITIVE, INTERNAL',
+                defaultValue: 'PII, GDPR, HIPAA, SENSITIVE, INTERNAL',
+            },
+        ],
+        build: (inputs) => {
+            const tags = String(inputs.tags || 'PII, GDPR, HIPAA, SENSITIVE, INTERNAL')
+                .split(',')
+                .map((t) => t.trim())
+                .filter(Boolean)
+            return {
+                predicate: {
+                    kind: 'group',
+                    op: 'and',
+                    children: [
+                        { kind: 'entityType', op: 'in', values: ['dataset'] },
+                        {
+                            kind: 'group',
+                            op: 'not',
+                            children: [
+                                { kind: 'tag', op: 'hasAny', values: tags.length ? tags : ['PII'] },
+                            ],
+                        },
+                    ],
+                },
+                options: {
+                    results: 'both',
+                    pageSize: 50,
+                    aggregations: [{
+                        by: 'ancestorType',
+                        ancestorEntityTypes: ['domain'],
+                        maxBuckets: 20,
+                        sampleHitsPerBucket: 3,
+                    }],
+                    includeAncestorPath: true,
+                },
+            }
+        },
+    },
+    {
+        id: 'property-coverage-owner',
+        label: 'Datasets without an owner',
+        description:
+            'Datasets that have no `owner` property set, rolled up by ' +
+            'domain. Drives the ownership-gap report.',
+        icon: 'UserX',
+        section: 'governance',
+        inputs: [
+            {
+                name: 'ownerKey',
+                kind: 'text',
+                label: 'Owner property',
+                placeholder: 'owner',
+                defaultValue: 'owner',
+            },
+        ],
+        build: (inputs) => ({
+            predicate: {
+                kind: 'group',
+                op: 'and',
+                children: [
+                    { kind: 'entityType', op: 'in', values: ['dataset'] },
+                    {
+                        kind: 'group',
+                        op: 'not',
+                        children: [
+                            { kind: 'hasProperty', key: String(inputs.ownerKey || 'owner') },
+                        ],
+                    },
+                ],
+            },
+            options: {
+                results: 'both',
+                pageSize: 50,
+                aggregations: [{
+                    by: 'ancestorType',
+                    ancestorEntityTypes: ['domain'],
+                    maxBuckets: 20,
+                    sampleHitsPerBucket: 3,
+                }],
+                includeAncestorPath: true,
+            },
+        }),
+    },
+    {
+        id: 'lineage-gaps',
+        label: 'Lineage gaps by domain',
+        description:
+            'Datasets that are roots (no upstream) OR leaves (no downstream) ' +
+            'in the lineage graph — likely missing connections. Rolls up ' +
+            'by domain so you can see which areas have incomplete lineage.',
+        icon: 'Unplug',
+        section: 'lineage',
+        inputs: [],
+        build: () => ({
+            predicate: {
+                kind: 'group',
+                op: 'and',
+                children: [
+                    { kind: 'entityType', op: 'in', values: ['dataset'] },
+                    {
+                        kind: 'group',
+                        op: 'or',
+                        children: [
+                            { kind: 'isLeaf', edgeClass: 'lineage' },
+                            { kind: 'isRoot', edgeClass: 'lineage' },
+                        ],
+                    },
+                ],
+            },
+            options: {
+                results: 'both',
+                pageSize: 50,
+                aggregations: [{
+                    by: 'ancestorType',
+                    ancestorEntityTypes: ['domain'],
+                    maxBuckets: 20,
+                    sampleHitsPerBucket: 3,
+                }],
+                includeAncestorPath: true,
+            },
+        }),
+    },
+    {
+        id: 'stale-lineage',
+        label: 'Datasets with stale lineage',
+        description:
+            'Datasets whose incoming lineage degree is below a threshold — ' +
+            'a proxy for "lineage was probably never wired up". Rolls up ' +
+            'by domain.',
+        icon: 'Clock',
+        section: 'lineage',
+        inputs: [
+            {
+                name: 'maxIncoming',
+                kind: 'number',
+                label: 'Max incoming lineage edges',
+                defaultValue: 1,
+                min: 0,
+                max: 10,
+            },
+        ],
+        build: (inputs) => ({
+            predicate: {
+                kind: 'group',
+                op: 'and',
+                children: [
+                    { kind: 'entityType', op: 'in', values: ['dataset'] },
+                    {
+                        kind: 'degree',
+                        direction: 'in',
+                        op: 'lte',
+                        value: Math.max(0, Math.min(10, Number(inputs.maxIncoming) || 1)),
+                        edgeClass: 'lineage',
+                    },
+                ],
+            },
+            options: {
+                results: 'both',
+                pageSize: 50,
+                aggregations: [{
+                    by: 'ancestorType',
+                    ancestorEntityTypes: ['domain'],
+                    maxBuckets: 20,
+                    sampleHitsPerBucket: 3,
+                }],
+                includeAncestorPath: true,
+            },
+        }),
+    },
+    {
+        id: 'cross-layer-paths',
+        label: 'Paths crossing the data stack',
+        description:
+            'Lineage paths from a source URN to a target URN — typically a ' +
+            'Bronze→Gold trace. Use to verify a customer-facing dashboard ' +
+            'has the lineage you expect.',
+        icon: 'GitMerge',
+        section: 'lineage',
+        inputs: [
+            {
+                name: 'sourceUrn',
+                kind: 'text',
+                label: 'Source URN (lower layer)',
+                placeholder: 'urn:li:dataset:bronze.raw_orders',
+            },
+            {
+                name: 'targetUrn',
+                kind: 'text',
+                label: 'Target URN (higher layer)',
+                placeholder: 'urn:li:dataset:gold.orders_kpi',
+            },
+            {
+                name: 'maxHops',
+                kind: 'number',
+                label: 'Max hops',
+                defaultValue: 5, min: 1, max: 6,
+            },
+        ],
+        build: (inputs) => ({
+            predicate: {
+                kind: 'path',
+                sourceUrns: [String(inputs.sourceUrn || '').trim()],
+                targetUrns: [String(inputs.targetUrn || '').trim()],
+                maxHops: Math.max(1, Math.min(6, Number(inputs.maxHops) || 5)),
+                edgeClass: 'lineage',
+                direction: 'outgoing',
+            },
+            options: { results: 'paths' },
+        }),
+    },
+    {
+        id: 'most-referenced-datasets',
+        label: 'Most-referenced datasets',
+        description:
+            'Datasets with the highest incoming-lineage count — your hot ' +
+            'data products. Use to focus reliability investment.',
+        icon: 'Star',
+        section: 'lineage',
+        inputs: [
+            {
+                name: 'minIncoming',
+                kind: 'number',
+                label: 'Min incoming lineage edges',
+                defaultValue: 3, min: 1, max: 100,
+            },
+        ],
+        build: (inputs) => ({
+            predicate: {
+                kind: 'group',
+                op: 'and',
+                children: [
+                    { kind: 'entityType', op: 'in', values: ['dataset'] },
+                    {
+                        kind: 'degree',
+                        direction: 'in',
+                        op: 'gte',
+                        value: Math.max(1, Math.min(100, Number(inputs.minIncoming) || 3)),
+                        edgeClass: 'lineage',
+                    },
+                ],
+            },
+            options: {
+                results: 'both',
+                pageSize: 50,
+                aggregations: [{
+                    by: 'ancestorType',
+                    ancestorEntityTypes: ['domain'],
+                    maxBuckets: 20,
+                    sampleHitsPerBucket: 3,
+                }],
+                includeAncestorPath: true,
+            },
+        }),
+    },
+    {
+        id: 'orphan-datasets-by-layer',
+        label: 'Orphan datasets by layer',
+        description:
+            'Datasets with no lineage edges at all, bucketed by the ' +
+            'layerAssignment property. Shows which layers carry the most ' +
+            'disconnected data.',
+        icon: 'Disc',
+        section: 'discovery',
+        inputs: [],
+        build: () => ({
+            predicate: {
+                kind: 'group',
+                op: 'and',
+                children: [
+                    { kind: 'entityType', op: 'in', values: ['dataset'] },
+                    { kind: 'isOrphan', edgeClass: 'lineage' },
+                ],
+            },
+            options: {
+                results: 'both',
+                pageSize: 50,
+                aggregations: [{
+                    by: 'property',
+                    propertyKey: 'layerAssignment',
+                    maxBuckets: 20,
+                    sampleHitsPerBucket: 3,
+                }],
+                includeAncestorPath: true,
+            },
+        }),
+    },
+    {
+        id: 'schema-fields-by-logical-type',
+        label: 'Schema fields by logical type',
+        description:
+            'Distribution of schema-field nodes by `logicalType` ' +
+            '(STRING / INT64 / TIMESTAMP / …). Use to scope a type-' +
+            'specific cleanup or normalisation pass.',
+        icon: 'Type',
+        section: 'discovery',
+        inputs: [],
+        build: () => ({
+            predicate: { kind: 'entityType', op: 'in', values: ['schemaField'] },
+            options: {
+                results: 'aggregates',
+                aggregations: [{
+                    by: 'property',
+                    propertyKey: 'logicalType',
+                    maxBuckets: 50,
+                    sampleHitsPerBucket: 3,
+                }],
+            },
         }),
     },
 ]

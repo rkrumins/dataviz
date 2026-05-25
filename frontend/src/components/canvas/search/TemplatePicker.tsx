@@ -21,31 +21,41 @@ import { type FC, useMemo } from 'react'
 
 import { cn } from '@/lib/utils'
 
-import { TEMPLATES, type SearchTemplate } from './searchTemplates'
+import { TEMPLATES, type SearchTemplate, type TemplateSection } from './searchTemplates'
 
 
-/** Grouping the templates makes a long list feel like a curated menu
- * rather than a dump. Each group has a section header. */
-const SECTIONS: { id: string; title: string; description: string; templateIds: string[] }[] = [
-    {
-        id: 'overview',
+/** Display metadata per section. The picker derives section
+ * membership from each ``template.section`` field rather than
+ * maintaining a parallel ID list — adding a template only requires
+ * setting ``section`` on the new entry. Sections render in the
+ * order listed here. */
+const SECTION_META: Record<TemplateSection, { title: string; description: string }> = {
+    overview: {
         title: 'Overview',
         description: 'Get the lay of the land — counts and distributions',
-        templateIds: ['overview-by-type', 'overview-by-layer'],
     },
-    {
-        id: 'find',
+    find: {
         title: 'Find',
         description: 'Locate specific entities by name, property, or tag',
-        templateIds: ['find-all-of-type', 'name-contains', 'property-equals',
-                      'biggest-by-property', 'tag-matches'],
     },
-    {
-        id: 'discover',
-        title: 'Discover',
+    governance: {
+        title: 'Governance',
+        description: 'PII spread, untagged datasets, ownership gaps',
+    },
+    lineage: {
+        title: 'Lineage',
+        description: 'Graph topology — orphans, paths, references',
+    },
+    discovery: {
+        title: 'Discovery',
         description: 'Explore metadata coverage across your graph',
-        templateIds: ['has-property'],
     },
+}
+
+/** Section render order. Sections with no member templates are
+ * skipped at render time. */
+const SECTION_ORDER: readonly TemplateSection[] = [
+    'overview', 'find', 'governance', 'lineage', 'discovery',
 ]
 
 
@@ -65,6 +75,17 @@ const TEMPLATE_ACCENTS: Record<string, {
     'biggest-by-property':    { iconBg: 'from-orange-500/25 to-amber-500/15',     iconText: 'text-orange-600 dark:text-orange-400', shadow: 'group-hover:shadow-orange-500/15', border: 'group-hover:border-orange-500/40' },
     'tag-matches':            { iconBg: 'from-amber-500/25 to-yellow-500/15',     iconText: 'text-amber-600 dark:text-amber-400', shadow: 'group-hover:shadow-amber-500/15', border: 'group-hover:border-amber-500/40' },
     'has-property':           { iconBg: 'from-rose-500/25 to-pink-500/15',        iconText: 'text-rose-600 dark:text-rose-400', shadow: 'group-hover:shadow-rose-500/15', border: 'group-hover:border-rose-500/40' },
+
+    // W2.5 — named insight templates.
+    'pii-spread':                    { iconBg: 'from-red-500/25 to-rose-500/15',         iconText: 'text-red-600 dark:text-red-400',        shadow: 'group-hover:shadow-red-500/15',         border: 'group-hover:border-red-500/40' },
+    'untagged-datasets':             { iconBg: 'from-stone-500/25 to-slate-500/15',      iconText: 'text-stone-600 dark:text-stone-400',    shadow: 'group-hover:shadow-stone-500/15',       border: 'group-hover:border-stone-500/40' },
+    'property-coverage-owner':       { iconBg: 'from-fuchsia-500/25 to-pink-500/15',     iconText: 'text-fuchsia-600 dark:text-fuchsia-400',shadow: 'group-hover:shadow-fuchsia-500/15',     border: 'group-hover:border-fuchsia-500/40' },
+    'lineage-gaps':                  { iconBg: 'from-amber-500/25 to-orange-500/15',     iconText: 'text-amber-600 dark:text-amber-400',    shadow: 'group-hover:shadow-amber-500/15',       border: 'group-hover:border-amber-500/40' },
+    'stale-lineage':                 { iconBg: 'from-yellow-500/25 to-amber-500/15',     iconText: 'text-yellow-600 dark:text-yellow-400',  shadow: 'group-hover:shadow-yellow-500/15',      border: 'group-hover:border-yellow-500/40' },
+    'cross-layer-paths':             { iconBg: 'from-violet-500/25 to-purple-500/15',    iconText: 'text-violet-600 dark:text-violet-400',  shadow: 'group-hover:shadow-violet-500/15',      border: 'group-hover:border-violet-500/40' },
+    'most-referenced-datasets':      { iconBg: 'from-yellow-500/25 to-amber-500/15',     iconText: 'text-yellow-600 dark:text-yellow-400',  shadow: 'group-hover:shadow-yellow-500/15',      border: 'group-hover:border-yellow-500/40' },
+    'orphan-datasets-by-layer':      { iconBg: 'from-zinc-500/25 to-slate-500/15',       iconText: 'text-zinc-600 dark:text-zinc-400',      shadow: 'group-hover:shadow-zinc-500/15',        border: 'group-hover:border-zinc-500/40' },
+    'schema-fields-by-logical-type': { iconBg: 'from-blue-500/25 to-cyan-500/15',        iconText: 'text-blue-600 dark:text-blue-400',      shadow: 'group-hover:shadow-blue-500/15',        border: 'group-hover:border-blue-500/40' },
 }
 
 const DEFAULT_ACCENT = {
@@ -88,10 +109,17 @@ export interface TemplatePickerProps {
 }
 
 export const TemplatePicker: FC<TemplatePickerProps> = ({ onPick }) => {
-    // Templates by id for fast section lookups.
-    const byId = useMemo(() => {
-        const m = new Map<string, SearchTemplate>()
-        for (const t of TEMPLATES) m.set(t.id, t)
+    // Group templates by section (derived from each template's
+    // ``section`` field). The picker no longer maintains a parallel
+    // ID list — adding a template only requires setting its
+    // ``section``. Empty sections are skipped at render time.
+    const bySection = useMemo(() => {
+        const m = new Map<TemplateSection, SearchTemplate[]>()
+        for (const t of TEMPLATES) {
+            const arr = m.get(t.section) ?? []
+            arr.push(t)
+            m.set(t.section, arr)
+        }
         return m
     }, [])
 
@@ -109,15 +137,14 @@ export const TemplatePicker: FC<TemplatePickerProps> = ({ onPick }) => {
                 </p>
             </div>
 
-            {SECTIONS.map((section, sIdx) => {
-                const sectionTemplates = section.templateIds
-                    .map((id) => byId.get(id))
-                    .filter((t): t is SearchTemplate => Boolean(t))
+            {SECTION_ORDER.map((sectionId, sIdx) => {
+                const sectionTemplates = bySection.get(sectionId) ?? []
                 if (sectionTemplates.length === 0) return null
+                const meta = SECTION_META[sectionId]
 
                 return (
                     <motion.div
-                        key={section.id}
+                        key={sectionId}
                         initial={{ opacity: 0, y: 8 }}
                         animate={{ opacity: 1, y: 0 }}
                         transition={{
@@ -129,10 +156,10 @@ export const TemplatePicker: FC<TemplatePickerProps> = ({ onPick }) => {
                     >
                         <div className="px-1">
                             <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">
-                                {section.title}
+                                {meta.title}
                             </div>
                             <div className="text-[11px] text-ink-muted/70 mt-0.5">
-                                {section.description}
+                                {meta.description}
                             </div>
                         </div>
 
