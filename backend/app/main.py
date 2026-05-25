@@ -211,6 +211,7 @@ async def lifespan(_app: FastAPI):
     #     must NOT take the whole service down — it degrades to "authored
     #     graphs unavailable" while everything else runs.
     _app.state._graph_relay_task = None
+    _app.state._falkor_projector_task = None
     try:
         from .db.graph_store_engine import init_graph_store_db  # noqa: E402
         from .services.graph_outbox_relay import (  # noqa: E402
@@ -224,6 +225,24 @@ async def lifespan(_app: FastAPI):
             run_graph_outbox_relay(stop_event=_graph_relay_stop)
         )
         logger.info("Graph Store ready; outbox relay started")
+
+        # 1c. FalkorDB projector (V1-5). Subscribes to the same outbox
+        #     stream and projects every default-branch commit into
+        #     ``authored_<graph_id>``. Independently best-effort — if
+        #     FalkorDB or the projector errors, authoring still works
+        #     and reads fall back to Postgres snapshots.
+        if os.getenv("GRAPH_FALKOR_PROJECTOR_ENABLED", "true").lower() in (
+            "true", "1", "yes",
+        ):
+            from .services.graph_falkor_projector import (  # noqa: E402
+                run_falkor_projector,
+            )
+            _falkor_projector_stop = asyncio.Event()
+            _app.state._falkor_projector_stop = _falkor_projector_stop
+            _app.state._falkor_projector_task = asyncio.create_task(
+                run_falkor_projector(stop_event=_falkor_projector_stop)
+            )
+            logger.info("FalkorDB projector started")
     except Exception as exc:  # noqa: BLE001 — feature-isolated, never fatal
         logger.warning(
             "Graph Store init/relay unavailable — authored-graph feature "
@@ -759,6 +778,21 @@ async def lifespan(_app: FastAPI):
             pass
         except Exception:  # noqa: BLE001 — best effort on shutdown
             pass
+
+    # Stop the FalkorDB projector (V1-5) the same way.
+    _projector_task = getattr(_app.state, "_falkor_projector_task", None)
+    if _projector_task is not None and not _projector_task.done():
+        stop = getattr(_app.state, "_falkor_projector_stop", None)
+        if stop is not None:
+            stop.set()
+        _projector_task.cancel()
+        try:
+            await _projector_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
         from .db.graph_store_engine import close_graph_store_db  # noqa: E402
 
